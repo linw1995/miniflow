@@ -188,6 +188,16 @@ Help lists qualified input names, types, required flags, JSON transports, and ve
 constructing providers, reading input/context files, or executing nodes. CLI syntax errors write to stderr
 and exit with status 2; input, context, and execution validation errors remain failures.
 
+`mf run ./flow --help` (or `-h`) combines the CLI help with runner help derived from the embedded
+manifest. Add `--node transform` before or after the help flag to inspect one Task. This reads the
+binary without executing it, preparing providers, reading input files, or entering TUI/chat mode;
+executable permission and a terminal are not required. Both Linux ELF64 and macOS Mach-O64 files can
+be inspected. Recompile older runners to embed the current manifest and Task input schemas.
+`mf run --help` shows only CLI help. Put help and node selection before named workflow arguments;
+once a named workflow argument starts, the remaining arguments belong to the runner. An explicit
+separator, such as `mf run ./flow -- --help`, also forwards arguments directly and shows only runner
+help. Missing, invalid, or unsupported manifests produce a diagnostic and a nonzero exit status.
+
 JSON and file transports also accept inline values, such as `--inputs='{"read.path":"data.txt"}'` and
 `--inputs-file=parameters.json`. A named string value starting with `--` must use inline syntax, such as
 `--read.path=--literal`; short-option-looking values such as `-v` remain literal when following a named input.

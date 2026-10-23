@@ -52,7 +52,12 @@ impl RunnerInvocation {
                 .filter(|target| target.kind == NodeTargetKind::Task)
                 .map(|target| &target.inputs),
         );
-        let command = argument_command(schemas, true, Some(targets));
+        let task_ids: Vec<_> = targets
+            .iter()
+            .filter(|target| target.kind == NodeTargetKind::Task)
+            .map(|target| target.id.as_str())
+            .collect();
+        let command = argument_command(schemas, true, Some(&task_ids));
         let matches = parse_arguments(arguments, command)?;
         let node = matches.get_one::<String>("node").cloned();
         let target = node
@@ -61,11 +66,7 @@ impl RunnerInvocation {
             .transpose()?;
         let schema = target.map_or(workflow, |target| &target.inputs);
         if matches.get_flag("help") {
-            let mut help = argument_command([schema], true, Some(targets));
-            if let Some(target) = target {
-                help = help.about(format!("Run workflow node {}", target.id));
-            }
-            display_help(help)?;
+            display_help(runner_help_command(schema, &task_ids, node.as_deref()))?;
         }
         let context = matches.get_one::<OsString>("context");
         let context_file = matches.get_one::<OsString>("context-file");
@@ -103,6 +104,20 @@ impl RunnerInvocation {
             inputs,
             context,
         })
+    }
+}
+
+/// Builds help from frozen input contracts without preparing or executing providers.
+pub fn runner_help_command(
+    schema: &WorkflowInputSchema,
+    task_ids: &[&str],
+    node: Option<&str>,
+) -> Command {
+    let command = argument_command([schema], true, Some(task_ids));
+    if let Some(node) = node {
+        command.about(format!("Run workflow node {node}"))
+    } else {
+        command
     }
 }
 
@@ -184,7 +199,7 @@ impl WorkflowArguments {
 fn argument_command<'a>(
     schemas: impl IntoIterator<Item = &'a WorkflowInputSchema>,
     allow_verbose: bool,
-    targets: Option<&[NodeTarget]>,
+    targets: Option<&[&str]>,
 ) -> Command {
     let mut command = Command::new("workflow")
         .no_binary_name(true)
@@ -247,15 +262,10 @@ fn argument_command<'a>(
                     .help("Read --node context from a regular JSON file (up to 1 MiB)")
                     .value_parser(OsStringValueParser::new()),
             );
-        let tasks: Vec<_> = targets
-            .iter()
-            .filter(|target| target.kind == NodeTargetKind::Task)
-            .map(|target| target.id.as_str())
-            .collect();
-        if !tasks.is_empty() {
+        if !targets.is_empty() {
             command = command.after_help(format!(
                 "Task targets:\n  {}\n\nUse --node ID --help to inspect a node's inputs.",
-                tasks.join("\n  ")
+                targets.join("\n  ")
             ));
         }
     }

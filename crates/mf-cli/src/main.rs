@@ -2,9 +2,10 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use mf_compiler::{
     CompileRequest, PipelineError, RunnerOptions, SupportPackages, compile_project_with_options,
 };
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 #[cfg(feature = "development-support")]
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -69,6 +70,17 @@ enum Command {
 enum CliError {
     #[snafu(display("could not run workflow {path:?}: {source}"))]
     Execute { path: PathBuf, source: io::Error },
+    #[cfg(unix)]
+    #[snafu(display("could not inspect workflow {path:?}: {source}"))]
+    Inspect {
+        path: PathBuf,
+        source: mf_tui::manifest::ManifestReadError,
+    },
+    #[snafu(display("could not write command help: {source}"))]
+    HelpOutput { source: io::Error },
+    #[cfg(unix)]
+    #[snafu(display("node target `{node}` is not a supported top-level Task"))]
+    HelpTarget { node: String },
     #[snafu(transparent)]
     Build { source: PipelineError },
     #[cfg(unix)]
@@ -80,6 +92,95 @@ enum CliError {
     #[cfg(not(unix))]
     #[snafu(display("TUI execution is supported on Linux and macOS"))]
     UnsupportedTui,
+    #[cfg(not(unix))]
+    #[snafu(display("workflow manifest inspection is supported on Linux and macOS"))]
+    UnsupportedInspection,
+}
+
+struct RunHelp {
+    executable: Option<PathBuf>,
+    node: Option<String>,
+}
+
+impl RunHelp {
+    fn parse(arguments: &[OsString]) -> Option<Self> {
+        let command = Cli::command().mut_subcommand("run", |command| {
+            command
+                .disable_help_flag(true)
+                .mut_args(|argument| {
+                    argument
+                        .required(false)
+                        .requires(clap::builder::Resettable::Reset)
+                        .conflicts_with(clap::builder::Resettable::Reset)
+                })
+                .arg(
+                    clap::Arg::new("help")
+                        .short('h')
+                        .long("help")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new("node")
+                        .long("node")
+                        .value_parser(clap::builder::NonEmptyStringValueParser::new()),
+                )
+        });
+        // A failed probe goes through the unchanged parser for its normal diagnostics.
+        let matches = command.try_get_matches_from(arguments).ok()?;
+        let matches = matches.subcommand_matches("run")?;
+        if !matches.get_flag("help") {
+            return None;
+        }
+        Some(Self {
+            executable: matches.get_one::<PathBuf>("executable").cloned(),
+            node: matches.get_one::<String>("node").cloned(),
+        })
+    }
+
+    fn print(self) -> Result<u8, CliError> {
+        let mut command = Cli::command();
+        command.build();
+        let cli_help = command
+            .find_subcommand_mut("run")
+            .expect("run subcommand")
+            .render_help();
+        let Some(executable) = self.executable else {
+            writeln!(io::stdout().lock(), "{cli_help}").context(HelpOutputSnafu)?;
+            return Ok(0);
+        };
+        #[cfg(unix)]
+        {
+            let manifest = mf_tui::manifest::read_manifest(&executable)
+                .context(InspectSnafu { path: executable })?;
+            let schema = if let Some(node) = &self.node {
+                manifest
+                    .task_inputs
+                    .get(node)
+                    .context(HelpTargetSnafu { node })?
+            } else {
+                &manifest.input_schema
+            };
+            let tasks: Vec<_> = manifest
+                .execution_order
+                .iter()
+                .filter(|id| manifest.task_inputs.contains_key(*id))
+                .map(String::as_str)
+                .collect();
+            let runner_help =
+                mf_runtime::runner_help_command(schema, &tasks, self.node.as_deref()).render_help();
+            writeln!(
+                io::stdout().lock(),
+                "CLI help:\n{cli_help}\n\nRunner help:\n{runner_help}"
+            )
+            .context(HelpOutputSnafu)?;
+            Ok(0)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (executable, self.node);
+            UnsupportedInspectionSnafu.fail()
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -104,7 +205,20 @@ struct CompileOptions {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    match invoke(std::env::args_os().collect()) {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            let _ = writeln!(io::stderr().lock(), "{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn invoke(arguments: Vec<OsString>) -> Result<u8, CliError> {
+    if let Some(help) = RunHelp::parse(&arguments) {
+        return help.print();
+    }
+    let cli = Cli::parse_from(arguments);
     if let Command::Run { arguments, .. } = &cli.command
         && arguments.first().is_some_and(|argument| {
             !argument
@@ -119,13 +233,7 @@ fn main() -> ExitCode {
             )
             .exit();
     }
-    match run(cli) {
-        Ok(code) => ExitCode::from(code),
-        Err(error) => {
-            let _ = writeln!(io::stderr().lock(), "{error}");
-            ExitCode::FAILURE
-        }
-    }
+    run(cli)
 }
 
 fn run(cli: Cli) -> Result<u8, CliError> {
