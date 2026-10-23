@@ -52,6 +52,7 @@ pub struct WorkflowDefinition {
     pub control_edges: Vec<ControlEdgeDefinition>,
     pub outputs: Vec<WorkflowOutputDefinition>,
     pub order_edges: Vec<OrderEdgeDefinition>,
+    pub clusters: Vec<ClusterDefinition>,
 }
 
 mod wire;
@@ -77,6 +78,8 @@ struct DefinitionFields {
     pub outputs: Vec<WorkflowOutputDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order_edges: Vec<OrderEdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<ClusterDefinition>,
 }
 
 fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
@@ -112,13 +115,26 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_03,
     #[serde(rename = "2026-10-19")]
     V2026_10_19,
+    #[serde(rename = "2026-10-23")]
+    V2026_10_23,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_19;
+    pub const CURRENT: Self = Self::V2026_10_23;
 
     pub fn supports_startup_inputs(self) -> bool {
-        matches!(self, Self::V2026_10_03 | Self::V2026_10_19)
+        matches!(
+            self,
+            Self::V2026_10_03 | Self::V2026_10_19 | Self::V2026_10_23
+        )
+    }
+
+    pub fn supports_node_success_edges(self) -> bool {
+        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+    }
+
+    pub fn supports_clusters(self) -> bool {
+        self == Self::V2026_10_23
     }
 }
 
@@ -187,6 +203,16 @@ pub struct LoopBodyDefinition {
     pub control_edges: Vec<ControlEdgeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order_edges: Vec<OrderEdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<ClusterDefinition>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterDefinition {
+    pub label: String,
+    pub annotation: String,
+    pub nodes: Vec<DefinitionId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

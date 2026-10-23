@@ -137,6 +137,56 @@ fn loop_pass_wire_records_require_the_new_schema() {
 }
 
 #[test]
+fn descriptions_validate_cluster_metadata_and_version() {
+    let mut value = json!({
+        "version": "2026-10-23",
+        "workflow_id": graph().workflow_id,
+        "execution": {"mode": "single"},
+        "nodes": [
+            {"id": "read", "kind": "fixture.read"},
+            {"id": "parse", "kind": "fixture.parse"}
+        ],
+        "data_edges": [],
+        "control_edges": [],
+        "execution_order": ["read", "parse"],
+        "clusters": [{
+            "label": "Load and validate",
+            "annotation": "Read the input and enforce its schema.",
+            "nodes": ["read", "parse"]
+        }]
+    });
+    let description = WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(description.clusters.len(), 1);
+    assert_eq!(description.clusters[0].nodes, ["read", "parse"]);
+
+    for version in ["2026-10-19", "2026-10-03"] {
+        let mut invalid = value.clone();
+        invalid["version"] = json!(version);
+        assert!(
+            WorkflowDescription::from_json(&serde_json::to_vec(&invalid).unwrap()).is_err(),
+            "{version}"
+        );
+    }
+
+    let mut unknown = value.clone();
+    unknown["clusters"][0]["nodes"] = json!(["missing"]);
+    assert!(WorkflowDescription::from_json(&serde_json::to_vec(&unknown).unwrap()).is_err());
+
+    let mut duplicate = value.clone();
+    duplicate["clusters"]
+        .as_array_mut()
+        .unwrap()
+        .push(value["clusters"][0].clone());
+    assert!(WorkflowDescription::from_json(&serde_json::to_vec(&duplicate).unwrap()).is_err());
+
+    let mut synthetic = value.clone();
+    synthetic["clusters"][0]["nodes"] = json!(["%loop"]);
+    assert!(WorkflowDescription::from_json(&serde_json::to_vec(&synthetic).unwrap()).is_err());
+
+    value["clusters"][0]["label"] = json!("");
+    assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
+}
+#[test]
 fn nested_descriptions_validate_scope_ownership_and_version() {
     for source in ["%loop", "$loop"] {
         let mut value = serde_json::to_value(graph()).unwrap();

@@ -10,7 +10,7 @@ use crate::{
 };
 use mf_telemetry::{
     ContractError,
-    description::{WorkflowDescription, WorkflowDescriptionVersion},
+    description::{NodeDescription, WorkflowDescription, WorkflowDescriptionVersion},
 };
 use ratatui::{
     buffer::Buffer,
@@ -32,6 +32,7 @@ const ROW_GAP: u32 = 2;
 const COMPONENT_GAP: u32 = 4;
 const MARGIN: u32 = 2;
 const LAYOUT_STACK_BYTES: usize = 64 * 1024 * 1024;
+const CLUSTER_KIND: &str = "node cluster";
 
 #[derive(Debug, Snafu)]
 pub enum GraphError {
@@ -58,6 +59,15 @@ pub struct GraphNode {
     pub id: String,
     pub kind: String,
     pub rect: GraphRect,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphCluster {
+    pub label: String,
+    pub annotation: String,
+    pub members: Vec<usize>,
+    pub rect: GraphRect,
+    pub collapsed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -121,7 +131,13 @@ pub struct GraphLayout {
     view: ConnectionView,
     hidden_data_count: usize,
     hidden_transitive_count: usize,
+    hidden_cluster_edge_count: usize,
     nodes: Vec<GraphNode>,
+    sources: Vec<Vec<usize>>,
+    display_of_node: Vec<usize>,
+    node_clusters: Vec<Option<usize>>,
+    all_nodes: Vec<NodeDescription>,
+    clusters: Vec<GraphCluster>,
     edges: Vec<GraphEdge>,
     routes: Vec<EdgeRoute>,
     crossings: Vec<Crossing>,
@@ -143,10 +159,19 @@ impl GraphLayout {
         path: &[String],
         view: ConnectionView,
     ) -> Result<Self, GraphError> {
+        Self::from_body_with_view_and_collapsed(description, path, view, &BTreeSet::new())
+    }
+
+    pub fn from_body_with_view_and_collapsed(
+        description: &WorkflowDescription,
+        path: &[String],
+        view: ConnectionView,
+        collapsed: &BTreeSet<usize>,
+    ) -> Result<Self, GraphError> {
         let body = description.body(path).ok_or(GraphError::MissingLoopBody)?;
         let scope = WorkflowDescription {
             order_edges: body.order_edges.clone(),
-            version: if description.version == WorkflowDescriptionVersion::V2026_10_19 {
+            version: if description.version.supports_iteration_bodies() {
                 description.version
             } else {
                 WorkflowDescriptionVersion::V2026_09_27
@@ -156,14 +181,15 @@ impl GraphLayout {
             data_edges: body.data_edges.clone(),
             control_edges: body.control_edges.clone(),
             execution_order: body.execution_order.clone(),
-            execution: (description.version == WorkflowDescriptionVersion::V2026_10_19).then_some(
+            execution: description.version.supports_iteration_bodies().then_some(
                 mf_telemetry::description::ExecutionDescription {
                     mode: mf_telemetry::description::ExecutionMode::Single,
                 },
             ),
             loop_bodies: Vec::new(),
+            clusters: body.clusters.clone(),
         };
-        Self::with_view(&scope, view)
+        Self::with_view_and_collapsed(&scope, view, collapsed)
     }
 
     pub fn new(description: &WorkflowDescription) -> Result<Self, GraphError> {
@@ -181,13 +207,35 @@ impl GraphLayout {
         description: &WorkflowDescription,
         view: ConnectionView,
     ) -> Result<Self, GraphError> {
-        Self::with_view_and_limits(description, view, routing::RoutingLimits::default())
+        Self::with_view_and_collapsed(description, view, &BTreeSet::new())
+    }
+
+    pub fn with_view_and_collapsed(
+        description: &WorkflowDescription,
+        view: ConnectionView,
+        collapsed: &BTreeSet<usize>,
+    ) -> Result<Self, GraphError> {
+        Self::with_view_and_limits_collapsed(
+            description,
+            view,
+            routing::RoutingLimits::default(),
+            collapsed,
+        )
     }
 
     pub fn with_view_and_limits(
         description: &WorkflowDescription,
         view: ConnectionView,
         limits: routing::RoutingLimits,
+    ) -> Result<Self, GraphError> {
+        Self::with_view_and_limits_collapsed(description, view, limits, &BTreeSet::new())
+    }
+
+    pub fn with_view_and_limits_collapsed(
+        description: &WorkflowDescription,
+        view: ConnectionView,
+        limits: routing::RoutingLimits,
+        collapsed: &BTreeSet<usize>,
     ) -> Result<Self, GraphError> {
         description.validate().context(DescriptionSnafu)?;
         if description.nodes.len() > MAX_SESSION_NODES {
@@ -196,8 +244,13 @@ impl GraphLayout {
             });
         }
 
-        let compact =
-            Self::with_attachment_spacing(description, limits, routing::ATTACHMENT_SPACING, view)?;
+        let compact = Self::with_attachment_spacing(
+            description,
+            limits,
+            routing::ATTACHMENT_SPACING,
+            view,
+            collapsed,
+        )?;
         if compact.unresolved_count() == 0 {
             return Ok(compact);
         }
@@ -225,7 +278,7 @@ impl GraphLayout {
         if remaining.max_geometry_items < estimate || remaining.max_conflict_checks == 0 {
             return Ok(compact);
         }
-        let relaxed = Self::with_attachment_spacing(description, remaining, 6, view)?;
+        let relaxed = Self::with_attachment_spacing(description, remaining, 6, view, collapsed)?;
         let extra = relaxed.routing_stats;
         let mut selected = if relaxed.unresolved_count() < compact.unresolved_count() {
             relaxed
@@ -246,45 +299,105 @@ impl GraphLayout {
         limits: routing::RoutingLimits,
         attachment_spacing: u32,
         view: ConnectionView,
+        collapsed: &BTreeSet<usize>,
     ) -> Result<Self, GraphError> {
-        let described: BTreeMap<_, _> = description
+        let node_index: BTreeMap<_, _> = description
             .nodes
             .iter()
-            .map(|node| (node.id.as_str(), node))
-            .collect();
-        let positions: BTreeMap<_, _> = description
-            .execution_order
-            .iter()
             .enumerate()
-            .map(|(index, id)| (id.as_str(), index))
+            .map(|(index, node)| (node.id.as_str(), index))
             .collect();
-        let mut nodes: Vec<_> = description
-            .execution_order
+        let cluster_members: Vec<Vec<usize>> = description
+            .clusters
             .iter()
-            .map(|id| GraphNode {
-                id: id.clone(),
-                kind: described[id.as_str()].kind.clone(),
+            .map(|cluster| {
+                cluster
+                    .nodes
+                    .iter()
+                    .map(|id| node_index[id.as_str()])
+                    .collect()
+            })
+            .collect();
+        let mut node_cluster = vec![None; description.nodes.len()];
+        for (index, members) in cluster_members.iter().enumerate() {
+            for &member in members {
+                node_cluster[member] = Some(index);
+            }
+        }
+        let collapsed: BTreeSet<usize> = collapsed
+            .iter()
+            .copied()
+            .filter(|index| *index < cluster_members.len())
+            .collect();
+        let mut display_of_node = vec![usize::MAX; description.nodes.len()];
+        let mut cluster_display = vec![None; cluster_members.len()];
+        let mut nodes: Vec<GraphNode> = Vec::new();
+        let mut sources: Vec<Vec<usize>> = Vec::new();
+        let mut node_clusters: Vec<Option<usize>> = Vec::new();
+        for id in &description.execution_order {
+            let node_index = node_index[id.as_str()];
+            let node = &description.nodes[node_index];
+            if let Some(cluster) = node_cluster[node_index]
+                && collapsed.contains(&cluster)
+            {
+                let display = match cluster_display[cluster] {
+                    Some(display) => display,
+                    None => {
+                        let display = nodes.len();
+                        nodes.push(GraphNode {
+                            id: description.clusters[cluster].label.clone(),
+                            kind: CLUSTER_KIND.into(),
+                            rect: GraphRect {
+                                x: 0,
+                                y: 0,
+                                width: NODE_WIDTH,
+                                height: NODE_HEIGHT,
+                            },
+                        });
+                        sources.push(cluster_members[cluster].clone());
+                        node_clusters.push(Some(cluster));
+                        cluster_display[cluster] = Some(display);
+                        display
+                    }
+                };
+                display_of_node[node_index] = display;
+                continue;
+            }
+            let display = nodes.len();
+            nodes.push(GraphNode {
+                id: node.id.clone(),
+                kind: node.kind.clone(),
                 rect: GraphRect {
                     x: 0,
                     y: 0,
                     width: NODE_WIDTH,
                     height: NODE_HEIGHT,
                 },
-            })
-            .collect();
+            });
+            sources.push(vec![node_index]);
+            node_clusters.push(node_cluster[node_index]);
+            display_of_node[node_index] = display;
+        }
         let mut edges: Vec<GraphEdge> = Vec::new();
         let mut bundles: BTreeMap<(usize, usize, EdgeKind), usize> = BTreeMap::new();
         let mut topology = BTreeSet::new();
+        let mut hidden_cluster_edge_count = 0;
         let execution_pairs: BTreeSet<_> = description
             .control_edges
             .iter()
-            .map(|edge| (edge.from_node.as_str(), edge.to_node.as_str()))
-            .chain(
-                description
-                    .order_edges
-                    .iter()
-                    .map(|edge| (edge.from_node.as_str(), edge.to_node.as_str())),
-            )
+            .map(|edge| {
+                (
+                    display_of_node[node_index[edge.from_node.as_str()]],
+                    display_of_node[node_index[edge.to_node.as_str()]],
+                )
+            })
+            .chain(description.order_edges.iter().map(|edge| {
+                (
+                    display_of_node[node_index[edge.from_node.as_str()]],
+                    display_of_node[node_index[edge.to_node.as_str()]],
+                )
+            }))
+            .filter(|(from, to)| from != to)
             .collect();
         let mut hidden_data_count = 0;
         for edge in &description.data_edges {
@@ -293,13 +406,15 @@ impl GraphLayout {
             } else {
                 EdgeKind::Data
             };
-            let from = positions[edge.from_node.as_str()];
-            let to = positions[edge.to_node.as_str()];
+            let from = display_of_node[node_index[edge.from_node.as_str()]];
+            let to = display_of_node[node_index[edge.to_node.as_str()]];
+            if from == to {
+                hidden_cluster_edge_count += 1;
+                continue;
+            }
             topology.insert((from as u32, to as u32));
             // An explicit execution connection already shows this dependency's direction.
-            if view == ConnectionView::Execution
-                && execution_pairs.contains(&(edge.from_node.as_str(), edge.to_node.as_str()))
-            {
+            if view == ConnectionView::Execution && execution_pairs.contains(&(from, to)) {
                 hidden_data_count += 1;
                 continue;
             }
@@ -332,10 +447,18 @@ impl GraphLayout {
                 to_row: 0,
             });
         }
+        let mut controls = BTreeSet::new();
         for edge in &description.control_edges {
-            let from = positions[edge.from_node.as_str()];
-            let to = positions[edge.to_node.as_str()];
+            let from = display_of_node[node_index[edge.from_node.as_str()]];
+            let to = display_of_node[node_index[edge.to_node.as_str()]];
+            if from == to {
+                hidden_cluster_edge_count += 1;
+                continue;
+            }
             topology.insert((from as u32, to as u32));
+            if !controls.insert((from, to, edge.from_output.clone())) {
+                continue;
+            }
             edges.push(GraphEdge {
                 key: EdgeKey {
                     source: nodes[from].id.clone(),
@@ -354,10 +477,18 @@ impl GraphLayout {
                 to_row: 0,
             });
         }
+        let mut orders = BTreeSet::new();
         for edge in &description.order_edges {
-            let from = positions[edge.from_node.as_str()];
-            let to = positions[edge.to_node.as_str()];
+            let from = display_of_node[node_index[edge.from_node.as_str()]];
+            let to = display_of_node[node_index[edge.to_node.as_str()]];
+            if from == to {
+                hidden_cluster_edge_count += 1;
+                continue;
+            }
             topology.insert((from as u32, to as u32));
+            if !orders.insert((from, to)) {
+                continue;
+            }
             edges.push(GraphEdge {
                 key: EdgeKey {
                     source: nodes[from].id.clone(),
@@ -553,6 +684,57 @@ impl GraphLayout {
         };
         let (crossings, routing_stats) =
             routing::route_all(&nodes, &edges, &mut routes, &node_components, limits);
+        let clusters = description
+            .clusters
+            .iter()
+            .enumerate()
+            .map(|(index, cluster)| {
+                let members = &cluster_members[index];
+                let collapsed = collapsed.contains(&index);
+                let rect = if collapsed {
+                    let display = cluster_display[index].expect("collapsed cluster has a display");
+                    nodes[display].rect
+                } else {
+                    let display: Vec<_> = members
+                        .iter()
+                        .map(|member| display_of_node[*member])
+                        .collect();
+                    let left = display
+                        .iter()
+                        .map(|index| nodes[*index].rect.x)
+                        .min()
+                        .unwrap_or(MARGIN);
+                    let top = display
+                        .iter()
+                        .map(|index| nodes[*index].rect.y)
+                        .min()
+                        .unwrap_or(MARGIN);
+                    let right = display
+                        .iter()
+                        .map(|index| nodes[*index].rect.x + nodes[*index].rect.width)
+                        .max()
+                        .unwrap_or(left);
+                    let bottom = display
+                        .iter()
+                        .map(|index| nodes[*index].rect.y + nodes[*index].rect.height)
+                        .max()
+                        .unwrap_or(top);
+                    GraphRect {
+                        x: left.saturating_sub(1),
+                        y: top.saturating_sub(1),
+                        width: right.saturating_sub(left.saturating_sub(1)) + 1,
+                        height: bottom.saturating_sub(top.saturating_sub(1)) + 1,
+                    }
+                };
+                GraphCluster {
+                    label: cluster.label.clone(),
+                    annotation: cluster.annotation.clone(),
+                    members: members.clone(),
+                    rect,
+                    collapsed,
+                }
+            })
+            .collect::<Vec<_>>();
         let right = nodes
             .iter()
             .map(|node| node.rect.x + node.rect.width)
@@ -560,6 +742,11 @@ impl GraphLayout {
                 routes
                     .iter()
                     .flat_map(|route| route.points.iter().map(|point| point.x)),
+            )
+            .chain(
+                clusters
+                    .iter()
+                    .map(|cluster| cluster.rect.x + cluster.rect.width),
             )
             .max()
             .unwrap_or(MARGIN);
@@ -571,16 +758,27 @@ impl GraphLayout {
                     .iter()
                     .flat_map(|route| route.points.iter().map(|point| point.y + MARGIN)),
             )
+            .chain(
+                clusters
+                    .iter()
+                    .map(|cluster| cluster.rect.y + cluster.rect.height + MARGIN),
+            )
             .max()
             .unwrap_or(MARGIN * 2);
         Ok(Self {
             view,
             hidden_data_count,
             hidden_transitive_count,
+            hidden_cluster_edge_count,
             routes,
             crossings,
             routing_stats,
             nodes,
+            sources,
+            display_of_node,
+            node_clusters,
+            all_nodes: description.nodes.clone(),
+            clusters,
             edges,
             width: right + MARGIN,
             height,
@@ -597,8 +795,61 @@ impl GraphLayout {
         self.hidden_transitive_count
     }
 
+    pub fn hidden_cluster_edge_count(&self) -> usize {
+        self.hidden_cluster_edge_count
+    }
+
     pub fn nodes(&self) -> &[GraphNode] {
         &self.nodes
+    }
+
+    pub fn clusters(&self) -> &[GraphCluster] {
+        &self.clusters
+    }
+
+    pub fn all_nodes(&self) -> &[NodeDescription] {
+        &self.all_nodes
+    }
+
+    pub fn cluster_of(&self, display: usize) -> Option<usize> {
+        self.node_clusters.get(display).copied().flatten()
+    }
+
+    pub fn is_collapsed_cluster(&self, display: usize) -> bool {
+        self.nodes
+            .get(display)
+            .is_some_and(|node| node.kind == CLUSTER_KIND)
+    }
+
+    pub fn sources(&self, display: usize) -> &[usize] {
+        self.sources.get(display).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn display_index_for_node_id(&self, id: &str) -> Option<usize> {
+        let node = self.all_nodes.iter().position(|node| node.id == id)?;
+        self.display_of_node
+            .get(node)
+            .copied()
+            .filter(|index| *index != usize::MAX)
+    }
+
+    pub fn display_index_for_source(&self, source: usize) -> Option<usize> {
+        self.display_of_node
+            .get(source)
+            .copied()
+            .filter(|index| *index != usize::MAX)
+    }
+
+    pub fn display_index_for_cluster(&self, cluster: usize) -> Option<usize> {
+        if !self.clusters.get(cluster)?.collapsed {
+            return None;
+        }
+        self.node_clusters
+            .iter()
+            .enumerate()
+            .find_map(|(index, owner)| {
+                (*owner == Some(cluster) && self.is_collapsed_cluster(index)).then_some(index)
+            })
     }
 
     pub fn edges(&self) -> &[GraphEdge] {
@@ -970,6 +1221,32 @@ impl<'a> GraphView<'a> {
         }
     }
 
+    fn observation(&self, source: usize) -> Option<&'a NodeObservation> {
+        let expected = self.layout.all_nodes().get(source)?;
+        self.nodes
+            .and_then(|nodes| nodes.get(source))
+            .filter(|item| item.id == expected.id)
+    }
+
+    fn display_status(&self, display: usize) -> NodeStatus {
+        let sources = self.layout.sources(display);
+        sources
+            .iter()
+            .filter_map(|source| self.observation(*source))
+            .map(|observation| observation.status)
+            .fold(None, |current, status| {
+                Some(current.map_or(status, |current| merge_status(current, status)))
+            })
+            .unwrap_or(NodeStatus::Pending)
+    }
+
+    fn display_uncertain(&self, display: usize) -> bool {
+        self.layout.sources(display).iter().any(|source| {
+            self.observation(*source)
+                .is_some_and(|observation| observation.possibly_missing_events)
+        })
+    }
+
     fn edge_style(&self, edge: &GraphEdge) -> Style {
         let default = match edge.kind {
             EdgeKind::Data => Color::Cyan,
@@ -977,23 +1254,32 @@ impl<'a> GraphView<'a> {
             EdgeKind::Control => Color::Blue,
             EdgeKind::Success => Color::Yellow,
         };
-        let Some(source) = self
-            .nodes
-            .and_then(|nodes| nodes.get(edge.from))
-            .filter(|source| source.id == self.layout.nodes[edge.from].id)
-        else {
-            return Style::default().fg(default);
-        };
-        if source.possibly_missing_events
-            || matches!(source.status, NodeStatus::Unknown | NodeStatus::Interrupted)
+        let collapsed = self.layout.is_collapsed_cluster(edge.from);
+        let source = (!collapsed)
+            .then(|| self.layout.sources(edge.from).first().copied())
+            .flatten()
+            .and_then(|source| self.observation(source));
+        let status = source.map_or_else(
+            || {
+                if collapsed {
+                    self.display_status(edge.from)
+                } else {
+                    NodeStatus::Pending
+                }
+            },
+            |source| source.status,
+        );
+        if source.is_some_and(|source| source.possibly_missing_events)
+            || self.display_uncertain(edge.from)
+            || matches!(status, NodeStatus::Unknown | NodeStatus::Interrupted)
         {
             return Style::default().fg(Color::Magenta);
         }
-        if matches!(source.status, NodeStatus::Skipped | NodeStatus::NotRun) {
+        if matches!(status, NodeStatus::Skipped | NodeStatus::NotRun) {
             return Style::default().fg(Color::DarkGray);
         }
         if edge.kind == EdgeKind::Success {
-            return match source.status {
+            return match status {
                 NodeStatus::Succeeded => Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -1001,6 +1287,9 @@ impl<'a> GraphView<'a> {
                 _ => Style::default().fg(default),
             };
         }
+        let Some(source) = source else {
+            return Style::default().fg(default);
+        };
         let port_state = |port: &str| {
             if source.produced_ports.iter().any(|name| name == port) {
                 1
@@ -1031,6 +1320,67 @@ impl<'a> GraphView<'a> {
         Style::default().fg(default)
     }
 
+    fn draw_cluster(&self, area: Rect, buffer: &mut Buffer, cluster: &GraphCluster) {
+        if cluster.collapsed {
+            return;
+        }
+        let rect = cluster.rect;
+        if rect.width < 3 || rect.height < 2 {
+            return;
+        }
+        let style = Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD);
+        self.horizontal(
+            area,
+            buffer,
+            rect.x + 1..=rect.x + rect.width - 2,
+            rect.y,
+            "─",
+            style,
+        );
+        self.horizontal(
+            area,
+            buffer,
+            rect.x + 1..=rect.x + rect.width - 2,
+            rect.y + rect.height - 1,
+            "─",
+            style,
+        );
+        self.vertical(
+            area,
+            buffer,
+            rect.x,
+            rect.y + 1..=rect.y + rect.height - 2,
+            "│",
+            style,
+        );
+        self.vertical(
+            area,
+            buffer,
+            rect.x + rect.width - 1,
+            rect.y + 1..=rect.y + rect.height - 2,
+            "│",
+            style,
+        );
+        for (x, y, symbol) in [
+            (rect.x, rect.y, "┌"),
+            (rect.x + rect.width - 1, rect.y, "┐"),
+            (rect.x, rect.y + rect.height - 1, "└"),
+            (rect.x + rect.width - 1, rect.y + rect.height - 1, "┘"),
+        ] {
+            self.put(area, buffer, x, y, symbol, style);
+        }
+        let label = format!(" {} ", display_line(&cluster.label));
+        let label_rect = GraphRect {
+            x: rect.x + 2,
+            y: rect.y,
+            width: rect.width.saturating_sub(4),
+            height: 1,
+        };
+        self.text(area, buffer, label_rect, &label, style);
+    }
+
     fn draw_node(&self, area: Rect, buffer: &mut Buffer, index: usize, node: &GraphNode) {
         let rect = node.rect;
         if rect.x >= self.offset.0.saturating_add(u32::from(area.width))
@@ -1041,9 +1391,17 @@ impl<'a> GraphView<'a> {
             return;
         }
         let observed = self
-            .nodes
-            .and_then(|nodes| nodes.get(index).filter(|item| item.id == node.id));
-        let status = observed.map_or(NodeStatus::Pending, |item| item.status);
+            .layout
+            .sources(index)
+            .first()
+            .copied()
+            .filter(|_| !self.layout.is_collapsed_cluster(index))
+            .and_then(|source| self.observation(source));
+        let status = if self.layout.is_collapsed_cluster(index) {
+            self.display_status(index)
+        } else {
+            observed.map_or(NodeStatus::Pending, |item| item.status)
+        };
         let style = node_style(status);
         self.horizontal(
             area,
@@ -1088,7 +1446,11 @@ impl<'a> GraphView<'a> {
 
         let marker = status_marker(status, observed, self.elapsed_ns);
         let title = format!("{marker} {}", display_line(&node.id));
-        let detail = display_line(&node_detail(node, observed, self.elapsed_ns));
+        let detail = if self.layout.is_collapsed_cluster(index) {
+            format!("{} nodes | collapsed", self.layout.sources(index).len())
+        } else {
+            display_line(&node_detail(node, observed, self.elapsed_ns))
+        };
         let title_rect = GraphRect {
             x: rect.x + 1,
             y: rect.y + 1,
@@ -1116,6 +1478,9 @@ impl<'a> GraphView<'a> {
 
 impl Widget for GraphView<'_> {
     fn render(self, area: Rect, buffer: &mut Buffer) {
+        for cluster in self.layout.clusters() {
+            self.draw_cluster(area, buffer, cluster);
+        }
         for index in 0..self.layout.edges.len() {
             self.draw_edge(area, buffer, index);
         }
@@ -1128,6 +1493,24 @@ impl Widget for GraphView<'_> {
         for index in 0..self.layout.edges.len() {
             self.draw_ports(area, buffer, index);
         }
+    }
+}
+
+fn merge_status(left: NodeStatus, right: NodeStatus) -> NodeStatus {
+    use NodeStatus::*;
+    let rank = |status| match status {
+        Failed => 6,
+        Running => 5,
+        Unknown | Interrupted => 4,
+        Pending => 3,
+        Succeeded => 2,
+        Skipped => 1,
+        NotRun => 0,
+    };
+    if rank(right) > rank(left) {
+        right
+    } else {
+        left
     }
 }
 
@@ -1275,6 +1658,18 @@ mod rendering_tests {
             view: ConnectionView::Ports,
             hidden_data_count: 0,
             hidden_transitive_count: 0,
+            hidden_cluster_edge_count: 0,
+            sources: vec![vec![0], vec![1]],
+            display_of_node: vec![0, 1],
+            node_clusters: vec![None, None],
+            all_nodes: nodes
+                .iter()
+                .map(|node| NodeDescription {
+                    id: node.id.clone(),
+                    kind: node.kind.clone(),
+                })
+                .collect(),
+            clusters: Vec::new(),
             nodes,
             edges,
             routes: vec![

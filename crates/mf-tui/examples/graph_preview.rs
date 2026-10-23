@@ -203,6 +203,7 @@ fn description() -> WorkflowDescription {
             .collect(),
         execution: None,
         loop_bodies: Vec::new(),
+        clusters: Vec::new(),
     }
 }
 
@@ -459,6 +460,7 @@ fn dump_graph() -> PreviewResult<()> {
             data_edges: fixture.data_edges.clone(),
             control_edges: fixture.control_edges.clone(),
             execution_order: fixture.execution_order.clone(),
+            clusters: Vec::new(),
         };
         fixture.version = WorkflowDescriptionVersion::V2026_09_29;
         fixture.nodes = vec![NodeDescription {

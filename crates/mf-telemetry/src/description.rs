@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_DESCRIPTION_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CLUSTERS_PER_SCOPE: usize = 1024;
+pub const MAX_CLUSTER_LABEL_BYTES: usize = 200;
+pub const MAX_CLUSTER_ANNOTATION_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowDescriptionVersion {
@@ -16,6 +19,8 @@ pub enum WorkflowDescriptionVersion {
     V2026_10_03,
     #[serde(rename = "2026-10-19")]
     V2026_10_19,
+    #[serde(rename = "2026-10-23")]
+    V2026_10_23,
 }
 
 impl WorkflowDescriptionVersion {
@@ -24,6 +29,18 @@ impl WorkflowDescriptionVersion {
 
     pub fn supports_loops(self) -> bool {
         self != Self::V2026_09_27
+    }
+
+    pub fn supports_iteration_bodies(self) -> bool {
+        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+    }
+
+    pub fn supports_clusters(self) -> bool {
+        self == Self::V2026_10_23
+    }
+
+    pub fn uses_node_success_edges(self) -> bool {
+        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
     }
 }
 
@@ -53,6 +70,8 @@ pub struct WorkflowDescription {
     pub execution_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_bodies: Vec<LoopBodyDescription>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<ClusterDescription>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +83,16 @@ pub struct LoopBodyDescription {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order_edges: Vec<OrderEdge>,
     pub execution_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<ClusterDescription>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterDescription {
+    pub label: String,
+    pub annotation: String,
+    pub nodes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,7 +134,7 @@ impl WorkflowDescription {
     }
 
     pub fn event_schema_version(&self) -> i64 {
-        if self.version == WorkflowDescriptionVersion::V2026_10_19 {
+        if self.version.uses_node_success_edges() {
             return if self.is_streaming() {
                 crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
             } else {
@@ -190,7 +219,7 @@ impl WorkflowDescription {
 
     pub fn validate(&self) -> Result<(), ContractError> {
         require(
-            self.version == WorkflowDescriptionVersion::V2026_10_19
+            self.version.uses_node_success_edges()
                 || (self.order_edges.is_empty()
                     && self
                         .loop_bodies
@@ -200,7 +229,9 @@ impl WorkflowDescription {
         )?;
         if matches!(
             self.version,
-            WorkflowDescriptionVersion::V2026_10_03 | WorkflowDescriptionVersion::V2026_10_19
+            WorkflowDescriptionVersion::V2026_10_03
+                | WorkflowDescriptionVersion::V2026_10_19
+                | WorkflowDescriptionVersion::V2026_10_23
         ) {
             require(
                 self.execution.is_some(),
@@ -286,6 +317,7 @@ impl WorkflowDescription {
             endpoint(&edge.from_node, &edge.from_output, &edge.to_node)?;
             require(controls.insert(edge), "duplicate control edge")?;
         }
+        validate_clusters(self.version, &self.clusters, &nodes)?;
         let mut orders = BTreeSet::new();
         for edge in &self.order_edges {
             require(
@@ -316,8 +348,8 @@ impl WorkflowDescription {
                 .iter()
                 .find(|node| node.id == *loop_id)
                 .ok_or_else(|| crate::invalid("unknown body container"))?;
-            let iteration = self.version == WorkflowDescriptionVersion::V2026_10_19
-                && container.kind == "builtin.iteration";
+            let iteration =
+                self.version.supports_iteration_bodies() && container.kind == "builtin.iteration";
             require(
                 container.kind == "workflow.loop" || iteration,
                 "body path does not name a supported container",
@@ -333,7 +365,7 @@ impl WorkflowDescription {
                 "body omits its synthetic source",
             )?;
             let scope = Self {
-                version: if self.version == WorkflowDescriptionVersion::V2026_10_19 {
+                version: if self.version.supports_iteration_bodies() {
                     self.version
                 } else {
                     WorkflowDescriptionVersion::V2026_09_27
@@ -344,12 +376,13 @@ impl WorkflowDescription {
                 data_edges: body.data_edges.clone(),
                 control_edges: body.control_edges.clone(),
                 execution_order: body.execution_order.clone(),
-                execution: (self.version == WorkflowDescriptionVersion::V2026_10_19).then_some(
+                execution: self.version.supports_iteration_bodies().then_some(
                     ExecutionDescription {
                         mode: ExecutionMode::Single,
                     },
                 ),
                 loop_bodies: Vec::new(),
+                clusters: body.clusters.clone(),
             };
             scope.validate()?;
             require(
@@ -361,4 +394,53 @@ impl WorkflowDescription {
         }
         Ok(())
     }
+}
+
+fn validate_clusters(
+    version: WorkflowDescriptionVersion,
+    clusters: &[ClusterDescription],
+    nodes: &BTreeMap<&str, &NodeDescription>,
+) -> Result<(), ContractError> {
+    require(
+        clusters.is_empty() || version.supports_clusters(),
+        "node clusters require a supported description version",
+    )?;
+    require(
+        clusters.len() <= MAX_CLUSTERS_PER_SCOPE,
+        "too many node clusters",
+    )?;
+    let mut members = BTreeSet::new();
+    for cluster in clusters {
+        require(
+            !cluster.label.trim().is_empty()
+                && cluster.label.len() <= MAX_CLUSTER_LABEL_BYTES
+                && !cluster.label.chars().any(char::is_control),
+            "invalid node cluster label",
+        )?;
+        require(
+            !cluster.annotation.trim().is_empty()
+                && cluster.annotation.len() <= MAX_CLUSTER_ANNOTATION_BYTES
+                && cluster
+                    .annotation
+                    .chars()
+                    .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')),
+            "invalid node cluster annotation",
+        )?;
+        require(!cluster.nodes.is_empty(), "node cluster must not be empty")?;
+        for node in &cluster.nodes {
+            require(
+                !matches!(node.as_str(), "%loop" | "$loop" | "%iteration"),
+                "synthetic nodes cannot belong to a cluster",
+            )?;
+            require(
+                nodes.contains_key(node.as_str()),
+                "unknown node cluster member",
+            )?;
+            require(
+                members.insert(node.as_str()),
+                "node belongs to multiple clusters",
+            )?;
+        }
+    }
+    Ok(())
 }

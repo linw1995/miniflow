@@ -2,9 +2,10 @@
 
 ## JSON format
 
-Use version `2026-10-19` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+Use version `2026-10-23` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
-`outputs` entry selects a node port and names the executable's JSON result.
+`outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
+display-only [node clusters](#node-clusters).
 
 The [conditional convergence example](../examples/exclusive-inputs.json) uses the new format. The [basic
 example](../examples/hello-workflow.json) retains legacy `2026-09-26` syntax. Existing supported versions keep their
@@ -33,6 +34,35 @@ Input names must match the provider's ports. Duplicate keys, unknown fields, nul
 fail. A connected optional input still skips its consumer when its source skips. Unbound inputs keep their existing
 required, optional, and startup parameter rules. Loop and Iteration bodies use the root version and the same binding
 syntax within their existing scope and message-domain restrictions.
+
+## Node clusters
+
+Version `2026-10-23` accepts an optional `clusters` array in the root graph and in Loop and Iteration bodies. Clusters
+group existing nodes for inspection only; they do not add scheduling dependencies, input bindings, or executable
+nodes. The [clustered example](../examples/clustered-workflow.json) compiles to the same result as
+[the scalar example](../examples/cel-scalar.json).
+
+```json
+{
+  "clusters": [
+    {
+      "label": "Load and validate",
+      "annotation": "Read the input and enforce its schema invariants.",
+      "nodes": ["read", "parse", "validate"]
+    }
+  ]
+}
+```
+
+`label` is the short single-line title shown in the graph. `annotation` is the longer explanation shown in Details.
+Both are required and bounded. Members belong to the containing scope, must be unique, and a node can belong to at most
+one cluster. Clusters are flat and cannot contain `%loop` or `%iteration` synthetic sources. A cluster may contain a
+Loop or Iteration node as an opaque member.
+
+In the terminal UI, `c` collapses or expands the cluster containing the selected node. A collapsed cluster is drawn as
+one node with the short label and an aggregate status; connections to its members attach to that node and internal
+connections are hidden. Expanding restores the member nodes and the cluster annotation. Cluster state is local to the
+TUI session and never changes workflow results. Older TUI readers reject the new description version before execution.
 
 ## Node dependencies
 

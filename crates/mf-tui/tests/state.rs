@@ -151,6 +151,7 @@ fn graph() -> WorkflowDescription {
         execution_order: vec!["a".into(), "b".into()],
         execution: None,
         loop_bodies: Vec::new(),
+        clusters: Vec::new(),
     }
 }
 
@@ -268,7 +269,9 @@ fn loop_graph() -> WorkflowDescription {
             }],
             control_edges: vec![],
             execution_order: vec!["%loop".into(), "step".into()],
+            clusters: Vec::new(),
         }],
+        clusters: Vec::new(),
     }
 }
 

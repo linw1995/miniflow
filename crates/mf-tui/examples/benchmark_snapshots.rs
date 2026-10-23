@@ -32,6 +32,7 @@ fn main() {
         execution_order: order,
         execution: None,
         loop_bodies: Vec::new(),
+        clusters: Vec::new(),
     };
     let state = SessionState::new(description, RunId::new()).unwrap();
     let started = Instant::now();

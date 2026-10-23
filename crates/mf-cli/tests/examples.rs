@@ -23,10 +23,11 @@ fn title_usage(node: &str, purpose: &str) -> Value {
     usage
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 15] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 16] {
     [
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
+        ("clustered-workflow.json", None, json!({"doubled": 42})),
         (
             "chat-flow.json",
             None,

@@ -578,8 +578,10 @@ The graph uses the full width by default. Press `d` to show or hide Details; Esc
 before navigating back. The footer shows only common controls. Press `?` in the graph or tracing view
 for the remaining shortcuts, and `?` or Esc to dismiss help. Help consumes navigation keys while open.
 The header keeps the observed workflow outcome separate from the child process result. Arrow keys
-pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. `e` cycles connection views. On a node with a
-described body, `l` opens
+pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. `e` cycles connection views.
+Declared node clusters show a labeled boundary and their annotation in Details. Press `c` to collapse or
+expand the selected node's cluster; collapsed clusters render as one aggregate node, remap external
+connections, and hide internal connections. On a node with a described body, `l` opens
 its body graph; `h` or Esc returns to the parent graph. `[` and `]` inspect older and newer retained
 pass frames. The detail pane shows active and completed pass counts, stop reason, and any hidden
 older detail. Streaming details also show observed invocation/completion/result counts, Batch state,

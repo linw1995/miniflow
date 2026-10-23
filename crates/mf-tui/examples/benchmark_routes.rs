@@ -34,6 +34,7 @@ fn main() {
         control_edges: Vec::new(),
         execution: None,
         loop_bodies: Vec::new(),
+        clusters: Vec::new(),
     };
     let edge = |from: usize, to: usize, port: usize| DataEdge {
         exclusive: false,

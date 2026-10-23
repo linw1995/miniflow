@@ -1,4 +1,6 @@
-use mf_compiler::{DefinitionParseError, WorkflowDefinition, WorkflowDefinitionVersion};
+use mf_compiler::{
+    DefinitionParseError, WorkflowDefinition, WorkflowDefinitionVersion, plan_definition,
+};
 
 #[test]
 fn parses_a_versioned_workflow_definition() {
@@ -110,6 +112,77 @@ fn dependencies_validate_sources_and_preserve_features() {
 }
 
 #[test]
+fn loop_body_clusters_are_preserved_in_descriptions() {
+    let definition = WorkflowDefinition::from_json(
+        r#"{
+            "version": "2026-10-23",
+            "dependencies": {},
+            "nodes": [{
+                "id": "repeat",
+                "kind": "workflow.loop",
+                "loop": {
+                    "max_iterations": 1,
+                    "variables": [{"name": "count", "type": "int"}],
+                    "body": {
+                        "nodes": [{"id": "step", "kind": "fixture.task"}],
+                        "clusters": [{
+                            "label": "Body step",
+                            "annotation": "The only body transformation.",
+                            "nodes": ["step"]
+                        }]
+                    }
+                }
+            }]
+        }"#,
+    )
+    .unwrap();
+    let plan = plan_definition(&definition).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(description.clusters.len(), 0);
+    assert_eq!(description.loop_bodies.len(), 1);
+    assert_eq!(description.loop_bodies[0].clusters.len(), 1);
+    assert_eq!(description.loop_bodies[0].clusters[0].label, "Body step");
+    assert_eq!(
+        description.loop_bodies[0].clusters[0].nodes,
+        vec!["step".to_owned()]
+    );
+}
+
+#[test]
+fn iteration_body_clusters_are_preserved_in_descriptions() {
+    let definition = WorkflowDefinition::from_json(
+        r#"{
+            "version": "2026-10-23",
+            "dependencies": {},
+            "nodes": [{
+                "id": "iterate",
+                "kind": "builtin.iteration",
+                "config": {
+                    "body": {
+                        "nodes": [{"id": "step", "kind": "fixture.task"}],
+                        "result": {"node": "step", "port": "value"},
+                        "clusters": [{
+                            "label": "Item step",
+                            "annotation": "The body executed for every item.",
+                            "nodes": ["step"]
+                        }]
+                    }
+                }
+            }]
+        }"#,
+    )
+    .unwrap();
+    let plan = plan_definition(&definition).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(description.loop_bodies.len(), 1);
+    assert_eq!(description.loop_bodies[0].clusters.len(), 1);
+    assert_eq!(description.loop_bodies[0].clusters[0].label, "Item step");
+    assert_eq!(
+        description.loop_bodies[0].clusters[0].nodes,
+        vec!["step".to_owned()]
+    );
+}
+#[test]
 fn old_schema_explains_migration() {
     let error =
         WorkflowDefinition::from_json(r#"{"version":"2026-09-24","nodes":[]}"#).unwrap_err();
@@ -127,4 +200,87 @@ fn documented_example_round_trips_with_dependencies() {
         definition,
         WorkflowDefinition::from_json(&serde_json::to_string(&definition).unwrap()).unwrap()
     );
+}
+
+#[test]
+fn clusters_require_the_supported_definition_version_and_round_trip() {
+    let mut value = serde_json::json!({
+        "version": "2026-10-23",
+        "dependencies": {},
+        "nodes": [
+            {"id": "read", "kind": "fixture.read"},
+            {"id": "parse", "kind": "fixture.parse"}
+        ],
+        "clusters": [{
+            "label": "Load and validate",
+            "annotation": "Read the input and enforce its schema.",
+            "nodes": ["read", "parse"]
+        }]
+    });
+    let definition = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+    assert_eq!(definition.version, WorkflowDefinitionVersion::V2026_10_23);
+    assert_eq!(definition.clusters.len(), 1);
+    assert_eq!(
+        definition,
+        WorkflowDefinition::from_json(&serde_json::to_string(&definition).unwrap()).unwrap()
+    );
+    let plan = plan_definition(&definition).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(
+        description.version,
+        mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23
+    );
+    assert_eq!(description.clusters.len(), 1);
+    assert_eq!(description.clusters[0].label, "Load and validate");
+
+    for version in ["2026-10-19", "2026-10-03"] {
+        value["version"] = serde_json::json!(version);
+        let error = WorkflowDefinition::from_json(&value.to_string()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("node clusters require version 2026-10-23"),
+            "{version}: {error}"
+        );
+    }
+    value["version"] = serde_json::json!("2026-10-23");
+}
+
+#[test]
+fn cluster_validation_rejects_unknown_duplicate_and_synthetic_members() {
+    let mut value = serde_json::json!({
+        "version": "2026-10-23",
+        "dependencies": {},
+        "nodes": [
+            {"id": "read", "kind": "fixture.read"},
+            {"id": "parse", "kind": "fixture.parse"}
+        ],
+        "clusters": [{
+            "label": "Load",
+            "annotation": "Read the input.",
+            "nodes": ["read"]
+        }]
+    });
+    let base = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+    assert!(plan_definition(&base).is_ok());
+
+    let mut unknown = base.clone();
+    unknown.clusters[0].nodes = vec!["missing".into()];
+    let error = plan_definition(&unknown).unwrap_err().to_string();
+    assert!(error.contains("unknown node"), "{error}");
+
+    let mut duplicate = base.clone();
+    duplicate.clusters.push(duplicate.clusters[0].clone());
+    let error = plan_definition(&duplicate).unwrap_err().to_string();
+    assert!(error.contains("more than one cluster"), "{error}");
+
+    let mut synthetic = base;
+    synthetic.clusters[0].nodes = vec!["%loop".into()];
+    let error = plan_definition(&synthetic).unwrap_err().to_string();
+    assert!(error.contains("synthetic nodes"), "{error}");
+
+    value["clusters"][0]["label"] = serde_json::json!("");
+    let empty_label = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+    let error = plan_definition(&empty_label).unwrap_err().to_string();
+    assert!(error.contains("cluster label"), "{error}");
 }

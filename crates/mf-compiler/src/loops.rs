@@ -61,7 +61,9 @@ pub fn body_definition(
     });
     nodes.extend(body.nodes.iter().cloned());
     WorkflowDefinition {
-        version: if !body.has_order_edges() {
+        version: if !body.clusters.is_empty() {
+            WorkflowDefinitionVersion::V2026_10_23
+        } else if !body.has_order_edges() {
             WorkflowDefinitionVersion::V2026_09_29
         } else {
             WorkflowDefinitionVersion::V2026_10_19
@@ -73,6 +75,7 @@ pub fn body_definition(
         control_edges: body.control_edges.clone(),
         order_edges: body.order_edges.clone(),
         outputs: Vec::new(),
+        clusters: body.clusters.clone(),
     }
 }
 
@@ -90,7 +93,14 @@ pub fn validate_structure(definition: &WorkflowDefinition) -> Result<(), Workflo
                 "Loop constructs require definition version 2026-09-29",
             ));
         }
-        validate_node(node, None, 0, &[], &definition.dependencies)?;
+        validate_node(
+            node,
+            None,
+            0,
+            &[],
+            &definition.dependencies,
+            definition.version,
+        )?;
     }
     Ok(())
 }
@@ -101,6 +111,7 @@ fn validate_node(
     depth: usize,
     path: &[DefinitionId],
     dependencies: &BTreeMap<String, mf_runtime::NodeDependency>,
+    version: WorkflowDefinitionVersion,
 ) -> Result<(), WorkflowCompileError> {
     let mut node_path = path.to_vec();
     node_path.push(node.id.clone());
@@ -116,7 +127,13 @@ fn validate_node(
                 .loop_definition
                 .as_deref()
                 .ok_or_else(|| invalid(&node_path, "Loop definition is missing"))?;
-            validate_loop(loop_definition, depth + 1, &node_path, dependencies)
+            validate_loop(
+                loop_definition,
+                depth + 1,
+                &node_path,
+                dependencies,
+                version,
+            )
         }
         LOOP_ASSIGN_KIND => {
             if node.loop_definition.is_some() {
@@ -156,7 +173,11 @@ fn validate_loop(
     depth: usize,
     path: &[DefinitionId],
     dependencies: &BTreeMap<String, mf_runtime::NodeDependency>,
+    version: WorkflowDefinitionVersion,
 ) -> Result<(), WorkflowCompileError> {
+    if !loop_definition.body.clusters.is_empty() && !version.supports_clusters() {
+        return Err(invalid(path, "node clusters require version 2026-10-23"));
+    }
     if !(1..=MAX_LOOP_ITERATIONS).contains(&loop_definition.max_iterations) {
         return Err(invalid(path, "max_iterations must be in 1..=1000"));
     }
@@ -241,7 +262,7 @@ fn validate_loop(
         }
     })?;
     for node in &loop_definition.body.nodes {
-        validate_node(node, Some(&types), depth, path, dependencies)?;
+        validate_node(node, Some(&types), depth, path, dependencies, version)?;
     }
     Ok(())
 }

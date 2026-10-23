@@ -52,6 +52,7 @@ fn definition(count: usize, payload: usize) -> WorkflowDefinition {
             port: "value".into(),
             optional: false,
         }],
+        clusters: Vec::new(),
     }
 }
 
