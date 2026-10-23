@@ -45,8 +45,8 @@ enum Command {
         /// Observe workflow execution in the terminal UI.
         #[arg(long)]
         tui: bool,
-        /// Keep an interactive conversation using this executable.
-        #[arg(long, requires_all = ["tui", "chat_db"])]
+        /// Keep an interactive conversation using this executable (implies --tui).
+        #[arg(long, requires = "chat_db")]
         chat: bool,
         /// SQLite database owned by this chat application.
         #[arg(long, value_name = "PATH", requires = "chat")]
@@ -229,7 +229,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             arguments,
             ..
         } => {
-            if !tui {
+            if !tui && !chat {
                 let mut command = std::process::Command::new(&executable);
                 for _ in 0..verbose {
                     command.arg("--verbose");
@@ -567,42 +567,42 @@ mod tests {
 mod chat_tests {
     use super::*;
     #[test]
-    fn chat_options_require_terminal_mode_database_and_explicit_chat() {
+    fn chat_options_require_database_and_explicit_chat() {
         for args in [
             vec!["mf", "run", "flow", "--chat"],
-            vec!["mf", "run", "flow", "--chat", "--chat-db", "chat.sqlite"],
             vec!["mf", "run", "flow", "--tui", "--chat-db", "chat.sqlite"],
             vec!["mf", "run", "flow", "--chat-profile", "default"],
         ] {
             assert!(Cli::try_parse_from(args).is_err());
         }
-        let cli = Cli::try_parse_from([
-            "mf",
-            "run",
-            "flow",
-            "--tui",
-            "--chat",
-            "--chat-db",
-            "chat.sqlite",
-            "--chat-profile",
-            "work",
-            "--task.path",
-            "input",
-        ])
-        .unwrap();
-        let Command::Run {
-            chat,
-            chat_db,
-            chat_profile,
-            arguments,
-            ..
-        } = cli.command
-        else {
-            panic!("expected run")
-        };
-        assert!(chat);
-        assert_eq!(chat_db, Some(PathBuf::from("chat.sqlite")));
-        assert_eq!(chat_profile.as_deref(), Some("work"));
-        assert_eq!(arguments.len(), 2);
+        for tui in [vec![], vec!["--tui"]] {
+            let mut args = vec![
+                "mf",
+                "run",
+                "flow",
+                "--chat",
+                "--chat-db",
+                "chat.sqlite",
+                "--chat-profile",
+                "work",
+            ];
+            args.extend(tui);
+            args.extend(["--task.path", "input"]);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Run {
+                chat,
+                chat_db,
+                chat_profile,
+                arguments,
+                ..
+            } = cli.command
+            else {
+                panic!("expected run")
+            };
+            assert!(chat);
+            assert_eq!(chat_db, Some(PathBuf::from("chat.sqlite")));
+            assert_eq!(chat_profile.as_deref(), Some("work"));
+            assert_eq!(arguments.len(), 2);
+        }
     }
 }

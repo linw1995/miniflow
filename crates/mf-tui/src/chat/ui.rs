@@ -21,6 +21,26 @@ use std::{
 };
 const MAX_EDITOR_BYTES: usize = 256 * 1024;
 
+fn execution_areas(body: Rect) -> (Rect, Rect) {
+    if body.width >= 120 && body.height >= 12 {
+        let [chat, panel] =
+            Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .areas(body);
+        (chat, panel)
+    } else if body.height >= 18 {
+        let [chat, panel] = Layout::vertical([
+            Constraint::Min(10),
+            Constraint::Length((body.height / 3).clamp(8, 14)),
+        ])
+        .areas(body);
+        (chat, panel)
+    } else {
+        let [chat, panel] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);
+        (chat, panel)
+    }
+}
+
 pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
     let launch = ChatLaunch::prepare(path, options)?;
     ensure!(
@@ -206,6 +226,7 @@ enum Action {
     Inspect,
     Earlier,
     Latest,
+    ToggleExecution,
     Quit,
 }
 
@@ -224,6 +245,7 @@ struct ChatView {
     retained: bool,
     unsaved: Option<String>,
     observation: Option<LocalObservation>,
+    show_execution: bool,
     inspector: ObservationView,
     scroll: u16,
     notice: String,
@@ -248,6 +270,7 @@ impl ChatView {
             retained: false,
             unsaved: None,
             observation: None,
+            show_execution: true,
             inspector: ObservationView::new(description)?,
             scroll: 0,
             notice: "Start a conversation, or Ctrl+S to resume one".into(),
@@ -436,6 +459,14 @@ impl ChatView {
         if self.earlier {
             actions.push((Action::Latest, "Latest messages"));
         }
+        actions.push((
+            Action::ToggleExecution,
+            if self.show_execution {
+                "Hide execution panel (Ctrl+E)"
+            } else {
+                "Show execution panel (Ctrl+E)"
+            },
+        ));
         actions.push((Action::Quit, "Quit"));
         actions
     }
@@ -465,6 +496,7 @@ impl ChatView {
                     && self.send(controller, ChatCommand::Retry { turn_id })
                 {
                     self.pending = Some(None);
+                    self.observation = None;
                     self.notice = "Starting retry...".into();
                 }
             }
@@ -486,6 +518,7 @@ impl ChatView {
                 self.earlier = false;
                 self.load(controller, None);
             }
+            Action::ToggleExecution => self.show_execution = !self.show_execution,
             Action::Quit => return true,
         }
         false
@@ -502,6 +535,7 @@ impl ChatView {
             },
         ) {
             self.pending = Some(Some(self.editor.revision));
+            self.observation = None;
             self.mode = Mode::Input;
             self.notice = "Starting...".into();
             self.earlier = false;
@@ -523,6 +557,10 @@ impl ChatView {
                 }
                 KeyCode::Char('n') => return self.act(Action::New, controller),
                 KeyCode::Char('s') => return self.act(Action::Switch, controller),
+                KeyCode::Char('e') => {
+                    self.show_execution = !self.show_execution;
+                    return false;
+                }
                 KeyCode::Char('u') if self.mode == Mode::Input => {
                     self.editor.text.clear();
                     self.editor.cursor = 0;
@@ -668,6 +706,27 @@ impl ChatView {
                 .style(Style::default().fg(Color::DarkGray)),
             header,
         );
+        let body = if self.show_execution
+            && (self.pending.is_some() || self.active.is_some() || self.observation.is_some())
+        {
+            let (chat, panel) = execution_areas(body);
+            let inner = if panel.height > 1 {
+                let block = Block::bordered().title(" Flow execution ");
+                let inner = block.inner(panel);
+                frame.render_widget(block, panel);
+                inner
+            } else {
+                panel
+            };
+            if let Some(observation) = &self.observation {
+                self.inspector.render_execution(frame, inner, observation);
+            } else {
+                frame.render_widget(Paragraph::new("Flow: Starting..."), inner);
+            }
+            chat
+        } else {
+            body
+        };
         let mut lines = vec![];
         if let Some(page) = &self.page {
             for record in &page.messages {
@@ -757,11 +816,11 @@ impl ChatView {
             input_area,
         );
         let hints = if self.active.is_some() || self.pending.is_some() {
-            "Ctrl+C cancel | Ctrl+P commands"
+            "Ctrl+C cancel | Ctrl+E flow | Ctrl+P commands"
         } else if self.retained {
-            "Ctrl+P recover reply | Ctrl+Q quit"
+            "Ctrl+P recover reply | Ctrl+E flow | Ctrl+Q quit"
         } else {
-            "Ctrl+P commands | Ctrl+S switch chat | Ctrl+Q quit"
+            "Ctrl+P commands | Ctrl+E flow | Ctrl+S chats | Ctrl+Q quit"
         };
         frame.render_widget(
             Paragraph::new(format!("{}\n{hints}", safe(&self.notice)))
@@ -855,6 +914,128 @@ mod tests {
             &controller,
         );
         assert_eq!(view.editor.text, "e");
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn execution_panel_adapts_to_resizing_and_preserves_the_editor() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        view.editor.insert("Draft for the next turn");
+        assert!(!render(&view, 180, 40).contains("Flow execution"));
+        view.pending = Some(None);
+        assert!(render(&view, 180, 40).contains("Flow: Starting..."));
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 0.1"]);
+        let mut run = LocalRun::start(
+            command,
+            launch.manifest.description().unwrap(),
+            mf_telemetry::identity::RunId::new(),
+            1024,
+        )
+        .unwrap();
+        view.observation = Some(run.observation());
+        for (width, height, side_by_side) in [(180, 40, true), (80, 32, false)] {
+            let text = render(&view, width, height);
+            let rows: Vec<_> = text.lines().collect();
+            let panel = rows
+                .iter()
+                .position(|row| row.contains("Flow execution"))
+                .unwrap();
+            let chat = rows
+                .iter()
+                .position(|row| row.contains("What would you like"))
+                .unwrap();
+            assert_eq!(panel == chat, side_by_side, "{text}");
+            assert!(text.contains("Flow: Running"), "{text}");
+            assert!(text.contains("start"), "{text}");
+            assert!(text.contains("Observation: Collecting"), "{text}");
+            assert!(text.contains("Draft for the next turn"), "{text}");
+        }
+        let compact = render(&view, 60, 18);
+        assert!(compact.contains("Flow: Running"), "{compact}");
+        assert!(!compact.contains("Flow execution"), "{compact}");
+        assert!(compact.contains("Draft for the next turn"), "{compact}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while run.poll().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        view.pending = None;
+        let finished = render(&view, 180, 40);
+        assert!(finished.contains("Flow: Exited 0"), "{finished}");
+        assert!(finished.contains("UnverifiedTail"), "{finished}");
+        for (width, height) in [(1, 1), (20, 6), (180, 10)] {
+            render(&view, width, height);
+        }
+        view.switch(None);
+        assert!(!render(&view, 180, 40).contains("Flow execution"));
+    }
+
+    #[test]
+    fn execution_panel_toggle_preserves_observation_drafts_and_preferences() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        assert!(view.show_execution);
+        view.editor.insert("first prompt");
+        view.submit(&controller);
+        pump(&mut view, &controller, |view| view.observation.is_some());
+        let invocation = view.active.as_ref().unwrap().0.call_id.clone();
+        view.editor.insert("next draft");
+        view.mode = Mode::Browse;
+        let toggle = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        view.key(toggle, &controller);
+        assert!(!view.show_execution);
+        assert!(view.mode == Mode::Browse);
+        for (width, height) in [(180, 40), (80, 32), (60, 18)] {
+            let text = render(&view, width, height);
+            assert!(
+                !text.contains("Flow execution") && !text.contains("Flow:"),
+                "{text}"
+            );
+            assert!(text.contains("next draft"), "{text}");
+        }
+        view.key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        view.selected = view
+            .actions()
+            .iter()
+            .position(|(action, label)| {
+                *action == Action::ToggleExecution && label.starts_with("Show")
+            })
+            .unwrap();
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        assert!(view.show_execution);
+        assert!(render(&view, 180, 40).contains("Flow: Running"));
+        assert!(controller.busy());
+        assert_eq!(view.active.as_ref().unwrap().0.call_id, invocation);
+        assert_eq!(view.editor.text, "next draft");
+        assert!(view.actions().iter().any(|(action, label)| {
+            *action == Action::ToggleExecution && label.starts_with("Hide")
+        }));
+        view.key(toggle, &controller);
+        controller.cancel();
+        pump(&mut view, &controller, |view| {
+            view.active.is_none() && view.page.is_some()
+        });
+        assert!(view.observation.is_some());
+        assert!(!render(&view, 180, 40).contains("Flow execution"));
+        view.act(Action::New, &controller);
+        assert!(!view.show_execution);
+        view.editor.insert("another turn");
+        view.submit(&controller);
+        pump(&mut view, &controller, |view| view.observation.is_some());
+        assert!(!view.show_execution);
+        view.key(toggle, &controller);
+        assert!(render(&view, 180, 40).contains("Flow: Running"));
         controller.close().unwrap();
     }
 
