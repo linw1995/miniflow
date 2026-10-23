@@ -16,13 +16,15 @@ use std::{
     process::{Command, ExitStatus},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
     time::Duration,
 };
 
+mod live;
+pub use live::LivePreview;
 mod ui;
 pub use ui::run_chat;
 const QUEUE_CAPACITY: usize = 16;
@@ -136,9 +138,9 @@ pub enum ChatEvent {
         prompt: String,
     },
     Observing(LocalObservation),
-    Live {
+    Preview {
         invocation: Invocation,
-        event: mf_runtime::LiveOutputEvent,
+        preview: LivePreview,
     },
     Finished {
         invocation: Invocation,
@@ -157,6 +159,10 @@ pub struct ChatController {
     _database: Arc<ChatDatabase>,
     commands: SyncSender<ChatCommand>,
     events: Receiver<ChatEvent>,
+    deferred: Mutex<Option<ChatEvent>>,
+    preview: Arc<Mutex<LivePreview>>,
+    preview_revision: AtomicU64,
+    presented_invocation: Mutex<Option<Invocation>>,
     closed: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -170,6 +176,7 @@ impl ChatController {
         let closed = Arc::new(AtomicBool::new(false));
         let busy = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
+        let preview = Arc::new(Mutex::new(LivePreview::default()));
         let controller = Controller {
             launch: Arc::new(launch),
             database: Arc::clone(&database),
@@ -179,6 +186,7 @@ impl ChatController {
             busy: Arc::clone(&busy),
             cancel: Arc::clone(&cancel),
             retained: None,
+            preview: preview.clone(),
         };
         let worker = thread::Builder::new()
             .name("mf-chat-controller".into())
@@ -190,6 +198,10 @@ impl ChatController {
             _database: database,
             commands,
             events,
+            deferred: Mutex::new(None),
+            preview,
+            preview_revision: AtomicU64::new(0),
+            presented_invocation: Mutex::new(None),
             closed,
             busy,
             cancel,
@@ -228,7 +240,48 @@ impl ChatController {
         self.cancel.store(true, Ordering::Release);
     }
     pub fn try_event(&self) -> Option<ChatEvent> {
-        self.events.try_recv().ok()
+        let event = self
+            .deferred
+            .lock()
+            .unwrap()
+            .take()
+            .or_else(|| self.events.try_recv().ok());
+        if let Some(ChatEvent::Submitted { invocation, .. }) = &event {
+            *self.presented_invocation.lock().unwrap() = Some(invocation.clone());
+        }
+        if matches!(event, Some(ChatEvent::Finished { .. }))
+            && let Some(preview) = self.updated_preview()
+        {
+            *self.deferred.lock().unwrap() = event;
+            return Some(preview);
+        }
+        if matches!(event, Some(ChatEvent::Finished { .. })) {
+            *self.presented_invocation.lock().unwrap() = None;
+        }
+        event.or_else(|| self.updated_preview())
+    }
+
+    fn updated_preview(&self) -> Option<ChatEvent> {
+        let expected = self.presented_invocation.lock().unwrap().clone();
+        let preview = self.preview.lock().unwrap();
+        if expected.is_none() || preview.invocation != expected {
+            return None;
+        }
+        if self.preview_revision.load(Ordering::Acquire) == preview.revision {
+            return None;
+        }
+        self.preview_revision
+            .store(preview.revision, Ordering::Release);
+        if preview.segments.is_empty() && !preview.omitted {
+            return None;
+        }
+        preview
+            .invocation
+            .as_ref()
+            .map(|invocation| ChatEvent::Preview {
+                invocation: invocation.clone(),
+                preview: preview.clone(),
+            })
     }
     pub fn close(mut self) -> Result<(), ChatRunError> {
         self.join_worker()
@@ -264,6 +317,7 @@ struct Controller {
     busy: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     retained: Option<Retained>,
+    preview: Arc<Mutex<LivePreview>>,
 }
 impl Controller {
     fn emit(&self, event: ChatEvent) {
@@ -378,6 +432,9 @@ impl Controller {
     ) -> Result<(), ChatRunError> {
         ensure!(self.retained.is_none(), BusySnafu);
         let invocation = Invocation::new(&session.id);
+        if self.launch.contract.answer_stream.is_some() {
+            self.preview.lock().unwrap().begin(invocation.clone());
+        }
         let captured = Arc::new(Mutex::new(None));
         let backend = ExternalBackend {
             launch: Arc::clone(&self.launch),
@@ -408,39 +465,21 @@ impl Controller {
             max_history_bytes: mf_chat::DEFAULT_HISTORY_BYTES,
         };
         let live = self.launch.contract.answer_stream.as_ref().map(|_| {
-            let output = self.output.clone();
+            let preview = self.preview.clone();
             let closed = self.closed.clone();
             let cancel = self.cancel.clone();
             let invocation = invocation.clone();
             mf_runtime::LivePublisher::new(move |event, cancellation| {
-                if let mf_runtime::LiveOutputKind::Value { value } = &event.event {
-                    mf_chat::contract::decode_answer_delta(value)
-                        .context(mf_runtime::StreamOutputDecodeSnafu)?;
+                if let Some(error) = cancellation.failure() {
+                    return Err(error);
                 }
-                let mut event = ChatEvent::Live {
-                    invocation: invocation.clone(),
-                    event,
-                };
-                loop {
-                    if let Some(error) = cancellation.failure() {
-                        return Err(error);
-                    }
-                    if cancel.load(Ordering::Acquire) || closed.load(Ordering::Acquire) {
-                        return Err(mf_runtime::StreamError::Execution {
-                            message: "chat live delivery cancelled".into(),
-                        });
-                    }
-                    match output.try_send(event) {
-                        Ok(()) => return Ok(()),
-                        Err(TrySendError::Full(pending)) => event = pending,
-                        Err(TrySendError::Disconnected(_)) => {
-                            return Err(mf_runtime::StreamError::Execution {
-                                message: "chat live receiver disconnected".into(),
-                            });
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(5));
+                if cancel.load(Ordering::Acquire) || closed.load(Ordering::Acquire) {
+                    return Err(mf_runtime::StreamError::Execution {
+                        message: "chat live delivery cancelled".into(),
+                    });
                 }
+                // Consume and compact independently of terminal refresh or inspection.
+                preview.lock().unwrap().apply(&invocation, event)
             })
             .select(["answer".into()])
         });

@@ -184,6 +184,16 @@ Each token counter exposes `known_subtotal`, `reported_calls`, and `missing_call
 
 SQL computes aggregate facts without loading raw call history. Integer overflow fails explicitly. Calls from title generation remain attributed to `title`, including valid replies whose title update was stale or whose application title was rejected. Monetary estimates require separate pricing data and are not provided by the core.
 
+Live answers appear as provisional segments, one per stream invocation. Closing an answer stream does not
+finish the turn while title generation or other workflow work remains active. Successful terminal text replaces
+the preview, including any workflow postprocessing. Failed or cancelled prefixes remain visibly incomplete;
+a full uncommitted reply uses the existing save/discard actions.
+
+Capture consumes live records independently of drawing and the execution inspector. Presentation keeps at most
+32 segments and 128 KiB of UTF-8 text, with an explicit truncation notice. Exceeding the preview limit continues
+to drain and validate the protocol. Each refresh handles a bounded number of control events before keyboard
+and cancellation polling. Events from an older chat invocation cannot alter the active turn.
+
 ## Optional live answer subscriptions
 
 `ChatHost::submit` and `retry` return terminal-only jobs and allocate no stream receiver. Subscribe before

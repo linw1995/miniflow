@@ -32,9 +32,9 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
 
     let root = tempfile::tempdir().unwrap();
     let server = Server::start(vec![
-        Reply::text("first answer"),
+        Reply::stream_text("first answer"),
         Reply::text("Generated title"),
-        Reply::text("second answer"),
+        Reply::stream_text("second answer"),
     ]);
     let binary = compiled(root.path(), &server, "chat-title-flow.json");
     let path = root.path().join("chat.sqlite");
@@ -68,6 +68,9 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
             assert!(Instant::now() < deadline, "conversation did not finish");
             match controller.try_event() {
                 Some(ChatEvent::Submitted { session, .. }) => session_id = Some(session.id),
+                Some(ChatEvent::Preview { preview, .. }) => {
+                    assert!(preview.segments.len() <= 32);
+                }
                 Some(ChatEvent::Observing(_)) | None => thread::sleep(Duration::from_millis(10)),
                 Some(ChatEvent::Finished { resolution, .. }) => {
                     let resolution = resolution.unwrap();

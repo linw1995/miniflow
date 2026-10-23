@@ -36,6 +36,17 @@ impl Reply {
         }
     }
 
+    pub fn stream_text(text: &str) -> Self {
+        let mut reply = Self::text(text);
+        let chunk = json!({"id":"mock-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]});
+        let finish = json!({"id":"mock-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+        reply.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+        reply
+            .headers
+            .push(("Content-Type".into(), "text/event-stream".into()));
+        reply
+    }
+
     pub fn text(text: &str) -> Self {
         Self::json(json!({
             "id": "mock-response", "object": "chat.completion", "created": 0, "model": "example-model",

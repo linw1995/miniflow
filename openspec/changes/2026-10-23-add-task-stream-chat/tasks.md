@@ -52,10 +52,10 @@
 
 ## 7. Terminal presentation
 
-- [ ] 7.1 Subscribe before launch and render bounded provisional answer segments by stream invocation; verify increments appear before completion, empty streams remain responsive, and repeated Loop calls are not concatenated into one identity.
-- [ ] 7.2 Keep capture/event draining independent of render refresh and preserve cancellation; verify paused rendering and saturated event delivery do not prevent child cancellation and reaping.
-- [ ] 7.3 Reconcile canonical saved text, incomplete prefixes, and full uncommitted replies with existing actions; verify postprocessed text replacement, failed/cancelled marking, save-only recovery, and stale-turn event rejection.
-- [ ] 7.4 Update chat UI documentation and CLI acceptance fixtures; verify the answer-plus-title executable and legacy JSON-only chat both retain terminal cleanup behavior.
+- [x] 7.1 Subscribe before launch and render bounded provisional answer segments by stream invocation; verify increments appear before completion, empty streams remain responsive, and repeated Loop calls are not concatenated into one identity.
+- [x] 7.2 Keep capture/event draining independent of render refresh and preserve cancellation; verify paused rendering and saturated event delivery do not prevent child cancellation and reaping.
+- [x] 7.3 Reconcile canonical saved text, incomplete prefixes, and full uncommitted replies with existing actions; verify postprocessed text replacement, failed/cancelled marking, save-only recovery, and stale-turn event rejection.
+- [x] 7.4 Update chat UI documentation and CLI acceptance fixtures; verify the answer-plus-title executable and legacy JSON-only chat both retain terminal cleanup behavior.
 
 ## 8. Integration and repository validation
 
