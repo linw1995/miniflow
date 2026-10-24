@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-29",
+  "version": "2026-10-23",
   "dependencies": {
     "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" },
     "code": { "package": "mfn-code", "path": "../crates/builtin-nodes/code" }
@@ -22,39 +22,40 @@
                 "language": "cel",
                 "inputs": { "count": "int" },
                 "code": { "next": "count + 1" }
+              },
+              "inputs": {
+                "count": { "from": { "node": "%loop", "port": "count" } }
               }
             },
             {
               "id": "assign",
               "kind": "workflow.loop_assign",
-              "config": { "variable": "count" }
+              "config": { "variable": "count" },
+              "inputs": {
+                "value": { "from": { "node": "increment", "port": "next" } }
+              }
             }
           ],
-          "edges": [
+          "clusters": [
             {
-              "from_node": "%loop",
-              "from_output": "count",
-              "to_node": "increment",
-              "to_input": "count"
-            },
-            {
-              "from_node": "increment",
-              "from_output": "next",
-              "to_node": "assign",
-              "to_input": "value"
+              "label": "Advance counter",
+              "annotation": "Increment the current counter and assign the next value to loop state.",
+              "nodes": ["increment", "assign"]
             }
           ]
         }
+      },
+      "inputs": {
+        "count": { "from": { "node": "seed", "port": "value" } }
       }
     }
   ],
-  "edges": [
+  "outputs": [{ "name": "count", "node": "repeat", "port": "count" }],
+  "clusters": [
     {
-      "from_node": "seed",
-      "from_output": "value",
-      "to_node": "repeat",
-      "to_input": "count"
+      "label": "Bounded counter",
+      "annotation": "Initialize the counter and repeat until it reaches three or the iteration limit is met.",
+      "nodes": ["seed", "repeat"]
     }
-  ],
-  "outputs": [{ "name": "count", "node": "repeat", "port": "count" }]
+  ]
 }

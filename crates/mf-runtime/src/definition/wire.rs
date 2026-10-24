@@ -21,8 +21,8 @@ impl<'de> Deserialize<'de> for WorkflowDefinition {
         let version: WorkflowDefinitionVersion =
             serde_json::from_value(value.get("version").cloned().unwrap_or(Value::Null))
                 .map_err(de::Error::custom)?;
-        let modern = version == WorkflowDefinitionVersion::V2026_10_19;
-        decode_scope(&mut value, modern, "workflow").map_err(de::Error::custom)?;
+        let modern = version.supports_node_success_edges();
+        decode_scope(&mut value, modern, version, "workflow").map_err(de::Error::custom)?;
         DefinitionFields::deserialize(value).map_err(de::Error::custom)
     }
 }
@@ -38,7 +38,8 @@ impl Serialize for WorkflowDefinition {
         let mut value = serde_json::to_value(Canonical(self)).map_err(ser::Error::custom)?;
         encode_scope(
             &mut value,
-            self.version == WorkflowDefinitionVersion::V2026_10_19,
+            self.version.supports_node_success_edges(),
+            self.version,
             "workflow",
         )
         .map_err(ser::Error::custom)?;
@@ -46,7 +47,12 @@ impl Serialize for WorkflowDefinition {
     }
 }
 
-fn decode_scope(value: &mut Value, modern: bool, path: &str) -> Result<(), WireError> {
+fn decode_scope(
+    value: &mut Value,
+    modern: bool,
+    version: WorkflowDefinitionVersion,
+    path: &str,
+) -> Result<(), WireError> {
     let Some(scope) = value.as_object_mut() else {
         return Ok(());
     };
@@ -55,6 +61,17 @@ fn decode_scope(value: &mut Value, modern: bool, path: &str) -> Result<(), WireE
         InvalidSnafu {
             path,
             message: "order_edges is an internal graph field"
+        }
+    );
+    ensure!(
+        scope
+            .get("clusters")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+            || version.supports_clusters(),
+        InvalidSnafu {
+            path,
+            message: "node clusters require version 2026-10-23"
         }
     );
     if modern {
@@ -164,13 +181,29 @@ fn decode_scope(value: &mut Value, modern: bool, path: &str) -> Result<(), WireE
             }
         );
     }
-    visit_bodies(scope, modern, path, decode_scope)
+    visit_bodies(scope, modern, version, path, decode_scope)
 }
 
-fn encode_scope(value: &mut Value, modern: bool, path: &str) -> Result<(), WireError> {
+fn encode_scope(
+    value: &mut Value,
+    modern: bool,
+    version: WorkflowDefinitionVersion,
+    path: &str,
+) -> Result<(), WireError> {
     let Some(scope) = value.as_object_mut() else {
         return Ok(());
     };
+    ensure!(
+        scope
+            .get("clusters")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+            || version.supports_clusters(),
+        InvalidSnafu {
+            path,
+            message: "node clusters require version 2026-10-23"
+        }
+    );
     if modern {
         let data: Vec<EdgeDefinition> =
             serde_json::from_value(scope.remove("edges").unwrap_or_else(|| json!([])))
@@ -250,14 +283,15 @@ fn encode_scope(value: &mut Value, modern: bool, path: &str) -> Result<(), WireE
         );
         scope.remove("order_edges");
     }
-    visit_bodies(scope, modern, path, encode_scope)
+    visit_bodies(scope, modern, version, path, encode_scope)
 }
 
 fn visit_bodies(
     scope: &mut Map<String, Value>,
     modern: bool,
+    version: WorkflowDefinitionVersion,
     path: &str,
-    visit: fn(&mut Value, bool, &str) -> Result<(), WireError>,
+    visit: fn(&mut Value, bool, WorkflowDefinitionVersion, &str) -> Result<(), WireError>,
 ) -> Result<(), WireError> {
     if let Some(nodes) = scope.get_mut("nodes").and_then(Value::as_array_mut) {
         for node in nodes {
@@ -266,14 +300,14 @@ fn visit_bodies(
                 node.get("id").and_then(Value::as_str).unwrap_or("?")
             );
             if let Some(body) = node.get_mut("loop").and_then(|value| value.get_mut("body")) {
-                visit(body, modern, &nested)?;
+                visit(body, modern, version, &nested)?;
             }
             if node.get("kind").and_then(Value::as_str) == Some(crate::ITERATION_KIND)
                 && let Some(body) = node
                     .get_mut("config")
                     .and_then(|value| value.get_mut("body"))
             {
-                visit(body, modern, &nested)?;
+                visit(body, modern, version, &nested)?;
             }
         }
     }

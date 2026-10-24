@@ -41,6 +41,7 @@ fn graph() -> WorkflowDescription {
         execution_order: vec![],
         execution: None,
         loop_bodies: Vec::new(),
+        clusters: Vec::new(),
     }
 }
 

@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-19",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -98,6 +98,18 @@
       "from_node": "route",
       "from_output": "else",
       "to_node": "local"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Select execution mode",
+      "annotation": "Read the CI flag and activate exactly one local or CI configuration producer.",
+      "nodes": ["params", "route", "local", "ci"]
+    },
+    {
+      "label": "Configuration convergence",
+      "annotation": "Consume the one produced configuration through an exclusive input binding.",
+      "nodes": ["consume"]
     }
   ]
 }

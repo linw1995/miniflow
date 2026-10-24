@@ -1,8 +1,8 @@
 use mf_telemetry::{
     Count,
     description::{
-        ControlEdge, DataEdge, LoopBodyDescription, NodeDescription, WorkflowDescription,
-        WorkflowDescriptionVersion,
+        ClusterDescription, ControlEdge, DataEdge, ExecutionDescription, ExecutionMode,
+        LoopBodyDescription, NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
     },
     event::{Event, LifecycleEvent, NodeIdentity, Outcome},
     identity::{RunId, WorkflowId},
@@ -17,6 +17,7 @@ use ratatui::{
     style::{Color, Modifier},
     widgets::Widget,
 };
+use std::collections::BTreeSet;
 
 fn description() -> WorkflowDescription {
     let nodes = ["source", "router", "left", "right", "join", "orphan"];
@@ -69,6 +70,337 @@ fn description() -> WorkflowDescription {
         execution_order: nodes.iter().map(|id| (*id).into()).collect(),
         execution: None,
         loop_bodies: Vec::new(),
+        clusters: Vec::new(),
+    }
+}
+
+#[test]
+fn clusters_render_expanded_bounds_and_collapse_to_one_node() {
+    let mut graph = description();
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.clusters = vec![ClusterDescription {
+        label: "left and join".into(),
+        annotation: "The left branch and its convergence point.".into(),
+        nodes: vec!["left".into(), "join".into()],
+    }];
+
+    let expanded = GraphLayout::with_view(&graph, mf_tui::graph::ConnectionView::Ports).unwrap();
+    assert_eq!(expanded.nodes().len(), graph.nodes.len());
+    assert_eq!(expanded.clusters().len(), 1);
+    let cluster = &expanded.clusters()[0];
+    assert!(!cluster.collapsed);
+    assert_eq!(cluster.members.len(), 2);
+    assert!(cluster.rect.width > expanded.nodes()[0].rect.width);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 160, 60));
+    GraphView::new(&expanded).render(buffer.area, &mut buffer);
+    assert!(buffer_text(&buffer).contains("left and join"));
+
+    let collapsed = GraphLayout::with_view_and_collapsed(
+        &graph,
+        mf_tui::graph::ConnectionView::Ports,
+        &BTreeSet::from([0]),
+    )
+    .unwrap();
+    assert_eq!(collapsed.nodes().len(), graph.nodes.len() - 1);
+    assert!(collapsed.clusters()[0].collapsed);
+    assert_eq!(collapsed.hidden_cluster_edge_count(), 1);
+    let cluster_node = collapsed
+        .nodes()
+        .iter()
+        .position(|node| node.id == "left and join")
+        .unwrap();
+    assert!(collapsed.is_collapsed_cluster(cluster_node));
+    assert_eq!(collapsed.sources(cluster_node), &[2, 4]);
+    assert_eq!(collapsed.display_index_for_cluster(0), Some(cluster_node));
+    assert_eq!(
+        collapsed.display_index_for_node_id("join"),
+        Some(cluster_node)
+    );
+    assert_eq!(collapsed.display_index_for_node_id("router"), Some(1));
+
+    let incoming = collapsed
+        .edges()
+        .iter()
+        .filter(|edge| edge.to == cluster_node)
+        .count();
+    assert_eq!(incoming, 2);
+    assert!(
+        collapsed
+            .edges()
+            .iter()
+            .all(|edge| edge.from != cluster_node || edge.to != cluster_node)
+    );
+    let mut collapsed_buffer = Buffer::empty(Rect::new(0, 0, 160, 60));
+    GraphView::new(&collapsed).render(collapsed_buffer.area, &mut collapsed_buffer);
+    assert!(buffer_text(&collapsed_buffer).contains("2 nodes | collapsed"));
+}
+
+#[test]
+fn cluster_titles_preserve_the_remaining_top_border() {
+    let mut graph = fan_graph(1);
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    for label in ["Computation", "Compute a\u{301} with 🦀"] {
+        graph.clusters = vec![ClusterDescription {
+            label: label.into(),
+            annotation: "Read the source and forward its value.".into(),
+            nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
+        }];
+        let layout = GraphLayout::new(&graph).unwrap();
+        let rect = layout.clusters()[0].rect;
+        let (width, height) = layout.size();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
+        GraphView::new(&layout).render(buffer.area, &mut buffer);
+        let label_end = rect.x + 2 + ratatui::text::Span::raw(format!(" {label} ")).width() as u32;
+        let right = rect.x + rect.width - 1;
+        assert!(label_end < right - 1);
+        for x in label_end..right {
+            assert_eq!(
+                buffer
+                    .cell(Position::new(x as u16, rect.y as u16))
+                    .unwrap()
+                    .symbol(),
+                "─"
+            );
+        }
+        assert_eq!(
+            buffer
+                .cell(Position::new(right as u16, rect.y as u16))
+                .unwrap()
+                .symbol(),
+            "┐"
+        );
+    }
+}
+
+#[test]
+fn chat_title_clusters_stay_disjoint_across_every_fold_and_connection_view() {
+    let definition = mf_compiler::WorkflowDefinition::from_json(include_str!(
+        "../../../examples/chat-title-flow.json"
+    ))
+    .unwrap();
+    let plan = mf_compiler::plan_definition(&definition).unwrap();
+    let graph = mf_compiler::describe_compiled(&plan).unwrap();
+    for bits in 0..(1 << graph.clusters.len()) {
+        let collapsed = (0..graph.clusters.len())
+            .filter(|cluster| bits & (1 << cluster) != 0)
+            .collect();
+        for view in [
+            mf_tui::graph::ConnectionView::Execution,
+            mf_tui::graph::ConnectionView::Dependencies,
+            mf_tui::graph::ConnectionView::Ports,
+        ] {
+            let layout = GraphLayout::with_view_and_collapsed(&graph, view, &collapsed).unwrap();
+            assert_eq!(layout.unresolved_count(), 0, "{collapsed:?} {view:?}");
+            let (width, height) = layout.size();
+            let mut buffer = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
+            GraphView::new(&layout).render(buffer.area, &mut buffer);
+            for (index, cluster) in layout.clusters().iter().enumerate() {
+                let rect = cluster.rect;
+                for other in &layout.clusters()[index + 1..] {
+                    let other = other.rect;
+                    assert!(
+                        rect.x + rect.width <= other.x
+                            || other.x + other.width <= rect.x
+                            || rect.y + rect.height <= other.y
+                            || other.y + other.height <= rect.y,
+                        "{collapsed:?} {view:?}: clusters overlap"
+                    );
+                }
+                if !cluster.collapsed {
+                    assert_eq!(
+                        buffer
+                            .cell(Position::new(
+                                (rect.x + rect.width - 1) as u16,
+                                rect.y as u16
+                            ))
+                            .unwrap()
+                            .symbol(),
+                        "┐",
+                        "{collapsed:?} {view:?}: {}",
+                        cluster.label
+                    );
+                }
+            }
+            assert_completed_geometry_is_safe(&layout);
+        }
+    }
+}
+
+#[test]
+fn folding_noncontiguous_members_preserves_projected_cycle_connections() {
+    let mut graph = fan_graph(2);
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.data_edges.push(DataEdge {
+        exclusive: false,
+        from_node: "sink-0000".into(),
+        from_output: "value".into(),
+        to_node: "sink-0001".into(),
+        to_input: "extra".into(),
+    });
+    graph.clusters = vec![ClusterDescription {
+        label: "Endpoints".into(),
+        annotation: "The source and final consumer.".into(),
+        nodes: vec!["source".into(), "sink-0001".into()],
+    }];
+    for view in [
+        mf_tui::graph::ConnectionView::Execution,
+        mf_tui::graph::ConnectionView::Dependencies,
+        mf_tui::graph::ConnectionView::Ports,
+    ] {
+        let layout =
+            GraphLayout::with_view_and_collapsed(&graph, view, &BTreeSet::from([0])).unwrap();
+        assert_eq!(layout.nodes().len(), 2);
+        assert_eq!(layout.edges().len(), 2);
+        assert_eq!(layout.hidden_transitive_count(), 0);
+        assert!(
+            layout
+                .edges()
+                .iter()
+                .any(|edge| edge.from == 0 && edge.to == 1)
+        );
+        assert!(
+            layout
+                .edges()
+                .iter()
+                .any(|edge| edge.from == 1 && edge.to == 0)
+        );
+        assert_completed_geometry_is_safe(&layout);
+    }
+}
+
+#[test]
+fn long_cluster_labels_fit_expanded_and_collapsed_geometry() {
+    let mut graph = description();
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.data_edges.push(DataEdge {
+        exclusive: false,
+        from_node: "source".into(),
+        from_output: "value".into(),
+        to_node: "join".into(),
+        to_input: "direct".into(),
+    });
+    for label in [
+        "Load and validate the complete workflow configuration",
+        "Validate a\u{301} configuration with 🦀 and a complete title",
+    ] {
+        graph.clusters = vec![ClusterDescription {
+            label: label.into(),
+            annotation: "Keep the entire title visible in both cluster states.".into(),
+            nodes: vec!["source".into()],
+        }];
+        for view in [
+            mf_tui::graph::ConnectionView::Execution,
+            mf_tui::graph::ConnectionView::Dependencies,
+            mf_tui::graph::ConnectionView::Ports,
+        ] {
+            for collapsed in [BTreeSet::new(), BTreeSet::from([0])] {
+                let layout =
+                    GraphLayout::with_view_and_collapsed(&graph, view, &collapsed).unwrap();
+                assert_eq!(layout.unresolved_count(), 0);
+                let node = &layout.nodes()[layout.display_index_for_node_id("source").unwrap()];
+                assert!(node.rect.width >= ratatui::text::Span::raw(label).width() as u32 + 4);
+                let (width, height) = layout.size();
+                let mut buffer = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
+                GraphView::new(&layout).render(buffer.area, &mut buffer);
+                let cluster = &layout.clusters()[0];
+                let (mut x, y) = if cluster.collapsed {
+                    (node.rect.x + 3, node.rect.y + 1)
+                } else {
+                    (cluster.rect.x + 3, cluster.rect.y)
+                };
+                let span = ratatui::text::Span::raw(label);
+                for grapheme in span.styled_graphemes(ratatui::style::Style::default()) {
+                    assert_eq!(
+                        buffer
+                            .cell(Position::new(x as u16, y as u16))
+                            .unwrap()
+                            .symbol(),
+                        grapheme.symbol
+                    );
+                    x += ratatui::text::Span::raw(grapheme.symbol).width() as u32;
+                }
+                assert_completed_geometry_is_safe(&layout);
+                for edge in layout.edges() {
+                    let source = layout.nodes()[edge.from].rect;
+                    let target = layout.nodes()[edge.to].rect;
+                    assert!(source.x + source.width < target.x);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cluster_annotations_wrap_in_the_graph_and_stay_clear_of_connections() {
+    let mut graph = description();
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.clusters = vec![ClusterDescription {
+        label: "Input".into(),
+        annotation: "01234567890123456789012345678901234567890123456789\n\tKeep a\u{301} and 🦀."
+            .into(),
+        nodes: vec!["source".into(), "router".into()],
+    }];
+    let expected = [
+        "0123456789012345678901",
+        "2345678901234567890123",
+        "456789",
+        "    Keep a\u{301} and 🦀.",
+    ];
+    for view in [
+        mf_tui::graph::ConnectionView::Execution,
+        mf_tui::graph::ConnectionView::Dependencies,
+        mf_tui::graph::ConnectionView::Ports,
+    ] {
+        for collapsed in [BTreeSet::new(), BTreeSet::from([0])] {
+            let layout = GraphLayout::with_view_and_collapsed(&graph, view, &collapsed).unwrap();
+            let node = &layout.nodes()[layout.display_index_for_node_id("source").unwrap()];
+            let start_y = node.rect.y + if collapsed.is_empty() { 0 } else { 3 };
+            let (width, height) = layout.size();
+            let mut full = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
+            GraphView::new(&layout).render(full.area, &mut full);
+            for (row, text) in expected.iter().enumerate() {
+                let mut x = node.rect.x + 1;
+                let span = ratatui::text::Span::raw(*text);
+                for grapheme in span.styled_graphemes(ratatui::style::Style::default()) {
+                    assert_eq!(
+                        full.cell(Position::new(x as u16, start_y as u16 + row as u16))
+                            .unwrap()
+                            .symbol(),
+                        grapheme.symbol
+                    );
+                    x += ratatui::text::Span::raw(grapheme.symbol).width() as u32;
+                }
+            }
+            let mut clipped = Buffer::empty(Rect::new(0, 0, width as u16, 2));
+            GraphView::new(&layout)
+                .offset(0, start_y + 1)
+                .render(clipped.area, &mut clipped);
+            for y in 0..2 {
+                for x in 0..width as u16 {
+                    assert_eq!(
+                        clipped.cell(Position::new(x, y)),
+                        full.cell(Position::new(x, start_y as u16 + 1 + y))
+                    );
+                }
+            }
+            assert_eq!(layout.unresolved_count(), 0);
+            assert_completed_geometry_is_safe(&layout);
+        }
     }
 }
 
@@ -105,6 +437,7 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
         }],
         control_edges: vec![],
         execution_order: vec!["%loop".into(), "child".into()],
+        clusters: Vec::new(),
     }];
     let layout = GraphLayout::from_loop_body(&graph, &["repeat".into()]).unwrap();
     assert_eq!(layout.nodes().len(), 2);
@@ -438,6 +771,78 @@ fn known_sequence_gap_marks_last_seen_running_state_as_uncertain() {
     assert!(buffer_text(&closed).contains("last running"));
 }
 
+#[test]
+fn body_clusters_collapse_within_their_scope() {
+    let mut graph = description();
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.nodes = vec![NodeDescription {
+        id: "repeat".into(),
+        kind: "workflow.loop".into(),
+    }];
+    graph.data_edges.clear();
+    graph.control_edges.clear();
+    graph.execution_order = vec!["repeat".into()];
+    graph.loop_bodies = vec![LoopBodyDescription {
+        path: vec!["repeat".into()],
+        nodes: vec![
+            NodeDescription {
+                id: "%loop".into(),
+                kind: "%loop".into(),
+            },
+            NodeDescription {
+                id: "step".into(),
+                kind: "fixture.task".into(),
+            },
+            NodeDescription {
+                id: "next".into(),
+                kind: "fixture.task".into(),
+            },
+        ],
+        data_edges: vec![
+            DataEdge {
+                exclusive: false,
+                from_node: "%loop".into(),
+                from_output: "count".into(),
+                to_node: "step".into(),
+                to_input: "input".into(),
+            },
+            DataEdge {
+                exclusive: false,
+                from_node: "step".into(),
+                from_output: "value".into(),
+                to_node: "next".into(),
+                to_input: "input".into(),
+            },
+        ],
+        control_edges: Vec::new(),
+        order_edges: Vec::new(),
+        execution_order: vec!["%loop".into(), "step".into(), "next".into()],
+        clusters: vec![ClusterDescription {
+            label: "Body work".into(),
+            annotation: "The body transformation and its successor.".into(),
+            nodes: vec!["step".into(), "next".into()],
+        }],
+    }];
+    let collapsed = GraphLayout::from_body_with_view_and_collapsed(
+        &graph,
+        &["repeat".into()],
+        mf_tui::graph::ConnectionView::Ports,
+        &BTreeSet::from([0]),
+    )
+    .unwrap();
+    assert_eq!(collapsed.nodes().len(), 2);
+    assert_eq!(collapsed.hidden_cluster_edge_count(), 1);
+    assert_eq!(
+        collapsed.display_index_for_node_id("next"),
+        collapsed
+            .nodes()
+            .iter()
+            .position(|node| node.id == "Body work")
+    );
+}
 #[test]
 fn stored_routes_preserve_connection_and_observation_identity() {
     let graph = description();
@@ -994,6 +1399,7 @@ fn root_and_loop_body_share_routing_geometry() {
         data_edges: body_graph.data_edges.clone(),
         control_edges: body_graph.control_edges.clone(),
         execution_order: body_graph.execution_order.clone(),
+        clusters: Vec::new(),
     }];
     for view in [
         mf_tui::graph::ConnectionView::Execution,
@@ -1104,6 +1510,7 @@ fn parameter_graph() -> WorkflowDescription {
         order_edges: vec![],
         execution_order: vec!["params".into(), "settings".into()],
         loop_bodies: vec![],
+        clusters: Vec::new(),
     }
 }
 

@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-26",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -31,37 +31,36 @@
                 "language": "cel",
                 "inputs": { "item": "int", "position": "int" },
                 "code": { "value": "item * 2 + position" }
+              },
+              "inputs": {
+                "item": { "from": { "node": "%iteration", "port": "item" } },
+                "position": { "from": { "node": "%iteration", "port": "index" } }
               }
             }
           ],
-          "edges": [
+          "result": { "node": "transform", "port": "value" },
+          "clusters": [
             {
-              "from_node": "%iteration",
-              "from_output": "item",
-              "to_node": "transform",
-              "to_input": "item"
-            },
-            {
-              "from_node": "%iteration",
-              "from_output": "index",
-              "to_node": "transform",
-              "to_input": "position"
+              "label": "Transform item",
+              "annotation": "Double the current item and add its zero-based position.",
+              "nodes": ["transform"]
             }
-          ],
-          "result": { "node": "transform", "port": "value" }
+          ]
         }
+      },
+      "inputs": {
+        "items": { "from": { "node": "source", "port": "value" } }
       }
-    }
-  ],
-  "edges": [
-    {
-      "from_node": "source",
-      "from_output": "value",
-      "to_node": "iteration",
-      "to_input": "items"
     }
   ],
   "outputs": [
     { "name": "results", "node": "iteration", "port": "results" }
+  ],
+  "clusters": [
+    {
+      "label": "Map input items",
+      "annotation": "Run the body once per input item in order and collect its results.",
+      "nodes": ["source", "iteration"]
+    }
   ]
 }

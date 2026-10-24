@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-03",
+  "version": "2026-10-23",
   "dependencies": {
     "llm": { "package": "mfn-llm", "path": "../crates/builtin-nodes/llm" }
   },
@@ -13,5 +13,12 @@
   "outputs": [
     { "name": "text", "node": "chat", "port": "text" },
     { "name": "history", "node": "chat", "port": "history" }
+  ],
+  "clusters": [
+    {
+      "label": "Model response",
+      "annotation": "Accept prompt and history inputs and return the model response with updated history.",
+      "nodes": ["chat"]
+    }
   ]
 }

@@ -203,7 +203,7 @@ fn packaged_cli_acceptance() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(description["version"], "2026-09-29");
+    assert_eq!(description["version"], "2026-10-23");
     assert_eq!(description["loop_bodies"].as_array().unwrap().len(), 1);
     let loop_result = checked(Command::new(&loop_output).env_clear().env("PATH", ""));
     assert_eq!(

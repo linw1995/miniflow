@@ -1,16 +1,26 @@
 {
-  "version": "2026-10-03",
+  "version": "2026-10-23",
   "dependencies": {
     "core": { "package": "mfn-core", "version": "0.1.0" }
   },
   "nodes": [
     { "id": "source", "kind": "builtin.constant", "config": { "value": 42 } },
-    { "id": "echo", "kind": "builtin.identity" }
-  ],
-  "edges": [
-    { "from_node": "source", "from_output": "value", "to_node": "echo", "to_input": "input" }
+    {
+      "id": "echo",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": { "from": { "node": "source", "port": "value" } }
+      }
+    }
   ],
   "outputs": [
     { "name": "answer", "node": "echo", "port": "value" }
+  ],
+  "clusters": [
+    {
+      "label": "Embedded answer",
+      "annotation": "Pass the constant answer through the embedded workflow and export it to the host.",
+      "nodes": ["source", "echo"]
+    }
   ]
 }

@@ -42,13 +42,13 @@ pub use context::{
     execute_resolved_node_in_context, select_context_output,
 };
 pub use definition::{
-    ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition,
-    ExclusiveInputError, InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID,
-    LoopBodyDefinition, LoopComparisonOperator, LoopConditionDefinition, LoopDefinition,
-    LoopVariableDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS,
-    NodeDefinition, NodeDependency, OrderEdgeDefinition, OutputReferenceDefinition,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
-    validate_exclusive_inputs,
+    ClusterDefinition, ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND,
+    EdgeDefinition, ExclusiveInputError, InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND,
+    LOOP_SOURCE_ID, LoopBodyDefinition, LoopComparisonOperator, LoopConditionDefinition,
+    LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS,
+    MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency, OrderEdgeDefinition,
+    OutputReferenceDefinition, WorkflowDefinition, WorkflowDefinitionVersion,
+    WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{ExecutionInputs, InputResolution, resolve_workflow_inputs};

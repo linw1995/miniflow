@@ -156,7 +156,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
     }
 }
 
-fn description() -> WorkflowDescription {
+pub fn description() -> WorkflowDescription {
     WorkflowDescription {
         order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
@@ -203,6 +203,21 @@ fn description() -> WorkflowDescription {
             .collect(),
         execution: None,
         loop_bodies: Vec::new(),
+        clusters: Vec::new(),
+    }
+}
+
+pub fn body_description(
+    fixture: &WorkflowDescription,
+) -> mf_telemetry::description::LoopBodyDescription {
+    mf_telemetry::description::LoopBodyDescription {
+        order_edges: Vec::new(),
+        path: vec!["repeat".into()],
+        nodes: fixture.nodes.clone(),
+        data_edges: fixture.data_edges.clone(),
+        control_edges: fixture.control_edges.clone(),
+        execution_order: fixture.execution_order.clone(),
+        clusters: Vec::new(),
     }
 }
 
@@ -452,14 +467,7 @@ fn dump_graph() -> PreviewResult<()> {
         Some(_) => return Err("unknown connection view".into()),
     };
     let layout = if std::env::args().any(|arg| arg == "--body") {
-        let body = mf_telemetry::description::LoopBodyDescription {
-            order_edges: Vec::new(),
-            path: vec!["repeat".into()],
-            nodes: fixture.nodes.clone(),
-            data_edges: fixture.data_edges.clone(),
-            control_edges: fixture.control_edges.clone(),
-            execution_order: fixture.execution_order.clone(),
-        };
+        let body = body_description(&fixture);
         fixture.version = WorkflowDescriptionVersion::V2026_09_29;
         fixture.nodes = vec![NodeDescription {
             id: "repeat".into(),

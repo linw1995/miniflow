@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-03",
+  "version": "2026-10-23",
   "dependencies": {
     "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" },
     "llm": { "package": "mfn-llm", "path": "../crates/builtin-nodes/llm" }
@@ -20,16 +20,21 @@
             {
               "id": "chat",
               "kind": "builtin.llm",
-              "config": { "model": "your-model", "api_key_env": "MODEL_API_KEY" }
+              "config": { "model": "your-model", "api_key_env": "MODEL_API_KEY" },
+              "inputs": {
+                "prompt": { "from": { "node": "%loop", "port": "prompt" } },
+                "history": { "from": { "node": "%loop", "port": "history" } }
+              }
             },
-            { "id": "remember", "kind": "workflow.loop_assign", "config": { "variable": "history" } },
-            { "id": "answer", "kind": "workflow.loop_assign", "config": { "variable": "text" } }
+            { "id": "remember", "kind": "workflow.loop_assign", "config": { "variable": "history" } , "inputs": {"value": { "from": { "node": "chat", "port": "history" } }} },
+            { "id": "answer", "kind": "workflow.loop_assign", "config": { "variable": "text" } , "inputs": {"value": { "from": { "node": "chat", "port": "text" } }} }
           ],
-          "edges": [
-            { "from_node": "%loop", "from_output": "prompt", "to_node": "chat", "to_input": "prompt" },
-            { "from_node": "%loop", "from_output": "history", "to_node": "chat", "to_input": "history" },
-            { "from_node": "chat", "from_output": "history", "to_node": "remember", "to_input": "value" },
-            { "from_node": "chat", "from_output": "text", "to_node": "answer", "to_input": "value" }
+          "clusters": [
+            {
+              "label": "Conversation turn",
+              "annotation": "Call the model with the current history, then save its updated history and answer.",
+              "nodes": ["chat", "remember", "answer"]
+            }
           ]
         }
       }
@@ -38,5 +43,12 @@
   "outputs": [
     { "name": "text", "node": "repeat", "port": "text" },
     { "name": "history", "node": "repeat", "port": "history" }
+  ],
+  "clusters": [
+    {
+      "label": "Conversation loop",
+      "annotation": "Run two model calls while carrying conversation history and the latest answer.",
+      "nodes": ["repeat"]
+    }
   ]
 }

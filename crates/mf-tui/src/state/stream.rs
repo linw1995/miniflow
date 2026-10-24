@@ -1347,6 +1347,7 @@ mod tests {
             execution_order: vec!["source".into(), "consume".into()],
             control_edges: Vec::new(),
             loop_bodies: Vec::new(),
+            clusters: Vec::new(),
             data_edges: vec![DataEdge {
                 exclusive: false,
                 from_node: "source".into(),
@@ -1657,6 +1658,7 @@ mod tests {
             execution_order: vec!["%loop".into()],
             data_edges: Vec::new(),
             control_edges: Vec::new(),
+            clusters: Vec::new(),
         }];
         let mut records = vec![
             record(

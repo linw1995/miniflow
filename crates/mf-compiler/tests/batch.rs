@@ -17,6 +17,7 @@ impl StreamClock for FixedClock {
 fn definition() -> WorkflowDefinition {
     let mut definition =
         WorkflowDefinition::from_json(include_str!("../../../examples/stream-batch.json")).unwrap();
+    definition.clusters.clear();
     definition.dependencies.remove("code");
     definition
         .nodes

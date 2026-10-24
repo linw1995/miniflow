@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-03",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -60,6 +60,11 @@
           "$ref": "params.api_key"
         },
         "capture_errors": true
+      },
+      "inputs": {
+        "prompt": { "from": { "node": "params", "port": "prompt" } },
+        "system": { "from": { "node": "params", "port": "system" } },
+        "history": { "from": { "node": "params", "port": "history" } }
       }
     }
   ],
@@ -98,24 +103,11 @@
       "optional": true
     }
   ],
-  "edges": [
+  "clusters": [
     {
-      "from_node": "params",
-      "from_output": "prompt",
-      "to_node": "chat",
-      "to_input": "prompt"
-    },
-    {
-      "from_node": "params",
-      "from_output": "system",
-      "to_node": "chat",
-      "to_input": "system"
-    },
-    {
-      "from_node": "params",
-      "from_output": "history",
-      "to_node": "chat",
-      "to_input": "history"
+      "label": "Conversation",
+      "annotation": "Resolve conversation parameters and produce one model response with captured errors and usage.",
+      "nodes": ["params", "chat"]
     }
   ]
 }

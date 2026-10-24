@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-26",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -55,38 +55,27 @@
     },
     {
       "id": "handle_large",
-      "kind": "builtin.identity"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": { "from": { "node": "load_order", "port": "value" } }
+      }
     },
     {
       "id": "handle_medium",
-      "kind": "builtin.identity"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": { "from": { "node": "load_order", "port": "value" } }
+      }
     },
     {
       "id": "handle_else",
-      "kind": "builtin.identity"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": { "from": { "node": "load_order", "port": "value" } }
+      }
     }
   ],
   "edges": [
-    {
-      "from_node": "load_order",
-      "from_output": "value",
-      "to_node": "handle_large",
-      "to_input": "input"
-    },
-    {
-      "from_node": "load_order",
-      "from_output": "value",
-      "to_node": "handle_medium",
-      "to_input": "input"
-    },
-    {
-      "from_node": "load_order",
-      "from_output": "value",
-      "to_node": "handle_else",
-      "to_input": "input"
-    }
-  ],
-  "control_edges": [
     {
       "from_node": "load_order",
       "from_output": "value",
@@ -131,6 +120,18 @@
       "node": "handle_else",
       "port": "value",
       "optional": true
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Order evaluation",
+      "annotation": "Load the order, complete the audit prerequisite, and choose the first matching amount branch.",
+      "nodes": ["load_order", "audit", "route"]
+    },
+    {
+      "label": "Branch results",
+      "annotation": "Forward the order through the selected branch and omit outputs from skipped handlers.",
+      "nodes": ["handle_large", "handle_medium", "handle_else"]
     }
   ]
 }
