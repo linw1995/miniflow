@@ -240,7 +240,9 @@ capacity, acknowledgment, cancellation, and backpressure remain shared mechanics
 ## Streaming runners
 
 Schema `2026-10-03` and later infer streaming execution from resolved node contracts and port usage.
-`execution` contains only optional resource limits. Sources are explicit nodes. The repository
+`execution` contains only optional resource limits. Execution metadata is resolved after provider loading;
+hosts observing a built runner must use its compiled manifest rather than a structural `plan_definition`
+result. Sources are explicit nodes. The repository
 example declares `builtin.readline` with string output `line`:
 
 ```sh

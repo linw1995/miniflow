@@ -1173,8 +1173,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
                 .any(|attribute| attribute.key == "mf.stream.invocation"))
     );
     let run_id = mf_telemetry::identity::RunId::new();
-    let described = mf_compiler::describe_compiled(&plan_definition(&definition).unwrap()).unwrap();
-    let mut receiver = LoopbackReceiver::bind(described, run_id).unwrap();
+    let mut receiver = LoopbackReceiver::bind(description, run_id).unwrap();
     let mut child = command(&runner)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
         .env("MF_RUN_ID", run_id.to_string())
