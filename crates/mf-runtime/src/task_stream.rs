@@ -97,7 +97,7 @@ impl<'a> Emitter<'a> {
         cancellation: StreamCancellation,
         sink: &'a mut dyn EmissionSink,
     ) -> Self {
-        // Native stream sinks already own validation and fatal instance state.
+        // Native stream sinks validate each send and own fatal instance state.
         let mut emitter = Self::new(node, ports, cancellation, sink);
         emitter.sink_validates = true;
         emitter

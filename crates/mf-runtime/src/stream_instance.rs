@@ -132,13 +132,10 @@ fn execution_error_phase(mut cause: &(dyn Error + 'static)) -> &'static str {
             }
             _ => {}
         }
-        if matches!(
-            cause.downcast_ref::<crate::WorkflowRunError>(),
-            Some(
-                crate::WorkflowRunError::OutputType { .. }
-                    | crate::WorkflowRunError::InvalidOutput { .. }
-            )
-        ) {
+        if cause
+            .downcast_ref::<crate::WorkflowRunError>()
+            .is_some_and(crate::WorkflowRunError::is_output_error)
+        {
             return "output";
         }
         if let Some(error) = cause.downcast_ref::<StreamError>() {

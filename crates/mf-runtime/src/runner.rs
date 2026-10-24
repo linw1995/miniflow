@@ -71,3 +71,9 @@ pub enum WorkflowRunError {
         definition_id: DefinitionId,
     },
 }
+
+impl WorkflowRunError {
+    pub(crate) fn is_output_error(&self) -> bool {
+        matches!(self, Self::OutputType { .. } | Self::InvalidOutput { .. })
+    }
+}
