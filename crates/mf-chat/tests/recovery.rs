@@ -19,6 +19,10 @@ fn begin(database: &ChatDatabase) -> mf_chat::Invocation {
 }
 fn usages() -> Vec<mfn_llm::CallUsage> {
     vec![mfn_llm::CallUsage {
+        timing: Some(mfn_llm::CallTiming {
+            elapsed_us: 2_000_000,
+            first_token_us: Some(500_000),
+        }),
         attribution: None,
         started_at: Some(86_399_999),
         call_id: "provider-call".into(),
@@ -106,6 +110,15 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
     );
     assert_eq!(saved.result, reply());
     assert_eq!(database.save_recovered(pending).unwrap(), saved);
+    let performance = database
+        .usage(Default::default())
+        .unwrap()
+        .overall
+        .performance;
+    assert_eq!(performance.elapsed.total_us, Some(2_000_000));
+    assert_eq!(performance.first_token.mean_ms, Some(500.0));
+    assert_eq!(performance.first_token.reported_calls, 1);
+    assert_eq!(performance.end_to_end.tokens_per_second, None);
     let mut conflicting = reply();
     conflicting.metadata = None;
     assert!(

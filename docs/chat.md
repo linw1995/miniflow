@@ -182,6 +182,29 @@ Filters accept session, profile, actual model name, purpose, and call start time
 
 Each token counter exposes `known_subtotal`, `reported_calls`, and `missing_calls`. A missing observation is not zero; an explicit zero is a reported observation. No observations yield an unknown subtotal. Treat a subtotal with missing observations as partial coverage. Attempt and status counts include begun failed, cancelled, and interrupted calls, but exclude never-started title requests.
 
+Each `CallUsage` can also retain `timing.elapsed_us` and optional `timing.first_token_us`.
+The LLM node starts a monotonic clock immediately before its Rig request and stops at provider
+completion, before terminal conversion or storage. FTT observes the first nonempty decoded text
+increment before publishing it; empty and metadata-only events do not count. Unary calls and older
+records leave FTT unknown. Captured failures retain observed timing.
+
+`CallUsage::token_rates()` derives two optional rates from the saved output-token count and timing:
+
+- `end_to_end_tokens_per_second`: output tokens divided by the whole request duration.
+- `generation_tokens_per_second`: output tokens divided by request duration minus FTT.
+
+The counters are provider-reported completion tokens, never streamed chunk counts. Missing counters,
+failed calls, and zero-duration rate windows remain unknown; a reported zero token count yields zero
+when the window is positive. These are client-observed rates and include local stream backpressure.
+They are not server-only decoding measurements. Raw integer timing is stored with the response so a
+save-only retry preserves the original observations and does not recalculate elapsed time.
+
+`statistics.overall.performance` and every group's `performance` expose `elapsed` and `first_token`
+latencies (`total_us`, `mean_ms`), plus `end_to_end` and `generation` throughput (`output_tokens`,
+`elapsed_us`, `tokens_per_second`). Every measure includes `reported_calls` and `missing_calls`.
+Aggregated rates divide summed paired tokens by summed positive durations instead of averaging
+per-call rates. Filters and group pagination use the same persisted snapshot as token statistics.
+
 SQL computes aggregate facts without loading raw call history. Integer overflow fails explicitly. Calls from title generation remain attributed to `title`, including valid replies whose title update was stale or whose application title was rejected. Monetary estimates require separate pricing data and are not provided by the core.
 
 Live answers appear as provisional segments, one per stream invocation. Closing an answer stream does not

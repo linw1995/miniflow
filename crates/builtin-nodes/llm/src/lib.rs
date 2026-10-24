@@ -2,7 +2,10 @@ mod streaming;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
 pub mod test_support;
+mod timing;
 mod transport;
+
+pub use timing::{CallTiming, CallTokenRates};
 
 use mf_runtime::{
     ConfigTemplate, ContextReference, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
@@ -59,6 +62,8 @@ pub struct CallUsage {
     pub attribution: Option<UsageAttribution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<CallTiming>,
     pub call_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<UsageNode>,
@@ -67,6 +72,23 @@ pub struct CallUsage {
     pub usage: Option<BTreeMap<String, i64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl CallUsage {
+    pub fn token_rates(&self) -> CallTokenRates {
+        if self.error.is_some() {
+            return CallTokenRates::default();
+        }
+        self.timing
+            .as_ref()
+            .map_or_else(CallTokenRates::default, |timing| {
+                timing.token_rates(
+                    self.usage
+                        .as_ref()
+                        .and_then(|usage| usage.get("output_tokens").copied()),
+                )
+            })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
@@ -371,6 +393,8 @@ pub enum LlmExecutionError {
     },
     #[snafu(display("LLM timeout exceeds the monotonic clock range"))]
     DeadlineRange,
+    #[snafu(display("LLM request timing exceeds the signed microsecond range"))]
+    TimingRange { source: std::num::TryFromIntError },
     #[snafu(display("LLM usage metadata is invalid"))]
     UsageMetadata { source: serde_json::Error },
     #[snafu(display("could not normalize LLM response metadata"))]
@@ -527,6 +551,7 @@ impl LlmNode {
             request = request.preamble(system);
         }
         let mut usage = CallUsage {
+            timing: None,
             attribution: config.attribution.clone(),
             started_at: Some(
                 i64::try_from(
@@ -554,6 +579,7 @@ impl LlmNode {
             usage: None,
             error: None,
         };
+        let mut timer = timing::CallTimer::new();
         let response = if emitter.is_connected() {
             context
                 .execute_future(
@@ -564,6 +590,7 @@ impl LlmNode {
                         config.max_output_bytes,
                         deadline,
                         context,
+                        &mut timer,
                     ),
                     Some(deadline),
                 )
@@ -582,6 +609,7 @@ impl LlmNode {
                     })
                 })
         };
+        usage.timing = Some(timer.finish()?);
         if let Some(reported) = transport.usage() {
             usage.usage = reported_usage(&reported).ok().flatten();
         }

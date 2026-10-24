@@ -358,6 +358,16 @@ pub fn validate_usages(usages: &[mfn_llm::CallUsage]) -> Result<(), ChatError> {
             );
         }
         validate_usage(usage.usage.as_ref())?;
+        ensure!(
+            usage
+                .timing
+                .as_ref()
+                .is_none_or(mfn_llm::CallTiming::is_valid),
+            InvalidSnafu {
+                field: "call timing",
+                reason: "requires nonnegative durations with first token no later than completion"
+            }
+        );
     }
     Ok(())
 }
@@ -918,6 +928,7 @@ mod tests {
     fn reply(text: &str) -> ConversationResult {
         ConversationResult {
             usages: vec![mfn_llm::CallUsage {
+                timing: None,
                 attribution: None,
                 started_at: None,
                 call_id: "reported-call".into(),

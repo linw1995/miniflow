@@ -22,6 +22,7 @@ fn result(title: &str) -> ConversationResult {
         text: "answer".into(),
         title: Some(title.into()),
         usages: vec![mfn_llm::CallUsage {
+            timing: None,
             attribution: Some(UsageAttribution {
                 purpose: Some("title".into()),
                 profile: Some("summary".into()),
@@ -181,9 +182,11 @@ fn upgrading_retires_pending_title_jobs_and_preserves_recorded_attempts() {
     let pending = database.create_session("default", None, None).unwrap();
     let attempted = database.create_session("default", None, None).unwrap();
     let mut connection = crate::storage::connect(&path).unwrap();
-    connection
-        .revert_last_migration(crate::storage::MIGRATIONS)
-        .unwrap();
+    while connection.applied_migrations().unwrap().len() > 4 {
+        connection
+            .revert_last_migration(crate::storage::MIGRATIONS)
+            .unwrap();
+    }
     for (id, owner, state) in [
         ("pending", &pending.id, "pending"),
         ("attempted", &attempted.id, "running"),

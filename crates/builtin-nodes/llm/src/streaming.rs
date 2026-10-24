@@ -17,6 +17,7 @@ pub async fn complete(
     limit: usize,
     deadline: Instant,
     context: &mf_runtime::ExecutionContext,
+    timer: &mut crate::timing::CallTimer,
 ) -> Result<CompletionResponse, LlmExecutionError> {
     let mut response = response.with_context(|source| crate::ProviderSnafu {
         kind: source.kind().code(),
@@ -34,6 +35,9 @@ pub async fn complete(
                 .map(|status| status.as_u16()),
         })?;
         if let Item::Event(StreamEvent::Text { text, .. }) = item {
+            if !text.is_empty() {
+                timer.observe_text();
+            }
             ensure!(
                 text.len() <= limit.saturating_sub(bytes),
                 crate::OutputTooLargeSnafu { limit }

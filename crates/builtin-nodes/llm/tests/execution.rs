@@ -668,6 +668,79 @@ fn streaming_reply(parts: &[&str], usage: Value, finish: Option<&str>, done: boo
 }
 
 #[test]
+fn request_timing_observes_first_nonempty_stream_text_and_unary_unknowns() {
+    let mut streamed = streaming_reply(
+        &["", "", "first", " second"],
+        json!({"completion_tokens":12}),
+        Some("stop"),
+        true,
+    );
+    streamed.header_delay = Duration::from_millis(40);
+    streamed.fragments = Some(
+        streamed
+            .body
+            .split_inclusive("\n\n")
+            .map(|frame| frame.as_bytes().to_vec())
+            .collect(),
+    );
+    streamed.fragment_delay = Duration::from_millis(30);
+    let mut unary = Reply::text("unary reply");
+    unary.body_delay = Duration::from_millis(40);
+    for (stream, reply) in [(true, streamed), (false, unary)] {
+        let server = Server::start(vec![reply]);
+        let result = probe(
+            &server,
+            json!({"stream":stream,"inputs":[{"prompt":"hello"}]}),
+            json!({}),
+        );
+        assert_eq!(result["results"][0]["ok"], true, "{result}");
+        let usage: mfn_llm::CallUsage =
+            serde_json::from_value(result["results"][0]["outputs"]["usages"][0].clone()).unwrap();
+        let timing = usage.timing.as_ref().unwrap();
+        assert!(timing.is_valid());
+        assert!(timing.elapsed_us >= 40_000);
+        if stream {
+            assert!(timing.first_token_us.unwrap() >= 90_000, "{timing:?}");
+            let rates = usage.token_rates();
+            assert!(
+                rates.generation_tokens_per_second.unwrap()
+                    > rates.end_to_end_tokens_per_second.unwrap()
+            );
+        } else {
+            assert_eq!(timing.first_token_us, None);
+            assert_eq!(usage.token_rates().generation_tokens_per_second, None);
+        }
+        assert_eq!(server.requests().len(), 1);
+    }
+}
+
+#[test]
+fn captured_stream_failures_retain_timing_without_claiming_throughput() {
+    for limited in [false, true] {
+        let mut reply = streaming_reply(&["prefix"], json!({"completion_tokens":2}), None, false);
+        let mut config = json!({"capture_errors":true});
+        if limited {
+            config["max_output_bytes"] = json!(1);
+        } else {
+            reply.body.push_str("data: invalid-json\n\n");
+        }
+        let server = Server::start(vec![reply]);
+        let result = probe(
+            &server,
+            json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
+            config,
+        );
+        let output = &result["results"][0]["outputs"];
+        assert_eq!(output["status"], "failed", "{result}");
+        let usage: mfn_llm::CallUsage =
+            serde_json::from_value(output["usages"][0].clone()).unwrap();
+        assert!(usage.timing.as_ref().unwrap().first_token_us.is_some());
+        assert_eq!(usage.token_rates(), mfn_llm::CallTokenRates::default());
+        assert_eq!(server.requests().len(), 1);
+    }
+}
+
+#[test]
 fn subscribed_streams_use_one_request_and_preserve_sparse_terminal_facts() {
     for (usage, expected) in [
         (Value::Null, Value::Null),
@@ -767,7 +840,7 @@ fn delivery_deadline_and_cancellation_cannot_become_captured_success() {
     for parameters in [
         json!({"block_delivery":true}),
         json!({"disconnect":true}),
-        json!({"block_delivery":true,"cancel":true}),
+        json!({"block_delivery":true,"cancel_after_prefix":true}),
     ] {
         let server = Server::start(vec![streaming_reply(
             &["prefix"],

@@ -426,6 +426,7 @@ fn common_results_preserve_sparse_fields_across_typed_and_json_transports() {
     let result = mf_chat::ConversationResult {
         text: "answer".into(),
         usages: vec![mf_chat::CallUsage {
+            timing: None,
             call_id: "call".into(),
             model: "model".into(),
             started_at: None,

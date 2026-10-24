@@ -27,9 +27,13 @@ pub use storage::ChatDatabase;
 pub use turn::{Invocation, ModelIdentity};
 pub use usage::CallPurpose;
 pub use usage::{
-    TokenCounter, UsageGroup, UsageGrouping, UsageQuery, UsageStatistics, UsageSummary,
+    LatencySummary, PerformanceSummary, TokenCounter, TokenRateSummary, UsageGroup, UsageGrouping,
+    UsageQuery, UsageStatistics, UsageSummary,
 };
 
-pub use mfn_llm::{CallUsage, MessageMetadata, TextDelta, UsageAttribution, UsageNode, UsageScope};
+pub use mfn_llm::{
+    CallTiming, CallTokenRates, CallUsage, MessageMetadata, TextDelta, UsageAttribution, UsageNode,
+    UsageScope,
+};
 
 pub use workflow::{ConversationBackend, WorkflowProfile};
