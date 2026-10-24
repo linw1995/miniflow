@@ -48,6 +48,11 @@ also run in CI. Main additionally builds and checks the macOS package;
 complete macOS test execution runs in nightly.
 
 Coverage dependencies and generated-project builds use persistent caches.
+CI disables dev/test debug information while retaining LLVM coverage maps.
+Instrumented dependency caches are keyed by toolchain, manifests, coverage settings,
+and compiled package scope; exact hits avoid uploading the same dependencies again.
+Source-dependent generated-project fixtures have a separate per-commit cache under
+`target/coverage-fixtures`, outside the instrumented target's identity cleanup.
 The script removes previous workspace binaries and report data while retaining
 dependencies, so stale coverage mappings cannot contribute to a new report.
 Reporting uses a temporary hard-linked binary view that omits `.kache-prestage-*`

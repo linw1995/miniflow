@@ -53,6 +53,8 @@ class CoverageTests(unittest.TestCase):
             ]:
                 env.pop(name, None)
             env["MF_TEST_BUILD_CACHE_DIR"] = str(root / "target/fixture-cache")
+            env["CARGO_PROFILE_DEV_DEBUG"] = "0"
+            env["CARGO_PROFILE_TEST_DEBUG"] = "0"
             env["MF_TEST_BUILD_CACHE_SESSION"] = "inherited-session"
 
             def execute(*args):
