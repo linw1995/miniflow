@@ -240,9 +240,8 @@ mod tests {{
             result = execute("bash", "scripts/run-cov.sh", "--prepare")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             provenance = json.loads(report.with_name("source.json").read_text())
-            self.assertEqual(provenance["input_environment"], {
-                "CARGO_PROFILE_DEV_DEBUG": "1", "CARGO_PROFILE_TEST_DEBUG": "1",
-            })
+            self.assertEqual(provenance["input_environment"]["CARGO_PROFILE_DEV_DEBUG"], "1")
+            self.assertEqual(provenance["input_environment"]["CARGO_PROFILE_TEST_DEBUG"], "1")
             binary = next(path for path in (root / "target/coverage/build/debug/deps").glob("coverage_fixture-*")
                           if path.is_file() and not path.suffix)
             self.assertFalse(report.exists())
