@@ -307,6 +307,14 @@ mod tests {
     fn malformed_events_preserve_typed_sources_and_legacy_facts() {
         use std::error::Error as _;
         let mut collector = CallEventCollector::default();
+        collector
+            .observe(&event("future.observation", 0, ""))
+            .unwrap();
+        assert!(
+            collector
+                .observe(&event(mfn_llm::FIRST_TEXT_EVENT, 1, " "))
+                .is_err()
+        );
         let mut invalid = event(mfn_llm::REQUEST_STARTED_EVENT, 0, "one");
         assert!(collector.observe(&invalid).is_err());
         invalid.time_unix_nano = 1;

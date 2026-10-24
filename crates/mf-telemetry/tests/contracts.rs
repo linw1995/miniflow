@@ -744,3 +744,30 @@ fn observations_share_the_original_timestamp_between_local_and_otel_consumers() 
             .is_err()
     );
 }
+
+#[test]
+fn observation_sources_capture_the_active_trace_identity() {
+    use opentelemetry::{
+        Context, TraceFlags,
+        trace::{SpanContext, SpanId, TraceContextExt, TraceId, TraceState},
+    };
+    let trace = TraceId::from_bytes([1; 16]);
+    let span = SpanId::from_bytes([2; 8]);
+    let correlation = SpanContext::new(
+        trace,
+        span,
+        TraceFlags::SAMPLED,
+        true,
+        TraceState::default(),
+    );
+    let _context = Context::new()
+        .with_remote_span_context(correlation)
+        .attach();
+    let record =
+        mf_telemetry::events::EventRecord::now("fixture.event", json!({"call_id":"call"})).unwrap();
+    let captured = record.trace_context.unwrap();
+    assert_eq!(captured.trace_id, trace.to_string());
+    assert_eq!(captured.span_id, span.to_string());
+    assert_eq!(captured.trace_flags, 1);
+    assert!(record.time_unix_nano > 0);
+}

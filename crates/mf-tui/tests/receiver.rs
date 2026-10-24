@@ -904,3 +904,89 @@ fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
     assert!(data.node.is_some());
     assert_eq!(data.status, "Complete");
 }
+
+#[test]
+fn call_events_ignore_foreign_records_and_reject_malformed_source_metadata() {
+    if !loopback_available() {
+        return;
+    }
+    let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
+    let submit = |records| {
+        let mut request = ExportLogsServiceRequest::decode(logs(records).as_slice()).unwrap();
+        request.resource_logs[0].scope_logs[0]
+            .scope
+            .as_mut()
+            .unwrap()
+            .name = mf_telemetry::events::SCOPE.into();
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec(),
+        )
+    };
+    let mut started = record(0, false, &run_id().to_string(), 1);
+    started.event_name = "llm.request.started".into();
+    started.time_unix_nano = 1_000_000_000;
+    started.body = Some(AnyValue {
+        value: Some(any_value::Value::KvlistValue(KeyValueList {
+            values: vec![
+                attribute("call_id", string("call")),
+                attribute("model", string("fixture")),
+            ],
+        })),
+    });
+    let mut finished = started.clone();
+    finished.event_name = "llm.request.finished".into();
+    finished.time_unix_nano = 3_000_000_000;
+    assert_eq!(submit(vec![finished, started.clone()]), 200);
+    for key in ["mf.run.id", "mf.workflow.id"] {
+        let mut foreign = started.clone();
+        foreign
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.key == key)
+            .unwrap()
+            .value = Some(string("foreign"));
+        foreign.body = None;
+        assert_eq!(submit(vec![foreign]), 200);
+    }
+    let mut unrelated = started.clone();
+    unrelated.event_name = "future.observation".into();
+    unrelated.body = None;
+    assert_eq!(submit(vec![unrelated]), 200);
+    let mut missing = started.clone();
+    missing.body = None;
+    let mut wrong_width = started.clone();
+    wrong_width.trace_id = vec![1];
+    let mut zero_context = started.clone();
+    zero_context.trace_id = vec![0; 16];
+    zero_context.span_id = vec![0; 8];
+    let mut wrong_body = started.clone();
+    wrong_body.body = Some(string("invalid payload"));
+    let mut missing_timestamp = started;
+    missing_timestamp.time_unix_nano = 0;
+    missing_timestamp.observed_time_unix_nano = 99_000_000_000;
+    for malformed in [
+        missing,
+        wrong_width,
+        zero_context,
+        wrong_body,
+        missing_timestamp,
+    ] {
+        assert_eq!(submit(vec![malformed]), 400);
+    }
+    let mut usages = vec![
+        serde_json::from_value(serde_json::json!({"call_id":"call", "model":"fixture"})).unwrap(),
+    ];
+    receiver.reader().apply_call_timings(&mut usages);
+    assert_eq!(usages[0].timing.as_ref().unwrap().elapsed_us, 2_000_000);
+    assert_eq!(usages[0].timing.as_ref().unwrap().first_token_us, None);
+    assert!(
+        receiver
+            .reader()
+            .calls_for_span(&[1; 16], &[2; 8])
+            .is_empty()
+    );
+    receiver.finish();
+}

@@ -452,9 +452,10 @@ finish reasons retain their provider value. Select optional metadata as optional
 omit it. Credential and provider errors retain typed sources while diagnostic display omits credential values and
 arbitrary remote bodies.
 
-The deadline covers setup and waiting for a terminal reply, with deadline and cancellation checks before returning
-converted data. Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot
-be forcibly preempted. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
+The deadline covers setup and waiting for a terminal reply, and limit checks also run before returning converted data.
+Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot be forcibly
+preempted. The reply-byte limit is checked after unary buffering and decoding and does not bound transport memory or
+the full transcript. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
 workflow thread. Async hosts use a blocking thread for synchronous workflow entry points.
 
 The [terminal example](../examples/llm-terminal.json) accepts startup prompt, system, and history inputs.
