@@ -85,7 +85,6 @@ mod line_producer;
 mod signal_fixture;
 mod stream_fixture;
 mod struct_inputs;
-mod task_stream;
 mod typed_fixture;
 
 pub mod generated_fixture;

@@ -52,11 +52,11 @@ fn combined_nodes_preserve_terminal_results_in_generated_and_isolated_execution(
     let definition = root.path().join("flow.json");
     let binary = root.path().join("flow");
     let build = root.path().join("build");
-    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes");
+    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/task-stream");
     for streaming in [false, true] {
         let mut document = json!({
             "version":"2026-10-19",
-            "dependencies":{"fixture":{"package":"fixture-multi-nodes", "path":plugin}},
+            "dependencies":{"fixture":{"package":"fixture-task-stream", "path":plugin}},
             "nodes":[{"id":"count", "kind":"fixture.task_stream"}],
             "outputs":[{"name":"result", "node":"count", "port":"total"}]
         });
