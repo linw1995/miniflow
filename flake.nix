@@ -64,10 +64,24 @@
           strictDeps = true;
           nativeBuildInputs = [ pkgs.cmake ];
         };
-        cargoArtifacts = craneLib.buildDepsOnly (cargoArgs // { cargoExtraArgs = "-p mf-cli"; });
+        packageArgs = "--locked -p mf-cli";
+        workspaceArgs = "--locked --workspace --all-targets --all-features";
+        packageArtifacts = craneLib.buildDepsOnly (cargoArgs // {
+          doCheck = false;
+          # Package consumers need linked dependencies, not test executables or check metadata.
+          buildPhaseCargoCommand = "cargoWithProfile build ${packageArgs}";
+        });
+        clippyArtifacts = craneLib.buildDepsOnly (cargoArgs // {
+          doCheck = false;
+          buildPhaseCargoCommand = "cargoWithProfile check ${workspaceArgs}";
+        });
+        testArtifacts = craneLib.buildDepsOnly (cargoArgs // {
+          doCheck = false;
+          buildPhaseCargoCommand = "cargoWithProfile test ${workspaceArgs} --no-run";
+        });
         miniflow = craneLib.buildPackage (cargoArgs // {
-          cargoExtraArgs = "-p mf-cli";
-          inherit cargoArtifacts;
+          cargoExtraArgs = packageArgs;
+          cargoArtifacts = packageArtifacts;
           nativeBuildInputs = [ pkgs.cmake pkgs.cargo-about ];
           # The dedicated nextest check runs the complete suite, including acceptance.
           doCheck = false;
@@ -115,15 +129,17 @@
           inherit miniflow;
           fmt = craneLib.cargoFmt cargoArgs;
           clippy = craneLib.cargoClippy (cargoArgs // {
-            inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--workspace --all-targets --all-features -- --deny warnings";
+            cargoArtifacts = clippyArtifacts;
+            cargoExtraArgs = workspaceArgs;
+            cargoClippyExtraArgs = "-- --deny warnings";
           });
           test = craneLib.cargoNextest (cargoArgs // {
-            inherit cargoArtifacts;
+            cargoArtifacts = testArtifacts;
             postPatch = ''
               patchShebangs scripts/nextest-cargo.sh scripts/profraw-wrapper.sh
             '';
-            cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features --profile ci"
+            cargoExtraArgs = workspaceArgs;
+            cargoNextestExtraArgs = "--profile ci"
               + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux " --no-fail-fast";
             nativeBuildInputs = [ pkgs.cmake pkgs.git pkgs.jq pkgs.python3 ];
           } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

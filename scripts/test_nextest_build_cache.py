@@ -15,6 +15,60 @@ spec.loader.exec_module(cache)
 
 
 class BuildCacheTests(unittest.TestCase):
+    def test_isolated_setup_prepares_sources_without_serial_compilation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metadata = {"packages": [{
+                "name": "mf-compiler",
+                "dependencies": [{"name": "serde_json", "req": "^1", "kind": None}],
+            }]}
+            with patch.object(cache.subprocess, "run") as run:
+                cache.prepare_cache(root, "/bin/cargo", metadata, root / "cache", True,
+                                    prewarm=False)
+            commands = [call.args[0][1] for call in run.call_args_list]
+            self.assertIn("vendor", commands)
+            self.assertIn("clean", commands)
+            self.assertNotIn("build", commands)
+            self.assertTrue((root / "cache/target/CACHEDIR.TAG").is_file())
+            self.assertTrue((root / "cache/source.toml").is_file())
+
+    def test_optimized_setup_isolates_targets_sources_and_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = {
+                "NEXTEST_WORKSPACE_ROOT": str(root),
+                "NEXTEST_ENV": str(root / "nextest.env"),
+                "NEXTEST_RUN_ID": "run",
+                "MF_TEST_BUILD_CACHE_DIR": str(root / "cache"),
+                "MF_TEST_BUILD_CACHE_SESSION": "session",
+            }
+
+            def prepare(workspace, cargo, metadata, target, persistent, prewarm=True):
+                self.assertFalse(prewarm)
+                (target / "target").mkdir(parents=True)
+                (target / "vendor").mkdir()
+                (target / "source.toml").write_text("fixture")
+
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(cache.shutil, "which", return_value="/bin/cargo"),
+                patch.object(cache.subprocess, "check_output", return_value=b"{}"),
+                patch.object(cache, "prepare_cache", side_effect=prepare),
+            ):
+                cache.main(optimized=True)
+                cache.main(optimized=True)
+            exported = (root / "nextest.env").read_text()
+            for name, value in {
+                "MF_TEST_TARGET_DIR": root / "cache/optimized/target",
+                "MF_TEST_VENDOR_DIR": root / "cache/optimized/vendor",
+                "CARGO_PROFILE_RELEASE_OPT_LEVEL": "3",
+                "CARGO_PROFILE_RELEASE_LTO": "true",
+                "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "1",
+            }.items():
+                self.assertIn(f"{name}={value}\n", exported)
+            self.assertFalse((root / "cache/prepared-session.json").exists())
+            self.assertTrue((root / "cache/optimized/prepared-session.json").exists())
+
     def test_persistent_preparation_cleans_checkout_packages_in_both_targets(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -52,7 +106,7 @@ class BuildCacheTests(unittest.TestCase):
                 "MF_TEST_BUILD_CACHE_SESSION": "first-session",
             }
 
-            def prepare(*args):
+            def prepare(*args, **kwargs):
                 (target / "target").mkdir(parents=True, exist_ok=True)
                 (target / "vendor").mkdir(exist_ok=True)
                 (target / "source.toml").write_text("fixture")

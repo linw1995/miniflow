@@ -93,7 +93,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NEXTEST_PROFILE: ci
-      MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
+      MF_COVERAGE_REPORT_FORMAT: ${{ (github.event_name == 'pull_request' || inputs.pr != '') && 'lcov' || 'full' }}
+      MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage-fixtures
     steps:
       - uses: actions/checkout@v7
         with:
@@ -128,17 +129,9 @@ jobs:
           SCRIPT
       - name: Cache coverage dependencies
         if: steps.selection.outputs.scoped != 'true' || steps.selection.outputs.run == 'true'
-        uses: actions/cache@v6
+        uses: ./.github/actions/cache-coverage
         with:
-          path: |
-            target/coverage/build/debug
-            target/coverage/build/.mf-coverage-identity
-            target/coverage/build/nextest-build-cache/ci
-          key: coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
-          restore-keys: |
-            coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
-            coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-
-            coverage-${{ runner.os }}-${{ runner.arch }}-
+          plan: ${{ steps.selection.outputs.scoped == 'true' && format('{0}/pr-validation/plan.json', runner.temp) || '' }}
       - name: Prepare and build coverage tests
         id: prepared
         if: steps.selection.outputs.scoped != 'true' || steps.selection.outputs.run == 'true'

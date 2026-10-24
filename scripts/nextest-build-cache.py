@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import hashlib
 import json
 import os
@@ -10,10 +11,14 @@ import subprocess
 from cargo_cache import clean_workspace
 
 
-def main():
+def main(optimized=False):
     # Behavior fixtures need release semantics, but not optimizer throughput.
     # Keep caller overrides and coverage instrumentation intact.
     os.environ.setdefault("CARGO_PROFILE_RELEASE_OPT_LEVEL", "0")
+    if optimized:
+        os.environ["CARGO_PROFILE_RELEASE_OPT_LEVEL"] = "3"
+        os.environ["CARGO_PROFILE_RELEASE_LTO"] = "true"
+        os.environ["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = "1"
     workspace = Path(os.environ["NEXTEST_WORKSPACE_ROOT"])
     cargo = shutil.which(os.environ.get("CARGO", "cargo"))
     if cargo is None:
@@ -33,6 +38,8 @@ def main():
         / "nextest-build-cache"
         / os.environ["NEXTEST_RUN_ID"]
     )
+    if optimized:
+        directory /= "optimized"
     # Package steps share immutable binaries and one preparation session. A new
     # coverage invocation must still discard restored workspace artifacts.
     session = os.environ.get("MF_TEST_BUILD_CACHE_SESSION")
@@ -56,7 +63,8 @@ def main():
         path.exists() for path in [directory / "target", directory / "vendor", directory / "source.toml"]
     ):
         marker.unlink(missing_ok=True)
-        prepare_cache(workspace, cargo, metadata, directory, bool(cache_directory))
+        prepare_cache(workspace, cargo, metadata, directory, bool(cache_directory),
+                      prewarm=not optimized)
         if session:
             pending = marker.with_suffix(".tmp")
             pending.write_text(json.dumps(identity, sort_keys=True))
@@ -67,7 +75,7 @@ def main():
     source_config = directory / "source.toml"
     vendor = directory / "vendor"
     with open(os.environ["NEXTEST_ENV"], "a") as output:
-        for name, value in {
+        environment = {
             "CARGO": workspace / "scripts/nextest-cargo.sh",
             # Selected fixtures use local packages and already-fetched registry dependencies.
             "CARGO_NET_OFFLINE": "true",
@@ -77,11 +85,15 @@ def main():
             "MF_TEST_PACKAGE_TARGET_DIR": directory / "packaged-target",
             "MF_TEST_SOURCE_CONFIG": source_config,
             "MF_TEST_VENDOR_DIR": vendor,
-        }.items():
+        }
+        if optimized:
+            environment["CARGO_PROFILE_RELEASE_LTO"] = "true"
+            environment["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = "1"
+        for name, value in environment.items():
             output.write(f"{name}={value}\n")
 
 
-def prepare_cache(workspace, cargo, metadata, directory, persistent):
+def prepare_cache(workspace, cargo, metadata, directory, persistent, prewarm=True):
     project = directory / "warmup"
     target = directory / "target"
     (project / "src").mkdir(parents=True, exist_ok=True)
@@ -162,13 +174,22 @@ def prepare_cache(workspace, cargo, metadata, directory, persistent):
     if (target / "debug").exists():
         shutil.rmtree(target / "debug")
     # Preserve wrappers, flags, and coverage instrumentation used by the tests.
-    subprocess.run(
-        [cargo, "build", "--offline", "--release", "--config", str(source_config)],
-        cwd=project,
-        env=env,
-        check=True,
+    # Optimized builds belong to the isolated test, where they can overlap other tests.
+    if prewarm:
+        subprocess.run(
+            [cargo, "build", "--offline", "--release", "--config", str(source_config)],
+            cwd=project,
+            env=env,
+            check=True,
+        )
+    target.mkdir(parents=True, exist_ok=True)
+    # Nested targets may omit this tag when an ancestor already has one.
+    (target / "CACHEDIR.TAG").write_text(
+        "Signature: 8a477f597d28d172789f06886806bc55\n"
     )
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--optimized", action="store_true")
+    main(parser.parse_args().optimized)

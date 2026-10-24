@@ -49,6 +49,8 @@ class CoverageTests(unittest.TestCase):
                 "CARGO", "CARGO_TARGET_DIR", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET",
                 "MF_TEST_SOURCE_CONFIG", "MF_TEST_TARGET_DIR", "RUSTFLAGS", "LLVM_PROFILE_FILE",
                 "NEXTEST_PROFILE", "MF_TEST_BUILD_CACHE_SESSION",
+                "MF_COVERAGE_REPORT_FORMAT",
+                "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG",
             ]:
                 env.pop(name, None)
             env["MF_TEST_BUILD_CACHE_DIR"] = str(root / "target/fixture-cache")
@@ -76,6 +78,8 @@ import tempfile
 session = os.environ["MF_TEST_BUILD_CACHE_SESSION"]
 assert session != "inherited-session"
 assert session == Path("target/coverage/build-cache-session").read_text().strip()
+assert os.environ["CARGO_PROFILE_DEV_DEBUG"] == os.environ.get("MF_EXPECTED_DEBUG", "0")
+assert os.environ["CARGO_PROFILE_TEST_DEBUG"] == os.environ.get("MF_EXPECTED_DEBUG", "0")
 binary = Path(os.environ["MF_COVERAGE_BINARIES_DIR"]) / "standalone-fixture"
 with tempfile.TemporaryDirectory() as directory:
     source = Path(directory).resolve() / "fixture.rs"
@@ -183,12 +187,20 @@ mod tests {{
                     for line in block.splitlines()
                 ), block)
             self.assertGreater((root / "target/coverage/result/cobertura.xml").stat().st_size, 0)
+            full_mappings = pr_validation.read_lcov(root, report)
+            env["MF_COVERAGE_REPORT_FORMAT"] = "lcov"
+            result = execute("bash", "scripts/run-cov.sh", "--report")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(pr_validation.read_lcov(root, report), full_mappings)
+            self.assertIn("Coverage timing (grcov):", result.stderr)
             self.assertIn("other/src/lib.rs", report.read_text())
             for source in ["build.rs", "fixture.rs"]:
                 block = next(block for block in blocks if f"SF:{source}\n" in block)
                 self.assertTrue(any(line.startswith("DA:") and int(line.split(",")[1]) > 0
                                     for line in block.splitlines()), block)
             provenance = json.loads(report.with_name("source.json").read_text())
+            self.assertNotIn("CARGO_PROFILE_DEV_DEBUG", provenance["input_environment"])
+            self.assertNotIn("CARGO_PROFILE_TEST_DEBUG", provenance["input_environment"])
             context = {"merge": head, "tree": git("rev-parse", "HEAD^{tree}"),
                        "signature": {key: provenance[key] for key in ("toolchain", "target", "profile")}}
             context["signature"]["coverage_target"] = 95
@@ -224,9 +236,16 @@ mod tests {{
             old_profile = root / "default_123_0_456.profraw"
             old_profile.write_text("Profiles from an earlier session must not be consumed.")
             # Separate steps must accumulate profiles without cleaning earlier crates.
+            env.update(CARGO_PROFILE_DEV_DEBUG="1", CARGO_PROFILE_TEST_DEBUG="1", MF_EXPECTED_DEBUG="1")
             result = execute("bash", "scripts/run-cov.sh", "--prepare")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            provenance = json.loads(report.with_name("source.json").read_text())
+            self.assertEqual(provenance["input_environment"]["CARGO_PROFILE_DEV_DEBUG"], "1")
+            self.assertEqual(provenance["input_environment"]["CARGO_PROFILE_TEST_DEBUG"], "1")
+            binary = next(path for path in (root / "target/coverage/build/debug/deps").glob("coverage_fixture-*")
+                          if path.is_file() and not path.suffix)
             self.assertFalse(report.exists())
+            self.assertFalse(report.with_name("cobertura.xml").exists())
             result = execute("bash", "scripts/run-cov.sh", "--prune-cache")
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             session = root / "target/coverage/build-cache-session"

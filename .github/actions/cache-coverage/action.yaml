@@ -1,0 +1,55 @@
+name: Cache coverage
+description: Cache instrumented dependencies separately from source-dependent fixtures.
+inputs:
+  plan:
+    description: Optional affected-test plan.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Identify compiled package scope
+      id: scope
+      shell: bash
+      env:
+        COVERAGE_PLAN: ${{ inputs.plan }}
+      run: |
+        if [[ -n "$COVERAGE_PLAN" ]]; then
+          packages="$(nix develop --command python3 scripts/coverage_selection.py packages --plan "$COVERAGE_PLAN" | LC_ALL=C sort)"
+        else
+          packages=workspace
+        fi
+        printf 'key=%s\n' "$(printf '%s' "$packages" | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+    - name: Cache instrumented dependencies
+      uses: actions/cache@v6
+      with:
+        path: |
+          target/coverage/build/debug
+          target/coverage/build/.mf-coverage-identity
+        # Checkout artifacts are pruned; unchanged dependencies need no per-commit upload.
+        key: coverage-deps-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ steps.scope.outputs.key }}
+        restore-keys: |
+          coverage-deps-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+          coverage-deps-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', '.github/actions/cache-coverage/action.yaml') }}-
+          coverage-deps-v3-${{ runner.os }}-${{ runner.arch }}-
+    - name: Cache generated-project fixtures
+      uses: actions/cache@v6
+      with:
+        path: |
+          target/coverage-fixtures/target
+          target/coverage-fixtures/packaged-target
+          target/coverage-fixtures/vendor
+        # Packaged workspace crates are validated by source digest before reuse.
+        key: coverage-fixtures-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+        restore-keys: |
+          coverage-fixtures-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+          coverage-fixtures-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-
+          coverage-fixtures-v3-${{ runner.os }}-${{ runner.arch }}-
+    - name: Cache optimized dependencies
+      uses: actions/cache@v6
+      with:
+        path: target/coverage-fixtures/optimized
+        key: coverage-optimized-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
+        restore-keys: |
+          coverage-optimized-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-
+          coverage-optimized-v3-${{ runner.os }}-${{ runner.arch }}-

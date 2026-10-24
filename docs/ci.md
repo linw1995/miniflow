@@ -43,11 +43,30 @@ standard Actions artifact retention applies. A local full-coverage run opts into
 the same collection with `scripts/run-cov.sh --coverage-graph <path>`, which
 cannot combine with `--affected-plan` and never publishes.
 
+Graph exports retain workspace line records only; function and branch records are
+not consumed by the index. Each LLVM subprocess uses one worker while tests export
+in parallel, avoiding nested thread pools. Export, indexer-build, and indexing times
+are reported separately. Aggregate coverage reports retain their existing coverage data.
+
 Formatting, package builds, Clippy, repository hooks, and CI script tests
 also run in CI. Main additionally builds and checks the macOS package;
 complete macOS test execution runs in nightly.
+Nix prepares separate dependency artifacts for the release CLI build, workspace
+Clippy checks, and full nextest suite. Each preparation runs only the Cargo phase
+its consumer needs, with matching package, target, feature, and profile settings.
 
 Coverage dependencies and generated-project builds use persistent caches.
+Coverage preparation defaults dev/test debug information to zero while retaining
+LLVM coverage maps and honoring caller overrides. These internal defaults are
+applied after recording caller inputs, just like coverage instrumentation, so
+default CI and local graph signatures remain compatible.
+Instrumented dependency caches are keyed by toolchain, manifests, coverage settings,
+and compiled package scope; exact hits avoid uploading the same dependencies again.
+Source-dependent generated-project fixtures have a separate per-commit cache under
+`target/coverage-fixtures`, outside the instrumented target's identity cleanup.
+Older caches within the same layout version and runner platform remain dependency
+seeds. Compiler/flag identities, Cargo fingerprints, workspace cleanup, and packaged
+source digests still validate their contents before reuse.
 The script removes previous workspace binaries and report data while retaining
 dependencies, so stale coverage mappings cannot contribute to a new report.
 Reporting uses a temporary hard-linked binary view that omits `.kache-prestage-*`
@@ -82,7 +101,13 @@ projects remain temporary and isolated.
 The default and CI profiles share the generated-build fixtures for the CLI,
 compiler, and chat host. The chat fixture copies only its own build inputs and
 keeps dependency paths in the checkout; it deletes the copied workspace before
-running the relocated host. All shared builds use one serialized test group.
+running the relocated host. Ordinary generated builds use one serialized test group.
+The LTO/strip probe has its own optimized target, vendor tree, setup session, and
+serialized group, so it can overlap ordinary fixture tests without replacing their
+runners. Its setup prepares sources only; optimized compilation runs inside the test
+instead of serially delaying the entire suite. Packaging remains serialized with
+ordinary builds while seeding its separate target. Packaging and LTO each reserve
+two nextest slots instead of blocking all tests.
 Only release dependencies are prewarmed; obsolete dev artifacts are removed.
 Generated-runner behavior tests use the release profile with optimization level
 zero by default. This keeps release semantics and artifact paths while reducing
@@ -97,6 +122,11 @@ run `--prepare` again before executing more package steps after pruning.
 Caches accelerate compilation without changing which tests execute.
 
 ## Coverage step timings
+
+PR validation generates LCOV and selection/source metadata only. Main, nightly,
+and local runs retain HTML, Cobertura, LCOV, and Markdown reports by default.
+Set `MF_COVERAGE_REPORT_FORMAT=lcov` for compact local reports. Reporting logs
+separate timings for profile collection, binary preparation, grcov, and publication.
 
 CI and nightly prepare and build the selected packages together, run a separate
 `Coverage tests (<package>)` step for each workspace package, and generate one
