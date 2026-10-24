@@ -519,6 +519,13 @@ to yellow. Their labels distinguish prerequisites in monochrome. Connections joi
 and `▶┤` input ports. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle
 loss remains visibly uncertain.
 
+LLM cards reserve two extra rows for FTT and Gen / E2E token rates, so receiving results does not move
+the graph. The node details explain the timing windows, report observation coverage, and list each
+call's model, purpose, and performance. Facts come from the node's `usages` snapshot, correlated by
+its exact trace/span identity. Repeated stream invocations and Loop passes retain their own identities;
+missing snapshots or legacy telemetry display `—` rather than borrowing another invocation's results.
+Collapsed clusters retain their existing aggregate status without combining member performance.
+
 Edges use ordered integer channel tracks and reserved passages for connections spanning multiple layers.
 Obstacle-aware search and bounded local retries handle blocked routes. Completed routes avoid boxes,
 labels, arrows, and shared collinear segments. Remaining perpendicular crossings have an explicit

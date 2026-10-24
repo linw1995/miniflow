@@ -1360,6 +1360,7 @@ fn draw(
         } else { graph };
         view_state.reveal(layout, graph);
         let mut graph_view = GraphView::new(layout)
+            .reader(receiver)
             .selected(view_state.selected)
             .offset(view_state.offset.0, view_state.offset.1)
             .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64);
@@ -1395,7 +1396,10 @@ fn draw(
                     )
                 }
             });
-            let bindings = binding_details(description, &view_state.path, selected_node);
+            let mut bindings = binding_details(description, &view_state.path, selected_node);
+            if let Some(node) = selected_node.filter(|node| node.kind == "builtin.llm") {
+                bindings.push_str(&crate::performance::details(&crate::performance::node_calls(receiver, node)));
+            }
             let details_body = format!(
                 "{}\n{}\n{}\n{}",
                 view_state.graph_notice.as_deref().unwrap_or_default(),
@@ -2292,6 +2296,7 @@ impl ObservationView {
         state.reveal(&self.root, graph);
         frame.render_widget(
             GraphView::new(&self.root)
+                .reader(&observation.reader)
                 .snapshot(&snapshot)
                 .selected(state.selected)
                 .offset(state.offset.0, state.offset.1)

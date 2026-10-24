@@ -175,6 +175,109 @@ fn send(endpoint: &str, path: &str, content_type: &str, body: &[u8]) -> u16 {
 }
 
 #[test]
+fn graph_metrics_follow_correlated_snapshots_without_reusing_other_calls() {
+    use mf_telemetry::description::NodeDescription;
+    use mf_tui::graph::{GraphLayout, GraphView};
+    use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+    if !loopback_available() {
+        return;
+    }
+    let mut graph = graph();
+    graph.nodes.push(NodeDescription {
+        id: "model".into(),
+        kind: "builtin.llm".into(),
+    });
+    graph.execution_order.push("model".into());
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut receiver = LoopbackReceiver::bind(graph.clone(), run_id()).unwrap();
+    let mut started = record(2, false, &run_id().to_string(), 1);
+    started.event_name = "mf.node.started".into();
+    started.attributes.extend([
+        attribute("mf.node.id", string("model")),
+        attribute("mf.node.kind", string("builtin.llm")),
+    ]);
+    started.body = Some(body(&[("position", 0), ("elapsed_ns", 0)]));
+    started.trace_id = vec![1; 16];
+    started.span_id = vec![2; 8];
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &logs(vec![started])
+        ),
+        200
+    );
+    let reader = receiver.reader();
+    let render = || {
+        let snapshot = reader.snapshot_shared();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
+        GraphView::new(&layout)
+            .snapshot(&snapshot)
+            .reader(&reader)
+            .render(buffer.area, &mut buffer);
+        (0..20)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(render().contains("FTT —"));
+    let usage = serde_json::json!({"call_id":"answer", "model":"fixture", "timing":{"elapsed_us":2000000,"first_token_us":500000}, "usage":{"output_tokens":100}});
+    let bodies = [
+        (
+            vec![2; 8],
+            serde_json::json!({"record":"header","version":mf_telemetry::capture::SNAPSHOT_VERSION}),
+        ),
+        (
+            vec![2; 8],
+            serde_json::json!({"record":"node","scope":[],"node":"model","inputs":{},"outputs":{"usages":[usage]},"skipped":[],"outcome":"succeeded"}),
+        ),
+        (
+            vec![3; 8],
+            serde_json::json!({"record":"node","scope":[],"node":"model","inputs":{},"outputs":{"usages":[]},"skipped":[],"outcome":"started"}),
+        ),
+        (vec![3; 8], serde_json::json!({"record":"end"})),
+    ];
+    let records = bodies
+        .into_iter()
+        .enumerate()
+        .flat_map(|(sequence, (span, body))| {
+            let workflow_id = graph.workflow_id.clone();
+            mf_telemetry::snapshot::packets(sequence, body)
+                .unwrap()
+                .map(move |packet| {
+                    let mut record =
+                        packet.into_log_record(workflow_id.as_str(), &run_id().to_string());
+                    record.trace_id = vec![1; 16];
+                    record.span_id = span.clone();
+                    record
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut request = ExportLogsServiceRequest::decode(logs(records).as_slice()).unwrap();
+    request.resource_logs[0].scope_logs[0]
+        .scope
+        .as_mut()
+        .unwrap()
+        .name = mf_telemetry::snapshot::SCOPE.into();
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec()
+        ),
+        200
+    );
+    let text = render();
+    assert!(text.contains("FTT 500ms"), "{text}");
+    assert!(text.contains("Gen 66.7 | E2E 50.0 tok/s"), "{text}");
+    receiver.finish();
+    assert!(render().contains("FTT 500ms"));
+}
+
+#[test]
 fn receives_protobuf_logs_and_traces_before_acknowledging() {
     if !loopback_available() {
         return;

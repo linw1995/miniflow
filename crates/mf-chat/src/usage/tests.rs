@@ -56,6 +56,7 @@ fn performance_uses_paired_weighted_facts_and_survives_reopen_and_replay() {
             },
         )
         .collect::<Vec<_>>();
+    let in_memory = UsageSummary::from_calls(&usages).unwrap();
     let reply = ConversationResult {
         text: "answer".into(),
         usages: usages.clone(),
@@ -75,7 +76,7 @@ fn performance_uses_paired_weighted_facts_and_survives_reopen_and_replay() {
         .unwrap();
     assert_eq!(
         database.call(&begun.invocation.call_id).unwrap().usages,
-        Some(usages)
+        Some(usages.clone())
     );
     drop(database);
     let database = ChatDatabase::open(&path).unwrap();
@@ -86,6 +87,14 @@ fn performance_uses_paired_weighted_facts_and_survives_reopen_and_replay() {
         })
         .unwrap();
     assert_eq!(before, after);
+    assert_eq!(in_memory, after.overall);
+    let first_page = database.messages(&session.id, 1, None).unwrap();
+    assert!(first_page.messages[0].usages.is_none());
+    let assistant_page = database
+        .messages(&session.id, 1, first_page.next_after)
+        .unwrap();
+    assert_eq!(assistant_page.messages.len(), 1);
+    assert_eq!(assistant_page.messages[0].usages, Some(usages));
     let performance = &after.overall.performance;
     assert_eq!(after.overall.attempted_calls, 7);
     assert_eq!(performance.elapsed.total_us, Some(16_000_000));

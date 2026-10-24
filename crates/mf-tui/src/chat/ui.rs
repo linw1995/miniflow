@@ -248,6 +248,7 @@ struct ChatView {
     retained: bool,
     unsaved: Option<String>,
     final_reply: Option<String>,
+    reply_usages: Vec<mf_chat::CallUsage>,
     preview: LivePreview,
     latest_invocation: Option<Invocation>,
     observation: Option<LocalObservation>,
@@ -276,6 +277,7 @@ impl ChatView {
             retained: false,
             unsaved: None,
             final_reply: None,
+            reply_usages: vec![],
             preview: LivePreview::default(),
             latest_invocation: None,
             observation: None,
@@ -319,6 +321,7 @@ impl ChatView {
         self.page = None;
         self.preview = LivePreview::default();
         self.final_reply = None;
+        self.reply_usages.clear();
         self.latest_invocation = None;
         self.earlier = false;
         self.observation = None;
@@ -356,6 +359,7 @@ impl ChatView {
                 self.latest_invocation = Some(invocation.clone());
                 self.preview = LivePreview::default();
                 self.final_reply = None;
+                self.reply_usages.clear();
                 self.active = Some((invocation, prompt));
                 self.observation = None;
                 self.unsaved = None;
@@ -405,12 +409,14 @@ impl ChatView {
                         match resolution.state {
                             CompletionState::Committed(completion) => {
                                 self.preview = LivePreview::default();
+                                self.reply_usages = completion.result.usages;
                                 self.final_reply = Some(completion.result.text);
                                 self.notice = "Saved".into();
                             }
                             CompletionState::Uncommitted(pending) => {
                                 self.preview = LivePreview::default();
                                 self.retained = true;
+                                self.reply_usages = pending.completion.result.usages;
                                 self.unsaved = Some(pending.completion.result.text);
                                 self.notice =
                                     "Reply not saved. Ctrl+P to save or discard it".into();
@@ -786,6 +792,15 @@ impl ChatView {
                 for line in safe(&record.message.content).split('\n') {
                     lines.push(Line::raw(line.to_owned()));
                 }
+                if record.message.role == "assistant" {
+                    let calls = crate::performance::conversation_calls(
+                        record.usages.as_deref().unwrap_or_default(),
+                    );
+                    lines.push(Line::styled(
+                        crate::performance::footer(&calls, body.width),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
                 if matches!(
                     record.turn_state.as_str(),
                     "failed" | "cancelled" | "interrupted"
@@ -826,6 +841,18 @@ impl ChatView {
             }
             lines.push(Line::raw(""));
         }
+        if self.active.is_some()
+            && self
+                .preview
+                .segments
+                .iter()
+                .any(|segment| !segment.text.is_empty())
+        {
+            lines.push(Line::styled(
+                "FTT / Gen / E2E: Measuring...",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         if self.preview.omitted {
             lines.push(Line::styled(
                 "[Preview limit reached; remaining output is still being received]",
@@ -846,6 +873,13 @@ impl ChatView {
             for line in safe(reply).split('\n') {
                 lines.push(Line::raw(line.to_owned()));
             }
+        }
+        if self.final_reply.is_some() || self.unsaved.is_some() {
+            let calls = crate::performance::conversation_calls(&self.reply_usages);
+            lines.push(Line::styled(
+                crate::performance::footer(&calls, body.width),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         if !self.outcome.is_empty() {
             for line in safe(&self.outcome).split('\n') {
@@ -975,6 +1009,94 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
     }
+    #[test]
+    fn metrics_follow_saved_unsaved_and_reloaded_replies() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let begun = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "question",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+                1024,
+            )
+            .unwrap();
+        let calls: Vec<mf_chat::CallUsage> = serde_json::from_value(serde_json::json!([
+            {"call_id":"answer", "model":"fixture", "timing":{"elapsed_us":2000000,"first_token_us":500000},"usage":{"output_tokens":100}},
+            {"call_id":"title", "model":"fixture", "timing":{"elapsed_us":10000,"first_token_us":1000},"usage":{"output_tokens":100},"attribution":{"purpose":"title"}}
+        ])).unwrap();
+        let response = mf_chat::ConversationResult {
+            text: "canonical answer".into(),
+            usages: calls,
+            ..Default::default()
+        };
+        view.session = Some(session.clone());
+        view.event(
+            ChatEvent::Finished {
+                invocation: begun.invocation.clone(),
+                resolution: Ok(ReconciledCompletion {
+                    state: CompletionState::Uncommitted(mf_chat::UncommittedCompletion {
+                        completion: mf_chat::Completion {
+                            invocation: begun.invocation.clone(),
+                            result: response.clone(),
+                        },
+                        database_path: controller._database.path().to_owned(),
+                    }),
+                    diagnostics: vec![],
+                }),
+                status: None,
+                stderr: String::new(),
+                capture_error: None,
+            },
+            &controller,
+        );
+        let text = render(&view, 100, 30);
+        assert!(text.contains("[not saved]"));
+        assert!(text.contains("FTT 500ms · Gen 66.7 | E2E 50.0 tok/s"));
+        assert!(!text.contains("Avg FTT"));
+        let completion = controller
+            ._database
+            .complete_turn(begun.invocation.clone(), response)
+            .unwrap();
+        view.event(
+            ChatEvent::Finished {
+                invocation: begun.invocation,
+                resolution: Ok(ReconciledCompletion {
+                    state: CompletionState::Committed(completion),
+                    diagnostics: vec![],
+                }),
+                status: None,
+                stderr: String::new(),
+                capture_error: None,
+            },
+            &controller,
+        );
+        assert!(render(&view, 100, 30).contains("FTT 500ms · Gen 66.7 | E2E 50.0 tok/s"));
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.event(ChatEvent::Loaded { session, page }, &controller);
+        assert!(view.final_reply.is_none());
+        let text = render(&view, 100, 30);
+        assert_eq!(text.matches("FTT 500ms").count(), 1);
+        assert!(text.contains("E2E 50.0 tok/s"));
+        assert!(!render(&view, 45, 30).contains("E2E"));
+        controller.close().unwrap();
+    }
+
     #[test]
     fn connection_shortcut_does_not_intercept_chat_prompt_editing() {
         let root = tempfile::tempdir().unwrap();

@@ -268,6 +268,64 @@ impl CallPurpose {
 }
 
 impl UsageSummary {
+    /// Aggregates call facts with the same paired, weighted rates as persisted queries.
+    pub fn from_calls(calls: &[crate::CallUsage]) -> Result<Self, ChatError> {
+        crate::turn::validate_usages(calls)?;
+        let mut summary = Self::empty();
+        for call in calls {
+            let count = |key| {
+                call.usage
+                    .as_ref()
+                    .and_then(|usage| usage.get(key))
+                    .copied()
+            };
+            let input = count("input_tokens");
+            let output = count("output_tokens");
+            let total = count("total_tokens");
+            let timing = call.timing.as_ref();
+            let elapsed = timing.map(|timing| timing.elapsed_us);
+            let first = timing.and_then(|timing| timing.first_token_us);
+            let rates = call.token_rates();
+            let end = rates.end_to_end_tokens_per_second.and(elapsed);
+            let generation = rates
+                .generation_tokens_per_second
+                .and_then(|_| timing.and_then(crate::CallTiming::generation_us));
+            summary.add(
+                if call.error.is_some() {
+                    "failed"
+                } else {
+                    "succeeded"
+                },
+                (
+                    (
+                        1,
+                        input,
+                        i64::from(input.is_some()),
+                        output,
+                        i64::from(output.is_some()),
+                        total,
+                        i64::from(total.is_some()),
+                    ),
+                    (
+                        elapsed,
+                        i64::from(elapsed.is_some()),
+                        first,
+                        i64::from(first.is_some()),
+                    ),
+                    (
+                        end.and(output),
+                        end,
+                        i64::from(end.is_some()),
+                        generation.and(output),
+                        generation,
+                        i64::from(generation.is_some()),
+                    ),
+                ),
+            )?;
+        }
+        Ok(summary)
+    }
+
     fn empty() -> Self {
         Self {
             attempted_calls: 0,

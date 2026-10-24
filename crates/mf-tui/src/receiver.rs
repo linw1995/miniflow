@@ -569,6 +569,9 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
             trace_flags: (record.flags & 0xff) as u8,
         })
     };
+    let correlation = trace_context
+        .as_ref()
+        .map(|_| (record.trace_id.clone(), record.span_id.clone()));
     let wire = WireRecord {
         scope: INSTRUMENTATION_SCOPE.into(),
         event_name: record.event_name,
@@ -607,14 +610,14 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
                 .state
                 .lock()
                 .expect("receiver state was not poisoned")
-                .apply_stream(event)?)
+                .apply_stream_observed(event, correlation)?)
         } else {
             let event = wire.decode()?;
             Ok(context
                 .state
                 .lock()
                 .expect("receiver state was not poisoned")
-                .apply(event)?)
+                .apply_observed(event, correlation)?)
         }
     })()
     .inspect_err(|_| {

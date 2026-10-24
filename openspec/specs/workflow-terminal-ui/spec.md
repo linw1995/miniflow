@@ -1056,3 +1056,28 @@ The terminal SHALL reconcile live text against the final result. Successful pers
 
 - **WHEN** a queued event belongs to an earlier invocation than the active turn
 - **THEN** it cannot append text to or change the completion state of the active turn
+
+### Requirement: Present model call performance beside replies and LLM nodes
+
+Completed assistant replies and LLM graph cards SHALL present FTT, Gen, and E2E throughput from authoritative call facts. Narrow chat views MAY omit E2E. Previews SHALL show a measuring indicator until final facts arrive. Missing data SHALL remain unknown. Reply summaries SHALL exclude explicitly attributed non-conversation calls, use mean observed FTT, and weight rates by paired tokens and durations.
+
+#### Scenario: Reload a completed reply
+
+- **WHEN** a saved assistant reply is loaded from a bounded message page
+- **THEN** its footer uses the original committed call facts and preserves unknown legacy timing
+
+#### Scenario: Recover a complete unsaved reply
+
+- **WHEN** a complete reply cannot be saved
+- **THEN** its performance footer retains the original facts during save-only recovery
+
+#### Scenario: Inspect a repeated LLM invocation
+
+- **WHEN** an LLM node runs repeatedly or inside a Loop
+- **THEN** its graph card uses only snapshots correlated to the displayed invocation, with stable space reserved for FTT and both rates
+- **AND** details explain both rate windows and report per-call facts and observation coverage
+
+#### Scenario: Observe missing call data
+
+- **WHEN** an LLM snapshot or provider token count is unavailable
+- **THEN** the card displays unknown values without estimating tokens or borrowing another invocation's data

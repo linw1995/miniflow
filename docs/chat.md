@@ -207,6 +207,17 @@ per-call rates. Filters and group pagination use the same persisted snapshot as 
 
 SQL computes aggregate facts without loading raw call history. Integer overflow fails explicitly. Calls from title generation remain attributed to `title`, including valid replies whose title update was stale or whose application title was rejected. Monetary estimates require separate pricing data and are not provided by the core.
 
+Completed assistant replies display a dim performance footer: `FTT 500ms · Gen 66.7 | E2E 50.0 tok/s`.
+FTT is time to the first nonempty text delta; Gen measures throughput after that delta; E2E includes
+the wait for the first delta. Narrow views prioritize FTT and Gen. Streaming previews show
+`Measuring...` until authoritative call facts arrive. Missing facts remain `—`.
+The footer includes conversation calls and calls without an explicit purpose; title and other explicit
+purposes are excluded. Multiple calls show mean FTT with observation coverage and paired weighted rates.
+Saved replies reload their committed call facts with each bounded message page in the same read
+transaction; user messages and legacy replies have no call facts. Complete unsaved replies retain their
+original facts during save-only recovery. `UsageSummary::from_calls` shares the persisted query's
+aggregation rules for callers presenting in-memory facts.
+
 Live answers appear as provisional segments, one per stream invocation. Closing an answer stream does not
 finish the turn while title generation or other workflow work remains active. Successful terminal text replaces
 the preview, including any workflow postprocessing. Failed or cancelled prefixes remain visibly incomplete;
