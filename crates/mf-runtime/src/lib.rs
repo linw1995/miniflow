@@ -102,8 +102,8 @@ pub use stream::{
     TypedStreamNode, execute_typed_event,
 };
 pub use stream_instance::{
-    ExecutionSnafu as StreamExecutionSnafu, MessageId, MonotonicClock, StreamClock, StreamDelivery,
-    StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
+    MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
+    StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
 pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{

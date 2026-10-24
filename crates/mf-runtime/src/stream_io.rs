@@ -200,14 +200,6 @@ impl StreamStdio {
         self.input.take()
     }
 
-    pub fn write_bytes(
-        &mut self,
-        bytes: &[u8],
-        cancellation: &StreamCancellation,
-    ) -> Result<(), StreamError> {
-        write_bytes(&mut self.output, bytes, cancellation)
-    }
-
     pub fn write_json(&mut self, value: &impl serde::Serialize) -> Result<(), StreamError> {
         serde_json::to_writer(&mut self.output, value).context(OutputEncodeSnafu)?;
         self.output
@@ -243,15 +235,7 @@ fn write_record(
 ) -> Result<(), StreamError> {
     let mut bytes = serde_json::to_vec(&output.outputs).context(OutputEncodeSnafu)?;
     bytes.push(b'\n');
-    write_bytes(file, &bytes, cancellation)
-}
-
-fn write_bytes(
-    file: &mut File,
-    bytes: &[u8],
-    cancellation: &StreamCancellation,
-) -> Result<(), StreamError> {
-    let mut remaining = bytes;
+    let mut remaining = bytes.as_slice();
     while !remaining.is_empty() {
         wait_ready(file, true, cancellation).context(OutputWriteSnafu)?;
         if let Some(error) = cancellation.failure() {
