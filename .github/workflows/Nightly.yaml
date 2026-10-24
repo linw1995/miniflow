@@ -57,8 +57,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NEXTEST_PROFILE: ci
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
       MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage-fixtures
     steps:
       - uses: actions/checkout@v7

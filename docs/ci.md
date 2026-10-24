@@ -56,11 +56,17 @@ Clippy checks, and full nextest suite. Each preparation runs only the Cargo phas
 its consumer needs, with matching package, target, feature, and profile settings.
 
 Coverage dependencies and generated-project builds use persistent caches.
-CI disables dev/test debug information while retaining LLVM coverage maps.
+Coverage preparation defaults dev/test debug information to zero while retaining
+LLVM coverage maps and honoring caller overrides. These internal defaults are
+applied after recording caller inputs, just like coverage instrumentation, so
+default CI and local graph signatures remain compatible.
 Instrumented dependency caches are keyed by toolchain, manifests, coverage settings,
 and compiled package scope; exact hits avoid uploading the same dependencies again.
 Source-dependent generated-project fixtures have a separate per-commit cache under
 `target/coverage-fixtures`, outside the instrumented target's identity cleanup.
+Older caches within the same layout version and runner platform remain dependency
+seeds. Compiler/flag identities, Cargo fingerprints, workspace cleanup, and packaged
+source digests still validate their contents before reuse.
 The script removes previous workspace binaries and report data while retaining
 dependencies, so stale coverage mappings cannot contribute to a new report.
 Reporting uses a temporary hard-linked binary view that omits `.kache-prestage-*`

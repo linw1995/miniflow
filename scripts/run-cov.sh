@@ -12,6 +12,9 @@ print(json.dumps({name: os.environ[name] for name in (
 ) if name in os.environ}))
 PYTHON
 )"
+# Defaults belong to coverage preparation, not the caller's graph identity.
+export CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
+export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
 export CARGO_INCREMENTAL=0
 export CARGO_TARGET_DIR="${coverage_dir}/build"
 export RUSTFLAGS="-Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0"
