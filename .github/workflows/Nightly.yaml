@@ -57,7 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NEXTEST_PROFILE: ci
-      MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
+      MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage-fixtures
     steps:
       - uses: actions/checkout@v7
         with:
@@ -66,16 +66,7 @@ jobs:
         with:
           cache-key-name: coverage
       - name: Cache coverage dependencies
-        uses: actions/cache@v6
-        with:
-          path: |
-            target/coverage/build/debug
-            target/coverage/build/.mf-coverage-identity
-            target/coverage/build/nextest-build-cache/ci
-          key: coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
-          restore-keys: |
-            coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
-            coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-
+        uses: ./.github/actions/cache-coverage
       - name: Prepare and build coverage tests
         run: nix develop --command bash scripts/run-cov.sh --prepare
       - name: Coverage tests (mf-chat)

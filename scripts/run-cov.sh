@@ -12,11 +12,23 @@ print(json.dumps({name: os.environ[name] for name in (
 ) if name in os.environ}))
 PYTHON
 )"
+# Defaults belong to coverage preparation, not the caller's graph identity.
+export CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
+export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
 export CARGO_INCREMENTAL=0
 export CARGO_TARGET_DIR="${coverage_dir}/build"
 export RUSTFLAGS="-Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0"
 export LLVM_PROFILE_FILE="${coverage_dir}/data/mf-%p-%m.profraw"
 export MF_COVERAGE_BINARIES_DIR="${coverage_dir}/extra-binaries"
+report_format="${MF_COVERAGE_REPORT_FORMAT:-full}"
+case "$report_format" in
+  full|lcov) ;;
+  *) echo "error: unknown coverage report format: $report_format" >&2; exit 1 ;;
+esac
+
+report_timing() {
+  printf 'Coverage timing (%s): %ss\n' "$1" "$((SECONDS - $2))" >&2
+}
 
 # Full coverage runs may opt into per-test profile collection for the
 # coverage graph; --coverage-graph must precede every other argument.
@@ -141,7 +153,10 @@ PYTHON
 }
 
 report_coverage() {
+  local started=$SECONDS
   collect_profiles
+  report_timing collect-profiles "$started"
+  started=$SECONDS
   # Compiler-cache backups can contain coverage maps from older source revisions.
   # Keep the build cache intact and expose only published Cargo artifacts to grcov.
   rm -rf "${coverage_dir}/report-binaries"
@@ -166,12 +181,19 @@ for manifest in sorted(extra.glob("*.paths.json")):
         mappings[source] = target
 (destination.parent / "path-mapping.json").write_text(json.dumps(mappings))
 PYTHON
+  report_timing prepare-binaries "$started"
   grcov_inputs=("${coverage_dir}/data")
   # Per-test profiles replace the shared data/ profiles on graph runs; merge
   # both directories so the aggregate report keeps its current meaning.
   if coverage_graph_requested; then
     grcov_inputs+=("${coverage_dir}/per-test")
   fi
+  local formats=html,cobertura,lcov,markdown destination="${coverage_dir}/result"
+  if [[ "$report_format" == lcov ]]; then
+    formats=lcov
+    destination="${coverage_dir}/result/lcov"
+  fi
+  started=$SECONDS
   grcov "${grcov_inputs[@]}" \
     --llvm \
     --branch \
@@ -181,14 +203,19 @@ PYTHON
     --ignore '/*' \
     --binary-path "${coverage_dir}/report-binaries" \
     --path-mapping "${coverage_dir}/path-mapping.json" \
-    --output-types html,cobertura,lcov,markdown \
-    --output-path "${coverage_dir}/result"
+    --output-types "$formats" \
+    --output-path "$destination"
+  report_timing grcov "$started"
 
   test -s "${coverage_dir}/result/lcov"
-  test -s "${coverage_dir}/result/cobertura.xml"
+  if [[ "$report_format" == full ]]; then
+    test -s "${coverage_dir}/result/cobertura.xml"
+  fi
   cp "${coverage_dir}/result/lcov" "${coverage_dir}/result/lcov.info"
+  started=$SECONDS
   python3 -B scripts/coverage_selection.py report
   rm -rf "${coverage_dir}/report-binaries"
+  report_timing publish-reports "$started"
 }
 
 # CI keeps one instrumented build and accumulates profiles across package steps.
@@ -226,7 +253,9 @@ case "${1:-}" in
     targets=("$CARGO_TARGET_DIR")
     if [[ -n "${MF_TEST_BUILD_CACHE_DIR:-}" ]]; then
       targets+=("${MF_TEST_BUILD_CACHE_DIR}/target" "${MF_TEST_BUILD_CACHE_DIR}/packaged-target")
+      targets+=("${MF_TEST_BUILD_CACHE_DIR}/optimized/target")
       rm -f "${MF_TEST_BUILD_CACHE_DIR}/prepared-session.json"
+      rm -f "${MF_TEST_BUILD_CACHE_DIR}/optimized/prepared-session.json"
     fi
     python3 scripts/prune-test-cache.py "${targets[@]}"
     rm -f "${coverage_dir}/binaries.json" "${coverage_dir}/cargo-metadata.json"
