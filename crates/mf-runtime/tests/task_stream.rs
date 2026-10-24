@@ -32,9 +32,14 @@ struct Combined {
     emit: bool,
     invalid: bool,
     ignore_error: bool,
+    supports_success: bool,
 }
 
 impl TypedTaskStreamNode for Combined {
+    fn supports_success_dependencies(&self) -> bool {
+        self.supports_success
+    }
+
     type Input = Input;
     type Output = Output;
     type Emission = Delta;
@@ -71,6 +76,7 @@ fn combined(emit: bool, invalid: bool, ignore_error: bool) -> Combined {
         emit,
         invalid,
         ignore_error,
+        supports_success: true,
     }
 }
 
@@ -650,4 +656,29 @@ fn publication_deadlines_interrupt_bounded_delivery_without_a_timer_thread() {
     drop(emitter);
     drop(sink);
     assert!(receiver.recv().unwrap().is_none());
+}
+
+#[test]
+fn task_adapters_preserve_success_dependency_capabilities() {
+    for supported in [false, true] {
+        let mut node = combined(false, false, false);
+        node.supports_success = supported;
+        let prepared = PreparedNode::typed_task_stream(node, NodeMetadata::default()).unwrap();
+        assert_eq!(
+            prepared
+                .execution
+                .as_task_node()
+                .unwrap()
+                .supports_success_dependencies(),
+            supported
+        );
+        assert_eq!(
+            prepared
+                .execution
+                .into_task_node()
+                .unwrap()
+                .supports_success_dependencies(),
+            supported
+        );
+    }
 }

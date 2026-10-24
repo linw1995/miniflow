@@ -793,3 +793,26 @@ fn skipped_combined_nodes_do_not_invent_live_invocations() {
     assert!(outputs.is_empty());
     assert!(events.is_empty());
 }
+
+#[test]
+fn combined_terminal_results_support_output_and_success_dependencies() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-10-23", "dependencies": {},
+        "nodes": [
+            {"id":"source", "kind":"fixture.task_stream"},
+            {"id":"after", "kind":"fixture.task_stream", "inputs": {
+                "count":{"from":{"node":"source", "port":"total"}}
+            }}
+        ],
+        "edges": [{"from_node":"source", "to_node":"after"}],
+        "outputs": [{"name":"total", "node":"after", "port":"total"}]
+    }))
+    .unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let outputs = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_with_inputs(WorkflowArguments::from_json(br#"{"source.count":3}"#).unwrap())
+        .unwrap();
+    assert_eq!(outputs["total"].as_u64(), Some(3));
+}

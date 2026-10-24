@@ -2,39 +2,38 @@
 
 ## Purpose
 
-Allow one node invocation to return an authoritative Task result while optionally delivering incremental stream values with explicit consumption and lifetime semantics.
+Run one operation that emits optional incremental values and returns an authoritative terminal Task result.
 
 ## Requirements
 
-### Requirement: Execute terminal and stream capabilities together
+### Requirement: Invoke combined execution once
 
-A combined node SHALL run one business invocation with both incremental publication and a terminal result available. It MUST NOT require a per-node Task/Stream mode selection or independently invoke two business entry points. Terminal results SHALL follow ordinary validation, context commit, skip, and success-dependency rules.
+A combined executor SHALL receive resolved inputs, a mutable execution context, and a borrowed emitter
+through one business entry point. It SHALL return one terminal `NodeResult` and MAY emit zero or more
+incremental results before returning. The runtime MUST NOT invoke separate Task and Stream business
+methods or reconstruct the terminal result from emitted values.
 
-#### Scenario: Return a final result after live values
+#### Scenario: Emit before returning the final result
 
-- **WHEN** a combined node emits several increments and returns a terminal result
-- **THEN** consumers can receive increments before return and terminal dependents receive the validated final result once
-- **AND** the node's business operation executes once
+- **WHEN** a combined operation emits several values and then returns its final result
+- **THEN** a connected sink receives those values before the operation returns and business logic runs once
 
-#### Scenario: Emit no values
+#### Scenario: Return without emitting
 
-- **WHEN** a connected combined node returns success without emitting
-- **THEN** its stream invocation closes normally and its terminal result remains available
-- **AND** no empty value, skipped message, or consumer Task invocation is invented
+- **WHEN** a combined operation returns successfully without any emission
+- **THEN** its terminal result remains available and no incremental result is invented
 
-### Requirement: Declare separate output categories
+### Requirement: Reflect separate output contracts
 
-Combined nodes SHALL declare separate terminal and stream result contracts with distinct port names. Type checking and runtime validation SHALL preserve each port's delivery category. Required emission fields constrain each emitted record and MUST NOT imply that an invocation emits at least one record.
+Typed combined providers SHALL declare associated input, terminal output, and emission value contracts.
+Dynamic providers SHALL reflect their input and terminal ports through `NodePortContract` and their
+incremental ports through its stream-output declaration. Preparation MUST NOT execute business logic
+or accept competing reflected metadata declarations.
 
-#### Scenario: Reject a missing field in an actual emission
+#### Scenario: Reject competing declarations
 
-- **WHEN** an emitted record omits a required stream field
-- **THEN** publication fails with that field and node identity even if terminal output is otherwise valid
-
-#### Scenario: Keep terminal fields out of emission validation
-
-- **WHEN** a node declares terminal text and stream delta fields
-- **THEN** an emission requires only its stream contract and the final result requires only its terminal contract
+- **WHEN** caller-supplied metadata redeclares reflected incremental ports
+- **THEN** preparation fails before an executor is returned
 
 ### Requirement: Validate port declarations in the compiler
 
@@ -86,6 +85,35 @@ shared-error carriers, or remembered-error state.
 
 - **WHEN** ordinary Task publication and an emission violate the same output contract
 - **THEN** both report the shared workflow output error and preserve that error through failure propagation
+
+### Requirement: Adapt terminal-only execution without a receiver
+
+Combined executors SHALL support ordinary Task borrowing and ownership conversion. Terminal-only
+adaptation SHALL use an unconnected discard sink without allocating an unread receiver. Providers MAY
+query connectivity and omit incremental construction. The adapter SHALL preserve the provider's declared
+success-dependency capability. Finite and streaming workflows SHALL support this terminal Task path;
+graph-local incremental routing and host export are separate planning capabilities.
+
+#### Scenario: Execute repeated terminal-only calls
+
+- **WHEN** a combined executor is invoked repeatedly through its Task adapter
+- **THEN** every invocation returns its own terminal result without waiting for incremental consumption
+
+#### Scenario: Preserve generated and isolated execution
+
+- **WHEN** a generated finite or streaming runner executes a combined node normally or as an isolated target
+- **THEN** it publishes the same terminal outputs through the existing Task contract
+
+### Requirement: Observe emissions without changing business values
+
+Combined execution SHALL report successfully admitted emissions through an attached snapshot recorder.
+Snapshot capture SHALL use the existing redaction policy and MUST NOT redact the values delivered to
+the business sink. Business delivery SHALL remain available without an attached recorder.
+
+#### Scenario: Capture a sensitive incremental value
+
+- **WHEN** a combined executor sends a secret-marked value with snapshot capture enabled
+- **THEN** the sink receives the original value while the snapshot contains its redacted representation
 
 ### Requirement: Discard streams without consumers
 
