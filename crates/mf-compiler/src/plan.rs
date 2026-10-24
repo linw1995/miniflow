@@ -543,6 +543,25 @@ fn generate_stream_artifacts(
     )?;
     let nodes = (0..order.len()).map(|index| format_ident!("node_stream_{index}"));
     let initial = initial_nodes(definition, order);
+    let mut connected = BTreeSet::new();
+    for (node, dependencies) in crate::compiler::incoming_dependencies(definition) {
+        for dependency in dependencies {
+            if let Some(input) = dependency.input() {
+                connected.insert((node.to_owned(), input.to_owned()));
+            }
+        }
+    }
+    let input_bindings = if connected.is_empty() {
+        quote! { |_, _| false }
+    } else {
+        let arms = connected.iter().map(|(node, input)| {
+            let node = LitStr::new(node, Span::call_site());
+            let input = LitStr::new(input, Span::call_site());
+            quote! { (#node, #input) => true, }
+        });
+        quote! { |node, input| match (node, input) { #(#arms)* _ => false } }
+    };
+
     let execution = LitStr::new(
         &serde_json::to_string(definition.execution.as_ref().unwrap()).context(SerializeSnafu)?,
         Span::call_site(),
@@ -558,10 +577,12 @@ fn generate_stream_artifacts(
                 .boxed()
                 .context(mf_compiler::WorkflowMetadataSnafu { definition_id: "<workflow>" })?;
             let nodes = vec![#(#nodes),*];
-            let input_schema = mf_compiler::stream_workflow_inputs(&nodes, STREAM_DEPENDENCIES, &[#(#initial),*])?;
+            let input_schema = mf_compiler::workflow_input_schema(
+                nodes.iter().zip([#(#initial),*]),
+                #input_bindings,
+            )?;
             let prepared = mf_runtime::PreparedStream::from_plan(
-                execution, nodes, std::borrow::Cow::Borrowed(STREAM_DEPENDENCIES),
-                stream_program(), std::borrow::Cow::Borrowed(STREAM_OUTPUTS), input_schema,
+                execution, nodes, stream_program(), input_schema,
             );
             Ok(bind_stream_guards(prepared))
         }
@@ -1023,13 +1044,11 @@ impl CompiledWorkflow {
                     Ok(())
                 }
             });
-            let dependencies = dependency_layout_tokens(&self.definition, &order);
-            let outputs = self.definition.outputs.iter().map(output_definition_tokens);
-            layouts.push(quote! {
-                pub static STREAM_DEPENDENCIES: &[std::borrow::Cow<'static, [mf_runtime::FlowDependency]>] = &[#(#dependencies),*];
-                pub static STREAM_OUTPUTS: &[mf_runtime::WorkflowOutputDefinition] = &[#(#outputs),*];
-            });
-            layouts.push(stream_program_tokens(prepared.plan()));
+            layouts.push(stream_program_tokens(
+                prepared.plan(),
+                &self.definition,
+                &order,
+            ));
             layouts.push(stream_guard_tokens(
                 &self.definition,
                 &order,
@@ -1431,19 +1450,6 @@ fn domain_tokens(plan: &mf_runtime::ExecutionDomains) -> TokenStream {
 }
 
 #[cfg(feature = "codegen")]
-fn output_definition_tokens(output: &mf_runtime::WorkflowOutputDefinition) -> TokenStream {
-    let name = LitStr::new(&output.name, Span::call_site());
-    let node = LitStr::new(output.node.as_str(), Span::call_site());
-    let port = LitStr::new(&output.port, Span::call_site());
-    let optional = output.optional;
-    quote! { mf_runtime::WorkflowOutputDefinition {
-        name: std::borrow::Cow::Borrowed(#name),
-        node: mf_runtime::DefinitionId::from_static(#node),
-        port: std::borrow::Cow::Borrowed(#port), optional: #optional,
-    } }
-}
-
-#[cfg(feature = "codegen")]
 fn task_layout_tokens(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
@@ -1677,7 +1683,12 @@ fn task_guard_tokens(
 }
 
 #[cfg(feature = "codegen")]
-fn stream_program_tokens(plan: &mf_runtime::StreamPlan) -> TokenStream {
+fn stream_program_tokens(
+    plan: &mf_runtime::StreamPlan,
+    definition: &WorkflowDefinition,
+    order: &[DefinitionId],
+) -> TokenStream {
+    let incoming = crate::compiler::incoming_dependencies(definition);
     let mut owners = vec![0; plan.nodes().len()];
     for (message, entry) in plan.program().messages.iter().enumerate() {
         for &domain in entry.schedule.domains.iter() {
@@ -1695,16 +1706,19 @@ fn stream_program_tokens(plan: &mf_runtime::StreamPlan) -> TokenStream {
     let mut functions = Vec::new();
     let inputs: Vec<_> = plan.nodes().iter().enumerate().map(|(index, _)| {
         let name = format_ident!("resolve_stream_input_{index}");
-        let dependencies: Vec<_> = plan.dependencies(index).iter().map(|dependency| {
-            let source = LitStr::new(&dependency.source_node, Span::call_site());
-            let output = LitStr::new(&dependency.source_output, Span::call_site());
-            let key = LitStr::new(&dependency.source_key, Span::call_site());
-            let input = dependency.input.as_ref().map(|input| {
+        let mut dependencies = incoming.get(order[index].as_str()).cloned().unwrap_or_default();
+        dependencies.sort();
+        let dependencies: Vec<_> = dependencies.iter().filter_map(|dependency| {
+            let output = dependency.source_output()?;
+            let source = LitStr::new(dependency.source_node(), Span::call_site());
+            let key = LitStr::new(&mf_runtime::output_id(dependency.source_node(), output), Span::call_site());
+            let output = LitStr::new(output, Span::call_site());
+            let input = dependency.input().map(|input| {
                 let input = LitStr::new(input, Span::call_site());
                 quote! { Some(#input) }
             }).unwrap_or_else(|| quote! { None });
-            let exclusive = dependency.exclusive;
-            quote! { mf_runtime::ExecutionDependency { exclusive: #exclusive, input: #input, source_node: #source, source_output: #output, source_key: std::borrow::Cow::Borrowed(#key) } }
+            let exclusive = dependency.exclusive();
+            Some(quote! { mf_runtime::ExecutionDependency { exclusive: #exclusive, input: #input, source_node: #source, source_output: #output, source_key: std::borrow::Cow::Borrowed(#key) } })
         }).collect();
         functions.push(quote! {
             fn #name(plan: &mf_runtime::StreamPlan, context: &mf_runtime::ExecutionContext, inputs: &mut mf_runtime::Inputs, causes: std::collections::BTreeSet<mf_runtime::SkipCause>) -> Result<mf_runtime::InputResolution, mf_runtime::WorkflowRunError> {
@@ -1735,7 +1749,7 @@ fn stream_program_tokens(plan: &mf_runtime::StreamPlan) -> TokenStream {
         let successors = schedule.successors.iter().map(|ranks| { let ranks = ranks.iter(); quote! { vec![#(#ranks),*].into_boxed_slice() } });
         let select = if program.select_outputs.is_some() {
             let name = format_ident!("select_stream_outputs_{message}");
-            let outputs = plan.outputs().iter().filter(|output| {
+            let outputs = definition.outputs.iter().filter(|output| {
                 let index = plan.nodes().iter().position(|node| node.definition_id == output.node).expect("validated selected output");
                 let owner = if plan.nodes()[index].metadata.stream_outputs.iter().any(|port| port.name == output.port) { plan.emission_binding(index).message } else { owners[index] };
                 owner == message

@@ -1127,7 +1127,6 @@ fn coordinate(
         }
         let wait = plan
             .message_sources()
-            .iter()
             .skip(1)
             .filter_map(|domain| guard.operators[domain.expect("emission domain")].as_ref())
             .filter(|operator| {
@@ -1155,7 +1154,7 @@ fn tick<'a>(
     #[cfg(feature = "async")] future_executor: &Arc<crate::future_execution::FutureExecutor>,
 ) -> Result<(MutexGuard<'a, State>, bool), StreamError> {
     let mut progress = false;
-    for source in plan.message_sources().iter().skip(1) {
+    for source in plan.message_sources().skip(1) {
         let index = source.expect("emission domain");
         let due = guard.operators[index]
             .as_ref()
@@ -1192,7 +1191,9 @@ fn tick<'a>(
         if guard.domains[domain].occupied {
             continue;
         }
-        let source = plan.message_sources()[domain].expect("emission domain");
+        let source = plan.program().messages[domain]
+            .source
+            .expect("emission domain");
         let Some(queued) = guard.operators[source]
             .as_mut()
             .unwrap()
@@ -1490,8 +1491,9 @@ fn tick<'a>(
                 }
             }
         } else if domain > 0 && !guard.domains[domain].occupied {
-            let operator = guard.operators
-                [plan.message_sources()[domain].expect("emission domain")]
+            let operator = guard.operators[plan.program().messages[domain]
+                .source
+                .expect("emission domain")]
             .as_ref()
             .unwrap();
             if operator.closed && operator.pending.is_empty() {
@@ -1864,6 +1866,10 @@ mod tests {
         selected: std::borrow::Cow<'static, [usize]>,
         execution_domains: crate::ExecutionDomains,
         by_message: std::borrow::Cow<'static, [std::borrow::Cow<'static, [usize]>]>,
+        dependencies: std::borrow::Cow<
+            'static,
+            [std::borrow::Cow<'static, [crate::FlowDependency]>],
+        >,
     ) -> crate::StreamProgram {
         let messages = sources
             .iter()
@@ -1932,8 +1938,11 @@ mod tests {
                     })
             })
             .collect();
-        let inputs = (0..node_count)
-            .map(|index| {
+        let inputs = dependencies
+            .into_owned()
+            .into_iter()
+            .enumerate()
+            .map(|(index, dependencies)| {
                 Arc::new(
                     move |plan: &crate::StreamPlan,
                           context: &crate::ExecutionContext,
@@ -1941,9 +1950,7 @@ mod tests {
                           causes| {
                         context.resolve_node_inputs(
                             &plan.nodes()[index],
-                            plan.dependencies(index)
-                                .iter()
-                                .map(crate::FlowDependency::borrowed),
+                            dependencies.iter().map(crate::FlowDependency::borrowed),
                             &[],
                             inputs,
                             causes,
@@ -2025,20 +2032,6 @@ mod tests {
                     ),
                 ),
             ],
-            vec![
-                Vec::new(),
-                vec![crate::FlowDependency {
-                    exclusive: false,
-                    input: None,
-                    source_node: "start".into(),
-                    source_output: "item".into(),
-                    source_key: "start.item".into(),
-                }],
-            ]
-            .into_iter()
-            .map(std::borrow::Cow::Owned)
-            .collect::<Vec<_>>()
-            .into(),
             program(
                 vec![None, Some(1)].into(),
                 2,
@@ -2076,8 +2069,21 @@ mod tests {
                     std::borrow::Cow::Owned(vec![]),
                 ]
                 .into(),
+                vec![
+                    Vec::new(),
+                    vec![crate::FlowDependency {
+                        exclusive: false,
+                        input: None,
+                        source_node: "start".into(),
+                        source_output: "item".into(),
+                        source_key: "start.item".into(),
+                    }],
+                ]
+                .into_iter()
+                .map(std::borrow::Cow::Owned)
+                .collect::<Vec<_>>()
+                .into(),
             ),
-            Vec::new().into(),
             Default::default(),
         );
         let instance = plan.start().unwrap();
@@ -2226,23 +2232,6 @@ mod tests {
                     ),
                 ),
             ],
-            vec![
-                Vec::new(),
-                vec![dependency("seed", "emitter", "seed")],
-                vec![dependency("seed", "emitter", "seed")],
-                vec![dependency("seed", "emitter", "seed")],
-                vec![dependency("seed", "emitter", "seed")],
-                vec![
-                    dependency("a", "a", "item"),
-                    dependency("b", "b", "item"),
-                    dependency("c", "c", "item"),
-                    dependency("d", "d", "item"),
-                ],
-            ]
-            .into_iter()
-            .map(std::borrow::Cow::Owned)
-            .collect::<Vec<_>>()
-            .into(),
             program(
                 vec![None, Some(0)].into(),
                 6,
@@ -2278,14 +2267,24 @@ mod tests {
                     std::borrow::Cow::Owned(vec![1, 2, 3, 4, 5]),
                 ]
                 .into(),
+                vec![
+                    Vec::new(),
+                    vec![dependency("seed", "emitter", "seed")],
+                    vec![dependency("seed", "emitter", "seed")],
+                    vec![dependency("seed", "emitter", "seed")],
+                    vec![dependency("seed", "emitter", "seed")],
+                    vec![
+                        dependency("a", "a", "item"),
+                        dependency("b", "b", "item"),
+                        dependency("c", "c", "item"),
+                        dependency("d", "d", "item"),
+                    ],
+                ]
+                .into_iter()
+                .map(std::borrow::Cow::Owned)
+                .collect::<Vec<_>>()
+                .into(),
             ),
-            vec![crate::WorkflowOutputDefinition {
-                name: "sum".into(),
-                node: "join".into(),
-                port: "sum".into(),
-                optional: false,
-            }]
-            .into(),
             Default::default(),
         );
         let instance = plan.start().unwrap();

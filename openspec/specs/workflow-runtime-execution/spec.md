@@ -494,3 +494,21 @@ ownership or select output fields by interpreting graph tables for each message.
 
 - **WHEN** a standalone runner starts
 - **THEN** it binds generated functions and fixed channels without rebuilding message ownership or graph routing
+
+### Requirement: Discard preparation-only ownership and descriptor storage
+
+Compiler preparation SHALL directly construct the executable stream program. It MUST NOT retain a
+separate message-ownership object or a duplicate execution-domain index per message. Streaming runtime
+state MUST NOT store descriptive dependency/output tables or cached source/selected-message lists.
+Queries SHALL derive from executable message entries. Emission validation SHALL retain only the needed
+output contract. Executors, input schemas, and live scheduling dependencies SHALL remain available.
+
+#### Scenario: Inspect the prepared stream
+
+- **WHEN** a host queries message sources or selected messages
+- **THEN** the query reflects the executable program without reading a duplicate ownership cache
+
+#### Scenario: Generate startup input binding
+
+- **WHEN** the compiler emits a streaming runner
+- **THEN** startup input connectivity is generated as fixed code and runtime factory interface drift is still rejected before dispatch

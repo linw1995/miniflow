@@ -4,7 +4,7 @@ use mf_runtime::{
     Emitter, ExecutionContext, ExecutionDomain, ExecutionDomains, FlowDependency, FlowNode, Inputs,
     NodeExecution, NodeExecutionError, NodeId, NodePorts, NodeResult, OutputVisibility, Outputs,
     PortSpec, PreparedNode, PreparedStream, StreamError, StreamExecution, StreamLimits, StreamMode,
-    StreamNode, TaskNode, ValueType, WorkflowOutputDefinition,
+    StreamNode, TaskNode, ValueType,
 };
 use serde_json::json;
 use std::{
@@ -104,7 +104,10 @@ impl TaskNode for Inspect {
     }
 }
 
-fn program(execution_domains: ExecutionDomains) -> mf_runtime::StreamProgram {
+fn program(
+    execution_domains: ExecutionDomains,
+    dependencies: Cow<'static, [Cow<'static, [FlowDependency]>]>,
+) -> mf_runtime::StreamProgram {
     use mf_runtime::{MessageSchedule, StreamEmissionBinding, StreamMessageProgram, StreamProgram};
     StreamProgram {
         execution_domains,
@@ -149,8 +152,11 @@ fn program(execution_domains: ExecutionDomains) -> mf_runtime::StreamProgram {
             }),
             None,
         ],
-        inputs: (0..2)
-            .map(|index| {
+        inputs: dependencies
+            .into_owned()
+            .into_iter()
+            .enumerate()
+            .map(|(index, dependencies)| {
                 Arc::new(
                     move |plan: &mf_runtime::StreamPlan,
                           context: &ExecutionContext,
@@ -158,9 +164,7 @@ fn program(execution_domains: ExecutionDomains) -> mf_runtime::StreamProgram {
                           causes| {
                         context.resolve_node_inputs(
                             &plan.nodes()[index],
-                            plan.dependencies(index)
-                                .iter()
-                                .map(FlowDependency::borrowed),
+                            dependencies.iter().map(FlowDependency::borrowed),
                             &[],
                             inputs,
                             causes,
@@ -207,50 +211,42 @@ fn prepare(inspect: Inspect) -> PreparedStream {
                 ),
             ),
         ],
-        vec![
-            Cow::Owned(vec![]),
-            Cow::Owned(
-                ["item", "backend"]
-                    .into_iter()
-                    .map(|port| FlowDependency {
-                        exclusive: false,
-                        input: Some(port.into()),
-                        source_node: "source".into(),
-                        source_output: port.into(),
-                        source_key: format!("source.{port}").into(),
+        program(
+            ExecutionDomains::from_parts(
+                (0..2)
+                    .map(|id| ExecutionDomain {
+                        id,
+                        nodes: vec![NodeId::new(id)].into(),
+                        positions: vec![id].into(),
+                        predecessors: vec![].into(),
+                        successors: vec![].into(),
+                        first_position: id,
+                        snapshot_visibility: OutputVisibility::Borrowed(&[
+                            "source.backend",
+                            "source.item",
+                        ]),
                     })
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
+                vec![Cow::Owned(vec![]), Cow::Owned(vec![])].into(),
             ),
-        ]
-        .into(),
-        program(ExecutionDomains::from_parts(
-            (0..2)
-                .map(|id| ExecutionDomain {
-                    id,
-                    nodes: vec![NodeId::new(id)].into(),
-                    positions: vec![id].into(),
-                    predecessors: vec![].into(),
-                    successors: vec![].into(),
-                    first_position: id,
-                    snapshot_visibility: OutputVisibility::Borrowed(&[
-                        "source.backend",
-                        "source.item",
-                    ]),
-                })
-                .collect::<Vec<_>>()
-                .into(),
-            vec![Cow::Owned(vec![]), Cow::Owned(vec![])].into(),
-        )),
-        ["item", "backend"]
-            .into_iter()
-            .map(|port| WorkflowOutputDefinition {
-                name: port.into(),
-                node: "inspect".into(),
-                port: port.into(),
-                optional: false,
-            })
-            .collect::<Vec<_>>()
+            vec![
+                Cow::Owned(vec![]),
+                Cow::Owned(
+                    ["item", "backend"]
+                        .into_iter()
+                        .map(|port| FlowDependency {
+                            exclusive: false,
+                            input: Some(port.into()),
+                            source_node: "source".into(),
+                            source_output: port.into(),
+                            source_key: format!("source.{port}").into(),
+                        })
+                        .collect(),
+                ),
+            ]
             .into(),
+        ),
         Default::default(),
     )
 }

@@ -699,8 +699,10 @@ the final Task result normally. There is no runtime publisher context or separat
 The compiler resolves message ownership before binding a `StreamProgram`. Standalone runners generate
 fixed functions for inputs, message initialization, domain execution, and output selection. Hosts using
 in-memory preparation bind equivalent functions once during preparation. `mf-runtime` receives executable
-bindings and scheduling layouts; it does not retain or interpret `MessageDomains`. Port validation and
-observation remain runtime contracts, independent of the compiled graph wiring.
+bindings and scheduling layouts. Ownership analysis remains local to preparation; source and selected
+channel queries read the final program directly. Descriptive dependency/output tables are absent from
+runtime state. Emission records retain only their output contract. Port validation and observation remain
+runtime contracts, independent of the compiled graph wiring.
 
 ## Workflow observation context
 

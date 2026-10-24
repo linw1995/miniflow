@@ -1093,7 +1093,7 @@ execution. The runtime SHALL own queue capacity, acknowledgment, cancellation, a
 
 #### Scenario: Execute without descriptive wiring tables
 
-- **WHEN** a generated runner retains its executable bindings but its descriptive dependency and selected-output tables are empty
+- **WHEN** a generated runner contains executable bindings without descriptive dependency and selected-output tables
 - **THEN** input binding, branches, batching, nested workflows, failures, and selected outputs retain the same behavior
 
 #### Scenario: Execute combined incremental and terminal outputs

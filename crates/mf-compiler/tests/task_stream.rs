@@ -671,6 +671,8 @@ fn generated_streams_bind_executable_functions_without_runtime_domain_tables() {
             .rust_source;
         syn::parse_file(&source).unwrap();
         assert!(!source.contains("MessageDomains"));
+        assert!(!source.contains("STREAM_DEPENDENCIES"));
+        assert!(!source.contains("STREAM_OUTPUTS"));
         assert!(!source.contains("plan.dependencies("));
         assert!(!source.contains("outputs_for_domain"));
         assert!(source.contains("initialize_stream_message_0"));

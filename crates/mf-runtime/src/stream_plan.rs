@@ -1,6 +1,6 @@
 use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
 use crate::runner::ContextSnafu;
-use crate::{FlowNode, NodeExecution, StreamExecution, TaskNode, WorkflowOutputDefinition};
+use crate::{FlowNode, NodeExecution, StreamExecution, TaskNode};
 use snafu::OptionExt;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -90,11 +90,7 @@ pub struct MessageSchedule {
 pub struct StreamPlan {
     execution: StreamExecution,
     nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>>,
-    dependencies: Cow<'static, [Cow<'static, [FlowDependency]>]>,
     program: StreamProgram,
-    sources: Vec<Option<usize>>,
-    selected: Vec<usize>,
-    outputs: Cow<'static, [WorkflowOutputDefinition]>,
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
     emission_nodes: Vec<Option<FlowNode<()>>>,
@@ -109,8 +105,14 @@ impl std::fmt::Debug for PreparedStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedStream")
             .field("execution", &self.plan.execution)
-            .field("message_sources", &self.plan.message_sources())
-            .field("selected_domains", &self.plan.selected_domains())
+            .field(
+                "message_sources",
+                &self.plan.message_sources().collect::<Vec<_>>(),
+            )
+            .field(
+                "selected_domains",
+                &self.plan.selected_domains().collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -128,9 +130,7 @@ impl PreparedStream {
     pub fn from_plan(
         execution: StreamExecution,
         nodes: Vec<FlowNode>,
-        dependencies: Cow<'static, [Cow<'static, [FlowDependency]>]>,
         program: StreamProgram,
-        outputs: Cow<'static, [WorkflowOutputDefinition]>,
         input_schema: crate::WorkflowInputSchema,
     ) -> Self {
         let mut operator_states = Vec::with_capacity(nodes.len());
@@ -145,11 +145,16 @@ impl PreparedStream {
                 {
                     return None;
                 }
-                let mut metadata = node.metadata.clone();
-                if !metadata.stream_outputs.is_empty() {
-                    metadata.ports.outputs = std::mem::take(&mut metadata.stream_outputs);
-                    metadata.exclusive_outputs.clear();
-                }
+                let outputs = if matches!(node.node, Some(NodeExecution::TaskStream(_))) {
+                    node.metadata.stream_outputs.clone()
+                } else {
+                    node.metadata.ports.outputs.clone()
+                };
+                // Emitted records need only their output contract for validation and publication.
+                let metadata = crate::NodeMetadata::new(crate::NodePorts {
+                    inputs: Vec::new(),
+                    outputs,
+                });
                 Some(FlowNode {
                     definition_id: node.definition_id.clone(),
                     node: (),
@@ -189,25 +194,10 @@ impl PreparedStream {
                 }
             })
             .collect();
-        let sources = program
-            .messages
-            .iter()
-            .map(|message| message.source)
-            .collect();
-        let selected = program
-            .messages
-            .iter()
-            .enumerate()
-            .filter_map(|(index, message)| message.select_outputs.is_some().then_some(index))
-            .collect();
         let plan = StreamPlan {
             execution,
             nodes,
-            dependencies,
             program,
-            sources,
-            selected,
-            outputs,
             input_schema,
             generated_domains: BTreeMap::new(),
             emission_nodes,
@@ -302,11 +292,10 @@ impl StreamPlan {
     pub fn nodes(&self) -> &[FlowNode<Option<Box<dyn TaskNode>>>] {
         &self.nodes
     }
-    pub fn dependencies(&self, node: usize) -> &[FlowDependency] {
-        &self.dependencies[node]
-    }
-    pub fn message_sources(&self) -> &[Option<usize>] {
-        &self.sources
+    pub fn message_sources(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Option<usize>> + DoubleEndedIterator + '_ {
+        self.program.messages.iter().map(|message| message.source)
     }
     pub fn message_schedule(&self, message: usize) -> &MessageSchedule {
         &self.program.messages[message].schedule
@@ -320,11 +309,12 @@ impl StreamPlan {
     pub fn execution_domain(&self, id: usize) -> &ExecutionDomain {
         &self.execution_domains().domains()[id]
     }
-    pub fn outputs(&self) -> &[WorkflowOutputDefinition] {
-        &self.outputs
-    }
-    pub fn selected_domains(&self) -> &[usize] {
-        &self.selected
+    pub fn selected_domains(&self) -> impl Iterator<Item = usize> + '_ {
+        self.program
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(message, entry)| entry.select_outputs.is_some().then_some(message))
     }
 
     pub fn execute_resolved_position(

@@ -232,8 +232,9 @@ existing pending-message limits, cancellation, and acknowledgment.
 
 The compiler emits fixed input-binding functions, named Task-domain functions, emitter channel bindings,
 and output-selection functions for each graph. The runner executes these entry points without interpreting
-message-ownership or selected-output tables. `MessageDomains` belongs to compiler analysis and is absent
-from `mf-runtime`. Runtime queues, acknowledgment, cancellation, and backpressure remain shared mechanics.
+message-ownership or selected-output tables. Ownership analysis is consumed directly while constructing
+the executable program. Runtime state retains no ownership object or descriptive wiring tables. Queue
+capacity, acknowledgment, cancellation, and backpressure remain shared mechanics.
 
 ## Streaming runners
 
