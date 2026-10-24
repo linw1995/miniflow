@@ -206,6 +206,75 @@ fn independent_selected_domains_do_not_overwrite_pending_deliveries() {
 }
 
 #[test]
+fn selected_domains_wait_for_acknowledgement_before_the_next_delivery() {
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
+
+    let root = tempfile::tempdir().unwrap();
+    let release = root.path().join("release");
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition = serde_json::from_value(json!({
+        "version":"2026-10-19", "dependencies":{}, "execution":{"mode":"stream"},
+        "nodes":[
+            {"id":"first","kind":"fixture.task_stream","config":{"wait_path":release}},
+            {"id":"second","kind":"fixture.task_stream","config":{"wait_path":release}}
+        ],
+        "outputs":[{"name":"first","node":"first","port":"delta"},
+            {"name":"second","node":"second","port":"delta"}]
+    }))
+    .unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let instance = Arc::new(
+        instantiate_stream(&plan, &registry)
+            .unwrap()
+            .start_with_options(StreamOptions {
+                arguments: WorkflowArguments::from_json(br#"{"first.count":1,"second.count":1}"#)
+                    .unwrap(),
+                ..Default::default()
+            })
+            .unwrap(),
+    );
+    let first = instance.receive().unwrap().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while instance.metrics().pending_frames < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "both output domains must become ready"
+        );
+        std::thread::yield_now();
+    }
+    std::fs::write(release, "release").unwrap();
+    while instance.metrics().active_workers > 0 {
+        assert!(Instant::now() < deadline, "both producers must finish");
+        std::thread::yield_now();
+    }
+    let (ready, started) = mpsc::sync_channel(1);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let receiving = Arc::clone(&instance);
+    let reader = std::thread::spawn(move || {
+        ready.send(()).unwrap();
+        assert!(sender.send(receiving.receive()).is_ok());
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    first.acknowledge().unwrap();
+    let second = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    second.acknowledge().unwrap();
+    reader.join().unwrap();
+    assert!(instance.recv().unwrap().is_none());
+    let summary = Arc::try_unwrap(instance).ok().unwrap().join().unwrap();
+    assert_eq!(summary.delivered_outputs, 2);
+    assert_eq!(summary.completed_frames, 3);
+}
+
+#[test]
 fn external_combined_provider_retains_terminal_execution_in_both_flow_modes() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for streaming in [false, true] {

@@ -405,4 +405,10 @@ Selected workflow outputs MAY span message domains. A delivered record SHALL con
 #### Scenario: Complete two selected domains together
 
 - **WHEN** another domain completes while a selected delivery awaits acknowledgment
-- **THEN** the completed frame remains pending until the delivery slot becomes available
+- **THEN** its selected record remains pending until the delivery slot becomes available
+
+#### Scenario: Serialize receipts across ready domains
+
+- **WHEN** a caller receives from another ready domain before the previous delivery is acknowledged
+- **THEN** the next receipt waits until acknowledgment is processed by the coordinator
+- **AND** each acknowledged domain is released exactly once before another receipt can replace its confirmation

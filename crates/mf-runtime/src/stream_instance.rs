@@ -925,7 +925,11 @@ impl StreamInstance {
             if let Some(error) = &state.failure {
                 return Err(error.clone());
             }
-            if let Some(output) = state.output.take() {
+            // The acknowledgement slot belongs to the coordinator until it releases the domain.
+            if !state.delivery_pending
+                && state.delivered.is_none()
+                && let Some(output) = state.output.take()
+            {
                 state.delivery_pending = true;
                 drop(state);
                 return Ok(Some(StreamDelivery {
