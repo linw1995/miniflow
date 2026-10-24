@@ -1284,7 +1284,7 @@ fn streaming_snapshots_preserve_large_values_and_report_interrupted_history() {
     }
     let root = tempfile::tempdir().unwrap();
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version": "2026-10-03", "execution": {"mode": "stream"},
+        "version": "2026-10-03", "execution": {},
         "dependencies": {"core": {"package": "mfn-core", "path": crates_dir().join("builtin-nodes/core")}},
         "nodes": [{"id": "feed", "kind": "builtin.readline"}],
         "outputs": [{"name": "line", "node": "feed", "port": "line"}]

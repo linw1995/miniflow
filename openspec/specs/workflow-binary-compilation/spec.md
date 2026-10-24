@@ -669,7 +669,10 @@ input, invoke executors, arm timers, or emit workflow execution events.
 
 ### Requirement: Declare source-driven streaming execution
 
-Schema `2026-10-03` SHALL accept `execution` with `mode: "stream"` and optional resource limits. Startup
+Schema `2026-10-03` and later SHALL accept optional resource limits under `execution` and reject a mode field.
+Compilation SHALL infer streaming execution from resolved Event/Stream contracts and consumed or selected
+incremental ports after provider loading. Terminal-only combined nodes SHALL remain finite. The generated
+Cargo build SHALL select a fixed runner path from that inferred result rather than input configuration. Startup
 parameters SHALL come from initial node ports, and stream item types from explicit source outputs. The engine
 input field, global sender, synthetic source, and their special-case validators SHALL be removed. Older
 single-run schemas SHALL retain their existing behavior.

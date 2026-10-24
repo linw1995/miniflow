@@ -209,7 +209,8 @@ JSON and file transports also accept inline values, such as `--inputs='{"read.pa
 
 Finite workflows return one final JSON object. Streaming workflows use the existing JSON-lines output:
 each line contains the selected outputs for one completed message. Select a combined node's incremental
-and terminal ports through the ordinary `outputs` list and set `execution.mode` to `stream`.
+and terminal ports through the ordinary `outputs` list. Selecting or connecting an incremental port
+automatically selects streaming execution at compile time; terminal-only graphs remain finite.
 
 ```sh
 ./flow --count.count 2
@@ -238,7 +239,8 @@ capacity, acknowledgment, cancellation, and backpressure remain shared mechanics
 
 ## Streaming runners
 
-Use schema `2026-10-03` with `execution.mode` set to `stream`. Sources are explicit nodes. The repository
+Schema `2026-10-03` and later infer streaming execution from resolved node contracts and port usage.
+`execution` contains only optional resource limits. Sources are explicit nodes. The repository
 example declares `builtin.readline` with string output `line`:
 
 ```sh

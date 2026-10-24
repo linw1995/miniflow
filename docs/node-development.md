@@ -820,7 +820,9 @@ the new `Stream` variant.
 parsing. Direct Serde deserialization checks the document shape; compilation validates execution
 settings for definitions constructed or deserialized by the host.
 
-Schema `2026-10-03` accepts `execution: {"mode": "stream"}`. Initial task and stream nodes receive
+Schema `2026-10-03` and later infer streaming execution when the graph contains an Event/Stream node
+or consumes or selects a combined node's incremental port. Terminal-only combined nodes remain finite.
+`execution` configures optional resource limits; there is no mode field. Initial task and stream nodes receive
 workflow arguments once; ordinary edges retain their message identity, while producer/event outputs create
 a new domain. Node inputs cannot implicitly join different domains. Selected outputs may span domains and
 each delivery contains only its own domain's fields. Initial EventNodes require an

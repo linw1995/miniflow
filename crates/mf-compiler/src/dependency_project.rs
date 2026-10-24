@@ -41,6 +41,7 @@ pub enum DependencyProjectError {
 const BUILD: &str = r#"
 fn main() {
     println!("cargo:rerun-if-changed=workflow-plan.json");
+    println!("cargo:rustc-check-cfg=cfg(mf_streaming)");
     if let Err(error) = generate() {
         eprintln!("{error}");
         std::process::exit(1);
@@ -51,7 +52,14 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let registry = mf_runtime::NodeRegistry::from_inventory()?;
     let workflow = mf_compiler::CompiledWorkflow::from_json(include_str!("workflow-plan.json"))?;
     let artifacts = workflow.generate_runner_execution_plans(&registry)?;
+    let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes)?;
+    let workflow = mf_compiler::plan_definition(&manifest.definition)?;
+    if workflow.definition.execution.is_some() {
+        println!("cargo:rustc-cfg=mf_streaming");
+    }
+    let source = workflow.generate_runner_artifacts()?;
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output directory"));
+    std::fs::write(output.join("workflow.rs"), source.rust_source)?;
     std::fs::write(output.join("flow-plans.rs"), artifacts.rust_source)?;
     std::fs::write(output.join("workflow-manifest.bin"), artifacts.manifest_bytes)?;
     std::fs::write(output.join("typed-fast-paths.json"), artifacts.typed_plan_json)?;
@@ -111,9 +119,9 @@ fn run(#[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<d
         return execute_selected(target, invocation.inputs, invocation.context, invocation.verbose, #[cfg(unix)] signals);
     }
     let arguments = invocation.inputs;
-    #[cfg(feature = "streaming")]
+    #[cfg(mf_streaming)]
     { execute_stream(arguments, invocation.verbose, #[cfg(unix)] signals) }
-    #[cfg(not(feature = "streaming"))]
+    #[cfg(not(mf_streaming))]
     {
         let outputs = execute(arguments, invocation.verbose, #[cfg(unix)] signals)?;
         println!("{}", serde_json::to_string(&outputs)?);
@@ -166,7 +174,7 @@ fn execute_selected(
         }
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.recorder()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
-        #[cfg(feature = "streaming")]
+        #[cfg(mf_streaming)]
         let outputs = {
             let prepared = workflow::prepare_stream(&registry).inspect_err(|error| {
                 if let Some(observation) = state.observation_mut() { observation.preparation_failed_unattributed(error.to_string()); }
@@ -176,7 +184,7 @@ fn execute_selected(
             let task = target.bind_stream(&prepared)?;
             mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
         };
-        #[cfg(not(feature = "streaming"))]
+        #[cfg(not(mf_streaming))]
         let outputs = {
             let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
             workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
@@ -199,7 +207,7 @@ fn execute_selected(
     result
 }
 
-#[cfg(feature = "streaming")]
+#[cfg(mf_streaming)]
 fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdio = mf_runtime::StreamStdio::claim()?;
     #[cfg(feature = "telemetry")]
@@ -287,7 +295,7 @@ fn capture_requested() -> bool {
     std::env::var(mf_telemetry::SNAPSHOT_CAPTURE_ENV).is_ok_and(|value| value == "1")
 }
 
-#[cfg(not(feature = "streaming"))]
+#[cfg(not(mf_streaming))]
 fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
@@ -375,7 +383,7 @@ fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run
     })?))
 }
 
-#[cfg(not(feature = "streaming"))]
+#[cfg(not(mf_streaming))]
 fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<SnapshotExport>, arguments: mf_runtime::WorkflowArguments, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
         #[cfg(unix)]
@@ -433,18 +441,15 @@ pub fn write_dependency_project_with_options(
     support: &SupportPackages,
     options: &RunnerOptions,
 ) -> Result<(), DependencyProjectError> {
-    let artifacts = plan.generate_runner_artifacts().context(PlanSnafu)?;
+    let plan_json = plan.to_json().context(PlanSnafu)?;
     let definition = &plan.definition;
     let mut features = Vec::new();
     if options.telemetry {
         features.push("\"telemetry\"");
     }
-    if definition.execution.is_some() {
-        features.push("\"streaming\"");
-    }
     let default_features = features.join(", ");
     let mut manifest = format!(
-        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\nstreaming = []\n\n[dependencies]\nserde_json = \"1.0.151\"\nsnafu = \"0.9.2\"\n"
+        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\n\n[dependencies]\nserde_json = \"1.0.151\"\nsnafu = \"0.9.2\"\n"
     );
     let mut build_dependencies = String::from("\n[build-dependencies]\n");
     for package in ["mf-runtime", "mf-compiler", "mf-telemetry"] {
@@ -529,8 +534,11 @@ pub fn write_dependency_project_with_options(
         ("Cargo.toml", manifest.as_str()),
         ("src/main.rs", main.as_str()),
         ("build.rs", build.as_str()),
-        ("src/workflow.rs", artifacts.rust_source.as_str()),
-        ("workflow-plan.json", artifacts.plan_json.as_str()),
+        (
+            "src/workflow.rs",
+            "include!(concat!(env!(\"OUT_DIR\"), \"/workflow.rs\"));\n",
+        ),
+        ("workflow-plan.json", plan_json.as_str()),
     ] {
         crate::state::write_if_changed(&project.join(name), value.as_bytes())
             .context(StateSnafu)?;

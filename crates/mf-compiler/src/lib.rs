@@ -76,7 +76,7 @@ pub use mf_runtime::{
     validate_exclusive_inputs,
 };
 pub use mf_runtime::{IterationErrorPolicy, IterationMode};
-pub use mf_runtime::{NodeExecution, PreparedStream, StreamExecution, StreamLimits, StreamMode};
+pub use mf_runtime::{NodeExecution, PreparedStream, StreamExecution, StreamLimits};
 #[cfg(feature = "codegen")]
 pub use pipeline::{
     CompileRequest, PipelineError, cargo_command, compile_project, compile_project_with_options,

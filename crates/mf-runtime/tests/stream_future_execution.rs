@@ -3,8 +3,8 @@
 use mf_runtime::{
     Emitter, ExecutionContext, ExecutionDomain, ExecutionDomains, FlowDependency, FlowNode, Inputs,
     NodeExecution, NodeExecutionError, NodeId, NodePorts, NodeResult, OutputVisibility, Outputs,
-    PortSpec, PreparedNode, PreparedStream, StreamError, StreamExecution, StreamLimits, StreamMode,
-    StreamNode, TaskNode, ValueType,
+    PortSpec, PreparedNode, PreparedStream, StreamError, StreamExecution, StreamLimits, StreamNode,
+    TaskNode, ValueType,
 };
 use serde_json::json;
 use std::{
@@ -183,7 +183,6 @@ fn prepare(inspect: Inspect) -> PreparedStream {
     ];
     PreparedStream::from_plan(
         StreamExecution {
-            mode: StreamMode::Stream,
             limits: StreamLimits {
                 workers: 1,
                 max_pending_messages: 1,

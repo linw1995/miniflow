@@ -107,7 +107,8 @@ impl CompiledWorkflow {
         &self,
         registry: &mf_runtime::NodeRegistry,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
-        self.manifest_with_schema(crate::describe_workflow_inputs(self, registry)?)
+        let (resolved, schema) = crate::compiler::prepare_interface(self, registry)?;
+        resolved.manifest_with_schema(schema)
     }
 
     fn manifest_with_schema(
@@ -209,7 +210,10 @@ impl CompiledWorkflow {
         observer: &mf_telemetry::observation::Observer,
         run_id: mf_telemetry::identity::RunId,
     ) -> Result<mf_runtime::StreamObservation, crate::DescriptionError> {
-        let description = crate::describe_compiled(self)?;
+        let mut description = crate::describe_compiled(self)?;
+        if let Some(execution) = &mut description.execution {
+            execution.mode = mf_telemetry::description::ExecutionMode::Stream;
+        }
         observer
             .start_stream(description, run_id)
             .context(crate::compiler::ContractSnafu)
@@ -297,24 +301,20 @@ impl CompiledWorkflow {
         );
         let plan_json = self.to_json()?;
         let source = LitStr::new(&plan_json, Span::call_site());
-        let preparation = if self.definition.execution.is_some() {
-            quote! {
-                pub fn prepare_stream(
-                    registry: &mf_runtime::NodeRegistry,
-                ) -> Result<mf_runtime::PreparedStream, mf_compiler::PlanError> {
-                    Ok(mf_compiler::instantiate_stream(&plan()?, registry)?)
-                }
+        let preparation = quote! {
+            pub fn prepare_stream(
+                registry: &mf_runtime::NodeRegistry,
+            ) -> Result<mf_runtime::PreparedStream, mf_compiler::PlanError> {
+                Ok(mf_compiler::instantiate_stream(&plan()?, registry)?)
             }
-        } else {
-            quote! {
-                pub fn prepare_workflow(
-                    registry: &mf_runtime::NodeRegistry,
-                    observation: Option<&mut mf_runtime::RunObservation>,
-                ) -> Result<mf_runtime::Flow, mf_compiler::PlanError> {
-                    Ok(mf_compiler::instantiate_compiled_with_observation(
-                        &plan()?, registry, observation,
-                    )?)
-                }
+
+            pub fn prepare_workflow(
+                registry: &mf_runtime::NodeRegistry,
+                observation: Option<&mut mf_runtime::RunObservation>,
+            ) -> Result<mf_runtime::Flow, mf_compiler::PlanError> {
+                Ok(mf_compiler::instantiate_compiled_with_observation(
+                    &plan()?, registry, observation,
+                )?)
             }
         };
         let generated = quote! {
@@ -983,6 +983,20 @@ impl CompiledWorkflow {
         if order != self.execution_order {
             return InvalidExecutionOrderSnafu.fail();
         }
+        let resolved = Self {
+            definition: crate::compiler::resolve_execution(&self.definition, &nodes)?,
+            execution_order: order.clone(),
+        };
+        resolved.generate_resolved_execution_plans(nodes, order, body_layouts, standard)
+    }
+
+    fn generate_resolved_execution_plans(
+        &self,
+        nodes: Vec<crate::FlowNode>,
+        order: Vec<DefinitionId>,
+        body_layouts: BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>,
+        standard: bool,
+    ) -> Result<GeneratedExecutionArtifacts, PlanError> {
         let node_targets_json =
             serde_json::to_string(&self.node_targets(&nodes)?).context(SerializeSnafu)?;
         let flow = crate::FlowBuilder::prepare(

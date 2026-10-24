@@ -70,7 +70,7 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         ("2026-10-03", false),
         ("2026-10-03", true),
     ] {
-        let mut definition = json!({
+        let definition = json!({
             "version": version,
             "dependencies": {},
             "nodes": [{"id": "source./~", "kind": "fixture.manifest", "config": {
@@ -78,9 +78,6 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
             }}],
             "outputs": [{"name": "result", "node": "source./~", "port": "value"}]
         });
-        if stream {
-            definition["execution"] = json!({"mode": "stream"});
-        }
         let definition = WorkflowDefinition::from_json(&definition.to_string()).unwrap();
         let plan = plan_definition(&definition).unwrap();
         let before = PREPARATIONS.load(Ordering::SeqCst);
@@ -91,7 +88,9 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         let before = PREPARATIONS.load(Ordering::SeqCst);
         assert_eq!(plan.manifest(&registry).unwrap(), manifest);
         assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
-        assert_eq!(manifest.definition, plan.definition);
+        let mut expected = plan.definition.clone();
+        expected.execution = stream.then(mf_runtime::StreamExecution::default);
+        assert_eq!(manifest.definition, expected);
         assert_eq!(
             manifest.node_definition("source./~").unwrap().config,
             plan.definition.nodes[0].config
@@ -133,21 +132,14 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
             .collect();
         assert_eq!(
             functions,
-            [
-                "plan",
-                "manifest",
-                if stream {
-                    "prepare_stream"
-                } else {
-                    "prepare_workflow"
-                }
-            ]
+            ["plan", "manifest", "prepare_stream", "prepare_workflow"]
         );
-        assert!(embedded.rust_source.contains(if stream {
-            "instantiate_stream"
-        } else {
-            "instantiate_compiled_with_observation"
-        }));
+        assert!(embedded.rust_source.contains("instantiate_stream"));
+        assert!(
+            embedded
+                .rust_source
+                .contains("instantiate_compiled_with_observation")
+        );
         assert_eq!(embedded.plan_json, plan.to_json().unwrap());
     }
 }

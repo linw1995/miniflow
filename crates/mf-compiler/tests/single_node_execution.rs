@@ -81,7 +81,7 @@ fn chain(stream: bool) -> Value {
         "outputs":[{"name":"alias", "node":"after", "port":"value"}]
     });
     if stream {
-        value["execution"] = json!({"mode":"stream"});
+        value["execution"] = json!({});
     }
     value
 }
@@ -803,8 +803,9 @@ fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results
 fn selected_stream_iteration_keeps_the_original_worker_ceiling() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = plan(
-        json!({"version":"2026-10-03", "execution":{"mode":"stream", "limits":{"workers":1}}, "dependencies":{},
-            "nodes":[{"id":"source", "kind":"builtin.constant", "config":{"value":[1,2,3]}},
+        json!({"version":"2026-10-03", "execution":{"limits":{"workers":1}}, "dependencies":{},
+            "nodes":[{"id":"producer", "kind":"test.isolation_producer"},
+            {"id":"source", "kind":"builtin.constant", "config":{"value":[1,2,3]}},
             {"id":"iteration", "kind":"builtin.iteration", "config":{"mode":"parallel", "body":{
                 "nodes":[{"id":"map", "kind":"test.isolation_item", "config":{"workers":1}}],
                 "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"map", "to_input":"item"}, {"from_node":"%iteration", "from_output":"index", "to_node":"map", "to_input":"index"}],

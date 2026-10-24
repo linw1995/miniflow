@@ -61,7 +61,7 @@ fn combined_nodes_preserve_terminal_results_in_generated_and_isolated_execution(
             "outputs":[{"name":"result", "node":"count", "port":"total"}]
         });
         if streaming {
-            document["execution"] = json!({"mode":"stream"});
+            document["execution"] = json!({});
         }
         fs::write(&definition, document.to_string()).unwrap();
         compile(&definition, &binary, &build, true);
@@ -217,7 +217,7 @@ fn streaming_binary_selects_finite_typed_tasks_and_rejects_producers_and_events(
     let binary = root.path().join("flow");
     let build = root.path().join("build");
     let core = common::crates_dir().join("builtin-nodes/core");
-    fs::write(&definition, json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{"core":{"package":"mfn-core", "path":core}},
+    fs::write(&definition, json!({"version":"2026-10-03", "execution":{}, "dependencies":{"core":{"package":"mfn-core", "path":core}},
         "nodes":[{"id":"read", "kind":"builtin.readline"}, {"id":"copy", "kind":"builtin.identity"}, {"id":"batch", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":10}}],
         "edges":[{"from_node":"read", "from_output":"line", "to_node":"copy", "to_input":"input"}, {"from_node":"read", "from_output":"line", "to_node":"batch", "to_input":"item"}],
         "outputs":[{"name":"line", "node":"copy", "port":"value"}]

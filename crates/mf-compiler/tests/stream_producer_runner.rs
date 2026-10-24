@@ -55,7 +55,7 @@ fn external_line_producer_matches_memory_and_drains_after_stdin_closes() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes");
     let value = json!({
         "version":"2026-10-03",
-        "execution":{"mode":"stream", "limits":{"max_pending_messages":4, "workers":1}},
+        "execution":{"limits":{"max_pending_messages":4, "workers":1}},
         "dependencies":{
             "fixture":{"package":"fixture-multi-nodes", "path":fixture},
             "core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}

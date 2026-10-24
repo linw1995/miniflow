@@ -68,7 +68,7 @@ fn graph(mut nodes: Value, edges: Vec<Value>) -> Value {
         .as_array_mut()
         .unwrap()
         .push(controlled::source(json!("int")));
-    json!({"version":"2026-10-03", "execution":{"mode":"stream"},
+    json!({"version":"2026-10-03", "execution":{},
         "dependencies":{}, "nodes":nodes, "edges":edges})
 }
 fn prepare(value: Value) -> Result<mf_runtime::PreparedStream, mf_compiler::WorkflowCompileError> {
@@ -327,7 +327,7 @@ fn sources_are_explicit_and_independent_initial_tasks_need_no_trigger() {
 }
 
 #[test]
-fn rejects_event_nodes_in_single_runs_and_synchronous_bodies() {
+fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
     let mut value = graph(
         json!([
             {"id":"source", "kind":"builtin.constant", "config":{"value":1}},
@@ -339,9 +339,10 @@ fn rejects_event_nodes_in_single_runs_and_synchronous_bodies() {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     assert!(
         compile_definition(&definition, &NodeRegistry::from_inventory().unwrap())
-            .unwrap_err()
-            .to_string()
-            .contains("requires streaming")
+            .unwrap()
+            .definition
+            .execution
+            .is_some()
     );
 
     let iteration = json!({"id":"iterate", "kind":"builtin.iteration", "config":{"body":{

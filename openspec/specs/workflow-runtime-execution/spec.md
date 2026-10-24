@@ -8,27 +8,43 @@ Prepare one executable Flow and schedule its synchronous execution domains throu
 
 ### Requirement: Prepare one executable Flow for both modes
 
-Both modes SHALL prepare one Flow with mode, executors, execution and message domains, dependencies, outputs, and limits. In-memory and generated runners SHALL use one runtime. Missing stream configuration selects oneshot; executor kind MUST NOT select the mode. Combined nodes SHALL work in both modes; oneshot adaptation SHALL discard unconnected increments without allocating a receiver. Preparation MUST reject unsupported executors before invocation.
+In-memory and generated runners SHALL use one runtime. The compiler SHALL infer streaming execution from
+resolved Event/Stream executors or consumed or selected incremental output ports. A combined executor alone
+MUST NOT force streaming execution. The input schema SHALL accept only resource limits under `execution`, with
+no mode field; the presence of resource configuration MUST NOT select execution semantics. Generated runners
+SHALL freeze the inferred path after provider resolution, without runtime mode inference. Combined nodes SHALL
+work in both modes; oneshot adaptation SHALL discard unconnected increments without allocating a receiver.
+Preparation MUST reject unsupported executors before invocation.
 
 #### Scenario: Prepare a oneshot workflow
 
-- **WHEN** a valid task-only workflow has no stream execution configuration
+- **WHEN** a valid task-only workflow has no incremental consumers, with or without resource configuration
 - **THEN** preparation produces the common Flow in oneshot mode and the runtime executes it once
 
 #### Scenario: Prepare a stream workflow
 
-- **WHEN** a valid workflow declares stream execution and contains supported task, event, stream, or combined nodes
+- **WHEN** a valid workflow contains an Event/Stream executor or consumes or selects an incremental output
 - **THEN** preparation produces the same Flow type in stream mode and the runtime starts a stream instance
 
-#### Scenario: Reject a node kind that does not support the selected mode
+#### Scenario: Reject streaming executors in a synchronous body
 
-- **WHEN** a oneshot workflow contains a pure event or stream executor
-- **THEN** preparation reports the node ID and mode before invoking any executor
+- **WHEN** a Loop or iteration body contains a pure event or stream executor
+- **THEN** preparation reports the node ID and synchronous scope before invoking any executor
 
 #### Scenario: Use the common runtime in generated runners
 
 - **WHEN** generated oneshot and stream runners execute their embedded plans
 - **THEN** both call the same runtime and domain scheduler
+
+#### Scenario: Configure resources without forcing streaming
+
+- **WHEN** a terminal-only workflow supplies `execution.limits`
+- **THEN** compiler inference retains finite execution instead of treating configuration presence as a mode switch
+
+#### Scenario: Infer an incremental dependency without configuration
+
+- **WHEN** a workflow consumes or selects a combined node's incremental port without an `execution` field
+- **THEN** compilation selects streaming execution with default resource limits
 
 #### Scenario: Adapt a combined node to terminal-only execution
 

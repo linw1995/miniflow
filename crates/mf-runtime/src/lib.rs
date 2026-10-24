@@ -95,8 +95,8 @@ pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{SuccessDependencySnafu, WorkflowRunError};
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
-    StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate, TypedEventNode,
-    TypedStreamNode, execute_typed_event,
+    StreamExecution, StreamLimits, StreamNode, TimerUpdate, TypedEventNode, TypedStreamNode,
+    execute_typed_event,
 };
 pub use stream_instance::{
     MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,

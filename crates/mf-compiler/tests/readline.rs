@@ -8,7 +8,7 @@ use std::{fs, fs::File};
 fn prepare(nodes: Value, edges: Value) -> PreparedStream {
     let definition = WorkflowDefinition::from_json(
         &json!({
-            "version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+            "version":"2026-10-03", "execution":{}, "dependencies":{},
             "nodes":nodes, "edges":edges,
             "outputs":[{"name":"text", "node":"read", "port":"line"}]
         })

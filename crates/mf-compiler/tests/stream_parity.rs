@@ -109,7 +109,7 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         controls.push(json!({"from_node":"route", "from_output":"positive", "to_node":"primary"}));
     }
     nodes.push(json!({"id":"feed", "kind":"test.controlled_source", "config":{"item_type":"int"}}));
-    serde_json::from_value(json!({"version":"2026-10-03", "execution":{"mode":"stream"},
+    serde_json::from_value(json!({"version":"2026-10-03", "execution":{},
         "dependencies":{"core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}, "code":{"package":"mfn-code", "path":common::crates_dir().join("builtin-nodes/code")}},
         "nodes":nodes, "edges":edges, "control_edges":controls, "outputs":[{"name":"value", "node":"consume", "port":result_port}]
     })).unwrap()

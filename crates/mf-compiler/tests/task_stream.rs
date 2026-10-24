@@ -115,7 +115,7 @@ fn compiler_rejects_duplicate_empty_and_colliding_output_declarations() {
 fn root_export() -> serde_json::Value {
     json!({
         "version":"2026-10-23", "dependencies":{},
-        "execution":{"mode":"stream","limits":{"workers":1,"max_pending_messages":2}},
+        "execution":{"limits":{"workers":1,"max_pending_messages":2}},
         "nodes":[{"id":"group.count","kind":"fixture.task_stream"}],
         "outputs":[{"name":"total","node":"group.count","port":"total"},
             {"name":"increment","node":"group.count","port":"delta"}]
@@ -170,7 +170,7 @@ fn selected_incremental_and_terminal_outputs_keep_their_message_domains() {
 fn independent_selected_domains_do_not_overwrite_pending_deliveries() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let definition = serde_json::from_value(json!({
-        "version":"2026-10-23", "dependencies":{}, "execution":{"mode":"stream"},
+        "version":"2026-10-23", "dependencies":{}, "execution":{},
         "nodes":[
             {"id":"first","kind":"fixture.task_stream_feed","config":{"counts":[1,2,3]}},
             {"id":"second","kind":"fixture.task_stream_feed","config":{"counts":[4,5,6]}}
@@ -214,7 +214,7 @@ fn selected_domains_wait_for_acknowledgement_before_the_next_delivery() {
     let release = root.path().join("release");
     let registry = NodeRegistry::from_inventory().unwrap();
     let definition = serde_json::from_value(json!({
-        "version":"2026-10-19", "dependencies":{}, "execution":{"mode":"stream"},
+        "version":"2026-10-19", "dependencies":{}, "execution":{},
         "nodes":[
             {"id":"first","kind":"fixture.task_stream","config":{"wait_path":release}},
             {"id":"second","kind":"fixture.task_stream","config":{"wait_path":release}}
@@ -285,10 +285,11 @@ fn external_combined_provider_retains_terminal_execution_in_both_flow_modes() {
             "outputs": [{"name": "total", "node": "count", "port": "total"}]
         });
         if streaming {
-            value["execution"] = json!({"mode": "stream"});
+            value["execution"] = json!({});
         }
         let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
+        assert!(plan.definition.execution.is_none());
         let arguments = WorkflowArguments::from_json(br#"{"count.count":100}"#).unwrap();
         let output = if streaming {
             let instance = instantiate_stream(&plan, &registry)
@@ -316,7 +317,7 @@ fn external_combined_provider_retains_terminal_execution_in_both_flow_modes() {
 fn planner_separates_terminal_and_stream_domains_and_rejects_implicit_joins() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut document = root_export();
-    document["execution"] = json!({"mode":"stream"});
+    document["execution"] = json!({});
     document["nodes"].as_array_mut().unwrap().push(json!({
         "id":"consume","kind":"builtin.identity", "inputs":{"input":{"from":{"node":"group.count","port":"delta"}}}
     }));
@@ -338,11 +339,12 @@ fn planner_separates_terminal_and_stream_domains_and_rejects_implicit_joins() {
             &serde_json::from_value(document.clone()).unwrap(),
             &registry
         )
-        .unwrap_err()
-        .to_string()
-        .contains("requires streaming execution")
+        .unwrap()
+        .definition
+        .execution
+        .is_some()
     );
-    document["execution"] = json!({"mode":"stream"});
+    document["execution"] = json!({});
     document["nodes"][1] = json!({"id":"consume","kind":"fixture.task_stream_join", "inputs":{
         "delta":{"from":{"node":"group.count","port":"delta"}},
         "total":{"from":{"node":"group.count","port":"total"}}
@@ -550,12 +552,66 @@ fn combined_observation_reports_terminal_ports_even_without_emissions() {
 }
 
 #[test]
-fn finite_output_selection_cannot_consume_an_incremental_port() {
+fn selected_incremental_outputs_infer_streaming_without_configuration() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut value = root_export();
     value.as_object_mut().unwrap().remove("execution");
-    let error = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap_err();
-    assert!(error.to_string().contains("streaming execution"));
+    let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
+    assert_eq!(
+        plan.definition.execution,
+        Some(mf_runtime::StreamExecution::default())
+    );
+    assert!(
+        instantiate_compiled(&plan, &registry)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("instantiate_stream")
+    );
+    instantiate_stream(&plan, &registry).unwrap();
+}
+
+#[test]
+fn data_and_control_dependencies_infer_streaming_from_incremental_ports() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for control in [false, true] {
+        let mut value = root_export();
+        value.as_object_mut().unwrap().remove("execution");
+        value["outputs"].as_array_mut().unwrap().pop();
+        if control {
+            value["nodes"].as_array_mut().unwrap().push(json!({
+                "id":"consume", "kind":"builtin.constant", "config":{"value":1}
+            }));
+            value["edges"] = json!([{
+                "from_node":"group.count", "from_output":"delta", "to_node":"consume"
+            }]);
+        } else {
+            value["nodes"].as_array_mut().unwrap().push(json!({
+                "id":"consume", "kind":"builtin.identity", "inputs":{
+                    "input":{"from":{"node":"group.count", "port":"delta"}}
+                }
+            }));
+        }
+        let definition = serde_json::from_value(value).unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        assert_eq!(
+            plan.definition.execution,
+            Some(mf_runtime::StreamExecution::default())
+        );
+        let instance = instantiate_stream(&plan, &registry)
+            .unwrap()
+            .start_with_options(StreamOptions {
+                arguments: WorkflowArguments::from_json(br#"{"group.count.count":2}"#).unwrap(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            json!(instance.recv().unwrap().unwrap().outputs),
+            json!({"total":2})
+        );
+        assert!(instance.recv().unwrap().is_none());
+        assert_eq!(instance.join().unwrap().completed_frames, 3);
+    }
 }
 
 #[test]

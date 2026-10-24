@@ -2006,7 +2006,6 @@ mod tests {
         }
         let plan = PreparedStream::from_plan(
             StreamExecution {
-                mode: crate::StreamMode::Stream,
                 limits: Default::default(),
             },
             vec![
@@ -2185,7 +2184,6 @@ mod tests {
             };
         let plan = PreparedStream::from_plan(
             StreamExecution {
-                mode: crate::StreamMode::Stream,
                 limits: Default::default(),
             },
             vec![
