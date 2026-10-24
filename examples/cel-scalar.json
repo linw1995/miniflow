@@ -14,29 +14,47 @@
     {
       "id": "source",
       "kind": "builtin.constant",
-      "config": { "value": "21" }
+      "config": {
+        "value": "21"
+      }
     },
     {
       "id": "transform",
       "kind": "builtin.code",
       "config": {
         "language": "cel",
-        "inputs": { "amount": "string" },
-        "code": { "doubled": "int(amount) * 2" }
+        "inputs": {
+          "amount": "string"
+        },
+        "code": {
+          "doubled": "int(amount) * 2"
+        }
       },
       "inputs": {
-        "amount": { "from": { "node": "source", "port": "value" } }
+        "amount": {
+          "from": {
+            "node": "source",
+            "port": "value"
+          }
+        }
       }
     }
   ],
   "outputs": [
-    { "name": "doubled", "node": "transform", "port": "doubled" }
+    {
+      "name": "doubled",
+      "node": "transform",
+      "port": "doubled"
+    }
   ],
   "clusters": [
     {
       "label": "Scalar computation",
       "annotation": "Parse the constant text as an integer and double it with CEL.",
-      "nodes": ["source", "transform"]
+      "nodes": [
+        "source",
+        "transform"
+      ]
     }
   ]
 }

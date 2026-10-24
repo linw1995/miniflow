@@ -68,7 +68,12 @@
         }
       },
       "inputs": {
-        "prompt": { "from": { "node": "params", "port": "prompt" } }
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        }
       }
     }
   ],
@@ -88,7 +93,10 @@
     {
       "label": "Configured conversation",
       "annotation": "Resolve startup parameters and model settings before generating a response.",
-      "nodes": ["params", "chat"]
+      "nodes": [
+        "params",
+        "chat"
+      ]
     }
   ]
 }

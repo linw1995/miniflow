@@ -14,7 +14,13 @@
     {
       "id": "source",
       "kind": "builtin.constant",
-      "config": { "value": [1, 2, 3] }
+      "config": {
+        "value": [
+          1,
+          2,
+          3
+        ]
+      }
     },
     {
       "id": "iteration",
@@ -29,38 +35,70 @@
               "kind": "builtin.code",
               "config": {
                 "language": "cel",
-                "inputs": { "item": "int", "position": "int" },
-                "code": { "value": "item * 2 + position" }
+                "inputs": {
+                  "item": "int",
+                  "position": "int"
+                },
+                "code": {
+                  "value": "item * 2 + position"
+                }
               },
               "inputs": {
-                "item": { "from": { "node": "%iteration", "port": "item" } },
-                "position": { "from": { "node": "%iteration", "port": "index" } }
+                "item": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                },
+                "position": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "index"
+                  }
+                }
               }
             }
           ],
-          "result": { "node": "transform", "port": "value" },
+          "result": {
+            "node": "transform",
+            "port": "value"
+          },
           "clusters": [
             {
               "label": "Transform item",
               "annotation": "Double the current item and add its zero-based position.",
-              "nodes": ["transform"]
+              "nodes": [
+                "transform"
+              ]
             }
           ]
         }
       },
       "inputs": {
-        "items": { "from": { "node": "source", "port": "value" } }
+        "items": {
+          "from": {
+            "node": "source",
+            "port": "value"
+          }
+        }
       }
     }
   ],
   "outputs": [
-    { "name": "results", "node": "iteration", "port": "results" }
+    {
+      "name": "results",
+      "node": "iteration",
+      "port": "results"
+    }
   ],
   "clusters": [
     {
       "label": "Map input items",
       "annotation": "Run the body once per input item in order and collect its results.",
-      "nodes": ["source", "iteration"]
+      "nodes": [
+        "source",
+        "iteration"
+      ]
     }
   ]
 }

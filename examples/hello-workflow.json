@@ -26,7 +26,9 @@
     {
       "label": "Answer",
       "annotation": "Return a constant integer as the workflow result.",
-      "nodes": ["answer"]
+      "nodes": [
+        "answer"
+      ]
     }
   ]
 }
