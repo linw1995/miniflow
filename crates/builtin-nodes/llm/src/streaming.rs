@@ -38,7 +38,7 @@ pub fn complete(
             && !text.is_empty()
         {
             if first_text {
-                context.record_event(
+                mf_telemetry::events::record(
                     crate::FIRST_TEXT_EVENT,
                     serde_json::json!({"call_id": call_id}),
                 );

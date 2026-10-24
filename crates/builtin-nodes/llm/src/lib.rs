@@ -540,9 +540,9 @@ impl LlmNode {
             usage: None,
             error: None,
         };
-        usage.started_at = context
-            .record_event(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
-            .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
+        usage.started_at =
+            mf_telemetry::events::record(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
+                .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
         let response = if emitter.is_connected() {
             streaming::complete(
                 model.stream(request),
@@ -574,7 +574,7 @@ impl LlmNode {
         }
         let mut finished = usage.clone();
         finished.error = response.as_ref().err().map(ToString::to_string);
-        context.record_event(REQUEST_FINISHED_EVENT, serde_json::json!(finished));
+        mf_telemetry::events::record(REQUEST_FINISHED_EVENT, serde_json::json!(finished));
         let failure_history = if config.capture_errors {
             history.clone()
         } else {

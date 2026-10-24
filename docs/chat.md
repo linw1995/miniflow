@@ -189,7 +189,8 @@ The LLM node emits `llm.request.started`, `llm.response.first_text`, and `llm.re
 The observation layer stamps source Unix nanoseconds once. LLM execution has no elapsed-time recorder.
 The first-text event precedes publication and backpressure; empty and metadata-only values do not emit it.
 `mf-chat` correlates events by `call_id` and derives microsecond differences before persistence. Its local collector
-works without external tracing exporters and follows execution contexts into concurrent and nested domains.
+uses the telemetry observation Context and works without external tracing exporters. A local no-export Observer
+propagates it into concurrent and nested domains when the host supplies no Observer.
 Executable chat collects the same `mf.observation` events through OTLP and applies their source timestamps before
 settlement or save-only recovery. TUI graph cards use the same aggregation and can display event-derived call facts
 before business snapshots arrive. Unary calls have no first-text event. Missing, conflicting, or noncausal event

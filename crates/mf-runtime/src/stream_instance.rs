@@ -180,7 +180,6 @@ pub struct StreamOptions {
     pub snapshots: Option<crate::SnapshotRecorder>,
     pub arguments: crate::WorkflowArguments,
     pub stdin: Option<crate::TextInput>,
-    pub events: Option<crate::EventRecorder>,
     pub cancellation: Option<crate::StreamCancellation>,
 }
 impl Default for StreamOptions {
@@ -191,7 +190,6 @@ impl Default for StreamOptions {
             snapshots: None,
             arguments: crate::WorkflowArguments::default(),
             stdin: None,
-            events: None,
             cancellation: None,
         }
     }
@@ -357,7 +355,6 @@ struct Shared {
     execution: StreamExecution,
     observation: Option<StreamObservation>,
     snapshots: Option<crate::SnapshotRecorder>,
-    events: Option<crate::EventRecorder>,
     cancellation: crate::StreamCancellation,
     worker_limit: std::num::NonZeroUsize,
 }
@@ -784,9 +781,6 @@ impl PreparedStream {
         if let Some(cancellation) = options.cancellation {
             context.set_cancellation(cancellation);
         }
-        if let Some(events) = &options.events {
-            context.set_event_recorder(events.clone());
-        }
         if let Some(capture) = &options.snapshots {
             context.set_snapshot_recorder(capture.clone());
         }
@@ -864,7 +858,6 @@ impl PreparedStream {
             execution: plan.execution().clone(),
             observation: options.observation,
             snapshots: options.snapshots,
-            events: options.events,
             cancellation,
             worker_limit,
         });
@@ -1260,9 +1253,6 @@ fn tick<'a>(
         context.set_future_executor(future_executor.clone());
         if let Some(capture) = &shared.snapshots {
             context.set_snapshot_recorder(capture.clone());
-        }
-        if let Some(events) = &shared.events {
-            context.set_event_recorder(events.clone());
         }
         context.set_cancellation(shared.cancellation.clone());
         context.configure_worker_limit(shared.worker_limit);

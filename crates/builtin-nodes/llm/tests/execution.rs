@@ -176,9 +176,9 @@ fn execution_probe() {
             }
             let events = Arc::new(std::sync::Mutex::new(Vec::new()));
             let recorded = events.clone();
-            context.set_event_recorder(mf_runtime::EventRecorder::new(move |event| {
+            let _events = mf_telemetry::events::collect(move |event| {
                 recorded.lock().unwrap().push(event.clone())
-            }));
+            });
             let mut sink = DeltaSink {
                 values: vec![],
                 block: parameters["block_delivery"] == true,

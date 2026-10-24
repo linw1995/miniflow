@@ -171,6 +171,13 @@ impl Observer {
         )
     }
 
+    fn event_context(&self, context: Context, workflow: WorkflowId, run: RunId) -> Context {
+        let backend = self.0.clone();
+        crate::events::with_emitter(context, move |name, event| {
+            (backend.emit_event)(name, event, &workflow, run);
+        })
+    }
+
     pub fn start(
         &self,
         workflow_id: WorkflowId,
@@ -257,7 +264,7 @@ impl Observer {
                 KeyValue::new("mf.run.id", run_id.to_string()),
             ])
             .start_with_context(&self.0.tracer, &parent);
-        let context = parent.with_span(span);
+        let context = self.event_context(parent.with_span(span), workflow_id.clone(), run_id);
         let mut run = RunObservation {
             backend: self.0.clone(),
             workflow_id,
@@ -460,10 +467,6 @@ impl RunObservation {
             })
             .ok()?;
         Some(step)
-    }
-
-    pub fn record_event(&self, name: &'static str, event: &crate::events::EventRecord) {
-        (self.backend.emit_event)(name, event, &self.workflow_id, self.run_id);
     }
 
     pub fn node_started(&mut self, step: &mut NodeObservation) {
@@ -955,10 +958,6 @@ impl fmt::Debug for BodyObservation {
 }
 
 impl BodyObservation {
-    pub fn record_event(&self, name: &'static str, event: &crate::events::EventRecord) {
-        (self.backend.emit_event)(name, event, &self.workflow_id, self.run_id);
-    }
-
     pub fn begin_node(&self, id: &str) -> Option<BodyNodeObservation> {
         let node = self.body_nodes.get(id)?.clone();
         let span = self

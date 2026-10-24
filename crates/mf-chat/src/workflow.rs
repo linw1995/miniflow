@@ -103,7 +103,6 @@ impl ConversationBackend for EmbeddedBackend {
             let instance = prepared.start_with_options(mf_runtime::StreamOptions {
                 arguments,
                 observation,
-                events: context.event_recorder().cloned(),
                 cancellation: Some(context.cancellation()),
                 ..Default::default()
             })?;
@@ -255,7 +254,8 @@ inventory::submit! {
 struct InvokeWorkflow {
     backend: Arc<dyn ConversationBackend>,
     automatic_titles: bool,
-    observer: Option<Observer>,
+    observer: Observer,
+    calls: Arc<Mutex<crate::CallEventCollector>>,
     delivered: Arc<Mutex<Option<ConversationResult>>>,
     previews: bool,
 }
@@ -275,12 +275,7 @@ impl TypedStreamNode for InvokeWorkflow {
         if let Some(context) = &mut input.request.context {
             context.title.enabled = self.automatic_titles;
         }
-        let calls = Arc::new(Mutex::new(crate::CallEventCollector::default()));
-        let collected = calls.clone();
-        let recorder = mf_runtime::EventRecorder::new(move |event| {
-            let _ = collected.lock().unwrap().observe(event);
-        });
-        context.set_event_recorder(recorder);
+        let calls = &self.calls;
         let response = {
             let invocation = input.invocation.clone();
             let mut consume = |delta| -> Result<(), ChatError> {
@@ -306,7 +301,7 @@ impl TypedStreamNode for InvokeWorkflow {
                 input.request,
                 context,
                 preview,
-                self.observer.as_ref(),
+                Some(&self.observer),
             )
         };
         if let Err(error) = &response {
@@ -495,6 +490,12 @@ pub fn run_conversation_with_preview(
         turn_id: request.turn_id.clone(),
         call_id: request.call_id.clone(),
     };
+    let calls = Arc::new(Mutex::new(crate::CallEventCollector::default()));
+    let collected = calls.clone();
+    let _events = mf_telemetry::events::collect(move |event| {
+        let _ = collected.lock().unwrap().observe(event);
+    });
+    let observer = observer.cloned().unwrap_or_else(|| Observer::stderr(0));
     let mut plan = flows::conversation::plan()?;
     let registry = NodeRegistry::from_inventory()?;
     let delivered = Arc::new(Mutex::new(None));
@@ -504,7 +505,8 @@ pub fn run_conversation_with_preview(
         InvokeWorkflow {
             backend,
             automatic_titles,
-            observer: observer.cloned(),
+            observer: observer.clone(),
+            calls,
             delivered: Arc::clone(&delivered),
             previews: preview.is_some(),
         },
@@ -538,9 +540,7 @@ pub fn run_conversation_with_preview(
             .0
             .insert(mf_runtime::output_id("begin", &name), value);
     }
-    let observation = observer
-        .map(|observer| plan.start_stream_observation(observer, RunId::new()))
-        .transpose()?;
+    let observation = Some(plan.start_stream_observation(&observer, RunId::new())?);
     let runtime_cancellation = StreamCancellation::default();
     cancellation.forward_to(&runtime_cancellation);
     let result = (|| -> Result<Settlement, ChatError> {

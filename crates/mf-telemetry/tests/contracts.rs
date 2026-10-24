@@ -695,24 +695,32 @@ fn selected_inputs_round_trip_and_require_declared_exclusive_sources() {
 #[cfg(feature = "otlp")]
 #[test]
 fn observations_share_the_original_timestamp_between_local_and_otel_consumers() {
-    use mf_telemetry::events::{EventRecord, EventRecorder};
+    use mf_telemetry::events;
     use opentelemetry::logs::{AnyValue, Logger, LoggerProvider};
     use opentelemetry_sdk::logs::SdkLoggerProvider;
     use std::sync::{Arc, Mutex};
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let received = recorded.clone();
-    let recorder = EventRecorder::new(move |event| received.lock().unwrap().push(event.clone()));
-    let event = EventRecord {
-        name: "llm.request.started".into(),
-        time_unix_nano: 10_500_000_000,
-        body: json!({"call_id":"request","model":"fixture"}),
-        trace_context: Some(TraceContext {
-            trace_id: "1234567890abcdef1234567890abcdef".into(),
-            span_id: "1234567890abcdef".into(),
-            trace_flags: 1,
-        }),
-    };
-    recorder.record(&event);
+    let _events = events::collect(move |event| received.lock().unwrap().push(event.clone()));
+    let trace =
+        opentelemetry::trace::TraceId::from_hex("1234567890abcdef1234567890abcdef").unwrap();
+    let span = opentelemetry::trace::SpanId::from_hex("1234567890abcdef").unwrap();
+    use opentelemetry::trace::{SpanContext, TraceContextExt, TraceState};
+    let _context = opentelemetry::Context::current()
+        .with_remote_span_context(SpanContext::new(
+            trace,
+            span,
+            opentelemetry::TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        ))
+        .attach();
+    events::record(
+        "llm.request.started",
+        json!({"call_id":"request","model":"fixture"}),
+    )
+    .unwrap();
+    let event = recorded.lock().unwrap()[0].clone();
     let provider = SdkLoggerProvider::builder().build();
     let logger = provider.logger(mf_telemetry::events::SCOPE);
     let mut log = logger.create_log_record();

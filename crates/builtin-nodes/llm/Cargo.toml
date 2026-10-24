@@ -12,9 +12,10 @@ tokio = ["mf-runtime/tokio"]
 test-support = []
 
 [dependencies]
-# Node contracts and optional future driving.
+# Node contracts, observation, and optional future driving.
 inventory.workspace = true
 mf-runtime = { workspace = true, features = ["async"] }
+mf-telemetry.workspace = true
 
 # Provider protocol and configured native HTTP transport.
 bytes.workspace = true

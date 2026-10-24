@@ -82,26 +82,34 @@ impl EventRecord {
     }
 }
 
-type RecordEvent = dyn Fn(&EventRecord) + Send + Sync;
+type CollectEvent = Arc<dyn Fn(&EventRecord) + Send + Sync>;
+type EmitEvent = Arc<dyn Fn(&'static str, &EventRecord) + Send + Sync>;
 
-#[derive(Clone)]
-pub struct EventRecorder(Arc<RecordEvent>);
-
-impl std::fmt::Debug for EventRecorder {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("EventRecorder")
-            .finish_non_exhaustive()
-    }
+/// Collect source events in the current observation context and its descendants.
+pub fn collect(
+    collect: impl Fn(&EventRecord) + Send + Sync + 'static,
+) -> opentelemetry::ContextGuard {
+    Context::current()
+        .with_value::<CollectEvent>(Arc::new(collect))
+        .attach()
 }
 
-impl EventRecorder {
-    pub fn new(record: impl Fn(&EventRecord) + Send + Sync + 'static) -> Self {
-        Self(Arc::new(record))
+/// Record one source timestamp for local collection and the active observation exporter.
+pub fn record(name: &'static str, body: Value) -> Option<u64> {
+    let event = EventRecord::now(name, body)?;
+    let context = Context::current();
+    if let Some(collect) = context.get::<CollectEvent>() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| collect(&event)));
     }
+    if let Some(emit) = context.get::<EmitEvent>() {
+        emit(name, &event);
+    }
+    Some(event.time_unix_nano)
+}
 
-    pub fn record(&self, event: &EventRecord) {
-        // Optional observers cannot change a workflow's execution result.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.0)(event)));
-    }
+pub(super) fn with_emitter(
+    context: Context,
+    emit: impl Fn(&'static str, &EventRecord) + Send + Sync + 'static,
+) -> Context {
+    context.with_value::<EmitEvent>(Arc::new(emit))
 }

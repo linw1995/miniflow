@@ -204,7 +204,6 @@ pub struct ExecutionContext {
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
-    events: Option<crate::EventRecorder>,
     scope_prefix: Vec<LoopPathEntry>,
     inputs: crate::ExecutionInputs,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
@@ -229,7 +228,6 @@ impl Default for ExecutionContext {
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
-            events: None,
             scope_prefix: Vec::new(),
             inputs: crate::ExecutionInputs::default(),
             stdin: None,
@@ -317,7 +315,6 @@ impl ExecutionContext {
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
-            events: self.events.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: crate::ExecutionInputs::default(),
             worker_handle: self.worker_handle.clone(),
@@ -510,7 +507,6 @@ impl ExecutionContext {
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
-            events: self.events.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: self.inputs.clone(),
             stdin: self.stdin.clone(),
@@ -572,27 +568,6 @@ impl ExecutionContext {
             &mut inputs,
         )?;
         Ok((inputs, resolution))
-    }
-
-    pub fn set_event_recorder(&mut self, recorder: crate::EventRecorder) {
-        self.events = Some(recorder);
-    }
-
-    pub fn event_recorder(&self) -> Option<&crate::EventRecorder> {
-        self.events.as_ref()
-    }
-
-    pub fn record_event(&self, name: &'static str, body: serde_json::Value) -> Option<u64> {
-        let event = crate::EventRecord::now(name, body)?;
-        if let Some(recorder) = &self.events {
-            recorder.record(&event);
-        }
-        if let Some(observation) = &self.observation {
-            observation.record_event(name, &event);
-        } else if let Some(observation) = &self.body_observation {
-            observation.record_event(name, &event);
-        }
-        Some(event.time_unix_nano)
     }
 
     pub fn resolve_event_inputs<N>(
@@ -678,7 +653,6 @@ impl ExecutionContext {
             child.future_executor = self.future_executor.clone();
         }
         child.snapshots = self.snapshots.clone();
-        child.events = self.events.clone();
         child.scope_prefix = self.invocation_path();
         child
     }

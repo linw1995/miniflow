@@ -25,6 +25,7 @@ pub struct HostConfig {
     pub profiles: BTreeMap<String, crate::WorkflowProfile>,
     pub max_active: usize,
     pub max_history_bytes: usize,
+    /// A local observer without export is used when none is supplied.
     pub observer: Option<Observer>,
     pub automatic_titles: bool,
 }

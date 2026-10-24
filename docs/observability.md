@@ -227,8 +227,10 @@ unchanged by local collectors and OTel export. The first-text observation is emi
 These observations do not consume workflow lifecycle sequence numbers or change lifecycle schema versions.
 
 Application hosts derive request duration and first-text latency from corresponding event timestamps, then combine
-those windows with provider output-token counts. Their local event recorder operates independently of optional
-exporters; executable receivers consume the same observations from OTLP. Missing or inconsistent observations yield
+those windows with provider output-token counts. `mf_telemetry::events::collect` installs a local collector in
+the observation Context; `events::record` shares each source event with that collector and the active exporter.
+Existing observation contexts propagate collection across worker and nested invocations. Runtime execution
+contexts do not store event recorders. Executable receivers consume the same observations from OTLP. Missing or inconsistent observations yield
 unknown timing rather than fallback receiver-time measurements. Diagnostic log retention does not gate aggregation.
 
 ## Sequences and acceptable loss

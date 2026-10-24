@@ -169,8 +169,8 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
             )])),
             error: None,
         };
-        context.record_event(mfn_llm::REQUEST_STARTED_EVENT, serde_json::json!(&usage));
-        context.record_event(
+        mf_telemetry::events::record(mfn_llm::REQUEST_STARTED_EVENT, serde_json::json!(&usage));
+        mf_telemetry::events::record(
             mfn_llm::FIRST_TEXT_EVENT,
             serde_json::json!({"call_id":call_id}),
         );
@@ -180,7 +180,7 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
                 model_call_id: call_id,
             },
         })?;
-        context.record_event(mfn_llm::REQUEST_FINISHED_EVENT, serde_json::json!(&usage));
+        mf_telemetry::events::record(mfn_llm::REQUEST_FINISHED_EVENT, serde_json::json!(&usage));
         Ok(ConversationResult {
             text: "isolated-final".into(),
             usages: vec![usage.into()],
