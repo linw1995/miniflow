@@ -9,7 +9,7 @@ use mf_telemetry::{
     stream::{StreamCounts, StreamFailure, StreamMessage, StreamTrigger},
 };
 use serde::Serialize;
-use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeSet, VecDeque},
     error::Error,
@@ -126,10 +126,6 @@ fn execution_error_phase(mut cause: &(dyn Error + 'static)) -> &'static str {
     loop {
         match cause.downcast_ref::<NodeExecutionError>() {
             Some(NodeExecutionError::OutputEncode { .. }) => return "output",
-            Some(NodeExecutionError::Shared { source }) => {
-                cause = source.as_ref();
-                continue;
-            }
             Some(NodeExecutionError::PluginFailed { source }) => {
                 cause = source.as_ref();
                 continue;
@@ -403,16 +399,6 @@ impl crate::EmissionSink for ProducerEmitter<'_> {
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
         self.admit(result)
     }
-
-    fn fail(&mut self, error: Arc<NodeExecutionError>) {
-        self.publication_failed = true;
-        self.shared.fail(
-            ProducerSnafu {
-                definition_id: self.plan.nodes()[self.index].definition_id.clone(),
-            }
-            .into_error(error.into()),
-        );
-    }
 }
 
 impl ProducerEmitter<'_> {
@@ -512,7 +498,7 @@ fn run_producer(
         publication_failed: false,
     };
     let failure = shared.state.lock().unwrap().failure.clone();
-    let mut emitter = Emitter::new(
+    let mut emitter = Emitter::with_sink_validation(
         plan.nodes()[index].definition_id.clone(),
         &plan.nodes()[index].metadata.ports.outputs,
         job.context.cancellation(),
@@ -533,7 +519,9 @@ fn run_producer(
         );
         catch_unwind(AssertUnwindSafe(|| {
             let result = node.execute(job.inputs, &mut job.context, &mut emitter);
-            emitter.finish()?;
+            if let Some(error) = job.context.cancellation().failure() {
+                return Err(error.into());
+            }
             result
         }))
         .unwrap_or_else(|payload| Err(panic_error(payload).into()))
@@ -550,13 +538,12 @@ fn run_producer(
                 .map_or(Ok(()), Err)
         })
     };
-    let publication_failed = emitter.failure().is_some();
     drop(emitter);
     if let Some(callback) = job.callback {
         match &result {
             Ok(()) => callback.succeeded(sink.emitted, sink.ports.into_iter().collect()),
             Err(error) => callback.failed(
-                if publication_failed || sink.publication_failed {
+                if sink.publication_failed || error.phase() == "output" {
                     FailurePhase::Publication
                 } else {
                     FailurePhase::Execution

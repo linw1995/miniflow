@@ -55,14 +55,20 @@ declarations without executing the node. Invalid declarations MUST NOT reach bus
 
 The emitter SHALL encode typed results and validate each emitted result against its incremental contract.
 Required fields SHALL constrain each emitted record rather than require an invocation to emit. Encoding,
-validation, and delivery failures MUST retain their typed source chains and suppress terminal success
-even if provider code ignores the immediate send error. Cancellation SHALL be checked before and after
-business execution and on attempted publication.
+validation, and delivery failures SHALL be returned through ordinary `Result` values with their typed
+source chains. Providers MAY propagate or handle recoverable errors. Cancellation SHALL be checked
+before and after business execution and on attempted publication.
 
-#### Scenario: Ignore a send failure
+#### Scenario: Propagate a send failure
 
-- **WHEN** a provider ignores an encoding or delivery failure and returns a successful terminal result
-- **THEN** combined execution still fails with the original typed publication cause
+- **WHEN** a provider propagates an encoding or delivery error with `?`
+- **THEN** combined execution fails with the original typed source and publishes no terminal result
+
+#### Scenario: Handle a recoverable send failure
+
+- **WHEN** a provider handles a failed emission before returning a valid terminal result
+- **THEN** the emitter does not poison that result or prevent subsequent valid emissions
+- **AND** cancellation and an already failed stream instance still stop execution
 
 #### Scenario: Emit an invalid discarded record
 
@@ -72,8 +78,8 @@ business execution and on attempted publication.
 ### Requirement: Reuse shared output error contracts
 
 Combined execution SHALL reuse ordinary typed-output conversion errors, workflow output validation
-errors, and stream delivery errors. Remembering a failure SHALL preserve its original typed source
-and display text rather than substitute an emission-specific encoding or validation error type.
+errors, and stream delivery errors. The emitter MUST NOT introduce emission-specific error categories,
+shared-error carriers, or remembered-error state.
 
 #### Scenario: Preserve one output failure across node kinds
 

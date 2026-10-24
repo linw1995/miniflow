@@ -44,8 +44,6 @@ pub trait EmissionSink {
     }
 
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError>;
-
-    fn fail(&mut self, _error: Arc<NodeExecutionError>) {}
 }
 
 pub struct DiscardSink;
@@ -60,12 +58,12 @@ impl EmissionSink for DiscardSink {
     }
 }
 
-/// A borrowed sink which remembers publication failures even if a provider ignores them.
+/// A borrowed, validated output sink for one invocation.
 pub struct Emitter<'a> {
     contract: FlowNode<()>,
     cancellation: StreamCancellation,
     sink: &'a mut dyn EmissionSink,
-    failure: Option<Arc<NodeExecutionError>>,
+    sink_validates: bool,
     snapshot: Option<(crate::SnapshotRecorder, Vec<LoopPathEntry>)>,
 }
 
@@ -88,9 +86,21 @@ impl<'a> Emitter<'a> {
             },
             cancellation,
             sink,
-            failure: None,
+            sink_validates: false,
             snapshot: None,
         }
+    }
+
+    pub(super) fn with_sink_validation(
+        node: impl Into<crate::DefinitionId>,
+        ports: &[PortSpec],
+        cancellation: StreamCancellation,
+        sink: &'a mut dyn EmissionSink,
+    ) -> Self {
+        // Native stream sinks already own validation and fatal instance state.
+        let mut emitter = Self::new(node, ports, cancellation, sink);
+        emitter.sink_validates = true;
+        emitter
     }
 
     pub fn is_connected(&self) -> bool {
@@ -99,8 +109,7 @@ impl<'a> Emitter<'a> {
 
     pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
         let snapshot = self.snapshot.as_ref().map(|_| result.outputs.clone());
-        let outcome = self.admit(result);
-        self.remember(outcome)?;
+        self.admit(result)?;
         if let (Some((recorder, scope)), Some(outputs)) = (&self.snapshot, snapshot) {
             recorder.record(crate::SnapshotEvent {
                 scope: scope.clone(),
@@ -124,54 +133,28 @@ impl<'a> Emitter<'a> {
     }
 
     fn admit(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
-        self.check()?;
+        self.check_cancellation()?;
         let node = self.contract.definition_id.as_str();
-        crate::ExecutionOutputs::validate_result(&self.contract, &result)?;
-        for port in &self.contract.metadata.ports.outputs {
-            ensure!(
-                !port.required || result.outputs.contains_key(port.name.as_ref()),
-                crate::runner::InvalidOutputSnafu {
-                    definition_id: node,
-                    message: format!("missing required output `{}`", port.name),
-                }
-            );
+        if !self.sink_validates {
+            crate::ExecutionOutputs::validate_result(&self.contract, &result)?;
+            for port in &self.contract.metadata.ports.outputs {
+                ensure!(
+                    !port.required || result.outputs.contains_key(port.name.as_ref()),
+                    crate::runner::InvalidOutputSnafu {
+                        definition_id: node,
+                        message: format!("missing required output `{}`", port.name),
+                    }
+                );
+            }
         }
         Ok(self.sink.send(result)?)
     }
 
-    fn check(&self) -> Result<(), NodeExecutionError> {
-        if let Some(error) = &self.failure {
-            return Err(error.clone().into());
-        }
+    fn check_cancellation(&self) -> Result<(), NodeExecutionError> {
         if let Some(error) = self.cancellation.failure() {
             return Err(error.into());
         }
         Ok(())
-    }
-
-    fn remember(
-        &mut self,
-        result: Result<(), NodeExecutionError>,
-    ) -> Result<(), NodeExecutionError> {
-        result.map_err(|error| self.remember_failure(error))
-    }
-
-    pub fn finish(&self) -> Result<(), NodeExecutionError> {
-        self.check()
-    }
-
-    pub fn failure(&self) -> Option<&Arc<NodeExecutionError>> {
-        self.failure.as_ref()
-    }
-
-    fn remember_failure(&mut self, error: NodeExecutionError) -> NodeExecutionError {
-        if let Some(error) = &self.failure {
-            return error.clone().into();
-        }
-        let error = Arc::new(error);
-        self.sink.fail(error.clone());
-        self.failure = Some(error.clone());
-        error.into()
     }
 }
 
@@ -196,8 +179,7 @@ impl<'a, 'sink, O: crate::NodeOutputs> TypedEmitter<'a, 'sink, O> {
         &mut self,
         result: impl Into<TypedNodeResult<O>>,
     ) -> Result<(), NodeExecutionError> {
-        let result = crate::encode_typed_result(result.into())
-            .map_err(|error| self.emitter.remember_failure(error))?;
+        let result = crate::encode_typed_result(result.into())?;
         self.emitter.send(result)
     }
 }
@@ -225,9 +207,9 @@ impl TaskStreamExecutor {
             sink,
         );
         emitter.set_snapshot_context(context);
-        emitter.finish()?;
+        emitter.check_cancellation()?;
         let result = self.node.execute(inputs, context, &mut emitter);
-        emitter.finish()?;
+        emitter.check_cancellation()?;
         result
     }
 }
@@ -264,7 +246,6 @@ impl<N: TypedTaskStreamNode> TaskStreamNode for TypedTaskStreamAdapter<N> {
         let result = self
             .0
             .execute(input, context, &mut TypedEmitter::new(emitter));
-        emitter.finish()?;
         crate::encode_typed_result(result?)
     }
 }
