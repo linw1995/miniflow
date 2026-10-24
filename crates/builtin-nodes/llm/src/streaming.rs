@@ -7,13 +7,14 @@ use rig_core::{
     operation::Completion,
     streaming::{Item, StreamEvent, Streamed},
 };
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use std::time::Instant;
 
 pub async fn complete(
     response: Result<Streamed<Completion>, ProviderError>,
     emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
     call_id: &str,
+    limit: usize,
     deadline: Instant,
     context: &mf_runtime::ExecutionContext,
 ) -> Result<CompletionResponse, LlmExecutionError> {
@@ -24,6 +25,7 @@ pub async fn complete(
             .map(|status| status.as_u16()),
     })?;
     let mut first_text = true;
+    let mut bytes = 0usize;
     while let Some(item) = response.next().await {
         context.check_future_limits(Some(deadline))?;
         let item = item.with_context(|source| crate::ProviderSnafu {
@@ -42,6 +44,11 @@ pub async fn complete(
                 );
                 first_text = false;
             }
+            ensure!(
+                text.len() <= limit.saturating_sub(bytes),
+                crate::OutputTooLargeSnafu { limit }
+            );
+            bytes += text.len();
             emitter
                 .send_with_deadline(
                     TypedNodeResult::from(LlmEmission {

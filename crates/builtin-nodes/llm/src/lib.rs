@@ -141,6 +141,7 @@ struct Config {
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     timeout_ms: u64,
+    max_output_bytes: usize,
     capture_errors: bool,
     attribution: Option<UsageAttribution>,
 }
@@ -203,6 +204,7 @@ impl PreparedConfig {
             ("base_url", Value::from("https://api.openai.com/v1")),
             ("api_key_env", Value::from("OPENAI_API_KEY")),
             ("timeout_ms", Value::from(60_000_u64)),
+            ("max_output_bytes", Value::from(1_048_576_u64)),
             ("capture_errors", Value::from(false)),
         ] {
             fields.entry(name.into()).or_insert(value);
@@ -309,7 +311,9 @@ fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
         {
             Some("a finite number from 0 to 2")
         }
-        "max_tokens" | "timeout_ms" if value.as_f64() == Some(0.0) => Some("a positive integer"),
+        "max_tokens" | "timeout_ms" | "max_output_bytes" if value.as_f64() == Some(0.0) => {
+            Some("a positive integer")
+        }
         "base_url" => {
             let base = url::Url::parse(value.as_str().unwrap()).context(BaseUrlSnafu)?;
             ensure!(
@@ -380,6 +384,8 @@ pub enum LlmExecutionError {
     UnsupportedOutput,
     #[snafu(display("LLM response contains no nonempty text"))]
     EmptyText,
+    #[snafu(display("LLM response text exceeds {limit} bytes"))]
+    OutputTooLarge { limit: usize },
     #[snafu(display("LLM usage counter `{counter}` exceeds the signed integer range"))]
     UsageCount {
         counter: &'static str,
@@ -573,6 +579,7 @@ impl LlmNode {
                         model.stream(request),
                         emitter,
                         &usage.call_id,
+                        config.max_output_bytes,
                         deadline,
                         context,
                     ),
@@ -616,10 +623,12 @@ impl LlmNode {
             if usage.usage.is_none() {
                 usage.usage = reported_usage(&response.usage).ok().flatten();
             }
-            terminal_outputs(response, inputs.prompt, history).and_then(|result| {
-                context.check_future_limits(Some(deadline))?;
-                Ok(result)
-            })
+            terminal_outputs(response, inputs.prompt, history, config.max_output_bytes).and_then(
+                |result| {
+                    context.check_future_limits(Some(deadline))?;
+                    Ok(result)
+                },
+            )
         });
         let mut result = match result {
             Ok(result) => result,
@@ -672,6 +681,7 @@ fn terminal_outputs(
     response: CompletionResponse,
     prompt: String,
     mut history: Vec<ChatMessage>,
+    limit: usize,
 ) -> Result<LlmOutputs, LlmExecutionError> {
     let finish_reason = response.finish_reason().map(|reason| match reason {
         FinishReason::Stop => "stop".into(),
@@ -684,6 +694,10 @@ fn terminal_outputs(
     for part in response.choice {
         match part {
             AssistantContent::Text(part) => {
+                ensure!(
+                    part.text.len() <= limit.saturating_sub(text.len()),
+                    OutputTooLargeSnafu { limit }
+                );
                 text.push_str(&part.text);
             }
             AssistantContent::Reasoning(_) => {}
@@ -744,14 +758,16 @@ mod tests {
         assert_eq!(defaults.base_url, "https://api.openai.com/v1");
         assert_eq!(defaults.api_key_env, "OPENAI_API_KEY");
         assert_eq!(defaults.timeout_ms, 60_000);
+        assert_eq!(defaults.max_output_bytes, 1_048_576);
         assert!(defaults.temperature.is_none());
         assert!(defaults.max_tokens.is_none());
-        let config = parse_config(json!({"model": "custom", "base_url": "http://localhost:1234/prefix/", "api_key_env": "CUSTOM_KEY", "temperature": 0.0, "max_tokens": 5, "timeout_ms": 7})).unwrap();
+        let config = parse_config(json!({"model": "custom", "base_url": "http://localhost:1234/prefix/", "api_key_env": "CUSTOM_KEY", "temperature": 0.0, "max_tokens": 5, "timeout_ms": 7, "max_output_bytes": 9})).unwrap();
         assert_eq!(config.base_url, "http://localhost:1234/prefix");
         assert_eq!(config.api_key_env, "CUSTOM_KEY");
         assert_eq!(config.temperature, Some(0.0));
         assert_eq!(config.max_tokens, Some(5));
         assert_eq!(config.timeout_ms, 7);
+        assert_eq!(config.max_output_bytes, 9);
     }
 
     #[test]
@@ -781,7 +797,7 @@ mod tests {
             json!({"timeout_ms": 0}),
             json!({"timeout_ms": 1.5}),
             json!({"timeout_ms": 1e30}),
-            json!({"max_output_bytes": 1024}),
+            json!({"max_output_bytes": 0}),
         ] {
             let mut config = json!({"model": "example"});
             config
@@ -812,12 +828,13 @@ mod tests {
             "temperature",
             "max_tokens",
             "timeout_ms",
+            "max_output_bytes",
         ] {
             config[field] = json!({"$ref": format!("params.{field}")});
         }
         validate_config(config.clone()).unwrap();
         let prepared = prepare_llm(config.clone()).unwrap();
-        assert_eq!(prepared.metadata.context_references.len(), 6);
+        assert_eq!(prepared.metadata.context_references.len(), 7);
         assert_eq!(prepared.metadata.ports.inputs, LlmInputs::ports());
         assert_eq!(prepared.metadata.ports.outputs, LlmOutputs::ports());
         config["api_key_env"] = "OTHER_KEY".into();
@@ -944,7 +961,7 @@ mod tests {
             role: "user".into(),
             content: "prior".into(),
         }];
-        let result = terminal_outputs(response, "next".into(), previous.clone()).unwrap();
+        let result = terminal_outputs(response, "next".into(), previous.clone(), 100).unwrap();
         assert_eq!(result.text, "firstsecond");
         assert_eq!(result.history[0], previous[0]);
         assert_eq!(result.history.len(), 3);
@@ -958,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_conversion_preserves_utf8_and_rejects_invalid_counts_or_empty_text() {
+    fn terminal_conversion_rejects_unrepresentable_usage_and_counts_utf8_bytes() {
         let response = CompletionResponse::new(
             vec![AssistantContent::text("reply")],
             rig_core::completion::Usage {
@@ -968,7 +985,7 @@ mod tests {
             "openai",
             json!({}),
         );
-        let error = terminal_outputs(response, "next".into(), vec![]).unwrap_err();
+        let error = terminal_outputs(response, "next".into(), vec![], 100).unwrap_err();
         assert!(matches!(error, LlmExecutionError::UsageCount { .. }));
         assert!(error.source().unwrap().is::<std::num::TryFromIntError>());
         let response = CompletionResponse::new(
@@ -977,15 +994,13 @@ mod tests {
             "openai",
             json!({}),
         );
-        assert_eq!(
-            terminal_outputs(response, "next".into(), vec![])
-                .unwrap()
-                .text,
-            "é"
-        );
+        assert!(matches!(
+            terminal_outputs(response, "next".into(), vec![], 1),
+            Err(LlmExecutionError::OutputTooLarge { .. })
+        ));
         let response = CompletionResponse::new(vec![], Default::default(), "openai", json!({}));
         assert!(matches!(
-            terminal_outputs(response, "next".into(), vec![]),
+            terminal_outputs(response, "next".into(), vec![], 100),
             Err(LlmExecutionError::EmptyText)
         ));
     }

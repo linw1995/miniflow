@@ -453,10 +453,11 @@ fn waiting_for_headers_or_body_is_bounded_and_cancelled_calls_publish_nothing() 
 }
 
 #[test]
-fn empty_tool_and_malformed_responses_fail_without_history() {
+fn oversized_empty_tool_and_malformed_responses_fail_without_history() {
     let mut tool = serde_json::from_str::<Value>(&Reply::text("text").body).unwrap();
     tool["choices"][0]["message"]["tool_calls"] = json!([{"id": "call", "type": "function", "function": {"name": "noop", "arguments": "{}"}}]);
     for (reply, config) in [
+        (Reply::text("long"), json!({"max_output_bytes": 2})),
         (Reply::text(""), json!({})),
         (Reply::json(tool), json!({})),
         (
@@ -796,7 +797,7 @@ fn subscribed_streams_use_one_request_and_preserve_sparse_terminal_facts() {
 }
 
 #[test]
-fn streaming_failures_and_capture_policy_never_retry_as_unary() {
+fn streaming_limits_failures_and_capture_policy_never_retry_as_unary() {
     let mut malformed = streaming_reply(&["prefix"], Value::Null, None, false);
     malformed.body.push_str("data: invalid-json\n\n");
     let mut incomplete = streaming_reply(&["prefix"], Value::Null, None, false);
@@ -810,6 +811,18 @@ fn streaming_failures_and_capture_policy_never_retry_as_unary() {
         ),
         (malformed, json!({}), false, true),
         (incomplete, json!({}), false, true),
+        (
+            streaming_reply(&["a", "b", "c"], Value::Null, Some("stop"), true),
+            json!({"max_output_bytes":2}),
+            false,
+            true,
+        ),
+        (
+            streaming_reply(&["é"], Value::Null, Some("stop"), true),
+            json!({"max_output_bytes":1}),
+            false,
+            false,
+        ),
     ] {
         let server = Server::start(vec![reply]);
         let result = probe(
@@ -857,7 +870,7 @@ fn delivery_deadline_and_cancellation_cannot_become_captured_success() {
 }
 
 #[test]
-fn large_utf8_replies_are_preserved_in_unary_and_streaming_calls() {
+fn configured_large_utf8_replies_are_preserved_in_unary_and_streaming_calls() {
     let text = "é".repeat(600_000);
     for streaming in [false, true] {
         let reply = if streaming {
@@ -874,7 +887,7 @@ fn large_utf8_replies_are_preserved_in_unary_and_streaming_calls() {
         let result = probe(
             &server,
             json!({"stream":streaming,"inputs":[{"prompt":"hello"}]}),
-            json!({}),
+            json!({"max_output_bytes":2_000_000}),
         );
         let result = &result["results"][0];
         assert_eq!(result["ok"], true);

@@ -368,8 +368,8 @@ The [answer-and-title example](../examples/chat-title-flow.json) declares only t
 Run the compiled example with `--output-format events-jsonl --stream-output answer`. The title call stays
 terminal-only, and the final `usages` includes both calls when title generation runs. Ordinary JSON invocation
 keeps both calls terminal-only. Loop and Iteration exports use their full source paths and per-invocation identities.
-SSE framing and generated text have no client byte quotas. The total deadline interrupts stalled reads and
-connected delivery under backpressure.
+`max_output_bytes` bounds decoded generated text, including live increments. SSE framing has no separate byte quota.
+The total deadline interrupts stalled reads and connected delivery under backpressure.
 Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
 Each history object has exactly two required string fields, `role` and `content`. Conversation roles are `user`
@@ -386,18 +386,21 @@ Static configuration has this shape:
   "api_key_env": "MODEL_API_KEY",
   "temperature": 0.2,
   "max_tokens": 256,
-  "timeout_ms": 60000
+  "timeout_ms": 60000,
+  "max_output_bytes": 1048576
 }
 ```
 
-`model` is required and nonblank. Defaults are the OpenAI API prefix, `OPENAI_API_KEY`, and a 60000 millisecond deadline.
+`model` is required and nonblank. Defaults are the OpenAI API prefix, `OPENAI_API_KEY`, a 60000 millisecond deadline,
+and a 1048576-byte generated text limit.
 Optional `temperature` must be finite and between 0 and 2; optional `max_tokens` must be positive. Supplied numeric
-fields cannot be null. Deadlines must be positive integers. Generated text and response frames have no client byte quota;
+fields cannot be null. Deadlines and `max_output_bytes` must be positive integers. The text limit counts UTF-8 bytes
+of the new reply independently of existing history; it is not a hard transport-memory bound.
 `max_tokens` is forwarded to the provider to control generation size.
 `base_url` is an HTTP or HTTPS API prefix without embedded credentials, query, or fragment. Configuration rejects
 unknown fields, including `stream` and provider-specific request overrides. Literal credentials are rejected.
 
-`model`, `base_url`, `temperature`, `max_tokens`, and `timeout_ms` also accept configuration
+`model`, `base_url`, `temperature`, `max_tokens`, `timeout_ms`, and `max_output_bytes` also accept configuration
 templates. Use `api_key` with a runtime reference to supply credentials from a parameter; it cannot be combined
 with `api_key_env`. The latter remains a literal environment-variable name for existing workflows.
 
