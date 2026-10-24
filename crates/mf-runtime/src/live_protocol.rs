@@ -12,44 +12,6 @@ use std::{
 };
 
 pub const LIVE_PROTOCOL_VERSION: u32 = 1;
-pub const MAX_LIVE_FINAL_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(Clone, Debug)]
-pub struct LiveProtocolLimits {
-    pub max_event_bytes: usize,
-    pub max_final_bytes: usize,
-    pub max_total_bytes: usize,
-}
-
-impl Default for LiveProtocolLimits {
-    fn default() -> Self {
-        Self {
-            max_event_bytes: 1024 * 1024,
-            max_final_bytes: MAX_LIVE_FINAL_BYTES,
-            max_total_bytes: 64 * 1024 * 1024,
-        }
-    }
-}
-
-impl LiveProtocolLimits {
-    fn validate(&self) -> Result<(), LiveProtocolError> {
-        ensure!(
-            self.max_event_bytes > 0
-                && self.max_final_bytes > 0
-                && self.max_event_bytes <= self.max_total_bytes
-                && self.max_final_bytes <= self.max_total_bytes,
-            InvalidLimitsSnafu
-        );
-        Ok(())
-    }
-
-    fn frame_bound(&self) -> usize {
-        self.max_event_bytes
-            .max(self.max_final_bytes.saturating_add(1024))
-            .min(self.max_total_bytes)
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveRecord {
@@ -68,8 +30,6 @@ pub enum LiveRecordKind {
 
 #[derive(Clone, Debug, Snafu)]
 pub enum LiveProtocolError {
-    #[snafu(display("invalid live protocol limits"))]
-    InvalidLimits,
     #[snafu(display("unsupported live protocol version {version}"))]
     Version { version: u32 },
     #[snafu(display("live output run identity does not match the launched execution"))]
@@ -96,8 +56,6 @@ pub enum LiveProtocolError {
     MissingFinal,
     #[snafu(display("live output protocol already failed"))]
     Failed,
-    #[snafu(display("live output exceeds the {limit}-byte {kind} limit"))]
-    Limit { kind: &'static str, limit: usize },
     #[snafu(display("live output writer is unavailable"))]
     WriterUnavailable,
     #[snafu(display("invalid live output record"))]
@@ -115,11 +73,6 @@ pub enum LiveProtocolError {
         name: String,
         #[snafu(source(from(crate::TypeMismatch, Arc::new)))]
         source: Arc<crate::TypeMismatch>,
-    },
-    #[snafu(display("could not encode live output: {source}"))]
-    Encoding {
-        #[snafu(source(from(StreamError, Arc::new)))]
-        source: Arc<StreamError>,
     },
     #[snafu(display("could not deliver live output: {source}"), visibility(pub))]
     Delivery {
@@ -270,8 +223,6 @@ type WriteRecord = dyn FnMut(&[u8], &StreamCancellation) -> Result<(), StreamErr
 
 struct WriterState {
     protocol: ProtocolState,
-    limits: LiveProtocolLimits,
-    total: usize,
     write: Box<WriteRecord>,
     failure: Option<LiveProtocolError>,
 }
@@ -283,14 +234,10 @@ impl LiveOutputWriter {
     pub fn new(
         run_id: RunId,
         contracts: &[StreamOutputContract],
-        limits: LiveProtocolLimits,
         write: impl FnMut(&[u8], &StreamCancellation) -> Result<(), StreamError> + Send + 'static,
     ) -> Result<Self, LiveProtocolError> {
-        limits.validate()?;
         Ok(Self(Arc::new(Mutex::new(WriterState {
             protocol: ProtocolState::new(run_id, contracts)?,
-            limits,
-            total: 0,
             write: Box::new(write),
             failure: None,
         }))))
@@ -350,15 +297,6 @@ impl WriterState {
         record: LiveRecordKind,
         cancellation: &StreamCancellation,
     ) -> Result<(), LiveProtocolError> {
-        if let LiveRecordKind::Final { outputs } = &record {
-            crate::live_channel::encoded_size(outputs, self.limits.max_final_bytes)
-                .context(EncodingSnafu)?;
-        }
-        let bound = if matches!(record, LiveRecordKind::Final { .. }) {
-            self.limits.frame_bound()
-        } else {
-            self.limits.max_event_bytes
-        };
         let packet = LiveRecord {
             version: LIVE_PROTOCOL_VERSION,
             run_id: self.protocol.run_id.clone(),
@@ -366,29 +304,16 @@ impl WriterState {
             record,
         };
         self.protocol.accept(&packet)?;
-        let size = crate::live_channel::encoded_size(&packet, bound.saturating_sub(1))
-            .context(EncodingSnafu)?;
-        ensure!(
-            size < self.limits.max_total_bytes - self.total,
-            LimitSnafu {
-                kind: "total transport",
-                limit: self.limits.max_total_bytes
-            }
-        );
-        let mut bytes = Vec::with_capacity(size + 1);
-        serde_json::to_writer(&mut bytes, &packet).context(JsonSnafu)?;
+        let mut bytes = serde_json::to_vec(&packet).context(JsonSnafu)?;
         bytes.push(b'\n');
         (self.write)(&bytes, cancellation).context(DeliverySnafu)?;
-        self.total += bytes.len();
         Ok(())
     }
 }
 
 pub struct LiveOutputDecoder {
     protocol: ProtocolState,
-    limits: LiveProtocolLimits,
     partial: Vec<u8>,
-    total: usize,
     final_outputs: Option<NodeValues>,
     failed: bool,
 }
@@ -397,14 +322,10 @@ impl LiveOutputDecoder {
     pub fn new(
         run_id: RunId,
         contracts: &[StreamOutputContract],
-        limits: LiveProtocolLimits,
     ) -> Result<Self, LiveProtocolError> {
-        limits.validate()?;
         Ok(Self {
             protocol: ProtocolState::new(run_id, contracts)?,
-            limits,
             partial: Vec::new(),
-            total: 0,
             final_outputs: None,
             failed: false,
         })
@@ -439,21 +360,6 @@ impl LiveOutputDecoder {
         emit: &mut dyn FnMut(LiveOutputEvent) -> Result<(), StreamError>,
     ) -> Result<(), LiveProtocolError> {
         for part in bytes.split_inclusive(|byte| *byte == b'\n') {
-            ensure!(
-                part.len() <= self.limits.max_total_bytes - self.total,
-                LimitSnafu {
-                    kind: "total transport",
-                    limit: self.limits.max_total_bytes
-                }
-            );
-            self.total += part.len();
-            ensure!(
-                part.len() <= self.limits.frame_bound() - self.partial.len(),
-                LimitSnafu {
-                    kind: "record",
-                    limit: self.limits.frame_bound()
-                }
-            );
             self.partial.extend_from_slice(part);
             if part.last() == Some(&b'\n') {
                 let mut record = std::mem::take(&mut self.partial);
@@ -474,19 +380,6 @@ impl LiveOutputDecoder {
             return Ok(());
         }
         let record: LiveRecord = crate::decode_unique_json(bytes).context(JsonSnafu)?;
-        match &record.record {
-            LiveRecordKind::Event { .. } => ensure!(
-                bytes.len() <= self.limits.max_event_bytes,
-                LimitSnafu {
-                    kind: "event record",
-                    limit: self.limits.max_event_bytes
-                }
-            ),
-            LiveRecordKind::Final { outputs } => {
-                crate::live_channel::encoded_size(outputs, self.limits.max_final_bytes)
-                    .context(EncodingSnafu)?;
-            }
-        }
         self.protocol.accept(&record)?;
         match record.record {
             LiveRecordKind::Event { event } => emit(event).context(DeliverySnafu),

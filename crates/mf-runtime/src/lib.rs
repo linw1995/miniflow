@@ -72,8 +72,7 @@ pub use live::{LiveOutputEvent, LiveOutputKind, LivePublisher};
 pub use live_channel::{LiveLimits, LiveMetrics, LiveReceiveError, LiveReceiver, live_channel};
 pub use live_protocol::{
     DeliverySnafu as LiveProtocolDeliverySnafu, LIVE_PROTOCOL_VERSION, LiveOutputDecoder,
-    LiveOutputWriter, LiveProtocolError, LiveProtocolLimits, LiveRecord, LiveRecordKind,
-    MAX_LIVE_FINAL_BYTES,
+    LiveOutputWriter, LiveProtocolError, LiveRecord, LiveRecordKind,
 };
 pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_exit, prepared_loop_source_types,

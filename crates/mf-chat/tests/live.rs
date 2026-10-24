@@ -102,7 +102,6 @@ fn explicit_subscription_precedes_launch_and_completion_does_not_cancel_closed_o
             "hello",
             mf_runtime::LiveLimits {
                 max_pending_records: 1,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -136,7 +135,6 @@ fn dropped_subscription_and_host_shutdown_interrupt_pressure() {
                 "hello",
                 mf_runtime::LiveLimits {
                     max_pending_records: 1,
-                    ..Default::default()
                 },
             )
             .unwrap();

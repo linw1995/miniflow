@@ -667,9 +667,10 @@ combined executors use the Task `Send + Sync` ownership contract.
 ### Buffered live delivery
 
 A finite Flow exports selected producer ports through an optional `LivePublisher` on its execution context.
-`live_channel(LiveLimits::default())` supplies a bounded publisher and receiver. Defaults are 64 pending records,
-4 MiB pending encoded data, a 1 MiB event body, and 64 MiB cumulative encoded event data. Invalid limits and exceeded
-bounds fail explicitly. No channel is created for a host that does not subscribe.
+`live_channel(LiveLimits::default())` supplies a publisher and receiver with a default capacity of 64 pending records.
+Capacity must be positive. A full queue blocks publication until consumption, cancellation, or receiver disconnection.
+In-memory delivery retains values directly without serialization or byte accounting. Record size and cumulative output
+have no runtime byte quotas. No channel is created for a host that does not subscribe.
 
 Drain an explicitly subscribed receiver concurrently with execution. This fragment assumes a prepared finite
 `flow`, resolved `arguments`, and an event handler:

@@ -1,7 +1,7 @@
 use mf_runtime::{
     LiveOutputDecoder, LiveOutputEvent, LiveOutputKind, LiveOutputWriter, LiveProtocolError,
-    LiveProtocolLimits, LiveRecord, LiveRecordKind, NodeValues, StreamCancellation,
-    StreamInvocation, StreamOutputContract, ValueType,
+    LiveRecord, LiveRecordKind, NodeValues, StreamCancellation, StreamInvocation,
+    StreamOutputContract, ValueType,
 };
 use mf_telemetry::identity::RunId;
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,7 @@ fn wire(values: &[&str]) -> (RunId, Vec<u8>) {
     let run = RunId::new();
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let output = bytes.clone();
-    let writer = LiveOutputWriter::new(run, &schema(), Default::default(), move |bytes, _| {
+    let writer = LiveOutputWriter::new(run, &schema(), move |bytes, _| {
         output.lock().unwrap().extend_from_slice(bytes);
         Ok(())
     })
@@ -72,7 +72,7 @@ fn wire(values: &[&str]) -> (RunId, Vec<u8>) {
 #[test]
 fn records_round_trip_across_utf8_and_json_read_boundaries() {
     let (run, bytes) = wire(&["hello ", "caf\u{e9}\n"]);
-    let mut decoder = LiveOutputDecoder::new(run, &schema(), Default::default()).unwrap();
+    let mut decoder = LiveOutputDecoder::new(run, &schema()).unwrap();
     let mut events = Vec::new();
     for byte in &bytes {
         decoder
@@ -98,7 +98,7 @@ fn records_round_trip_across_utf8_and_json_read_boundaries() {
 #[test]
 fn zero_values_and_never_invoked_exports_are_valid() {
     let (run, bytes) = wire(&[]);
-    let mut decoder = LiveOutputDecoder::new(run, &schema(), Default::default()).unwrap();
+    let mut decoder = LiveOutputDecoder::new(run, &schema()).unwrap();
     decoder.feed(&bytes, |_| Ok(())).unwrap();
     decoder.finish(|_| Ok(())).unwrap();
     let record = LiveRecord {
@@ -109,7 +109,7 @@ fn zero_values_and_never_invoked_exports_are_valid() {
             outputs: NodeValues::new(),
         },
     };
-    let mut decoder = LiveOutputDecoder::new(run, &schema(), Default::default()).unwrap();
+    let mut decoder = LiveOutputDecoder::new(run, &schema()).unwrap();
     decoder
         .feed(&serde_json::to_vec(&record).unwrap(), |_| Ok(()))
         .unwrap();
@@ -150,7 +150,7 @@ fn versions_sequences_sources_and_lifecycles_are_validated_before_final_acceptan
                 bytes
             })
             .collect::<Vec<_>>();
-        let mut decoder = LiveOutputDecoder::new(run, &schema(), Default::default()).unwrap();
+        let mut decoder = LiveOutputDecoder::new(run, &schema()).unwrap();
         assert!(decoder.feed(&bytes, |_| Ok(())).is_err(), "{case}");
         assert!(decoder.final_outputs().is_none(), "{case}");
         assert!(
@@ -172,12 +172,12 @@ fn duplicate_nested_keys_and_truncated_final_records_are_rejected() {
         "\"path\":[],\"path\":[]",
         1,
     );
-    let mut decoder = LiveOutputDecoder::new(run, &schema(), Default::default()).unwrap();
+    let mut decoder = LiveOutputDecoder::new(run, &schema()).unwrap();
     assert!(matches!(
         decoder.feed(text.as_bytes(), |_| Ok(())),
         Err(LiveProtocolError::Json { .. })
     ));
-    let mut decoder = LiveOutputDecoder::new(run, &schema(), Default::default()).unwrap();
+    let mut decoder = LiveOutputDecoder::new(run, &schema()).unwrap();
     decoder.feed(&bytes[..bytes.len() - 3], |_| Ok(())).unwrap();
     assert!(decoder.finish(|_| Ok(())).is_err());
     assert!(decoder.final_outputs().is_none());
@@ -196,44 +196,24 @@ fn a_valid_final_result_survives_later_diagnostics_in_the_same_read() {
     };
     let mut final_bytes = serde_json::to_vec(&final_record).unwrap();
     final_bytes.push(b'\n');
-    for limited in [false, true] {
-        let limits = if limited {
-            LiveProtocolLimits {
-                max_event_bytes: 64,
-                max_final_bytes: 64,
-                max_total_bytes: final_bytes.len() + 2,
-            }
-        } else {
-            Default::default()
-        };
-        let mut decoder = LiveOutputDecoder::new(run, &[], limits).unwrap();
-        let bytes = [final_bytes.as_slice(), b"invalid late record\n"].concat();
-        assert!(decoder.feed(&bytes, |_| Ok(())).is_err());
-        assert_eq!(
-            decoder.final_outputs().unwrap()["text"].as_str(),
-            Some("complete")
-        );
-    }
+    let mut decoder = LiveOutputDecoder::new(run, &[]).unwrap();
+    let bytes = [final_bytes.as_slice(), b"invalid late record\n"].concat();
+    assert!(decoder.feed(&bytes, |_| Ok(())).is_err());
+    assert_eq!(
+        decoder.final_outputs().unwrap()["text"].as_str(),
+        Some("complete")
+    );
 }
 
 #[test]
-fn writer_limits_are_sticky_and_never_publish_a_final_after_failure() {
+fn protocol_failures_are_sticky_and_never_publish_a_final_after_failure() {
     let run = RunId::new();
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let captured = bytes.clone();
-    let writer = LiveOutputWriter::new(
-        run,
-        &schema(),
-        LiveProtocolLimits {
-            max_event_bytes: 512,
-            max_final_bytes: 512,
-            max_total_bytes: 4096,
-        },
-        move |bytes, _| {
-            captured.lock().unwrap().extend_from_slice(bytes);
-            Ok(())
-        },
-    )
+    let writer = LiveOutputWriter::new(run, &schema(), move |bytes, _| {
+        captured.lock().unwrap().extend_from_slice(bytes);
+        Ok(())
+    })
     .unwrap();
     let publisher = writer.publisher();
     let cancellation = StreamCancellation::default();
@@ -244,7 +224,7 @@ fn writer_limits_are_sticky_and_never_publish_a_final_after_failure() {
         publisher
             .publish(
                 event(LiveOutputKind::Value {
-                    value: "x".repeat(1024).into()
+                    value: false.into()
                 }),
                 &cancellation
             )
@@ -253,6 +233,66 @@ fn writer_limits_are_sticky_and_never_publish_a_final_after_failure() {
     assert!(writer.finish(&NodeValues::new(), &cancellation).is_err());
     let bytes = bytes.lock().unwrap();
     assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
+}
+
+#[test]
+fn large_events_final_results_and_cumulative_output_round_trip_without_byte_quotas() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const VALUE_BYTES: usize = 2 * 1024 * 1024;
+    const FINAL_BYTES: usize = 17 * 1024 * 1024;
+    const EMISSIONS: usize = 33;
+    let run = RunId::new();
+    let decoder = Arc::new(Mutex::new(LiveOutputDecoder::new(run, &schema()).unwrap()));
+    let received = Arc::new(AtomicUsize::new(0));
+    let incoming = decoder.clone();
+    let count = received.clone();
+    let writer = LiveOutputWriter::new(run, &schema(), move |bytes, _| {
+        let mut decoder = incoming.lock().unwrap();
+        for part in bytes.chunks(65_537) {
+            decoder.feed(part, |event| {
+                if let LiveOutputKind::Value { value } = event.event {
+                    assert_eq!(value.as_str().unwrap().len(), VALUE_BYTES);
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let publisher = writer.publisher();
+    let cancellation = StreamCancellation::default();
+    publisher
+        .publish(event(LiveOutputKind::Open), &cancellation)
+        .unwrap();
+    let value = event(LiveOutputKind::Value {
+        value: "x".repeat(VALUE_BYTES).into(),
+    });
+    for _ in 0..EMISSIONS {
+        publisher.publish(value.clone(), &cancellation).unwrap();
+    }
+    publisher
+        .publish(
+            event(LiveOutputKind::Close { completed: true }),
+            &cancellation,
+        )
+        .unwrap();
+    writer
+        .finish(
+            &NodeValues::from([("text".into(), "y".repeat(FINAL_BYTES).into())]),
+            &cancellation,
+        )
+        .unwrap();
+    let mut decoder = decoder.lock().unwrap();
+    decoder.finish(|_| Ok(())).unwrap();
+    assert_eq!(received.load(Ordering::Relaxed), EMISSIONS);
+    assert_eq!(
+        decoder.final_outputs().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .len(),
+        FINAL_BYTES
+    );
 }
 
 #[test]
@@ -275,7 +315,7 @@ fn invocation_identity_cannot_change_between_open_values_and_close() {
                 });
             changed
         }];
-        let mut decoder = LiveOutputDecoder::new(run, &schema(), Default::default()).unwrap();
+        let mut decoder = LiveOutputDecoder::new(run, &schema()).unwrap();
         for (sequence, event) in records.into_iter().enumerate() {
             let mut bytes = serde_json::to_vec(&LiveRecord {
                 version: 1,
@@ -303,7 +343,7 @@ fn delivery_failures_preserve_sources_and_prevent_further_writes() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let attempts = Arc::new(AtomicUsize::new(0));
     let captured = attempts.clone();
-    let writer = LiveOutputWriter::new(RunId::new(), &schema(), Default::default(), move |_, _| {
+    let writer = LiveOutputWriter::new(RunId::new(), &schema(), move |_, _| {
         captured.fetch_add(1, Ordering::SeqCst);
         Err(mf_runtime::StreamError::Execution {
             message: "transport disconnected".into(),

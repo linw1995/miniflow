@@ -462,7 +462,6 @@ fn disconnected_live_subscription_cancels_combined_production() {
         compile_definition(&serde_json::from_value(stream_export()).unwrap(), &registry).unwrap();
     let (publisher, receiver) = mf_runtime::live_channel(mf_runtime::LiveLimits {
         max_pending_records: 1,
-        ..Default::default()
     })
     .unwrap();
     let instance = instantiate_stream(&plan, &registry)
@@ -518,7 +517,6 @@ fn pure_producer_exports_drain_and_close_without_dropping_the_instance() {
     let plan = compile_definition(&serde_json::from_value(document).unwrap(), &registry).unwrap();
     let (publisher, receiver) = mf_runtime::live_channel(mf_runtime::LiveLimits {
         max_pending_records: 1,
-        ..Default::default()
     })
     .unwrap();
     let (finished, ready) = std::sync::mpsc::channel();

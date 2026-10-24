@@ -697,7 +697,6 @@ impl ExternalBackend {
                     contracts: vec![contract.clone()],
                     publisher: publisher.clone(),
                     cancellation: context.cancellation(),
-                    limits: Default::default(),
                 },
             )?
         } else {

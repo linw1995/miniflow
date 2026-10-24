@@ -96,3 +96,17 @@ Terminal results SHALL be returned directly rather than reconstructed from emitt
 
 - **WHEN** a combined invocation returns an execution error after several delivered emissions
 - **THEN** those values remain identifiable as provisional and no successful terminal result is published
+
+### Requirement: Keep live delivery independent of byte quotas
+
+Runtime live channels SHALL bound pending delivery by record count. Live channels and the finite live protocol MUST NOT impose pending-byte, per-record, final-result, or cumulative byte quotas. Protocol validation, ordered delivery, cancellation, and receiver-disconnection behavior SHALL remain enforced.
+
+#### Scenario: Deliver a large live record
+
+- **WHEN** a valid emitted value exceeds the previous default byte limits
+- **THEN** runtime live delivery accepts it subject to pending record capacity
+
+#### Scenario: Continue after a large cumulative output
+
+- **WHEN** consumers drain valid live records whose combined wire size exceeds the previous cumulative byte limit
+- **THEN** publication and final-result decoding continue without a runtime byte-budget failure

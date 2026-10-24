@@ -335,7 +335,6 @@ pub struct LiveCaptureOptions {
     pub contracts: Vec<mf_runtime::StreamOutputContract>,
     pub publisher: mf_runtime::LivePublisher,
     pub cancellation: mf_runtime::StreamCancellation,
-    pub limits: mf_runtime::LiveProtocolLimits,
 }
 
 struct LiveCaptureState {
@@ -375,7 +374,7 @@ impl LocalRun {
             command,
             description,
             run_id,
-            options.limits.max_final_bytes as u64,
+            MAX_STDOUT_BYTES,
             Some(options),
         )
     }
@@ -392,11 +391,7 @@ impl LocalRun {
                 let cancellation = mf_runtime::StreamCancellation::default();
                 options.cancellation.forward_to(&cancellation);
                 Ok::<_, mf_runtime::LiveProtocolError>(LiveCaptureState {
-                    decoder: mf_runtime::LiveOutputDecoder::new(
-                        run_id,
-                        &options.contracts,
-                        options.limits,
-                    )?,
+                    decoder: mf_runtime::LiveOutputDecoder::new(run_id, &options.contracts)?,
                     publisher: options.publisher,
                     cancellation,
                 })
@@ -2346,12 +2341,11 @@ mod tests {
         }];
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let output = bytes.clone();
-        let writer =
-            mf_runtime::LiveOutputWriter::new(run, &schema, Default::default(), move |bytes, _| {
-                output.lock().unwrap().extend_from_slice(bytes);
-                Ok(())
-            })
-            .unwrap();
+        let writer = mf_runtime::LiveOutputWriter::new(run, &schema, move |bytes, _| {
+            output.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        })
+        .unwrap();
         let publisher = writer.publisher();
         let cancellation = mf_runtime::StreamCancellation::default();
         for event in [
@@ -2430,7 +2424,6 @@ mod tests {
                 contracts: schema,
                 publisher,
                 cancellation: Default::default(),
-                limits: Default::default(),
             },
         )
         .unwrap();
@@ -2504,7 +2497,6 @@ mod tests {
                 contracts: schema,
                 publisher: mf_runtime::LivePublisher::new(|_, _| Ok(())),
                 cancellation: Default::default(),
-                limits: Default::default(),
             },
         )
         .unwrap();
@@ -2544,7 +2536,6 @@ mod tests {
                     },
                 ),
                 cancellation: Default::default(),
-                limits: Default::default(),
             },
         )
         .unwrap();
@@ -2578,7 +2569,6 @@ mod tests {
                 contracts: schema,
                 publisher: mf_runtime::LivePublisher::new(|_, _| Ok(())),
                 cancellation: Default::default(),
-                limits: Default::default(),
             },
         )
         .unwrap();
@@ -2628,7 +2618,6 @@ mod tests {
         let (command, _) = gated_writer(root.path(), &records);
         let (publisher, receiver) = mf_runtime::live_channel(mf_runtime::LiveLimits {
             max_pending_records: 1,
-            ..Default::default()
         })
         .unwrap();
         let cancellation = mf_runtime::StreamCancellation::default();
@@ -2640,7 +2629,6 @@ mod tests {
                 contracts: schema,
                 publisher,
                 cancellation: cancellation.clone(),
-                limits: Default::default(),
             },
         )
         .unwrap();

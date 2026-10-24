@@ -3,9 +3,6 @@ use futures::StreamExt;
 use rig_core::http_client::BoxedStream;
 use snafu::{Snafu, ensure};
 
-const MAX_FRAME_BYTES: usize = 1024 * 1024;
-const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
-
 #[derive(Debug, Snafu)]
 pub enum StreamingTransportError {
     #[snafu(transparent)]
@@ -19,8 +16,6 @@ pub enum StreamingTransportError {
     },
     #[snafu(transparent)]
     Normalization { source: LlmExecutionError },
-    #[snafu(display("LLM streaming response exceeds its {limit}-byte {kind} limit"))]
-    Limit { kind: &'static str, limit: usize },
     #[snafu(display("LLM streaming response contains an incomplete SSE event"))]
     TruncatedEvent,
     #[snafu(display("LLM streaming response contains invalid UTF-8"))]
@@ -33,7 +28,6 @@ struct Frames {
     body: BoxedStream,
     pending: Bytes,
     frame: Vec<u8>,
-    total: usize,
     usage: Arc<Mutex<Option<Usage>>>,
     cancellation: mf_runtime::StreamCancellation,
     deadline: std::time::Instant,
@@ -65,7 +59,7 @@ fn normalize_event(
     Ok(Bytes::from(event))
 }
 
-pub fn bounded(
+pub fn normalize_stream(
     body: BoxedStream,
     usage: Arc<Mutex<Option<Usage>>>,
     cancellation: mf_runtime::StreamCancellation,
@@ -76,7 +70,6 @@ pub fn bounded(
             body,
             pending: Bytes::new(),
             frame: Vec::new(),
-            total: 0,
             usage,
             cancellation,
             deadline,
@@ -97,21 +90,6 @@ pub fn bounded(
                         .iter()
                         .position(|byte| *byte == b'\n')
                         .map_or(state.pending.len(), |index| index + 1);
-                    ensure!(
-                        length <= MAX_FRAME_BYTES - state.frame.len(),
-                        LimitSnafu {
-                            kind: "SSE event",
-                            limit: MAX_FRAME_BYTES
-                        }
-                    );
-                    ensure!(
-                        length <= MAX_STREAM_BYTES - state.total,
-                        LimitSnafu {
-                            kind: "stream",
-                            limit: MAX_STREAM_BYTES
-                        }
-                    );
-                    state.total += length;
                     state
                         .frame
                         .extend_from_slice(&state.pending.split_to(length));
@@ -133,13 +111,39 @@ mod tests {
     use std::error::Error as _;
 
     #[test]
+    fn large_frames_and_cumulative_streams_have_no_byte_quota() {
+        let frame = Bytes::from(format!(": {}\n\n", "x".repeat(5 * 1024 * 1024)));
+        let body = Box::pin(futures::stream::iter(vec![frame; 13]).map(Ok));
+        let mut frames = normalize_stream(
+            body,
+            Arc::new(Mutex::new(None)),
+            Default::default(),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        let received = mf_runtime::ExecutionContext::default()
+            .execute_future(
+                async {
+                    let mut count = 0;
+                    while let Some(frame) = frames.next().await {
+                        assert!(frame.unwrap().len() > 5 * 1024 * 1024);
+                        count += 1;
+                    }
+                    count
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(received, 13);
+    }
+
+    #[test]
     fn metadata_only_frames_check_cancellation_between_deliveries() {
         let cancellation = mf_runtime::StreamCancellation::default();
         let body = Box::pin(futures::stream::iter([
             Ok(Bytes::from_static(b": heartbeat\n\n")),
             Ok(Bytes::from_static(b": heartbeat\n\n")),
         ]));
-        let mut frames = bounded(
+        let mut frames = normalize_stream(
             body,
             Arc::new(Mutex::new(None)),
             cancellation.clone(),
@@ -172,7 +176,7 @@ mod tests {
         let body = Box::pin(futures::stream::iter([Ok(Bytes::from_static(
             b": heartbeat\n\n",
         ))]));
-        let mut frames = bounded(
+        let mut frames = normalize_stream(
             body,
             Arc::new(Mutex::new(None)),
             Default::default(),

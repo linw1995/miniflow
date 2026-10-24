@@ -1,8 +1,7 @@
 use crate::{LiveOutputEvent, LivePublisher, StreamCancellation, StreamError};
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{Snafu, ensure};
 use std::{
     collections::VecDeque,
-    io,
     sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
@@ -10,18 +9,12 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct LiveLimits {
     pub max_pending_records: usize,
-    pub max_pending_bytes: usize,
-    pub max_record_bytes: usize,
-    pub max_total_bytes: usize,
 }
 
 impl Default for LiveLimits {
     fn default() -> Self {
         Self {
             max_pending_records: 64,
-            max_pending_bytes: 4 * 1024 * 1024,
-            max_record_bytes: 1024 * 1024,
-            max_total_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -29,8 +22,6 @@ impl Default for LiveLimits {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveMetrics {
     pub pending_records: usize,
-    pub pending_bytes: usize,
-    pub total_bytes: usize,
 }
 
 #[derive(Debug, Snafu)]
@@ -44,9 +35,7 @@ pub enum LiveReceiveError {
 }
 
 struct State {
-    queue: VecDeque<(LiveOutputEvent, usize)>,
-    bytes: usize,
-    total: usize,
+    queue: VecDeque<LiveOutputEvent>,
     receiver_alive: bool,
     closed: bool,
     failure: Option<StreamError>,
@@ -90,50 +79,8 @@ impl Drop for LiveReceiver {
             });
         }
         state.queue.clear();
-        state.bytes = 0;
         self.0.changed.notify_all();
     }
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(display("live output record exceeds {limit} bytes"))]
-struct RecordLimit {
-    limit: usize,
-}
-
-struct SizeWriter {
-    size: usize,
-    limit: usize,
-}
-
-impl io::Write for SizeWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > self.limit - self.size {
-            return Err(io::Error::new(
-                io::ErrorKind::FileTooLarge,
-                RecordLimitSnafu { limit: self.limit }.build(),
-            ));
-        }
-        self.size += bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-pub(super) fn encoded_size<T: serde::Serialize + ?Sized>(
-    event: &T,
-    limit: usize,
-) -> Result<usize, StreamError> {
-    let mut writer = SizeWriter { size: 0, limit };
-    serde_json::to_writer(&mut writer, event).context(crate::stream_instance::OutputEncodeSnafu)?;
-    Ok(writer.size)
-}
-
-fn resource(message: &str) -> StreamError {
-    crate::stream_instance::ResourceSnafu { message }.build()
 }
 
 impl Sender {
@@ -162,19 +109,6 @@ impl Sender {
         event: LiveOutputEvent,
         cancellation: &StreamCancellation,
     ) -> Result<(), StreamError> {
-        let bytes = match encoded_size(&event, self.0.limits.max_record_bytes) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.0
-                    .state
-                    .lock()
-                    .unwrap()
-                    .failure
-                    .get_or_insert(error.clone());
-                self.0.changed.notify_all();
-                return Err(error);
-            }
-        };
         let mut state = self.0.state.lock().unwrap();
         state
             .cancellation
@@ -192,15 +126,7 @@ impl Sender {
                 }
                 .fail();
             }
-            if bytes > self.0.limits.max_total_bytes - state.total {
-                let error = resource("live output exceeds the cumulative byte limit");
-                state.failure = Some(error.clone());
-                self.0.changed.notify_all();
-                return Err(error);
-            }
-            if state.queue.len() < self.0.limits.max_pending_records
-                && bytes <= self.0.limits.max_pending_bytes - state.bytes
-            {
+            if state.queue.len() < self.0.limits.max_pending_records {
                 break;
             }
             state = self
@@ -210,9 +136,7 @@ impl Sender {
                 .unwrap()
                 .0;
         }
-        state.bytes += bytes;
-        state.total += bytes;
-        state.queue.push_back((event, bytes));
+        state.queue.push_back(event);
         self.0.changed.notify_all();
         Ok(())
     }
@@ -220,8 +144,7 @@ impl Sender {
 
 impl LiveReceiver {
     fn pop(state: &mut State) -> Result<LiveOutputEvent, LiveReceiveError> {
-        if let Some((event, bytes)) = state.queue.pop_front() {
-            state.bytes -= bytes;
+        if let Some(event) = state.queue.pop_front() {
             return Ok(event);
         }
         if let Some(error) = &state.failure {
@@ -272,28 +195,21 @@ impl LiveReceiver {
         let state = self.0.state.lock().unwrap();
         LiveMetrics {
             pending_records: state.queue.len(),
-            pending_bytes: state.bytes,
-            total_bytes: state.total,
         }
     }
 }
 
 pub fn live_channel(limits: LiveLimits) -> Result<(LivePublisher, LiveReceiver), StreamError> {
     ensure!(
-        limits.max_pending_records > 0
-            && limits.max_record_bytes > 0
-            && limits.max_record_bytes <= limits.max_pending_bytes
-            && limits.max_pending_bytes <= limits.max_total_bytes,
+        limits.max_pending_records > 0,
         crate::stream_instance::ConfigurationSnafu {
-            message: "live limits require positive record capacity and record <= pending <= total bytes"
+            message: "live limits require positive record capacity"
         }
     );
     let shared = Arc::new(Shared {
         limits,
         state: Mutex::new(State {
             queue: VecDeque::new(),
-            bytes: 0,
-            total: 0,
             receiver_alive: true,
             closed: false,
             failure: None,

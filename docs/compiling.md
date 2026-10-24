@@ -241,9 +241,9 @@ Task binding. Source paths are independent of observation's outer-only Iteration
 workflows retain their existing result-line protocol; event mode is available for their isolated Task targets.
 Older JSON-only executables remain usable and must be recompiled to add the new protocol.
 
-Default transport bounds are 1 MiB per encoded event record, 16 MiB for the final output object, and 64 MiB cumulative
-wire data. The final frame has bounded framing overhead. Incremental readers also bound their partial-record buffer,
-reject duplicate keys, validate run/sequence/source/lifecycle/type contracts, and reject incomplete final records.
+The live protocol imposes no per-record, final-result, or cumulative wire byte quota. Incremental readers retain the
+current partial record, reject duplicate keys, validate run/sequence/source/lifecycle/type contracts, and reject
+incomplete final records. Subscribed in-memory delivery applies backpressure by pending record count.
 A fully validated final value is retained if later process or protocol diagnostics arrive. Live capture retains only
 that final value and bounded in-flight records rather than spooling the entire event history. Capture and cancellation
 continue independently of terminal rendering.

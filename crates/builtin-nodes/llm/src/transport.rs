@@ -147,7 +147,8 @@ impl HttpClientExt for TerminalTransport {
             if !response.status().is_success() {
                 return Ok(response);
             }
-            Ok(response.map(|body| streaming::bounded(body, usage, cancellation, deadline)))
+            Ok(response
+                .map(|body| streaming::normalize_stream(body, usage, cancellation, deadline)))
         }
     }
 }

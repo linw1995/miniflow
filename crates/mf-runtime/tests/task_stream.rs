@@ -467,7 +467,6 @@ fn publication_deadlines_interrupt_bounded_delivery_without_a_timer_thread() {
     }
     let (publisher, _receiver) = mf_runtime::live_channel(mf_runtime::LiveLimits {
         max_pending_records: 1,
-        ..Default::default()
     })
     .unwrap();
     let mut sink = QueueSink(publisher);

@@ -90,8 +90,7 @@ fn compiled_finite_live_output_flushes_before_completion_and_preserves_json_mode
     let mut output = BufReader::new(child.stdout.take().unwrap());
     let manifest = mf_tui::manifest::read_manifest(&executable).unwrap();
     assert!(manifest.supports_live_output());
-    let mut decoder =
-        LiveOutputDecoder::new(run, &manifest.stream_outputs, Default::default()).unwrap();
+    let mut decoder = LiveOutputDecoder::new(run, &manifest.stream_outputs).unwrap();
     let mut events = Vec::new();
     for _ in 0..2 {
         let mut line = Vec::new();
@@ -170,8 +169,7 @@ fn generated_scoped_exports_preserve_full_loop_and_iteration_paths() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let mut decoder =
-            LiveOutputDecoder::new(run, &manifest.stream_outputs, Default::default()).unwrap();
+        let mut decoder = LiveOutputDecoder::new(run, &manifest.stream_outputs).unwrap();
         let mut events = Vec::new();
         decoder
             .feed(&output.stdout, |event| {
@@ -327,8 +325,7 @@ fn answer_and_title_share_one_result_while_only_answer_is_streamed() {
             String::from_utf8_lossy(&output.stderr)
         );
         let result = if live {
-            let mut decoder =
-                LiveOutputDecoder::new(run, &manifest.stream_outputs, Default::default()).unwrap();
+            let mut decoder = LiveOutputDecoder::new(run, &manifest.stream_outputs).unwrap();
             let mut values = 0;
             decoder
                 .feed(&output.stdout, |event| {

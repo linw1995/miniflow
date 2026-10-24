@@ -446,11 +446,10 @@ fn waiting_for_headers_or_body_is_bounded_and_cancelled_calls_publish_nothing() 
 }
 
 #[test]
-fn oversized_empty_tool_and_malformed_responses_fail_without_history() {
+fn empty_tool_and_malformed_responses_fail_without_history() {
     let mut tool = serde_json::from_str::<Value>(&Reply::text("text").body).unwrap();
     tool["choices"][0]["message"]["tool_calls"] = json!([{"id": "call", "type": "function", "function": {"name": "noop", "arguments": "{}"}}]);
     for (reply, config) in [
-        (Reply::text("long"), json!({"max_output_bytes": 2})),
         (Reply::text(""), json!({})),
         (Reply::json(tool), json!({})),
         (
@@ -716,14 +715,10 @@ fn request_timing_observes_first_nonempty_stream_text_and_unary_unknowns() {
 
 #[test]
 fn captured_stream_failures_retain_timing_without_claiming_throughput() {
-    for limited in [false, true] {
+    for suffix in ["data: invalid-json\n\n", "data: {"] {
         let mut reply = streaming_reply(&["prefix"], json!({"completion_tokens":2}), None, false);
-        let mut config = json!({"capture_errors":true});
-        if limited {
-            config["max_output_bytes"] = json!(1);
-        } else {
-            reply.body.push_str("data: invalid-json\n\n");
-        }
+        let config = json!({"capture_errors":true});
+        reply.body.push_str(suffix);
         let server = Server::start(vec![reply]);
         let result = probe(
             &server,
@@ -784,12 +779,11 @@ fn subscribed_streams_use_one_request_and_preserve_sparse_terminal_facts() {
 }
 
 #[test]
-fn streaming_limits_failures_and_capture_policy_never_retry_as_unary() {
+fn streaming_failures_and_capture_policy_never_retry_as_unary() {
     let mut malformed = streaming_reply(&["prefix"], Value::Null, None, false);
     malformed.body.push_str("data: invalid-json\n\n");
     let mut incomplete = streaming_reply(&["prefix"], Value::Null, None, false);
     incomplete.body.push_str("data: {");
-    let huge = "x".repeat(1024 * 1024 + 1);
     for (reply, config, captured, prefix) in [
         (
             streaming_reply(&["prefix"], Value::Null, None, false),
@@ -799,24 +793,6 @@ fn streaming_limits_failures_and_capture_policy_never_retry_as_unary() {
         ),
         (malformed, json!({}), false, true),
         (incomplete, json!({}), false, true),
-        (
-            streaming_reply(&["a", "b", "c"], Value::Null, Some("stop"), true),
-            json!({"max_output_bytes":2}),
-            false,
-            true,
-        ),
-        (
-            streaming_reply(&[&huge], Value::Null, Some("stop"), true),
-            json!({}),
-            false,
-            false,
-        ),
-        (
-            streaming_reply(&["\u{e9}"], Value::Null, Some("stop"), true),
-            json!({"max_output_bytes":1}),
-            false,
-            false,
-        ),
     ] {
         let server = Server::start(vec![reply]);
         let result = probe(
@@ -864,6 +840,40 @@ fn delivery_deadline_and_cancellation_cannot_become_captured_success() {
 }
 
 #[test]
+fn large_utf8_replies_are_preserved_in_unary_and_streaming_calls() {
+    let text = "é".repeat(600_000);
+    for streaming in [false, true] {
+        let reply = if streaming {
+            streaming_reply(
+                &[&text],
+                json!({"completion_tokens":10}),
+                Some("stop"),
+                true,
+            )
+        } else {
+            Reply::text(&text)
+        };
+        let server = Server::start(vec![reply]);
+        let result = probe(
+            &server,
+            json!({"stream":streaming,"inputs":[{"prompt":"hello"}]}),
+            json!({}),
+        );
+        let result = &result["results"][0];
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["outputs"]["text"].as_str().unwrap(), text);
+        assert_eq!(
+            result["outputs"]["history"][1]["content"].as_str().unwrap(),
+            text
+        );
+        if streaming {
+            assert_eq!(result["deltas"][0]["delta"]["text"].as_str().unwrap(), text);
+        }
+        assert_eq!(server.requests().len(), 1);
+    }
+}
+
+#[test]
 fn streaming_byte_boundaries_and_many_small_frames_preserve_one_final_text() {
     let parts = vec!["\u{e9}"; 100];
     let mut reply = streaming_reply(&parts, json!({"completion_tokens":5}), Some("stop"), true);
@@ -879,7 +889,7 @@ fn streaming_byte_boundaries_and_many_small_frames_preserve_one_final_text() {
     let result = probe(
         &server,
         json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
-        json!({"max_output_bytes":200}),
+        json!({}),
     );
     assert_eq!(result["results"][0]["ok"], true, "{result}");
     assert_eq!(result["results"][0]["outputs"]["text"], parts.concat());

@@ -18,45 +18,40 @@ fn event(text: &str) -> LiveOutputEvent {
 }
 
 #[test]
-fn record_and_byte_pressure_resume_in_order_without_retaining_history() {
-    let value = event(&"x".repeat(32));
-    let bytes = serde_json::to_vec(&value).unwrap().len();
-    for records in [1, 10] {
-        let (publisher, receiver) = live_channel(LiveLimits {
-            max_pending_records: records,
-            max_pending_bytes: bytes,
-            max_record_bytes: bytes,
-            max_total_bytes: bytes * 3,
-        })
-        .unwrap();
-        let cancellation = StreamCancellation::default();
-        publisher.publish(value.clone(), &cancellation).unwrap();
-        let pending = publisher.clone();
-        let second = value.clone();
-        let (started, ready) = mpsc::channel();
-        let worker = thread::spawn(move || {
-            started.send(()).unwrap();
-            pending.publish(second, &cancellation)
-        });
-        ready.recv().unwrap();
-        assert!(!worker.is_finished());
-        assert_eq!(receiver.metrics().pending_records, 1);
-        assert_eq!(receiver.metrics().pending_bytes, bytes);
-        receiver.recv().unwrap().unwrap();
-        worker.join().unwrap().unwrap();
-        drop(publisher);
-        receiver.recv().unwrap().unwrap();
-        assert!(receiver.recv().unwrap().is_none());
-        assert_eq!(receiver.metrics().pending_bytes, 0);
-        assert_eq!(receiver.metrics().total_bytes, bytes * 2);
-    }
+fn record_pressure_resumes_in_order_without_retaining_history() {
+    let (publisher, receiver) = live_channel(LiveLimits {
+        max_pending_records: 1,
+    })
+    .unwrap();
+    let cancellation = StreamCancellation::default();
+    publisher.publish(event("first"), &cancellation).unwrap();
+    let pending = publisher.clone();
+    let (started, ready) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        started.send(()).unwrap();
+        pending.publish(event("second"), &cancellation)
+    });
+    ready.recv().unwrap();
+    assert!(!worker.is_finished());
+    assert_eq!(receiver.metrics().pending_records, 1);
+    let first = receiver.recv().unwrap().unwrap();
+    assert!(
+        matches!(first.event, LiveOutputKind::Value { value } if value.as_str() == Some("first"))
+    );
+    worker.join().unwrap().unwrap();
+    drop(publisher);
+    let second = receiver.recv().unwrap().unwrap();
+    assert!(
+        matches!(second.event, LiveOutputKind::Value { value } if value.as_str() == Some("second"))
+    );
+    assert!(receiver.recv().unwrap().is_none());
+    assert_eq!(receiver.metrics().pending_records, 0);
 }
 
 #[test]
 fn receiver_drop_wakes_a_blocked_connected_publisher() {
     let (publisher, receiver) = live_channel(LiveLimits {
         max_pending_records: 1,
-        ..Default::default()
     })
     .unwrap();
     let cancellation = StreamCancellation::default();
@@ -82,7 +77,6 @@ fn receiver_drop_wakes_a_blocked_connected_publisher() {
 fn cancellation_interrupts_a_full_live_queue() {
     let (publisher, receiver) = live_channel(LiveLimits {
         max_pending_records: 1,
-        ..Default::default()
     })
     .unwrap();
     let cancellation = StreamCancellation::default();
@@ -104,44 +98,25 @@ fn cancellation_interrupts_a_full_live_queue() {
 }
 
 #[test]
-fn per_record_and_total_limits_fail_without_silent_truncation() {
-    let (publisher, receiver) = live_channel(LiveLimits {
-        max_record_bytes: 128,
-        max_pending_bytes: 256,
-        max_total_bytes: 512,
-        ..Default::default()
-    })
-    .unwrap();
-    let error = publisher
-        .publish(event(&"x".repeat(1024)), &StreamCancellation::default())
-        .unwrap_err();
-    assert!(matches!(error, StreamError::OutputEncode { .. }));
-    assert!(matches!(
-        receiver.try_recv(),
-        Err(LiveReceiveError::Failed { .. })
-    ));
-    assert_eq!(receiver.metrics().pending_records, 0);
-
-    let value = event("value");
-    let bytes = serde_json::to_vec(&value).unwrap().len();
+fn large_records_and_cumulative_output_have_no_byte_quota() {
+    let text = "x".repeat(5 * 1024 * 1024);
+    let value = event(&text);
     let (publisher, receiver) = live_channel(LiveLimits {
         max_pending_records: 1,
-        max_record_bytes: bytes,
-        max_pending_bytes: bytes,
-        max_total_bytes: bytes * 2,
     })
     .unwrap();
-    for _ in 0..2 {
+    for _ in 0..13 {
         publisher
             .publish(value.clone(), &StreamCancellation::default())
             .unwrap();
-        receiver.recv().unwrap().unwrap();
+        assert_eq!(receiver.metrics().pending_records, 1);
+        let received = receiver.recv().unwrap().unwrap();
+        assert!(
+            matches!(received.event, LiveOutputKind::Value { value } if value.as_str() == Some(text.as_str()))
+        );
     }
-    let error = publisher
-        .publish(value, &StreamCancellation::default())
-        .unwrap_err();
-    assert!(matches!(error, StreamError::Resource { .. }));
-    assert_eq!(receiver.metrics().total_bytes, bytes * 2);
+    drop(publisher);
+    assert!(receiver.recv().unwrap().is_none());
 }
 
 #[test]
@@ -149,7 +124,6 @@ fn empty_and_closed_are_distinct_and_invalid_limits_are_rejected() {
     assert!(
         live_channel(LiveLimits {
             max_pending_records: 0,
-            ..Default::default()
         })
         .is_err()
     );

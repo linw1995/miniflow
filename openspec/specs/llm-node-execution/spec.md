@@ -27,7 +27,7 @@ The node SHALL require a model field and validate literal settings during prepar
 #### Scenario: Use default connection settings
 
 - **WHEN** a configuration supplies only a valid model
-- **THEN** it selects the OpenAI API prefix, `OPENAI_API_KEY`, a 60000 millisecond deadline, and a 1048576 byte output text limit
+- **THEN** it selects the OpenAI API prefix, `OPENAI_API_KEY`, a 60000 millisecond deadline
 
 #### Scenario: Reject invalid configuration
 
@@ -121,7 +121,7 @@ Each successful invocation SHALL return required message-list `history` containi
 
 ### Requirement: Publish a terminal text result atomically
 
-Success SHALL publish one terminal result with complete string `text`, updated message-list `history`, succeeded status, one-call `usages`, and optional `usage` and `finish_reason`. Text blocks SHALL retain response order. Conversion and validation MUST precede publication. Empty or excessive text, unsupported content, and invalid counts SHALL fail without terminal outputs or transcript mutation by default. Earlier increments SHALL remain provisional.
+Success SHALL publish one terminal result with complete string `text`, updated message-list `history`, succeeded status, one-call `usages`, and optional `usage` and `finish_reason`. Text blocks SHALL retain response order. Conversion and validation MUST precede publication. Empty text, unsupported content, and invalid counts SHALL fail without terminal outputs or transcript mutation by default. Earlier increments SHALL remain provisional.
 
 #### Scenario: Receive a complete text answer
 
@@ -135,16 +135,11 @@ Success SHALL publish one terminal result with complete string `text`, updated m
 - **THEN** with capture_errors disabled the invocation fails without publishing terminal text, updated history, or metadata
 - **AND** supplied history remains unchanged
 
-#### Scenario: Exceed the text limit
+#### Scenario: Preserve a large text reply
 
-- **WHEN** decoded generated text exceeds the configured UTF-8 byte limit
-- **THEN** the node rejects the result before terminal publication and stops further live publication
-- **AND** streaming checks the bound incrementally while unary buffering retains its documented transport-memory limitation
-
-#### Scenario: Apply the reply limit independently of history
-
-- **WHEN** the generated reply fits the output text limit but the full transcript is larger
-- **THEN** that text limit does not trim or reject the transcript solely because of its aggregate size
+- **WHEN** a valid reply exceeds previous client-side text or SSE byte limits
+- **THEN** the node preserves complete text and any live increments without a byte-quota failure
+- **AND** provider `max_tokens`, invocation timeout, cancellation, and protocol validation remain in effect
 
 #### Scenario: Complete at the token limit
 
@@ -269,9 +264,9 @@ Connected live text SHALL carry ordered text increments and the actual model-cal
 - **WHEN** a streaming endpoint reports partial or no usage counters
 - **THEN** the final call record preserves reported counts and absent counts remain unknown
 
-### Requirement: Preserve streaming bounds and captured failures
+### Requirement: Preserve streaming deadlines and captured failures
 
-The resolved request deadline SHALL cover setup, all streaming reads, and final conversion. Cancellation, malformed/truncated frames, unsupported content, and incremental text limits SHALL stop publication. Existing captured-provider-failure policy SHALL retain reported call facts without making partial text successful. Delivery failure and cancellation MUST remain execution failures.
+The resolved request deadline SHALL cover setup, all streaming reads, and final conversion. Cancellation, malformed/truncated frames, and unsupported content SHALL stop publication. Existing captured-provider-failure policy SHALL retain reported call facts without making partial text successful. Delivery failure and cancellation MUST remain execution failures.
 
 #### Scenario: Handle a provider error after text
 

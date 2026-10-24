@@ -141,7 +141,7 @@ struct LiveRun {
 impl LiveRun {
     fn new(mut stdio: mf_runtime::StreamStdio, manifest: &mf_runtime::WorkflowManifest, run_id: mf_telemetry::identity::RunId, names: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
         let stdin = stdio.take_input();
-        let writer = mf_runtime::LiveOutputWriter::new(run_id, &manifest.stream_outputs, Default::default(), move |bytes, cancellation| {
+        let writer = mf_runtime::LiveOutputWriter::new(run_id, &manifest.stream_outputs, move |bytes, cancellation| {
             stdio.write_bytes(bytes, cancellation)
         })?;
         let publisher = if names.is_empty() { writer.publisher() } else { writer.publisher().select(names.iter().cloned()) };
