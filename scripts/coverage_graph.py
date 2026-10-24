@@ -111,12 +111,12 @@ def plan_exports(inventory, groups):
     return exports
 
 
-def export_test(tools, work_dir, export):
+def export_test(tools, work_dir, export, workspace_root):
     profdata, cov = tools
     merged = work_dir / "profdata" / f"{export['key']}.profdata"
     lcov = work_dir / "lcov" / f"{export['key']}.lcov"
     merge = subprocess.run(
-        [str(profdata), "merge", "-sparse",
+        [str(profdata), "merge", "-sparse", "--num-threads=1",
          *[str(profile) for profile in export["profiles"]], "-o", str(merged)],
         capture_output=True, text=True)
     if merge.returncode:
@@ -125,7 +125,10 @@ def export_test(tools, work_dir, export):
     with open(lcov, "w") as output:
         result = subprocess.run(
             [str(cov), "export", "--format=lcov", "-object", str(export["binary_path"]),
-             f"--instr-profile={merged}"], stdout=output, stderr=subprocess.PIPE, text=True)
+             f"--instr-profile={merged}", "--skip-functions", "--skip-branches",
+             "--num-threads=1",
+             f"--include-filename-regex=^{re.escape(str(workspace_root) + os.sep)}"],
+            stdout=output, stderr=subprocess.PIPE, text=True)
     if result.returncode:
         raise ValueError(f"llvm-cov export failed for {export['key']}: "
                          + result.stderr.strip().splitlines()[-1])
@@ -213,14 +216,21 @@ def build(coverage_dir, output):
     tools = llvm_tools()
     started = time.monotonic()
     with ThreadPoolExecutor(max_workers=min(10, os.cpu_count() or 1)) as pool:
-        list(pool.map(lambda export: export_test(tools, work_dir, export), exports))
+        list(pool.map(lambda export: export_test(tools, work_dir, export, root), exports))
     export_seconds = time.monotonic() - started
     manifest = write_manifest(work_dir, source, exports)
     output.parent.mkdir(parents=True, exist_ok=True)
-    summary = index(root, build_indexer(root), manifest, output, work_dir)
+    started = time.monotonic()
+    indexer = build_indexer(root)
+    build_seconds = time.monotonic() - started
+    started = time.monotonic()
+    summary = index(root, indexer, manifest, output, work_dir)
+    index_seconds = time.monotonic() - started
     metadata = write_metadata(output, manifest, summary)
     print(json.dumps({"tests": summary["tests"], "files": summary["files"],
                       "ranges": summary["ranges"], "export_seconds": round(export_seconds, 3),
+                      "build_seconds": round(build_seconds, 3),
+                      "index_seconds": round(index_seconds, 3),
                       "graph": str(output), "metadata": str(metadata)}, indent=2))
 
 

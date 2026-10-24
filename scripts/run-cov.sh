@@ -249,7 +249,9 @@ case "${1:-}" in
     targets=("$CARGO_TARGET_DIR")
     if [[ -n "${MF_TEST_BUILD_CACHE_DIR:-}" ]]; then
       targets+=("${MF_TEST_BUILD_CACHE_DIR}/target" "${MF_TEST_BUILD_CACHE_DIR}/packaged-target")
+      targets+=("${MF_TEST_BUILD_CACHE_DIR}/optimized/target")
       rm -f "${MF_TEST_BUILD_CACHE_DIR}/prepared-session.json"
+      rm -f "${MF_TEST_BUILD_CACHE_DIR}/optimized/prepared-session.json"
     fi
     python3 scripts/prune-test-cache.py "${targets[@]}"
     rm -f "${coverage_dir}/binaries.json" "${coverage_dir}/cargo-metadata.json"

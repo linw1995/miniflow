@@ -4,6 +4,9 @@ experimental = ["setup-scripts", "wrapper-scripts"]
 [test-groups.shared-cargo]
 max-threads = 1
 
+[test-groups.optimized-cargo]
+max-threads = 1
+
 [scripts.wrapper.per-test-profraw]
 # Transparent unless MF_COVERAGE_PER_TEST_DIR is set by scripts/run-cov.sh
 # during full coverage-graph collection.
@@ -18,6 +21,16 @@ capture-stderr = true
 command = ["python3", "scripts/nextest-build-cache.py"]
 capture-stdout = true
 capture-stderr = true
+
+[scripts.setup.optimized-build-cache]
+command = ["python3", "scripts/nextest-build-cache.py", "--optimized"]
+capture-stdout = true
+capture-stderr = true
+
+[[profile.default.scripts]]
+platform = 'cfg(unix)'
+filter = 'binary_id(=mf-cli::manifest) & test(=release_lto_and_strip_preserve_standalone_factory_free_manifest)'
+setup = "optimized-build-cache"
 
 [[profile.default.scripts]]
 platform = 'cfg(unix)'
@@ -84,10 +97,8 @@ binary_id(=mf-compiler::runner_signals) |
     test(=streaming_runner_exports_message_lifecycles_without_changing_results) |
     test(=streaming_snapshots_preserve_large_values_and_report_interrupted_history)
 )) |
-(binary_id(=mf-cli::manifest) & (
-    test(=moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts) |
-    test(=release_lto_and_strip_preserve_standalone_factory_free_manifest)
-)) |
+(binary_id(=mf-cli::manifest) &
+    test(=moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts)) |
 (binary_id(=mf-cli::stream_tui) &
     test(=generated_streams_run_in_tui_with_parameters_files_and_interrupts)) |
 (binary_id(=mf-compiler::embedding_host) &
@@ -182,10 +193,8 @@ binary_id(=mf-compiler::runner_signals) |
     test(=streaming_runner_exports_message_lifecycles_without_changing_results) |
     test(=streaming_snapshots_preserve_large_values_and_report_interrupted_history)
 )) |
-(binary_id(=mf-cli::manifest) & (
-    test(=moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts) |
-    test(=release_lto_and_strip_preserve_standalone_factory_free_manifest)
-)) |
+(binary_id(=mf-cli::manifest) &
+    test(=moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts)) |
 (binary_id(=mf-cli::stream_tui) &
     test(=generated_streams_run_in_tui_with_parameters_files_and_interrupts)) |
 (binary_id(=mf-compiler::embedding_host) &
@@ -219,9 +228,15 @@ binary_id(=mf-compiler::runner_signals) |
 test-group = "shared-cargo"
 
 [[profile.default.overrides]]
+platform = 'cfg(unix)'
+filter = 'binary_id(=mf-cli::manifest) & test(=release_lto_and_strip_preserve_standalone_factory_free_manifest)'
+test-group = "optimized-cargo"
+threads-required = 2
+
+[[profile.default.overrides]]
 filter = 'test(=packaged_cli_acceptance)'
 # The acceptance test performs several Cargo builds in isolated directories.
-threads-required = "num-test-threads"
+threads-required = 2
 slow-timeout = { period = "60s", terminate-after = 20 }
 
 [profile.ci]

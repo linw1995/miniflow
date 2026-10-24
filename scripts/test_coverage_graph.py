@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 import unittest.mock
@@ -73,6 +75,65 @@ class ExportPlanning(unittest.TestCase):
         groups = {"mf-runtime__UNATTRIBUTED": [Path("a.profraw")]}
         with self.assertRaises(ValueError):
             coverage_graph.plan_exports(inventory(), groups)
+
+
+class ExportExecution(unittest.TestCase):
+    def test_compact_export_preserves_workspace_lines_without_dependency_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "workspace [coverage]"
+            root.mkdir()
+            dependency = base / "external.rs"
+            dependency.write_text("pub fn value() -> u32 { 7 }\n")
+            library = base / "libexternal.rlib"
+            source = root / "main.rs"
+            source.write_text('''fn main() {
+    assert_eq!(external::value(), 7);
+    assert_eq!(value(true), 1);
+}
+fn value(flag: bool) -> u32 {
+    if flag { 1 } else { 2 }
+}
+''')
+            binary = root / "fixture"
+            common = ["rustc", "--edition=2024", "-Cinstrument-coverage", "-Cdebuginfo=0"]
+            subprocess.run(common + [str(dependency), "--crate-name", "external",
+                                    "--crate-type=rlib", "-o", str(library)], check=True)
+            subprocess.run(common + [source.name, "--extern", f"external={library}",
+                                    "-o", str(binary)], cwd=root, check=True)
+            profile = base / "fixture.profraw"
+            subprocess.run([str(binary)], check=True,
+                           env=os.environ | {"LLVM_PROFILE_FILE": str(profile)})
+            work = base / "export"
+            for name in ["profdata", "lcov"]:
+                (work / name).mkdir(parents=True)
+            export = {"key": "fixture", "profiles": [profile], "binary_path": binary}
+            tools = coverage_graph.llvm_tools()
+            coverage_graph.export_test(tools, work, export, root)
+            compact = (work / "lcov/fixture.lcov").read_text()
+            full = subprocess.check_output([
+                str(tools[1]), "export", "--format=lcov", "-object", str(binary),
+                f"--instr-profile={work / 'profdata/fixture.profdata'}",
+            ], text=True)
+
+            def workspace_lines(report):
+                lines = {}
+                source = None
+                for line in report.splitlines():
+                    if line.startswith("SF:"):
+                        source = Path(line[3:]).resolve()
+                    elif line.startswith("DA:") and source.is_relative_to(root):
+                        number, count, *_ = line[3:].split(",")
+                        lines[source, int(number)] = int(count)
+                return lines
+
+            self.assertTrue(workspace_lines(full))
+            self.assertEqual(workspace_lines(compact), workspace_lines(full))
+            self.assertIn(str(dependency), full)
+            self.assertNotIn(str(dependency), compact)
+            self.assertIn("FNDA:", full)
+            self.assertNotIn("FNDA:", compact)
+            self.assertLess(len(compact), len(full))
 
 
 class Signature(unittest.TestCase):

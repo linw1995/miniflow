@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import hashlib
 import json
 import os
@@ -10,10 +11,14 @@ import subprocess
 from cargo_cache import clean_workspace
 
 
-def main():
+def main(optimized=False):
     # Behavior fixtures need release semantics, but not optimizer throughput.
     # Keep caller overrides and coverage instrumentation intact.
     os.environ.setdefault("CARGO_PROFILE_RELEASE_OPT_LEVEL", "0")
+    if optimized:
+        os.environ["CARGO_PROFILE_RELEASE_OPT_LEVEL"] = "3"
+        os.environ["CARGO_PROFILE_RELEASE_LTO"] = "true"
+        os.environ["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = "1"
     workspace = Path(os.environ["NEXTEST_WORKSPACE_ROOT"])
     cargo = shutil.which(os.environ.get("CARGO", "cargo"))
     if cargo is None:
@@ -33,6 +38,8 @@ def main():
         / "nextest-build-cache"
         / os.environ["NEXTEST_RUN_ID"]
     )
+    if optimized:
+        directory /= "optimized"
     # Package steps share immutable binaries and one preparation session. A new
     # coverage invocation must still discard restored workspace artifacts.
     session = os.environ.get("MF_TEST_BUILD_CACHE_SESSION")
@@ -67,7 +74,7 @@ def main():
     source_config = directory / "source.toml"
     vendor = directory / "vendor"
     with open(os.environ["NEXTEST_ENV"], "a") as output:
-        for name, value in {
+        environment = {
             "CARGO": workspace / "scripts/nextest-cargo.sh",
             # Selected fixtures use local packages and already-fetched registry dependencies.
             "CARGO_NET_OFFLINE": "true",
@@ -77,7 +84,11 @@ def main():
             "MF_TEST_PACKAGE_TARGET_DIR": directory / "packaged-target",
             "MF_TEST_SOURCE_CONFIG": source_config,
             "MF_TEST_VENDOR_DIR": vendor,
-        }.items():
+        }
+        if optimized:
+            environment["CARGO_PROFILE_RELEASE_LTO"] = "true"
+            environment["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = "1"
+        for name, value in environment.items():
             output.write(f"{name}={value}\n")
 
 
@@ -168,7 +179,13 @@ def prepare_cache(workspace, cargo, metadata, directory, persistent):
         env=env,
         check=True,
     )
+    # Nested targets may omit this tag when an ancestor already has one.
+    (target / "CACHEDIR.TAG").write_text(
+        "Signature: 8a477f597d28d172789f06886806bc55\n"
+    )
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--optimized", action="store_true")
+    main(parser.parse_args().optimized)

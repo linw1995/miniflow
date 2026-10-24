@@ -43,9 +43,17 @@ standard Actions artifact retention applies. A local full-coverage run opts into
 the same collection with `scripts/run-cov.sh --coverage-graph <path>`, which
 cannot combine with `--affected-plan` and never publishes.
 
+Graph exports retain workspace line records only; function and branch records are
+not consumed by the index. Each LLVM subprocess uses one worker while tests export
+in parallel, avoiding nested thread pools. Export, indexer-build, and indexing times
+are reported separately. Aggregate coverage reports retain their existing coverage data.
+
 Formatting, package builds, Clippy, repository hooks, and CI script tests
 also run in CI. Main additionally builds and checks the macOS package;
 complete macOS test execution runs in nightly.
+Nix prepares separate dependency artifacts for the release CLI build, workspace
+Clippy checks, and full nextest suite. Each preparation runs only the Cargo phase
+its consumer needs, with matching package, target, feature, and profile settings.
 
 Coverage dependencies and generated-project builds use persistent caches.
 CI disables dev/test debug information while retaining LLVM coverage maps.
@@ -87,7 +95,11 @@ projects remain temporary and isolated.
 The default and CI profiles share the generated-build fixtures for the CLI,
 compiler, and chat host. The chat fixture copies only its own build inputs and
 keeps dependency paths in the checkout; it deletes the copied workspace before
-running the relocated host. All shared builds use one serialized test group.
+running the relocated host. Ordinary generated builds use one serialized test group.
+The LTO/strip probe has its own optimized target, vendor tree, setup session, and
+serialized group, so it can overlap ordinary fixture tests without replacing their
+runners. Packaging remains serialized with ordinary builds while seeding its separate
+target. Packaging and LTO each reserve two nextest slots instead of blocking all tests.
 Only release dependencies are prewarmed; obsolete dev artifacts are removed.
 Generated-runner behavior tests use the release profile with optimization level
 zero by default. This keeps release semantics and artifact paths while reducing
