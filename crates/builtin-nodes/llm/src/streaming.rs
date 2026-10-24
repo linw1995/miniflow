@@ -10,7 +10,7 @@ use rig_core::{
 use snafu::ResultExt;
 use std::time::Instant;
 
-pub async fn complete(
+pub fn complete(
     response: Result<Streamed<Completion>, ProviderError>,
     emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
     call_id: &str,
@@ -24,7 +24,9 @@ pub async fn complete(
             .map(|status| status.as_u16()),
     })?;
     let mut first_text = true;
-    while let Some(item) = response.next().await {
+    // Keep synchronous publication outside the future driver's deadline check so
+    // a delivery failure cannot be replaced with a capturable provider timeout.
+    while let Some(item) = context.execute_future(response.next(), Some(deadline))? {
         context.check_future_limits(Some(deadline))?;
         let item = item.with_context(|source| crate::ProviderSnafu {
             kind: source.kind().code(),
@@ -55,9 +57,8 @@ pub async fn complete(
                 .context(crate::PublicationSnafu)?;
         }
     }
-    response
-        .finish()
-        .await
+    context
+        .execute_future(response.finish(), Some(deadline))?
         .with_context(|source| crate::ProviderSnafu {
             kind: source.kind().code(),
             status: source

@@ -544,19 +544,13 @@ impl LlmNode {
             .record_event(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
             .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
         let response = if emitter.is_connected() {
-            context
-                .execute_future(
-                    streaming::complete(
-                        model.stream(request),
-                        emitter,
-                        &usage.call_id,
-                        deadline,
-                        context,
-                    ),
-                    Some(deadline),
-                )
-                .map_err(LlmExecutionError::from)
-                .and_then(|result| result)
+            streaming::complete(
+                model.stream(request),
+                emitter,
+                &usage.call_id,
+                deadline,
+                context,
+            )
         } else {
             context
                 .execute_future(model.call(request), Some(deadline))
