@@ -387,11 +387,10 @@ fn waiting_for_headers_or_body_is_bounded_and_cancelled_calls_publish_nothing() 
 }
 
 #[test]
-fn oversized_empty_tool_and_malformed_responses_fail_without_history() {
+fn empty_tool_and_malformed_responses_fail_without_history() {
     let mut tool = serde_json::from_str::<Value>(&Reply::text("text").body).unwrap();
     tool["choices"][0]["message"]["tool_calls"] = json!([{"id": "call", "type": "function", "function": {"name": "noop", "arguments": "{}"}}]);
     for (reply, config) in [
-        (Reply::text("long"), json!({"max_output_bytes": 2})),
         (Reply::text(""), json!({})),
         (Reply::json(tool), json!({})),
         (
@@ -584,4 +583,19 @@ fn attribution_is_reported_for_success_and_captured_failure_without_entering_pro
         assert!(request.body.get("attribution").is_none());
         assert!(!request.body.to_string().contains("summary-profile"));
     }
+}
+
+#[test]
+fn large_utf8_reply_is_preserved_without_a_client_output_byte_limit() {
+    let text = "é".repeat(600_000);
+    let server = Server::start(vec![Reply::text(&text)]);
+    let result = probe(&server, json!({"inputs":[{"prompt":"hello"}]}), json!({}));
+    let result = &result["results"][0];
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["outputs"]["text"].as_str().unwrap(), text);
+    assert_eq!(
+        result["outputs"]["history"][1]["content"].as_str().unwrap(),
+        text
+    );
+    assert_eq!(server.requests().len(), 1);
 }

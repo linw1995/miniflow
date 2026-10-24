@@ -367,18 +367,17 @@ Static configuration has this shape:
   "api_key_env": "MODEL_API_KEY",
   "temperature": 0.2,
   "max_tokens": 256,
-  "timeout_ms": 60000,
-  "max_output_bytes": 1048576
+  "timeout_ms": 60000
 }
 ```
 
-`model` is required and nonblank. Defaults are the OpenAI API prefix, `OPENAI_API_KEY`, a 60000 millisecond deadline,
-and a 1 MiB generated-text limit. Optional `temperature` must be finite and between 0 and 2; optional `max_tokens`
-must be positive. Supplied numeric fields cannot be null. Deadlines and text limits must be positive integers.
+`model` is required and nonblank. Defaults are the OpenAI API prefix, `OPENAI_API_KEY`, and a 60000 millisecond deadline.
+Generated text has no client-side byte limit. Optional `temperature` must be finite and between 0 and 2; optional `max_tokens`
+must be positive. Supplied numeric fields cannot be null. Deadlines must be positive integers.
 `base_url` is an HTTP or HTTPS API prefix without embedded credentials, query, or fragment. Configuration rejects
 unknown fields, including `stream` and provider-specific request overrides. Literal credentials are rejected.
 
-`model`, `base_url`, `temperature`, `max_tokens`, `timeout_ms`, and `max_output_bytes` also accept configuration
+`model`, `base_url`, `temperature`, `max_tokens`, and `timeout_ms` also accept configuration
 templates. Use `api_key` with a runtime reference to supply credentials from a parameter; it cannot be combined
 with `api_key_env`. The latter remains a literal environment-variable name for existing workflows.
 
