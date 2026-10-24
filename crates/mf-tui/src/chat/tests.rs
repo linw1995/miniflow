@@ -442,13 +442,16 @@ fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf)
         {"answer":{"text":"provisional","model_call_id":"model-call"}},
         {"status":"succeeded","text":"canonical","usages":[]}
     ]);
+    // Exceed preview and queue limits without turning delivery checks into a throughput benchmark.
+    let flood_records = (super::preview::MAX_PREVIEW_BYTES * 2).div_ceil(64);
     let script = format!(
         r#"#!/usr/bin/env python3
 import json, os, sys, time
 records = json.loads({records:?})
 mode = {mode:?}
 if mode == 'flood':
-    records = [records[0].copy() for _ in range(20000)] + records[-1:]
+    records[0]['answer']['text'] = 'x' * 64
+    records = [records[0].copy() for _ in range({flood_records})] + records[-1:]
 if mode == 'empty':
     records = records[-1:]
 split = 0 if mode == 'empty' else 1
