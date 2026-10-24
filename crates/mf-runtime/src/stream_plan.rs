@@ -205,7 +205,7 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
-    pub(super) fn emission_node(&self, node: usize) -> &FlowNode<()> {
+    pub fn emission_node(&self, node: usize) -> &FlowNode<()> {
         self.emission_nodes[node]
             .as_ref()
             .expect("message source has an emission contract")

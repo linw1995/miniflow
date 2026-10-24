@@ -643,21 +643,24 @@ fn validate_base_metadata(
         .iter()
         .map(|node| (node.definition_id.clone(), &node.metadata))
         .collect();
-    let invalid = |id: &DefinitionId, message: String| WorkflowCompileError::InvalidNodeMetadata {
-        definition_id: id.clone(),
-        message,
+    let invalid = |id: &DefinitionId, message: String| {
+        InvalidNodeMetadataSnafu {
+            definition_id: id.clone(),
+            message,
+        }
+        .build()
     };
     let mut output_index = BTreeMap::new();
     for node in nodes {
         let ports = registrations[&node.definition_id];
-        if !ports.stream_outputs.is_empty()
-            && !matches!(node.node, Some(mf_runtime::NodeExecution::TaskStream(_)))
-        {
-            return Err(invalid(
-                &node.definition_id,
-                "separate stream outputs require a combined executor".into(),
-            ));
-        }
+        ensure!(
+            ports.stream_outputs.is_empty()
+                || matches!(node.node, Some(mf_runtime::NodeExecution::TaskStream(_))),
+            InvalidNodeMetadataSnafu {
+                definition_id: node.definition_id.clone(),
+                message: "separate stream outputs require a combined executor",
+            }
+        );
         if !node.metadata.input_bindings.is_empty()
             && (!startup || incoming.contains_key(node.definition_id.as_str()))
         {

@@ -574,7 +574,7 @@ impl ExecutionContext {
         self.snapshots = Some(recorder);
     }
 
-    pub(super) fn execute_task_stream<N>(
+    pub fn execute_task_stream<N>(
         &mut self,
         node: &FlowNode<N>,
         executor: &crate::TaskStreamExecutor,
@@ -614,7 +614,7 @@ impl ExecutionContext {
         result
     }
 
-    pub(super) fn with_node<T, E>(
+    pub fn with_node<T, E>(
         &mut self,
         node: crate::DefinitionId,
         invoke: impl FnOnce(&mut Self) -> Result<T, E>,
