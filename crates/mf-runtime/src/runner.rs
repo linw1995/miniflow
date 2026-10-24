@@ -5,11 +5,6 @@ use snafu::Snafu;
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
     #[snafu(
-        display("live output delivery failed: {source}"),
-        visibility(pub(super))
-    )]
-    LiveOutput { source: crate::StreamError },
-    #[snafu(
         display("node `{definition_id}` requires successful node `{source_node}`: {source}"),
         visibility(pub)
     )]
@@ -80,29 +75,5 @@ pub enum WorkflowRunError {
 impl WorkflowRunError {
     pub(crate) fn is_output_error(&self) -> bool {
         matches!(self, Self::OutputType { .. } | Self::InvalidOutput { .. })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::error::Error;
-
-    #[test]
-    fn live_delivery_failure_preserves_its_runtime_source() {
-        let error = WorkflowRunError::LiveOutput {
-            source: crate::StreamError::Execution {
-                message: "transport disconnected".into(),
-            },
-        };
-        assert!(error.to_string().contains("live output delivery failed"));
-        let source = error
-            .source()
-            .unwrap()
-            .downcast_ref::<crate::StreamError>()
-            .unwrap();
-        assert!(
-            matches!(source, crate::StreamError::Execution { message } if message == "transport disconnected")
-        );
     }
 }

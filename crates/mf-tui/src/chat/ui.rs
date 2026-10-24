@@ -1692,26 +1692,16 @@ mod tests {
         );
         let mut preview = LivePreview::default();
         preview.begin(invocation.clone());
-        let event = |event| mf_runtime::LiveOutputEvent {
-            export: "answer".into(),
-            source: vec!["answer".into()],
-            invocation: mf_runtime::StreamInvocation {
-                id: 1,
-                node: "answer".into(),
-                path: vec![],
-            },
-            event,
-        };
-        preview
-            .apply(&invocation, event(mf_runtime::LiveOutputKind::Open))
-            .unwrap();
         preview
             .apply(
                 &invocation,
-                event(mf_runtime::LiveOutputKind::Value {
-                    value: serde_json::json!({"text":"draft prefix","model_call_id":"model-call"})
-                        .into(),
-                }),
+                mf_chat::PreviewEvent {
+                    invocation: invocation.clone(),
+                    delta: mf_chat::TextDelta {
+                        text: "draft prefix".into(),
+                        model_call_id: "model-call".into(),
+                    },
+                },
             )
             .unwrap();
         view.event(
@@ -1787,14 +1777,9 @@ mod tests {
         view.preview.begin(invocation.clone());
         view.preview
             .segments
-            .push(super::super::live::PreviewSegment {
-                invocation: mf_runtime::StreamInvocation {
-                    id: 1,
-                    node: "answer".into(),
-                    path: vec![],
-                },
+            .push(super::super::preview::PreviewSegment {
+                model_call_id: "model-call".into(),
                 text: "partial text".into(),
-                closed: true,
             });
         view.event(
             ChatEvent::Finished {

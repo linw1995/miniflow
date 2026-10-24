@@ -37,8 +37,6 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
-    #[snafu(display("invalid live export `{name}`: {message}"))]
-    InvalidLiveExport { name: String, message: String },
     #[snafu(display("invalid node-success dependency: {message}"))]
     InvalidSuccessDependency { message: String },
     #[snafu(transparent)]
@@ -489,63 +487,22 @@ pub fn prepare_definition_with_layouts(
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
-    let mut names = BTreeSet::new();
-    for output in &definition.stream_outputs {
-        ensure!(
-            definition.version.supports_live_outputs(),
-            InvalidLiveExportSnafu {
-                name: &output.name,
-                message: "stream_outputs requires version 2026-10-23",
-            }
-        );
-        ensure!(
-            !output.name.trim().is_empty() && names.insert(&output.name),
-            InvalidLiveExportSnafu {
-                name: &output.name,
-                message: "export names must be nonempty and unique",
-            }
-        );
-        ensure!(
-            !output.path.is_empty()
-                && output.path.iter().all(|id| !id.as_str().is_empty())
-                && !output.port.is_empty(),
-            InvalidLiveExportSnafu {
-                name: &output.name,
-                message: "source path and port must be nonempty",
-            }
-        );
-    }
-    let mut resolved = BTreeSet::new();
-    let result = prepare_graph(
+    prepare_graph(
         definition,
         &mut GraphPreparation {
             registry,
             body_layouts,
             path: Vec::new(),
-            exports: &definition.stream_outputs,
-            resolved: &mut resolved,
         },
         None,
         false,
-    )?;
-    for output in &definition.stream_outputs {
-        ensure!(
-            resolved.contains(&output.name),
-            InvalidLiveExportSnafu {
-                name: &output.name,
-                message: "source path does not identify a prepared node",
-            }
-        );
-    }
-    Ok(result)
+    )
 }
 
 struct GraphPreparation<'a> {
     registry: &'a NodeRegistry,
     body_layouts: Option<&'a mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
     path: Vec<DefinitionId>,
-    exports: &'a [mf_runtime::WorkflowStreamOutputDefinition],
-    resolved: &'a mut BTreeSet<String>,
 }
 
 fn prepare_graph(
@@ -629,14 +586,6 @@ fn prepare_graph(
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         inference.resolve_node(&mut nodes[indices[id]], dependencies)?;
     }
-    for node in &mut nodes {
-        let mut path = preparation.path.clone();
-        path.push(node.definition_id.clone());
-        let exports = bind_stream_outputs(node, &path, preparation.exports)?;
-        preparation
-            .resolved
-            .extend(exports.into_iter().map(|output| output.name));
-    }
     crate::construction::validate_exclusive_branches(order.iter().map(|id| {
         (
             &nodes[indices[id]],
@@ -645,54 +594,6 @@ fn prepare_graph(
     }))
     .context(FlowConstructionSnafu)?;
     Ok((nodes, order))
-}
-
-pub fn bind_stream_outputs(
-    node: &mut FlowNode,
-    path: &[DefinitionId],
-    selections: &[mf_runtime::WorkflowStreamOutputDefinition],
-) -> Result<Vec<mf_runtime::StreamOutputContract>, WorkflowCompileError> {
-    let mut exports = Vec::new();
-    for output in selections.iter().filter(|output| output.path == path) {
-        let execution = node.node.as_ref().with_context(|| InvalidLiveExportSnafu {
-            name: &output.name,
-            message: "source has no prepared executor",
-        })?;
-        ensure!(
-            matches!(
-                execution,
-                mf_runtime::NodeExecution::TaskStream(_) | mf_runtime::NodeExecution::Stream(_)
-            ),
-            InvalidLiveExportSnafu {
-                name: &output.name,
-                message: "live exports require a combined or Stream producer; Event results use ordinary stream output selection",
-            }
-        );
-        let port = execution
-            .stream_outputs(&node.metadata)
-            .iter()
-            .find(|port| port.name == output.port)
-            .with_context(|| InvalidLiveExportSnafu {
-                name: &output.name,
-                message: format!("source port `{}` is not a stream output", output.port),
-            })?;
-        exports.push(mf_runtime::StreamOutputContract {
-            name: output.name.clone(),
-            path: path.to_vec(),
-            port: output.port.clone(),
-            value_type: port.value_type.clone(),
-            required: port.required,
-        });
-    }
-    if let Some(mf_runtime::NodeExecution::TaskStream(executor)) = &mut node.node {
-        executor.set_stream_contract(&node.metadata.stream_outputs);
-        executor.set_exports(exports.clone());
-    }
-    node.metadata
-        .stream_exports
-        .retain(|contract| contract.path != path);
-    node.metadata.stream_exports.extend(exports.iter().cloned());
-    Ok(exports)
 }
 
 pub fn incoming_dependencies(
@@ -773,9 +674,9 @@ fn validate_base_metadata(
                 })?;
         }
         for (direction, specs) in [
-            ("input", ports.ports.inputs.iter().collect::<Vec<_>>()),
-            ("output", ports.ports.outputs.iter().collect()),
-            ("stream output", ports.stream_outputs.iter().collect()),
+            ("input", &ports.ports.inputs),
+            ("output", &ports.ports.outputs),
+            ("stream output", &node.metadata.stream_outputs),
         ] {
             let mut names = BTreeSet::new();
             for port in specs {
@@ -870,7 +771,10 @@ fn validate_base_metadata(
     for edge in definition.edges.iter() {
         let source = registrations[&edge.from_node];
         let target = registrations[&edge.to_node];
-        let Some(_) = source.output_port(&edge.from_output) else {
+        let Some(_) = source
+            .output_ports()
+            .find(|port| port.name == edge.from_output)
+        else {
             return UnknownOutputPortSnafu {
                 from_node: edge.from_node.clone(),
                 from_output: edge.from_output.clone(),
@@ -1324,11 +1228,6 @@ pub fn normalize_plan(
                 edges
             },
             outputs,
-            stream_outputs: {
-                let mut outputs = definition.stream_outputs.clone();
-                outputs.sort_by(|left, right| left.name.cmp(&right.name));
-                outputs
-            },
             clusters: definition.clusters.clone(),
         },
         execution_order,
@@ -1414,28 +1313,13 @@ pub fn describe_workflow_inputs(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::WorkflowInputSchema, WorkflowCompileError> {
-    describe_workflow_contracts(plan, registry).map(|(inputs, _)| inputs)
-}
-
-pub fn describe_workflow_contracts(
-    plan: &CompiledWorkflow,
-    registry: &NodeRegistry,
-) -> Result<
-    (
-        mf_runtime::WorkflowInputSchema,
-        Vec<mf_runtime::StreamOutputContract>,
-    ),
-    WorkflowCompileError,
-> {
     if plan.definition.execution.is_some() {
-        let prepared = crate::instantiate_stream(plan, registry)?;
-        Ok((
-            prepared.plan().input_schema().clone(),
-            prepared.plan().stream_outputs(),
-        ))
+        Ok(crate::instantiate_stream(plan, registry)?
+            .plan()
+            .input_schema()
+            .clone())
     } else {
-        let flow = instantiate_compiled(plan, registry)?;
-        Ok((flow.input_schema().clone(), flow.stream_outputs()))
+        Ok(instantiate_compiled(plan, registry)?.input_schema().clone())
     }
 }
 
@@ -1444,18 +1328,11 @@ pub fn describe_interface(
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::WorkflowInterface, WorkflowCompileError> {
     let graph = describe_compiled(plan)?;
-    let (schema, stream_outputs) = describe_workflow_contracts(plan, registry)?;
-    let live_output = plan.definition.execution.is_none();
+    let schema = describe_workflow_inputs(plan, registry)?;
     let interface = mf_runtime::WorkflowInterface {
-        version: if live_output || !stream_outputs.is_empty() {
-            mf_runtime::WorkflowInterfaceVersion::V2026_10_23
-        } else {
-            mf_runtime::WorkflowInterfaceVersion::for_schema(&schema)
-        },
+        version: mf_runtime::WorkflowInterfaceVersion::for_schema(&schema),
         workflow_id: graph.workflow_id.clone(),
         schema,
-        live_output,
-        stream_outputs,
     };
     interface.validate_for_description(&graph)?;
     Ok(interface)
@@ -1609,20 +1486,14 @@ pub fn resolve_nodes(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
-    if !definition.stream_outputs.is_empty() {
-        return prepare_definition(definition, registry).map(|(nodes, _)| nodes);
-    }
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
-    let mut resolved = BTreeSet::new();
     resolve_nodes_in_scope(
         definition,
         &mut GraphPreparation {
             registry,
             body_layouts: None,
             path: Vec::new(),
-            exports: &[],
-            resolved: &mut resolved,
         },
         None,
         false,
@@ -1700,10 +1571,6 @@ fn bind_subgraph_node(
             path: Vec::new(),
         })
         .collect();
-    let stream_exports = nodes
-        .iter()
-        .flat_map(|node| node.metadata.stream_exports.iter().cloned())
-        .collect();
     let flow = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
         .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
@@ -1718,13 +1585,12 @@ fn bind_subgraph_node(
     let body = PreparedSubgraph::new(identities, outputs, move |state| {
         flow.execute_in_context(state)
     });
-    let mut instance = registration
+    let instance = registration
         .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
         .context(NodeConstructionSnafu {
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
-    instance.metadata.stream_exports = stream_exports;
     Ok(FlowNode::new(node.id.clone(), instance))
 }
 

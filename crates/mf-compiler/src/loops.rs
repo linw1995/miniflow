@@ -70,7 +70,6 @@ pub fn body_definition(
         control_edges: body.control_edges.clone(),
         order_edges: body.order_edges.clone(),
         outputs: Vec::new(),
-        stream_outputs: Vec::new(),
         clusters: body.clusters.clone(),
     }
 }

@@ -159,7 +159,7 @@ fn prepare(inspect: Inspect) -> PreparedStream {
         MessageDomains::from_parts(
             vec![None, Some(0)].into(),
             vec![1, 1].into(),
-            Some(1),
+            vec![1].into(),
             ExecutionDomains::from_parts(
                 (0..2)
                     .map(|id| ExecutionDomain {

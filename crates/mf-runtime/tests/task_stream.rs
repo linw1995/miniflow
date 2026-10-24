@@ -1,7 +1,7 @@
 use mf_runtime::{
     DiscardSink, EmissionSink, Emitter, ExecutionContext, Inputs, NodeBuildError, NodeExecution,
     NodeExecutionError, NodeMetadata, NodeResult, NodeValue, PreparedNode, StreamCancellation,
-    StreamError, StreamInvocation, TypedEmitter, TypedNodeResult, TypedTaskStreamNode,
+    StreamError, TypedEmitter, TypedNodeResult, TypedTaskStreamNode,
 };
 use std::{
     error::Error,
@@ -274,57 +274,6 @@ fn handled_send_errors_cannot_hide_cancellation() {
 }
 
 #[test]
-fn live_exports_preserve_recovery_and_fatal_delivery_boundaries() {
-    for invalid in [false, true] {
-        let mut context = ExecutionContext::default();
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let captured = events.clone();
-        context.set_live_publisher(mf_runtime::LivePublisher::new(move |event, _| {
-            if matches!(event.event, mf_runtime::LiveOutputKind::Value { .. }) {
-                return Err(StreamError::Execution {
-                    message: "live receiver disconnected".into(),
-                });
-            }
-            captured.lock().unwrap().push(event);
-            Ok(())
-        }));
-        let node = combined(true, invalid, true);
-        let returned = node.returned.clone();
-        let prepared = PreparedNode::typed_task_stream(node, NodeMetadata::default()).unwrap();
-        let NodeExecution::TaskStream(mut executor) = prepared.execution else {
-            panic!("expected a combined executor");
-        };
-        executor.set_exports(vec![mf_runtime::StreamOutputContract {
-            name: "answer".into(),
-            path: vec!["model".into()],
-            port: "delta".into(),
-            value_type: mf_runtime::ValueType::Float64,
-            required: true,
-        }]);
-        let result = executor.execute_with_sink(inputs(2), &mut context, &mut DiscardSink);
-        assert!(returned.load(Ordering::SeqCst));
-        let events = events.lock().unwrap();
-        if invalid {
-            assert_eq!(
-                result.unwrap().outputs["text"].as_str(),
-                Some("processed 2")
-            );
-            assert!(context.cancellation().failure().is_none());
-            assert!(matches!(
-                events.last().unwrap().event,
-                mf_runtime::LiveOutputKind::Close { completed: true }
-            ));
-        } else {
-            let error = result.unwrap_err();
-            assert!(has_source::<StreamError>(&error));
-            assert!(error.to_string().contains("live receiver disconnected"));
-            assert!(context.cancellation().failure().is_some());
-            assert_eq!(events.len(), 1);
-        }
-    }
-}
-
-#[test]
 fn discarded_dynamic_emissions_still_validate_types_and_required_fields() {
     let mut sink = DiscardSink;
     let mut emitter = Emitter::new(
@@ -467,16 +416,6 @@ fn cancellation_is_checked_even_without_emissions() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-#[test]
-fn invocation_identities_do_not_reuse_a_previous_call() {
-    let context = ExecutionContext::default();
-    let first = StreamInvocation::new(&context).unwrap();
-    let second = StreamInvocation::new(&context).unwrap();
-    assert_ne!(first.id, second.id);
-    assert_eq!(first.node, second.node);
-    assert_eq!(first.path, second.path);
-}
-
 struct Dynamic {
     ports: Vec<mf_runtime::PortSpec>,
 }
@@ -519,29 +458,6 @@ fn dynamic_preparation_reflects_output_categories_and_success_capabilities() {
         prepared.execution.stream_outputs(&prepared.metadata),
         Delta::ports()
     );
-}
-
-#[test]
-fn invocation_paths_survive_body_and_domain_context_forks() {
-    let mut context = ExecutionContext::default();
-    let scope = mf_runtime::ExecutionScope::new(
-        "repeat",
-        "%loop",
-        3,
-        Default::default(),
-        Default::default(),
-    )
-    .unwrap();
-    context
-        .run_scope(scope, |context| {
-            let child = context.fork_body(None).fork_domain_with_observation(None);
-            let invocation = StreamInvocation::new(&child).unwrap();
-            assert_eq!(invocation.path.len(), 1);
-            assert_eq!(invocation.path[0].loop_id, "repeat");
-            assert_eq!(invocation.path[0].index.get(), 3);
-            Ok(())
-        })
-        .unwrap();
 }
 
 #[derive(NodeValue)]
@@ -600,65 +516,6 @@ fn combined_emission_snapshots_are_redacted_independently_of_business_delivery()
 }
 
 #[test]
-fn publication_deadlines_interrupt_bounded_delivery_without_a_timer_thread() {
-    struct QueueSink(mf_runtime::LivePublisher);
-    impl EmissionSink for QueueSink {
-        fn send(&mut self, _: NodeResult) -> Result<(), StreamError> {
-            unreachable!()
-        }
-        fn send_with_cancellation(
-            &mut self,
-            result: NodeResult,
-            cancellation: &StreamCancellation,
-        ) -> Result<(), StreamError> {
-            self.0.publish(
-                mf_runtime::LiveOutputEvent {
-                    export: "answer".into(),
-                    source: vec!["llm".into()],
-                    invocation: StreamInvocation {
-                        id: 0,
-                        node: "llm".into(),
-                        path: vec![],
-                    },
-                    event: mf_runtime::LiveOutputKind::Value {
-                        value: result.outputs["delta"].clone(),
-                    },
-                },
-                cancellation,
-            )
-        }
-    }
-    let (publisher, _receiver) = mf_runtime::live_channel(mf_runtime::LiveLimits {
-        max_pending_records: 1,
-    })
-    .unwrap();
-    let mut sink = QueueSink(publisher);
-    let cancellation = StreamCancellation::default();
-    let mut emitter = Emitter::new("llm", &Delta::ports(), cancellation.clone(), &mut sink);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(40);
-    let result = || Delta { delta: 1.0 }.into_values().unwrap().into();
-    emitter.send_with_deadline(result(), deadline).unwrap();
-    let error = emitter.send_with_deadline(result(), deadline).unwrap_err();
-    assert!(error.to_string().contains("publication deadline exceeded"));
-    assert!(cancellation.failure().is_none());
-    let (publisher, receiver) = mf_runtime::live_channel(Default::default()).unwrap();
-    let mut sink = QueueSink(publisher);
-    let mut emitter = Emitter::new("llm", &Delta::ports(), cancellation, &mut sink);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
-    emitter.send_with_deadline(result(), deadline).unwrap();
-    receiver.recv().unwrap().unwrap();
-    std::thread::sleep(
-        deadline.saturating_duration_since(std::time::Instant::now())
-            + std::time::Duration::from_millis(2),
-    );
-    emitter.send(result()).unwrap();
-    receiver.recv().unwrap().unwrap();
-    drop(emitter);
-    drop(sink);
-    assert!(receiver.recv().unwrap().is_none());
-}
-
-#[test]
 fn task_adapters_preserve_success_dependency_capabilities() {
     for supported in [false, true] {
         let mut node = combined(false, false, false);
@@ -681,4 +538,44 @@ fn task_adapters_preserve_success_dependency_capabilities() {
             supported
         );
     }
+}
+
+#[test]
+fn publication_deadlines_are_scoped_to_a_send_without_poisoning_the_emitter() {
+    struct BlockOnce(bool);
+    impl EmissionSink for BlockOnce {
+        fn send(&mut self, _: NodeResult) -> Result<(), StreamError> {
+            Ok(())
+        }
+        fn send_with_cancellation(
+            &mut self,
+            result: NodeResult,
+            cancellation: &StreamCancellation,
+        ) -> Result<(), StreamError> {
+            if self.0 {
+                self.0 = false;
+                loop {
+                    if let Some(error) = cancellation.failure() {
+                        return Err(error);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+            self.send(result)
+        }
+    }
+    let cancellation = StreamCancellation::default();
+    let mut sink = BlockOnce(true);
+    let mut emitter = Emitter::new("source", &Delta::ports(), cancellation.clone(), &mut sink);
+    let result = || Delta { delta: 1.0 }.into_values().unwrap().into();
+    let error = emitter
+        .send_with_deadline(
+            result(),
+            std::time::Instant::now() + std::time::Duration::from_millis(20),
+        )
+        .unwrap_err();
+    assert!(has_source::<StreamError>(&error));
+    assert!(error.to_string().contains("publication deadline exceeded"));
+    assert!(cancellation.failure().is_none());
+    emitter.send(result()).unwrap();
 }

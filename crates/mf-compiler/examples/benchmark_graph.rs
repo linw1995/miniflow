@@ -41,7 +41,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
     WorkflowDefinition {
         version: WorkflowDefinitionVersion::CURRENT,
         execution: None,
-        stream_outputs: Vec::new(),
+
         dependencies: BTreeMap::new(),
         nodes,
         edges,
@@ -96,7 +96,6 @@ fn task_only_benchmark_preserves_numeric_and_string_payloads() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for payload in [0, 16] {
         let definition = definition(3, payload);
-        assert!(definition.stream_outputs.is_empty());
         let plan = plan_definition(&definition).unwrap();
         let output = instantiate_compiled(&plan, &registry)
             .unwrap()

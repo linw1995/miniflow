@@ -107,13 +107,7 @@ impl crate::FlowRuntime {
                 [],
                 state,
             )?;
-            let outputs = state.target_outputs(&target.node)?;
-            if let Some(publisher) = state.live_publisher() {
-                publisher
-                    .flush(&state.cancellation())
-                    .context(crate::runner::LiveOutputSnafu)?;
-            }
-            Ok(outputs)
+            state.target_outputs(&target.node)
         })();
         if let Err(error) = &result {
             state.select_observation_failure(error);

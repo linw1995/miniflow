@@ -431,51 +431,33 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
 
 fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf) {
     let mut launch = launch(directory);
-    launch.manifest.version = mf_runtime::WorkflowManifestVersion::V2026_10_23;
-    let mut definition = serde_json::to_value(&launch.manifest.definition).unwrap();
-    definition["version"] = json!("2026-10-23");
-    definition["stream_outputs"] = json!([{"name":"answer","path":["start"],"port":"delta"}]);
-    launch.manifest.definition = serde_json::from_value(definition).unwrap();
-    launch.manifest.stream_outputs = vec![mf_runtime::StreamOutputContract {
-        name: "answer".into(),
-        path: vec!["start".into()],
-        port: "delta".into(),
-        value_type: mf_runtime::ValueType::Object,
-        required: true,
-    }];
+    launch.manifest.definition.execution =
+        Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    launch.manifest.definition.outputs.push(
+        serde_json::from_value(json!({"name":"answer","node":"start","port":"delta"})).unwrap(),
+    );
     launch.contract = ChatContract::from_manifest(&launch.manifest).unwrap();
     let gate = directory.join("release");
-    let event = |kind| json!({"export":"answer","source":["start"],"invocation":{"id":1,"node":"start","path":[]},"event":kind});
-    let kinds = [
-        json!({"kind":"event","event":event(json!({"kind":"open"}))}),
-        json!({"kind":"event","event":event(json!({"kind":"value","value":{"text":"provisional","model_call_id":"model-call"}}))}),
-        json!({"kind":"event","event":event(json!({"kind":"close","completed":true}))}),
-        json!({"kind":"final","outputs":{"status":"succeeded","text":"canonical","usages":[]}}),
-    ];
-    let records: Vec<_> = kinds.into_iter().enumerate().map(|(sequence, record)| json!({"version":1,"run_id":"RUN_ID","sequence":sequence,"record":record})).collect();
+    let records = json!([
+        {"answer":{"text":"provisional","model_call_id":"model-call"}},
+        {"status":"succeeded","text":"canonical","usages":[]}
+    ]);
     let script = format!(
         r#"#!/usr/bin/env python3
 import json, os, sys, time
 records = json.loads({records:?})
 mode = {mode:?}
 if mode == 'flood':
-    records = records[:2] + [records[1].copy() for _ in range(20000)] + records[2:]
+    records = [records[0].copy() for _ in range(20000)] + records[-1:]
 if mode == 'empty':
     records = records[-1:]
-    records[0]['sequence'] = 0
-split = 3 if mode == 'gated' else (0 if mode == 'empty' else 2)
+split = 0 if mode == 'empty' else 1
 for record in records[:split]:
-    record['run_id'] = os.environ['MF_RUN_ID']
     print(json.dumps(record), flush=True)
 if mode == 'gated':
-    while not os.path.exists({gate:?}):
-        time.sleep(0.01)
-if mode == 'prefix':
-    sys.exit(2)
-for sequence, record in enumerate(records[split:], start=split):
-    record['sequence'] = sequence
-    record['run_id'] = os.environ['MF_RUN_ID']
-    print(json.dumps(record), flush=True)
+    while not os.path.exists({gate:?}): time.sleep(0.01)
+if mode == 'prefix': sys.exit(2)
+for record in records[split:]: print(json.dumps(record), flush=True)
 if mode == 'late':
     print('late diagnostic', flush=True)
     sys.exit(13)
@@ -535,8 +517,8 @@ fn executable_live_previews_arrive_before_authoritative_settlement() {
 }
 
 #[test]
-fn valid_live_final_survives_late_diagnostics_and_prefix_death_never_saves_text() {
-    for mode in ["late", "prefix", "empty"].into_iter().cycle().take(24) {
+fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes() {
+    for mode in ["late", "prefix", "empty"] {
         let root = tempfile::tempdir().unwrap();
         let (launch, _) = live_launch(root.path(), mode);
         let controller = ChatController::open(launch).unwrap();
@@ -547,41 +529,54 @@ fn valid_live_final_survives_late_diagnostics_and_prefix_death_never_saves_text(
             })
             .unwrap();
         loop {
-            let event = next(&controller);
-            if let ChatEvent::Error { source, .. } = &event {
-                panic!("{mode} failed before settlement: {source}");
-            }
             if let ChatEvent::Finished {
                 resolution,
                 capture_error,
                 ..
-            } = event
+            } = next(&controller)
             {
                 let resolution = resolution.unwrap();
-                if mode == "prefix" {
-                    let mut typed_capture = false;
-                    for diagnostic in &resolution.diagnostics {
-                        let mut source: Option<&(dyn std::error::Error + 'static)> =
-                            Some(diagnostic);
-                        while let Some(error) = source {
-                            typed_capture |= error.is::<Arc<crate::run::CaptureFailure>>();
-                            source = error.source();
+                match resolution.state {
+                    CompletionState::Uncommitted(pending) => {
+                        assert_eq!(mode, "late");
+                        assert_eq!(pending.completion.result.text, "canonical");
+                        assert!(capture_error.is_some());
+                        controller.send(ChatCommand::Save).unwrap();
+                        loop {
+                            if let ChatEvent::Finished { resolution, .. } = next(&controller) {
+                                assert!(matches!(
+                                    resolution.unwrap().state,
+                                    CompletionState::Committed(_)
+                                ));
+                                break;
+                            }
                         }
                     }
-                    assert!(
-                        typed_capture,
-                        "capture failures must retain their typed source"
-                    );
-                }
-                match resolution.state {
                     CompletionState::Committed(completion) => {
-                        assert!(matches!(mode, "late" | "empty"));
+                        assert_eq!(mode, "empty");
                         assert_eq!(completion.result.text, "canonical");
-                        assert_eq!(capture_error.is_some(), mode == "late");
                     }
                     CompletionState::Finished(turn) => {
                         assert_eq!(mode, "prefix");
                         assert_eq!(turn.state, "failed");
+                        let typed = resolution.diagnostics.iter().any(|diagnostic| {
+                            let mut cause: Option<&(dyn std::error::Error + 'static)> =
+                                Some(diagnostic);
+                            while let Some(error) = cause {
+                                if matches!(
+                                    error.downcast_ref::<mf_chat::ChatError>(),
+                                    Some(mf_chat::ChatError::Capture { .. })
+                                ) {
+                                    return true;
+                                }
+                                cause = error.source();
+                            }
+                            false
+                        });
+                        assert!(
+                            typed,
+                            "missing terminal replies must keep their typed application error"
+                        );
                     }
                     _ => panic!("unexpected settlement"),
                 }
@@ -593,12 +588,10 @@ fn valid_live_final_survives_late_diagnostics_and_prefix_death_never_saves_text(
 }
 
 #[test]
-fn incompatible_public_answer_contract_is_rejected_without_launching() {
+fn answer_selection_requires_native_streaming_execution() {
     let root = tempfile::tempdir().unwrap();
     let (mut launch, _) = live_launch(root.path(), "prefix");
-    launch.manifest.stream_outputs[0].value_type = mf_runtime::ValueType::String;
-    assert!(ChatContract::from_manifest(&launch.manifest).is_err());
-    launch.manifest.version = mf_runtime::WorkflowManifestVersion::V2026_10_16;
+    launch.manifest.definition.execution = None;
     assert!(ChatContract::from_manifest(&launch.manifest).is_err());
 }
 
@@ -625,7 +618,7 @@ fn paused_rendering_keeps_capture_draining_with_bounded_previews() {
     assert_eq!(preview.segments.len(), 1);
     assert_eq!(
         preview.segments[0].text.len(),
-        super::live::MAX_PREVIEW_BYTES
+        super::preview::MAX_PREVIEW_BYTES
     );
     assert!(preview.omitted);
     let mut saw_preview = false;

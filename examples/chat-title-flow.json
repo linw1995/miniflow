@@ -373,6 +373,11 @@
       "node": "title",
       "port": "value",
       "optional": true
+    },
+    {
+      "name": "answer",
+      "node": "model",
+      "port": "delta"
     }
   ],
   "clusters": [
@@ -413,13 +418,7 @@
       ]
     }
   ],
-  "stream_outputs": [
-    {
-      "name": "answer",
-      "path": [
-        "model"
-      ],
-      "port": "delta"
-    }
-  ]
+  "execution": {
+    "mode": "stream"
+  }
 }

@@ -164,30 +164,23 @@ impl ChatHost {
         &self,
         session_id: &str,
         prompt: &str,
-        limits: mf_runtime::LiveLimits,
-    ) -> Result<(ChatJob, mf_runtime::LiveReceiver), ChatError> {
-        let (publisher, receiver) = mf_runtime::live_channel(limits)?;
-        let job = self.start(
-            session_id,
-            prompt,
-            None,
-            Some(publisher.select(["answer".into()])),
-        )?;
+    ) -> Result<(ChatJob, crate::PreviewReceiver), ChatError> {
+        let (consumer, receiver) = crate::PreviewConsumer::channel();
+        let job = self.start(session_id, prompt, None, Some(consumer))?;
         Ok((job, receiver))
     }
 
     pub fn retry_stream(
         &self,
         turn_id: &str,
-        limits: mf_runtime::LiveLimits,
-    ) -> Result<(ChatJob, mf_runtime::LiveReceiver), ChatError> {
+    ) -> Result<(ChatJob, crate::PreviewReceiver), ChatError> {
         let (original, prompt) = self.database().retry_prompt(turn_id)?;
-        let (publisher, receiver) = mf_runtime::live_channel(limits)?;
+        let (consumer, receiver) = crate::PreviewConsumer::channel();
         let job = self.start(
             &original.session_id,
             &prompt,
             Some(turn_id.into()),
-            Some(publisher.select(["answer".into()])),
+            Some(consumer),
         )?;
         Ok((job, receiver))
     }
@@ -202,7 +195,7 @@ impl ChatHost {
         session_id: &str,
         prompt: &str,
         retry_of: Option<String>,
-        live: Option<mf_runtime::LivePublisher>,
+        preview: Option<crate::PreviewConsumer>,
     ) -> Result<ChatJob, ChatError> {
         ensure!(
             !prompt.is_empty(),
@@ -290,7 +283,7 @@ impl ChatHost {
             .name(format!("mf-chat-{}", invocation.call_id))
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    inner.conversation(request, profile, job_cancellation, live)
+                    inner.conversation(request, profile, job_cancellation, preview)
                 }));
                 let result = match result {
                     Ok(result) => result,
@@ -432,21 +425,21 @@ impl Inner {
         request: BeginTurnInputs,
         profile: crate::WorkflowProfile,
         cancellation: StreamCancellation,
-        live: Option<mf_runtime::LivePublisher>,
+        preview: Option<crate::PreviewConsumer>,
     ) -> Result<Completion, ChatError> {
         let invocation = Invocation {
             session_id: request.session_id.clone(),
             turn_id: request.turn_id.clone(),
             call_id: request.call_id.clone(),
         };
-        let resolution = crate::workflow::run_conversation_with_live(
+        let resolution = crate::workflow::run_conversation_with_preview(
             &self.database,
             request,
             profile.backend(),
             cancellation,
             self.config.automatic_titles,
             self.config.observer.as_ref(),
-            live,
+            preview,
         )?;
         match resolution.state {
             crate::contract::CompletionState::Committed(completion) => Ok(completion),

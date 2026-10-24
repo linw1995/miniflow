@@ -51,7 +51,6 @@ pub struct WorkflowDefinition {
     pub edges: Vec<EdgeDefinition>,
     pub control_edges: Vec<ControlEdgeDefinition>,
     pub outputs: Vec<WorkflowOutputDefinition>,
-    pub stream_outputs: Vec<WorkflowStreamOutputDefinition>,
     pub order_edges: Vec<OrderEdgeDefinition>,
     pub clusters: Vec<ClusterDefinition>,
 }
@@ -77,8 +76,6 @@ struct DefinitionFields {
     pub control_edges: Vec<ControlEdgeDefinition>,
     #[serde(default)]
     pub outputs: Vec<WorkflowOutputDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stream_outputs: Vec<WorkflowStreamOutputDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order_edges: Vec<OrderEdgeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -137,10 +134,6 @@ impl WorkflowDefinitionVersion {
     }
 
     pub fn supports_clusters(self) -> bool {
-        self == Self::V2026_10_23
-    }
-
-    pub fn supports_live_outputs(self) -> bool {
         self == Self::V2026_10_23
     }
 }
@@ -341,14 +334,6 @@ pub struct WorkflowOutputDefinition {
     pub port: Cow<'static, str>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub optional: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowStreamOutputDefinition {
-    pub name: String,
-    pub path: Vec<DefinitionId>,
-    pub port: String,
 }
 
 fn is_false(value: &bool) -> bool {

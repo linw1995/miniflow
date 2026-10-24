@@ -9,32 +9,17 @@ chat workflows independently of process supervision and terminal presentation.
 
 ### Requirement: Validate the executable conversation contract
 
-The backend SHALL validate a finite executable through its external startup and final-result contracts. It MUST NOT restrict internal node kinds, model counts, control edges, loop bodies, or output source nodes. Advertised finite live-output protocols SHALL be supported alongside final JSON. Top-level streaming execution and required stdin resources remain unsupported. The caller SHALL execute the whole workflow rather than selecting an internal model task.
+The backend SHALL validate finite JSON and native Stream executables through their startup and final-result contracts. It MUST NOT restrict internal node kinds, model counts, preprocessing, or loops. Stdin-dependent execution SHALL remain unsupported. The caller SHALL execute the whole workflow rather than an internal model task.
 
-#### Scenario: Accept a multi-model workflow
+#### Scenario: Accept a native streaming workflow
 
-- **WHEN** a finite workflow exposes compatible conversation inputs and result outputs
-- **THEN** preflight accepts it regardless of its internal model and preprocessing nodes
+- **WHEN** a native Stream executable exposes compatible conversation inputs, final fields, and optional answer output
+- **THEN** preflight accepts its ordinary manifest without a separate live capability
 
-#### Scenario: Execute repeated model calls
+#### Scenario: Reject incompatible admission
 
-- **WHEN** a workflow explicitly accumulates usage records inside a bounded loop
-- **THEN** each reported call remains identifiable and the loop is not rejected by chat preflight
-
-#### Scenario: Reject an incompatible executable
-
-- **WHEN** the manifest describes top-level streaming execution or missing required conversation inputs
-- **THEN** contract construction fails before storage is opened or a model request is made
-
-#### Scenario: Accept a single model task
-
-- **WHEN** a valid single-model manifest is supplied
-- **THEN** the contract accepts its external interface for whole-workflow execution
-
-#### Scenario: Admit a finite workflow with live output
-
-- **WHEN** a finite executable advertises a supported live protocol and compatible public answer stream
-- **THEN** preflight accepts it without inspecting or reconfiguring internal model nodes
+- **WHEN** required conversation inputs are missing or stdin resources are declared
+- **THEN** contract construction fails before storage ownership or business invocation
 
 ### Requirement: Bind configuration separately from conversation inputs
 
@@ -194,44 +179,29 @@ stages. Saving SHALL validate the captured title revision and preserve concurren
 - **WHEN** a successful result contains a title and its completion write fails
 - **THEN** retry retains the same title candidate and usages without another provider call
 
-### Requirement: Negotiate live output from external contracts
+### Requirement: Consume native workflow output records
 
-Executable callers SHALL choose live mode only from advertised protocol and public stream contracts. A public `answer` stream SHALL use the shared typed answer-increment contract; incompatible declared contracts MUST fail preflight. Executables without live capability SHALL retain final-JSON execution. Unsupported protocol versions MUST fail before model work rather than trigger a second invocation.
+A native streaming executable MAY select an ordinary output named `answer`. Its records SHALL decode as text deltas with nonempty model-call identity. Final status, text, usages, and optional conversation fields SHALL form one complete result record. Unrelated outputs MAY be ignored. Finite JSON executables SHALL remain supported without preview delivery.
 
-#### Scenario: Use an older conversation executable
+#### Scenario: Reject a malformed delta
 
-- **WHEN** a valid executable exposes only the final conversation contract
-- **THEN** chat runs it once and displays its complete result without requiring live records
-
-#### Scenario: Reject a mistyped answer export
-
-- **WHEN** an executable declares public `answer` increments with an incompatible value contract
-- **THEN** admission fails before starting the executable's business work
+- **WHEN** an answer record is incompatible with the application delta contract
+- **THEN** it fails before entering conversation preview processing and preserves its typed decode source
 
 ### Requirement: Reconcile only authoritative final results
 
-Live increments and stream-close controls SHALL remain provisional and MUST NOT settle a conversation, update history/title, or synthesize usage. Only a complete validated final conversation result SHALL enter existing settlement and save-retry handlers. Already committed success SHALL retain precedence over later diagnostics.
+Deltas SHALL remain provisional and MUST NOT synthesize a reply or usage. A successful complete backend result SHALL enter the conversation Flow's settlement route. A validated reply retained before a later process or delivery failure SHALL be available for explicit save-only recovery. Prefixes without a complete result MUST NOT be saved. Existing committed state SHALL retain precedence.
 
-#### Scenario: End the answer stream before title generation
+#### Scenario: Fail after a complete result
 
-- **WHEN** the answer stream closes while a title node remains active
-- **THEN** the turn remains running until the final workflow result is reconciled
+- **WHEN** a valid result record is received but later output or process completion fails
+- **THEN** the application retains it without automatic settlement and saving it does not replay generation
 
-#### Scenario: Lose the executable after a live prefix
+### Requirement: Capture native output independently of rendering
 
-- **WHEN** the child exits or is cancelled before a valid final result is captured
-- **THEN** the turn follows failed/cancelled/interrupted cleanup and partial text is not saved as an assistant message
+Executable supervision SHALL parse native JSONL and drain stdout independently of render refresh. It SHALL keep bounded pending records and the final recovery result rather than spool all preview history. Duplicate keys and malformed records SHALL preserve typed capture causes. Caller cancellation SHALL interrupt a blocked output consumer.
 
-### Requirement: Capture live output independently of rendering
+#### Scenario: End within a record
 
-Executable supervision SHALL parse bounded live records and drain stdout while the UI is idle. It MUST retain only the bounded final-result recovery value rather than spool the complete live history as final JSON. Protocol validation SHALL reject wrong execution identity, ordering, lifecycle, and size violations while retaining typed capture causes.
-
-#### Scenario: Generate more output than a pipe can buffer
-
-- **WHEN** a valid child writes enough live records to fill an undrained pipe and rendering is paused
-- **THEN** independent capture continues consuming subject to bounded delivery and cancellation remains available
-
-#### Scenario: Receive an incomplete final record
-
-- **WHEN** the process stops halfway through a final JSON-lines record
-- **THEN** recovery does not treat its earlier deltas as a complete reply or confirmed usage
+- **WHEN** the executable ends halfway through a JSONL record
+- **THEN** earlier deltas remain provisional and the decoder reports a typed capture failure

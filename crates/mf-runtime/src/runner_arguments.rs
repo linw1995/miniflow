@@ -37,15 +37,6 @@ pub struct RunnerInvocation {
     pub node: Option<String>,
     pub inputs: WorkflowArguments,
     pub context: WorkflowArguments,
-    pub output_format: RunnerOutputFormat,
-    pub stream_outputs: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RunnerOutputFormat {
-    #[default]
-    Json,
-    EventsJsonl,
 }
 
 impl RunnerInvocation {
@@ -76,31 +67,6 @@ impl RunnerInvocation {
             }
             display_help(help)?;
         }
-        let output_format = match matches
-            .get_one::<String>("output-format")
-            .map(String::as_str)
-        {
-            Some("events-jsonl") => RunnerOutputFormat::EventsJsonl,
-            _ => RunnerOutputFormat::Json,
-        };
-        let stream_outputs = matches
-            .get_many::<String>("stream-output")
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
-        ensure!(
-            stream_outputs.is_empty() || output_format == RunnerOutputFormat::EventsJsonl,
-            InvalidSnafu {
-                message: "--stream-output requires --output-format events-jsonl",
-            }
-        );
-        ensure!(
-            stream_outputs.iter().collect::<BTreeSet<_>>().len() == stream_outputs.len(),
-            InvalidSnafu {
-                message: "--stream-output names must be unique",
-            }
-        );
         let context = matches.get_one::<OsString>("context");
         let context_file = matches.get_one::<OsString>("context-file");
         ensure!(
@@ -136,34 +102,7 @@ impl RunnerInvocation {
             node,
             inputs,
             context,
-            output_format,
-            stream_outputs,
         })
-    }
-
-    pub fn validate_output(
-        &self,
-        manifest: &crate::WorkflowManifest,
-    ) -> Result<(), RunnerArgumentError> {
-        ensure!(
-            self.output_format == RunnerOutputFormat::Json
-                || manifest.version == crate::WorkflowManifestVersion::V2026_10_23,
-            InvalidSnafu {
-                message: "finite live output requires a capable workflow manifest",
-            }
-        );
-        for name in &self.stream_outputs {
-            ensure!(
-                manifest
-                    .stream_outputs
-                    .iter()
-                    .any(|output| output.name == *name),
-                InvalidSnafu {
-                    message: "requested live export is not declared by the workflow",
-                }
-            );
-        }
-        Ok(())
     }
 }
 
@@ -291,21 +230,6 @@ fn argument_command<'a>(
     }
     if let Some(targets) = targets {
         command = command
-            .arg(
-                Arg::new("output-format")
-                    .long("output-format")
-                    .value_name("FORMAT")
-                    .help("Finite result protocol: json or events-jsonl")
-                    .value_parser(["json", "events-jsonl"]),
-            )
-            .arg(
-                Arg::new("stream-output")
-                    .long("stream-output")
-                    .value_name("NAME")
-                    .help("Subscribe to a named live export (repeatable; defaults to all)")
-                    .action(ArgAction::Append)
-                    .value_parser(clap::builder::NonEmptyStringValueParser::new()),
-            )
             .arg(
                 Arg::new("node")
                     .long("node")
@@ -455,15 +379,7 @@ fn decode_options(
     for name in matches.ids().filter(|name| {
         !matches!(
             name.as_str(),
-            "help"
-                | "verbose"
-                | "node"
-                | "context"
-                | "context-file"
-                | "inputs"
-                | "inputs-file"
-                | "output-format"
-                | "stream-output"
+            "help" | "verbose" | "node" | "context" | "context-file" | "inputs" | "inputs-file"
         )
     }) {
         let name = name.as_str();

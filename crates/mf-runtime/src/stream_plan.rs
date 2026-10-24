@@ -54,6 +54,7 @@ pub struct StreamPlan {
     dependencies: Cow<'static, [Cow<'static, [FlowDependency]>]>,
     domains: MessageDomains,
     outputs: Cow<'static, [WorkflowOutputDefinition]>,
+    selected_output_domains: Vec<usize>,
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
     schedules: Vec<MessageSchedule>,
@@ -70,7 +71,7 @@ impl std::fmt::Debug for PreparedStream {
         f.debug_struct("PreparedStream")
             .field("execution", &self.plan.execution)
             .field("message_sources", &self.plan.message_sources())
-            .field("selected_domain", &self.plan.selected_domain())
+            .field("selected_domains", &self.plan.selected_domains())
             .finish_non_exhaustive()
     }
 }
@@ -118,7 +119,7 @@ impl PreparedStream {
                 })
             })
             .collect();
-        let nodes = nodes
+        let nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>> = nodes
             .into_iter()
             .enumerate()
             .map(|(index, node)| {
@@ -146,6 +147,27 @@ impl PreparedStream {
                 }
             })
             .collect();
+        let selected_output_domains = outputs
+            .iter()
+            .map(|output| {
+                let index = nodes
+                    .iter()
+                    .position(|node| node.definition_id == output.node)
+                    .expect("selected output source was validated");
+                if nodes[index]
+                    .metadata
+                    .stream_outputs
+                    .iter()
+                    .any(|port| port.name == output.port)
+                {
+                    domains
+                        .stream_output_domain(index)
+                        .expect("selected emission domain was planned")
+                } else {
+                    domains.output_domain(index)
+                }
+            })
+            .collect();
         let schedules = build_message_schedules(&domains);
         let plan = StreamPlan {
             execution,
@@ -153,6 +175,7 @@ impl PreparedStream {
             dependencies,
             domains,
             outputs,
+            selected_output_domains,
             input_schema,
             generated_domains: BTreeMap::new(),
             schedules,
@@ -182,12 +205,6 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
-    pub fn stream_outputs(&self) -> Vec<crate::StreamOutputContract> {
-        self.nodes
-            .iter()
-            .flat_map(|node| node.metadata.stream_exports.iter().cloned())
-            .collect()
-    }
     pub(super) fn emission_node(&self, node: usize) -> &FlowNode<()> {
         self.emission_nodes[node]
             .as_ref()
@@ -201,7 +218,7 @@ impl StreamPlan {
         let domain = self
             .stream_output_domain(node)
             .unwrap_or_else(|| self.output_domain(node));
-        self.selected_domain() == Some(domain)
+        self.selected_domains().contains(&domain)
             || !self.execution_domains_for_message(domain).is_empty()
     }
     pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
@@ -247,8 +264,18 @@ impl StreamPlan {
     pub fn outputs(&self) -> &[WorkflowOutputDefinition] {
         &self.outputs
     }
-    pub fn selected_domain(&self) -> Option<usize> {
-        self.domains.selected_domain()
+    pub fn selected_domains(&self) -> &[usize] {
+        self.domains.selected_domains()
+    }
+
+    pub fn outputs_for_domain(
+        &self,
+        domain: usize,
+    ) -> impl Iterator<Item = &WorkflowOutputDefinition> {
+        self.outputs
+            .iter()
+            .zip(&self.selected_output_domains)
+            .filter_map(move |(output, selected)| (*selected == domain).then_some(output))
     }
 
     pub fn execute_resolved_position(

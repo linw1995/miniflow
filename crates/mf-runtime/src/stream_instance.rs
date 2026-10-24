@@ -23,22 +23,6 @@ use std::{
 #[derive(Clone, Debug, Snafu)]
 pub enum StreamError {
     #[snafu(
-        display("stream output has an invalid payload: {source}"),
-        visibility(pub)
-    )]
-    OutputDecode {
-        #[snafu(source(from(crate::InputDecodeError, Arc::new)))]
-        source: Arc<crate::InputDecodeError>,
-    },
-    #[snafu(
-        display("live output protocol failed: {source}"),
-        visibility(pub(super))
-    )]
-    LiveProtocol {
-        #[snafu(source(from(crate::LiveProtocolError, Arc::new)))]
-        source: Arc<crate::LiveProtocolError>,
-    },
-    #[snafu(
         display("invalid stream runtime configuration: {message}"),
         visibility(pub)
     )]
@@ -135,11 +119,9 @@ impl StreamError {
             Self::InputFailure { .. } | Self::InputRecord { .. } | Self::InputValidation { .. } => {
                 "input"
             }
-            Self::OutputDecode { .. }
-            | Self::Output { .. }
+            Self::Output { .. }
             | Self::OutputWrite { .. }
             | Self::OutputEncode { .. }
-            | Self::LiveProtocol { .. }
             | Self::PublicationDeadline => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
@@ -201,7 +183,8 @@ pub struct StreamOptions {
     pub snapshots: Option<crate::SnapshotRecorder>,
     pub arguments: crate::WorkflowArguments,
     pub stdin: Option<crate::TextInput>,
-    pub live: Option<crate::LivePublisher>,
+    pub events: Option<crate::EventRecorder>,
+    pub cancellation: Option<crate::StreamCancellation>,
 }
 impl Default for StreamOptions {
     fn default() -> Self {
@@ -211,7 +194,8 @@ impl Default for StreamOptions {
             snapshots: None,
             arguments: crate::WorkflowArguments::default(),
             stdin: None,
-            live: None,
+            events: None,
+            cancellation: None,
         }
     }
 }
@@ -375,7 +359,7 @@ struct Shared {
     execution: StreamExecution,
     observation: Option<StreamObservation>,
     snapshots: Option<crate::SnapshotRecorder>,
-    live: Mutex<Option<crate::LivePublisher>>,
+    events: Option<crate::EventRecorder>,
     cancellation: crate::StreamCancellation,
     worker_limit: std::num::NonZeroUsize,
 }
@@ -557,25 +541,18 @@ fn run_producer(
                 );
                 job.context
                     .with_node(plan.nodes()[index].definition_id.clone(), |context| {
-                        crate::live::with_exports(
-                            &plan.nodes()[index].metadata.stream_exports,
-                            context,
+                        let mut emitter = Emitter::with_sink_validation(
+                            plan.nodes()[index].definition_id.clone(),
+                            &plan.emission_node(index).metadata.ports.outputs,
+                            context.cancellation(),
                             &mut sink,
-                            |context, sink| {
-                                let mut emitter = Emitter::with_sink_validation(
-                                    plan.nodes()[index].definition_id.clone(),
-                                    &plan.emission_node(index).metadata.ports.outputs,
-                                    context.cancellation(),
-                                    sink,
-                                );
-                                emitter.set_snapshot_context(context);
-                                let result = node.execute(job.inputs, context, &mut emitter);
-                                if let Some(error) = context.cancellation().failure() {
-                                    return Err(error.into());
-                                }
-                                result
-                            },
-                        )
+                        );
+                        emitter.set_snapshot_context(context);
+                        let result = node.execute(job.inputs, context, &mut emitter);
+                        if let Some(error) = context.cancellation().failure() {
+                            return Err(error.into());
+                        }
+                        result
                     })
             }
             ProducerNode::TaskStream(node) => {
@@ -657,7 +634,6 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::Context { definition_id, .. }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
         crate::WorkflowRunError::WorkflowInputs { .. }
-        | crate::WorkflowRunError::LiveOutput { .. }
         | crate::WorkflowRunError::NodeTarget { .. }
         | crate::WorkflowRunError::WorkerPool { .. } => "<workflow>".to_owned(),
     }
@@ -793,8 +769,11 @@ impl PreparedStream {
         let worker_limit = std::num::NonZeroUsize::new(domain_limit)
             .expect("validated stream worker limit is positive");
         let mut context = ExecutionContext::default();
-        if let Some(publisher) = &options.live {
-            context.set_live_publisher(publisher.clone());
+        if let Some(cancellation) = options.cancellation {
+            context.set_cancellation(cancellation);
+        }
+        if let Some(events) = &options.events {
+            context.set_event_recorder(events.clone());
         }
         if let Some(capture) = &options.snapshots {
             context.set_snapshot_recorder(capture.clone());
@@ -871,7 +850,7 @@ impl PreparedStream {
             execution: plan.execution().clone(),
             observation: options.observation,
             snapshots: options.snapshots,
-            live: Mutex::new(options.live),
+            events: options.events,
             cancellation,
             worker_limit,
         });
@@ -1260,8 +1239,8 @@ fn tick<'a>(
         if let Some(capture) = &shared.snapshots {
             context.set_snapshot_recorder(capture.clone());
         }
-        if let Some(publisher) = shared.live.lock().unwrap().clone() {
-            context.set_live_publisher(publisher);
+        if let Some(events) = &shared.events {
+            context.set_event_recorder(events.clone());
         }
         context.set_cancellation(shared.cancellation.clone());
         context.configure_worker_limit(shared.worker_limit);
@@ -1282,10 +1261,14 @@ fn tick<'a>(
             continue;
         };
         if frame.complete() {
+            if plan.selected_domains().contains(&message_domain) && guard.output.is_some() {
+                guard.domains[message_domain].frame = Some(frame);
+                continue;
+            }
             take_sequence(&mut guard.summary.completed_frames)?;
-            if plan.selected_domain() == Some(message_domain) {
+            if plan.selected_domains().contains(&message_domain) {
                 let mut outputs = FlowOutputs::new();
-                for output in plan.outputs() {
+                for output in plan.outputs_for_domain(message_domain) {
                     if let Some(value) = frame
                         .context
                         .select_output(
@@ -1478,10 +1461,14 @@ fn tick<'a>(
         }
 
         if frame.complete() {
+            if plan.selected_domains().contains(&message_domain) && guard.output.is_some() {
+                guard.domains[message_domain].frame = Some(frame);
+                continue;
+            }
             take_sequence(&mut guard.summary.completed_frames)?;
-            if plan.selected_domain() == Some(message_domain) {
+            if plan.selected_domains().contains(&message_domain) {
                 let mut outputs = FlowOutputs::new();
-                for output in plan.outputs() {
+                for output in plan.outputs_for_domain(message_domain) {
                     if let Some(value) = frame
                         .context
                         .select_output(
@@ -1891,17 +1878,6 @@ fn finish_instance(shared: &Shared) {
         domain.closed = true;
     }
     state.active_workers = 0;
-    let flush = state.failure.is_none();
-    drop(state);
-    let publisher = shared.live.lock().unwrap().take();
-    if flush
-        && let Some(publisher) = &publisher
-        && let Err(error) = publisher.flush(&shared.cancellation)
-    {
-        shared.fail(error);
-    }
-    drop(publisher);
-    let mut state = shared.state.lock().unwrap();
     state.done = true;
     let summary = state.summary.clone();
     let failure = state.failure.clone();
@@ -2017,7 +1993,7 @@ mod tests {
             crate::MessageDomains::from_parts(
                 vec![None, Some(1)].into(),
                 vec![0, 1].into(),
-                None,
+                vec![].into(),
                 crate::ExecutionDomains::from_parts(
                     vec![
                         crate::ExecutionDomain {
@@ -2222,7 +2198,7 @@ mod tests {
             crate::MessageDomains::from_parts(
                 vec![None, Some(0)].into(),
                 vec![1, 1, 1, 1, 1, 1].into(),
-                Some(1),
+                vec![1].into(),
                 crate::ExecutionDomains::from_parts(
                     vec![
                         domain(0, 0, vec![], vec![1, 2, 3, 4], &[]),

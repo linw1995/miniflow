@@ -205,7 +205,6 @@ pub struct ExecutionContext {
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
     events: Option<crate::EventRecorder>,
-    live: Option<crate::LivePublisher>,
     scope_prefix: Vec<LoopPathEntry>,
     inputs: crate::ExecutionInputs,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
@@ -231,7 +230,6 @@ impl Default for ExecutionContext {
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
             events: None,
-            live: None,
             scope_prefix: Vec::new(),
             inputs: crate::ExecutionInputs::default(),
             stdin: None,
@@ -320,7 +318,6 @@ impl ExecutionContext {
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
             events: self.events.clone(),
-            live: self.live.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: crate::ExecutionInputs::default(),
             worker_handle: self.worker_handle.clone(),
@@ -514,7 +511,6 @@ impl ExecutionContext {
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
             events: self.events.clone(),
-            live: self.live.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: self.inputs.clone(),
             stdin: self.stdin.clone(),
@@ -625,14 +621,6 @@ impl ExecutionContext {
         self.snapshots = Some(recorder);
     }
 
-    pub fn set_live_publisher(&mut self, publisher: crate::LivePublisher) {
-        self.live = Some(publisher);
-    }
-
-    pub fn live_publisher(&self) -> Option<&crate::LivePublisher> {
-        self.live.as_ref()
-    }
-
     pub(super) fn execute_task_stream<N>(
         &mut self,
         node: &FlowNode<N>,
@@ -702,7 +690,6 @@ impl ExecutionContext {
         }
         child.snapshots = self.snapshots.clone();
         child.events = self.events.clone();
-        child.live = self.live.clone();
         child.scope_prefix = self.invocation_path();
         child
     }
@@ -848,7 +835,6 @@ impl ExecutionContext {
             WorkflowRunError::WorkflowInputs { .. } => (None, FailurePhase::Dependency),
             WorkflowRunError::NodeTarget { .. } => (None, FailurePhase::Dependency),
             WorkflowRunError::WorkerPool { .. } => (None, FailurePhase::Execution),
-            WorkflowRunError::LiveOutput { .. } => (None, FailurePhase::Publication),
         };
         observation.select_failure(node, phase, error.to_string());
     }

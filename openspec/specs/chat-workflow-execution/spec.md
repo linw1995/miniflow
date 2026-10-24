@@ -168,44 +168,34 @@ Shutdown SHALL stop accepting requests, cancel or complete active workflows, fin
 - **THEN** their local execution is joined and database ownership is released only after finalization is attempted
 - **AND** unresolved work is recoverable as interrupted on the next open
 
-### Requirement: Subscribe to live conversation output explicitly
+### Requirement: Route incremental events through the conversation Flow
 
-Hosts SHALL support an optional live subscription established before submission begins. Ordinary submission SHALL allocate no unread live receiver and SHALL preserve terminal-only poll/join behavior. Live callers SHALL drain their bounded receiver concurrently or cancel; unexpected receiver closure SHALL propagate delivery failure. Embedded and executable backends SHALL expose the same public event contract.
+The application-owned conversation JSON SHALL admit, invoke, route, and settle the turn. Backend deltas SHALL enter the invocation node's ordinary Stream output. An Event node SHALL publish application previews and retain the final response until successful upstream close. Hosts MUST NOT forward model deltas around this graph.
 
-#### Scenario: Join without subscribing
+#### Scenario: Receive previews before title completion
 
-- **WHEN** an embedded caller submits a turn and waits only for its final result
-- **THEN** unconnected live output is discarded without preventing completion
+- **WHEN** a backend emits answer text while later work remains active
+- **THEN** the conversation Flow delivers previews and defers settlement until backend success
 
-#### Scenario: Subscribe before the first increment
+#### Scenario: Fail after a provisional prefix
 
-- **WHEN** a caller requests live delivery as part of submission
-- **THEN** the subscription is attached before user workflow execution and cannot miss startup increments
+- **WHEN** the backend fails before producing a successful final event
+- **THEN** the route does not release settlement inputs and no partial assistant message is saved
 
-#### Scenario: Drop a connected receiver
+### Requirement: Acknowledge application preview delivery before settlement
 
-- **WHEN** a caller drops its live receiver during execution
-- **THEN** the invocation fails delivery or is explicitly cancelled and blocked publishers are released
+Preview and settlement outputs SHALL share one ordered application message domain. Hosts SHALL acknowledge each native preview delivery only after its consumer receives it. Terminal-only submissions SHALL allocate no unread preview receiver. Cancellation and receiver closure SHALL interrupt blocked delivery and host teardown SHALL join active instances before releasing storage.
 
-### Requirement: Preserve live invocation attribution
+#### Scenario: Drop an unread preview
 
-Host-delivered events SHALL identify the owning chat invocation, exported stream, and unique node invocation including dynamic scope path. Actual model-call identities SHALL remain distinct from the conversation execution identity. Hosts MUST NOT combine separate node invocations into a single stream or inspect hidden model outputs to recover missing events.
+- **WHEN** a subscribed preview receiver closes before consuming pending text
+- **THEN** settlement cannot overtake that delivery and a retained complete reply remains eligible for save-only recovery
 
-#### Scenario: Repeat a model in one turn
+### Requirement: Preserve application and model identities in previews
 
-- **WHEN** a user workflow invokes the same exported node twice in a Loop
-- **THEN** subscribers receive separate stream lifetimes tied to the same chat turn and distinct actual calls
+Application previews SHALL identify their owning chat invocation and actual model call. Distinct model calls SHALL remain separate presentation segments. Runtime-specific stream lifetimes and node paths MUST NOT be required by the chat preview protocol.
 
-### Requirement: Keep live delivery separate from durable settlement
+#### Scenario: Repeat a model call within one turn
 
-Application workflows SHALL retain their existing admission and settlement ownership. Live output SHALL not create durable partial assistant messages. A failed persistence attempt SHALL retain the complete final result for save-only retry; that retry MUST NOT invoke a backend or replay live model output. Shutdown SHALL cancel and join publishers and consumers before releasing storage ownership.
-
-#### Scenario: Retry saving a streamed response
-
-- **WHEN** live text was displayed but saving the complete final response fails
-- **THEN** save-only retry persists the retained result without another model call or duplicate stream invocation
-
-#### Scenario: Close a host under backpressure
-
-- **WHEN** a host closes while a publisher is blocked on a subscribed stream
-- **THEN** cancellation releases publication and host teardown joins active work before dropping database ownership
+- **WHEN** answer events carry different actual model-call identities
+- **THEN** the application preserves their distinction within the same chat invocation

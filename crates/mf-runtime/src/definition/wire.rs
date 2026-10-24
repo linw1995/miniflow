@@ -21,11 +21,6 @@ impl<'de> Deserialize<'de> for WorkflowDefinition {
         let version: WorkflowDefinitionVersion =
             serde_json::from_value(value.get("version").cloned().unwrap_or(Value::Null))
                 .map_err(de::Error::custom)?;
-        if !version.supports_live_outputs() && value.get("stream_outputs").is_some() {
-            return Err(de::Error::custom(
-                "stream_outputs requires version 2026-10-23",
-            ));
-        }
         let modern = version.supports_node_success_edges();
         decode_scope(&mut value, modern, version, "workflow").map_err(de::Error::custom)?;
         DefinitionFields::deserialize(value).map_err(de::Error::custom)

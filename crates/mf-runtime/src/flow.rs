@@ -2,7 +2,6 @@ use crate::definition::DefinitionId;
 use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
 use crate::{NodeMetadata, PreparedNode, TaskNode};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
 use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -396,14 +395,6 @@ impl Flow {
         &self.inner.plan.execution_domains
     }
 
-    pub fn stream_outputs(&self) -> Vec<crate::StreamOutputContract> {
-        self.inner
-            .nodes
-            .iter()
-            .flat_map(|node| node.metadata.stream_exports.iter().cloned())
-            .collect()
-    }
-
     pub fn execute_with_inputs(
         &self,
         arguments: crate::WorkflowArguments,
@@ -477,11 +468,7 @@ impl Flow {
                 workflow_outputs.insert(output.name.clone().into_owned(), value);
             }
         }
-        if let Some(publisher) = state.live_publisher() {
-            publisher
-                .flush(&state.cancellation())
-                .context(crate::runner::LiveOutputSnafu)?;
-        }
+
         Ok(workflow_outputs)
     }
 

@@ -140,9 +140,9 @@ fn conversation_example_hosts_a_supplied_workflow() {
         .unwrap();
     }
     let server = Server::start(vec![
-        Reply::text("first answer"),
+        Reply::stream_text("first answer"),
         Reply::text("Generated title"),
-        Reply::text("second answer"),
+        Reply::stream_text("second answer"),
     ]);
     let mut definition: Value =
         serde_json::from_slice(&fs::read(root.join("examples/chat-title-flow.json")).unwrap())
@@ -260,10 +260,10 @@ fn source_free_host_preserves_multi_session_retry_title_and_statistics() {
     let mut failed = Reply::json(json!({"error":{"message":"synthetic failure"}}));
     failed.status = 500;
     let server = Server::start(vec![
-        Reply::text("answer A"),
+        Reply::stream_text("answer A"),
         Reply::text("Summary A"),
         failed,
-        Reply::text("answer B"),
+        Reply::stream_text("answer B"),
         Reply::text("Summary B"),
     ]);
     let mut command = Command::new(&binary);

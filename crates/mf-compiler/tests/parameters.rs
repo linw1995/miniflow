@@ -70,7 +70,7 @@ fn configuration_and_graph_placement_are_validated_without_reading_sources() {
     let interface = mf_compiler::describe_interface(&plan, &registry).unwrap();
     assert_eq!(
         interface.version,
-        mf_runtime::WorkflowInterfaceVersion::V2026_10_23
+        mf_runtime::WorkflowInterfaceVersion::V2026_10_16
     );
     let json = serde_json::to_vec(&interface).unwrap();
     assert_eq!(

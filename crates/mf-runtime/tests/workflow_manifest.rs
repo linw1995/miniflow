@@ -18,7 +18,6 @@ fn compiled_manifests_derive_views_from_original_facts() {
     }))
     .unwrap();
     let manifest = WorkflowManifest {
-        stream_outputs: Vec::new(),
         version: WorkflowManifestVersion::V2026_10_16,
         definition,
         execution_order: vec!["root.a/~".into()],
@@ -111,7 +110,6 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
     }))
     .unwrap();
     let manifest = WorkflowManifest {
-        stream_outputs: Vec::new(),
         version: WorkflowManifestVersion::V2026_10_16,
         definition,
         execution_order: vec!["repeat".into()],
@@ -208,7 +206,6 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
 
 fn sample() -> WorkflowManifest {
     WorkflowManifest {
-        stream_outputs: Vec::new(),
         version: WorkflowManifestVersion::V2026_10_16,
         definition: serde_json::from_value(serde_json::json!({
             "version": "2026-10-03", "dependencies": {},
@@ -238,49 +235,6 @@ fn sample() -> WorkflowManifest {
             .into(),
         },
     }
-}
-
-#[test]
-fn live_contracts_are_offline_source_facts_and_runtime_drift_is_rejected() {
-    let mut manifest = sample();
-    manifest.version = WorkflowManifestVersion::V2026_10_23;
-    manifest.definition.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_23;
-    let node = manifest.definition.nodes[0].id.clone();
-    manifest.definition.stream_outputs = vec![mf_runtime::WorkflowStreamOutputDefinition {
-        name: "answer".into(),
-        path: vec![node.clone()],
-        port: "delta".into(),
-    }];
-    manifest.stream_outputs = vec![mf_runtime::StreamOutputContract {
-        name: "answer".into(),
-        path: vec![node],
-        port: "delta".into(),
-        value_type: mf_runtime::ValueType::String,
-        required: true,
-    }];
-    let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
-    assert!(decoded.supports_live_output());
-    let interface = decoded.interface().unwrap();
-    assert!(interface.live_output);
-    assert_eq!(
-        interface.version,
-        mf_runtime::WorkflowInterfaceVersion::V2026_10_23
-    );
-    assert_eq!(interface.stream_outputs, manifest.stream_outputs);
-    decoded
-        .validate_prepared_stream_outputs(&manifest.stream_outputs)
-        .unwrap();
-    let mut drift = manifest.stream_outputs.clone();
-    drift[0].value_type = mf_runtime::ValueType::Boolean;
-    assert!(matches!(
-        decoded.validate_prepared_stream_outputs(&drift),
-        Err(WorkflowManifestError::InterfaceDrift { .. })
-    ));
-    let mut invalid = manifest.clone();
-    invalid.stream_outputs[0].port = "other".into();
-    assert!(invalid.validate().is_err());
-    manifest.version = WorkflowManifestVersion::V2026_10_16;
-    assert!(manifest.validate().is_err());
 }
 
 fn frame(payload: &[u8]) -> Vec<u8> {

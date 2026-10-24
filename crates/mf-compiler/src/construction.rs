@@ -1287,7 +1287,7 @@ pub fn build_message_domains(
             );
         }
     }
-    let mut selected_domain = None;
+    let mut selected_domains = BTreeSet::new();
     for output in outputs {
         let index = indices
             .get(output.node.as_str())
@@ -1317,16 +1317,7 @@ pub fn build_message_domains(
         } else {
             output_domains[index]
         };
-        ensure!(
-            selected_domain.is_none_or(|selected| selected == domain),
-            InvalidPlanSnafu {
-                message: format!(
-                    "selected output `{}` belongs to a different message domain",
-                    output.name
-                ),
-            }
-        );
-        selected_domain = Some(domain);
+        selected_domains.insert(domain);
     }
 
     let mut execution_edges = Vec::new();
@@ -1365,7 +1356,7 @@ pub fn build_message_domains(
         sources.into(),
         output_domains.into(),
         stream_output_domains.into(),
-        selected_domain,
+        selected_domains.into_iter().collect::<Vec<_>>().into(),
         execution_domains,
         execution_domains_by_message
             .into_iter()
@@ -1584,7 +1575,7 @@ pub fn prepare_stream(
     let reserved_domains = 1
         + (1..domains.sources().len())
             .filter(|domain| {
-                domains.selected_domain() == Some(*domain)
+                domains.selected_domains().contains(domain)
                     || !domains.execution_domains_for_message(*domain).is_empty()
             })
             .count();

@@ -354,7 +354,7 @@ The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing 
 | Output | `finish_reason` | `string` | No |
 | Stream output | `delta` | `Object` | Yes, per emission |
 
-The `delta` payload contains `text` and `model_call_id`. A connected graph edge or subscribed host export
+The `delta` payload contains `text` and `model_call_id`. A connected graph edge or selected native output
 selects one streaming request; an unconsumed invocation sends one ordinary request and emits nothing.
 There is no per-node streaming flag or fallback request. Terminal text, history, finish reason, and usages
 come from the completed provider response. Delivered prefixes remain provisional on failure or cancellation.
@@ -362,12 +362,12 @@ come from the completed provider response. Delivered prefixes remain provisional
 The [answer-and-title example](../examples/chat-title-flow.json) declares only the answer as public:
 
 ```json
-"stream_outputs": [{"name": "answer", "path": ["model"], "port": "delta"}]
+"outputs": [{"name": "answer", "node": "model", "port": "delta"}]
 ```
 
-Run the compiled example with `--output-format events-jsonl --stream-output answer`. The title call stays
-terminal-only, and the final `usages` includes both calls when title generation runs. Ordinary JSON invocation
-keeps both calls terminal-only. Loop and Iteration exports use their full source paths and per-invocation identities.
+The example uses `execution.mode = stream` and ordinary JSONL output. The title call stays terminal-only,
+and final `usages` includes both calls when title generation runs. A finite workflow selecting only terminal
+ports keeps ordinary JSON execution. Distinct actual model calls carry their own `model_call_id`.
 Generated text and SSE framing have no client-side byte limits.
 The total deadline interrupts stalled reads and connected delivery under backpressure.
 Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
@@ -839,40 +839,35 @@ between invocations. `describe_workflow_inputs` inspects configured requirements
 
 Older single-run schemas keep their required-edge rules.
 
-## Combined terminal results and live output
+## Combined terminal and incremental results
 
-Version `2026-10-23` adds `stream_outputs` without changing the `2026-10-19` input-reference and prerequisite
-syntax. A combined provider declares its terminal and incremental ports separately and executes once. Its
-terminal values remain ordinary workflow results. A finite workflow can explicitly export incremental values
-to its host without changing to `execution.mode = stream`:
+A combined provider declares terminal and incremental ports separately and executes once. Use ordinary
+port references for both categories:
 
 ```json
 {
-  "stream_outputs": [
-    {"name": "increments", "path": ["group.count"], "port": "delta"}
+  "execution": {"mode": "stream"},
+  "outputs": [
+    {"name": "increments", "node": "group.count", "port": "delta"},
+    {"name": "total", "node": "group.count", "port": "total"}
   ]
 }
 ```
 
-This fragment assumes a combined provider named `group.count` with a stream port `delta`, such as the counting
-provider described in [node development](node-development.md#combined-task-and-stream-execution).
-Every path element is a complete node ID; dots are not split. A path such as `["repeat", "count"]` selects
-`count` inside a Loop or Iteration. Compilation validates the exact producer source and reflects its value contract. Direct live exports support combined
-and pure Stream producers. Event callback results retain ordinary selected stream output delivery, so host
-backpressure cannot block the coordinator through a direct Event export.
-Nested exports preserve distinct dynamic invocation identities, including parallel iteration items.
+This fragment assumes a combined provider named `group.count`, such as the counting provider in
+[node development](node-development.md#combined-task-and-stream-execution). Node IDs remain opaque;
+dots are not path separators. Incremental graph edges and output selections require streaming execution.
+Finite scopes and isolated Task targets retain terminal-only adaptation without an unread receiver.
 
-Attach a `mf_runtime::LivePublisher` to the execution context before running a finite Flow to consume its
-exports. Each invoked exported node produces open/close controls, with zero or more values between them.
-Live delivery is independent of telemetry. A node in a skipped branch produces no invocation controls.
-A host without a publisher is not a consumer: exports are automatically discarded and no unread queue is
-created. A provider can check consumer presence and avoid constructing incremental output entirely.
+A combined node's terminal ports stay in its input domain; its incremental ports create a separate ordered
+domain. One consumer cannot implicitly correlate values from different domains. A workflow may select
+outputs from multiple domains, but each JSONL record contains only the fields selected in its own domain.
+Per-domain ordering and native delivery acknowledgment remain enforced. Successful workflow completion
+waits for connected work to drain, and terminal values are never reconstructed from increments.
 
-Graph-local stream consumers require streaming execution. A combined node's terminal ports stay in its
-input domain; its incremental ports create a separate ordered domain. Mixing a delta and terminal answer
-in one consumer is rejected rather than implicitly correlated. Synchronous Loop/Iteration bodies support
-explicit host exports while retaining ordinary Task result ordering; graph-local stream edges remain unsupported
-inside those bodies. Required emission fields constrain actual values and do not require at least one emission.
+Use application event nodes when several delivery kinds must share one ordered protocol. The conversation
+Flow routes preview events and releases final settlement inputs on upstream close, so the graph owns their
+ordering rather than a runtime publisher bypass.
 
 ## Streaming through the in-memory API
 

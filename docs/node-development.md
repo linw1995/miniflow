@@ -670,43 +670,31 @@ contract violations use shared `WorkflowRunError` variants, and sink failures re
 There is no separate emission error type or remembered-error state. Cancellation is checked at
 invocation boundaries, and a failed native stream instance remains failed.
 
-### Buffered live delivery
+### Consume native Stream outputs
 
-A finite Flow exports selected producer ports through an optional `LivePublisher` on its execution context.
-`live_channel(LiveLimits::default())` supplies a publisher and receiver with a default capacity of 64 pending records.
-Capacity must be positive. A full queue blocks publication until consumption, cancellation, or receiver disconnection.
-In-memory delivery retains values directly without serialization or byte accounting. Record size and cumulative output
-have no runtime byte quotas. No channel is created for a host that does not subscribe.
+Connect incremental ports through ordinary graph edges or select them in workflow `outputs`. Streaming
+execution assigns increments their own message domain while terminal values remain in the input domain.
+One consumer cannot implicitly join values from different domains. Selected workflow outputs can span
+domains; each delivered record contains only its domain's selected fields.
 
-Drain an explicitly subscribed receiver concurrently with execution. This fragment assumes a prepared finite
-`flow`, resolved `arguments`, and an event handler:
+Use the prepared Stream instance's existing delivery API:
 
 ```rust
-let (publisher, receiver) = mf_runtime::live_channel(Default::default())?;
-let worker = std::thread::spawn(move || {
-    let mut context = mf_runtime::ExecutionContext::default();
-    context.set_workflow_arguments(arguments);
-    context.set_live_publisher(publisher);
-    flow.execute_in_context(&mut context)
-});
-while let Some(event) = receiver.recv()? {
-    handle_event(event);
+let instance = prepared.start()?;
+while let Some(delivery) = instance.receive()? {
+    handle_output(delivery.output());
+    delivery.acknowledge()?;
 }
-let final_outputs = worker.join().expect("workflow worker panicked")?;
+let summary = instance.join()?;
 ```
 
-Use `publisher.select(["answer".into()])` to subscribe to specific export names. Other exports stay unconnected;
-subscription filtering applies before a provider checks consumer presence, rather than discarding data afterward.
-`LiveReceiver::try_recv` distinguishes empty, closed, and failed delivery. Receiver drop fails pending delivery;
-blocked senders and final drain honor cancellation. Terminal dependents can execute after the combined node
-returns, while whole-Flow success waits for live delivery to drain. The publisher is released at stream-instance
-completion, so receiver EOF does not require dropping an otherwise finished instance.
+Acknowledgment releases the pending message. Hold the delivery while consuming its values to preserve
+backpressure. Cancellation or receiver drop interrupts blocked producers. Required emission fields apply
+to actual records; returning without an emission does not invent a value or invocation event.
 
-`LivePublisher::new` is for synchronous application callbacks. A callback buffering its own output must use
-`with_flush` and implement a cancellation-aware flush. Live records identify the static source path and dynamic
-node invocation. Open/close controls exist even with zero values; close ends production, while final Task and
-workflow results determine success. Snapshot capture stays optional and redacts secret values independently of
-explicit business delivery. Diagnostic capture does not make an otherwise unconnected producer connected.
+Unconnected incremental ports use the discard sink and reserve no unread receiver. Providers can check
+`is_connected()` to avoid incremental construction. Finite execution and isolated Task adaptation return
+the final Task result normally. There is no runtime publisher context or separate live-output protocol.
 
 ## Workflow observation context
 
@@ -826,7 +814,8 @@ settings for definitions constructed or deserialized by the host.
 
 Schema `2026-10-03` accepts `execution: {"mode": "stream"}`. Initial task and stream nodes receive
 workflow arguments once; ordinary edges retain their message identity, while producer/event outputs create
-a new domain. Nodes and selected outputs cannot join different domains. Initial EventNodes require an
+a new domain. Node inputs cannot implicitly join different domains. Selected outputs may span domains and
+each delivery contains only its own domain's fields. Initial EventNodes require an
 activation source, and nested synchronous bodies remain task-only.
 
 Embedded node construction in `mf-compiler` returns `WorkflowBuildError`, preserving configuration and factory error sources.

@@ -226,7 +226,7 @@ transaction; user messages and legacy replies have no call facts. Complete unsav
 original facts during save-only recovery. `UsageSummary::from_calls` shares the persisted query's
 aggregation rules for callers presenting in-memory facts.
 
-Live answers appear as provisional segments, one per stream invocation. Closing an answer stream does not
+Live answers appear as provisional segments, one per model call. Closing an answer stream does not
 finish the turn while title generation or other workflow work remains active. Successful terminal text replaces
 the preview, including any workflow postprocessing. Failed or cancelled prefixes remain visibly incomplete;
 a full uncommitted reply uses the existing save/discard actions.
@@ -242,20 +242,19 @@ and cancellation polling. Events from an older chat invocation cannot alter the 
 launch with `submit_stream` or `retry_stream`; drain the returned receiver concurrently with completion:
 
 ```rust
-let (job, events) = host.submit_stream(&session.id, "Hello", Default::default())?;
+let (job, events) = host.submit_stream(&session.id, "Hello")?;
 let reader = std::thread::spawn(move || {
-    while let Some(event) = events.recv()? {
+    while let Ok(event) = events.recv() {
         render_provisional(event);
     }
-    Ok::<_, mf_runtime::StreamError>(())
 });
 let completion = job.join()?;
-reader.join().expect("reader panicked")?;
+reader.join().expect("reader panicked");
 ```
 
-The public `answer` export carries objects with string `text` and `model_call_id` fields. It is selected from
-reflected export contracts, independently of node kinds or graph topology. A node may emit zero fragments.
-Each open/value/close sequence belongs to one scoped stream invocation; repeated Loop calls stay separate.
+The public `answer` output carries objects with string `text` and `model_call_id` fields. It is selected through
+ordinary workflow outputs, independently of node kinds or graph topology. A node may emit zero fragments.
+Native output records carry deltas directly; completion is established by normal stream drain and process exit.
 Chat `Invocation.call_id` identifies the application turn. A delta's `model_call_id` identifies its model request
 and matches that request's terminal usage entry; a turn can contain several model calls.
 
@@ -267,21 +266,28 @@ that complete reply available for save-only retry without invoking the backend a
 
 ## Executable conversation backend
 
-`mf_chat::contract::ChatContract` validates a finite executable's external conversation contract. Internal node kinds,
+`mf_chat::contract::ChatContract` validates an executable's external conversation contract. Internal node kinds,
 node counts, control edges, preprocessing, and loops are workflow implementation choices. Execute the whole
 workflow; there is no isolated-model execution mode or assumption that a workflow contains one LLM.
 
 The startup interface supplies an unambiguous `prompt` string and optionally `system`, `history`, and `context`.
 Their qualified names can belong to any startup node. Remaining declared inputs form `contract.parameters`;
 resolve them with `mf_runtime::resolve_workflow_inputs` before admission. The contract rejects ambiguous or
-mistyped conversation ports, stdin-dependent execution, and top-level native stream execution.
+mistyped conversation ports and stdin-dependent execution.
 
-Executables advertising finite live output and a compatible public `answer` export use `events-jsonl` with
-that export explicitly selected. Older JSON executables keep their existing transport. The capture worker
-validates bounded protocol records independently of rendering and retains only the final JSON result.
-A valid final remains authoritative if the process later reports diagnostics or exits unsuccessfully.
-A prefix without a final cannot be saved as a reply. Connected-delivery failures retain an available final
-for explicit recovery instead of silently committing it.
+Finite executables keep their existing final JSON transport. Native streaming executables may select an
+ordinary output named `answer` containing `text` and `model_call_id`. The backend drains standard JSONL
+records, validates deltas, and retains the final conversation result until execution completes.
+
+`workflows/conversation.json` owns incremental processing: `begin` admits the turn, `workflow.invoke`
+emits application invocation events, and `route` publishes previews while retaining the final response.
+The route releases settlement inputs only after the backend producer closes successfully. Preview and
+settlement deliveries share one ordered message domain, so unread previews cannot be overtaken by a save.
+The host consumes these Flow outputs; it does not forward raw model events around the application graph.
+
+Preview delivery is independent of terminal rendering. Application events carry the chat invocation and
+actual model-call identity; they do not need runtime open/close envelopes. A complete result retained before
+a later failure remains available for explicit save-only recovery, while partial text never becomes history.
 
 The [single-call example](../examples/chat-flow.json), the
 [conversation and title example](../examples/chat-title-flow.json), and the

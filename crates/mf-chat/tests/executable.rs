@@ -120,7 +120,9 @@ fn preflight_checks_transport_and_external_ports() {
     let mut streaming = original.clone();
     streaming.definition.execution =
         Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
-    for invalid in [wrong_type, missing, ambiguous, stdin, streaming] {
+    assert!(ChatContract::from_manifest(&streaming).unwrap().streaming);
+    assert!(!ChatContract::from_manifest(&original).unwrap().streaming);
+    for invalid in [wrong_type, missing, ambiguous, stdin] {
         assert!(ChatContract::from_manifest(&invalid).is_err());
     }
     for name in ["status", "text", "usages"] {

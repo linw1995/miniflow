@@ -170,7 +170,8 @@ pub use recovery::{
 #[derive(Clone, Debug)]
 pub struct ChatContract {
     pub parameters: WorkflowInputSchema,
-    pub answer_stream: Option<mf_runtime::StreamOutputContract>,
+    pub answer_stream: Option<mf_runtime::WorkflowOutputDefinition>,
+    pub streaming: bool,
     inputs: BTreeMap<String, String>,
 }
 
@@ -178,10 +179,10 @@ impl ChatContract {
     pub fn from_manifest(manifest: &WorkflowManifest) -> Result<Self, ChatError> {
         manifest.validate()?;
         ensure!(
-            !manifest.description()?.is_streaming() && manifest.input_schema.stdin.is_empty(),
+            manifest.input_schema.stdin.is_empty(),
             InvalidSnafu {
                 field: "chat executable",
-                reason: "requires finite JSON execution without stdin"
+                reason: "requires workflow execution without stdin"
             }
         );
         let mut configuration = manifest.input_schema.clone();
@@ -234,24 +235,24 @@ impl ChatContract {
                 }
             );
         }
+        let streaming = manifest.description()?.is_streaming();
         let answer_stream = manifest
-            .stream_outputs
+            .definition
+            .outputs
             .iter()
             .find(|output| output.name == "answer")
             .cloned();
-        if let Some(answer) = &answer_stream {
-            ensure!(
-                manifest.supports_live_output()
-                    && answer.value_type == mf_runtime::ValueType::Object,
-                InvalidSnafu {
-                    field: "answer stream",
-                    reason: "requires finite live output with object text deltas"
-                }
-            );
-        }
+        ensure!(
+            answer_stream.is_none() || streaming,
+            InvalidSnafu {
+                field: "answer stream",
+                reason: "requires native streaming execution"
+            }
+        );
         Ok(Self {
             parameters: configuration,
             answer_stream,
+            streaming,
             inputs,
         })
     }
@@ -380,13 +381,153 @@ pub fn decode_answer_delta(
     <mfn_llm::TextDelta as mf_runtime::InputField>::decode_field("answer", Some(value.clone()))
 }
 
-pub fn publish_answer(
-    publisher: &mf_runtime::LivePublisher,
-    event: mf_runtime::LiveOutputEvent,
-    cancellation: &mf_runtime::StreamCancellation,
-) -> Result<(), mf_runtime::StreamError> {
-    if let mf_runtime::LiveOutputKind::Value { value } = &event.event {
-        decode_answer_delta(value).context(mf_runtime::StreamOutputDecodeSnafu)?;
+/// Validates native workflow output records against the conversation protocol.
+pub struct ConversationOutputDecoder {
+    answer: bool,
+    result: Option<ConversationResult>,
+}
+
+impl ConversationOutputDecoder {
+    pub fn new(contract: &ChatContract) -> Self {
+        Self {
+            answer: contract.answer_stream.is_some(),
+            result: None,
+        }
     }
-    publisher.publish(event, cancellation)
+
+    pub fn accept(
+        &mut self,
+        mut values: NodeValues,
+    ) -> Result<Option<mfn_llm::TextDelta>, ChatError> {
+        let delta = values
+            .remove("answer")
+            .map(|value| -> Result<_, ChatError> {
+                ensure!(
+                    self.answer,
+                    InvalidSnafu {
+                        field: "answer stream",
+                        reason: "was not declared by the workflow"
+                    }
+                );
+                let delta = decode_answer_delta(&value)?;
+                ensure!(
+                    !delta.text.is_empty() && !delta.model_call_id.trim().is_empty(),
+                    InvalidSnafu {
+                        field: "answer stream",
+                        reason: "requires nonempty text and a model call identity"
+                    }
+                );
+                Ok(delta)
+            })
+            .transpose()?;
+        let ports = ConversationResult::ports();
+        values.retain(|name, _| ports.iter().any(|port| port.name == name.as_str()));
+        if !values.is_empty() {
+            ensure!(
+                self.result.is_none(),
+                InvalidSnafu {
+                    field: "workflow result",
+                    reason: "must be produced only once"
+                }
+            );
+            self.result = Some(ConversationResult::decode(values)?);
+        }
+        Ok(delta)
+    }
+
+    pub fn result(&self) -> Option<&ConversationResult> {
+        self.result.as_ref()
+    }
+
+    pub fn finish(self) -> Result<ConversationResult, ChatError> {
+        self.result.context(CaptureSnafu {
+            message: "workflow ended without a terminal conversation result",
+        })
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn decoder(answer: bool) -> ConversationOutputDecoder {
+        ConversationOutputDecoder::new(&ChatContract {
+            parameters: Default::default(),
+            answer_stream: answer.then(|| {
+                serde_json::from_value(json!({"name":"answer","node":"model","port":"delta"}))
+                    .unwrap()
+            }),
+            streaming: true,
+            inputs: Default::default(),
+        })
+    }
+
+    fn values(value: serde_json::Value) -> NodeValues {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn native_results_remain_authoritative_when_other_domains_finish_later() {
+        let mut decoder = decoder(true);
+        decoder
+            .accept(values(
+                json!({"status":"succeeded","text":"canonical","usages":[]}),
+            ))
+            .unwrap();
+        assert!(
+            decoder
+                .accept(values(json!({"debug":42})))
+                .unwrap()
+                .is_none()
+        );
+        let delta = decoder
+            .accept(values(
+                json!({"answer":{"text":"prefix","model_call_id":"model"}}),
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(delta.text, "prefix");
+        assert_eq!(decoder.finish().unwrap().text, "canonical");
+    }
+
+    #[test]
+    fn native_conversation_records_reject_unadvertised_or_invalid_deltas() {
+        assert!(
+            decoder(false)
+                .accept(values(
+                    json!({"answer":{"text":"prefix","model_call_id":"model"}})
+                ))
+                .is_err()
+        );
+        assert!(matches!(
+            decoder(true).accept(values(json!({"answer":"wrong type"}))),
+            Err(ChatError::Decode { .. })
+        ));
+        for delta in [
+            json!({"text":"","model_call_id":"model"}),
+            json!({"text":"prefix","model_call_id":""}),
+        ] {
+            assert!(matches!(
+                decoder(true).accept(values(json!({"answer":delta}))),
+                Err(ChatError::Invalid { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn native_conversation_records_require_one_complete_terminal_result() {
+        assert!(matches!(
+            decoder(true).finish(),
+            Err(ChatError::Capture { .. })
+        ));
+        let mut decoder = decoder(true);
+        let result = json!({"status":"succeeded","text":"canonical","usages":[]});
+        decoder.accept(values(result.clone())).unwrap();
+        assert!(matches!(
+            decoder.accept(values(result)),
+            Err(ChatError::Invalid { .. })
+        ));
+        assert_eq!(decoder.result().unwrap().text, "canonical");
+    }
 }

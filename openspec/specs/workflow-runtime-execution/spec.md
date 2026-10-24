@@ -8,7 +8,7 @@ Prepare one executable Flow and schedule its synchronous execution domains throu
 
 ### Requirement: Prepare one executable Flow for both modes
 
-Both modes SHALL prepare one Flow with mode, executors, execution and message domains, dependencies, outputs, and limits. In-memory and generated runners SHALL use one runtime. Missing stream configuration selects oneshot; executor kind MUST NOT select the mode. Combined nodes SHALL work in both modes and expose host live exports in oneshot. Preparation MUST reject unsupported executors before invocation.
+Both modes SHALL prepare one Flow with mode, executors, execution and message domains, dependencies, outputs, and limits. In-memory and generated runners SHALL use one runtime. Missing stream configuration selects oneshot; executor kind MUST NOT select the mode. Combined nodes SHALL work in both modes; oneshot adaptation SHALL discard unconnected increments without allocating a receiver. Preparation MUST reject unsupported executors before invocation.
 
 #### Scenario: Prepare a oneshot workflow
 
@@ -30,9 +30,9 @@ Both modes SHALL prepare one Flow with mode, executors, execution and message do
 - **WHEN** generated oneshot and stream runners execute their embedded plans
 - **THEN** both call the same runtime and domain scheduler
 
-#### Scenario: Keep a live chat workflow finite
+#### Scenario: Adapt a combined node to terminal-only execution
 
-- **WHEN** a oneshot workflow contains a combined node and a live export
+- **WHEN** a oneshot workflow contains a combined node without incremental consumers
 - **THEN** the workflow remains finite and returns its complete selected Task outputs once
 
 ### Requirement: Partition task graphs into synchronous execution domains
@@ -476,12 +476,3 @@ A combined node's validated return SHALL publish terminal outputs and permit ord
 
 - **WHEN** a combined model node returns a valid answer while admitted live records are still draining
 - **THEN** its terminal dependent can start and workflow success waits for both paths
-
-### Requirement: Preserve scoped combined invocation identity
-
-Finite Loop and Iteration execution SHALL retain ordinary Task ordering, limits, commits, and cancellation while routing explicitly exported combined emissions. Export routing SHALL retain the complete static node path and dynamic iteration identity through context forks without exposing parent application outputs to child workflows.
-
-#### Scenario: Observe parallel iteration items
-
-- **WHEN** different Iteration items invoke the same combined body node
-- **THEN** each live stream has a distinct item/invocation identity and ordinary result ordering is preserved

@@ -395,9 +395,14 @@ A combined invocation SHALL finish production when its execution entry point ret
 
 ### Requirement: Keep selected-output domain rules explicit
 
-Existing selected stream-workflow results SHALL retain their single-message-domain restriction. Explicit live exports SHALL be independently routed and MUST NOT merge terminal and emission domains into one synthetic result. Ownership validation SHALL use source output category rather than one domain per node.
+Selected workflow outputs MAY span message domains. A delivered record SHALL contain only fields selected in its own domain. Each domain SHALL retain ordered delivery and acknowledgment. A pending selected delivery MUST NOT be overwritten by another completed domain. Node inputs MUST NOT implicitly join unrelated message domains.
 
-#### Scenario: Select terminal output and export deltas
+#### Scenario: Select terminal and incremental output
 
-- **WHEN** a streaming graph selects an origin-domain terminal output and separately exports a combined stream
-- **THEN** both routes retain their own identities without permitting a mixed-domain selected output object
+- **WHEN** a workflow selects an origin-domain terminal result and a combined node's increments
+- **THEN** both routes remain observable as separate records with their own message identities
+
+#### Scenario: Complete two selected domains together
+
+- **WHEN** another domain completes while a selected delivery awaits acknowledgment
+- **THEN** the completed frame remains pending until the delivery slot becomes available

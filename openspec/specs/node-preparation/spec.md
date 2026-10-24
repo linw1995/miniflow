@@ -112,7 +112,7 @@ unconnected emissions without allocating a receiver.
 
 ### Requirement: Restrict synchronous execution to tasks
 
-Synchronous flows and generated task bodies SHALL contain only ordinary or combined Task executors. Pure event and stream nodes MUST be rejected before invocation. Combined stream exports SHALL be supported, while graph-local stream edges in synchronous bodies remain unsupported. Metadata inference SHALL remain independent of execution kind.
+Synchronous flows and generated task bodies SHALL contain only ordinary or combined Task executors. Pure event and stream nodes MUST be rejected before invocation. Incremental connections and output selections SHALL require streaming execution; synchronous scopes SHALL consume only terminal results. Metadata inference SHALL remain independent of execution kind.
 
 #### Scenario: Reject an event in a synchronous flow
 

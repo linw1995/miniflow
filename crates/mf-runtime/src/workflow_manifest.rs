@@ -31,8 +31,6 @@ pub struct LoopExecutionOrder {
 pub enum WorkflowManifestVersion {
     #[serde(rename = "2026-10-16")]
     V2026_10_16,
-    #[serde(rename = "2026-10-23")]
-    V2026_10_23,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -44,8 +42,6 @@ pub struct WorkflowManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_orders: Vec<LoopExecutionOrder>,
     pub input_schema: WorkflowInputSchema,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stream_outputs: Vec<crate::StreamOutputContract>,
 }
 
 #[derive(Debug, Snafu)]
@@ -70,27 +66,6 @@ pub enum WorkflowManifestError {
 }
 
 impl WorkflowManifest {
-    pub fn supports_live_output(&self) -> bool {
-        self.version == WorkflowManifestVersion::V2026_10_23 && self.definition.execution.is_none()
-    }
-
-    pub fn validate_prepared_stream_outputs(
-        &self,
-        actual: &[crate::StreamOutputContract],
-    ) -> Result<(), WorkflowManifestError> {
-        let mut expected = self.stream_outputs.clone();
-        let mut actual = actual.to_vec();
-        expected.sort_by(|a, b| a.name.cmp(&b.name));
-        actual.sort_by(|a, b| a.name.cmp(&b.name));
-        ensure!(
-            actual == expected,
-            InterfaceDriftSnafu {
-                path: "/stream_outputs",
-                component: "live output contract"
-            }
-        );
-        Ok(())
-    }
     /// Borrows an original root node without preparing or executing its provider.
     pub fn node_definition(&self, id: &str) -> Option<&crate::NodeDefinition> {
         self.definition
@@ -114,15 +89,9 @@ impl WorkflowManifest {
 
     fn interface_for(&self, workflow_id: WorkflowId) -> WorkflowInterface {
         WorkflowInterface {
-            version: if self.supports_live_output() || !self.stream_outputs.is_empty() {
-                crate::WorkflowInterfaceVersion::V2026_10_23
-            } else {
-                crate::WorkflowInterfaceVersion::for_schema(&self.input_schema)
-            },
+            version: crate::WorkflowInterfaceVersion::for_schema(&self.input_schema),
             workflow_id,
             schema: self.input_schema.clone(),
-            live_output: self.supports_live_output(),
-            stream_outputs: self.stream_outputs.clone(),
         }
     }
 
@@ -187,40 +156,6 @@ impl WorkflowManifest {
     }
 
     pub fn validate(&self) -> Result<(), WorkflowManifestError> {
-        crate::workflow_inputs::validate_stream_outputs(&self.stream_outputs)
-            .context(InterfaceSnafu)?;
-        ensure!(
-            self.version == WorkflowManifestVersion::V2026_10_23
-                || (self.stream_outputs.is_empty() && self.definition.stream_outputs.is_empty()),
-            FramingSnafu {
-                message: "live output contracts require manifest version 2026-10-23",
-            }
-        );
-        let declared = self
-            .definition
-            .stream_outputs
-            .iter()
-            .map(|output| (output.name.as_str(), output))
-            .collect::<BTreeMap<_, _>>();
-        ensure!(
-            declared.len() == self.definition.stream_outputs.len()
-                && declared.len() == self.stream_outputs.len(),
-            FramingSnafu {
-                message: "live output declarations and prepared contracts disagree",
-            }
-        );
-        for output in &self.stream_outputs {
-            ensure!(
-                declared
-                    .get(output.name.as_str())
-                    .is_some_and(
-                        |selection| selection.path == output.path && selection.port == output.port
-                    ),
-                FramingSnafu {
-                    message: "live output source route differs from its declaration",
-                }
-            );
-        }
         let description = self.description()?;
         self.interface_for(description.workflow_id.clone())
             .validate_for_description(&description)

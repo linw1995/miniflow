@@ -16,6 +16,7 @@ impl ConversationBackend for Backend {
         invocation: &Invocation,
         _: ConversationInputs,
         context: &mut ExecutionContext,
+        _: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), mf_chat::ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
     ) -> Result<ConversationResult, mf_chat::ChatError> {
         let mut usage: mf_chat::CallUsage = serde_json::from_value(json!({"call_id":format!("model-{}", invocation.call_id), "model":"fixture", "usage":{"output_tokens":100}})).unwrap();

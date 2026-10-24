@@ -1016,22 +1016,17 @@ The TUI SHALL advance elapsed time while a local run is active. Once completion 
 
 ### Requirement: Display provisional streamed chat replies
 
-The chat terminal SHALL subscribe before execution and display bounded live answer text before final completion. Records SHALL be consumed independently of render refresh. Separate exported node invocations SHALL remain distinct provisional segments, and unexported internal model output MUST NOT appear as answer text. Stream closure SHALL not imply conversation completion.
+The chat terminal SHALL consume application preview outputs from the conversation Flow before final settlement. Records SHALL be processed independently of rendering. Presentation state SHALL be bounded and grouped by actual model-call identity. A preview MUST NOT imply conversation success, and unrelated internal model output MUST NOT become answer text.
 
 #### Scenario: Wait for title generation
 
-- **WHEN** answer increments finish while the user Flow continues generating a title
-- **THEN** the terminal keeps the answer visible as provisional and indicates remaining work
+- **WHEN** answer previews arrive while the backend continues title generation
+- **THEN** the terminal keeps them provisional and indicates remaining work
 
-#### Scenario: Receive repeated model invocations
+#### Scenario: Receive no increments
 
-- **WHEN** one turn receives multiple answer streams from separate Loop iterations
-- **THEN** the terminal distinguishes their provisional segments instead of concatenating unrelated invocations
-
-#### Scenario: Receive an empty stream
-
-- **WHEN** an invoked answer stream opens and closes without increments
-- **THEN** the terminal remains responsive and can display the final response when available
+- **WHEN** the backend completes without answer deltas
+- **THEN** the terminal displays its final response without requiring open or close events
 
 ### Requirement: Replace previews with authoritative completion state
 

@@ -81,6 +81,12 @@ fn configured_profile(
 ) -> Result<WorkflowProfile, ChatError> {
     let mut definition: Value =
         serde_json::from_str(include_str!("../../../examples/chat-title-flow.json")).unwrap();
+    // Keep finite backend coverage independent of the streaming example.
+    definition.as_object_mut().unwrap().remove("execution");
+    definition["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|output| output["name"] != "answer");
     let parameters = definition["nodes"][0]["config"]["parameters"]
         .as_object_mut()
         .unwrap();

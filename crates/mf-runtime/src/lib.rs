@@ -9,9 +9,6 @@ mod flow;
 #[cfg(feature = "async")]
 mod future_execution;
 mod iteration;
-mod live;
-mod live_channel;
-mod live_protocol;
 mod loop_node;
 mod message_domain;
 mod node;
@@ -52,7 +49,7 @@ pub use definition::{
     LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS,
     MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency, OrderEdgeDefinition,
     OutputReferenceDefinition, WorkflowDefinition, WorkflowDefinitionVersion,
-    WorkflowOutputDefinition, WorkflowStreamOutputDefinition, validate_exclusive_inputs,
+    WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{ExecutionInputs, InputResolution, resolve_workflow_inputs};
@@ -67,12 +64,6 @@ pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
     iteration_input_flow_node,
-};
-pub use live::{LiveOutputEvent, LiveOutputKind, LivePublisher};
-pub use live_channel::{LiveLimits, LiveMetrics, LiveReceiveError, LiveReceiver, live_channel};
-pub use live_protocol::{
-    DeliverySnafu as LiveProtocolDeliverySnafu, LIVE_PROTOCOL_VERSION, LiveOutputDecoder,
-    LiveOutputWriter, LiveProtocolError, LiveRecord, LiveRecordKind,
 };
 pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_exit, prepared_loop_source_types,
@@ -120,8 +111,8 @@ pub use stream_plan::{
 };
 pub use subgraph::PreparedSubgraph;
 pub use task_stream::{
-    DiscardSink, EmissionSink, Emitter, StreamInvocation, StreamOutputContract, TaskStreamExecutor,
-    TaskStreamNode, TypedEmitter, TypedTaskStreamNode,
+    DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,
+    TypedTaskStreamNode,
 };
 pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, Nullable, Shared, decode_default_input,
@@ -147,7 +138,7 @@ pub use workflow_inputs::{
 };
 
 pub use runner_arguments::{
-    RunnerArgumentError, RunnerArguments, RunnerInvocation, RunnerOutputFormat, runner_help_command,
+    RunnerArgumentError, RunnerArguments, RunnerInvocation, runner_help_command,
 };
 #[cfg(unix)]
 pub use runner_signals::{RunnerSignalError, RunnerSignals};
@@ -166,5 +157,3 @@ pub use workflow_manifest::{
     MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES,
     WorkflowManifest, WorkflowManifestError, WorkflowManifestVersion, describe_definition,
 };
-
-pub use stream_instance::OutputDecodeSnafu as StreamOutputDecodeSnafu;

@@ -3,14 +3,8 @@ use crate::{
     PortSpec, StreamCancellation, StreamError, TaskNode, TypedNodeResult,
 };
 use mf_telemetry::event::LoopPathEntry;
-use snafu::{OptionExt, ResultExt, ensure};
-use std::{
-    marker::PhantomData,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use snafu::{ResultExt, ensure};
+use std::{marker::PhantomData, sync::Arc};
 
 /// One business invocation with incremental values and an authoritative final result.
 pub trait TaskStreamNode: Send + Sync {
@@ -61,8 +55,6 @@ pub trait EmissionSink {
         }
         self.send(result)
     }
-
-    fn set_deadline(&mut self, _deadline: std::time::Instant) {}
 }
 
 pub struct DiscardSink;
@@ -150,7 +142,6 @@ impl<'a> Emitter<'a> {
         result: NodeResult,
         deadline: std::time::Instant,
     ) -> Result<(), NodeExecutionError> {
-        self.sink.set_deadline(deadline);
         let original = self.cancellation.clone();
         self.cancellation = original.with_deadline(deadline);
         let result = self.send(result);
@@ -227,79 +218,21 @@ impl<'a, 'sink, O: crate::NodeOutputs> TypedEmitter<'a, 'sink, O> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct StreamInvocation {
-    pub id: u64,
-    pub node: String,
-    pub path: Vec<LoopPathEntry>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StreamOutputContract {
-    pub name: String,
-    pub path: Vec<crate::DefinitionId>,
-    pub port: String,
-    pub value_type: crate::ValueType,
-    pub required: bool,
-}
-
-impl StreamInvocation {
-    pub fn new(context: &ExecutionContext) -> Result<Self, StreamError> {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT_ID
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .ok()
-            .context(crate::stream_instance::ResourceSnafu {
-                message: "stream invocation identities exhausted",
-            })?;
-        Ok(Self {
-            id,
-            node: context.current_node().unwrap_or("<task-stream>").into(),
-            path: context.invocation_path(),
-        })
-    }
-}
-
 pub struct TaskStreamExecutor {
     node: Box<dyn TaskStreamNode>,
     outputs: Vec<PortSpec>,
-    exports: Vec<StreamOutputContract>,
 }
 
 impl TaskStreamExecutor {
     pub fn new(node: Box<dyn TaskStreamNode>, outputs: Vec<PortSpec>) -> Self {
-        Self {
-            node,
-            outputs,
-            exports: Vec::new(),
-        }
-    }
-
-    pub fn set_exports(&mut self, exports: Vec<StreamOutputContract>) {
-        self.exports = exports;
+        Self { node, outputs }
     }
 
     pub fn set_stream_contract(&mut self, outputs: &[PortSpec]) {
         self.outputs = outputs.to_vec();
     }
 
-    pub fn exports(&self) -> &[StreamOutputContract] {
-        &self.exports
-    }
-
     pub fn execute_with_sink(
-        &self,
-        inputs: Inputs,
-        context: &mut ExecutionContext,
-        sink: &mut dyn EmissionSink,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        crate::live::with_exports(&self.exports, context, sink, |context, sink| {
-            self.invoke(inputs, context, sink)
-        })
-    }
-
-    fn invoke(
         &self,
         inputs: Inputs,
         context: &mut ExecutionContext,

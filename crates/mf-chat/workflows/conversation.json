@@ -36,24 +36,36 @@
       }
     },
     {
+      "id": "route",
+      "kind": "mf_chat.conversation.route",
+      "inputs": {
+        "event": {
+          "from": {
+            "node": "workflow",
+            "port": "event"
+          }
+        }
+      }
+    },
+    {
       "id": "settle",
       "kind": "mf_chat.turn.settle",
       "inputs": {
         "database_path": {
           "from": {
-            "node": "workflow",
+            "node": "route",
             "port": "database_path"
           }
         },
         "invocation": {
           "from": {
-            "node": "workflow",
+            "node": "route",
             "port": "invocation"
           }
         },
         "response": {
           "from": {
-            "node": "workflow",
+            "node": "route",
             "port": "response"
           }
         }
@@ -62,9 +74,19 @@
   ],
   "outputs": [
     {
+      "name": "preview",
+      "node": "route",
+      "port": "preview",
+      "optional": true
+    },
+    {
       "name": "settlement",
       "node": "settle",
-      "port": "settlement"
+      "port": "settlement",
+      "optional": true
     }
-  ]
+  ],
+  "execution": {
+    "mode": "stream"
+  }
 }

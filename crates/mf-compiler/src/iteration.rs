@@ -48,7 +48,6 @@ pub fn body_definition(
     Ok(WorkflowDefinition {
         version: parent.version,
         execution: None,
-        stream_outputs: Vec::new(),
         dependencies: parent.dependencies.clone(),
         nodes,
         edges: config.body.edges.clone(),

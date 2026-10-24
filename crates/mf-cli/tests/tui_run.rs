@@ -722,7 +722,6 @@ fn failed_stdout_delivery_uses_cli_error_or_preserves_child_failure() {
 
 fn manifest() -> mf_runtime::WorkflowManifest {
     mf_runtime::WorkflowManifest {
-        stream_outputs: Vec::new(),
         version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
         definition: serde_json::from_value(serde_json::json!({
             "version": "2026-09-26", "dependencies": {},

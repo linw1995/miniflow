@@ -25,10 +25,6 @@ impl StreamCancellation {
             target: Arc::downgrade(&target.0),
         })));
     }
-    pub(super) fn without_deadline(&self) -> Self {
-        Self(self.0.clone(), None)
-    }
-
     pub(super) fn with_deadline(&self, deadline: std::time::Instant) -> Self {
         Self(
             self.0.clone(),
