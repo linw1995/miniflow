@@ -294,7 +294,7 @@ fn stream_skip_observations_use_logical_inputs_and_keep_selected_sources() {
         stream::{StreamPayload, StreamRecord},
     };
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+        "version":"2026-10-03", "dependencies":{}, "execution":{},
         "nodes":[
             controlled::source(json!("int")),
             {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"positive", "condition":{"source":{"output":"feed.item", "path":""}, "operator":"gt", "value":0}}]}},
@@ -359,7 +359,7 @@ fn exclusive_startup_input_activates_a_stream_producer() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for ci in [false, true] {
         let definition: WorkflowDefinition = serde_json::from_value(json!({
-            "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+            "version":"2026-10-03", "dependencies":{}, "execution":{},
             "nodes":[
                 {"id":"params", "kind":"builtin.parameters", "config":{"parameters":{
                     "control":{"type":"string"}, "ci":{"type":"bool", "default":ci, "secret":false}
@@ -539,8 +539,9 @@ fn executable_builders_require_proof_and_valid_task_output_contracts() {
                     controlled::source(json!("int"))
                 };
                 let definition = serde_json::from_value(json!({
-                    "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"}, "nodes":[replacement]
-                })).unwrap();
+                    "version":"2026-10-03", "dependencies":{}, "execution":{}, "nodes":[replacement]
+                }))
+                .unwrap();
                 route.node = mf_compiler::resolve_nodes(&definition, &registry)
                     .unwrap()
                     .pop()
@@ -563,7 +564,7 @@ fn executable_builders_require_proof_and_valid_task_output_contracts() {
         }
         let result = if case.starts_with("stream_") {
             builder
-                .into_stream(serde_json::from_value(json!({"mode":"stream"})).unwrap())
+                .into_stream(serde_json::from_value(json!({})).unwrap())
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         } else {
@@ -595,7 +596,7 @@ fn stateful_boundaries_do_not_export_per_invocation_branch_facts() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for event in [false, true] {
         let mut value = serde_json::to_value(definition(true, json!(1), json!(2))).unwrap();
-        value["execution"] = json!({"mode":"stream"});
+        value["execution"] = json!({});
         value["nodes"][2] = if event {
             json!({"id":"left", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}})
         } else {

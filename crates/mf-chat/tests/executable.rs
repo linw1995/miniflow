@@ -118,8 +118,7 @@ fn preflight_checks_transport_and_external_ports() {
         .stdin
         .insert("params".into(), mf_runtime::StdinRequirement::Always);
     let mut streaming = original.clone();
-    streaming.definition.execution =
-        Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    streaming.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
     for invalid in [wrong_type, missing, ambiguous, stdin, streaming] {
         assert!(ChatContract::from_manifest(&invalid).is_err());
     }

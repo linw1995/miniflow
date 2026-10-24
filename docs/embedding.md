@@ -89,7 +89,7 @@ outputs are unchanged and are not enabled for embedding.
 
 ## Prepare streams
 
-Streaming definitions expose `prepare_stream`:
+Use `prepare_stream` for workflows whose resolved contracts require streaming:
 
 ```rust
 mf_compiler::embed_workflow!(pub mod events);
@@ -205,3 +205,7 @@ Compiler dependencies distinguish `Dependency::Output` from `Dependency::NodeSuc
 `ExecutionDependency` borrows them. Executable runtime dependencies contain only data and output gates. Success prerequisites carry no input or output port. They retain activation facts,
 but router success alone adds no branch-selection fact. Success errors preserve their typed source chains, and
 isolated-node execution still accepts resolved inputs without running predecessors.
+
+Execution is inferred when the host registry resolves node contracts. Embedded modules expose both
+`prepare_workflow` and `prepare_stream`; finite preparation rejects graphs that require streaming.
+Standalone Cargo runners resolve this choice during their build and compile one fixed execution path.

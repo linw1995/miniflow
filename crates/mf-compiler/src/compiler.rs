@@ -277,12 +277,14 @@ impl TypeInferenceState {
     ) -> Result<(), WorkflowCompileError> {
         let id = &node.definition_id;
         let derivations = node.metadata.output_derivations.clone();
-        node.metadata
-            .ports
-            .validate_derivations(id.as_str(), &derivations)
-            .with_context(|_| OutputDerivationSnafu {
-                definition_id: id.clone(),
-            })?;
+        mf_runtime::NodePorts {
+            inputs: node.metadata.ports.inputs.clone(),
+            outputs: node.metadata.output_ports().cloned().collect(),
+        }
+        .validate_derivations(id.as_str(), &derivations)
+        .with_context(|_| OutputDerivationSnafu {
+            definition_id: id.clone(),
+        })?;
 
         let mut inputs: BTreeMap<&str, TypeFact> = BTreeMap::new();
         for dependency in dependencies {
@@ -376,7 +378,13 @@ impl TypeInferenceState {
             .into_iter()
             .map(|derivation| (derivation.output().to_owned(), derivation))
             .collect();
-        for output in &mut node.metadata.ports.outputs {
+        for output in node
+            .metadata
+            .ports
+            .outputs
+            .iter_mut()
+            .chain(&mut node.metadata.stream_outputs)
+        {
             let declared = output.value_type.clone();
             let mut fact = match derivations.get(output.name.as_ref()) {
                 Some(OutputDerivation::KnownType { value_type, .. }) => TypeFact {
@@ -509,7 +517,7 @@ fn prepare_graph(
     let order = structural_order_graph(definition)?;
     let mut nodes =
         resolve_nodes_in_scope(definition, preparation, enclosing, allow_iteration_input)?;
-    if definition.execution.is_none()
+    if !preparation.path.is_empty()
         && let Some(node) = nodes.iter().find(|node| {
             matches!(
                 &node.node,
@@ -633,15 +641,26 @@ fn validate_base_metadata(
 ) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
-        .map(|node| (node.definition_id.clone(), &node.metadata.ports))
+        .map(|node| (node.definition_id.clone(), &node.metadata))
         .collect();
-    let invalid = |id: &DefinitionId, message: String| WorkflowCompileError::InvalidNodeMetadata {
-        definition_id: id.clone(),
-        message,
+    let invalid = |id: &DefinitionId, message: String| {
+        InvalidNodeMetadataSnafu {
+            definition_id: id.clone(),
+            message,
+        }
+        .build()
     };
     let mut output_index = BTreeMap::new();
     for node in nodes {
         let ports = registrations[&node.definition_id];
+        ensure!(
+            ports.stream_outputs.is_empty()
+                || matches!(node.node, Some(mf_runtime::NodeExecution::TaskStream(_))),
+            InvalidNodeMetadataSnafu {
+                definition_id: node.definition_id.clone(),
+                message: "separate stream outputs require a combined executor",
+            }
+        );
         if !node.metadata.input_bindings.is_empty()
             && (!startup || incoming.contains_key(node.definition_id.as_str()))
         {
@@ -652,14 +671,14 @@ fn validate_base_metadata(
         }
         if let Some(generation) = &node.metadata.typed_generation {
             generation
-                .validate(ports)
+                .validate(&ports.ports)
                 .with_context(|_| TypedGenerationSnafu {
                     definition_id: node.definition_id.clone(),
                 })?;
         }
         for (direction, specs) in [
-            ("input", &ports.inputs),
-            ("output", &ports.outputs),
+            ("input", &ports.ports.inputs),
+            ("output", &ports.ports.outputs),
             ("stream output", &node.metadata.stream_outputs),
         ] {
             let mut names = BTreeSet::new();
@@ -681,6 +700,7 @@ fn validate_base_metadata(
         }
         for port in &node.metadata.stream_outputs {
             if ports
+                .ports
                 .outputs
                 .iter()
                 .any(|terminal| terminal.name == port.name)
@@ -691,7 +711,7 @@ fn validate_base_metadata(
                 ));
             }
         }
-        for port in &ports.outputs {
+        for port in ports.output_ports() {
             let key = crate::output_id(node.definition_id.as_str(), &port.name);
             if let Some((previous_node, previous_port)) =
                 output_index.insert(key.clone(), (&node.definition_id, &port.name))
@@ -743,8 +763,7 @@ fn validate_base_metadata(
     }
     for edge in &definition.control_edges {
         if !registrations[&edge.from_node]
-            .outputs
-            .iter()
+            .output_ports()
             .any(|port| port.name == edge.from_output)
         {
             return Err(control_error(edge, "unknown source output"));
@@ -756,8 +775,7 @@ fn validate_base_metadata(
         let source = registrations[&edge.from_node];
         let target = registrations[&edge.to_node];
         let Some(_) = source
-            .outputs
-            .iter()
+            .output_ports()
             .find(|port| port.name == edge.from_output)
         else {
             return UnknownOutputPortSnafu {
@@ -768,7 +786,12 @@ fn validate_base_metadata(
             }
             .fail();
         };
-        let Some(_) = target.inputs.iter().find(|port| port.name == edge.to_input) else {
+        let Some(_) = target
+            .ports
+            .inputs
+            .iter()
+            .find(|port| port.name == edge.to_input)
+        else {
             return UnknownInputPortSnafu {
                 from_node: edge.from_node.clone(),
                 from_output: edge.from_output.clone(),
@@ -785,7 +808,12 @@ fn validate_base_metadata(
         if startup && !incoming.contains_key(node.id.as_str()) {
             continue;
         }
-        for port in registration.inputs.iter().filter(|port| port.required) {
+        for port in registration
+            .ports
+            .inputs
+            .iter()
+            .filter(|port| port.required)
+        {
             if !connected_inputs.contains(&(node.id.clone(), port.name.to_string())) {
                 return MissingRequiredInputSnafu {
                     node_id: node.id.clone(),
@@ -799,8 +827,7 @@ fn validate_base_metadata(
     for output in &definition.outputs {
         let registration = registrations[&output.node];
         if !registration
-            .outputs
-            .iter()
+            .output_ports()
             .any(|port| port.name == output.port)
         {
             return UnknownWorkflowOutputPortSnafu {
@@ -1113,6 +1140,7 @@ pub fn compile_definition(
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
     let (nodes, execution_order) = prepare_definition(definition, registry)?;
+    let definition = resolve_execution(definition, &nodes)?;
     let flow = crate::FlowBuilder::prepare(
         nodes,
         definition.edges.clone(),
@@ -1130,7 +1158,40 @@ pub fn compile_definition(
         flow.into_tasks().context(FlowConstructionSnafu)?;
     }
 
-    normalize_plan(definition, execution_order)
+    normalize_plan(&definition, execution_order)
+}
+
+pub fn resolve_execution(
+    definition: &WorkflowDefinition,
+    nodes: &[FlowNode],
+) -> Result<WorkflowDefinition, WorkflowCompileError> {
+    let stream_outputs: BTreeSet<_> = nodes
+        .iter()
+        .flat_map(|node| {
+            node.metadata
+                .stream_outputs
+                .iter()
+                .map(move |port| (node.definition_id.as_str(), port.name.as_ref()))
+        })
+        .collect();
+    let streaming =
+        nodes.iter().any(|node| {
+            matches!(
+                node.node,
+                Some(mf_runtime::NodeExecution::Event(_) | mf_runtime::NodeExecution::Stream(_))
+            )
+        }) || definition.edges.iter().any(|edge| {
+            stream_outputs.contains(&(edge.from_node.as_str(), edge.from_output.as_ref()))
+        }) || definition.control_edges.iter().any(|edge| {
+            stream_outputs.contains(&(edge.from_node.as_str(), edge.from_output.as_ref()))
+        }) || definition
+            .outputs
+            .iter()
+            .any(|output| stream_outputs.contains(&(output.node.as_str(), output.port.as_ref())));
+    let mut resolved = definition.clone();
+    resolved.execution = streaming.then(|| definition.execution.clone().unwrap_or_default());
+    crate::validate_execution(&resolved).context(StreamConstructionSnafu)?;
+    Ok(resolved)
 }
 
 /// Plan graph structure without loading nodes. Preparation validates linked node implementations.
@@ -1234,16 +1295,28 @@ pub fn instantiate_compiled(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<Flow, WorkflowCompileError> {
-    if plan.definition.execution.is_some() {
+    let (resolved, builder) = prepare_compiled_plan(plan, registry)?;
+    if resolved.definition.execution.is_some() {
         return InvalidStreamSnafu {
             message: "use instantiate_stream for streaming workflows",
         }
         .fail();
     }
+    builder.into_tasks().context(FlowConstructionSnafu)
+}
+
+pub fn prepare_compiled_plan(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+) -> Result<(CompiledWorkflow, crate::FlowBuilder), WorkflowCompileError> {
     let (nodes, canonical_order) = prepare_definition(&plan.definition, registry)?;
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
     }
+    let resolved = CompiledWorkflow {
+        definition: resolve_execution(&plan.definition, &nodes)?,
+        execution_order: canonical_order,
+    };
     let builder = crate::FlowBuilder::prepare(
         nodes,
         plan.definition.edges.clone(),
@@ -1258,7 +1331,7 @@ pub fn instantiate_compiled(
     } else {
         builder
     };
-    builder.into_tasks().context(FlowConstructionSnafu)
+    Ok((resolved, builder))
 }
 
 /// Prepare a task workflow and report attributed node preparation failures.
@@ -1289,22 +1362,37 @@ pub fn describe_workflow_inputs(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::WorkflowInputSchema, WorkflowCompileError> {
-    if plan.definition.execution.is_some() {
-        Ok(crate::instantiate_stream(plan, registry)?
+    prepare_interface(plan, registry).map(|(_, schema)| schema)
+}
+
+pub fn prepare_interface(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+) -> Result<(CompiledWorkflow, mf_runtime::WorkflowInputSchema), WorkflowCompileError> {
+    let (resolved, builder) = prepare_compiled_plan(plan, registry)?;
+    let schema = if let Some(execution) = &resolved.definition.execution {
+        builder
+            .into_stream(execution.clone())
+            .context(StreamConstructionSnafu)?
             .plan()
             .input_schema()
-            .clone())
+            .clone()
     } else {
-        Ok(instantiate_compiled(plan, registry)?.input_schema().clone())
-    }
+        builder
+            .into_tasks()
+            .context(FlowConstructionSnafu)?
+            .input_schema()
+            .clone()
+    };
+    Ok((resolved, schema))
 }
 
 pub fn describe_interface(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::WorkflowInterface, WorkflowCompileError> {
-    let graph = describe_compiled(plan)?;
-    let schema = describe_workflow_inputs(plan, registry)?;
+    let (resolved, schema) = prepare_interface(plan, registry)?;
+    let graph = describe_compiled(&resolved)?;
     let interface = mf_runtime::WorkflowInterface {
         version: mf_runtime::WorkflowInterfaceVersion::for_schema(&schema),
         workflow_id: graph.workflow_id.clone(),

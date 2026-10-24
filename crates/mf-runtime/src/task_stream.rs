@@ -194,6 +194,10 @@ impl TaskStreamExecutor {
         Self { node, outputs }
     }
 
+    pub fn set_stream_contract(&mut self, outputs: &[PortSpec]) {
+        self.outputs = outputs.to_vec();
+    }
+
     pub fn execute_with_sink(
         &self,
         inputs: Inputs,

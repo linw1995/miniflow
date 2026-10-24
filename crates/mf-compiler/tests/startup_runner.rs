@@ -16,7 +16,7 @@ fn standalone_sources_describe_parameters_and_run_without_stdin_or_build_inputs(
     let build = root.path().join("build");
     let data = root.path().join("not-created-during-preflight.txt");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes");
-    fs::write(&definition, json!({"version":"2026-10-03", "execution":{"mode":"stream", "limits":{"max_pending_messages":2, "workers":1}},
+    fs::write(&definition, json!({"version":"2026-10-03", "execution":{"limits":{"max_pending_messages":2, "workers":1}},
         "dependencies":{"fixture":{"package":"fixture-multi-nodes", "path":fixture}},
         "nodes":[{"id":"read", "kind":"fixture.read_lines"}],
         "outputs":[{"name":"line", "node":"read", "port":"line"}]}).to_string()).unwrap();

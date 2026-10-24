@@ -52,3 +52,26 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
 }
 
 inventory::submit! { NodeRegistration { kind: "fixture.stream_echo", factory: mf_runtime::NodeFactory::Plain(factory) } }
+
+struct EmptyStream;
+
+impl mf_runtime::StreamNode for EmptyStream {
+    fn execute(
+        &mut self,
+        _: Inputs,
+        _: &mut mf_runtime::ExecutionContext,
+        _: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<(), NodeExecutionError> {
+        Ok(())
+    }
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "fixture.empty_stream",
+        factory: mf_runtime::NodeFactory::Plain(|_| Ok(mf_runtime::PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Stream(Box::new(EmptyStream)),
+            mf_runtime::NodeMetadata::default(),
+        ))),
+    }
+}

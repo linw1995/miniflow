@@ -142,8 +142,7 @@ fn typed_tasks_use_the_same_adapter_and_context_in_task_and_stream_domains() {
             "outputs":[{"name":"result", "node":"add", "port":"value"}]
         });
         if streaming {
-            value["execution"] =
-                json!({"mode":"stream", "limits":{"max_pending_messages":2,"workers":1}});
+            value["execution"] = json!({"limits":{"max_pending_messages":2,"workers":1}});
         }
         let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
         let registry = NodeRegistry::from_inventory().unwrap();
@@ -209,7 +208,7 @@ fn derived_outputs_reject_disjoint_consumers_before_execution() {
 #[test]
 fn typed_producer_rejects_invalid_unobserved_outputs_before_publication() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+        "version":"2026-10-03", "dependencies":{}, "execution":{},
         "nodes":[{"id":"source", "kind":"test.typed_task_source", "config":{"stream":true, "invalid":true}}],
         "outputs":[{"name":"result", "node":"source", "port":"item"}]
     })).unwrap();

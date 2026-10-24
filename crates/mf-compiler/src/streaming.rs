@@ -1,9 +1,7 @@
-use crate::compiler::{
-    FlowConstructionSnafu, InvalidStreamSnafu, NonCanonicalPlanOrderSnafu, StreamConstructionSnafu,
-};
+use crate::compiler::StreamConstructionSnafu;
 use crate::{CompiledWorkflow, NodeRegistry, WorkflowCompileError, WorkflowExecutionError};
 use mf_runtime::PreparedStream;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::ResultExt;
 
 pub fn start_stream(
     plan: &CompiledWorkflow,
@@ -22,23 +20,7 @@ pub fn instantiate_stream(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<PreparedStream, WorkflowCompileError> {
-    let execution = plan
-        .definition
-        .execution
-        .clone()
-        .context(InvalidStreamSnafu {
-            message: "workflow does not declare streaming execution",
-        })?;
-    let (nodes, order) = crate::compiler::prepare_definition(&plan.definition, registry)?;
-    ensure!(order == plan.execution_order, NonCanonicalPlanOrderSnafu);
-    let flow = crate::FlowBuilder::prepare(
-        nodes,
-        plan.definition.edges.clone(),
-        order,
-        plan.definition.outputs.clone(),
-    )
-    .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
-    .and_then(|flow| flow.with_order_edges(plan.definition.order_edges.clone()))
-    .context(FlowConstructionSnafu)?;
+    let (resolved, flow) = crate::compiler::prepare_compiled_plan(plan, registry)?;
+    let execution = resolved.definition.execution.unwrap_or_default();
     flow.into_stream(execution).context(StreamConstructionSnafu)
 }

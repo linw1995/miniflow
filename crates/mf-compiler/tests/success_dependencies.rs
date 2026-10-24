@@ -369,7 +369,7 @@ fn stream_messages_have_independent_success_conditions() {
             {"from_node":"source","to_node":"target"}
         ]),
     );
-    graph.execution = Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    graph.execution = Some(serde_json::from_value(json!({})).unwrap());
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&graph, &registry).unwrap();
     let run = controlled::SourceRun::start(
@@ -394,7 +394,7 @@ fn programmatic_builders_and_stream_domains_enforce_success_boundaries() {
         vec![controlled::source(json!("int")), task("target", &path)],
         json!([{"from_node":"feed","to_node":"target"}]),
     );
-    graph.execution = Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    graph.execution = Some(serde_json::from_value(json!({})).unwrap());
     let registry = NodeRegistry::from_inventory().unwrap();
     assert!(compile_definition(&graph, &registry).is_err());
     let nodes = mf_compiler::resolve_nodes(&graph, &registry).unwrap();
@@ -521,7 +521,7 @@ fn success_edges_cannot_join_startup_and_message_domains() {
         ],
         json!([{"from_node":"initial","to_node":"target"}]),
     );
-    graph.execution = Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    graph.execution = Some(serde_json::from_value(json!({})).unwrap());
     assert!(
         compile_definition(&graph, &NodeRegistry::from_inventory().unwrap())
             .unwrap_err()
@@ -617,7 +617,7 @@ fn stream_success_events_round_trip_with_node_only_skip_causes() {
             {"from_node":"feed","from_output":"item","to_node":"route"},{"from_node":"route","from_output":"positive","to_node":"source"},{"from_node":"source","to_node":"target"}
         ]),
     );
-    graph.execution = Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    graph.execution = Some(serde_json::from_value(json!({})).unwrap());
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&graph, &registry).unwrap();
     let harness = capture::Harness::new(false);
@@ -757,7 +757,7 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
             {"from_node":"read","from_output":"line","to_node":"source"},{"from_node":"source","to_node":"target"}
         ]),
     );
-    stream.execution = Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    stream.execution = Some(serde_json::from_value(json!({})).unwrap());
     stream.outputs =
         serde_json::from_value(json!([{"name":"line","node":"read","port":"line"}])).unwrap();
     cases.push(stream);

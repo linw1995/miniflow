@@ -74,7 +74,7 @@ fn prepare(mut value: Value) -> mf_runtime::PreparedStream {
     value["version"] = json!("2026-10-03");
     value["dependencies"] = json!({});
     if value.get("execution").is_none() {
-        value["execution"] = json!({"mode":"stream"});
+        value["execution"] = json!({});
     }
     let definition = WorkflowDefinition::from_json(&value.to_string()).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -85,7 +85,7 @@ fn prepare(mut value: Value) -> mf_runtime::PreparedStream {
 #[test]
 fn autonomous_source_uses_startup_arguments_and_drains_beyond_capacity() {
     let prepared = prepare(
-        json!({"execution":{"mode":"stream", "limits":{"max_pending_messages":2,"workers":1}},
+        json!({"execution":{"limits":{"max_pending_messages":2,"workers":1}},
         "nodes":[{"id":"%input", "kind":"test.autonomous_source", "config":{"count":2000}}, {"id":"copy", "kind":"builtin.identity"}],
         "edges":[{"from_node":"%input", "from_output":"item", "to_node":"copy", "to_input":"input"}],
         "outputs":[{"name":"value", "node":"copy", "port":"value"}]}),
@@ -131,7 +131,7 @@ fn independent_startup_producers_progress_directly_and_after_tasks() {
             WorkflowArguments::try_from(json!({"a.start":1, "zzz.start":2})).unwrap()
         };
         let prepared = prepare(
-            json!({"execution":{"mode":"stream", "limits":{"max_pending_messages":3,"workers":1}},
+            json!({"execution":{"limits":{"max_pending_messages":3,"workers":1}},
             "nodes":nodes, "edges":edges, "outputs":[{"name":"value", "node":"a", "port":"item"}]}),
         );
         let instance = prepared

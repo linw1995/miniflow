@@ -8,35 +8,56 @@ Prepare one executable Flow and schedule its synchronous execution domains throu
 
 ### Requirement: Prepare one executable Flow for both modes
 
-The compiler and in-memory APIs SHALL prepare both modes into one Flow containing mode, prepared executors, execution domains, message-domain metadata, dependencies, outputs, and limits. One runtime SHALL execute both modes in memory and generated runners. Missing stream configuration selects oneshot; mode MUST NOT be inferred from executor kind. Preparation MUST reject unsupported node kinds before invocation.
+In-memory and generated runners SHALL use one runtime. The compiler SHALL infer streaming execution from
+resolved Event/Stream executors or consumed or selected incremental output ports. A combined executor alone
+MUST NOT force streaming execution. The input schema SHALL accept only resource limits under `execution`, with
+no mode field; the presence of resource configuration MUST NOT select execution semantics. Generated runners
+SHALL freeze the inferred path after provider resolution, without runtime mode inference. Combined nodes SHALL
+work in both modes; oneshot adaptation SHALL discard unconnected increments without allocating a receiver.
+Preparation MUST reject unsupported executors before invocation.
 
 #### Scenario: Prepare a oneshot workflow
 
-- **WHEN** a valid task-only workflow has no stream execution configuration
+- **WHEN** a valid task-only workflow has no incremental consumers, with or without resource configuration
 - **THEN** preparation produces the common Flow in oneshot mode and the runtime executes it once
 
 #### Scenario: Prepare a stream workflow
 
-- **WHEN** a valid workflow declares stream execution and contains supported task, event, or stream nodes
+- **WHEN** a valid workflow contains an Event/Stream executor or consumes or selects an incremental output
 - **THEN** preparation produces the same Flow type in stream mode and the runtime starts a stream instance
 
-#### Scenario: Reject a node kind that does not support the selected mode
+#### Scenario: Reject streaming executors in a synchronous body
 
-- **WHEN** a oneshot workflow contains an event or stream executor
-- **THEN** preparation reports the node ID and mode before invoking any executor
+- **WHEN** a Loop or iteration body contains a pure event or stream executor
+- **THEN** preparation reports the node ID and synchronous scope before invoking any executor
 
 #### Scenario: Use the common runtime in generated runners
 
 - **WHEN** generated oneshot and stream runners execute their embedded plans
 - **THEN** both call the same runtime and domain scheduler
 
+#### Scenario: Configure resources without forcing streaming
+
+- **WHEN** a terminal-only workflow supplies `execution.limits`
+- **THEN** compiler inference retains finite execution instead of treating configuration presence as a mode switch
+
+#### Scenario: Infer an incremental dependency without configuration
+
+- **WHEN** a workflow consumes or selects a combined node's incremental port without an `execution` field
+- **THEN** compilation selects streaming execution with default resource limits
+
+#### Scenario: Adapt a combined node to terminal-only execution
+
+- **WHEN** a oneshot workflow contains a combined node without incremental consumers
+- **THEN** the workflow remains finite and returns its complete selected Task outputs once
+
 ### Requirement: Partition task graphs into synchronous execution domains
 
-The planner SHALL assign every ordinary task node to exactly one execution domain. Each domain SHALL be a maximal serial region in validated topological order, split at forks, joins, and event or stream boundaries. Fork branches SHALL become separate dependent domains; a fan-in domain SHALL depend on every incoming branch. The domain DAG MUST preserve all data and control dependencies.
+Every ordinary Task SHALL belong to one maximal serial execution domain in validated topological order, split at forks, joins, and Event/Stream boundaries. Combined nodes SHALL split where graph-local consumers need independent progress. Fork branches SHALL become separate dependent domains; fan-in SHALL depend on all incoming branches. The domain DAG MUST preserve data and control dependencies.
 
 #### Scenario: Keep a linear chain in one domain
 
-- **WHEN** a workflow is a simple task chain without forks or joins
+- **WHEN** a workflow is a simple task chain without forks, joins, or stream boundaries
 - **THEN** its tasks belong to one domain and execute synchronously in topological order
 
 #### Scenario: Split a fan-out into branch domains
@@ -48,6 +69,11 @@ The planner SHALL assign every ordinary task node to exactly one execution domai
 
 - **WHEN** two branch domains feed a join task
 - **THEN** the join's domain depends on both branches and cannot start until both complete
+
+#### Scenario: Consume while a combined node remains active
+
+- **WHEN** a combined node has graph-local stream consumers
+- **THEN** those consumers can progress before the node returns its Task result
 
 ### Requirement: Keep execution domains distinct from message domains
 
@@ -131,7 +157,7 @@ Each domain invocation SHALL receive a private context seeded with committed pre
 
 ### Requirement: Preserve node-kind state ownership
 
-Ordinary tasks SHALL execute serially within their domain. An EventNode instance SHALL receive callbacks serially. A stateful StreamNode SHALL serialize invocations of its own instance while independent domains and producers progress. Producer backpressure MUST NOT occupy all execution capacity required by downstream domains.
+Ordinary tasks SHALL execute serially within their domain. An EventNode instance SHALL receive callbacks serially. Stateful pure producers and combined nodes SHALL serialize their invocations within one streaming instance while independent domains and producers progress. Producer backpressure MUST NOT occupy all execution capacity required by downstream domains, timers, or output consumers. Separate invocations SHALL retain isolated contexts.
 
 #### Scenario: Serialize one event node's callbacks
 
@@ -147,6 +173,11 @@ Ordinary tasks SHALL execute serially within their domain. An EventNode instance
 
 - **WHEN** a producer blocks while its output queue is full
 - **THEN** the runtime retains capacity for downstream domains that can release the queue
+
+#### Scenario: Fill a combined output queue with one task worker
+
+- **WHEN** a combined node emits more records than capacity with one ordinary Task worker configured
+- **THEN** consumers drain records in order and cancellation can interrupt any blocked send
 
 ### Requirement: Stop scheduling and drain started domains on failure
 
@@ -452,3 +483,48 @@ invocations. This metadata MUST NOT install an implicit application usage collec
 
 - **WHEN** a nested task fails or panics
 - **THEN** its parent context retains the parent node identity and the outer caller is restored afterward
+
+### Requirement: Publish combined terminal completion independently of stream drain
+
+A combined node's validated return SHALL publish terminal outputs and permit ordinary success dependencies in its originating frame. Terminal publication MUST NOT wait for all admitted stream values to be acknowledged. Whole-workflow success SHALL still wait for connected stream delivery and downstream drain. Publication failure observed before terminal commit MUST suppress Task success.
+
+#### Scenario: Continue after a combined invocation returns
+
+- **WHEN** a combined node returns a valid terminal result while admitted emission records are still draining
+- **THEN** its terminal dependent can start and workflow success waits for both paths
+
+### Requirement: Bind executable stream programs before starting an instance
+
+Streaming execution SHALL receive executable input, message-initialization, domain-execution, and
+output-selection functions with fixed emission channels. `mf-runtime` MUST NOT define or retain
+`MessageDomains`. Compiler analysis MAY use message ownership to validate graph boundaries and lower
+in-memory hosts to equivalent bound functions during preparation. Scheduling MUST NOT reconstruct
+ownership or select output fields by interpreting graph tables for each message.
+
+#### Scenario: Prepare an in-memory workflow
+
+- **WHEN** the host prepares a streaming workflow
+- **THEN** compiler analysis binds its executable functions before any business invocation starts
+
+#### Scenario: Start a generated runner
+
+- **WHEN** a standalone runner starts
+- **THEN** it binds generated functions and fixed channels without rebuilding message ownership or graph routing
+
+### Requirement: Discard preparation-only ownership and descriptor storage
+
+Compiler preparation SHALL directly construct the executable stream program. It MUST NOT retain a
+separate message-ownership object or a duplicate execution-domain index per message. Streaming runtime
+state MUST NOT store descriptive dependency/output tables or cached source/selected-message lists.
+Queries SHALL derive from executable message entries. Emission validation SHALL retain only the needed
+output contract. Executors, input schemas, and live scheduling dependencies SHALL remain available.
+
+#### Scenario: Inspect the prepared stream
+
+- **WHEN** a host queries message sources or selected messages
+- **THEN** the query reflects the executable program without reading a duplicate ownership cache
+
+#### Scenario: Generate startup input binding
+
+- **WHEN** the compiler emits a streaming runner
+- **THEN** startup input connectivity is generated as fixed code and runtime factory interface drift is still rejected before dispatch

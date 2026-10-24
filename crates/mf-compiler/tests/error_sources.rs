@@ -118,7 +118,7 @@ fn readline_conversion_preserves_the_stream_input_failure_phase() {
     let path = root.path().join("invalid.txt");
     fs::write(&path, b"\xff\n").unwrap();
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version": "2026-10-03", "execution": {"mode": "stream"}, "dependencies": {},
+        "version": "2026-10-03", "execution": {}, "dependencies": {},
         "nodes": [{"id": "read", "kind": "builtin.readline"}],
         "outputs": [{"name": "text", "node": "read", "port": "line"}]
     }))

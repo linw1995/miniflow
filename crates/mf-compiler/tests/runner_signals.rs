@@ -55,7 +55,11 @@ fn generated_runners_cancel_cleanly_and_escalate_repeated_interrupts() {
             "outputs": [{"name": "finished", "node": "wait", "port": "finished"}]
         });
         if streaming {
-            flow["execution"] = json!({"mode": "stream", "limits": {"workers": 1}});
+            flow["execution"] = json!({"limits": {"workers": 1}});
+            flow["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"stream", "kind":"fixture.empty_stream"}));
         }
         fs::write(&definition, flow.to_string()).unwrap();
         compile_project_with_options(

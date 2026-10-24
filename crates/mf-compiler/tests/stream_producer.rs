@@ -218,7 +218,7 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
 fn graph(key: &str, count: usize) -> Value {
     json!({
             "version":"2026-10-03", "dependencies":{},
-            "execution":{"mode":"stream", "limits":{"max_pending_messages":3, "workers":1}},
+            "execution":{"limits":{"max_pending_messages":3, "workers":1}},
             "nodes":[
                 {"id":"produce", "kind":"test.producer", "config":{"key":key, "count":count}},
                 {"id":"consume", "kind":"builtin.identity"}
@@ -563,18 +563,18 @@ fn ignored_invalid_sends_fail_publication_and_producer_observation_counts_output
 }
 
 #[test]
-fn preparation_rejects_synchronous_and_mixed_domain_placement_without_execution() {
+fn preparation_infers_root_producers_and_rejects_invalid_explicit_bindings() {
     let mut value = graph("preparation", 1);
     value.as_object_mut().unwrap().remove("execution");
     value["edges"].as_array_mut().unwrap().remove(0);
     let registry = NodeRegistry::from_inventory().unwrap();
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
-    let error = compile_definition(&definition, &registry)
-        .unwrap_err()
-        .to_string();
     assert!(
-        error.contains("produce") && error.contains("synchronous"),
-        "{error}"
+        compile_definition(&definition, &registry)
+            .unwrap()
+            .definition
+            .execution
+            .is_some()
     );
     let node = producer(json!({"key":"preparation"})).unwrap();
     assert!(matches!(

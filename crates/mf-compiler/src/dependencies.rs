@@ -327,15 +327,8 @@ pub fn bind_stream_guards(
                         let causes = guard
                             .as_ref()
                             .map_or_else(|| Ok(BTreeSet::new()), |guard| guard(ctx))?;
-                        ctx.resolve_node_inputs(
-                            node,
-                            plan.dependencies(*position)
-                                .iter()
-                                .map(mf_runtime::FlowDependency::borrowed),
-                            &[],
-                            inputs,
-                            causes,
-                        )
+                        let _ = node;
+                        plan.resolve_inputs(*position, ctx, inputs, causes)
                     })?;
                 }
                 Ok(())

@@ -56,8 +56,7 @@ fn compiled_manifests_derive_views_from_original_facts() {
     );
     let mut stream = decoded.clone();
     let definition = &mut stream.definition;
-    definition.execution =
-        Some(serde_json::from_value(serde_json::json!({"mode": "stream"})).unwrap());
+    definition.execution = Some(serde_json::from_value(serde_json::json!({})).unwrap());
     assert_eq!(
         stream.description().unwrap().event_schema_version(),
         mf_telemetry::STREAM_EVENT_SCHEMA_VERSION

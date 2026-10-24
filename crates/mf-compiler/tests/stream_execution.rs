@@ -153,7 +153,7 @@ fn graph(mut nodes: Value, edges: Vec<Value>, outputs: Value) -> Value {
         .as_array_mut()
         .unwrap()
         .push(controlled::source(json!("int")));
-    json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+    json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":nodes, "edges":edges, "outputs":outputs})
 }
 fn start(value: Value, clock: Arc<dyn StreamClock>) -> SourceRun {

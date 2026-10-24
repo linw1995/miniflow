@@ -669,7 +669,10 @@ input, invoke executors, arm timers, or emit workflow execution events.
 
 ### Requirement: Declare source-driven streaming execution
 
-Schema `2026-10-03` SHALL accept `execution` with `mode: "stream"` and optional resource limits. Startup
+Schema `2026-10-03` and later SHALL accept optional resource limits under `execution` and reject a mode field.
+Compilation SHALL infer streaming execution from resolved Event/Stream contracts and consumed or selected
+incremental ports after provider loading. Terminal-only combined nodes SHALL remain finite. The generated
+Cargo build SHALL select a fixed runner path from that inferred result rather than input configuration. Startup
 parameters SHALL come from initial node ports, and stream item types from explicit source outputs. The engine
 input field, global sender, synthetic source, and their special-case validators SHALL be removed. Older
 single-run schemas SHALL retain their existing behavior.
@@ -1064,3 +1067,39 @@ resource cleanup.
 
 - **WHEN** a runner receives SIGINT after registering handlers but before binding cancellation
 - **THEN** binding publishes the pending cancellation before returning
+
+### Requirement: Compile native combined output domains
+
+Generated streaming runners SHALL support combined nodes through the same message-domain plan as in-memory execution. Incremental and terminal output selections SHALL use ordinary output declarations. Each JSONL record SHALL contain only its domain's selected fields. Isolated combined targets SHALL execute through the terminal Task adapter.
+
+#### Scenario: Deliver an increment before completion
+
+- **WHEN** a combined provider emits a value before returning its final result
+- **THEN** the generated Stream runner delivers that selected increment before the provider finishes
+
+#### Scenario: Select several output domains
+
+- **WHEN** a workflow selects a combined node's increments and terminal result
+- **THEN** generated and in-memory execution preserve both routes without overwriting pending deliveries
+
+#### Scenario: Move a compiled streaming executable
+
+- **WHEN** a compiled native Stream workflow is moved and its build inputs are removed
+- **THEN** its manifest and incremental/terminal execution remain available without rebuilding
+
+### Requirement: Generate executable stream wiring
+
+The compiler SHALL generate graph-specific input resolvers, message initializers, Task-domain functions,
+fixed emitter channel bindings, and output selectors. Generated data flow MUST NOT interpret a
+`MessageDomains` structure, search output ownership, or read descriptive connection/output tables during
+execution. The runtime SHALL own queue capacity, acknowledgment, cancellation, and scheduling mechanics.
+
+#### Scenario: Execute without descriptive wiring tables
+
+- **WHEN** a generated runner contains executable bindings without descriptive dependency and selected-output tables
+- **THEN** input binding, branches, batching, nested workflows, failures, and selected outputs retain the same behavior
+
+#### Scenario: Execute combined incremental and terminal outputs
+
+- **WHEN** a compiled combined node emits increments and returns its terminal result
+- **THEN** compiler-fixed channel bindings deliver the increments and generated Task-domain functions continue the terminal path

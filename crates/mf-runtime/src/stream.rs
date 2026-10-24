@@ -3,16 +3,9 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StreamMode {
-    Stream,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamExecution {
-    pub mode: StreamMode,
     #[serde(default)]
     pub limits: StreamLimits,
 }

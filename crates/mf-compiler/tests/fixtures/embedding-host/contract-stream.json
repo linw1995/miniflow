@@ -1,8 +1,5 @@
 {
   "version": "2026-10-03",
-  "execution": {
-    "mode": "stream"
-  },
   "dependencies": {
     "fixture": {
       "package": "fixture-multi-nodes",

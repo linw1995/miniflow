@@ -218,8 +218,7 @@ fn stream_subgraphs_share_workers_and_effective_limit_across_messages() {
                 serde_json::to_value(workflow("parallel", runtime_workers.min(stream_workers)))
                     .unwrap();
             definition["version"] = json!("2026-10-03");
-            definition["execution"] =
-                json!({"mode": "stream", "limits": {"workers": stream_workers}});
+            definition["execution"] = json!({"limits": {"workers": stream_workers}});
             definition["nodes"][0] = json!({"id": "seed", "kind": "test.controlled_source", "config": {"item_type": "any"}});
             definition["edges"][0]["from_output"] = json!("item");
             // Only the downstream Iteration needs a runtime execution worker.

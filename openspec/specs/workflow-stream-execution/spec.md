@@ -84,16 +84,12 @@ Events that mutate one node instance SHALL be serialized. Each operator SHALL ha
 
 ### Requirement: Preserve message identity through ordinary dependencies
 
-Ordinary nodes SHALL resolve data and control dependencies within one message domain and identity, preserved
-by fan-out. Initial tasks and ordinary startup dependencies SHALL share one startup frame. Collectors and
-producers SHALL create new domains; startup values MUST NOT be implicitly broadcast across them. Cross-domain
-dependencies MUST be rejected unless an explicit supported correlation operation defines their relationship.
+Ordinary nodes SHALL resolve dependencies within one message domain and identity, preserved by fan-out. Initial tasks SHALL share one startup frame. Collector and producer emissions, including combined-node emissions, SHALL create new domains; combined terminal outputs SHALL retain the input domain. Startup values MUST NOT be implicitly broadcast. Cross-domain dependencies MUST be rejected unless a supported explicit correlation operation defines their relationship.
 
 #### Scenario: Rejoin two branches of one input
 
 - **WHEN** two ordinary branches of the same input feed a consumer
-- **THEN** the consumer receives values from that same input and retains the existing conjunctive skip
-  behavior
+- **THEN** the consumer receives values from that same input and retains the existing conjunctive skip behavior
 
 #### Scenario: Reject item and batch mixing
 
@@ -118,8 +114,17 @@ dependencies MUST be rejected unless an explicit supported correlation operation
 #### Scenario: Reject a startup value mixed with a stream message
 
 - **WHEN** a downstream task combines a startup constant with the output of an independent producer
-- **THEN** validation rejects the domain mismatch rather than broadcasting or retaining the constant as global
-  state
+- **THEN** validation rejects the domain mismatch rather than broadcasting or retaining the constant as global state
+
+#### Scenario: Keep a combined answer in its input frame
+
+- **WHEN** a combined node emits deltas and returns a terminal answer
+- **THEN** downstream delta consumers receive emission-domain messages and terminal consumers receive the answer in the input domain
+
+#### Scenario: Reject a delta joined with its final answer
+
+- **WHEN** one consumer binds a delta and terminal answer from the same combined node
+- **THEN** preparation reports the cross-domain dependency rather than correlating them by arrival order
 
 ### Requirement: Preserve order within a message domain
 
@@ -373,3 +378,37 @@ The runtime SHALL create event and producer callback spans, invoke EventNode cal
 - **WHEN** a synchronous span processor cancels the workflow while an upstream-close callback span is created
 - **THEN** span creation completes without holding the scheduler mutex
 - **AND** the close callback is not invoked and failure cleanup does not flush a tail
+
+### Requirement: Preserve combined invocation closure and drain
+
+A combined invocation SHALL finish production when its execution entry point returns or fails. Admitted emissions SHALL retain their delivery obligations. A successful zero-emission invocation SHALL release its input frame's Task dependencies without creating an emission frame. Closing one invocation MUST NOT close the operator before later upstream invocations finish.
+
+#### Scenario: Handle an empty invocation before a nonempty invocation
+
+- **WHEN** a combined node emits nothing for one input and emits values for the next
+- **THEN** the first Task result completes normally and later emissions remain deliverable
+
+#### Scenario: Drain after terminal publication
+
+- **WHEN** terminal output has been published and an earlier delta still has pending downstream work
+- **THEN** the instance cannot report successful completion until that connected work drains
+
+### Requirement: Keep selected-output domain rules explicit
+
+Selected workflow outputs MAY span message domains. A delivered record SHALL contain only fields selected in its own domain. Each domain SHALL retain ordered delivery and acknowledgment. A pending selected delivery MUST NOT be overwritten by another completed domain. Node inputs MUST NOT implicitly join unrelated message domains.
+
+#### Scenario: Select terminal and incremental output
+
+- **WHEN** a workflow selects an origin-domain terminal result and a combined node's increments
+- **THEN** both routes remain observable as separate records with their own message identities
+
+#### Scenario: Complete two selected domains together
+
+- **WHEN** another domain completes while a selected delivery awaits acknowledgment
+- **THEN** its selected record remains pending until the delivery slot becomes available
+
+#### Scenario: Serialize receipts across ready domains
+
+- **WHEN** a caller receives from another ready domain before the previous delivery is acknowledged
+- **THEN** the next receipt waits until acknowledgment is processed by the coordinator
+- **AND** each acknowledged domain is released exactly once before another receipt can replace its confirmation

@@ -1,6 +1,8 @@
 mod common;
 #[path = "fixtures/multi-nodes/src/struct_inputs.rs"]
 mod fixture;
+#[path = "fixtures/multi-nodes/src/stream_fixture.rs"]
+mod stream_fixture;
 extern crate mfn_core as _;
 
 use mf_compiler::{
@@ -228,7 +230,11 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
     for streaming in [false, true] {
         let mut definition = definition(json!({"marker":marker}));
         if streaming {
-            definition.execution = Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+            definition.execution = Some(serde_json::from_value(json!({})).unwrap());
+            definition.nodes.push(
+                serde_json::from_value(json!({"id":"stream", "kind":"fixture.empty_stream"}))
+                    .unwrap(),
+            );
         }
         fs::write(&input_file, serde_json::to_vec(&definition).unwrap()).unwrap();
         compile_project_with_options(

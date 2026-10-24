@@ -205,9 +205,44 @@ JSON and file transports also accept inline values, such as `--inputs='{"read.pa
 `--inputs-file=parameters.json`. A named string value starting with `--` must use inline syntax, such as
 `--read.path=--literal`; short-option-looking values such as `-v` remain literal when following a named input.
 
+## Native incremental output
+
+Finite workflows return one final JSON object. Streaming workflows use the existing JSON-lines output:
+each line contains the selected outputs for one completed message. Select a combined node's incremental
+and terminal ports through the ordinary `outputs` list. Selecting or connecting an incremental port
+automatically selects streaming execution at compile time; terminal-only graphs remain finite.
+
+```sh
+./flow --count.count 2
+```
+
+A counting workflow can produce:
+
+```json
+{"increment":0}
+{"increment":1}
+{"total":2}
+```
+
+Records remain ordered within each message domain. Different domains can interleave, so a terminal record
+can arrive before all incremental records drain. Consumers must read to EOF and check successful process
+completion before settling the workflow. Isolated Task targets retain one terminal JSON result.
+
+The manifest uses the ordinary workflow definition and startup interface. Native delivery uses the
+existing pending-message limits, cancellation, and acknowledgment.
+
+The compiler emits fixed input-binding functions, named Task-domain functions, emitter channel bindings,
+and output-selection functions for each graph. The runner executes these entry points without interpreting
+message-ownership or selected-output tables. Ownership analysis is consumed directly while constructing
+the executable program. Runtime state retains no ownership object or descriptive wiring tables. Queue
+capacity, acknowledgment, cancellation, and backpressure remain shared mechanics.
+
 ## Streaming runners
 
-Use schema `2026-10-03` with `execution.mode` set to `stream`. Sources are explicit nodes. The repository
+Schema `2026-10-03` and later infer streaming execution from resolved node contracts and port usage.
+`execution` contains only optional resource limits. Execution metadata is resolved after provider loading;
+hosts observing a built runner must use its compiled manifest rather than a structural `plan_definition`
+result. Sources are explicit nodes. The repository
 example declares `builtin.readline` with string output `line`:
 
 ```sh

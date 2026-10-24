@@ -167,6 +167,42 @@ def declarations_only(contents):
     return True
 
 
+def executable_items(contents):
+    # The pinned Rust parser locates top-level items without interpreting literals or macros.
+    # Keep every nondeclaration byte-for-byte so missing mappings cannot hide body changes.
+    try:
+        parsed = subprocess.run(["rust-analyzer", "parse", "--json"], input=contents,
+                                capture_output=True, text=True, timeout=30, check=True)
+        tree = json.loads(parsed.stdout)
+        source = contents.encode()
+        if tree["kind"] != "SOURCE_FILE" or tree["end"][0] != len(source):
+            return None
+        def has_error(node):
+            return node["kind"] == "ERROR" or any(has_error(child) for child in node.get("children", []))
+        if has_error(tree):
+            return None
+        items, offset = [], 0
+        for item in tree["children"]:
+            start, end = item["start"][0], item["end"][0]
+            if start != offset or not start <= end <= len(source):
+                return None
+            offset = end
+            if item["kind"] == "WHITESPACE":
+                continue
+            text = source[start:end].decode()
+            if item["kind"] in {"USE", "MODULE", "EXTERN_CRATE"} and declarations_only(text):
+                continue
+            items.append((item["kind"], text))
+        return items if offset == len(source) else None
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
+        return None
+
+
+def declaration_changes_only(before, after):
+    previous = executable_items(before)
+    return previous is not None and previous == executable_items(after)
+
+
 def evaluate_coverage(root, current, comparison, plan, report):
     verify_current(root, current)
     if (comparison["head"] != current["merge"] or plan["head"] != comparison["head"]
@@ -192,7 +228,12 @@ def evaluate_coverage(root, current, comparison, plan, report):
     for path, changed in sorted(changes.items()):
         contents = command(root, "git", "show", f"{current['merge']}:{path}").splitlines()
         if path not in mappings:
-            if declarations_only("\n".join(contents)):
+            after = "\n".join(contents)
+            try:
+                before = command(root, "git", "show", f"{comparison['base']}:{path}")
+            except AnalysisError:
+                before = ""
+            if declarations_only(after) or declaration_changes_only(before.rstrip("\n"), after):
                 non_executable.append(path)
             else:
                 missing.append(path)

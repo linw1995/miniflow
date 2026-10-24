@@ -256,7 +256,7 @@ fn run_case(mode: &str) {
         json!({"id":"feed", "kind":"builtin.constant", "config":{"value":1}})
     };
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[
             feed,
             {"id":"event", "kind":"test.cancel_event", "config":{"mode":mode}}],

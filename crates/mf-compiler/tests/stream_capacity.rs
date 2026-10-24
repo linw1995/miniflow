@@ -130,7 +130,7 @@ fn wait_until(description: &str, mut predicate: impl FnMut() -> bool) {
 fn definition() -> Value {
     json!({
           "version": "2026-10-03",
-          "execution": { "mode": "stream" },
+          "execution": {  },
           "dependencies": {
             "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" }
           },

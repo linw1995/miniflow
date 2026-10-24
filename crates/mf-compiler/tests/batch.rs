@@ -86,7 +86,7 @@ fn batch_infers_types_and_delivers_full_and_tail_batches() {
 #[test]
 fn conditional_skips_do_not_add_items_or_skip_a_pending_batch() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[
             {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"positive", "condition":{
                 "source":{"output":"feed.item", "path":""}, "operator":"gt", "value":0

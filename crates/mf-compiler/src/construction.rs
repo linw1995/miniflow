@@ -45,6 +45,18 @@ pub enum FlowBuildError {
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(display("node `{definition_id}` cannot execute in a synchronous flow"))]
     NonTaskNode { definition_id: DefinitionId },
+    #[snafu(display(
+        "node `{definition_id}` declares separate stream ports without a combined executor"
+    ))]
+    InvalidStreamPorts { definition_id: DefinitionId },
+    #[snafu(display(
+        "stream dependency `{from_node}`.`{port}` -> `{to_node}` requires streaming execution"
+    ))]
+    SynchronousStreamEdge {
+        from_node: String,
+        port: String,
+        to_node: String,
+    },
     #[snafu(display("execution plan entry {position} references unknown node `{definition_id}`"))]
     UnknownNodeInExecutionOrder {
         definition_id: DefinitionId,
@@ -215,8 +227,17 @@ where
             activation.clear();
         }
         successes.insert(id, activation.clone());
-        for port in &node.metadata.ports.outputs {
-            let mut facts = activation.clone();
+        for port in node.metadata.output_ports() {
+            let mut facts = if node
+                .metadata
+                .stream_outputs
+                .iter()
+                .any(|stream| stream.name == port.name)
+            {
+                Facts::new()
+            } else {
+                activation.clone()
+            };
             if exclusive.iter().any(|name| *name == port.name) {
                 facts.insert((id, port.name.as_ref()));
             }
@@ -239,6 +260,65 @@ pub struct FlowBuilder {
 
 impl FlowBuilder {
     pub fn into_tasks(self) -> Result<mf_runtime::Flow, FlowBuildError> {
+        for target in &self.nodes {
+            for reference in &target.metadata.context_references {
+                for source in &self.nodes {
+                    for port in &source.metadata.stream_outputs {
+                        ensure!(
+                            output_id(source.definition_id.as_str(), &port.name)
+                                != reference.output,
+                            SynchronousStreamEdgeSnafu {
+                                from_node: source.definition_id.as_str(),
+                                port: port.name.as_ref(),
+                                to_node: target.definition_id.as_str(),
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        for output in &self.outputs {
+            let source = &self.nodes[output.node_id.index()];
+            ensure!(
+                !source
+                    .metadata
+                    .stream_outputs
+                    .iter()
+                    .any(|port| port.name == output.port),
+                SynchronousStreamEdgeSnafu {
+                    from_node: source.definition_id.as_str(),
+                    port: output.port.as_ref(),
+                    to_node: "<workflow output>",
+                }
+            );
+        }
+        for (target, dependencies) in self.dependencies.iter().enumerate() {
+            for dependency in dependencies {
+                let edge = dependency.borrowed();
+                let Some(port) = edge.source_output() else {
+                    continue;
+                };
+                let source = self
+                    .nodes
+                    .iter()
+                    .find(|node| node.definition_id.as_str() == edge.source_node())
+                    .expect("validated source");
+                ensure!(
+                    !source
+                        .metadata
+                        .stream_outputs
+                        .iter()
+                        .any(|output| output.name == port),
+                    SynchronousStreamEdgeSnafu {
+                        from_node: edge.source_node(),
+                        port,
+                        to_node: self.nodes[self.execution_order[target].index()]
+                            .definition_id
+                            .as_str(),
+                    }
+                );
+            }
+        }
         validate_exclusive_branches(self.execution_order.iter().zip(&self.dependencies).map(
             |(id, dependencies)| {
                 (
@@ -376,6 +456,13 @@ impl FlowBuilder {
         crate::validate_exclusive_inputs(&connections)?;
         let mut definition_indices = BTreeMap::new();
         for (index, node) in nodes.iter().enumerate() {
+            ensure!(
+                node.metadata.stream_outputs.is_empty()
+                    || matches!(node.node, Some(NodeExecution::TaskStream(_))),
+                InvalidStreamPortsSnafu {
+                    definition_id: node.definition_id.clone()
+                }
+            );
             if definition_indices
                 .insert(node.definition_id.clone(), NodeId::new(index))
                 .is_some()
@@ -389,7 +476,7 @@ impl FlowBuilder {
 
         let mut output_ids = BTreeMap::new();
         for node in &nodes {
-            for port in &node.metadata.ports.outputs {
+            for port in node.metadata.output_ports() {
                 let output_id = crate::output_id(node.definition_id.as_str(), &port.name);
                 if let Some((first_node, first_port)) =
                     output_ids.insert(output_id.clone(), (&node.definition_id, &port.name))
@@ -473,9 +560,7 @@ impl FlowBuilder {
             ensure!(
                 nodes[from_node.index()]
                     .metadata
-                    .ports
-                    .outputs
-                    .iter()
+                    .output_ports()
                     .any(|port| port.name == connection.from_output),
                 UnknownPortSnafu {
                     definition_id: connection.from_node.clone(),
@@ -522,9 +607,7 @@ impl FlowBuilder {
             ensure!(
                 nodes[node_id.index()]
                     .metadata
-                    .ports
-                    .outputs
-                    .iter()
+                    .output_ports()
                     .any(|port| port.name == output.port),
                 UnknownPortSnafu {
                     definition_id: output.node.clone(),
@@ -636,9 +719,7 @@ impl FlowBuilder {
             ensure!(
                 source
                     .metadata
-                    .ports
-                    .outputs
-                    .iter()
+                    .output_ports()
                     .any(|port| port.name == edge.from_output),
                 UnknownPortSnafu {
                     definition_id: edge.from_node.clone(),
@@ -989,7 +1070,7 @@ pub fn partition_execution_domains(
 pub fn bind_domain_snapshots<N>(
     domains: ExecutionDomains,
     nodes: &[FlowNode<N>],
-    message_source: impl Fn(usize) -> Option<usize>,
+    message_source: impl Fn(&ExecutionDomain) -> Option<usize>,
 ) -> ExecutionDomains {
     let visibility = domains
         .domains()
@@ -1000,10 +1081,10 @@ pub fn bind_domain_snapshots<N>(
                 .iter()
                 .flat_map(|&ancestor| domains.domains()[ancestor].nodes.iter().copied());
             let keys: BTreeSet<_> = ancestors
-                .chain(message_source(domain.id).map(NodeId::new))
+                .chain(message_source(domain).map(NodeId::new))
                 .flat_map(|id| {
                     let node = &nodes[id.index()];
-                    node.metadata.ports.outputs.iter().map(move |port| {
+                    node.metadata.output_ports().map(move |port| {
                         mf_runtime::output_id(node.definition_id.as_str(), &port.name)
                     })
                 })
@@ -1015,11 +1096,11 @@ pub fn bind_domain_snapshots<N>(
 }
 
 /// Validates message ownership and partitions execution domains for a stream graph.
-pub fn build_message_domains(
+pub fn build_stream_program(
     nodes: &[FlowNode],
     dependencies: &[Vec<FlowDependency>],
     outputs: &[WorkflowOutputDefinition],
-) -> Result<mf_runtime::MessageDomains, StreamBuildError> {
+) -> Result<mf_runtime::StreamProgram, StreamBuildError> {
     let mut indices = BTreeMap::new();
     let mut output_index = BTreeMap::new();
     for (index, node) in nodes.iter().enumerate() {
@@ -1029,10 +1110,15 @@ pub fn build_message_domains(
                 message: format!("duplicate node `{}`", node.definition_id),
             }
         );
-        for port in &node.metadata.ports.outputs {
+        for port in node.metadata.output_ports() {
             let name = output_id(node.definition_id.as_str(), &port.name);
+            let stream = node
+                .metadata
+                .stream_outputs
+                .iter()
+                .any(|output| output.name == port.name);
             ensure!(
-                output_index.insert(name.clone(), index).is_none(),
+                output_index.insert(name.clone(), (index, stream)).is_none(),
                 InvalidPlanSnafu {
                     message: format!("ambiguous output `{name}`"),
                 }
@@ -1041,6 +1127,7 @@ pub fn build_message_domains(
     }
     let mut sources = vec![None];
     let mut output_domains = vec![0; nodes.len()];
+    let mut stream_output_domains = vec![None; nodes.len()];
     let mut node_message_domains = vec![0; nodes.len()];
     for (index, node) in nodes.iter().enumerate() {
         let mut incoming_domains = BTreeSet::new();
@@ -1069,9 +1156,7 @@ pub fn build_message_domains(
                 ensure!(
                     nodes[source]
                         .metadata
-                        .ports
-                        .outputs
-                        .iter()
+                        .output_ports()
                         .any(|port| port.name == port_name),
                     InvalidPlanSnafu {
                         message: format!(
@@ -1101,7 +1186,18 @@ pub fn build_message_domains(
                     }
                 );
             }
-            incoming_domains.insert(output_domains[source]);
+            let stream = dependency.borrowed().source_output().is_some_and(|port| {
+                nodes[source]
+                    .metadata
+                    .stream_outputs
+                    .iter()
+                    .any(|output| output.name == port)
+            });
+            incoming_domains.insert(if stream {
+                stream_output_domains[source].expect("connected stream source was planned")
+            } else {
+                output_domains[source]
+            });
         }
         ensure!(incoming_domains.len() <= 1, {
             let edges = dependencies[index]
@@ -1151,18 +1247,37 @@ pub fn build_message_domains(
                 new_domain
             }
         };
+        let stream_connected = node.metadata.stream_outputs.iter().any(|port| {
+            dependencies.iter().flatten().any(|dependency| {
+                let edge = dependency.borrowed();
+                edge.source_node() == node.definition_id.as_str()
+                    && edge.source_output() == Some(port.name.as_ref())
+            }) || outputs
+                .iter()
+                .any(|output| output.node == node.definition_id && output.port == port.name)
+        });
+        if stream_connected {
+            stream_output_domains[index] = Some(sources.len());
+            sources.push(Some(index));
+        }
         for reference in &node.metadata.context_references {
-            let producer = output_index
-                .get(&reference.output)
-                .copied()
-                .with_context(|| InvalidPlanSnafu {
-                    message: format!(
-                        "node `{}` references unknown output `{}`",
-                        node.definition_id, reference.output
-                    ),
-                })?;
+            let (producer, stream) =
+                output_index
+                    .get(&reference.output)
+                    .copied()
+                    .with_context(|| InvalidPlanSnafu {
+                        message: format!(
+                            "node `{}` references unknown output `{}`",
+                            node.definition_id, reference.output
+                        ),
+                    })?;
             ensure!(
-                output_domains[producer] == domain && producer < index,
+                (if stream {
+                    stream_output_domains[producer]
+                } else {
+                    Some(output_domains[producer])
+                }) == Some(domain)
+                    && producer < index,
                 InvalidPlanSnafu {
                     message: format!(
                         "node `{}` context reference `{}` crosses a message boundary",
@@ -1172,7 +1287,7 @@ pub fn build_message_domains(
             );
         }
     }
-    let mut selected_domain = None;
+    let mut selected_outputs = vec![Vec::new(); sources.len()];
     for output in outputs {
         let index = indices
             .get(output.node.as_str())
@@ -1183,9 +1298,7 @@ pub fn build_message_domains(
         ensure!(
             nodes[index]
                 .metadata
-                .ports
-                .outputs
-                .iter()
+                .output_ports()
                 .any(|port| port.name == output.port),
             InvalidPlanSnafu {
                 message: format!(
@@ -1194,17 +1307,22 @@ pub fn build_message_domains(
                 ),
             }
         );
-        let domain = output_domains[index];
-        ensure!(
-            selected_domain.is_none_or(|selected| selected == domain),
-            InvalidPlanSnafu {
-                message: format!(
-                    "selected output `{}` belongs to a different message domain",
-                    output.name
-                ),
-            }
-        );
-        selected_domain = Some(domain);
+        let domain = if nodes[index]
+            .metadata
+            .stream_outputs
+            .iter()
+            .any(|port| port.name == output.port)
+        {
+            stream_output_domains[index].expect("selected stream source was planned")
+        } else {
+            output_domains[index]
+        };
+        selected_outputs[domain].push((
+            output.name.to_string(),
+            output.node.to_string(),
+            output_id(output.node.as_str(), &output.port),
+            output.optional,
+        ));
     }
 
     let mut execution_edges = Vec::new();
@@ -1219,38 +1337,144 @@ pub fn build_message_domains(
     let order: Vec<_> = (0..nodes.len()).map(NodeId::new).collect();
     let boundaries: Vec<_> = nodes
         .iter()
-        .map(|node| {
+        .enumerate()
+        .map(|(index, node)| {
             matches!(
                 node.node,
                 Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
-            )
+            ) || stream_output_domains[index].is_some()
         })
         .collect();
     let execution_domains = partition_execution_domains(&order, &execution_edges, &boundaries);
-    let mut execution_domains_by_message = vec![Vec::new(); sources.len()];
-    let mut message_domain_by_execution = vec![0; execution_domains.len()];
-    for execution_domain in execution_domains.domains() {
-        let node = execution_domain.nodes[0].index();
-        let message_domain = node_message_domains[node];
-        execution_domains_by_message[message_domain].push(execution_domain.id);
-        message_domain_by_execution[execution_domain.id] = message_domain;
-    }
-    let execution_domains = bind_domain_snapshots(execution_domains, nodes, |id| {
-        sources[message_domain_by_execution[id]]
+    let execution_domains = bind_domain_snapshots(execution_domains, nodes, |execution| {
+        sources[node_message_domains[execution.nodes[0].index()]]
     });
-    Ok(mf_runtime::MessageDomains::from_parts(
-        sources.into(),
-        output_domains.into(),
-        selected_domain,
+    let messages: Vec<_> = selected_outputs
+        .into_iter()
+        .enumerate()
+        .map(|(message, selected)| {
+            let select_outputs = (!selected.is_empty()).then(|| {
+                std::sync::Arc::new(move |context: &mut mf_runtime::ExecutionContext| {
+                    let mut values = mf_runtime::FlowOutputs::new();
+                    for (name, node, key, optional) in &selected {
+                        if let Some(value) =
+                            context.select_output_keyed(name, node, key, *optional)?
+                        {
+                            values.insert(name.clone(), value);
+                        }
+                    }
+                    Ok(values)
+                }) as std::sync::Arc<mf_runtime::StreamOutputSelector>
+            });
+            mf_runtime::StreamMessageProgram {
+                source: sources[message],
+                schedule: build_message_schedule(
+                    &execution_domains,
+                    &node_message_domains,
+                    message,
+                ),
+                select_outputs,
+            }
+        })
+        .collect();
+    let emissions = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let terminal = matches!(node.node, Some(NodeExecution::TaskStream(_)));
+            let message = if terminal {
+                stream_output_domains[index]
+            } else {
+                sources.iter().position(|source| *source == Some(index))
+            }?;
+            Some(mf_runtime::StreamEmissionBinding {
+                message,
+                connected: messages[message].select_outputs.is_some()
+                    || !messages[message].schedule.domains.is_empty(),
+                terminal,
+                initialize: std::sync::Arc::new(move |plan, result| {
+                    mf_runtime::ExecutionContext::for_message(plan.emission_node(index), result)
+                }),
+            })
+        })
+        .collect();
+    let inputs = dependencies
+        .iter()
+        .enumerate()
+        .map(|(index, dependencies)| {
+            let dependencies: Vec<_> = dependencies
+                .iter()
+                .filter_map(crate::FlowDependency::output_dependency)
+                .collect();
+            std::sync::Arc::new(
+                move |plan: &mf_runtime::StreamPlan,
+                      context: &mf_runtime::ExecutionContext,
+                      inputs: &mut mf_runtime::Inputs,
+                      causes| {
+                    context.resolve_node_inputs(
+                        &plan.nodes()[index],
+                        dependencies
+                            .iter()
+                            .map(mf_runtime::FlowDependency::borrowed),
+                        &[],
+                        inputs,
+                        causes,
+                    )
+                },
+            ) as std::sync::Arc<mf_runtime::StreamInputResolver>
+        })
+        .collect();
+    Ok(mf_runtime::StreamProgram {
         execution_domains,
-        execution_domains_by_message
-            .into_iter()
-            .map(Cow::Owned)
-            .collect::<Vec<_>>()
-            .into(),
-        message_domain_by_execution.into(),
-    ))
+        messages,
+        emissions,
+        inputs,
+    })
 }
+
+fn build_message_schedule(
+    execution_domains: &ExecutionDomains,
+    node_messages: &[usize],
+    message: usize,
+) -> mf_runtime::MessageSchedule {
+    let domains: Vec<_> = execution_domains
+        .domains()
+        .iter()
+        .filter(|domain| node_messages[domain.nodes[0].index()] == message)
+        .map(|domain| domain.id)
+        .collect();
+    let mut local = vec![usize::MAX; execution_domains.len()];
+    for (rank, &domain) in domains.iter().enumerate() {
+        local[domain] = rank;
+    }
+    let initial_deps = domains
+        .iter()
+        .map(|&domain| {
+            execution_domains.domains()[domain]
+                .predecessors
+                .iter()
+                .filter(|&&previous| local[previous] != usize::MAX)
+                .count()
+        })
+        .collect();
+    let successors = domains
+        .iter()
+        .map(|&domain| {
+            execution_domains.domains()[domain]
+                .successors
+                .iter()
+                .filter_map(|&next| (local[next] != usize::MAX).then_some(local[next]))
+                .collect()
+        })
+        .collect();
+    mf_runtime::MessageSchedule {
+        domains: domains.into_boxed_slice(),
+        local: local.into_boxed_slice(),
+        initial_deps,
+        successors,
+    }
+}
+
 pub fn workflow_input_schema<'a, N: 'a>(
     nodes: impl IntoIterator<Item = (&'a FlowNode<N>, bool)>,
     mut input_bound: impl FnMut(&str, &str) -> bool,
@@ -1450,19 +1674,25 @@ pub fn prepare_stream(
             message: "stream nodes and dependencies must have equal lengths"
         }
     );
-    let domains = build_message_domains(&nodes, &dependencies, &outputs)?;
+    let program = build_stream_program(&nodes, &dependencies, &outputs)?;
     validate_exclusive_branches(nodes.iter().zip(&dependencies).map(|(node, dependencies)| {
         (
             node,
             dependencies.iter().map(crate::FlowDependency::borrowed),
         )
     }))?;
+    let reserved_domains = 1 + program
+        .messages
+        .iter()
+        .skip(1)
+        .filter(|message| message.select_outputs.is_some() || !message.schedule.domains.is_empty())
+        .count();
     ensure!(
-        execution.limits.max_pending_messages >= domains.sources().len(),
+        execution.limits.max_pending_messages >= reserved_domains,
         InvalidPlanSnafu {
             message: format!(
                 "max_pending_messages must reserve at least {} domain slots",
-                domains.sources().len()
+                reserved_domains
             )
         }
     );
@@ -1487,14 +1717,7 @@ pub fn prepare_stream(
         .collect();
     let schema =
         stream_workflow_inputs(&nodes, &dependencies, &initial).context(WorkflowInputsSnafu)?;
-    let prepared = mf_runtime::PreparedStream::from_plan(
-        execution,
-        nodes,
-        dependencies.into(),
-        domains,
-        outputs.into(),
-        schema,
-    );
+    let prepared = mf_runtime::PreparedStream::from_plan(execution, nodes, program, schema);
     Ok(crate::dependencies::bind_stream_guards(prepared, guards))
 }
 #[cfg(test)]
