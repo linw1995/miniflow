@@ -833,10 +833,6 @@ impl NodeMetadata {
         self.ports.outputs.iter().chain(&self.stream_outputs)
     }
 
-    pub fn output_port(&self, name: &str) -> Option<&PortSpec> {
-        self.output_ports().find(|port| port.name == name)
-    }
-
     pub fn new(ports: NodePorts) -> Self {
         Self {
             ports,

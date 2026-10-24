@@ -1899,7 +1899,7 @@ fn take_sequence(sequence: &mut u64) -> Result<u64, StreamError> {
     Ok(current)
 }
 
-pub(super) fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
+fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
     let message = payload
         .downcast_ref::<String>()
         .cloned()

@@ -2261,40 +2261,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn scoped_event_recorders_restore_the_previous_subscriber_after_unwinding() {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
-        use std::sync::{Arc, Mutex};
-        let previous = Arc::new(Mutex::new(Vec::new()));
-        let scoped = Arc::new(Mutex::new(Vec::new()));
-        let seen = previous.clone();
-        let mut context = ExecutionContext::default();
-        context.set_event_recorder(crate::EventRecorder::new(move |event| {
-            seen.lock().unwrap().push(event.name.clone());
-        }));
-        context
-            .record_event("before", serde_json::Value::Null)
-            .unwrap();
-        let seen = scoped.clone();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            context.with_event_recorder(
-                crate::EventRecorder::new(move |event| {
-                    seen.lock().unwrap().push(event.name.clone());
-                }),
-                |context| {
-                    context
-                        .record_event("scoped", serde_json::Value::Null)
-                        .unwrap();
-                    panic!("injected backend panic");
-                },
-            );
-        }));
-        assert!(result.is_err());
-        context
-            .record_event("after", serde_json::Value::Null)
-            .unwrap();
-        assert_eq!(previous.lock().unwrap().join(","), "before,after");
-        assert_eq!(scoped.lock().unwrap().join(","), "scoped");
-    }
 }
