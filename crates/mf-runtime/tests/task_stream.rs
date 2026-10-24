@@ -221,7 +221,11 @@ fn ignored_encoding_failure_remains_failure_when_output_is_discarded() {
         .execute(inputs(2), &mut ExecutionContext::default())
         .unwrap_err();
     assert!(has_source::<Box<mf_runtime::OutputEncodeError>>(&error));
-    assert!(error.to_string().contains("stream output"));
+    assert!(
+        error
+            .to_string()
+            .contains("could not encode typed node outputs")
+    );
 }
 
 #[test]
@@ -255,7 +259,7 @@ fn discarded_dynamic_emissions_still_validate_types_and_required_fields() {
     );
     assert!(!emitter.is_connected());
     let error = emitter.send(NodeResult::default()).unwrap_err();
-    assert!(error.to_string().contains("required port `delta`"));
+    assert!(error.to_string().contains("required output `delta`"));
     assert!(emitter.finish().is_err());
 
     let mut emitter = Emitter::new(
@@ -272,6 +276,82 @@ fn discarded_dynamic_emissions_still_validate_types_and_required_fields() {
         .unwrap_err();
     assert!(has_source::<mf_runtime::TypeMismatch>(&error));
     assert!(error.to_string().contains("source"));
+}
+
+#[test]
+fn remembered_output_failures_keep_shared_sources_and_stream_attribution() {
+    for result in [
+        NodeResult::default(),
+        NodeResult {
+            outputs: [("delta".into(), "wrong type".into())].into(),
+            ..Default::default()
+        },
+        NodeResult {
+            outputs: [("undeclared".into(), 1.into())].into(),
+            ..Default::default()
+        },
+    ] {
+        let mut sink = DiscardSink;
+        let mut emitter = Emitter::new("source", &Delta::ports(), Default::default(), &mut sink);
+        let error = emitter.send(result).unwrap_err();
+        assert!(has_source::<mf_runtime::WorkflowRunError>(&error));
+        let original = emitter.failure().unwrap().clone();
+        assert_eq!(error.to_string(), original.to_string());
+        let NodeExecutionError::Shared { source } = emitter.finish().unwrap_err() else {
+            panic!("expected the shared original failure");
+        };
+        assert!(Arc::ptr_eq(&source, &original));
+        let source = Arc::new(error);
+        let failures = [
+            StreamError::Producer {
+                definition_id: "source".into(),
+                source: source.clone(),
+            },
+            StreamError::Event {
+                definition_id: "source".into(),
+                source: source.clone(),
+            },
+            StreamError::Workflow {
+                message: mf_runtime::MessageId {
+                    domain: 0,
+                    sequence: 0,
+                },
+                source: Arc::new(mf_runtime::WorkflowRunError::NodeExecution {
+                    definition_id: "source".into(),
+                    source: source.into(),
+                }),
+            },
+        ];
+        for failure in failures {
+            assert_eq!(failure.phase(), "output");
+        }
+    }
+}
+
+#[test]
+fn typed_emissions_preserve_standard_output_encoding_errors() {
+    let expected =
+        mf_runtime::encode_typed_result(TypedNodeResult::from(Delta { delta: f64::NAN }))
+            .unwrap_err();
+    let prepared =
+        PreparedNode::typed_task_stream(combined(true, true, true), NodeMetadata::default())
+            .unwrap();
+    let actual = prepared
+        .execution
+        .into_task_node()
+        .unwrap()
+        .execute(inputs(1), &mut ExecutionContext::default())
+        .unwrap_err();
+    assert_eq!(actual.to_string(), expected.to_string());
+    assert!(has_source::<Box<mf_runtime::OutputEncodeError>>(&actual));
+    assert_eq!(
+        StreamError::Producer {
+            definition_id: "source".into(),
+            source: Arc::new(actual)
+        }
+        .phase(),
+        "output"
+    );
 }
 
 #[test]

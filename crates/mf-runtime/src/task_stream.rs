@@ -3,7 +3,7 @@ use crate::{
     PortSpec, StreamCancellation, StreamError, TaskNode, TypedNodeResult,
 };
 use mf_telemetry::event::LoopPathEntry;
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{ResultExt, ensure};
 use std::{marker::PhantomData, sync::Arc};
 
 /// One business invocation with incremental values and an authoritative final result.
@@ -45,7 +45,7 @@ pub trait EmissionSink {
 
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError>;
 
-    fn fail(&mut self, _error: EmissionError) {}
+    fn fail(&mut self, _error: Arc<NodeExecutionError>) {}
 }
 
 pub struct DiscardSink;
@@ -60,38 +60,12 @@ impl EmissionSink for DiscardSink {
     }
 }
 
-#[derive(Clone, Debug, Snafu)]
-pub enum EmissionError {
-    #[snafu(display("invalid stream output from `{node}`: {source}"))]
-    Validation {
-        node: String,
-        #[snafu(source(from(crate::WorkflowRunError, Arc::new)))]
-        source: Arc<crate::WorkflowRunError>,
-    },
-    #[snafu(display("could not encode stream output from `{node}`: {source}"))]
-    Encoding {
-        node: String,
-        #[snafu(source(from(NodeExecutionError, Arc::new)))]
-        source: Arc<NodeExecutionError>,
-    },
-    #[snafu(display("stream delivery from `{node}` failed: {source}"))]
-    Delivery { node: String, source: StreamError },
-    #[snafu(display("stream output from `{node}` is missing required port `{port}`"))]
-    Missing { node: String, port: String },
-}
-
-impl From<EmissionError> for NodeExecutionError {
-    fn from(error: EmissionError) -> Self {
-        Box::<dyn std::error::Error + Send + Sync>::from(error).into()
-    }
-}
-
 /// A borrowed sink which remembers publication failures even if a provider ignores them.
 pub struct Emitter<'a> {
     contract: FlowNode<()>,
     cancellation: StreamCancellation,
     sink: &'a mut dyn EmissionSink,
-    failure: Option<EmissionError>,
+    failure: Option<Arc<NodeExecutionError>>,
     snapshot: Option<(crate::SnapshotRecorder, Vec<LoopPathEntry>)>,
 }
 
@@ -149,58 +123,55 @@ impl<'a> Emitter<'a> {
             .map(|recorder| (recorder.clone(), context.invocation_path()));
     }
 
-    fn admit(&mut self, result: NodeResult) -> Result<(), EmissionError> {
+    fn admit(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
         self.check()?;
         let node = self.contract.definition_id.as_str();
-        crate::ExecutionOutputs::validate_result(&self.contract, &result)
-            .context(ValidationSnafu { node })?;
+        crate::ExecutionOutputs::validate_result(&self.contract, &result)?;
         for port in &self.contract.metadata.ports.outputs {
             ensure!(
                 !port.required || result.outputs.contains_key(port.name.as_ref()),
-                MissingSnafu {
-                    node,
-                    port: port.name.to_string(),
+                crate::runner::InvalidOutputSnafu {
+                    definition_id: node,
+                    message: format!("missing required output `{}`", port.name),
                 }
             );
         }
-        self.sink.send(result).context(DeliverySnafu { node })
+        Ok(self.sink.send(result)?)
     }
 
-    fn check(&self) -> Result<(), EmissionError> {
+    fn check(&self) -> Result<(), NodeExecutionError> {
         if let Some(error) = &self.failure {
-            return Err(error.clone());
+            return Err(error.clone().into());
         }
         if let Some(error) = self.cancellation.failure() {
-            return Err(error).context(DeliverySnafu {
-                node: self.contract.definition_id.as_str(),
-            });
+            return Err(error.into());
         }
         Ok(())
     }
 
-    fn remember(&mut self, result: Result<(), EmissionError>) -> Result<(), NodeExecutionError> {
-        result.map_err(|error| {
-            if self.failure.is_none() {
-                self.sink.fail(error.clone());
-                self.failure = Some(error.clone());
-            }
-            error.into()
-        })
+    fn remember(
+        &mut self,
+        result: Result<(), NodeExecutionError>,
+    ) -> Result<(), NodeExecutionError> {
+        result.map_err(|error| self.remember_failure(error))
     }
 
     pub fn finish(&self) -> Result<(), NodeExecutionError> {
-        self.check().map_err(NodeExecutionError::from)
+        self.check()
     }
 
-    pub fn failure(&self) -> Option<&EmissionError> {
+    pub fn failure(&self) -> Option<&Arc<NodeExecutionError>> {
         self.failure.as_ref()
     }
 
-    fn encoding_failed(&mut self, error: NodeExecutionError) -> NodeExecutionError {
-        let result = Err(error).context(EncodingSnafu {
-            node: self.contract.definition_id.as_str(),
-        });
-        self.remember(result).unwrap_err()
+    fn remember_failure(&mut self, error: NodeExecutionError) -> NodeExecutionError {
+        if let Some(error) = &self.failure {
+            return error.clone().into();
+        }
+        let error = Arc::new(error);
+        self.sink.fail(error.clone());
+        self.failure = Some(error.clone());
+        error.into()
     }
 }
 
@@ -226,7 +197,7 @@ impl<'a, 'sink, O: crate::NodeOutputs> TypedEmitter<'a, 'sink, O> {
         result: impl Into<TypedNodeResult<O>>,
     ) -> Result<(), NodeExecutionError> {
         let result = crate::encode_typed_result(result.into())
-            .map_err(|error| self.emitter.encoding_failed(error))?;
+            .map_err(|error| self.emitter.remember_failure(error))?;
         self.emitter.send(result)
     }
 }

@@ -1,5 +1,5 @@
 use crate::node::ExecutionFailedSnafu;
-use crate::runner::{ContextSnafu, OutputSelectionSnafu, OutputTypeSnafu};
+use crate::runner::{ContextSnafu, InvalidOutputSnafu, OutputSelectionSnafu, OutputTypeSnafu};
 use crate::{
     FlowNode, GeneratedNodeResult, NodeExecutionError, NodeResult, Outputs, ValueRef,
     WorkflowRunError, output_id,
@@ -213,7 +213,7 @@ impl ExecutionOutputs {
                 .iter()
                 .find(|port| port.name == *name)
             else {
-                return ContextSnafu {
+                return InvalidOutputSnafu {
                     definition_id: id,
                     message: format!("produced undeclared output `{name}`"),
                 }
@@ -247,7 +247,7 @@ impl ExecutionOutputs {
         let mut transferred = Vec::with_capacity(produced.len());
         for name in &produced {
             let Some(key) = node.output_key(name) else {
-                return ContextSnafu {
+                return InvalidOutputSnafu {
                     definition_id: node.definition_id.as_str(),
                     message: format!("produced undeclared output `{name}`"),
                 }
@@ -316,7 +316,7 @@ fn validate_skipped_outputs<N>(
     for name in skipped {
         ensure!(
             !produced(name),
-            ContextSnafu {
+            InvalidOutputSnafu {
                 definition_id: id,
                 message: format!("output `{name}` is both produced and skipped"),
             }
@@ -327,7 +327,7 @@ fn validate_skipped_outputs<N>(
                 .outputs
                 .iter()
                 .any(|port| port.name == *name && !port.required),
-            ContextSnafu {
+            InvalidOutputSnafu {
                 definition_id: id,
                 message: format!("cannot explicitly skip unknown or required output `{name}`"),
             }

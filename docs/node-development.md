@@ -665,6 +665,11 @@ send error cannot turn the invocation into success. A terminal result is returne
 reconstructed by collecting deltas. Existing pure producers keep their exclusive mutable state contract;
 combined executors use the Task `Send + Sync` ownership contract.
 
+Typed emissions use the ordinary `NodeExecutionError::OutputEncode` conversion path. Actual output
+contract violations use shared `WorkflowRunError` variants, and sink failures retain their `StreamError`.
+The emitter remembers the original error through `NodeExecutionError::Shared` without replacing its
+typed source or display text with emission-specific errors.
+
 Finite and streaming workflows currently consume the terminal outputs of a combined node through the
 ordinary Task path. Connecting its incremental ports inside a workflow or exporting them to a host
 requires the separate live-output planning support. Direct callers can already consume those values

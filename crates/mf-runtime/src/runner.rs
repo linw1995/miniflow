@@ -56,6 +56,11 @@ pub enum WorkflowRunError {
         source: crate::TypeMismatch,
     },
     #[snafu(display("node `{definition_id}`: {message}"), visibility(pub))]
+    InvalidOutput {
+        definition_id: DefinitionId,
+        message: String,
+    },
+    #[snafu(display("node `{definition_id}`: {message}"), visibility(pub))]
     Context {
         definition_id: DefinitionId,
         message: String,

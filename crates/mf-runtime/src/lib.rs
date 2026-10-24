@@ -110,8 +110,8 @@ pub use stream_plan::{
 };
 pub use subgraph::PreparedSubgraph;
 pub use task_stream::{
-    DiscardSink, EmissionError, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode,
-    TypedEmitter, TypedTaskStreamNode,
+    DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,
+    TypedTaskStreamNode,
 };
 pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, Nullable, Shared, decode_default_input,

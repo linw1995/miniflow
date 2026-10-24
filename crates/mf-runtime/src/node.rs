@@ -670,6 +670,10 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
+    #[snafu(transparent)]
+    Shared {
+        source: std::sync::Arc<NodeExecutionError>,
+    },
     #[snafu(display("could not decode typed node inputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
     InputDecode {
         #[snafu(source(from(crate::InputDecodeError, Box::new)))]

@@ -69,6 +69,17 @@ business execution and on attempted publication.
 - **WHEN** an unconnected provider attempts to emit a value with missing or incompatible fields
 - **THEN** emission validation fails despite the absence of a consumer
 
+### Requirement: Reuse shared output error contracts
+
+Combined execution SHALL reuse ordinary typed-output conversion errors, workflow output validation
+errors, and stream delivery errors. Remembering a failure SHALL preserve its original typed source
+and display text rather than substitute an emission-specific encoding or validation error type.
+
+#### Scenario: Preserve one output failure across node kinds
+
+- **WHEN** ordinary Task publication and an emission violate the same output contract
+- **THEN** both report the shared workflow output error and preserve that error through failure propagation
+
 ### Requirement: Adapt terminal-only execution without a receiver
 
 Combined executors SHALL support ordinary Task borrowing and ownership conversion. Terminal-only

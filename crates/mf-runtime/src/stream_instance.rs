@@ -114,25 +114,44 @@ impl StreamError {
             Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
-                if let NodeExecutionError::PluginFailed { source } = source.as_ref() {
-                    let mut cause: &dyn Error = source.as_ref();
-                    loop {
-                        if cause.is::<crate::EmissionError>() {
-                            return "output";
-                        }
-                        if let Some(error) = cause.downcast_ref::<Self>() {
-                            return error.phase();
-                        }
-                        let Some(source) = cause.source() else {
-                            break;
-                        };
-                        cause = source;
-                    }
-                }
-                "execution"
+                execution_error_phase(source.as_ref())
             }
-            _ => "execution",
+            Self::Workflow { source, .. } => execution_error_phase(source.as_ref()),
+            Self::Execution { .. } => "execution",
         }
+    }
+}
+
+fn execution_error_phase(mut cause: &(dyn Error + 'static)) -> &'static str {
+    loop {
+        match cause.downcast_ref::<NodeExecutionError>() {
+            Some(NodeExecutionError::OutputEncode { .. }) => return "output",
+            Some(NodeExecutionError::Shared { source }) => {
+                cause = source.as_ref();
+                continue;
+            }
+            Some(NodeExecutionError::PluginFailed { source }) => {
+                cause = source.as_ref();
+                continue;
+            }
+            _ => {}
+        }
+        if matches!(
+            cause.downcast_ref::<crate::WorkflowRunError>(),
+            Some(
+                crate::WorkflowRunError::OutputType { .. }
+                    | crate::WorkflowRunError::InvalidOutput { .. }
+            )
+        ) {
+            return "output";
+        }
+        if let Some(error) = cause.downcast_ref::<StreamError>() {
+            return error.phase();
+        }
+        let Some(source) = cause.source() else {
+            return "execution";
+        };
+        cause = source;
     }
 }
 
@@ -385,7 +404,7 @@ impl crate::EmissionSink for ProducerEmitter<'_> {
         self.admit(result)
     }
 
-    fn fail(&mut self, error: crate::EmissionError) {
+    fn fail(&mut self, error: Arc<NodeExecutionError>) {
         self.publication_failed = true;
         self.shared.fail(
             ProducerSnafu {
@@ -575,6 +594,7 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::SuccessDependency { definition_id, .. }
         | crate::WorkflowRunError::InputType { definition_id, .. }
         | crate::WorkflowRunError::OutputType { definition_id, .. }
+        | crate::WorkflowRunError::InvalidOutput { definition_id, .. }
         | crate::WorkflowRunError::OutputSelection { definition_id, .. }
         | crate::WorkflowRunError::Context { definition_id, .. }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
