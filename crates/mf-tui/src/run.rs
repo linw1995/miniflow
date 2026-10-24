@@ -2,7 +2,7 @@
 
 use crate::{
     duration::format_duration_ns,
-    graph::{ConnectionView, GraphError, GraphLayout, GraphRect, GraphView},
+    graph::{ConnectionView, GraphCluster, GraphError, GraphLayout, GraphRect, GraphView},
     logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
@@ -32,7 +32,7 @@ use ratatui::{
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
 use snafu::{IntoError, ResultExt, Snafu};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     env,
     fs::File,
     io::{self, IsTerminal, Read, Seek, SeekFrom, Write},
@@ -1016,6 +1016,7 @@ struct ViewState {
     selected: usize,
     pass_offset: usize,
     details_offset: usize,
+    details_height: usize,
 }
 
 impl ViewState {
@@ -1047,7 +1048,7 @@ impl ViewState {
         let id = path
             .get(self.path.len())
             .map_or(&latest.node.id, |entry| &entry.loop_id);
-        if let Some(selected) = layout.nodes().iter().position(|node| node.id == *id) {
+        if let Some(selected) = layout.display_index_for_node_id(id) {
             if self.selected != selected {
                 self.details_offset = 0;
             }
@@ -1127,10 +1128,14 @@ impl ViewState {
             KeyCode::Char('d') => self.details_visible = !self.details_visible,
             KeyCode::Esc if self.details_visible => self.details_visible = false,
             KeyCode::PageDown if self.details_visible => {
-                self.details_offset = self.details_offset.saturating_add(10)
+                self.details_offset = self
+                    .details_offset
+                    .saturating_add(self.details_height.max(1))
             }
             KeyCode::PageUp if self.details_visible => {
-                self.details_offset = self.details_offset.saturating_sub(10)
+                self.details_offset = self
+                    .details_offset
+                    .saturating_sub(self.details_height.max(1))
             }
             KeyCode::Char('l') => {
                 if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
@@ -1365,13 +1370,39 @@ fn draw(
         }
         frame.render_widget(graph_view, graph);
         if let Some(details) = details {
-            let selected_node = if let Some(nodes) = &display_nodes {
-                nodes.get(view_state.selected)
-            } else {
-                snapshot.nodes.get(view_state.selected)
-            };
+            view_state.details_height = usize::from(details.height.saturating_sub(2));
+            let observations = display_nodes.as_deref().unwrap_or(&snapshot.nodes);
+            let selected = view_state.selected;
+            let collapsed_cluster = layout.is_collapsed_cluster(selected);
+            let selected_node = (!collapsed_cluster)
+                .then(|| {
+                    layout
+                        .sources(selected)
+                        .first()
+                        .and_then(|source| observations.get(*source))
+                })
+                .flatten();
+            let cluster = layout.cluster_of(selected).map(|cluster| {
+                let cluster = &layout.clusters()[cluster];
+                if collapsed_cluster {
+                    collapsed_cluster_details(cluster, layout.sources(selected), observations)
+                } else {
+                    format!(
+                        "Cluster: {}\n{}\nMembers: {}\n",
+                        display_text(&cluster.label),
+                        display_text(&cluster.annotation),
+                        cluster.members.len()
+                    )
+                }
+            });
             let bindings = binding_details(description, &view_state.path, selected_node);
-            let details_body = format!("{}\n{}\n{}", view_state.graph_notice.as_deref().unwrap_or_default(), details_text(selected_node, pass, snapshot, capture, &bindings), layout.routing_details(view_state.selected));
+            let details_body = format!(
+                "{}\n{}\n{}\n{}",
+                view_state.graph_notice.as_deref().unwrap_or_default(),
+                cluster.unwrap_or_default(),
+                details_text(selected_node, pass, snapshot, capture, &bindings),
+                layout.routing_details(selected)
+            );
             let (window, offset) = details_window(&details_body, usize::from(details.width.saturating_sub(2)), usize::from(details.height.saturating_sub(2)), view_state.details_offset);
             view_state.details_offset = offset;
             frame.render_widget(Paragraph::new(window)
@@ -1402,7 +1433,7 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
     } else {
         "Arrows         Pan graph\nTab / Shift-Tab, j/k   Select node\n\
          d              Show / hide details\nPgUp/PgDn      Scroll visible details\n\
-         e              Cycle connection view\nv              Open OTEL tracing\n\
+         e              Cycle connection view\nc              Collapse / expand cluster\nv              Open OTEL tracing\n\
          l              Enter selected body\nh              Return to parent scope\n\
          Esc            Close details / return to parent\n\
          [ / ]          Older / newer pass\nf              Reset viewport\n\
@@ -1439,7 +1470,7 @@ fn body_observations(
 ) -> Vec<NodeObservation> {
     let order = || {
         layout
-            .nodes()
+            .all_nodes()
             .iter()
             .map(|node| (node.id.as_str(), node.kind.as_str()))
     };
@@ -1469,7 +1500,51 @@ fn connection_summary(layout: &GraphLayout) -> String {
     if transitive > 0 {
         summary.push_str(&format!(" | {transitive} transitive dependencies hidden"));
     }
+    let collapsed = layout
+        .clusters()
+        .iter()
+        .filter(|cluster| cluster.collapsed)
+        .count();
+    if collapsed > 0 {
+        summary.push_str(&format!(
+            " | {collapsed}/{} clusters collapsed | {} internal edges hidden",
+            layout.clusters().len(),
+            layout.hidden_cluster_edge_count()
+        ));
+    }
     summary
+}
+
+fn display_text(value: &str) -> String {
+    let mut text = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\t' => text.push_str("    "),
+            ch if ch.is_control() && ch != '\n' => text.push(' '),
+            ch => text.push(ch),
+        }
+    }
+    text
+}
+
+fn collapsed_cluster_details(
+    cluster: &GraphCluster,
+    members: &[usize],
+    observations: &[NodeObservation],
+) -> String {
+    let mut text = format!(
+        "Cluster: {}\n{}\nMembers:\n",
+        display_text(&cluster.label),
+        display_text(&cluster.annotation)
+    );
+    for member in members {
+        let (id, status) = observations.get(*member).map_or_else(
+            || ("?", crate::state::NodeStatus::Pending),
+            |observation| (observation.id.as_str(), observation.status),
+        );
+        text.push_str(&format!("  {id}: {status:?}\n"));
+    }
+    text
 }
 
 fn binding_details(
@@ -1864,6 +1939,38 @@ fn details_text(
         .collect()
 }
 
+#[derive(Clone, Debug)]
+enum SelectionAnchor {
+    Node(String),
+    Cluster(usize),
+}
+
+fn selection_anchor(layout: &GraphLayout, selected: usize) -> Option<SelectionAnchor> {
+    if layout.is_collapsed_cluster(selected) {
+        return layout.cluster_of(selected).map(SelectionAnchor::Cluster);
+    }
+    let source = *layout.sources(selected).first()?;
+    Some(SelectionAnchor::Node(
+        layout.all_nodes().get(source)?.id.clone(),
+    ))
+}
+
+fn anchor_display(layout: &GraphLayout, anchor: &SelectionAnchor) -> Option<usize> {
+    match anchor {
+        SelectionAnchor::Node(id) => layout.display_index_for_node_id(id),
+        SelectionAnchor::Cluster(cluster) => {
+            layout.display_index_for_cluster(*cluster).or_else(|| {
+                layout
+                    .clusters()
+                    .get(*cluster)?
+                    .members
+                    .first()
+                    .and_then(|source| layout.display_index_for_source(*source))
+            })
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct GraphViewport {
     offset: (u32, u32),
@@ -1878,6 +1985,8 @@ pub struct ObservationView {
     // Retain only the currently inspected body, regardless of the number of scopes or views.
     bodies: BTreeMap<Vec<String>, GraphLayout>,
     viewports: BTreeMap<(Vec<String>, ConnectionView), GraphViewport>,
+    collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
+    cluster_focus: BTreeMap<(Vec<String>, usize), usize>,
     state: ViewState,
 }
 impl ObservationView {
@@ -1889,8 +1998,77 @@ impl ObservationView {
             root,
             bodies: BTreeMap::new(),
             viewports: BTreeMap::new(),
+            collapsed: BTreeMap::new(),
+            cluster_focus: BTreeMap::new(),
             state: ViewState::default(),
         })
+    }
+    fn collapsed_at(&self, path: &[String]) -> BTreeSet<usize> {
+        self.collapsed.get(path).cloned().unwrap_or_default()
+    }
+    fn rebuild_layouts(&mut self) -> Result<(), RunError> {
+        let view = self.root.connection_view();
+        let root_collapsed = self.collapsed_at(&[]);
+        self.root = GraphLayout::with_view_and_collapsed(&self.description, view, &root_collapsed)
+            .context(GraphSnafu)?;
+        self.bodies.clear();
+        if !self.state.path.is_empty() {
+            let path = self.state.path.clone();
+            let collapsed = self.collapsed_at(&path);
+            let body = GraphLayout::from_body_with_view_and_collapsed(
+                &self.description,
+                &path,
+                view,
+                &collapsed,
+            )
+            .context(GraphSnafu)?;
+            self.bodies.insert(path, body);
+        }
+        Ok(())
+    }
+    fn toggle_cluster(&mut self) -> Result<(), RunError> {
+        let (cluster, collapsed, anchor, focus) = {
+            let layout = self.state.layout(&self.root, &self.bodies);
+            let selected = self.state.selected;
+            let Some(cluster) = layout.cluster_of(selected) else {
+                return Ok(());
+            };
+            let collapsed = layout.clusters()[cluster].collapsed;
+            let focus = (!collapsed && !layout.is_collapsed_cluster(selected))
+                .then(|| layout.sources(selected).first().copied())
+                .flatten();
+            let anchor =
+                selection_anchor(layout, selected).unwrap_or(SelectionAnchor::Cluster(cluster));
+            (cluster, collapsed, anchor, focus)
+        };
+        let path = self.state.path.clone();
+        if let Some(focus) = focus {
+            self.cluster_focus.insert((path.clone(), cluster), focus);
+        }
+        let set = self.collapsed.entry(path.clone()).or_default();
+        if collapsed {
+            set.remove(&cluster);
+        } else {
+            set.insert(cluster);
+        }
+        self.rebuild_layouts()?;
+        let layout = self.state.layout(&self.root, &self.bodies);
+        let selected = match &anchor {
+            SelectionAnchor::Cluster(cluster) => self
+                .cluster_focus
+                .get(&(path, *cluster))
+                .copied()
+                .and_then(|source| layout.display_index_for_source(source))
+                .or_else(|| anchor_display(layout, &anchor)),
+            _ => anchor_display(layout, &anchor),
+        };
+        if let Some(selected) = selected {
+            self.state.selected = selected;
+        }
+        self.state.reveal_selected = true;
+        self.state.details_offset = 0;
+        self.save_viewport();
+        Ok(())
     }
     fn save_viewport(&mut self) {
         self.viewports.insert(
@@ -1910,17 +2088,20 @@ impl ObservationView {
             .cloned()
             .unwrap_or_default();
         self.state.offset = viewport.offset;
-        self.state.selected = viewport.selected;
+        let node_count = self.state.layout(&self.root, &self.bodies).nodes().len();
+        self.state.selected = viewport.selected.min(node_count.saturating_sub(1));
         self.state.pass_offset = viewport.pass_offset;
         self.state.details_offset = viewport.details_offset;
         self.state.reveal_selected = true;
     }
     fn load_body(&mut self, path: &[String]) -> Result<(), RunError> {
         if !path.is_empty() && !self.bodies.contains_key(path) {
-            let layout = GraphLayout::from_body_with_view(
+            let collapsed = self.collapsed_at(path);
+            let layout = GraphLayout::from_body_with_view_and_collapsed(
                 &self.description,
                 path,
                 self.root.connection_view(),
+                &collapsed,
             )
             .context(GraphSnafu)?;
             self.bodies.insert(path.to_vec(), layout);
@@ -1928,20 +2109,26 @@ impl ObservationView {
         Ok(())
     }
     fn switch_connections(&mut self) -> Result<(), RunError> {
-        let selected = self
-            .state
-            .layout(&self.root, &self.bodies)
-            .nodes()
-            .get(self.state.selected)
-            .map(|node| node.id.clone());
+        let anchor = selection_anchor(
+            self.state.layout(&self.root, &self.bodies),
+            self.state.selected,
+        );
         let view = self.root.connection_view().next();
-        let root = GraphLayout::with_view(&self.description, view).context(GraphSnafu)?;
+        let root_collapsed = self.collapsed_at(&[]);
+        let root = GraphLayout::with_view_and_collapsed(&self.description, view, &root_collapsed)
+            .context(GraphSnafu)?;
         let body = if self.state.path.is_empty() {
             None
         } else {
+            let collapsed = self.collapsed_at(&self.state.path);
             Some(
-                GraphLayout::from_body_with_view(&self.description, &self.state.path, view)
-                    .context(GraphSnafu)?,
+                GraphLayout::from_body_with_view_and_collapsed(
+                    &self.description,
+                    &self.state.path,
+                    view,
+                    &collapsed,
+                )
+                .context(GraphSnafu)?,
             )
         };
         self.save_viewport();
@@ -1951,14 +2138,11 @@ impl ObservationView {
             self.bodies.insert(self.state.path.clone(), body);
         }
         self.restore_viewport();
-        if let Some(id) = selected {
-            self.state.selected = self
-                .state
-                .layout(&self.root, &self.bodies)
-                .nodes()
-                .iter()
-                .position(|node| node.id == id)
-                .unwrap_or_default();
+        if let Some(anchor) = anchor
+            && let Some(selected) =
+                anchor_display(self.state.layout(&self.root, &self.bodies), &anchor)
+        {
+            self.state.selected = selected;
         }
         Ok(())
     }
@@ -1996,6 +2180,13 @@ impl ObservationView {
         logs: &LogSnapshot,
     ) {
         if !self.state.traces.visible {
+            if key == KeyCode::Char('c') {
+                self.state.graph_notice = self
+                    .toggle_cluster()
+                    .err()
+                    .map(|error| format!("Cluster fold unavailable: {error}"));
+                return;
+            }
             if key == KeyCode::Char('e') {
                 self.state.graph_notice = self
                     .switch_connections()
@@ -2463,7 +2654,8 @@ mod tests {
     use mf_telemetry::{
         Count,
         description::{
-            LoopBodyDescription, NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
+            ClusterDescription, DataEdge, ExecutionDescription, ExecutionMode, LoopBodyDescription,
+            NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
         },
         event::{Event as LifecycleKind, LifecycleEvent, LoopPathEntry},
         identity::WorkflowId,
@@ -2480,6 +2672,87 @@ mod tests {
                 "control_edges":[],"execution_order":["%loop","source","target"]
             })))
         })).unwrap()
+    }
+
+    #[test]
+    fn cluster_folding_rebuilds_the_layout_and_preserves_the_selected_member() {
+        let description = WorkflowDescription {
+            version: WorkflowDescriptionVersion::V2026_10_23,
+            workflow_id: WorkflowId::try_from(format!("sha256:{}", "f".repeat(64))).unwrap(),
+            execution: Some(ExecutionDescription {
+                mode: ExecutionMode::Single,
+            }),
+            nodes: ["read", "parse", "publish"]
+                .map(|id| NodeDescription {
+                    id: id.into(),
+                    kind: "fixture.task".into(),
+                })
+                .to_vec(),
+            data_edges: vec![
+                DataEdge {
+                    exclusive: false,
+                    from_node: "read".into(),
+                    from_output: "value".into(),
+                    to_node: "parse".into(),
+                    to_input: "input".into(),
+                },
+                DataEdge {
+                    exclusive: false,
+                    from_node: "parse".into(),
+                    from_output: "value".into(),
+                    to_node: "publish".into(),
+                    to_input: "input".into(),
+                },
+            ],
+            control_edges: Vec::new(),
+            order_edges: Vec::new(),
+            execution_order: vec!["read".into(), "parse".into(), "publish".into()],
+            loop_bodies: Vec::new(),
+            clusters: vec![ClusterDescription {
+                label: "Load".into(),
+                annotation: "Read and parse the input.".into(),
+                nodes: vec!["read".into(), "parse".into()],
+            }],
+        };
+        let mut view = ObservationView::new(&description).unwrap();
+        view.state.selected = view.root.display_index_for_node_id("parse").unwrap();
+        view.toggle_cluster().unwrap();
+        assert!(view.root.clusters()[0].collapsed);
+        assert!(view.root.is_collapsed_cluster(view.state.selected));
+        assert_eq!(view.root.sources(view.state.selected), &[0, 1]);
+
+        view.toggle_cluster().unwrap();
+        assert!(!view.root.clusters()[0].collapsed);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "parse");
+        assert_eq!(view.root.nodes().len(), description.nodes.len());
+    }
+
+    #[test]
+    fn chat_title_usage_folding_and_view_changes_preserve_selection() {
+        let definition = mf_compiler::WorkflowDefinition::from_json(include_str!(
+            "../../../examples/chat-title-flow.json"
+        ))
+        .unwrap();
+        let plan = mf_compiler::plan_definition(&definition).unwrap();
+        let description = mf_compiler::describe_compiled(&plan).unwrap();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.state.selected = view.root.display_index_for_node_id("usages").unwrap();
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert!(view.state.graph_notice.is_none());
+        assert!(view.root.is_collapsed_cluster(view.state.selected));
+        for _ in 0..3 {
+            view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+            assert!(view.state.graph_notice.is_none());
+            assert!(view.root.is_collapsed_cluster(view.state.selected));
+        }
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert!(view.state.graph_notice.is_none());
+        assert_eq!(view.root.nodes()[view.state.selected].id, "usages");
     }
 
     #[test]
@@ -2891,6 +3164,60 @@ mod tests {
     }
 
     #[test]
+    fn short_details_pages_preserve_the_complete_cluster_annotation() {
+        let description = scope_fixture();
+        let layout = GraphLayout::new(&description).unwrap();
+        let session = crate::state::SessionState::new(description, RunId::new()).unwrap();
+        let cluster = GraphCluster {
+            label: "Read and validate the complete configuration".into(),
+            annotation: "Read every configuration field.\n\tPreserve a\u{301} and 🦀 across narrow pages.\nFinish with the complete annotation.".into(),
+            members: vec![0],
+            rect: GraphRect { x: 0, y: 0, width: 24, height: 4 },
+            collapsed: true,
+        };
+        let text = collapsed_cluster_details(&cluster, &[0], &session.snapshot().nodes);
+        assert!(text.contains("    Preserve"));
+        let mut state = ViewState {
+            details_visible: true,
+            details_height: 2,
+            ..Default::default()
+        };
+        let mut rows = BTreeMap::new();
+        loop {
+            let (page, offset) =
+                details_window(&text, 12, state.details_height, state.details_offset);
+            for (row, line) in page.split('\n').enumerate() {
+                rows.insert(offset + row, line.to_owned());
+            }
+            if offset < state.details_offset {
+                break;
+            }
+            state.handle_key(
+                KeyCode::PageDown,
+                &session.snapshot(),
+                &layout,
+                &BTreeMap::new(),
+                &TraceSnapshot::default(),
+                &LogSnapshot::default(),
+            );
+        }
+        assert_eq!(
+            rows.into_values().collect::<String>(),
+            text.replace('\n', "")
+        );
+        let previous_offset = state.details_offset;
+        state.handle_key(
+            KeyCode::PageUp,
+            &session.snapshot(),
+            &layout,
+            &BTreeMap::new(),
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(state.details_offset, previous_offset - state.details_height);
+    }
+
+    #[test]
     fn shortcut_help_consumes_navigation_until_dismissed() {
         let mut state = ViewState::default();
         assert!(!state.help_visible);
@@ -2971,6 +3298,7 @@ mod tests {
             &LogSnapshot::default(),
         );
         assert!(view.details_visible);
+        view.details_height = 10;
         view.handle_key(
             KeyCode::PageDown,
             &session.snapshot(),
@@ -3158,7 +3486,9 @@ mod tests {
                 }],
                 control_edges: vec![],
                 execution_order: vec!["%loop".into(), "child".into()],
+                clusters: Vec::new(),
             }],
+            clusters: Vec::new(),
         };
         let root = GraphLayout::new(&description).unwrap();
         let bodies = BTreeMap::from([(

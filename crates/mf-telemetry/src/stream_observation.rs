@@ -582,6 +582,7 @@ mod tests {
                     execution_order: vec!["%input".into()],
                     execution: None,
                     loop_bodies: Vec::new(),
+                    clusters: Vec::new(),
                 },
                 RunId::new(),
             )

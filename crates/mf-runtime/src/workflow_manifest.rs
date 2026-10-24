@@ -3,8 +3,8 @@ use crate::{
     workflow_inputs::{from_unique_json, pointer},
 };
 use mf_telemetry::description::{
-    ControlEdge, DataEdge, ExecutionDescription, ExecutionMode, LoopBodyDescription,
-    NodeDescription, OrderEdge, WorkflowDescriptionVersion,
+    ClusterDescription, ControlEdge, DataEdge, ExecutionDescription, ExecutionMode,
+    LoopBodyDescription, NodeDescription, OrderEdge, WorkflowDescriptionVersion,
 };
 use mf_telemetry::identity::WorkflowId;
 use mf_telemetry::{ContractError, description::WorkflowDescription};
@@ -318,7 +318,8 @@ pub fn describe_definition(
         &mut Vec::new(),
         &mut orders,
         &mut loop_bodies,
-        definition.has_order_edges(),
+        definition.has_order_edges()
+            || definition.version == crate::WorkflowDefinitionVersion::V2026_10_23,
     )?;
     ensure!(
         orders.is_empty(),
@@ -328,7 +329,9 @@ pub fn describe_definition(
     );
     let description = WorkflowDescription {
         order_edges: order_edges(&definition.order_edges),
-        version: if definition.has_order_edges() {
+        version: if definition.version == crate::WorkflowDefinitionVersion::V2026_10_23 {
+            WorkflowDescriptionVersion::V2026_10_23
+        } else if definition.has_order_edges() {
             WorkflowDescriptionVersion::V2026_10_19
         } else {
             match definition.version {
@@ -368,6 +371,7 @@ pub fn describe_definition(
         control_edges: control_edges(&definition.control_edges),
         execution_order: execution_order.to_vec(),
         loop_bodies,
+        clusters: clusters(&definition.clusters),
     };
     description.validate()?;
     Ok(description)
@@ -433,6 +437,17 @@ fn control_edges(edges: &[crate::ControlEdgeDefinition]) -> Vec<ControlEdge> {
         .collect()
 }
 
+fn clusters(clusters: &[crate::ClusterDefinition]) -> Vec<ClusterDescription> {
+    clusters
+        .iter()
+        .map(|cluster| ClusterDescription {
+            label: cluster.label.clone(),
+            annotation: cluster.annotation.clone(),
+            nodes: cluster.nodes.iter().map(ToString::to_string).collect(),
+        })
+        .collect()
+}
+
 fn order_edges(edges: &[crate::OrderEdgeDefinition]) -> Vec<OrderEdge> {
     edges
         .iter()
@@ -452,7 +467,7 @@ fn describe_loops(
 ) -> Result<(), ContractError> {
     for node in nodes {
         let iteration;
-        let (nodes, data, controls, successes, source_id, source_kind) =
+        let (nodes, data, controls, successes, body_clusters, source_id, source_kind) =
             if let Some(definition) = &node.loop_definition {
                 let body = &definition.body;
                 (
@@ -460,6 +475,7 @@ fn describe_loops(
                     &body.edges,
                     &body.control_edges,
                     &body.order_edges,
+                    &body.clusters,
                     crate::LOOP_SOURCE_ID,
                     crate::LOOP_SOURCE_ID,
                 )
@@ -471,6 +487,7 @@ fn describe_loops(
                     &body.edges,
                     &body.control_edges,
                     &body.order_edges,
+                    &body.clusters,
                     crate::ITERATION_INPUT_ID,
                     crate::ITERATION_INPUT_KIND,
                 )
@@ -497,6 +514,7 @@ fn describe_loops(
             control_edges: control_edges(controls),
             order_edges: order_edges(successes),
             execution_order: order.to_vec(),
+            clusters: clusters(body_clusters),
         });
         describe_loops(nodes, path, orders, bodies, include_iterations)?;
         path.pop();

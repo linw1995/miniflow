@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-03",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -66,15 +66,10 @@
         "max_tokens": {
           "$ref": "params.max_tokens"
         }
+      },
+      "inputs": {
+        "prompt": { "from": { "node": "params", "port": "prompt" } }
       }
-    }
-  ],
-  "edges": [
-    {
-      "from_node": "params",
-      "from_output": "prompt",
-      "to_node": "chat",
-      "to_input": "prompt"
     }
   ],
   "outputs": [
@@ -87,6 +82,13 @@
       "name": "history",
       "node": "chat",
       "port": "history"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Configured conversation",
+      "annotation": "Resolve startup parameters and model settings before generating a response.",
+      "nodes": ["params", "chat"]
     }
   ]
 }

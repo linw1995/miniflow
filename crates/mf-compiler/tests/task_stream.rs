@@ -21,6 +21,26 @@ fn root_export() -> serde_json::Value {
     })
 }
 
+#[test]
+fn clusters_and_live_exports_survive_round_trip_planning_and_execution() {
+    let mut value = root_export();
+    value["clusters"] = json!([{
+        "label": "Incremental task",
+        "annotation": "Publish previews and retain the terminal count.",
+        "nodes": ["group.count"]
+    }]);
+    let definition: WorkflowDefinition = serde_json::from_value(value.clone()).unwrap();
+    let encoded = serde_json::to_value(&definition).unwrap();
+    assert_eq!(encoded["clusters"], value["clusters"]);
+    assert_eq!(encoded["stream_outputs"], value["stream_outputs"]);
+    let plan = compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(description.clusters[0].label, "Incremental task");
+    let (output, events) = run_live(encoded, r#"{"group.count.count":2}"#);
+    assert_eq!(output["total"].as_u64(), Some(2));
+    assert_eq!(events.len(), 4);
+}
+
 fn run_live(
     value: serde_json::Value,
     arguments: &str,

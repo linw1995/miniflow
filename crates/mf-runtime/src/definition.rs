@@ -53,6 +53,7 @@ pub struct WorkflowDefinition {
     pub outputs: Vec<WorkflowOutputDefinition>,
     pub stream_outputs: Vec<WorkflowStreamOutputDefinition>,
     pub order_edges: Vec<OrderEdgeDefinition>,
+    pub clusters: Vec<ClusterDefinition>,
 }
 
 mod wire;
@@ -80,6 +81,8 @@ struct DefinitionFields {
     pub stream_outputs: Vec<WorkflowStreamOutputDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order_edges: Vec<OrderEdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<ClusterDefinition>,
 }
 
 fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
@@ -129,8 +132,12 @@ impl WorkflowDefinitionVersion {
         )
     }
 
-    pub fn supports_order_edges(self) -> bool {
+    pub fn supports_node_success_edges(self) -> bool {
         matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+    }
+
+    pub fn supports_clusters(self) -> bool {
+        self == Self::V2026_10_23
     }
 
     pub fn supports_live_outputs(self) -> bool {
@@ -203,6 +210,16 @@ pub struct LoopBodyDefinition {
     pub control_edges: Vec<ControlEdgeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order_edges: Vec<OrderEdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<ClusterDefinition>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterDefinition {
+    pub label: String,
+    pub annotation: String,
+    pub nodes: Vec<DefinitionId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

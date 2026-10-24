@@ -172,15 +172,19 @@ impl CompiledWorkflow {
             };
             let inputs = crate::workflow_input_schema(std::iter::once((node, true)), |_, _| false)?;
             let mut description = mf_telemetry::description::WorkflowDescription {
-            order_edges: Vec::new(),
+                order_edges: Vec::new(),
                 version: mf_telemetry::description::WorkflowDescriptionVersion::CURRENT,
                 workflow_id: original.workflow_id.clone(), execution: None,
                 nodes: vec![original.nodes[index].clone()],
                 data_edges: Vec::new(), control_edges: Vec::new(),
                 execution_order: vec![id.clone()],
                 loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
+                clusters: Vec::new(),
             };
-            if description.loop_bodies.iter().any(|body| !body.order_edges.is_empty() || body.nodes.iter().any(|node| node.id == mf_runtime::ITERATION_INPUT_ID)) {
+            if original.version.supports_clusters() {
+                description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23;
+                description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
+            } else if description.loop_bodies.iter().any(|body| !body.order_edges.is_empty() || body.nodes.iter().any(|node| node.id == mf_runtime::ITERATION_INPUT_ID)) {
                 description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_19;
                 description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
             }
@@ -868,7 +872,7 @@ fn subgraph_preparation(
                 })?;
         body_static_scope.push(node.id.to_string());
         (
-            crate::loops::body_definition(&definition.body, &parent.dependencies),
+            crate::loops::body_definition(&definition.body, &parent.dependencies, parent.version),
             serde_json::json!({
                 "max_iterations": definition.max_iterations,
                 "variables": definition.variables,
@@ -1586,7 +1590,11 @@ fn collect_body_layouts(
             .find(|node| &node.id == id)
             .expect("validated node ID");
         let body = if let Some(loop_definition) = &node.loop_definition {
-            crate::loops::body_definition(&loop_definition.body, &definition.dependencies)
+            crate::loops::body_definition(
+                &loop_definition.body,
+                &definition.dependencies,
+                definition.version,
+            )
         } else if node.kind == ITERATION_KIND {
             let invalid = |message| {
                 IterationSnafu {

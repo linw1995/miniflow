@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-03",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -152,6 +152,11 @@
                   "$ref": "%loop.api_key"
                 },
                 "capture_errors": true
+              },
+              "inputs": {
+                "prompt": { "from": { "node": "%loop", "port": "prompt" } },
+                "system": { "from": { "node": "%loop", "port": "system" } },
+                "history": { "from": { "node": "%loop", "port": "history" } }
               }
             },
             {
@@ -170,6 +175,10 @@
                 "code": {
                   "value": "left + right"
                 }
+              },
+              "inputs": {
+                "left": { "from": { "node": "%loop", "port": "usages" } },
+                "right": { "from": { "node": "chat", "port": "usages" } }
               }
             },
             {
@@ -177,6 +186,9 @@
               "kind": "workflow.loop_assign",
               "config": {
                 "variable": "history"
+              },
+              "inputs": {
+                "value": { "from": { "node": "chat", "port": "history" } }
               }
             },
             {
@@ -184,6 +196,9 @@
               "kind": "workflow.loop_assign",
               "config": {
                 "variable": "usages"
+              },
+              "inputs": {
+                "value": { "from": { "node": "collect", "port": "value" } }
               }
             },
             {
@@ -191,6 +206,9 @@
               "kind": "workflow.loop_assign",
               "config": {
                 "variable": "status"
+              },
+              "inputs": {
+                "value": { "from": { "node": "chat", "port": "status" } }
               }
             },
             {
@@ -198,6 +216,9 @@
               "kind": "workflow.loop_assign",
               "config": {
                 "variable": "text"
+              },
+              "inputs": {
+                "value": { "from": { "node": "chat", "port": "text" } }
               }
             },
             {
@@ -205,135 +226,38 @@
               "kind": "workflow.loop_assign",
               "config": {
                 "variable": "error"
+              },
+              "inputs": {
+                "value": { "from": { "node": "chat", "port": "error" } }
               }
             }
           ],
-          "edges": [
+          "clusters": [
             {
-              "from_node": "%loop",
-              "from_output": "prompt",
-              "to_node": "chat",
-              "to_input": "prompt"
+              "label": "Generate and account",
+              "annotation": "Generate one reply and append the call usage to the accumulated usage list.",
+              "nodes": ["chat", "collect"]
             },
             {
-              "from_node": "%loop",
-              "from_output": "system",
-              "to_node": "chat",
-              "to_input": "system"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "history",
-              "to_node": "chat",
-              "to_input": "history"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "usages",
-              "to_node": "collect",
-              "to_input": "left"
-            },
-            {
-              "from_node": "chat",
-              "from_output": "usages",
-              "to_node": "collect",
-              "to_input": "right"
-            },
-            {
-              "from_node": "chat",
-              "from_output": "history",
-              "to_node": "save_history",
-              "to_input": "value"
-            },
-            {
-              "from_node": "collect",
-              "from_output": "value",
-              "to_node": "save_usages",
-              "to_input": "value"
-            },
-            {
-              "from_node": "chat",
-              "from_output": "status",
-              "to_node": "save_status",
-              "to_input": "value"
-            },
-            {
-              "from_node": "chat",
-              "from_output": "text",
-              "to_node": "save_text",
-              "to_input": "value"
-            },
-            {
-              "from_node": "chat",
-              "from_output": "error",
-              "to_node": "save_error",
-              "to_input": "value"
+              "label": "Persist turn state",
+              "annotation": "Carry history, usage, status, text, and errors into the next loop iteration.",
+              "nodes": ["save_history", "save_usages", "save_status", "save_text", "save_error"]
             }
           ]
         }
+      },
+      "inputs": {
+        "prompt": { "from": { "node": "params", "port": "prompt" } },
+        "system": { "from": { "node": "params", "port": "system" } },
+        "history": { "from": { "node": "params", "port": "history" } },
+        "usages": { "from": { "node": "empty_usages", "port": "value" } },
+        "status": { "from": { "node": "initial_status", "port": "value" } },
+        "text": { "from": { "node": "empty_text", "port": "value" } },
+        "error": { "from": { "node": "empty_text", "port": "value" } },
+        "model": { "from": { "node": "params", "port": "model" } },
+        "base_url": { "from": { "node": "params", "port": "base_url" } },
+        "api_key": { "from": { "node": "params", "port": "api_key" } }
       }
-    }
-  ],
-  "edges": [
-    {
-      "from_node": "params",
-      "from_output": "prompt",
-      "to_node": "repeat",
-      "to_input": "prompt"
-    },
-    {
-      "from_node": "params",
-      "from_output": "system",
-      "to_node": "repeat",
-      "to_input": "system"
-    },
-    {
-      "from_node": "params",
-      "from_output": "history",
-      "to_node": "repeat",
-      "to_input": "history"
-    },
-    {
-      "from_node": "empty_usages",
-      "from_output": "value",
-      "to_node": "repeat",
-      "to_input": "usages"
-    },
-    {
-      "from_node": "initial_status",
-      "from_output": "value",
-      "to_node": "repeat",
-      "to_input": "status"
-    },
-    {
-      "from_node": "empty_text",
-      "from_output": "value",
-      "to_node": "repeat",
-      "to_input": "text"
-    },
-    {
-      "from_node": "empty_text",
-      "from_output": "value",
-      "to_node": "repeat",
-      "to_input": "error"
-    },
-    {
-      "from_node": "params",
-      "from_output": "model",
-      "to_node": "repeat",
-      "to_input": "model"
-    },
-    {
-      "from_node": "params",
-      "from_output": "base_url",
-      "to_node": "repeat",
-      "to_input": "base_url"
-    },
-    {
-      "from_node": "params",
-      "from_output": "api_key",
-      "to_node": "repeat",
-      "to_input": "api_key"
     }
   ],
   "outputs": [
@@ -361,6 +285,18 @@
       "name": "metadata",
       "node": "annotation",
       "port": "value"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Conversation setup",
+      "annotation": "Resolve model settings and initialize the loop state and response metadata.",
+      "nodes": ["params", "annotation", "empty_usages", "initial_status", "empty_text"]
+    },
+    {
+      "label": "Repeated conversation",
+      "annotation": "Run two conversation turns, carrying history and accumulating usage across iterations.",
+      "nodes": ["repeat"]
     }
   ]
 }

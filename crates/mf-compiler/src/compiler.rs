@@ -218,6 +218,8 @@ pub enum WorkflowCompileError {
         to_node: DefinitionId,
         message: String,
     },
+    #[snafu(display("invalid node cluster: {message}"))]
+    InvalidCluster { message: String },
     #[snafu(display("invalid Loop at {path}: {message}"), visibility(pub))]
     InvalidLoop { path: String, message: String },
     #[snafu(display("invalid Loop at {path}: {source}"), visibility(pub))]
@@ -927,7 +929,7 @@ pub fn topological_order(
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
-    if definition.has_order_edges() && !definition.version.supports_order_edges() {
+    if definition.has_order_edges() && !definition.version.supports_node_success_edges() {
         return InvalidSuccessDependencySnafu {
             message: "node-success edges require version 2026-10-19",
         }
@@ -948,6 +950,7 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
             .fail();
         }
     }
+    validate_clusters(definition, &ids)?;
     crate::validate_exclusive_inputs(&definition.edges)?;
     let mut connected = BTreeSet::new();
     for edge in definition.edges.iter() {
@@ -1013,6 +1016,75 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
                 node_id: output.node.clone(),
             }
             .fail();
+        }
+    }
+    Ok(())
+}
+
+fn validate_clusters(
+    definition: &WorkflowDefinition,
+    node_ids: &BTreeSet<DefinitionId>,
+) -> Result<(), WorkflowCompileError> {
+    if !definition.clusters.is_empty() && !definition.version.supports_clusters() {
+        return InvalidClusterSnafu {
+            message: "node clusters require version 2026-10-23",
+        }
+        .fail();
+    }
+    if definition.clusters.len() > mf_telemetry::description::MAX_CLUSTERS_PER_SCOPE {
+        return InvalidClusterSnafu {
+            message: "too many node clusters",
+        }
+        .fail();
+    }
+    let mut members = BTreeSet::new();
+    for cluster in &definition.clusters {
+        if cluster.label.trim().is_empty()
+            || cluster.label.len() > mf_telemetry::description::MAX_CLUSTER_LABEL_BYTES
+            || cluster.label.chars().any(char::is_control)
+        {
+            return InvalidClusterSnafu {
+                message: "cluster label must be a nonblank single line within the size limit",
+            }
+            .fail();
+        }
+        if cluster.annotation.trim().is_empty()
+            || cluster.annotation.len() > mf_telemetry::description::MAX_CLUSTER_ANNOTATION_BYTES
+            || !cluster
+                .annotation
+                .chars()
+                .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        {
+            return InvalidClusterSnafu {
+                message: "cluster annotation must be nonblank, printable, and within the size limit",
+            }
+            .fail();
+        }
+        if cluster.nodes.is_empty() {
+            return InvalidClusterSnafu {
+                message: "cluster must list at least one node",
+            }
+            .fail();
+        }
+        for node in &cluster.nodes {
+            if matches!(node.as_str(), "%loop" | "$loop" | "%iteration") {
+                return InvalidClusterSnafu {
+                    message: "synthetic nodes cannot belong to a cluster",
+                }
+                .fail();
+            }
+            if !node_ids.contains(node) {
+                return InvalidClusterSnafu {
+                    message: format!("cluster references unknown node `{node}`"),
+                }
+                .fail();
+            }
+            if !members.insert(node.clone()) {
+                return InvalidClusterSnafu {
+                    message: format!("node `{node}` belongs to more than one cluster"),
+                }
+                .fail();
+            }
         }
     }
     Ok(())
@@ -1197,7 +1269,7 @@ pub fn normalize_plan(
         .map(|id| (*nodes_by_id[id]).clone())
         .collect();
     for node in &mut nodes {
-        normalize_loop_node(node, &definition.dependencies)?;
+        normalize_loop_node(node, &definition.dependencies, definition.version)?;
         if node.kind == ITERATION_KIND {
             node.config = normalize_config(definition, node)?;
         }
@@ -1243,6 +1315,7 @@ pub fn normalize_plan(
                 outputs.sort_by(|left, right| left.name.cmp(&right.name));
                 outputs
             },
+            clusters: definition.clusters.clone(),
         },
         execution_order,
     })
@@ -1251,11 +1324,12 @@ pub fn normalize_plan(
 fn normalize_loop_node(
     node: &mut crate::NodeDefinition,
     dependencies: &BTreeMap<String, crate::NodeDependency>,
+    version: crate::WorkflowDefinitionVersion,
 ) -> Result<(), WorkflowCompileError> {
     let Some(loop_definition) = &mut node.loop_definition else {
         return Ok(());
     };
-    let body = crate::loops::body_definition(&loop_definition.body, dependencies);
+    let body = crate::loops::body_definition(&loop_definition.body, dependencies, version);
     let mut normalized = normalize_plan(&body, structural_order_graph(&body)?)?.definition;
     normalized
         .nodes
@@ -1443,7 +1517,8 @@ pub fn loop_execution_orders(
         definition,
         &mut Vec::new(),
         &mut orders,
-        definition.has_order_edges(),
+        definition.has_order_edges()
+            || definition.version == crate::WorkflowDefinitionVersion::V2026_10_23,
     )?;
     Ok(orders)
 }
@@ -1456,7 +1531,11 @@ fn collect_loop_execution_orders(
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
         let body = if let Some(loop_definition) = &node.loop_definition {
-            crate::loops::body_definition(&loop_definition.body, &definition.dependencies)
+            crate::loops::body_definition(
+                &loop_definition.body,
+                &definition.dependencies,
+                definition.version,
+            )
         } else if include_iterations && node.kind == ITERATION_KIND {
             let config = parse_config(node)
                 .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
@@ -1653,6 +1732,7 @@ fn resolve_nodes_in_scope(
                     let body = crate::loops::body_definition(
                         &loop_definition.body,
                         &definition.dependencies,
+                        definition.version,
                     );
                     let options = serde_json::json!({
                         "max_iterations": loop_definition.max_iterations,

@@ -342,6 +342,7 @@ fn wait_until(mut check: impl FnMut() -> bool) {
 fn definition() -> Value {
     let mut value: Value =
         serde_json::from_str(include_str!("../../../examples/stream-batch.json")).unwrap();
+    value.as_object_mut().unwrap().remove("clusters");
     value["dependencies"]
         .as_object_mut()
         .unwrap()
@@ -350,23 +351,13 @@ fn definition() -> Value {
         .as_array_mut()
         .unwrap()
         .retain(|node| node["id"] != "convert");
-    {
-        let edges = value["edges"].as_array_mut().unwrap();
-        let input = edges
-            .iter_mut()
-            .find(|edge| edge["to_node"] == "convert")
-            .unwrap();
-        input["to_node"] = json!("collect");
-        input["to_input"] = json!("item");
-        edges.retain(|edge| edge["from_node"] != "convert");
-    }
+    value["nodes"][0]["inputs"]["item"] = json!({"from":{"node":"feed","port":"item"}});
     *value["nodes"]
         .as_array_mut()
         .unwrap()
         .iter_mut()
         .find(|node| node["id"] == "feed")
         .unwrap() = controlled::source(json!("int"));
-    value["edges"][0]["from_output"] = json!("item");
     value
 }
 fn plan(value: Value) -> mf_compiler::CompiledWorkflow {
@@ -609,11 +600,10 @@ fn task_failures_preserve_outcomes_and_raw_snapshots_need_no_telemetry() {
     value["nodes"]
         .as_array_mut()
         .unwrap()
-        .push(json!({"id":"before", "kind":"builtin.identity"}));
+        .push(json!({"id":"before", "kind":"builtin.identity",
+            "inputs":{"input":{"from":{"node":"collect","port":"items"}}}}));
     value["outputs"][0]["port"] = json!("hit");
-    value["edges"][1] = json!({"from_node":"collect", "from_output":"items", "to_node":"before", "to_input":"input"});
-    value["control_edges"] =
-        json!([{"from_node":"before", "from_output":"value", "to_node":"consume"}]);
+    value["edges"] = json!([{"from_node":"before", "from_output":"value", "to_node":"consume"}]);
     let plan = plan(value);
     let observation = plan
         .start_stream_observation(&harness.observer(), RunId::new())

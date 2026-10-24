@@ -375,6 +375,44 @@
       "optional": true
     }
   ],
+  "clusters": [
+    {
+      "label": "Conversation",
+      "annotation": "Resolve inputs and generate the primary response before deciding whether a title is needed.",
+      "nodes": [
+        "input",
+        "model"
+      ]
+    },
+    {
+      "label": "Title eligibility",
+      "annotation": "Generate a title only after a successful response when the provisional title allows an attempt.",
+      "nodes": [
+        "eligible",
+        "title_route"
+      ]
+    },
+    {
+      "label": "Title generation",
+      "annotation": "Build the title prompt, call the title model, and expose the title only when that call succeeds.",
+      "nodes": [
+        "title_prompt",
+        "title_system",
+        "title_model",
+        "title_success",
+        "title"
+      ]
+    },
+    {
+      "label": "Usage accounting",
+      "annotation": "Combine conversation and title usage, or preserve conversation usage when title generation is skipped.",
+      "nodes": [
+        "combined_usages",
+        "conversation_usages",
+        "usages"
+      ]
+    }
+  ],
   "stream_outputs": [
     {
       "name": "answer",

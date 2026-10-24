@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-26",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -23,18 +23,20 @@
         "language": "cel",
         "inputs": { "items": { "list": "int" } },
         "code": { "doubled": "items.map(x, x * 2)" }
+      },
+      "inputs": {
+        "items": { "from": { "node": "source", "port": "value" } }
       }
-    }
-  ],
-  "edges": [
-    {
-      "from_node": "source",
-      "from_output": "value",
-      "to_node": "transform",
-      "to_input": "items"
     }
   ],
   "outputs": [
     { "name": "doubled", "node": "transform", "port": "doubled" }
+  ],
+  "clusters": [
+    {
+      "label": "List computation",
+      "annotation": "Transform a typed list with CEL and return the resulting values.",
+      "nodes": ["source", "transform"]
+    }
   ]
 }

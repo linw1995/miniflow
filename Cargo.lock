@@ -1723,6 +1723,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "mf-chat",
+ "mf-compiler",
  "mf-runtime",
  "mf-telemetry",
  "nix",

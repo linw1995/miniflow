@@ -170,6 +170,10 @@ fn config_references_require_known_explicit_predecessors() {
     assert!(error.to_string().contains("is unknown"), "{error}");
     let mut definition = parameter_definition();
     definition["edges"] = json!([]);
+    definition["nodes"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("inputs");
     let error =
         compile_definition(&serde_json::from_value(definition).unwrap(), &registry).unwrap_err();
     assert!(

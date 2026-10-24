@@ -60,6 +60,7 @@ pub fn body_definition(
             port: config.body.result.port.clone().into(),
             optional: false,
         }],
+        clusters: config.body.clusters.clone(),
     })
 }
 
@@ -90,6 +91,7 @@ pub fn normalize_config(
     config.body.edges = normalized.edges;
     config.body.control_edges = normalized.control_edges;
     config.body.order_edges = normalized.order_edges;
+    config.body.clusters = normalized.clusters;
     serde_json::to_value(config).context(IterationConfigurationSnafu {
         definition_id: node.id.clone(),
     })
