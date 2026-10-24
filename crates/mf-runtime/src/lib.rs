@@ -25,6 +25,7 @@ mod stream_instance;
 mod stream_io;
 mod stream_plan;
 mod subgraph;
+mod task_stream;
 mod typed_inputs;
 mod typed_outputs;
 mod value;
@@ -100,7 +101,7 @@ pub use stream::{
     TypedStreamNode, execute_typed_event,
 };
 pub use stream_instance::{
-    Emitter, MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
+    MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
 pub use stream_io::{StreamStdio, TextInput};
@@ -108,6 +109,10 @@ pub use stream_plan::{
     FlowDependency, GeneratedStreamDomainExecutor, MessageSchedule, PreparedStream, StreamPlan,
 };
 pub use subgraph::PreparedSubgraph;
+pub use task_stream::{
+    DiscardSink, EmissionError, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode,
+    TypedEmitter, TypedTaskStreamNode,
+};
 pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, Nullable, Shared, decode_default_input,
     decode_input, decode_node_value, decode_object_value, decode_required_input,

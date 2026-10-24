@@ -130,7 +130,12 @@ where
         let exclusive = &node.metadata.exclusive_outputs;
         if !exclusive.is_empty() {
             ensure!(
-                exclusive.len() >= 2 && matches!(node.node, Some(NodeExecution::Task(_))),
+                exclusive.len() >= 2
+                    && node
+                        .node
+                        .as_ref()
+                        .and_then(NodeExecution::as_task_node)
+                        .is_some(),
                 InvalidExclusiveOutputsSnafu {
                     definition_id: id,
                     message: "at least two outputs on a task node are required",
@@ -201,7 +206,12 @@ where
             }
         }
         // Stateful operators can emit buffered values from a different invocation.
-        if !matches!(node.node, Some(NodeExecution::Task(_))) {
+        if node
+            .node
+            .as_ref()
+            .and_then(NodeExecution::as_task_node)
+            .is_none()
+        {
             activation.clear();
         }
         successes.insert(id, activation.clone());
@@ -884,7 +894,10 @@ pub fn validate_success_connection(
 }
 
 fn ordinary_task(node: &FlowNode) -> bool {
-    matches!(&node.node, Some(NodeExecution::Task(task)) if task.supports_success_dependencies())
+    node.node
+        .as_ref()
+        .and_then(NodeExecution::as_task_node)
+        .is_some_and(|task| task.supports_success_dependencies())
 }
 
 /// Partitions a validated topological order; boundary nodes form separate domains.
@@ -1131,7 +1144,7 @@ pub fn build_message_domains(
                 node.definition_id
             ),
         })? {
-            NodeExecution::Task(_) => domain,
+            NodeExecution::Task(_) | NodeExecution::TaskStream(_) => domain,
             NodeExecution::Event(_) | NodeExecution::Stream(_) => {
                 let new_domain = sources.len();
                 sources.push(Some(index));

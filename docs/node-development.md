@@ -609,6 +609,67 @@ Event, stream, and nested-scope execution retain the existing dynamic scheduler 
   methods that previously replaced them after construction.
 - Rebuild the plugin and consumers against the same runtime package identity.
 
+## Combined Task and Stream execution
+
+Use `TypedTaskStreamNode` when one operation produces optional incremental values and a final Task result.
+`PreparedNode::typed_task_stream` reflects its associated `Input`, `Output`, and `Emission` contracts.
+Terminal fields remain in `metadata.ports.outputs`; incremental fields are in `metadata.stream_outputs`.
+The two output categories must have distinct names. Dynamic providers use `TaskStreamNode` and
+`NodePortContract::stream_outputs` with `PreparedNode::task_stream`.
+
+```rust
+use mf_runtime::{
+    ExecutionContext, NodeExecutionError, NodeValue, TypedEmitter, TypedNodeResult,
+    TypedTaskStreamNode,
+};
+
+#[derive(NodeValue)]
+struct Request { count: usize }
+#[derive(NodeValue)]
+struct Reply { total: usize }
+#[derive(NodeValue)]
+struct Increment { delta: usize }
+
+struct Count;
+impl TypedTaskStreamNode for Count {
+    type Input = Request;
+    type Output = Reply;
+    type Emission = Increment;
+
+    fn execute(
+        &self,
+        input: Request,
+        _: &mut ExecutionContext,
+        emitter: &mut TypedEmitter<'_, '_, Increment>,
+    ) -> Result<TypedNodeResult<Reply>, NodeExecutionError> {
+        if emitter.is_connected() {
+            for delta in 0..input.count {
+                emitter.send(Increment { delta })?;
+            }
+        }
+        Ok(Reply { total: input.count }.into())
+    }
+}
+```
+
+One invocation calls this entry point once. Returning without an emission is valid, even with a connected sink.
+`NodeExecution::as_task_node` and `into_task_node` also accept combined executors; terminal-only adaptation
+uses a discard sink and never allocates an unread receiver. `TaskStreamExecutor::execute_with_sink` accepts
+an explicit `EmissionSink` for direct incremental consumption. Required stream fields constrain each actual
+emission, not how many emissions an invocation produces.
+
+Every attempted emission is encoded and validated even when discarded. `is_connected()` allows providers
+to skip constructing incremental values. The emitter retains encoding and delivery failures, so ignoring a
+send error cannot turn the invocation into success. A terminal result is returned directly and is never
+reconstructed by collecting deltas. Existing pure producers keep their exclusive mutable state contract;
+combined executors use the Task `Send + Sync` ownership contract.
+
+Finite and streaming workflows currently consume the terminal outputs of a combined node through the
+ordinary Task path. Connecting its incremental ports inside a workflow or exporting them to a host
+requires the separate live-output planning support. Direct callers can already consume those values
+with `execute_with_sink`. Success dependencies retain the executor's declared
+`supports_success_dependencies` capability.
+
 ## Workflow observation context
 
 Observed execution activates the workflow's OTel context and a node span around dependency resolution, invocation, and output publication. A node using an application-provided OTel tracer can create child spans through the current context without changing its execution interface. The runtime does not install a global provider or configure a plugin's tracer. Threads created by plugins require explicit context propagation.
@@ -623,7 +684,7 @@ Lifecycle events are emitted by the runtime independently of plugin diagnostic l
 with `PreparedNode::typed_event`; they do not implement `ports()`, `EventNode`, or a task adapter themselves.
 
 Use `prepared.execution.as_task_node()` to borrow a task executor or
-`prepared.execution.into_task_node()` to take ownership of it. Both return `None` for event and stream execution.
+`prepared.execution.into_task_node()` to take ownership of it. Both accept combined Task/Stream execution and return `None` for pure event and stream execution.
 The consuming conversion moves only the execution field, leaving `prepared.metadata` available.
 
 `EventNode::on_event` receives `Input`, `Timer`, or `UpstreamClosed` and returns zero or more complete
@@ -639,7 +700,7 @@ summaries, and timer updates are preserved. `EventEffects<O>::default()` does no
 `buffered_items` is forwarded to the same provider state. `execute_typed_event` supports direct state invocation with
 dynamic events using the same conversion boundary.
 
-Oneshot preparation accepts task nodes and rejects event or stream nodes with their definition IDs. Direct callers
+Oneshot preparation accepts ordinary and combined task nodes and rejects pure event or stream nodes with their definition IDs. Direct callers
 of the low-level task helper convert a prepared `FlowNode` with `into_task()` first. Normal `mf_compiler::build_flow` callers and
 generated oneshot runners pass a task Flow to `FlowRuntime`; streaming preparation keeps the same Flow graph and
 uses the runtime's stream lifecycle and message-domain scheduler.

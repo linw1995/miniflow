@@ -76,13 +76,23 @@ body or supplying a body to a plain factory MUST fail during preparation without
 
 ### Requirement: Select execution kind during preparation
 
-A prepared node SHALL contain a task, event, or stream executor alongside its metadata. Event and stream
+A prepared node SHALL contain a task, combined task/stream, event, or stream executor alongside its metadata. Event and stream
 providers SHALL construct their state directly and MUST NOT require a task execution method. Tasks SHALL
 retain `Send + Sync`; event and stream state MAY be `Send` without `Sync` and SHALL be invoked through
 exclusive mutable access. The event contract SHALL accept input, timer, and upstream-close events and
 return complete emissions and deadline updates. Stream executors SHALL emit results incrementally
 during each startup or input invocation. An initial EventNode without upstream dependencies MUST be
 rejected because the event contract does not define autonomous startup.
+
+Combined executors SHALL use a single invocation with optional incremental emissions and one terminal
+Task result. They SHALL retain the Task `Send + Sync` ownership contract and expose terminal and stream
+ports separately. Their terminal Task adapter SHALL preserve success-dependency capabilities and discard
+unconnected emissions without allocating a receiver.
+
+#### Scenario: Prepare a combined executor without executing it
+
+- **WHEN** a provider prepares a combined task/stream implementation
+- **THEN** the runtime reflects distinct input, terminal, and emission contracts without invoking business logic
 
 #### Scenario: Construct event state directly
 
@@ -102,7 +112,9 @@ rejected because the event contract does not define autonomous startup.
 
 ### Requirement: Restrict synchronous execution to tasks
 
-Synchronous flows and generated task bodies SHALL contain only task executors. Event and stream nodes MUST be rejected during preparation of a synchronous flow, before any executor is invoked. Metadata inference SHALL remain available independently of the execution kind.
+Synchronous flows and generated task bodies SHALL contain only ordinary or combined task executors.
+Pure event and stream nodes MUST be rejected during preparation of a synchronous flow, before any
+executor is invoked. Metadata inference SHALL remain available independently of the execution kind.
 
 #### Scenario: Reject an event in a synchronous flow
 
