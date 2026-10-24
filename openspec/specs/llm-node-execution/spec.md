@@ -27,7 +27,7 @@ The node SHALL require a model field and validate literal settings during prepar
 #### Scenario: Use default connection settings
 
 - **WHEN** a configuration supplies only a valid model
-- **THEN** it selects the OpenAI API prefix, `OPENAI_API_KEY`, a 60000 millisecond deadline, and a 1048576 byte output text limit
+- **THEN** it selects the OpenAI API prefix, `OPENAI_API_KEY`, a 60000 millisecond deadline
 
 #### Scenario: Reject invalid configuration
 
@@ -116,7 +116,7 @@ Each successful invocation SHALL return required message-list `history` containi
 
 ### Requirement: Publish a terminal text result atomically
 
-A successful invocation SHALL publish exactly one result containing complete string `text`, updated message-list `history`, succeeded status, a one-call usages list, and optional scalar `usage` and `finish_reason`. Text blocks SHALL retain response order. Conversion and validation MUST finish before publication. Empty text, unsupported output content, invalid usage counts, and excessive output text SHALL fail without any outputs by default or transcript mutation.
+A successful invocation SHALL publish exactly one result containing complete string `text`, updated message-list `history`, succeeded status, a one-call usages list, and optional scalar `usage` and `finish_reason`. Text blocks SHALL retain response order. Conversion and validation MUST finish before publication. Empty text, unsupported output content, and invalid usage counts SHALL fail without any outputs by default or transcript mutation.
 
 #### Scenario: Receive a complete text answer
 
@@ -130,16 +130,11 @@ A successful invocation SHALL publish exactly one result containing complete str
 - **THEN** with capture_errors disabled the invocation fails without publishing text, updated history, or metadata
 - **AND** supplied history remains unchanged
 
-#### Scenario: Exceed the text limit
+#### Scenario: Preserve a large reply
 
-- **WHEN** the decoded terminal text exceeds the configured UTF-8 byte limit
-- **THEN** the node rejects the result before publication
-- **AND** the limit is documented as a text output limit rather than a hard transport-memory bound
-
-#### Scenario: Apply the reply limit independently of history
-
-- **WHEN** the generated reply fits the output text limit but the full transcript is larger
-- **THEN** that text limit does not trim or reject the transcript solely because of its aggregate size
+- **WHEN** valid generated text exceeds the former client-side output byte limit
+- **THEN** the node preserves the complete text and updated history without a byte-limit failure
+- **AND** provider token limits, timeout, cancellation, and output validation remain in effect
 
 #### Scenario: Complete at the token limit
 
