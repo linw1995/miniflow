@@ -774,7 +774,8 @@ fn validate_base_metadata(
         }
         for (direction, specs) in [
             ("input", ports.ports.inputs.iter().collect::<Vec<_>>()),
-            ("output", ports.output_ports().collect()),
+            ("output", ports.ports.outputs.iter().collect()),
+            ("stream output", ports.stream_outputs.iter().collect()),
         ] {
             let mut names = BTreeSet::new();
             for port in specs {
@@ -791,6 +792,19 @@ fn validate_base_metadata(
                         direction,
                         port: port.name.as_ref(),
                     })?;
+            }
+        }
+        for port in &node.metadata.stream_outputs {
+            if ports
+                .ports
+                .outputs
+                .iter()
+                .any(|terminal| terminal.name == port.name)
+            {
+                return Err(invalid(
+                    &node.definition_id,
+                    format!("terminal and stream outputs share port `{}`", port.name),
+                ));
             }
         }
         for port in ports.output_ports() {

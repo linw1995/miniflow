@@ -61,6 +61,11 @@ pub enum WorkflowRunError {
         source: crate::TypeMismatch,
     },
     #[snafu(display("node `{definition_id}`: {message}"), visibility(pub))]
+    InvalidOutput {
+        definition_id: DefinitionId,
+        message: String,
+    },
+    #[snafu(display("node `{definition_id}`: {message}"), visibility(pub))]
     Context {
         definition_id: DefinitionId,
         message: String,
@@ -70,6 +75,12 @@ pub enum WorkflowRunError {
         source: NodeExecutionError,
         definition_id: DefinitionId,
     },
+}
+
+impl WorkflowRunError {
+    pub(crate) fn is_output_error(&self) -> bool {
+        matches!(self, Self::OutputType { .. } | Self::InvalidOutput { .. })
+    }
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use mf_telemetry::{
     stream::{StreamCounts, StreamFailure, StreamMessage, StreamTrigger},
 };
 use serde::Serialize;
-use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeSet, VecDeque},
     error::Error,
@@ -143,25 +143,37 @@ impl StreamError {
             | Self::PublicationDeadline => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
-                if let NodeExecutionError::PluginFailed { source } = source.as_ref() {
-                    let mut cause: &dyn Error = source.as_ref();
-                    loop {
-                        if cause.is::<crate::EmissionError>() {
-                            return "output";
-                        }
-                        if let Some(error) = cause.downcast_ref::<Self>() {
-                            return error.phase();
-                        }
-                        let Some(source) = cause.source() else {
-                            break;
-                        };
-                        cause = source;
-                    }
-                }
-                "execution"
+                execution_error_phase(source.as_ref())
             }
-            _ => "execution",
+            Self::Workflow { source, .. } => execution_error_phase(source.as_ref()),
+            Self::Execution { .. } => "execution",
         }
+    }
+}
+
+fn execution_error_phase(mut cause: &(dyn Error + 'static)) -> &'static str {
+    loop {
+        match cause.downcast_ref::<NodeExecutionError>() {
+            Some(NodeExecutionError::OutputEncode { .. }) => return "output",
+            Some(NodeExecutionError::PluginFailed { source }) => {
+                cause = source.as_ref();
+                continue;
+            }
+            _ => {}
+        }
+        if cause
+            .downcast_ref::<crate::WorkflowRunError>()
+            .is_some_and(crate::WorkflowRunError::is_output_error)
+        {
+            return "output";
+        }
+        if let Some(error) = cause.downcast_ref::<StreamError>() {
+            return error.phase();
+        }
+        let Some(source) = cause.source() else {
+            return "execution";
+        };
+        cause = source;
     }
 }
 
@@ -433,16 +445,6 @@ impl crate::EmissionSink for ProducerEmitter<'_> {
     ) -> Result<(), StreamError> {
         self.admit(result, cancellation)
     }
-
-    fn fail(&mut self, error: crate::EmissionError) {
-        self.publication_failed = true;
-        self.shared.fail(
-            ProducerSnafu {
-                definition_id: self.plan.nodes()[self.index].definition_id.clone(),
-            }
-            .into_error(error.into()),
-        );
-    }
 }
 
 impl ProducerEmitter<'_> {
@@ -560,7 +562,7 @@ fn run_producer(
                             context,
                             &mut sink,
                             |context, sink| {
-                                let mut emitter = Emitter::new(
+                                let mut emitter = Emitter::with_sink_validation(
                                     plan.nodes()[index].definition_id.clone(),
                                     &plan.emission_node(index).metadata.ports.outputs,
                                     context.cancellation(),
@@ -568,7 +570,9 @@ fn run_producer(
                                 );
                                 emitter.set_snapshot_context(context);
                                 let result = node.execute(job.inputs, context, &mut emitter);
-                                emitter.finish()?;
+                                if let Some(error) = context.cancellation().failure() {
+                                    return Err(error.into());
+                                }
                                 result
                             },
                         )
@@ -610,7 +614,7 @@ fn run_producer(
         match &result {
             Ok(()) => callback.succeeded(sink.emitted, sink.ports.into_iter().collect()),
             Err(error) => callback.failed(
-                if sink.publication_failed {
+                if sink.publication_failed || error.phase() == "output" {
                     FailurePhase::Publication
                 } else {
                     FailurePhase::Execution
@@ -648,6 +652,7 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::SuccessDependency { definition_id, .. }
         | crate::WorkflowRunError::InputType { definition_id, .. }
         | crate::WorkflowRunError::OutputType { definition_id, .. }
+        | crate::WorkflowRunError::InvalidOutput { definition_id, .. }
         | crate::WorkflowRunError::OutputSelection { definition_id, .. }
         | crate::WorkflowRunError::Context { definition_id, .. }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),

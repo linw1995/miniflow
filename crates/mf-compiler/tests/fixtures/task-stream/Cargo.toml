@@ -1,0 +1,13 @@
+[package]
+name = "fixture-task-stream"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+inventory = "0.3.24"
+mf-runtime = { path = "../../../../mf-runtime", version = "0.1.0" }
+serde_json = "1.0.151"

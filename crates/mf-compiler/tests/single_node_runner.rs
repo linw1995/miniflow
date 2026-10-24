@@ -266,3 +266,33 @@ fn finite_typed_segments_keep_normal_execution_and_isolated_publication_contract
     assert!(invalid.stdout.is_empty());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("output `value`"));
 }
+
+#[test]
+fn combined_nodes_preserve_terminal_results_in_generated_and_isolated_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let definition = root.path().join("flow.json");
+    let binary = root.path().join("flow");
+    let build = root.path().join("build");
+    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/task-stream");
+    for streaming in [false, true] {
+        let mut document = json!({
+            "version":"2026-10-19",
+            "dependencies":{"fixture":{"package":"fixture-task-stream", "path":plugin}},
+            "nodes":[{"id":"count", "kind":"fixture.task_stream"}],
+            "outputs":[{"name":"result", "node":"count", "port":"total"}]
+        });
+        if streaming {
+            document["execution"] = json!({"mode":"stream"});
+        }
+        fs::write(&definition, document.to_string()).unwrap();
+        compile(&definition, &binary, &build, true);
+        assert_eq!(
+            result(run(&binary, &["--count.count=100"])),
+            json!({"result":100})
+        );
+        assert_eq!(
+            result(run(&binary, &["--node=count", "--count.count=200"])),
+            json!({"total":200})
+        );
+    }
+}

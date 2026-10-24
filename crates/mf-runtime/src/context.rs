@@ -647,15 +647,7 @@ impl ExecutionContext {
         });
         let result = result.and_then(|result| {
             let snapshot = self.snapshots.as_ref().map(|_| result.clone());
-            let published =
-                self.publish(node, Some(result))
-                    .context(crate::task_stream::TerminalSnafu {
-                        node: node.definition_id.as_str(),
-                    });
-            if let Err(error) = published {
-                sink.fail(error.clone());
-                return Err(error.into());
-            }
+            self.publish(node, Some(result))?;
             if let Some(inputs) = &snapshot_inputs {
                 self.capture_node(
                     node,
@@ -842,7 +834,8 @@ impl ExecutionContext {
             WorkflowRunError::InputType { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Dependency)
             }
-            WorkflowRunError::OutputType { definition_id, .. } => {
+            WorkflowRunError::OutputType { definition_id, .. }
+            | WorkflowRunError::InvalidOutput { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Publication)
             }
             WorkflowRunError::OutputSelection { .. } => (None, FailurePhase::OutputSelection),

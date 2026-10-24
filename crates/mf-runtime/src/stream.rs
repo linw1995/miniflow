@@ -209,8 +209,8 @@ impl<N: TypedStreamNode> StreamNode for TypedStreamAdapter<N> {
     ) -> Result<(), NodeExecutionError> {
         let input = <N::Input as crate::NodeInputs>::from_inputs(inputs)
             .context(crate::node::InputDecodeSnafu)?;
-        let mut typed = crate::TypedEmitter::<N::Output>::new(emitter);
-        self.0
-            .execute(input, context, &mut |result| typed.send(result))
+        self.0.execute(input, context, &mut |result| {
+            emitter.send(crate::encode_typed_result(result)?)
+        })
     }
 }

@@ -658,10 +658,6 @@ pub enum NodeBuildError {
     ConflictingOutputDeclarations,
     #[snafu(display("stream output ports must be reflected from the node contract"))]
     ConflictingStreamDeclarations,
-    #[snafu(display("terminal and stream outputs share port `{port}`"))]
-    OutputCategoryCollision { port: String },
-    #[snafu(display("stream output port `{port}` is declared more than once"))]
-    DuplicateStreamOutput { port: String },
     #[snafu(display("invalid prepared subgraph: {message}"), visibility(pub))]
     InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"), context(false))]
@@ -1150,11 +1146,11 @@ impl PreparedNode {
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
-        Self::combined(
+        Ok(Self::combined(
             Box::new(crate::task_stream::TypedTaskStreamAdapter(task)),
             <N::Emission as crate::NodeOutputs>::ports(),
             metadata,
-        )
+        ))
     }
 
     pub fn task_stream<N: crate::TaskStreamNode + NodePortContract + 'static>(
@@ -1163,38 +1159,19 @@ impl PreparedNode {
     ) -> Result<Self, NodeBuildError> {
         let metadata = reflected_node_metadata(task.ports(), metadata.into())?;
         let outputs = task.stream_outputs();
-        Self::combined(Box::new(task), outputs, metadata)
+        Ok(Self::combined(Box::new(task), outputs, metadata))
     }
 
     fn combined(
         task: Box<dyn crate::TaskStreamNode>,
         outputs: Vec<PortSpec>,
         mut metadata: NodeMetadata,
-    ) -> Result<Self, NodeBuildError> {
-        let mut names = std::collections::BTreeSet::new();
-        for port in &outputs {
-            ensure!(
-                names.insert(&port.name),
-                DuplicateStreamOutputSnafu {
-                    port: port.name.to_string()
-                }
-            );
-            ensure!(
-                !metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .any(|terminal| terminal.name == port.name),
-                OutputCategoryCollisionSnafu {
-                    port: port.name.to_string()
-                }
-            );
-        }
+    ) -> Self {
         metadata.stream_outputs = outputs.clone();
-        Ok(Self::from_parts(
+        Self::from_parts(
             NodeExecution::TaskStream(Box::new(crate::TaskStreamExecutor::new(task, outputs))),
             metadata,
-        ))
+        )
     }
 
     /// Reflects both value contracts and adapts typed event execution without dispatching an event.

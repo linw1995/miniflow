@@ -36,6 +36,57 @@ Combined nodes SHALL declare separate terminal and stream result contracts with 
 - **WHEN** a node declares terminal text and stream delta fields
 - **THEN** an emission requires only its stream contract and the final result requires only its terminal contract
 
+### Requirement: Validate port declarations in the compiler
+
+The compiler SHALL reject empty or duplicate port names and names shared across terminal and incremental
+outputs through its node metadata validation before execution. Node preparation SHALL reflect those
+declarations without executing the node. Invalid declarations MUST NOT reach business execution.
+
+#### Scenario: Reject an ambiguous output category
+
+- **WHEN** terminal and incremental contracts use the same port name
+- **THEN** compilation fails with the conflicting node and port identities before any executor runs
+
+#### Scenario: Reject duplicate or empty incremental names
+
+- **WHEN** a provider reflects duplicate or empty incremental port names
+- **THEN** compilation rejects the declarations through the same metadata validation as ordinary ports
+
+### Requirement: Validate every attempted emission
+
+The emitter SHALL encode typed results and validate each emitted result against its incremental contract.
+Required fields SHALL constrain each emitted record rather than require an invocation to emit. Encoding,
+validation, and delivery failures SHALL be returned through ordinary `Result` values with their typed
+source chains. Providers MAY propagate or handle recoverable errors. Cancellation SHALL be checked
+before and after business execution and on attempted publication.
+
+#### Scenario: Propagate a send failure
+
+- **WHEN** a provider propagates an encoding or delivery error with `?`
+- **THEN** combined execution fails with the original typed source and publishes no terminal result
+
+#### Scenario: Handle a recoverable send failure
+
+- **WHEN** a provider handles a failed emission before returning a valid terminal result
+- **THEN** the emitter does not poison that result or prevent subsequent valid emissions
+- **AND** cancellation and an already failed stream instance still stop execution
+
+#### Scenario: Emit an invalid discarded record
+
+- **WHEN** an unconnected provider attempts to emit a value with missing or incompatible fields
+- **THEN** emission validation fails despite the absence of a consumer
+
+### Requirement: Reuse shared output error contracts
+
+Combined execution SHALL reuse ordinary typed-output conversion errors, workflow output validation
+errors, and stream delivery errors. The emitter MUST NOT introduce emission-specific error categories,
+shared-error carriers, or remembered-error state.
+
+#### Scenario: Preserve one output failure across node kinds
+
+- **WHEN** ordinary Task publication and an emission violate the same output contract
+- **THEN** both report the shared workflow output error and preserve that error through failure propagation
+
 ### Requirement: Discard streams without consumers
 
 An unconnected stream SHALL be valid without an explicit discard node and SHALL reserve no pending-delivery capacity. Nodes SHALL be able to detect consumer absence and omit emission entirely. Every attempted emission SHALL retain encoding, output validation, cancellation, and publication-error semantics before discard.
@@ -64,10 +115,10 @@ Connected streams SHALL deliver accepted values in order through bounded capacit
 - **WHEN** a connected receiver closes before its invocation is finalized
 - **THEN** the invocation receives a delivery failure and cannot claim successful live delivery
 
-#### Scenario: Ignore a publication error
+#### Scenario: Handle a live delivery failure
 
-- **WHEN** business code ignores a failed emission and returns a successful terminal result
-- **THEN** the runtime still reports the publication failure and suppresses successful terminal publication
+- **WHEN** business code handles a failed publication to a subscribed live receiver
+- **THEN** live delivery cancellation still prevents successful invocation completion
 
 ### Requirement: Identify and close each stream invocation
 

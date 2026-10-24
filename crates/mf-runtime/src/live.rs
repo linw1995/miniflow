@@ -1,6 +1,6 @@
 use crate::{
-    DefinitionId, EmissionError, EmissionSink, NodeResult, StreamCancellation, StreamError,
-    StreamInvocation, StreamOutputContract, ValueRef,
+    DefinitionId, EmissionSink, NodeResult, StreamCancellation, StreamError, StreamInvocation,
+    StreamOutputContract, ValueRef,
 };
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -183,15 +183,17 @@ impl ExportSink<'_> {
         event: LiveOutputKind,
         cancellation: &StreamCancellation,
     ) -> Result<(), StreamError> {
-        self.publisher.publish(
-            LiveOutputEvent {
-                export: export.name.clone(),
-                source: export.path.clone(),
-                invocation: self.invocation.clone(),
-                event,
-            },
-            cancellation,
-        )
+        self.publisher
+            .publish(
+                LiveOutputEvent {
+                    export: export.name.clone(),
+                    source: export.path.clone(),
+                    invocation: self.invocation.clone(),
+                    event,
+                },
+                cancellation,
+            )
+            .inspect_err(|error| self.cancellation.cancel(error.clone()))
     }
 
     pub fn open(&self) -> Result<(), StreamError> {
@@ -238,16 +240,6 @@ impl EmissionSink for ExportSink<'_> {
         }
         Ok(())
     }
-
-    fn fail(&mut self, error: EmissionError) {
-        use snafu::IntoError;
-        self.cancellation.cancel(
-            crate::stream_instance::ProducerSnafu {
-                definition_id: self.invocation.node.as_str(),
-            }
-            .into_error(error.into()),
-        );
-    }
 }
 
 pub(super) struct FanoutSink<'a> {
@@ -278,10 +270,5 @@ impl EmissionSink for FanoutSink<'_> {
         self.first
             .send_with_cancellation(result.clone(), cancellation)?;
         self.second.send_with_cancellation(result, cancellation)
-    }
-
-    fn fail(&mut self, error: EmissionError) {
-        self.first.fail(error.clone());
-        self.second.fail(error);
     }
 }

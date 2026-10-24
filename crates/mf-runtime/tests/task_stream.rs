@@ -179,9 +179,9 @@ fn terminal_task_adaptation_discards_without_an_unread_receiver() {
 }
 
 #[test]
-fn ignored_encoding_failure_remains_failure_when_output_is_discarded() {
+fn propagated_encoding_failure_keeps_its_source_when_discarded() {
     let prepared =
-        PreparedNode::typed_task_stream(combined(true, true, true), NodeMetadata::default())
+        PreparedNode::typed_task_stream(combined(true, true, false), NodeMetadata::default())
             .unwrap();
     let error = prepared
         .execution
@@ -190,13 +190,17 @@ fn ignored_encoding_failure_remains_failure_when_output_is_discarded() {
         .execute(inputs(2), &mut ExecutionContext::default())
         .unwrap_err();
     assert!(has_source::<Box<mf_runtime::OutputEncodeError>>(&error));
-    assert!(error.to_string().contains("stream output"));
+    assert!(
+        error
+            .to_string()
+            .contains("could not encode typed node outputs")
+    );
 }
 
 #[test]
-fn ignored_delivery_failure_suppresses_terminal_success() {
+fn propagated_delivery_failure_suppresses_terminal_success() {
     let prepared =
-        PreparedNode::typed_task_stream(combined(true, false, true), NodeMetadata::default())
+        PreparedNode::typed_task_stream(combined(true, false, false), NodeMetadata::default())
             .unwrap();
     let NodeExecution::TaskStream(executor) = prepared.execution else {
         panic!("expected combined executor")
@@ -214,6 +218,107 @@ fn ignored_delivery_failure_suppresses_terminal_success() {
 }
 
 #[test]
+fn handled_send_errors_do_not_poison_terminal_execution() {
+    for invalid in [false, true] {
+        let node = combined(true, invalid, true);
+        let returned = node.returned.clone();
+        let mut sink = Collect {
+            returned: returned.clone(),
+            fail: !invalid,
+            ..Default::default()
+        };
+        let prepared = PreparedNode::typed_task_stream(node, NodeMetadata::default()).unwrap();
+        let NodeExecution::TaskStream(executor) = prepared.execution else {
+            panic!("expected a combined executor");
+        };
+        let result = executor
+            .execute_with_sink(inputs(2), &mut ExecutionContext::default(), &mut sink)
+            .unwrap();
+        assert_eq!(result.outputs["text"].as_str(), Some("processed 2"));
+        assert!(returned.load(Ordering::SeqCst));
+        assert!(sink.values.is_empty());
+    }
+}
+
+#[test]
+fn handled_send_errors_cannot_hide_cancellation() {
+    struct CancelOnSend(StreamCancellation);
+    impl EmissionSink for CancelOnSend {
+        fn send(&mut self, _: NodeResult) -> Result<(), StreamError> {
+            self.0.cancel(StreamError::Execution {
+                message: "cancelled by sink".into(),
+            });
+            Err(self.0.failure().unwrap())
+        }
+    }
+    let mut context = ExecutionContext::default();
+    let mut sink = CancelOnSend(context.cancellation());
+    let node = combined(true, false, true);
+    let returned = node.returned.clone();
+    let prepared = PreparedNode::typed_task_stream(node, NodeMetadata::default()).unwrap();
+    let NodeExecution::TaskStream(executor) = prepared.execution else {
+        panic!("expected a combined executor");
+    };
+    let error = executor
+        .execute_with_sink(inputs(2), &mut context, &mut sink)
+        .unwrap_err();
+    assert!(returned.load(Ordering::SeqCst));
+    assert!(has_source::<StreamError>(&error));
+    assert!(error.to_string().contains("cancelled by sink"));
+}
+
+#[test]
+fn live_exports_preserve_recovery_and_fatal_delivery_boundaries() {
+    for invalid in [false, true] {
+        let mut context = ExecutionContext::default();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        context.set_live_publisher(mf_runtime::LivePublisher::new(move |event, _| {
+            if matches!(event.event, mf_runtime::LiveOutputKind::Value { .. }) {
+                return Err(StreamError::Execution {
+                    message: "live receiver disconnected".into(),
+                });
+            }
+            captured.lock().unwrap().push(event);
+            Ok(())
+        }));
+        let node = combined(true, invalid, true);
+        let returned = node.returned.clone();
+        let prepared = PreparedNode::typed_task_stream(node, NodeMetadata::default()).unwrap();
+        let NodeExecution::TaskStream(mut executor) = prepared.execution else {
+            panic!("expected a combined executor");
+        };
+        executor.set_exports(vec![mf_runtime::StreamOutputContract {
+            name: "answer".into(),
+            path: vec!["model".into()],
+            port: "delta".into(),
+            value_type: mf_runtime::ValueType::Float64,
+            required: true,
+        }]);
+        let result = executor.execute_with_sink(inputs(2), &mut context, &mut DiscardSink);
+        assert!(returned.load(Ordering::SeqCst));
+        let events = events.lock().unwrap();
+        if invalid {
+            assert_eq!(
+                result.unwrap().outputs["text"].as_str(),
+                Some("processed 2")
+            );
+            assert!(context.cancellation().failure().is_none());
+            assert!(matches!(
+                events.last().unwrap().event,
+                mf_runtime::LiveOutputKind::Close { completed: true }
+            ));
+        } else {
+            let error = result.unwrap_err();
+            assert!(has_source::<StreamError>(&error));
+            assert!(error.to_string().contains("live receiver disconnected"));
+            assert!(context.cancellation().failure().is_some());
+            assert_eq!(events.len(), 1);
+        }
+    }
+}
+
+#[test]
 fn discarded_dynamic_emissions_still_validate_types_and_required_fields() {
     let mut sink = DiscardSink;
     let mut emitter = Emitter::new(
@@ -224,8 +329,7 @@ fn discarded_dynamic_emissions_still_validate_types_and_required_fields() {
     );
     assert!(!emitter.is_connected());
     let error = emitter.send(NodeResult::default()).unwrap_err();
-    assert!(error.to_string().contains("required port `delta`"));
-    assert!(emitter.finish().is_err());
+    assert!(error.to_string().contains("required output `delta`"));
 
     let mut emitter = Emitter::new(
         "source",
@@ -241,6 +345,83 @@ fn discarded_dynamic_emissions_still_validate_types_and_required_fields() {
         .unwrap_err();
     assert!(has_source::<mf_runtime::TypeMismatch>(&error));
     assert!(error.to_string().contains("source"));
+}
+
+#[test]
+fn output_failures_use_shared_errors_and_stream_attribution() {
+    for result in [
+        NodeResult::default(),
+        NodeResult {
+            outputs: [("delta".into(), "wrong type".into())].into(),
+            ..Default::default()
+        },
+        NodeResult {
+            outputs: [("undeclared".into(), 1.into())].into(),
+            ..Default::default()
+        },
+    ] {
+        let mut sink = DiscardSink;
+        let mut emitter = Emitter::new("source", &Delta::ports(), Default::default(), &mut sink);
+        let error = emitter.send(result.clone()).unwrap_err();
+        assert!(has_source::<mf_runtime::WorkflowRunError>(&error));
+        let workflow_error = emitter.send(result).unwrap_err();
+        emitter
+            .send(NodeResult {
+                outputs: [("delta".into(), serde_json::json!(1.0).into())].into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let source = Arc::new(error);
+        let failures = [
+            StreamError::Producer {
+                definition_id: "source".into(),
+                source: source.clone(),
+            },
+            StreamError::Event {
+                definition_id: "source".into(),
+                source: source.clone(),
+            },
+            StreamError::Workflow {
+                message: mf_runtime::MessageId {
+                    domain: 0,
+                    sequence: 0,
+                },
+                source: Arc::new(mf_runtime::WorkflowRunError::NodeExecution {
+                    definition_id: "source".into(),
+                    source: workflow_error,
+                }),
+            },
+        ];
+        for failure in failures {
+            assert_eq!(failure.phase(), "output");
+        }
+    }
+}
+
+#[test]
+fn typed_emissions_preserve_standard_output_encoding_errors() {
+    let expected =
+        mf_runtime::encode_typed_result(TypedNodeResult::from(Delta { delta: f64::NAN }))
+            .unwrap_err();
+    let prepared =
+        PreparedNode::typed_task_stream(combined(true, true, false), NodeMetadata::default())
+            .unwrap();
+    let actual = prepared
+        .execution
+        .into_task_node()
+        .unwrap()
+        .execute(inputs(1), &mut ExecutionContext::default())
+        .unwrap_err();
+    assert_eq!(actual.to_string(), expected.to_string());
+    assert!(has_source::<Box<mf_runtime::OutputEncodeError>>(&actual));
+    assert_eq!(
+        StreamError::Producer {
+            definition_id: "source".into(),
+            source: Arc::new(actual)
+        }
+        .phase(),
+        "output"
+    );
 }
 
 #[test]
@@ -316,31 +497,7 @@ impl mf_runtime::TaskStreamNode for Dynamic {
 }
 
 #[test]
-fn dynamic_contracts_reject_colliding_and_duplicate_stream_names() {
-    let collision = PreparedNode::task_stream(
-        Dynamic {
-            ports: Output::ports(),
-        },
-        NodeMetadata::default(),
-    )
-    .err()
-    .unwrap();
-    assert!(matches!(
-        collision,
-        NodeBuildError::OutputCategoryCollision { .. }
-    ));
-    let duplicate = PreparedNode::task_stream(
-        Dynamic {
-            ports: [Delta::ports(), Delta::ports()].concat(),
-        },
-        NodeMetadata::default(),
-    )
-    .err()
-    .unwrap();
-    assert!(matches!(
-        duplicate,
-        NodeBuildError::DuplicateStreamOutput { .. }
-    ));
+fn dynamic_preparation_reflects_output_categories_and_success_capabilities() {
     let prepared = PreparedNode::task_stream(
         Dynamic {
             ports: Delta::ports(),
@@ -477,7 +634,6 @@ fn publication_deadlines_interrupt_bounded_delivery_without_a_timer_thread() {
     emitter.send_with_deadline(result(), deadline).unwrap();
     let error = emitter.send_with_deadline(result(), deadline).unwrap_err();
     assert!(error.to_string().contains("publication deadline exceeded"));
-    assert!(emitter.finish().is_err());
     assert!(cancellation.failure().is_none());
     let (publisher, receiver) = mf_runtime::live_channel(Default::default()).unwrap();
     let mut sink = QueueSink(publisher);
@@ -489,7 +645,8 @@ fn publication_deadlines_interrupt_bounded_delivery_without_a_timer_thread() {
         deadline.saturating_duration_since(std::time::Instant::now())
             + std::time::Duration::from_millis(2),
     );
-    emitter.finish().unwrap();
+    emitter.send(result()).unwrap();
+    receiver.recv().unwrap().unwrap();
     drop(emitter);
     drop(sink);
     assert!(receiver.recv().unwrap().is_none());
