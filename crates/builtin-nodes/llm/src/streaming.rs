@@ -16,7 +16,6 @@ pub async fn complete(
     call_id: &str,
     deadline: Instant,
     context: &mf_runtime::ExecutionContext,
-    timer: &mut crate::timing::CallTimer,
 ) -> Result<CompletionResponse, LlmExecutionError> {
     let mut response = response.with_context(|source| crate::ProviderSnafu {
         kind: source.kind().code(),
@@ -24,6 +23,7 @@ pub async fn complete(
             .provider_response_status()
             .map(|status| status.as_u16()),
     })?;
+    let mut first_text = true;
     while let Some(item) = response.next().await {
         context.check_future_limits(Some(deadline))?;
         let item = item.with_context(|source| crate::ProviderSnafu {
@@ -32,23 +32,27 @@ pub async fn complete(
                 .provider_response_status()
                 .map(|status| status.as_u16()),
         })?;
-        if let Item::Event(StreamEvent::Text { text, .. }) = item {
-            if !text.is_empty() {
-                timer.observe_text();
+        if let Item::Event(StreamEvent::Text { text, .. }) = item
+            && !text.is_empty()
+        {
+            if first_text {
+                context.record_event(
+                    crate::FIRST_TEXT_EVENT,
+                    serde_json::json!({"call_id": call_id}),
+                );
+                first_text = false;
             }
-            if !text.is_empty() {
-                emitter
-                    .send_with_deadline(
-                        TypedNodeResult::from(LlmEmission {
-                            delta: TextDelta {
-                                text,
-                                model_call_id: call_id.into(),
-                            },
-                        }),
-                        deadline,
-                    )
-                    .context(crate::PublicationSnafu)?;
-            }
+            emitter
+                .send_with_deadline(
+                    TypedNodeResult::from(LlmEmission {
+                        delta: TextDelta {
+                            text,
+                            model_call_id: call_id.into(),
+                        },
+                    }),
+                    deadline,
+                )
+                .context(crate::PublicationSnafu)?;
         }
     }
     response

@@ -305,6 +305,7 @@ pub struct LocalOutcome {
     pub capture_failure: Option<Arc<CaptureFailure>>,
     pub live_final: bool,
     pub live_delivery_failure: Option<Arc<mf_runtime::StreamError>>,
+    pub call_events: mf_chat::CallEventCollector,
 }
 
 #[derive(Debug, Snafu)]
@@ -549,6 +550,7 @@ impl LocalRun {
                 })?;
             stdout
         };
+        self.receiver.finish();
         let outcome = LocalOutcome {
             status,
             interrupted: self.interrupted_at.is_some(),
@@ -558,9 +560,9 @@ impl LocalRun {
             capture_failure: capture.failure.clone(),
             live_final,
             live_delivery_failure: capture.live_delivery_failure.clone(),
+            call_events: self.receiver.reader().call_events(),
         };
         self.child.running = false;
-        self.receiver.finish();
         *self
             .completion
             .lock()

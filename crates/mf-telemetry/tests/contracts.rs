@@ -691,3 +691,56 @@ fn selected_inputs_round_trip_and_require_declared_exclusive_sources() {
     wire.body["selected_inputs"][0]["source_output"] = json!("");
     assert!(wire.decode().is_err());
 }
+
+#[cfg(feature = "otlp")]
+#[test]
+fn observations_share_the_original_timestamp_between_local_and_otel_consumers() {
+    use mf_telemetry::events::{EventRecord, EventRecorder};
+    use opentelemetry::logs::{AnyValue, Logger, LoggerProvider};
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
+    use std::sync::{Arc, Mutex};
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let received = recorded.clone();
+    let recorder = EventRecorder::new(move |event| received.lock().unwrap().push(event.clone()));
+    let event = EventRecord {
+        name: "llm.request.started".into(),
+        time_unix_nano: 10_500_000_000,
+        body: json!({"call_id":"request","model":"fixture"}),
+        trace_context: Some(TraceContext {
+            trace_id: "1234567890abcdef1234567890abcdef".into(),
+            span_id: "1234567890abcdef".into(),
+            trace_flags: 1,
+        }),
+    };
+    recorder.record(&event);
+    let provider = SdkLoggerProvider::builder().build();
+    let logger = provider.logger(mf_telemetry::events::SCOPE);
+    let mut log = logger.create_log_record();
+    event
+        .write_to(
+            "llm.request.started",
+            &graph().workflow_id,
+            RunId::new(),
+            &mut log,
+        )
+        .unwrap();
+    assert_eq!(log.event_name(), Some("llm.request.started"));
+    assert_eq!(
+        log.timestamp()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        u128::from(recorded.lock().unwrap()[0].time_unix_nano)
+    );
+    assert!(matches!(log.body(), Some(AnyValue::Map(_))));
+    assert_eq!(
+        log.trace_context().unwrap().span_id.to_string(),
+        "1234567890abcdef"
+    );
+    assert!(
+        event
+            .write_to("other.event", &graph().workflow_id, RunId::new(), &mut log)
+            .is_err()
+    );
+}

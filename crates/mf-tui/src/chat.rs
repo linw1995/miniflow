@@ -629,6 +629,10 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         } else {
             mf_chat::ConversationResult::from_json(&outcome.stdout).boxed()
         };
+        let result = result.map(|mut response| {
+            outcome.call_events.apply(&mut response.usages);
+            response
+        });
         *self
             .captured
             .lock()
@@ -746,20 +750,27 @@ fn reconcile_turn(
     outcome: &LocalOutcome,
 ) -> Result<ReconciledCompletion, mf_chat::ChatError> {
     let reason = exit_reason(outcome);
-    database.reconcile_completion(ConversationExit {
+    let stdout = outcome
+        .capture_error
+        .is_none()
+        .then_some(outcome.stdout.as_slice())
+        .or_else(|| outcome.live_final.then_some(outcome.stdout.as_slice()));
+    let result = stdout.map(|bytes| {
+        mf_chat::ConversationResult::from_json(bytes).map(|mut response| {
+            outcome.call_events.apply(&mut response.usages);
+            response
+        })
+    });
+    database.reconcile_result(
         invocation,
-        stdout: outcome
-            .capture_error
-            .is_none()
-            .then_some(outcome.stdout.as_slice())
-            .or_else(|| outcome.live_final.then_some(outcome.stdout.as_slice())),
-        outcome: reason,
-        summary: if outcome.stderr.is_empty() {
+        result,
+        reason,
+        if outcome.stderr.is_empty() {
             "runner exited without completion"
         } else {
             &outcome.stderr
         },
-    })
+    )
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ mod host;
 mod models;
 #[macro_use]
 pub mod nodes;
+mod call_events;
 pub mod contract;
 mod schema;
 mod session;
@@ -13,6 +14,7 @@ mod storage;
 mod title;
 mod turn;
 mod usage;
+pub use call_events::{CallEventCollector, CallEventError};
 pub mod workflow;
 
 pub use contract::{

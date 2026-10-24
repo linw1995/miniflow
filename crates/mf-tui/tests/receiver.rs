@@ -175,7 +175,7 @@ fn send(endpoint: &str, path: &str, content_type: &str, body: &[u8]) -> u16 {
 }
 
 #[test]
-fn graph_metrics_follow_correlated_snapshots_without_reusing_other_calls() {
+fn graph_metrics_use_source_events_before_snapshots_and_keep_call_identity() {
     use mf_telemetry::description::NodeDescription;
     use mf_tui::graph::{GraphLayout, GraphView};
     use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
@@ -222,7 +222,55 @@ fn graph_metrics_follow_correlated_snapshots_without_reusing_other_calls() {
             .join("\n")
     };
     assert!(render().contains("FTT —"));
-    let usage = serde_json::json!({"call_id":"answer", "model":"fixture", "timing":{"elapsed_us":2000000,"first_token_us":500000}, "usage":{"output_tokens":100}});
+    let usage =
+        serde_json::json!({"call_id":"answer", "model":"fixture", "usage":{"output_tokens":100}});
+    let mut call_events = vec![];
+    for (name, timestamp, with_usage) in [
+        ("llm.request.finished", 12_000_000_000, true),
+        ("llm.response.first_text", 10_500_000_000, false),
+        ("llm.request.started", 10_000_000_000, true),
+    ] {
+        let mut fields = vec![attribute("call_id", string("answer"))];
+        if with_usage {
+            fields.push(attribute("model", string("fixture")));
+            fields.push(attribute("usage", body(&[("output_tokens", 100)])));
+        }
+        call_events.push(LogRecord {
+            event_name: name.into(),
+            time_unix_nano: timestamp,
+            observed_time_unix_nano: 90_000_000_000,
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            attributes: vec![
+                attribute("mf.workflow.id", string(graph.workflow_id.as_str())),
+                attribute("mf.run.id", string(run_id().to_string())),
+            ],
+            body: Some(AnyValue {
+                value: Some(any_value::Value::KvlistValue(KeyValueList {
+                    values: fields,
+                })),
+            }),
+            ..Default::default()
+        });
+    }
+    let mut request = ExportLogsServiceRequest::decode(logs(call_events).as_slice()).unwrap();
+    request.resource_logs[0].scope_logs[0]
+        .scope
+        .as_mut()
+        .unwrap()
+        .name = mf_telemetry::events::SCOPE.into();
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec()
+        ),
+        200
+    );
+    let text = render();
+    assert!(text.contains("FTT 500ms"), "{text}");
+    assert!(text.contains("Gen 66.7 | E2E 50.0 tok/s"), "{text}");
     let bodies = [
         (
             vec![2; 8],

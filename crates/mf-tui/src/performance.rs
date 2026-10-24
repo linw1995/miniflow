@@ -8,17 +8,18 @@ pub fn node_calls(reader: &ObservationReader, node: &NodeObservation) -> Vec<Cal
         return vec![];
     };
     let data = reader.span_data(trace, span);
-    let Some(value) = data
+    let mut usages: Vec<CallUsage> = data
         .node
         .as_ref()
         .and_then(|node| node.outputs.get("usages"))
-    else {
-        return vec![];
-    };
-    serde_json::to_value(value)
-        .ok()
+        .and_then(|value| serde_json::to_value(value).ok())
         .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if usages.is_empty() {
+        usages = reader.calls_for_span(trace, span);
+    }
+    reader.apply_call_timings(&mut usages);
+    usages
 }
 
 pub fn conversation_calls(calls: &[CallUsage]) -> Vec<CallUsage> {

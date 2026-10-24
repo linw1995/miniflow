@@ -183,10 +183,16 @@ Filters accept session, profile, actual model name, purpose, and call start time
 Each token counter exposes `known_subtotal`, `reported_calls`, and `missing_calls`. A missing observation is not zero; an explicit zero is a reported observation. No observations yield an unknown subtotal. Treat a subtotal with missing observations as partial coverage. Attempt and status counts include begun failed, cancelled, and interrupted calls, but exclude never-started title requests.
 
 Each `CallUsage` can also retain `timing.elapsed_us` and optional `timing.first_token_us`.
-The LLM node starts a monotonic clock immediately before its Rig request and stops at provider
-completion, before terminal conversion or storage. FTT observes the first nonempty decoded text
-increment before publishing it; empty and metadata-only events do not count. Unary calls and older
-records leave FTT unknown. Captured failures retain observed timing.
+The LLM node emits `llm.request.started`, `llm.response.first_text`, and `llm.request.finished` observations.
+The observation layer stamps source Unix nanoseconds once. LLM execution has no elapsed-time recorder.
+The first-text event precedes publication and backpressure; empty and metadata-only values do not emit it.
+`mf-chat` correlates events by `call_id` and derives microsecond differences before persistence. Its local collector
+works without external tracing exporters and follows execution contexts into concurrent and nested domains.
+Executable chat collects the same `mf.observation` events through OTLP and applies their source timestamps before
+settlement or save-only recovery. TUI graph cards use the same aggregation and can display event-derived call facts
+before business snapshots arrive. Unary calls have no first-text event. Missing, conflicting, or noncausal event
+sequences remain unknown; receiver arrival times are never substituted. Older stored timing remains readable.
+Raw standalone node outputs retain call facts without computing timing; the hosting application owns enrichment.
 
 `CallUsage::token_rates()` derives two optional rates from the saved output-token count and timing:
 

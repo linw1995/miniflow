@@ -228,12 +228,24 @@ impl TypedTaskNode for InvokeWorkflow {
         if let Some(context) = &mut input.request.context {
             context.title.enabled = self.automatic_titles;
         }
-        let response = self.backend.invoke(
-            &input.invocation,
-            input.request,
-            context,
-            self.observer.as_ref(),
-        )?;
+        let calls = Arc::new(Mutex::new(crate::CallEventCollector::default()));
+        let collected = calls.clone();
+        let previous = context.event_recorder().cloned();
+        let recorder = mf_runtime::EventRecorder::new(move |event| {
+            if let Some(previous) = &previous {
+                previous.record(event);
+            }
+            let _ = collected.lock().unwrap().observe(event);
+        });
+        let mut response = context.with_event_recorder(recorder, |context| {
+            self.backend.invoke(
+                &input.invocation,
+                input.request,
+                context,
+                self.observer.as_ref(),
+            )
+        })?;
+        calls.lock().unwrap().apply(&mut response.usages);
         response.validate()?;
         // Retain only the backend's final protocol result for save-only recovery.
         *self

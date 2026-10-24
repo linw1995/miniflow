@@ -1,8 +1,5 @@
-use crate::{LlmExecutionError, TimingRangeSnafu};
 use mf_runtime::NodeValue;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
-use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct CallTiming {
@@ -43,41 +40,6 @@ impl CallTiming {
             end_to_end_tokens_per_second: rate(Some(self.elapsed_us)),
             generation_tokens_per_second: rate(self.generation_us()),
         }
-    }
-}
-
-pub struct CallTimer {
-    started: Instant,
-    first_token: Option<Duration>,
-}
-
-impl CallTimer {
-    pub fn new() -> Self {
-        Self {
-            started: Instant::now(),
-            first_token: None,
-        }
-    }
-
-    pub fn observe_text(&mut self) {
-        self.first_token
-            .get_or_insert_with(|| self.started.elapsed());
-    }
-
-    pub fn finish(&self) -> Result<CallTiming, LlmExecutionError> {
-        Self::durations(self.started.elapsed(), self.first_token)
-    }
-
-    fn durations(
-        elapsed: Duration,
-        first: Option<Duration>,
-    ) -> Result<CallTiming, LlmExecutionError> {
-        let micros =
-            |duration: Duration| i64::try_from(duration.as_micros()).context(TimingRangeSnafu);
-        Ok(CallTiming {
-            elapsed_us: micros(elapsed)?,
-            first_token_us: first.map(micros).transpose()?,
-        })
     }
 }
 
@@ -181,7 +143,5 @@ mod tests {
             single.token_rates(Some(1)).generation_tokens_per_second,
             None
         );
-        assert!(CallTimer::durations(Duration::MAX, None).is_err());
-        assert!(CallTimer::durations(Duration::ZERO, Some(Duration::MAX)).is_err());
     }
 }

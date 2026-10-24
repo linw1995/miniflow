@@ -1,3 +1,4 @@
+use std::sync::Arc;
 mod support;
 
 use mf_runtime::{ExecutionContext, Inputs, NodeRegistry, StreamCancellation, StreamError};
@@ -169,6 +170,11 @@ fn execution_probe() {
             {
                 input["history"] = history.clone();
             }
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = events.clone();
+            context.set_event_recorder(mf_runtime::EventRecorder::new(move |event| {
+                recorded.lock().unwrap().push(event.clone())
+            }));
             let mut sink = DeltaSink {
                 values: vec![],
                 block: parameters["block_delivery"] == true,
@@ -187,11 +193,12 @@ fn execution_probe() {
                 Ok(result) => {
                     let output = serde_json::to_value(result.outputs).unwrap();
                     history = Some(output["history"].clone());
-                    results.push(json!({"ok": true, "outputs": output, "deltas": sink.values}));
+                    results.push(json!({"ok": true, "outputs": output, "deltas": sink.values, "events": events.lock().unwrap().clone()}));
                 }
                 Err(error) => {
                     let mut result = failure(error);
                     result["deltas"] = json!(sink.values);
+                    result["events"] = json!(events.lock().unwrap().clone());
                     results.push(result);
                 }
             }
@@ -667,7 +674,7 @@ fn streaming_reply(parts: &[&str], usage: Value, finish: Option<&str>, done: boo
 }
 
 #[test]
-fn request_timing_observes_first_nonempty_stream_text_and_unary_unknowns() {
+fn request_events_observe_first_nonempty_stream_text_and_unary_unknowns() {
     let mut streamed = streaming_reply(
         &["", "", "first", " second"],
         json!({"completion_tokens":12}),
@@ -695,26 +702,31 @@ fn request_timing_observes_first_nonempty_stream_text_and_unary_unknowns() {
         assert_eq!(result["results"][0]["ok"], true, "{result}");
         let usage: mfn_llm::CallUsage =
             serde_json::from_value(result["results"][0]["outputs"]["usages"][0].clone()).unwrap();
-        let timing = usage.timing.as_ref().unwrap();
-        assert!(timing.is_valid());
-        assert!(timing.elapsed_us >= 40_000);
+        assert!(usage.timing.is_none());
+        let events = result["results"][0]["events"].as_array().unwrap();
+        let start = events.first().unwrap();
+        let end = events.last().unwrap();
+        assert_eq!(start["name"], mfn_llm::REQUEST_STARTED_EVENT);
+        assert_eq!(end["name"], mfn_llm::REQUEST_FINISHED_EVENT);
+        for event in events {
+            assert_eq!(event["body"]["call_id"], usage.call_id);
+        }
+        let start = start["time_unix_nano"].as_u64().unwrap();
+        let end = end["time_unix_nano"].as_u64().unwrap();
+        assert!(end - start >= 40_000_000);
         if stream {
-            assert!(timing.first_token_us.unwrap() >= 90_000, "{timing:?}");
-            let rates = usage.token_rates();
-            assert!(
-                rates.generation_tokens_per_second.unwrap()
-                    > rates.end_to_end_tokens_per_second.unwrap()
-            );
+            assert_eq!(events.len(), 3);
+            assert_eq!(events[1]["name"], mfn_llm::FIRST_TEXT_EVENT);
+            assert!(events[1]["time_unix_nano"].as_u64().unwrap() - start >= 90_000_000);
         } else {
-            assert_eq!(timing.first_token_us, None);
-            assert_eq!(usage.token_rates().generation_tokens_per_second, None);
+            assert_eq!(events.len(), 2);
         }
         assert_eq!(server.requests().len(), 1);
     }
 }
 
 #[test]
-fn captured_stream_failures_retain_timing_without_claiming_throughput() {
+fn captured_stream_failures_retain_events_without_node_local_timing() {
     for suffix in ["data: invalid-json\n\n", "data: {"] {
         let mut reply = streaming_reply(&["prefix"], json!({"completion_tokens":2}), None, false);
         let config = json!({"capture_errors":true});
@@ -729,7 +741,12 @@ fn captured_stream_failures_retain_timing_without_claiming_throughput() {
         assert_eq!(output["status"], "failed", "{result}");
         let usage: mfn_llm::CallUsage =
             serde_json::from_value(output["usages"][0].clone()).unwrap();
-        assert!(usage.timing.as_ref().unwrap().first_token_us.is_some());
+        assert!(usage.timing.is_none());
+        let events = result["results"][0]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1]["name"], mfn_llm::FIRST_TEXT_EVENT);
+        assert_eq!(events[2]["name"], mfn_llm::REQUEST_FINISHED_EVENT);
+        assert!(events[2]["body"]["error"].is_string());
         assert_eq!(usage.token_rates(), mfn_llm::CallTokenRates::default());
         assert_eq!(server.requests().len(), 1);
     }

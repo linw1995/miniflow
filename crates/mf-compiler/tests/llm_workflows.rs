@@ -80,10 +80,7 @@ fn parameter_templates_configure_memory_and_standalone_llm_requests() {
                 let usage = usage.as_object_mut().unwrap();
                 usage.remove("call_id");
                 usage.remove("started_at");
-                let timing: mfn_llm::CallTiming =
-                    serde_json::from_value(usage.remove("timing").unwrap()).unwrap();
-                assert!(timing.is_valid() && timing.elapsed_us > 0);
-                assert_eq!(timing.first_token_us, None);
+                assert!(usage.remove("timing").is_none_or(|timing| timing.is_null()));
             }
         }
         outputs

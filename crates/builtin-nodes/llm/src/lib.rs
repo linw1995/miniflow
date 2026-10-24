@@ -56,6 +56,10 @@ pub struct UsageAttribution {
     pub profile: Option<String>,
 }
 
+pub const REQUEST_STARTED_EVENT: &str = "llm.request.started";
+pub const FIRST_TEXT_EVENT: &str = "llm.response.first_text";
+pub const REQUEST_FINISHED_EVENT: &str = "llm.request.finished";
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
 pub struct CallUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -347,10 +351,6 @@ fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
 
 #[derive(Snafu)]
 pub enum LlmExecutionError {
-    #[snafu(display("could not timestamp model invocation: {source}"))]
-    Clock { source: std::time::SystemTimeError },
-    #[snafu(display("model invocation timestamp exceeds the signed range: {source}"))]
-    TimestampRange { source: std::num::TryFromIntError },
     #[snafu(transparent)]
     Configuration { source: LlmConfigError },
     #[snafu(display("LLM input `{path}` requires {requirement}"))]
@@ -387,8 +387,6 @@ pub enum LlmExecutionError {
     },
     #[snafu(display("LLM timeout exceeds the monotonic clock range"))]
     DeadlineRange,
-    #[snafu(display("LLM request timing exceeds the signed microsecond range"))]
-    TimingRange { source: std::num::TryFromIntError },
     #[snafu(display("LLM usage metadata is invalid"))]
     UsageMetadata { source: serde_json::Error },
     #[snafu(display("could not normalize LLM response metadata"))]
@@ -477,9 +475,9 @@ impl LlmNode {
         context: &ExecutionContext,
         emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
     ) -> Result<LlmOutputs, LlmExecutionError> {
-        let started = Instant::now();
+        let deadline_origin = Instant::now();
         let config = self.config.resolve(context)?;
-        let deadline = started
+        let deadline = deadline_origin
             .checked_add(Duration::from_millis(config.timeout_ms))
             .context(DeadlineRangeSnafu)?;
         context.check_future_limits(Some(deadline))?;
@@ -547,15 +545,7 @@ impl LlmNode {
         let mut usage = CallUsage {
             timing: None,
             attribution: config.attribution.clone(),
-            started_at: Some(
-                i64::try_from(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .context(ClockSnafu)?
-                        .as_millis(),
-                )
-                .context(TimestampRangeSnafu)?,
-            ),
+            started_at: None,
             call_id: uuid::Uuid::new_v4().to_string(),
             node: context.current_node().map(|id| UsageNode {
                 id: id.into(),
@@ -573,7 +563,9 @@ impl LlmNode {
             usage: None,
             error: None,
         };
-        let mut timer = timing::CallTimer::new();
+        usage.started_at = context
+            .record_event(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
+            .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
         let response = if emitter.is_connected() {
             context
                 .execute_future(
@@ -583,7 +575,6 @@ impl LlmNode {
                         &usage.call_id,
                         deadline,
                         context,
-                        &mut timer,
                     ),
                     Some(deadline),
                 )
@@ -602,10 +593,17 @@ impl LlmNode {
                     })
                 })
         };
-        usage.timing = Some(timer.finish()?);
         if let Some(reported) = transport.usage() {
             usage.usage = reported_usage(&reported).ok().flatten();
         }
+        if usage.usage.is_none()
+            && let Ok(response) = &response
+        {
+            usage.usage = reported_usage(&response.usage).ok().flatten();
+        }
+        let mut finished = usage.clone();
+        finished.error = response.as_ref().err().map(ToString::to_string);
+        context.record_event(REQUEST_FINISHED_EVENT, serde_json::json!(finished));
         let failure_history = if config.capture_errors {
             history.clone()
         } else {

@@ -13,7 +13,7 @@ fn workspace() -> &'static Path {
 }
 
 fn chat_usage(path: Value) -> Value {
-    json!({"started_at":0,"timing":{"elapsed_us":0},"call_id":"generated", "node":{"id":"chat", "kind":"builtin.llm", "path":path}, "model":"example-model", "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}})
+    json!({"started_at":0,"call_id":"generated", "node":{"id":"chat", "kind":"builtin.llm", "path":path}, "model":"example-model", "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}})
 }
 
 fn title_usage(node: &str, purpose: &str) -> Value {
@@ -225,11 +225,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 usage["call_id"] = "generated".into();
                 assert!(usage["started_at"].as_i64().unwrap() > 0);
                 usage["started_at"] = 0.into();
-                let timing: mfn_llm::CallTiming =
-                    serde_json::from_value(usage["timing"].clone()).unwrap();
-                assert!(timing.is_valid() && timing.elapsed_us > 0);
-                assert_eq!(timing.first_token_us, None);
-                usage["timing"]["elapsed_us"] = 0.into();
+                assert!(usage.get("timing").is_none_or(Value::is_null));
             }
         }
         assert_eq!(actual, expected, "{name}: unexpected workflow output");

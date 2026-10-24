@@ -516,6 +516,13 @@ fn embedded_conversation_preserves_two_turn_history_and_sparse_metadata() {
     let server = Server::start(vec![Reply::text("first answer"), second]);
     let result = probe(&server, "conversation", None);
     assert_eq!(result["messages"], 4);
+    for turn in ["first", "second"] {
+        let usage: mf_chat::CallUsage =
+            serde_json::from_value(result[turn]["result"]["usages"][0].clone()).unwrap();
+        let timing = usage.timing.unwrap();
+        assert!(timing.is_valid() && timing.elapsed_us > 0);
+        assert_eq!(timing.first_token_us, None);
+    }
     assert_eq!(
         result["second"]["result"]["usages"][0]["usage"],
         json!({"output_tokens":1})

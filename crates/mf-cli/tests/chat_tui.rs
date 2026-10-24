@@ -84,6 +84,13 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
                     };
                     assert_eq!(completion.result.text, expected);
                     assert_eq!(completion.result.usages.len(), calls);
+                    for usage in &completion.result.usages {
+                        let timing = usage
+                            .timing
+                            .as_ref()
+                            .expect("runner request events populate timing");
+                        assert!(timing.is_valid() && timing.elapsed_us > 0);
+                    }
                     assert_eq!(
                         completion.result.title.as_deref(),
                         (calls == 2).then_some("Generated title")
@@ -416,6 +423,17 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     let usage = database.usage(Default::default()).unwrap();
     assert_eq!(usage.overall.attempted_calls, 6);
     assert_eq!(usage.overall.total_tokens.missing_calls, 1);
+    assert_eq!(usage.overall.performance.elapsed.reported_calls, 6);
+    let retained = transcript
+        .iter()
+        .find(|message| message.message.content == "retained reply")
+        .unwrap();
+    assert!(retained.usages.as_ref().unwrap().iter().all(|usage| {
+        usage
+            .timing
+            .as_ref()
+            .is_some_and(|timing| timing.is_valid() && timing.elapsed_us > 0)
+    }));
     assert!(
         sessions
             .iter()
@@ -693,6 +711,12 @@ fn loop_conversations() {
         assert_eq!(usages.len(), 2);
         assert_ne!(usages[0].call_id, usages[1].call_id);
         assert!(usages.iter().all(|usage| usage.model == "loop-model"));
+        assert!(usages.iter().all(|usage| {
+            usage
+                .timing
+                .as_ref()
+                .is_some_and(|timing| timing.is_valid() && timing.elapsed_us > 0)
+        }));
         assert_ne!(
             usages[0].node.as_ref().unwrap().path,
             usages[1].node.as_ref().unwrap().path
