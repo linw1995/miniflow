@@ -90,6 +90,9 @@ impl PreparedStream {
             .map(|node| {
                 let (task, state) = match node.node {
                     Some(NodeExecution::Task(task)) => (Some(task), None),
+                    Some(NodeExecution::TaskStream(task)) => {
+                        (Some(task as Box<dyn TaskNode>), None)
+                    }
                     Some(state @ (NodeExecution::Event(_) | NodeExecution::Stream(_))) => {
                         (None, Some(state))
                     }

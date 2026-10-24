@@ -720,7 +720,8 @@ impl ExecutionContext {
             WorkflowRunError::InputType { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Dependency)
             }
-            WorkflowRunError::OutputType { definition_id, .. } => {
+            WorkflowRunError::OutputType { definition_id, .. }
+            | WorkflowRunError::InvalidOutput { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Publication)
             }
             WorkflowRunError::OutputSelection { .. } => (None, FailurePhase::OutputSelection),

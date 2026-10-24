@@ -656,6 +656,8 @@ pub enum NodeBuildError {
     ConflictingInputDeclarations,
     #[snafu(display("output ports must be reflected from the node contract"))]
     ConflictingOutputDeclarations,
+    #[snafu(display("stream output ports must be reflected from the node contract"))]
+    ConflictingStreamDeclarations,
     #[snafu(display("invalid prepared subgraph: {message}"), visibility(pub))]
     InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"), context(false))]
@@ -746,6 +748,10 @@ pub trait TaskNode: Send + Sync {
 /// Use value types for fixed interfaces and this contract for compiled programs or schemas.
 pub trait NodePortContract {
     fn ports(&self) -> NodePorts;
+
+    fn stream_outputs(&self) -> Vec<PortSpec> {
+        Vec::new()
+    }
 }
 
 /// A task whose input and output declarations and conversion are owned by the runtime.
@@ -810,6 +816,8 @@ impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stream_outputs: Vec<PortSpec>,
     /// At most one listed output may produce a value per task invocation.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclusive_outputs: Vec<String>,
@@ -1066,6 +1074,10 @@ fn reflected_node_metadata(
         metadata.ports.outputs.is_empty(),
         ConflictingOutputDeclarationsSnafu
     );
+    ensure!(
+        metadata.stream_outputs.is_empty(),
+        ConflictingStreamDeclarationsSnafu
+    );
     metadata.ports = ports;
     Ok(metadata)
 }
@@ -1077,14 +1089,31 @@ pub struct PreparedNode {
 
 pub enum NodeExecution {
     Task(Box<dyn TaskNode>),
+    TaskStream(Box<crate::TaskStreamExecutor>),
     Event(Box<dyn crate::EventNode>),
     Stream(Box<dyn crate::StreamNode>),
 }
 
 impl NodeExecution {
+    pub fn terminal_outputs<'a>(&self, metadata: &'a NodeMetadata) -> &'a [PortSpec] {
+        match self {
+            Self::Task(_) | Self::TaskStream(_) => &metadata.ports.outputs,
+            Self::Event(_) | Self::Stream(_) => &[],
+        }
+    }
+
+    pub fn stream_outputs<'a>(&self, metadata: &'a NodeMetadata) -> &'a [PortSpec] {
+        match self {
+            Self::TaskStream(_) => &metadata.stream_outputs,
+            Self::Event(_) | Self::Stream(_) => &metadata.ports.outputs,
+            Self::Task(_) => &[],
+        }
+    }
+
     pub fn as_task_node(&self) -> Option<&dyn TaskNode> {
         match self {
             Self::Task(task) => Some(task.as_ref()),
+            Self::TaskStream(task) => Some(task.as_ref()),
             Self::Event(_) | Self::Stream(_) => None,
         }
     }
@@ -1092,12 +1121,49 @@ impl NodeExecution {
     pub fn into_task_node(self) -> Option<Box<dyn TaskNode>> {
         match self {
             Self::Task(task) => Some(task),
+            Self::TaskStream(task) => Some(task),
             Self::Event(_) | Self::Stream(_) => None,
         }
     }
 }
 
 impl PreparedNode {
+    pub fn typed_task_stream<N: crate::TypedTaskStreamNode + 'static>(
+        task: N,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Result<Self, NodeBuildError> {
+        let metadata = reflected_node_metadata(
+            NodePorts::from_types::<N::Input, N::Output>(),
+            metadata.into(),
+        )?;
+        Ok(Self::combined(
+            Box::new(crate::task_stream::TypedTaskStreamAdapter(task)),
+            <N::Emission as crate::NodeOutputs>::ports(),
+            metadata,
+        ))
+    }
+
+    pub fn task_stream<N: crate::TaskStreamNode + NodePortContract + 'static>(
+        task: N,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Result<Self, NodeBuildError> {
+        let metadata = reflected_node_metadata(task.ports(), metadata.into())?;
+        let outputs = task.stream_outputs();
+        Ok(Self::combined(Box::new(task), outputs, metadata))
+    }
+
+    fn combined(
+        task: Box<dyn crate::TaskStreamNode>,
+        outputs: Vec<PortSpec>,
+        mut metadata: NodeMetadata,
+    ) -> Self {
+        metadata.stream_outputs = outputs.clone();
+        Self::from_parts(
+            NodeExecution::TaskStream(Box::new(crate::TaskStreamExecutor::new(task, outputs))),
+            metadata,
+        )
+    }
+
     /// Reflects both value contracts and adapts typed event execution without dispatching an event.
     pub fn typed_event<N: crate::TypedEventNode + 'static>(
         state: N,

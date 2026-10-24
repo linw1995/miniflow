@@ -87,6 +87,38 @@ fn rejected_results_preserve_existing_dynamic_and_typed_outputs() {
 }
 
 #[test]
+fn task_publication_and_emission_share_output_contract_failures() {
+    let node = node("source");
+    let invalid = NodeResult {
+        outputs: [("undeclared".into(), 1.into())].into(),
+        ..Default::default()
+    };
+    let task = ExecutionOutputs::default()
+        .publish(&node, Some(invalid.clone()))
+        .unwrap_err();
+    assert!(matches!(task, WorkflowRunError::InvalidOutput { .. }));
+    let mut sink = mf_runtime::DiscardSink;
+    let mut emitter = mf_runtime::Emitter::new(
+        "source",
+        &node.metadata.ports.outputs,
+        Default::default(),
+        &mut sink,
+    );
+    let emission = emitter.send(invalid).unwrap_err();
+    let mut cause: &dyn std::error::Error = &emission;
+    loop {
+        if let Some(error) = cause.downcast_ref::<WorkflowRunError>() {
+            assert!(matches!(error, WorkflowRunError::InvalidOutput { .. }));
+            assert_eq!(task.to_string(), error.to_string());
+            break;
+        }
+        cause = cause
+            .source()
+            .expect("expected the shared output validation error");
+    }
+}
+
+#[test]
 fn publication_transitions_between_dynamic_typed_and_skipped_outputs() {
     let node = node("source");
     let mut state = ExecutionOutputs::default();

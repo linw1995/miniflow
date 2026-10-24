@@ -1,7 +1,7 @@
 use crate::{
-    EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, Inputs,
-    MessageSchedule, NodeEvent, NodeExecution, NodeExecutionError, NodeResult, PreparedStream,
-    StreamExecution, StreamNode, StreamPlan, TimerUpdate, WorkerPool,
+    Emitter, EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs,
+    Inputs, MessageSchedule, NodeEvent, NodeExecution, NodeExecutionError, NodeResult,
+    PreparedStream, StreamExecution, StreamNode, StreamPlan, TimerUpdate, WorkerPool,
 };
 use mf_telemetry::{
     event::FailurePhase,
@@ -114,22 +114,37 @@ impl StreamError {
             Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
-                if let NodeExecutionError::PluginFailed { source } = source.as_ref() {
-                    let mut cause: &dyn Error = source.as_ref();
-                    loop {
-                        if let Some(error) = cause.downcast_ref::<Self>() {
-                            return error.phase();
-                        }
-                        let Some(source) = cause.source() else {
-                            break;
-                        };
-                        cause = source;
-                    }
-                }
-                "execution"
+                execution_error_phase(source.as_ref())
             }
-            _ => "execution",
+            Self::Workflow { source, .. } => execution_error_phase(source.as_ref()),
+            Self::Execution { .. } => "execution",
         }
+    }
+}
+
+fn execution_error_phase(mut cause: &(dyn Error + 'static)) -> &'static str {
+    loop {
+        match cause.downcast_ref::<NodeExecutionError>() {
+            Some(NodeExecutionError::OutputEncode { .. }) => return "output",
+            Some(NodeExecutionError::PluginFailed { source }) => {
+                cause = source.as_ref();
+                continue;
+            }
+            _ => {}
+        }
+        if cause
+            .downcast_ref::<crate::WorkflowRunError>()
+            .is_some_and(crate::WorkflowRunError::is_output_error)
+        {
+            return "output";
+        }
+        if let Some(error) = cause.downcast_ref::<StreamError>() {
+            return error.phase();
+        }
+        let Some(source) = cause.source() else {
+            return "execution";
+        };
+        cause = source;
     }
 }
 
@@ -344,7 +359,7 @@ impl Shared {
 }
 
 /// A borrowed, non-cloneable output sink for one producer invocation.
-pub struct Emitter<'a> {
+struct ProducerEmitter<'a> {
     shared: &'a Shared,
     plan: &'a StreamPlan,
     index: usize,
@@ -375,13 +390,15 @@ fn capture_snapshot(
     }
 }
 
-impl Emitter<'_> {
+impl crate::EmissionSink for ProducerEmitter<'_> {
     /// Wait for queue capacity and transfer one validated result to the runtime.
     /// Failure wakes waiting senders. Success does not imply downstream completion.
-    pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
-        Ok(self.admit(result)?)
+    fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
+        self.admit(result)
     }
+}
 
+impl ProducerEmitter<'_> {
     fn admit(&mut self, result: NodeResult) -> Result<(), StreamError> {
         let mut state = self.shared.state.lock().unwrap();
         loop {
@@ -469,7 +486,7 @@ fn run_producer(
 ) {
     let index = plan.execution_domain(job.execution_domain).nodes[0].index();
     let _span = job.callback.as_ref().map(StreamCallback::enter);
-    let mut emitter = Emitter {
+    let mut sink = ProducerEmitter {
         shared,
         plan,
         index,
@@ -478,6 +495,12 @@ fn run_producer(
         publication_failed: false,
     };
     let failure = shared.state.lock().unwrap().failure.clone();
+    let mut emitter = Emitter::with_sink_validation(
+        plan.nodes()[index].definition_id.clone(),
+        &plan.nodes()[index].metadata.ports.outputs,
+        job.context.cancellation(),
+        &mut sink,
+    );
     let result = if let Some(error) = failure {
         Err(error)
     } else {
@@ -492,7 +515,11 @@ fn run_producer(
             crate::SnapshotOutcome::Started,
         );
         catch_unwind(AssertUnwindSafe(|| {
-            node.execute(job.inputs, &mut job.context, &mut emitter)
+            let result = node.execute(job.inputs, &mut job.context, &mut emitter);
+            if let Some(error) = job.context.cancellation().failure() {
+                return Err(error.into());
+            }
+            result
         }))
         .unwrap_or_else(|payload| Err(panic_error(payload).into()))
         .context(ProducerSnafu {
@@ -508,11 +535,12 @@ fn run_producer(
                 .map_or(Ok(()), Err)
         })
     };
+    drop(emitter);
     if let Some(callback) = job.callback {
         match &result {
-            Ok(()) => callback.succeeded(emitter.emitted, emitter.ports.into_iter().collect()),
+            Ok(()) => callback.succeeded(sink.emitted, sink.ports.into_iter().collect()),
             Err(error) => callback.failed(
-                if emitter.publication_failed {
+                if sink.publication_failed || error.phase() == "output" {
                     FailurePhase::Publication
                 } else {
                     FailurePhase::Execution
@@ -550,6 +578,7 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::SuccessDependency { definition_id, .. }
         | crate::WorkflowRunError::InputType { definition_id, .. }
         | crate::WorkflowRunError::OutputType { definition_id, .. }
+        | crate::WorkflowRunError::InvalidOutput { definition_id, .. }
         | crate::WorkflowRunError::OutputSelection { definition_id, .. }
         | crate::WorkflowRunError::Context { definition_id, .. }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
@@ -726,7 +755,9 @@ impl PreparedStream {
                             worker: None,
                             active: false,
                         }),
-                        NodeExecution::Task(_) => unreachable!("tasks remain in the plan"),
+                        NodeExecution::Task(_) | NodeExecution::TaskStream(_) => {
+                            unreachable!("tasks remain in the plan")
+                        }
                     },
                     deadline: None,
                     pending: VecDeque::new(),
