@@ -599,6 +599,9 @@ remain visible and move under them when they arrive; selection stays attached to
 Spans appear after completion and export. Use `j`/`k` or Up/Down to select, Home for the first
 entry, and End/`f` to follow the last entry in tree order. `v` or Esc returns to the graph.
 
+Span, log, and Data timestamps use `YYYY-MM-DD HH:MM:SS.nnnnnnnnn UTC`, retaining nanosecond
+precision. Missing timestamps appear as `Not set`. Durations and span event offsets use adaptive units.
+
 Tab switches the selected span's right-hand pane:
 
 - **Details** shows timing, status, IDs, attributes, span events, links, resource, and scope metadata.
