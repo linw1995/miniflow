@@ -35,7 +35,7 @@ fn generated_task_and_stream_runners_reject_runtime_contract_changes_before_disp
         }, "nodes":[{"id":"source./~", "kind":"fixture.startup_contract", "config":{"stream":stream}}],
         "outputs":[{"name":"result", "node":"source./~", "port":"value"}]});
         if stream {
-            definition["execution"] = json!({"mode":"stream"});
+            definition["execution"] = json!({});
         }
         fs::write(root.path().join("workflow.json"), definition.to_string()).unwrap();
         compile(root.path()).unwrap();

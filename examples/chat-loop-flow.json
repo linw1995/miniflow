@@ -154,9 +154,24 @@
                 "capture_errors": true
               },
               "inputs": {
-                "prompt": { "from": { "node": "%loop", "port": "prompt" } },
-                "system": { "from": { "node": "%loop", "port": "system" } },
-                "history": { "from": { "node": "%loop", "port": "history" } }
+                "prompt": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "prompt"
+                  }
+                },
+                "system": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "system"
+                  }
+                },
+                "history": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "history"
+                  }
+                }
               }
             },
             {
@@ -177,8 +192,18 @@
                 }
               },
               "inputs": {
-                "left": { "from": { "node": "%loop", "port": "usages" } },
-                "right": { "from": { "node": "chat", "port": "usages" } }
+                "left": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "usages"
+                  }
+                },
+                "right": {
+                  "from": {
+                    "node": "chat",
+                    "port": "usages"
+                  }
+                }
               }
             },
             {
@@ -188,7 +213,12 @@
                 "variable": "history"
               },
               "inputs": {
-                "value": { "from": { "node": "chat", "port": "history" } }
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "history"
+                  }
+                }
               }
             },
             {
@@ -198,7 +228,12 @@
                 "variable": "usages"
               },
               "inputs": {
-                "value": { "from": { "node": "collect", "port": "value" } }
+                "value": {
+                  "from": {
+                    "node": "collect",
+                    "port": "value"
+                  }
+                }
               }
             },
             {
@@ -208,7 +243,12 @@
                 "variable": "status"
               },
               "inputs": {
-                "value": { "from": { "node": "chat", "port": "status" } }
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "status"
+                  }
+                }
               }
             },
             {
@@ -218,7 +258,12 @@
                 "variable": "text"
               },
               "inputs": {
-                "value": { "from": { "node": "chat", "port": "text" } }
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "text"
+                  }
+                }
               }
             },
             {
@@ -228,7 +273,12 @@
                 "variable": "error"
               },
               "inputs": {
-                "value": { "from": { "node": "chat", "port": "error" } }
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "error"
+                  }
+                }
               }
             }
           ],
@@ -236,27 +286,86 @@
             {
               "label": "Generate and account",
               "annotation": "Generate one reply and append the call usage to the accumulated usage list.",
-              "nodes": ["chat", "collect"]
+              "nodes": [
+                "chat",
+                "collect"
+              ]
             },
             {
               "label": "Persist turn state",
               "annotation": "Carry history, usage, status, text, and errors into the next loop iteration.",
-              "nodes": ["save_history", "save_usages", "save_status", "save_text", "save_error"]
+              "nodes": [
+                "save_history",
+                "save_usages",
+                "save_status",
+                "save_text",
+                "save_error"
+              ]
             }
           ]
         }
       },
       "inputs": {
-        "prompt": { "from": { "node": "params", "port": "prompt" } },
-        "system": { "from": { "node": "params", "port": "system" } },
-        "history": { "from": { "node": "params", "port": "history" } },
-        "usages": { "from": { "node": "empty_usages", "port": "value" } },
-        "status": { "from": { "node": "initial_status", "port": "value" } },
-        "text": { "from": { "node": "empty_text", "port": "value" } },
-        "error": { "from": { "node": "empty_text", "port": "value" } },
-        "model": { "from": { "node": "params", "port": "model" } },
-        "base_url": { "from": { "node": "params", "port": "base_url" } },
-        "api_key": { "from": { "node": "params", "port": "api_key" } }
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "empty_usages",
+            "port": "value"
+          }
+        },
+        "status": {
+          "from": {
+            "node": "initial_status",
+            "port": "value"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "empty_text",
+            "port": "value"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "empty_text",
+            "port": "value"
+          }
+        },
+        "model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        }
       }
     }
   ],
@@ -291,12 +400,20 @@
     {
       "label": "Conversation setup",
       "annotation": "Resolve model settings and initialize the loop state and response metadata.",
-      "nodes": ["params", "annotation", "empty_usages", "initial_status", "empty_text"]
+      "nodes": [
+        "params",
+        "annotation",
+        "empty_usages",
+        "initial_status",
+        "empty_text"
+      ]
     },
     {
       "label": "Repeated conversation",
       "annotation": "Run two conversation turns, carrying history and accumulating usage across iterations.",
-      "nodes": ["repeat"]
+      "nodes": [
+        "repeat"
+      ]
     }
   ]
 }

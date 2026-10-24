@@ -76,7 +76,7 @@ pub use mf_runtime::{
     validate_exclusive_inputs,
 };
 pub use mf_runtime::{IterationErrorPolicy, IterationMode};
-pub use mf_runtime::{NodeExecution, PreparedStream, StreamExecution, StreamLimits, StreamMode};
+pub use mf_runtime::{NodeExecution, PreparedStream, StreamExecution, StreamLimits};
 #[cfg(feature = "codegen")]
 pub use pipeline::{
     CompileRequest, PipelineError, cargo_command, compile_project, compile_project_with_options,
@@ -99,7 +99,7 @@ pub use construction::{
     MetadataSnafu as WorkflowMetadataSnafu, NodeConstructionSnafu as WorkflowNodeConstructionSnafu,
     StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
     UnknownKindSnafu as WorkflowUnknownKindSnafu, WorkflowBuildError, bind_workflow_inputs,
-    build_flow, build_message_domains, instantiate_node_with_metadata,
+    build_flow, build_stream_program, instantiate_node_with_metadata,
     instantiate_subgraph_with_metadata, into_task, partition_execution_domains, prepare_stream,
     prepared_loop_assign_from_json, prepared_loop_source_from_json, stream_workflow_inputs,
     validate_execution, validate_stream_limits, validate_success_connection, workflow_input_schema,

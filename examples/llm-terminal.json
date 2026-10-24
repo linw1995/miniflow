@@ -1,24 +1,40 @@
 {
   "version": "2026-10-23",
   "dependencies": {
-    "llm": { "package": "mfn-llm", "path": "../crates/builtin-nodes/llm" }
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
   },
   "nodes": [
     {
       "id": "chat",
       "kind": "builtin.llm",
-      "config": { "model": "your-model", "api_key_env": "MODEL_API_KEY" }
+      "config": {
+        "model": "your-model",
+        "api_key_env": "MODEL_API_KEY"
+      }
     }
   ],
   "outputs": [
-    { "name": "text", "node": "chat", "port": "text" },
-    { "name": "history", "node": "chat", "port": "history" }
+    {
+      "name": "text",
+      "node": "chat",
+      "port": "text"
+    },
+    {
+      "name": "history",
+      "node": "chat",
+      "port": "history"
+    }
   ],
   "clusters": [
     {
       "label": "Model response",
       "annotation": "Accept prompt and history inputs and return the model response with updated history.",
-      "nodes": ["chat"]
+      "nodes": [
+        "chat"
+      ]
     }
   ]
 }

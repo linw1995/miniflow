@@ -1,8 +1,14 @@
 {
   "version": "2026-10-23",
   "dependencies": {
-    "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" },
-    "llm": { "package": "mfn-llm", "path": "../crates/builtin-nodes/llm" }
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
   },
   "nodes": [
     {
@@ -11,29 +17,85 @@
       "loop": {
         "max_iterations": 2,
         "variables": [
-          { "name": "prompt", "type": "string" },
-          { "name": "history", "type": { "list": "object" } },
-          { "name": "text", "type": "string" }
+          {
+            "name": "prompt",
+            "type": "string"
+          },
+          {
+            "name": "history",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "text",
+            "type": "string"
+          }
         ],
         "body": {
           "nodes": [
             {
               "id": "chat",
               "kind": "builtin.llm",
-              "config": { "model": "your-model", "api_key_env": "MODEL_API_KEY" },
+              "config": {
+                "model": "your-model",
+                "api_key_env": "MODEL_API_KEY"
+              },
               "inputs": {
-                "prompt": { "from": { "node": "%loop", "port": "prompt" } },
-                "history": { "from": { "node": "%loop", "port": "history" } }
+                "prompt": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "prompt"
+                  }
+                },
+                "history": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "history"
+                  }
+                }
               }
             },
-            { "id": "remember", "kind": "workflow.loop_assign", "config": { "variable": "history" } , "inputs": {"value": { "from": { "node": "chat", "port": "history" } }} },
-            { "id": "answer", "kind": "workflow.loop_assign", "config": { "variable": "text" } , "inputs": {"value": { "from": { "node": "chat", "port": "text" } }} }
+            {
+              "id": "remember",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "history"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "history"
+                  }
+                }
+              }
+            },
+            {
+              "id": "answer",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "text"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "text"
+                  }
+                }
+              }
+            }
           ],
           "clusters": [
             {
               "label": "Conversation turn",
               "annotation": "Call the model with the current history, then save its updated history and answer.",
-              "nodes": ["chat", "remember", "answer"]
+              "nodes": [
+                "chat",
+                "remember",
+                "answer"
+              ]
             }
           ]
         }
@@ -41,14 +103,24 @@
     }
   ],
   "outputs": [
-    { "name": "text", "node": "repeat", "port": "text" },
-    { "name": "history", "node": "repeat", "port": "history" }
+    {
+      "name": "text",
+      "node": "repeat",
+      "port": "text"
+    },
+    {
+      "name": "history",
+      "node": "repeat",
+      "port": "history"
+    }
   ],
   "clusters": [
     {
       "label": "Conversation loop",
       "annotation": "Run two model calls while carrying conversation history and the latest answer.",
-      "nodes": ["repeat"]
+      "nodes": [
+        "repeat"
+      ]
     }
   ]
 }

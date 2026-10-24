@@ -221,7 +221,7 @@ fn parameters_probe() {
     }
 
     let mut stream_graph = graph.clone();
-    stream_graph.execution = Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    stream_graph.execution = Some(serde_json::from_value(json!({})).unwrap());
     let stream_plan = compile_definition(&stream_graph, &registry).unwrap();
     let stream = mf_compiler::instantiate_stream(&stream_plan, &registry)
         .unwrap()

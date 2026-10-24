@@ -669,7 +669,10 @@ input, invoke executors, arm timers, or emit workflow execution events.
 
 ### Requirement: Declare source-driven streaming execution
 
-Schema `2026-10-03` SHALL accept `execution` with `mode: "stream"` and optional resource limits. Startup
+Schema `2026-10-03` and later SHALL accept optional resource limits under `execution` and reject a mode field.
+Compilation SHALL infer streaming execution from resolved Event/Stream contracts and consumed or selected
+incremental ports after provider loading. Terminal-only combined nodes SHALL remain finite. The generated
+Cargo build SHALL select a fixed runner path from that inferred result rather than input configuration. Startup
 parameters SHALL come from initial node ports, and stream item types from explicit source outputs. The engine
 input field, global sender, synthetic source, and their special-case validators SHALL be removed. Older
 single-run schemas SHALL retain their existing behavior.
@@ -1079,11 +1082,28 @@ Generated streaming runners SHALL support combined nodes through the same messag
 - **WHEN** a workflow selects a combined node's increments and terminal result
 - **THEN** generated and in-memory execution preserve both routes without overwriting pending deliveries
 
-### Requirement: Use standard Stream records for executable chat
-
-Executable chat streaming SHALL use ordinary native JSONL records and the existing manifest. Business interpretation SHALL belong to the conversation contract. Runtime MUST NOT introduce a separate live publisher, bounded live channel, scoped export schema, or versioned live envelope. Finite and isolated Task JSON execution SHALL remain available.
-
 #### Scenario: Move a compiled streaming executable
 
 - **WHEN** a compiled native Stream workflow is moved and its build inputs are removed
 - **THEN** its manifest and incremental/terminal execution remain available without rebuilding
+
+### Requirement: Generate executable stream wiring
+
+The compiler SHALL generate graph-specific input resolvers, message initializers, Task-domain functions,
+fixed emitter channel bindings, and output selectors. Generated data flow MUST NOT interpret a
+`MessageDomains` structure, search output ownership, or read descriptive connection/output tables during
+execution. The runtime SHALL own queue capacity, acknowledgment, cancellation, and scheduling mechanics.
+
+#### Scenario: Execute without descriptive wiring tables
+
+- **WHEN** a generated runner contains executable bindings without descriptive dependency and selected-output tables
+- **THEN** input binding, branches, batching, nested workflows, failures, and selected outputs retain the same behavior
+
+#### Scenario: Execute combined incremental and terminal outputs
+
+- **WHEN** a compiled combined node emits increments and returns its terminal result
+- **THEN** compiler-fixed channel bindings deliver the increments and generated Task-domain functions continue the terminal path
+
+### Requirement: Use standard Stream records for executable chat
+
+Executable chat streaming SHALL use ordinary native JSONL records and the existing manifest. Business interpretation SHALL belong to the conversation contract. Runtime MUST NOT introduce a separate live publisher, bounded live channel, scoped export schema, or versioned live envelope. Finite and isolated Task JSON execution SHALL remain available.

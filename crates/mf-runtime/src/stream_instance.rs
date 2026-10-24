@@ -291,6 +291,7 @@ struct QueuedEmission {
 }
 
 struct Operator {
+    emission: crate::StreamEmissionBinding,
     executor: OperatorExecutor,
     deadline: Option<Duration>,
     pending: VecDeque<QueuedEmission>,
@@ -384,6 +385,7 @@ struct ProducerEmitter<'a> {
     shared: &'a Shared,
     plan: &'a StreamPlan,
     index: usize,
+    binding: crate::StreamEmissionBinding,
     emitted: usize,
     ports: BTreeSet<String>,
     publication_failed: bool,
@@ -413,7 +415,7 @@ fn capture_snapshot(
 
 impl crate::EmissionSink for ProducerEmitter<'_> {
     fn is_connected(&self) -> bool {
-        self.plan.has_emission_consumers(self.index)
+        self.binding.connected
     }
 
     /// Wait for queue capacity and transfer one validated result to the runtime.
@@ -462,7 +464,13 @@ impl ProducerEmitter<'_> {
             let emitted = self.emitted.checked_add(1).context(ResourceSnafu {
                 message: "producer emission counter exhausted",
             })?;
-            enqueue_emission(&mut state, self.plan, self.index, result.into())?;
+            enqueue_emission(
+                &mut state,
+                self.plan,
+                self.index,
+                &self.binding,
+                result.into(),
+            )?;
             self.emitted = emitted;
             self.ports.extend(ports);
             Ok(())
@@ -519,6 +527,7 @@ fn run_producer(
         shared,
         plan,
         index,
+        binding: plan.emission_binding(index).clone(),
         emitted: 0,
         ports: BTreeSet::new(),
         publication_failed: false,
@@ -803,8 +812,10 @@ impl PreparedStream {
         domains[0].occupied = true;
         let operators = operator_states
             .into_iter()
-            .map(|state| {
+            .enumerate()
+            .map(|(index, state)| {
                 state.map(|state| Operator {
+                    emission: prepared.emission_binding(index).clone(),
                     executor: match state {
                         NodeExecution::Event(state) => OperatorExecutor::Event(state),
                         NodeExecution::Stream(node) => OperatorExecutor::Producer(Producer {
@@ -1159,7 +1170,6 @@ fn coordinate(
         }
         let wait = plan
             .message_sources()
-            .iter()
             .skip(1)
             .filter_map(|domain| guard.operators[domain.expect("emission domain")].as_ref())
             .filter(|operator| {
@@ -1187,7 +1197,7 @@ fn tick<'a>(
     #[cfg(feature = "async")] future_executor: &Arc<crate::future_execution::FutureExecutor>,
 ) -> Result<(MutexGuard<'a, State>, bool), StreamError> {
     let mut progress = false;
-    for source in plan.message_sources().iter().skip(1) {
+    for source in plan.message_sources().skip(1) {
         let index = source.expect("emission domain");
         let due = guard.operators[index]
             .as_ref()
@@ -1224,7 +1234,9 @@ fn tick<'a>(
         if guard.domains[domain].occupied {
             continue;
         }
-        let source = plan.message_sources()[domain].expect("emission domain");
+        let source = plan.program().messages[domain]
+            .source
+            .expect("emission domain");
         let Some(queued) = guard.operators[source]
             .as_mut()
             .unwrap()
@@ -1233,11 +1245,14 @@ fn tick<'a>(
         else {
             continue;
         };
-        let mut context =
-            ExecutionContext::for_message(plan.emission_node(source), queued.emission.result)
-                .context(WorkflowSnafu {
-                    message: queued.message,
-                })?;
+        let mut context = (guard.operators[source]
+            .as_ref()
+            .unwrap()
+            .emission
+            .initialize)(plan, queued.emission.result)
+        .context(WorkflowSnafu {
+            message: queued.message,
+        })?;
         #[cfg(feature = "async")]
         context.set_future_executor(future_executor.clone());
         if let Some(capture) = &shared.snapshots {
@@ -1265,29 +1280,17 @@ fn tick<'a>(
             continue;
         };
         if frame.complete() {
-            if plan.selected_domains().contains(&message_domain) && guard.output.is_some() {
+            if plan.selects_outputs(message_domain) && guard.output.is_some() {
                 guard.domains[message_domain].frame = Some(frame);
                 continue;
             }
             take_sequence(&mut guard.summary.completed_frames)?;
-            if plan.selected_domains().contains(&message_domain) {
-                let mut outputs = FlowOutputs::new();
-                for output in plan.outputs_for_domain(message_domain) {
-                    if let Some(value) = frame
-                        .context
-                        .select_output(
-                            &output.name,
-                            output.node.as_str(),
-                            &output.port,
-                            output.optional,
-                        )
-                        .context(WorkflowSnafu {
-                            message: frame.message,
-                        })?
-                    {
-                        outputs.insert(output.name.clone().into_owned(), value);
-                    }
-                }
+            if plan.selects_outputs(message_domain) {
+                let outputs = plan
+                    .select_outputs(message_domain, &mut frame.context)
+                    .context(WorkflowSnafu {
+                        message: frame.message,
+                    })?;
                 guard.output = Some(StreamOutput {
                     message: frame.message,
                     outputs,
@@ -1325,6 +1328,7 @@ fn tick<'a>(
                     continue;
                 }
                 let is_producer = matches!(&operator.executor, OperatorExecutor::Producer(_));
+                let returns_terminal = operator.emission.terminal;
                 let _ = operator;
                 let mut callback;
                 (guard, callback) = event_callback(
@@ -1340,9 +1344,8 @@ fn tick<'a>(
                     },
                 )?;
                 let _context = callback.as_ref().map(StreamCallback::enter);
-                let (inputs, resolution) = match frame
-                    .context
-                    .event_input_resolution(&plan.nodes()[index], plan.dependencies(index))
+                let (inputs, resolution) = match plan
+                    .resolve_event_inputs(index, &mut frame.context)
                 {
                     Ok(inputs) => inputs,
                     Err(error) => {
@@ -1371,8 +1374,7 @@ fn tick<'a>(
                             }
                         });
                         let context = frame.context.fork_stream(observation);
-                        let detached =
-                            message_domain == 0 && plan.stream_output_domain(index).is_none();
+                        let detached = message_domain == 0 && !returns_terminal;
                         let operator = guard.operators[index].as_mut().unwrap();
                         let OperatorExecutor::Producer(producer) = &mut operator.executor else {
                             unreachable!("producer kind was checked above")
@@ -1465,29 +1467,17 @@ fn tick<'a>(
         }
 
         if frame.complete() {
-            if plan.selected_domains().contains(&message_domain) && guard.output.is_some() {
+            if plan.selects_outputs(message_domain) && guard.output.is_some() {
                 guard.domains[message_domain].frame = Some(frame);
                 continue;
             }
             take_sequence(&mut guard.summary.completed_frames)?;
-            if plan.selected_domains().contains(&message_domain) {
-                let mut outputs = FlowOutputs::new();
-                for output in plan.outputs_for_domain(message_domain) {
-                    if let Some(value) = frame
-                        .context
-                        .select_output(
-                            &output.name,
-                            output.node.as_str(),
-                            &output.port,
-                            output.optional,
-                        )
-                        .context(WorkflowSnafu {
-                            message: frame.message,
-                        })?
-                    {
-                        outputs.insert(output.name.clone().into_owned(), value);
-                    }
-                }
+            if plan.selects_outputs(message_domain) {
+                let outputs = plan
+                    .select_outputs(message_domain, &mut frame.context)
+                    .context(WorkflowSnafu {
+                        message: frame.message,
+                    })?;
                 guard.output = Some(StreamOutput {
                     message: frame.message,
                     outputs,
@@ -1547,8 +1537,9 @@ fn tick<'a>(
                 }
             }
         } else if domain > 0 && !guard.domains[domain].occupied {
-            let operator = guard.operators
-                [plan.message_sources()[domain].expect("emission domain")]
+            let operator = guard.operators[plan.program().messages[domain]
+                .source
+                .expect("emission domain")]
             .as_ref()
             .unwrap();
             if operator.closed && operator.pending.is_empty() {
@@ -1739,11 +1730,10 @@ fn enqueue_emission(
     state: &mut State,
     plan: &StreamPlan,
     index: usize,
+    route: &crate::StreamEmissionBinding,
     emission: EventEmission,
 ) -> Result<MessageId, StreamError> {
-    let domain = plan
-        .stream_output_domain(index)
-        .unwrap_or_else(|| plan.output_domain(index));
+    let domain = route.message;
     crate::ExecutionOutputs::validate_result(plan.emission_node(index), &emission.result).context(
         WorkflowSnafu {
             message: MessageId {
@@ -1754,7 +1744,7 @@ fn enqueue_emission(
     )?;
     let sequence = take_sequence(&mut state.sequences[domain])?;
     take_sequence(&mut state.summary.emitted_messages)?;
-    if !plan.has_emission_consumers(index) {
+    if !route.connected {
         return Ok(MessageId { domain, sequence });
     }
     state.operators[index]
@@ -1777,8 +1767,9 @@ fn apply_effects(
     mut capture: Option<&mut Vec<crate::Outputs>>,
 ) -> Result<(), StreamError> {
     let operator = state.operators[index].as_mut().unwrap();
+    let binding = operator.emission.clone();
     ensure!(
-        !plan.has_emission_consumers(index)
+        !binding.connected
             || effects
                 .emissions
                 .len()
@@ -1793,7 +1784,7 @@ fn apply_effects(
     );
     for emission in effects.emissions {
         let ports = capture.as_ref().map(|_| emission.result.outputs.clone());
-        enqueue_emission(state, plan, index, emission)?;
+        enqueue_emission(state, plan, index, &binding, emission)?;
         if let (Some(capture), Some(ports)) = (capture.as_mut(), ports) {
             capture.push(ports);
         }
@@ -1914,6 +1905,113 @@ fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
 
 #[cfg(test)]
 mod tests {
+
+    fn program(
+        sources: std::borrow::Cow<'static, [Option<usize>]>,
+        node_count: usize,
+        selected: std::borrow::Cow<'static, [usize]>,
+        execution_domains: crate::ExecutionDomains,
+        by_message: std::borrow::Cow<'static, [std::borrow::Cow<'static, [usize]>]>,
+        dependencies: std::borrow::Cow<
+            'static,
+            [std::borrow::Cow<'static, [crate::FlowDependency]>],
+        >,
+    ) -> crate::StreamProgram {
+        let messages = sources
+            .iter()
+            .enumerate()
+            .map(|(message, &source)| {
+                let domains = &by_message[message];
+                let mut local = vec![usize::MAX; execution_domains.len()];
+                for (rank, &domain) in domains.iter().enumerate() {
+                    local[domain] = rank;
+                }
+                let schedule = crate::MessageSchedule {
+                    domains: domains.to_vec().into_boxed_slice(),
+                    initial_deps: domains
+                        .iter()
+                        .map(|&domain| {
+                            execution_domains.domains()[domain]
+                                .predecessors
+                                .iter()
+                                .filter(|&&previous| local[previous] != usize::MAX)
+                                .count()
+                        })
+                        .collect(),
+                    successors: domains
+                        .iter()
+                        .map(|&domain| {
+                            execution_domains.domains()[domain]
+                                .successors
+                                .iter()
+                                .filter_map(|&next| {
+                                    (local[next] != usize::MAX).then_some(local[next])
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                    local: local.into_boxed_slice(),
+                };
+                crate::StreamMessageProgram {
+                    source,
+                    schedule,
+                    select_outputs: selected.contains(&message).then(|| {
+                        Arc::new(move |context: &mut crate::ExecutionContext| {
+                            let mut values = crate::FlowOutputs::new();
+                            if let Some(value) =
+                                context.select_output("sum", "join", "sum", false)?
+                            {
+                                values.insert("sum".into(), value);
+                            }
+                            Ok(values)
+                        }) as Arc<crate::StreamOutputSelector>
+                    }),
+                }
+            })
+            .collect();
+        let emissions = (0..node_count)
+            .map(|index| {
+                sources
+                    .iter()
+                    .position(|source| *source == Some(index))
+                    .map(|message| crate::StreamEmissionBinding {
+                        message,
+                        connected: selected.contains(&message) || !by_message[message].is_empty(),
+                        terminal: false,
+                        initialize: Arc::new(move |plan, result| {
+                            crate::ExecutionContext::for_message(plan.emission_node(index), result)
+                        }),
+                    })
+            })
+            .collect();
+        let inputs = dependencies
+            .into_owned()
+            .into_iter()
+            .enumerate()
+            .map(|(index, dependencies)| {
+                Arc::new(
+                    move |plan: &crate::StreamPlan,
+                          context: &crate::ExecutionContext,
+                          inputs: &mut crate::Inputs,
+                          causes| {
+                        context.resolve_node_inputs(
+                            &plan.nodes()[index],
+                            dependencies.iter().map(crate::FlowDependency::borrowed),
+                            &[],
+                            inputs,
+                            causes,
+                        )
+                    },
+                ) as Arc<crate::StreamInputResolver>
+            })
+            .collect();
+        crate::StreamProgram {
+            execution_domains,
+            messages,
+            emissions,
+            inputs,
+        }
+    }
     use super::*;
     #[test]
     fn identities_fail_before_wraparound() {
@@ -1954,7 +2052,6 @@ mod tests {
         }
         let plan = PreparedStream::from_plan(
             StreamExecution {
-                mode: crate::StreamMode::Stream,
                 limits: Default::default(),
             },
             vec![
@@ -1980,23 +2077,9 @@ mod tests {
                     ),
                 ),
             ],
-            vec![
-                Vec::new(),
-                vec![crate::FlowDependency {
-                    exclusive: false,
-                    input: None,
-                    source_node: "start".into(),
-                    source_output: "item".into(),
-                    source_key: "start.item".into(),
-                }],
-            ]
-            .into_iter()
-            .map(std::borrow::Cow::Owned)
-            .collect::<Vec<_>>()
-            .into(),
-            crate::MessageDomains::from_parts(
+            program(
                 vec![None, Some(1)].into(),
-                vec![0, 1].into(),
+                2,
                 vec![].into(),
                 crate::ExecutionDomains::from_parts(
                     vec![
@@ -2031,9 +2114,21 @@ mod tests {
                     std::borrow::Cow::Owned(vec![]),
                 ]
                 .into(),
-                vec![0, 0].into(),
+                vec![
+                    Vec::new(),
+                    vec![crate::FlowDependency {
+                        exclusive: false,
+                        input: None,
+                        source_node: "start".into(),
+                        source_output: "item".into(),
+                        source_key: "start.item".into(),
+                    }],
+                ]
+                .into_iter()
+                .map(std::borrow::Cow::Owned)
+                .collect::<Vec<_>>()
+                .into(),
             ),
-            Vec::new().into(),
             Default::default(),
         );
         let instance = plan.start().unwrap();
@@ -2135,7 +2230,6 @@ mod tests {
             };
         let plan = PreparedStream::from_plan(
             StreamExecution {
-                mode: crate::StreamMode::Stream,
                 limits: Default::default(),
             },
             vec![
@@ -2182,26 +2276,9 @@ mod tests {
                     ),
                 ),
             ],
-            vec![
-                Vec::new(),
-                vec![dependency("seed", "emitter", "seed")],
-                vec![dependency("seed", "emitter", "seed")],
-                vec![dependency("seed", "emitter", "seed")],
-                vec![dependency("seed", "emitter", "seed")],
-                vec![
-                    dependency("a", "a", "item"),
-                    dependency("b", "b", "item"),
-                    dependency("c", "c", "item"),
-                    dependency("d", "d", "item"),
-                ],
-            ]
-            .into_iter()
-            .map(std::borrow::Cow::Owned)
-            .collect::<Vec<_>>()
-            .into(),
-            crate::MessageDomains::from_parts(
+            program(
                 vec![None, Some(0)].into(),
-                vec![1, 1, 1, 1, 1, 1].into(),
+                6,
                 vec![1].into(),
                 crate::ExecutionDomains::from_parts(
                     vec![
@@ -2234,15 +2311,24 @@ mod tests {
                     std::borrow::Cow::Owned(vec![1, 2, 3, 4, 5]),
                 ]
                 .into(),
-                vec![0, 1, 1, 1, 1, 1].into(),
+                vec![
+                    Vec::new(),
+                    vec![dependency("seed", "emitter", "seed")],
+                    vec![dependency("seed", "emitter", "seed")],
+                    vec![dependency("seed", "emitter", "seed")],
+                    vec![dependency("seed", "emitter", "seed")],
+                    vec![
+                        dependency("a", "a", "item"),
+                        dependency("b", "b", "item"),
+                        dependency("c", "c", "item"),
+                        dependency("d", "d", "item"),
+                    ],
+                ]
+                .into_iter()
+                .map(std::borrow::Cow::Owned)
+                .collect::<Vec<_>>()
+                .into(),
             ),
-            vec![crate::WorkflowOutputDefinition {
-                name: "sum".into(),
-                node: "join".into(),
-                port: "sum".into(),
-                optional: false,
-            }]
-            .into(),
             Default::default(),
         );
         let instance = plan.start().unwrap();

@@ -200,7 +200,6 @@ fn embedded_exports_preserve_user_identity_and_hide_colliding_application_contex
     let root = tempfile::tempdir().unwrap();
     let definition = mf_compiler::WorkflowDefinition::from_json(&serde_json::json!({
         "version":"2026-10-23", "dependencies":{},
-        "execution":{"mode":"stream"},
         "nodes":[{"id":"begin","kind":"test.chat.streaming"}],
         "outputs":[{"name":"answer","node":"begin","port":"delta"},{"name":"status","node":"begin","port":"status"},{"name":"text","node":"begin","port":"text"},{"name":"usages","node":"begin","port":"usages"}]
     }).to_string()).unwrap();

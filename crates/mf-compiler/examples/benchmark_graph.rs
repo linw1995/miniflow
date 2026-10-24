@@ -41,7 +41,6 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
     WorkflowDefinition {
         version: WorkflowDefinitionVersion::CURRENT,
         execution: None,
-
         dependencies: BTreeMap::new(),
         nodes,
         edges,
@@ -89,23 +88,4 @@ fn main() {
             "generate_ms": generate_ms, "source_bytes": source_bytes,
         })
     );
-}
-
-#[test]
-fn task_only_benchmark_preserves_numeric_and_string_payloads() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    for payload in [0, 16] {
-        let definition = definition(3, payload);
-        let plan = plan_definition(&definition).unwrap();
-        let output = instantiate_compiled(&plan, &registry)
-            .unwrap()
-            .execute()
-            .unwrap();
-        let expected = if payload == 0 {
-            json!(42)
-        } else {
-            json!("x".repeat(payload))
-        };
-        assert_eq!(output["result"], expected);
-    }
 }

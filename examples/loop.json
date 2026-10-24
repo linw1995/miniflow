@@ -1,18 +1,39 @@
 {
   "version": "2026-10-23",
   "dependencies": {
-    "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" },
-    "code": { "package": "mfn-code", "path": "../crates/builtin-nodes/code" }
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    }
   },
   "nodes": [
-    { "id": "seed", "kind": "builtin.constant", "config": { "value": 0 } },
+    {
+      "id": "seed",
+      "kind": "builtin.constant",
+      "config": {
+        "value": 0
+      }
+    },
     {
       "id": "repeat",
       "kind": "workflow.loop",
       "loop": {
         "max_iterations": 5,
-        "variables": [{ "name": "count", "type": "int" }],
-        "until": { "variable": "count", "operator": "gte", "value": 3 },
+        "variables": [
+          {
+            "name": "count",
+            "type": "int"
+          }
+        ],
+        "until": {
+          "variable": "count",
+          "operator": "gte",
+          "value": 3
+        },
         "body": {
           "nodes": [
             {
@@ -20,19 +41,35 @@
               "kind": "builtin.code",
               "config": {
                 "language": "cel",
-                "inputs": { "count": "int" },
-                "code": { "next": "count + 1" }
+                "inputs": {
+                  "count": "int"
+                },
+                "code": {
+                  "next": "count + 1"
+                }
               },
               "inputs": {
-                "count": { "from": { "node": "%loop", "port": "count" } }
+                "count": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "count"
+                  }
+                }
               }
             },
             {
               "id": "assign",
               "kind": "workflow.loop_assign",
-              "config": { "variable": "count" },
+              "config": {
+                "variable": "count"
+              },
               "inputs": {
-                "value": { "from": { "node": "increment", "port": "next" } }
+                "value": {
+                  "from": {
+                    "node": "increment",
+                    "port": "next"
+                  }
+                }
               }
             }
           ],
@@ -40,22 +77,39 @@
             {
               "label": "Advance counter",
               "annotation": "Increment the current counter and assign the next value to loop state.",
-              "nodes": ["increment", "assign"]
+              "nodes": [
+                "increment",
+                "assign"
+              ]
             }
           ]
         }
       },
       "inputs": {
-        "count": { "from": { "node": "seed", "port": "value" } }
+        "count": {
+          "from": {
+            "node": "seed",
+            "port": "value"
+          }
+        }
       }
     }
   ],
-  "outputs": [{ "name": "count", "node": "repeat", "port": "count" }],
+  "outputs": [
+    {
+      "name": "count",
+      "node": "repeat",
+      "port": "count"
+    }
+  ],
   "clusters": [
     {
       "label": "Bounded counter",
       "annotation": "Initialize the counter and repeat until it reaches three or the iteration limit is met.",
-      "nodes": ["seed", "repeat"]
+      "nodes": [
+        "seed",
+        "repeat"
+      ]
     }
   ]
 }

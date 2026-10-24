@@ -1070,7 +1070,7 @@ pub fn partition_execution_domains(
 pub fn bind_domain_snapshots<N>(
     domains: ExecutionDomains,
     nodes: &[FlowNode<N>],
-    message_source: impl Fn(usize) -> Option<usize>,
+    message_source: impl Fn(&ExecutionDomain) -> Option<usize>,
 ) -> ExecutionDomains {
     let visibility = domains
         .domains()
@@ -1081,7 +1081,7 @@ pub fn bind_domain_snapshots<N>(
                 .iter()
                 .flat_map(|&ancestor| domains.domains()[ancestor].nodes.iter().copied());
             let keys: BTreeSet<_> = ancestors
-                .chain(message_source(domain.id).map(NodeId::new))
+                .chain(message_source(domain).map(NodeId::new))
                 .flat_map(|id| {
                     let node = &nodes[id.index()];
                     node.metadata.output_ports().map(move |port| {
@@ -1096,11 +1096,11 @@ pub fn bind_domain_snapshots<N>(
 }
 
 /// Validates message ownership and partitions execution domains for a stream graph.
-pub fn build_message_domains(
+pub fn build_stream_program(
     nodes: &[FlowNode],
     dependencies: &[Vec<FlowDependency>],
     outputs: &[WorkflowOutputDefinition],
-) -> Result<mf_runtime::MessageDomains, StreamBuildError> {
+) -> Result<mf_runtime::StreamProgram, StreamBuildError> {
     let mut indices = BTreeMap::new();
     let mut output_index = BTreeMap::new();
     for (index, node) in nodes.iter().enumerate() {
@@ -1287,7 +1287,7 @@ pub fn build_message_domains(
             );
         }
     }
-    let mut selected_domains = BTreeSet::new();
+    let mut selected_outputs = vec![Vec::new(); sources.len()];
     for output in outputs {
         let index = indices
             .get(output.node.as_str())
@@ -1317,7 +1317,12 @@ pub fn build_message_domains(
         } else {
             output_domains[index]
         };
-        selected_domains.insert(domain);
+        selected_outputs[domain].push((
+            output.name.to_string(),
+            output.node.to_string(),
+            output_id(output.node.as_str(), &output.port),
+            output.optional,
+        ));
     }
 
     let mut execution_edges = Vec::new();
@@ -1341,31 +1346,135 @@ pub fn build_message_domains(
         })
         .collect();
     let execution_domains = partition_execution_domains(&order, &execution_edges, &boundaries);
-    let mut execution_domains_by_message = vec![Vec::new(); sources.len()];
-    let mut message_domain_by_execution = vec![0; execution_domains.len()];
-    for execution_domain in execution_domains.domains() {
-        let node = execution_domain.nodes[0].index();
-        let message_domain = node_message_domains[node];
-        execution_domains_by_message[message_domain].push(execution_domain.id);
-        message_domain_by_execution[execution_domain.id] = message_domain;
-    }
-    let execution_domains = bind_domain_snapshots(execution_domains, nodes, |id| {
-        sources[message_domain_by_execution[id]]
+    let execution_domains = bind_domain_snapshots(execution_domains, nodes, |execution| {
+        sources[node_message_domains[execution.nodes[0].index()]]
     });
-    Ok(mf_runtime::MessageDomains::from_parts_with_streams(
-        sources.into(),
-        output_domains.into(),
-        stream_output_domains.into(),
-        selected_domains.into_iter().collect::<Vec<_>>().into(),
+    let messages: Vec<_> = selected_outputs
+        .into_iter()
+        .enumerate()
+        .map(|(message, selected)| {
+            let select_outputs = (!selected.is_empty()).then(|| {
+                std::sync::Arc::new(move |context: &mut mf_runtime::ExecutionContext| {
+                    let mut values = mf_runtime::FlowOutputs::new();
+                    for (name, node, key, optional) in &selected {
+                        if let Some(value) =
+                            context.select_output_keyed(name, node, key, *optional)?
+                        {
+                            values.insert(name.clone(), value);
+                        }
+                    }
+                    Ok(values)
+                }) as std::sync::Arc<mf_runtime::StreamOutputSelector>
+            });
+            mf_runtime::StreamMessageProgram {
+                source: sources[message],
+                schedule: build_message_schedule(
+                    &execution_domains,
+                    &node_message_domains,
+                    message,
+                ),
+                select_outputs,
+            }
+        })
+        .collect();
+    let emissions = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let terminal = matches!(node.node, Some(NodeExecution::TaskStream(_)));
+            let message = if terminal {
+                stream_output_domains[index]
+            } else {
+                sources.iter().position(|source| *source == Some(index))
+            }?;
+            Some(mf_runtime::StreamEmissionBinding {
+                message,
+                connected: messages[message].select_outputs.is_some()
+                    || !messages[message].schedule.domains.is_empty(),
+                terminal,
+                initialize: std::sync::Arc::new(move |plan, result| {
+                    mf_runtime::ExecutionContext::for_message(plan.emission_node(index), result)
+                }),
+            })
+        })
+        .collect();
+    let inputs = dependencies
+        .iter()
+        .enumerate()
+        .map(|(index, dependencies)| {
+            let dependencies: Vec<_> = dependencies
+                .iter()
+                .filter_map(crate::FlowDependency::output_dependency)
+                .collect();
+            std::sync::Arc::new(
+                move |plan: &mf_runtime::StreamPlan,
+                      context: &mf_runtime::ExecutionContext,
+                      inputs: &mut mf_runtime::Inputs,
+                      causes| {
+                    context.resolve_node_inputs(
+                        &plan.nodes()[index],
+                        dependencies
+                            .iter()
+                            .map(mf_runtime::FlowDependency::borrowed),
+                        &[],
+                        inputs,
+                        causes,
+                    )
+                },
+            ) as std::sync::Arc<mf_runtime::StreamInputResolver>
+        })
+        .collect();
+    Ok(mf_runtime::StreamProgram {
         execution_domains,
-        execution_domains_by_message
-            .into_iter()
-            .map(Cow::Owned)
-            .collect::<Vec<_>>()
-            .into(),
-        message_domain_by_execution.into(),
-    ))
+        messages,
+        emissions,
+        inputs,
+    })
 }
+
+fn build_message_schedule(
+    execution_domains: &ExecutionDomains,
+    node_messages: &[usize],
+    message: usize,
+) -> mf_runtime::MessageSchedule {
+    let domains: Vec<_> = execution_domains
+        .domains()
+        .iter()
+        .filter(|domain| node_messages[domain.nodes[0].index()] == message)
+        .map(|domain| domain.id)
+        .collect();
+    let mut local = vec![usize::MAX; execution_domains.len()];
+    for (rank, &domain) in domains.iter().enumerate() {
+        local[domain] = rank;
+    }
+    let initial_deps = domains
+        .iter()
+        .map(|&domain| {
+            execution_domains.domains()[domain]
+                .predecessors
+                .iter()
+                .filter(|&&previous| local[previous] != usize::MAX)
+                .count()
+        })
+        .collect();
+    let successors = domains
+        .iter()
+        .map(|&domain| {
+            execution_domains.domains()[domain]
+                .successors
+                .iter()
+                .filter_map(|&next| (local[next] != usize::MAX).then_some(local[next]))
+                .collect()
+        })
+        .collect();
+    mf_runtime::MessageSchedule {
+        domains: domains.into_boxed_slice(),
+        local: local.into_boxed_slice(),
+        initial_deps,
+        successors,
+    }
+}
+
 pub fn workflow_input_schema<'a, N: 'a>(
     nodes: impl IntoIterator<Item = (&'a FlowNode<N>, bool)>,
     mut input_bound: impl FnMut(&str, &str) -> bool,
@@ -1565,20 +1674,19 @@ pub fn prepare_stream(
             message: "stream nodes and dependencies must have equal lengths"
         }
     );
-    let domains = build_message_domains(&nodes, &dependencies, &outputs)?;
+    let program = build_stream_program(&nodes, &dependencies, &outputs)?;
     validate_exclusive_branches(nodes.iter().zip(&dependencies).map(|(node, dependencies)| {
         (
             node,
             dependencies.iter().map(crate::FlowDependency::borrowed),
         )
     }))?;
-    let reserved_domains = 1
-        + (1..domains.sources().len())
-            .filter(|domain| {
-                domains.selected_domains().contains(domain)
-                    || !domains.execution_domains_for_message(*domain).is_empty()
-            })
-            .count();
+    let reserved_domains = 1 + program
+        .messages
+        .iter()
+        .skip(1)
+        .filter(|message| message.select_outputs.is_some() || !message.schedule.domains.is_empty())
+        .count();
     ensure!(
         execution.limits.max_pending_messages >= reserved_domains,
         InvalidPlanSnafu {
@@ -1609,14 +1717,7 @@ pub fn prepare_stream(
         .collect();
     let schema =
         stream_workflow_inputs(&nodes, &dependencies, &initial).context(WorkflowInputsSnafu)?;
-    let prepared = mf_runtime::PreparedStream::from_plan(
-        execution,
-        nodes,
-        dependencies.into(),
-        domains,
-        outputs.into(),
-        schema,
-    );
+    let prepared = mf_runtime::PreparedStream::from_plan(execution, nodes, program, schema);
     Ok(crate::dependencies::bind_stream_guards(prepared, guards))
 }
 #[cfg(test)]

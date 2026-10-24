@@ -1,7 +1,6 @@
 {
   "version": "2026-10-19",
   "execution": {
-    "mode": "stream",
     "limits": {
       "max_pending_messages": 2,
       "workers": 1

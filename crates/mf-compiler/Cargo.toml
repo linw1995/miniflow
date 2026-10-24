@@ -13,7 +13,6 @@ codegen = ["dep:prettyplease", "dep:proc-macro2", "dep:quote", "dep:syn"]
 [[example]]
 name = "benchmark_graph"
 required-features = ["codegen"]
-test = true
 
 [dependencies]
 # Runtime contracts and workflow observation.

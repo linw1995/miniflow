@@ -23,6 +23,7 @@ cargo run -p mf-cli --features development-support -- run ./target/test-affected
 Omit `--params.run true` to produce a plan without executing tests.
 
 These checks cover formatting, Rust diagnostics, affected package tests, workflow configuration, Markdown, and the [dependency license audit](docs/licensing.md).
+The JSON hook automatically formats files with two-space indentation, preserving key order and Unicode characters.
 See [test selection](docs/ci.md#affected-package-tests) for commit and PR comparisons.
 Do not run `nix flake check -L` locally: its test check repeats the complete suite already run by CI coverage.
 

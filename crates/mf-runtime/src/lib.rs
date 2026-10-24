@@ -10,7 +10,6 @@ mod flow;
 mod future_execution;
 mod iteration;
 mod loop_node;
-mod message_domain;
 mod node;
 mod node_target;
 mod number;
@@ -69,7 +68,6 @@ pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_exit, prepared_loop_source_types,
     prepared_scope_source,
 };
-pub use message_domain::MessageDomains;
 pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{NodeIdentity, SkipCause};
 pub use mf_telemetry::events::{EventRecord, EventRecorder};
@@ -98,8 +96,8 @@ pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{SuccessDependencySnafu, WorkflowRunError};
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
-    StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate, TypedEventNode,
-    TypedStreamNode, execute_typed_event,
+    StreamExecution, StreamLimits, StreamNode, TimerUpdate, TypedEventNode, TypedStreamNode,
+    execute_typed_event,
 };
 pub use stream_instance::{
     MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
@@ -107,7 +105,9 @@ pub use stream_instance::{
 };
 pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{
-    FlowDependency, GeneratedStreamDomainExecutor, MessageSchedule, PreparedStream, StreamPlan,
+    FlowDependency, GeneratedStreamDomainExecutor, MessageSchedule, PreparedStream,
+    StreamEmissionBinding, StreamInputResolver, StreamMessageInitializer, StreamMessageProgram,
+    StreamOutputSelector, StreamPlan, StreamProgram,
 };
 pub use subgraph::PreparedSubgraph;
 pub use task_stream::{

@@ -41,7 +41,7 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
                 json!({"result":27}),
             ),
             "stream" => (
-                json!({"version":"2026-10-03", "execution":{"mode":"stream"},
+                json!({"version":"2026-10-03", "execution":{},
                 "nodes":[{"id":"read", "kind":"builtin.readline"}],
                 "outputs":[{"name":"result", "node":"read", "port":"line"}]}),
                 json!({"read.path":data}),

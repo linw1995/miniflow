@@ -104,12 +104,19 @@
     {
       "label": "Select execution mode",
       "annotation": "Read the CI flag and activate exactly one local or CI configuration producer.",
-      "nodes": ["params", "route", "local", "ci"]
+      "nodes": [
+        "params",
+        "route",
+        "local",
+        "ci"
+      ]
     },
     {
       "label": "Configuration convergence",
       "annotation": "Consume the one produced configuration through an exclusive input binding.",
-      "nodes": ["consume"]
+      "nodes": [
+        "consume"
+      ]
     }
   ]
 }

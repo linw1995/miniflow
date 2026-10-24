@@ -2,6 +2,19 @@ use mf_runtime::{
     ExecutionContext, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
     NodeRegistration, NodeValue, PreparedNode, TypedEmitter, TypedNodeResult, TypedTaskStreamNode,
 };
+use snafu::{ResultExt, Snafu};
+use std::path::PathBuf;
+
+#[derive(Debug, Snafu)]
+enum Error {
+    #[snafu(display("could not write fixture marker `{}`: {source}", path.display()))]
+    WriteMarker {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[snafu(display("timed out waiting for fixture delivery gate `{}`", path.display()))]
+    DeliveryGateTimeout { path: PathBuf },
+}
 
 #[derive(NodeValue)]
 struct Request {
@@ -36,7 +49,8 @@ impl TypedTaskStreamNode for Count {
     ) -> Result<TypedNodeResult<Reply>, NodeExecutionError> {
         if let Some(path) = &self.marker {
             std::fs::write(path, "executed")
-                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
+                .context(WriteMarkerSnafu { path })
+                .boxed()?;
         }
         if emitter.is_connected() {
             for delta in 0..input.count {
@@ -50,10 +64,7 @@ impl TypedTaskStreamNode for Count {
                             return Err(error.into());
                         }
                         if std::time::Instant::now() >= deadline {
-                            return mf_runtime::NodeExecutionFailedSnafu {
-                                message: "fixture delivery gate timed out",
-                            }
-                            .fail();
+                            DeliveryGateTimeoutSnafu { path }.fail::<()>().boxed()?;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
@@ -156,7 +167,8 @@ impl mf_runtime::TypedTaskNode for Finish {
         _: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<Empty>, NodeExecutionError> {
         std::fs::write(&self.0, input.total.to_string())
-            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
+            .context(WriteMarkerSnafu { path: &self.0 })
+            .boxed()?;
         Ok(Empty {}.into())
     }
 }

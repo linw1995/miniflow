@@ -365,7 +365,7 @@ The [answer-and-title example](../examples/chat-title-flow.json) declares only t
 "outputs": [{"name": "answer", "node": "model", "port": "delta"}]
 ```
 
-The example uses `execution.mode = stream` and ordinary JSONL output. The title call stays terminal-only,
+Selecting the answer delta infers streaming execution and ordinary JSONL output. The title call stays terminal-only,
 and final `usages` includes both calls when title generation runs. A finite workflow selecting only terminal
 ports keeps ordinary JSON execution. Distinct actual model calls carry their own `model_call_id`.
 Generated text and SSE framing have no client-side byte limits.
@@ -846,7 +846,6 @@ port references for both categories:
 
 ```json
 {
-  "execution": {"mode": "stream"},
   "outputs": [
     {"name": "increments", "node": "group.count", "port": "delta"},
     {"name": "total", "node": "group.count", "port": "total"}
@@ -856,7 +855,8 @@ port references for both categories:
 
 This fragment assumes a combined provider named `group.count`, such as the counting provider in
 [node development](node-development.md#combined-task-and-stream-execution). Node IDs remain opaque;
-dots are not path separators. Incremental graph edges and output selections require streaming execution.
+dots are not path separators. Incremental graph edges and output selections select streaming execution
+automatically during compilation. A combined node with only terminal consumers keeps finite execution.
 Finite scopes and isolated Task targets retain terminal-only adaptation without an unread receiver.
 
 A combined node's terminal ports stay in its input domain; its incremental ports create a separate ordered
@@ -867,11 +867,13 @@ waits for connected work to drain, and terminal values are never reconstructed f
 
 Use application event nodes when several delivery kinds must share one ordered protocol. The conversation
 Flow routes preview events and releases final settlement inputs on upstream close, so the graph owns their
-ordering rather than a runtime publisher bypass.
+ordering.
 
 ## Streaming through the in-memory API
 
-Schemas `2026-10-03`, `2026-10-19`, and `2026-10-23` enable streams with `execution: {"mode": "stream"}` and optional limits. Initial
+Schemas `2026-10-03`, `2026-10-19`, and `2026-10-23` infer streams from Event/Stream node contracts
+and consumed or selected incremental ports. `execution` accepts optional `limits` without a mode field;
+its presence does not force a terminal-only graph into streaming execution. Initial
 nodes receive their workflow parameters once. Initial tasks and their ordinary dependencies execute in one
 startup frame; producers execute independently and emit messages into their own domains. An empty graph or a
 task-only graph finishes without external input. A producer reached through startup tasks also starts once.

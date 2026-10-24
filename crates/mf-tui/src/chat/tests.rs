@@ -431,8 +431,7 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
 
 fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf) {
     let mut launch = launch(directory);
-    launch.manifest.definition.execution =
-        Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    launch.manifest.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
     launch.manifest.definition.outputs.push(
         serde_json::from_value(json!({"name":"answer","node":"start","port":"delta"})).unwrap(),
     );

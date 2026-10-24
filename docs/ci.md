@@ -436,8 +436,7 @@ non-executable input can pass without a mapping: blank/line-comment files, or a
 restricted grammar of imports and out-of-line module declarations with known
 `cfg`, `path`, or `macro_use` attributes. In mixed modules, the evaluator can also
 prove that only those declarations changed by comparing all remaining top-level
-items verbatim against the comparison base. It masks strings, characters, and
-nested comments while locating item boundaries, and rejects malformed boundaries.
+items verbatim against the comparison base. It uses the pinned `rust-analyzer` parser to locate item boundaries and rejects malformed syntax.
 Changed executable items, inline modules, unknown attributes, and macro invocations
 do not qualify. The allowed built-in attributes
 cannot be shadowed by user-defined attributes; see the [Rust name-resolution rules](https://doc.rust-lang.org/reference/names/name-resolution.html). Other unmapped Rust source needs a suitable instrumented build or an

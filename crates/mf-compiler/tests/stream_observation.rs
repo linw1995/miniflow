@@ -209,7 +209,7 @@ inventory::submit! { mf_runtime::NodeRegistration {
 #[test]
 fn partial_event_publication_keeps_only_admitted_data_and_failed_outcome() {
     let plan = plan(
-        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[{"id":"start", "kind":"builtin.identity"}, {"id":"partial","kind":"test.partial_capture"}],
         "edges":[{"from_node":"start","from_output":"value","to_node":"partial","to_input":"value"}],
         "outputs":[{"name":"value","node":"partial","port":"value"}]}),
@@ -384,7 +384,7 @@ fn records(harness: &Harness) -> Vec<StreamRecord> {
 #[test]
 fn startup_loop_observation_needs_no_synthetic_message_or_source() {
     let plan = plan(
-        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[{"id":"repeat", "kind":"workflow.loop", "loop":{"max_iterations":2,
             "variables":[{"name":"x", "type":"int"}], "body":{
                 "nodes":[{"id":"copy", "kind":"builtin.identity"}],
@@ -426,7 +426,7 @@ fn startup_loop_observation_needs_no_synthetic_message_or_source() {
 #[test]
 fn invalid_startup_arguments_fail_before_any_node_started_record() {
     let plan = plan(
-        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[{"id":"copy", "kind":"builtin.identity"}]}),
     );
     let harness = Harness::new(true);
@@ -634,7 +634,7 @@ fn task_failures_preserve_outcomes_and_raw_snapshots_need_no_telemetry() {
     let value = json!({"items":[null, true, 7]});
     let recording = Snapshots::memory();
     let plan = self::plan(
-        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[{"id":"copy", "kind":"builtin.identity"}],
         "outputs":[{"name":"value","node":"copy","port":"value"}]}),
     );
@@ -663,7 +663,7 @@ fn task_failures_preserve_outcomes_and_raw_snapshots_need_no_telemetry() {
 
 #[test]
 fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
-    let value = json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+    let value = json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[
             {"id":"repeat", "kind":"workflow.loop", "loop":{"max_iterations":2, "variables":[{"name":"x", "type":"int"}], "body":{
                 "nodes":[{"id":"copy", "kind":"builtin.identity"}], "edges":[{"from_node":"%loop", "from_output":"x", "to_node":"copy", "to_input":"input"}]}}},

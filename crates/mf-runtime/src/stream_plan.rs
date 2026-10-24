@@ -1,7 +1,6 @@
 use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
-use crate::message_domain::MessageDomains;
 use crate::runner::ContextSnafu;
-use crate::{FlowNode, NodeExecution, StreamExecution, TaskNode, WorkflowOutputDefinition};
+use crate::{FlowNode, NodeExecution, StreamExecution, TaskNode};
 use snafu::OptionExt;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -36,7 +35,47 @@ pub type GeneratedStreamDomainExecutor = dyn Fn(&StreamPlan, &mut crate::Executi
     + Send
     + Sync;
 
+pub type StreamMessageInitializer = dyn Fn(&StreamPlan, crate::NodeResult) -> Result<crate::ExecutionContext, crate::WorkflowRunError>
+    + Send
+    + Sync;
+pub type StreamOutputSelector = dyn Fn(&mut crate::ExecutionContext) -> Result<crate::FlowOutputs, crate::WorkflowRunError>
+    + Send
+    + Sync;
+pub type StreamInputResolver = dyn Fn(
+        &StreamPlan,
+        &crate::ExecutionContext,
+        &mut crate::Inputs,
+        std::collections::BTreeSet<crate::SkipCause>,
+    ) -> Result<crate::InputResolution, crate::WorkflowRunError>
+    + Send
+    + Sync;
+
+/// A fixed emission channel bound before an invocation starts.
+#[derive(Clone)]
+pub struct StreamEmissionBinding {
+    pub message: usize,
+    pub connected: bool,
+    pub terminal: bool,
+    pub initialize: Arc<StreamMessageInitializer>,
+}
+
+/// Executable entry point and output selector for one message channel.
+pub struct StreamMessageProgram {
+    pub source: Option<usize>,
+    pub schedule: MessageSchedule,
+    pub select_outputs: Option<Arc<StreamOutputSelector>>,
+}
+
+/// Executable wiring and scheduling layout lowered before business execution.
+pub struct StreamProgram {
+    pub execution_domains: ExecutionDomains,
+    pub messages: Vec<StreamMessageProgram>,
+    pub emissions: Vec<Option<StreamEmissionBinding>>,
+    pub inputs: Vec<Arc<StreamInputResolver>>,
+}
+
 /// Precomputed scheduling layout for one message domain.
+#[derive(Clone)]
 pub struct MessageSchedule {
     /// Execution domain ids in rank order (== execution_domains_for_message).
     pub domains: Box<[usize]>,
@@ -51,13 +90,9 @@ pub struct MessageSchedule {
 pub struct StreamPlan {
     execution: StreamExecution,
     nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>>,
-    dependencies: Cow<'static, [Cow<'static, [FlowDependency]>]>,
-    domains: MessageDomains,
-    outputs: Cow<'static, [WorkflowOutputDefinition]>,
-    selected_output_domains: Vec<usize>,
+    program: StreamProgram,
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
-    schedules: Vec<MessageSchedule>,
     emission_nodes: Vec<Option<FlowNode<()>>>,
 }
 
@@ -70,8 +105,14 @@ impl std::fmt::Debug for PreparedStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedStream")
             .field("execution", &self.plan.execution)
-            .field("message_sources", &self.plan.message_sources())
-            .field("selected_domains", &self.plan.selected_domains())
+            .field(
+                "message_sources",
+                &self.plan.message_sources().collect::<Vec<_>>(),
+            )
+            .field(
+                "selected_domains",
+                &self.plan.selected_domains().collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -89,9 +130,7 @@ impl PreparedStream {
     pub fn from_plan(
         execution: StreamExecution,
         nodes: Vec<FlowNode>,
-        dependencies: Cow<'static, [Cow<'static, [FlowDependency]>]>,
-        domains: MessageDomains,
-        outputs: Cow<'static, [WorkflowOutputDefinition]>,
+        program: StreamProgram,
         input_schema: crate::WorkflowInputSchema,
     ) -> Self {
         let mut operator_states = Vec::with_capacity(nodes.len());
@@ -102,15 +141,20 @@ impl PreparedStream {
                 if !matches!(
                     node.node,
                     Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
-                ) && domains.stream_output_domain(index).is_none()
+                ) && program.emissions[index].is_none()
                 {
                     return None;
                 }
-                let mut metadata = node.metadata.clone();
-                if !metadata.stream_outputs.is_empty() {
-                    metadata.ports.outputs = std::mem::take(&mut metadata.stream_outputs);
-                    metadata.exclusive_outputs.clear();
-                }
+                let outputs = if matches!(node.node, Some(NodeExecution::TaskStream(_))) {
+                    node.metadata.stream_outputs.clone()
+                } else {
+                    node.metadata.ports.outputs.clone()
+                };
+                // Emitted records need only their output contract for validation and publication.
+                let metadata = crate::NodeMetadata::new(crate::NodePorts {
+                    inputs: Vec::new(),
+                    outputs,
+                });
                 Some(FlowNode {
                     definition_id: node.definition_id.clone(),
                     node: (),
@@ -127,7 +171,10 @@ impl PreparedStream {
                     Some(NodeExecution::Task(task)) => (Some(task), None),
                     Some(NodeExecution::TaskStream(mut task)) => {
                         task.set_stream_contract(&node.metadata.stream_outputs);
-                        if domains.stream_output_domain(index).is_some() {
+                        if program.emissions[index]
+                            .as_ref()
+                            .is_some_and(|route| route.terminal)
+                        {
                             (None, Some(NodeExecution::TaskStream(task)))
                         } else {
                             (Some(task as Box<dyn TaskNode>), None)
@@ -147,38 +194,12 @@ impl PreparedStream {
                 }
             })
             .collect();
-        let selected_output_domains = outputs
-            .iter()
-            .map(|output| {
-                let index = nodes
-                    .iter()
-                    .position(|node| node.definition_id == output.node)
-                    .expect("selected output source was validated");
-                if nodes[index]
-                    .metadata
-                    .stream_outputs
-                    .iter()
-                    .any(|port| port.name == output.port)
-                {
-                    domains
-                        .stream_output_domain(index)
-                        .expect("selected emission domain was planned")
-                } else {
-                    domains.output_domain(index)
-                }
-            })
-            .collect();
-        let schedules = build_message_schedules(&domains);
         let plan = StreamPlan {
             execution,
             nodes,
-            dependencies,
-            domains,
-            outputs,
-            selected_output_domains,
+            program,
             input_schema,
             generated_domains: BTreeMap::new(),
-            schedules,
             emission_nodes,
         };
         Self {
@@ -205,22 +226,63 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
-    pub(super) fn emission_node(&self, node: usize) -> &FlowNode<()> {
+    pub fn emission_node(&self, node: usize) -> &FlowNode<()> {
         self.emission_nodes[node]
             .as_ref()
             .expect("message source has an emission contract")
     }
 
-    pub fn has_emission_consumers(&self, node: usize) -> bool {
-        if self.nodes[node].node.is_some() {
-            return false;
-        }
-        let domain = self
-            .stream_output_domain(node)
-            .unwrap_or_else(|| self.output_domain(node));
-        self.selected_domains().contains(&domain)
-            || !self.execution_domains_for_message(domain).is_empty()
+    pub fn emission_binding(&self, node: usize) -> &StreamEmissionBinding {
+        self.program.emissions[node]
+            .as_ref()
+            .expect("emitting node has a bound channel")
     }
+
+    pub fn has_emission_consumers(&self, node: usize) -> bool {
+        self.program.emissions[node]
+            .as_ref()
+            .is_some_and(|route| route.connected)
+    }
+
+    pub fn program(&self) -> &StreamProgram {
+        &self.program
+    }
+
+    pub fn resolve_inputs(
+        &self,
+        node: usize,
+        context: &crate::ExecutionContext,
+        inputs: &mut crate::Inputs,
+        causes: std::collections::BTreeSet<crate::SkipCause>,
+    ) -> Result<crate::InputResolution, crate::WorkflowRunError> {
+        (self.program.inputs[node])(self, context, inputs, causes)
+    }
+
+    pub fn resolve_event_inputs(
+        &self,
+        node: usize,
+        context: &mut crate::ExecutionContext,
+    ) -> Result<(crate::Inputs, crate::InputResolution), crate::WorkflowRunError> {
+        context.resolve_event_inputs(&self.nodes[node], |context, inputs| {
+            self.resolve_inputs(node, context, inputs, Default::default())
+        })
+    }
+
+    pub fn selects_outputs(&self, message: usize) -> bool {
+        self.program.messages[message].select_outputs.is_some()
+    }
+
+    pub fn select_outputs(
+        &self,
+        message: usize,
+        context: &mut crate::ExecutionContext,
+    ) -> Result<crate::FlowOutputs, crate::WorkflowRunError> {
+        (self.program.messages[message]
+            .select_outputs
+            .as_ref()
+            .expect("selected message has an output function"))(context)
+    }
+
     pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
         &self.input_schema
     }
@@ -230,52 +292,29 @@ impl StreamPlan {
     pub fn nodes(&self) -> &[FlowNode<Option<Box<dyn TaskNode>>>] {
         &self.nodes
     }
-    pub fn dependencies(&self, node: usize) -> &[FlowDependency] {
-        &self.dependencies[node]
+    pub fn message_sources(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Option<usize>> + DoubleEndedIterator + '_ {
+        self.program.messages.iter().map(|message| message.source)
     }
-    pub fn message_domains(&self) -> &MessageDomains {
-        &self.domains
-    }
-    pub fn message_sources(&self) -> &[Option<usize>] {
-        self.domains.sources()
-    }
-    pub fn message_schedule(&self, message_domain: usize) -> &MessageSchedule {
-        &self.schedules[message_domain]
+    pub fn message_schedule(&self, message: usize) -> &MessageSchedule {
+        &self.program.messages[message].schedule
     }
     pub fn execution_domains(&self) -> &ExecutionDomains {
-        self.domains.execution_domains()
+        &self.program.execution_domains
     }
-    pub fn execution_domains_for_message(&self, message_domain: usize) -> &[usize] {
-        self.domains.execution_domains_for_message(message_domain)
+    pub fn execution_domains_for_message(&self, message: usize) -> &[usize] {
+        &self.message_schedule(message).domains
     }
     pub fn execution_domain(&self, id: usize) -> &ExecutionDomain {
         &self.execution_domains().domains()[id]
     }
-    pub fn message_domain_for_execution(&self, id: usize) -> usize {
-        self.domains.message_domain_for_execution(id)
-    }
-    pub fn output_domain(&self, node: usize) -> usize {
-        self.domains.output_domain(node)
-    }
-
-    pub fn stream_output_domain(&self, node: usize) -> Option<usize> {
-        self.domains.stream_output_domain(node)
-    }
-    pub fn outputs(&self) -> &[WorkflowOutputDefinition] {
-        &self.outputs
-    }
-    pub fn selected_domains(&self) -> &[usize] {
-        self.domains.selected_domains()
-    }
-
-    pub fn outputs_for_domain(
-        &self,
-        domain: usize,
-    ) -> impl Iterator<Item = &WorkflowOutputDefinition> {
-        self.outputs
+    pub fn selected_domains(&self) -> impl Iterator<Item = usize> + '_ {
+        self.program
+            .messages
             .iter()
-            .zip(&self.selected_output_domains)
-            .filter_map(move |(output, selected)| (*selected == domain).then_some(output))
+            .enumerate()
+            .filter_map(|(message, entry)| entry.select_outputs.is_some().then_some(message))
     }
 
     pub fn execute_resolved_position(
@@ -321,15 +360,8 @@ impl StreamPlan {
                 break;
             }
             self.execute_resolved_position(position, context, |node, ctx, inputs| {
-                ctx.resolve_node_inputs(
-                    node,
-                    self.dependencies(position)
-                        .iter()
-                        .map(FlowDependency::borrowed),
-                    &[],
-                    inputs,
-                    Default::default(),
-                )
+                let _ = node;
+                self.resolve_inputs(position, ctx, inputs, Default::default())
             })?;
             if context.scope_exit_requested() {
                 break;
@@ -337,46 +369,4 @@ impl StreamPlan {
         }
         Ok(())
     }
-}
-
-fn build_message_schedules(domains: &MessageDomains) -> Vec<MessageSchedule> {
-    let execution_domains = domains.execution_domains();
-    let count = execution_domains.len();
-    (0..domains.sources().len())
-        .map(|message| {
-            let message_domains = domains.execution_domains_for_message(message);
-            let mut local = vec![usize::MAX; count];
-            for (rank, &domain) in message_domains.iter().enumerate() {
-                local[domain] = rank;
-            }
-            let initial_deps = message_domains
-                .iter()
-                .map(|&domain| {
-                    execution_domains.domains()[domain]
-                        .predecessors
-                        .iter()
-                        .filter(|&&predecessor| local[predecessor] != usize::MAX)
-                        .count()
-                })
-                .collect();
-            let successors = message_domains
-                .iter()
-                .map(|&domain| {
-                    execution_domains.domains()[domain]
-                        .successors
-                        .iter()
-                        .filter_map(|&successor| {
-                            (local[successor] != usize::MAX).then_some(local[successor])
-                        })
-                        .collect()
-                })
-                .collect();
-            MessageSchedule {
-                domains: message_domains.to_vec().into_boxed_slice(),
-                local: local.into_boxed_slice(),
-                initial_deps,
-                successors,
-            }
-        })
-        .collect()
 }

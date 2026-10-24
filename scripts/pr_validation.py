@@ -167,82 +167,40 @@ def declarations_only(contents):
     return True
 
 
-def executable_items(source):
-    """Retain unknown Rust items verbatim; strip only proven declarations."""
-    raw_literal = re.compile(r'r(#{0,255})"')
-    quoted_literal = re.compile(r'"(?:[^"\\]|\\[\s\S])*"')
-    character_literal = re.compile(r"'(?:[^'\\\n]|\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.))'")
-    masked = list(source)
-    index = 0
-    while index < len(source):
-        start = index
-        if source.startswith('//', index):
-            end = source.find('\n', index)
-            index = len(source) if end < 0 else end
-        elif source.startswith('/*', index):
-            index += 2
-            depth = 1
-            while index < len(source) and depth:
-                if source.startswith('/*', index):
-                    depth += 1
-                    index += 2
-                elif source.startswith('*/', index):
-                    depth -= 1
-                    index += 2
-                else:
-                    index += 1
-            if depth:
-                return None
-        elif raw := raw_literal.match(source, index):
-            end = source.find('"' + raw[1], raw.end())
-            if end < 0:
-                return None
-            index = end + len(raw[1]) + 1
-        elif source[index] == '"':
-            literal = quoted_literal.match(source, index)
-            if literal is None:
-                return None
-            index = literal.end()
-        elif char := character_literal.match(source, index):
-            index = char.end()
-        else:
-            index += 1
-            continue
-        masked[start:index] = ['\n' if char == '\n' else ' ' for char in source[start:index]]
-
-    items, stack, start = [], [], 0
-    for index, char in enumerate(masked):
-        if char in '([{':
-            stack.append(char)
-        elif char in ')]}':
-            if not stack or stack.pop() != {')': '(', ']': '[', '}': '{'}[char]:
-                return None
-        boundary = char == ';' and not stack
-        if char == '}' and not stack:
-            # Braced imports end at their semicolon, unlike function and macro bodies.
-            boundary = not declarations_only(source[start:index + 1] + ';')
-        if boundary:
-            item = source[start:index + 1]
-            if not declarations_only(item):
-                items.append(item.strip())
-            start = index + 1
-    if stack:
-        return None
-    tail = source[start:]
-    if not declarations_only(tail):
-        items.append(tail.strip())
-    return items
-
-
-def declaration_changes_only(root, base, path, contents):
-    if declarations_only(contents):
-        return True
+def executable_items(contents):
+    # The pinned Rust parser locates top-level items without interpreting literals or macros.
+    # Keep every nondeclaration byte-for-byte so missing mappings cannot hide body changes.
     try:
-        previous = command(root, 'git', 'show', f'{base}:{path}')
-    except AnalysisError:
-        return False
-    before, after = executable_items(previous), executable_items(contents)
-    return before is not None and after is not None and before == after
+        parsed = subprocess.run(["rust-analyzer", "parse", "--json"], input=contents,
+                                capture_output=True, text=True, timeout=30, check=True)
+        tree = json.loads(parsed.stdout)
+        source = contents.encode()
+        if tree["kind"] != "SOURCE_FILE" or tree["end"][0] != len(source):
+            return None
+        def has_error(node):
+            return node["kind"] == "ERROR" or any(has_error(child) for child in node.get("children", []))
+        if has_error(tree):
+            return None
+        items, offset = [], 0
+        for item in tree["children"]:
+            start, end = item["start"][0], item["end"][0]
+            if start != offset or not start <= end <= len(source):
+                return None
+            offset = end
+            if item["kind"] == "WHITESPACE":
+                continue
+            text = source[start:end].decode()
+            if item["kind"] in {"USE", "MODULE", "EXTERN_CRATE"} and declarations_only(text):
+                continue
+            items.append((item["kind"], text))
+        return items if offset == len(source) else None
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
+        return None
+
+
+def declaration_changes_only(before, after):
+    previous = executable_items(before)
+    return previous is not None and previous == executable_items(after)
 
 
 def evaluate_coverage(root, current, comparison, plan, report):
@@ -270,7 +228,12 @@ def evaluate_coverage(root, current, comparison, plan, report):
     for path, changed in sorted(changes.items()):
         contents = command(root, "git", "show", f"{current['merge']}:{path}").splitlines()
         if path not in mappings:
-            if declaration_changes_only(root, comparison["base"], path, "\n".join(contents)):
+            after = "\n".join(contents)
+            try:
+                before = command(root, "git", "show", f"{comparison['base']}:{path}")
+            except AnalysisError:
+                before = ""
+            if declarations_only(after) or declaration_changes_only(before.rstrip("\n"), after):
                 non_executable.append(path)
             else:
                 missing.append(path)

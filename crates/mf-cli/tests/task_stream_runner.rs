@@ -50,7 +50,6 @@ fn count_flow(streaming: bool, gate: Option<&Path>, marker: Option<&Path>) -> se
         "outputs":[{"name":"total","node":"count","port":"total"}]
     });
     if streaming {
-        document["execution"] = json!({"mode":"stream"});
         document["outputs"]
             .as_array_mut()
             .unwrap()

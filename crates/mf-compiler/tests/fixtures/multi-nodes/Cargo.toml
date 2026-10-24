@@ -24,3 +24,4 @@ mf-runtime = { path = "../../../../mf-runtime", version = "0.1.0" }
 # Test node configuration and values.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+snafu = "0.9.2"

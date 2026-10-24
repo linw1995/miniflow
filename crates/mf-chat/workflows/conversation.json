@@ -85,8 +85,5 @@
       "port": "settlement",
       "optional": true
     }
-  ],
-  "execution": {
-    "mode": "stream"
-  }
+  ]
 }

@@ -6,6 +6,8 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-toml
+      - id: pretty-format-json
+        args: ["--autofix", "--indent=2", "--no-sort-keys", "--no-ensure-ascii"]
       - id: check-merge-conflict
       - id: check-case-conflict
 

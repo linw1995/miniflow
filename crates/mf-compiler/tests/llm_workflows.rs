@@ -425,7 +425,7 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
     fs::write(&input, "first\nsecond\n").unwrap();
     let server = Server::start(vec![Reply::text("reply"); 4]);
     let mut value = json!({
-        "version": "2026-10-03", "execution": {"mode": "stream", "limits": {"workers": 1, "max_pending_messages": 2}},
+        "version": "2026-10-03", "execution": {"limits": {"workers": 1, "max_pending_messages": 2}},
         "dependencies": dependencies(),
         "nodes": [{"id": "read", "kind": "builtin.readline"}, {"id": "chat", "kind": "builtin.llm"}],
         "edges": [{"from_node": "read", "from_output": "line", "to_node": "chat", "to_input": "prompt"}],

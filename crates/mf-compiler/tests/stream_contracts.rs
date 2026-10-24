@@ -4,7 +4,7 @@ use serde_json::json;
 #[test]
 fn streaming_schema_validates_versions_types_and_limits() {
     let original = json!({"version":"2026-10-03", "dependencies":{}, "nodes":[],
-        "execution":{"mode":"stream"}});
+        "execution":{}});
     let definition = WorkflowDefinition::from_json(&original.to_string()).unwrap();
     let execution = definition.execution.as_ref().unwrap();
     assert_eq!(execution.limits, StreamLimits::default());
@@ -54,10 +54,11 @@ fn streaming_schema_validates_versions_types_and_limits() {
     }
     for execution in [
         json!(null),
+        json!({"mode":"stream"}),
         json!({"mode":"unknown", "input_type":"int"}),
-        json!({"mode":"stream", "input_type":"invalid"}),
-        json!({"mode":"stream", "input_type":"int", "unknown":true}),
-        json!({"mode":"stream", "input_type":"int", "limits":{"unknown":1}}),
+        json!({"input_type":"invalid"}),
+        json!({"input_type":"int", "unknown":true}),
+        json!({"input_type":"int", "limits":{"unknown":1}}),
     ] {
         let mut value = original.clone();
         value["execution"] = execution;

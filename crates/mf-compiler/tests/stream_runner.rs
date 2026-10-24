@@ -318,7 +318,7 @@ fn native_stdio_probe() {
     }
     let mut stdio = mf_runtime::StreamStdio::claim().unwrap();
     let definition = serde_json::from_value(json!({
-        "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+        "version":"2026-10-03", "dependencies":{}, "execution":{},
         "nodes":[{"id":"read","kind":"builtin.readline"},{"id":"copy","kind":"builtin.identity"}],
         "edges":[{"from_node":"read","from_output":"line","to_node":"copy","to_input":"input"}],
         "outputs":[{"name":"value","node":"copy","port":"value"}]

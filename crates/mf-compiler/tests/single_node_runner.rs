@@ -47,6 +47,36 @@ fn compile(definition: &Path, binary: &Path, build: &Path, telemetry: bool) {
 }
 
 #[test]
+fn combined_nodes_preserve_terminal_results_in_generated_and_isolated_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let definition = root.path().join("flow.json");
+    let binary = root.path().join("flow");
+    let build = root.path().join("build");
+    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/task-stream");
+    for streaming in [false, true] {
+        let mut document = json!({
+            "version":"2026-10-19",
+            "dependencies":{"fixture":{"package":"fixture-task-stream", "path":plugin}},
+            "nodes":[{"id":"count", "kind":"fixture.task_stream"}],
+            "outputs":[{"name":"result", "node":"count", "port":"total"}]
+        });
+        if streaming {
+            document["execution"] = json!({});
+        }
+        fs::write(&definition, document.to_string()).unwrap();
+        compile(&definition, &binary, &build, true);
+        assert_eq!(
+            result(run(&binary, &["--count.count=100"])),
+            json!({"result":100})
+        );
+        assert_eq!(
+            result(run(&binary, &["--node=count", "--count.count=200"])),
+            json!({"total":200})
+        );
+    }
+}
+
+#[test]
 fn finite_runner_isolates_noisy_plugins_and_survives_without_build_inputs() {
     let root = tempfile::tempdir().unwrap();
     let definition = root.path().join("flow.json");
@@ -187,7 +217,7 @@ fn streaming_binary_selects_finite_typed_tasks_and_rejects_producers_and_events(
     let binary = root.path().join("flow");
     let build = root.path().join("build");
     let core = common::crates_dir().join("builtin-nodes/core");
-    fs::write(&definition, json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{"core":{"package":"mfn-core", "path":core}},
+    fs::write(&definition, json!({"version":"2026-10-03", "execution":{}, "dependencies":{"core":{"package":"mfn-core", "path":core}},
         "nodes":[{"id":"read", "kind":"builtin.readline"}, {"id":"copy", "kind":"builtin.identity"}, {"id":"batch", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":10}}],
         "edges":[{"from_node":"read", "from_output":"line", "to_node":"copy", "to_input":"input"}, {"from_node":"read", "from_output":"line", "to_node":"batch", "to_input":"item"}],
         "outputs":[{"name":"line", "node":"copy", "port":"value"}]
@@ -265,34 +295,4 @@ fn finite_typed_segments_keep_normal_execution_and_isolated_publication_contract
     assert!(!invalid.status.success());
     assert!(invalid.stdout.is_empty());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("output `value`"));
-}
-
-#[test]
-fn combined_nodes_preserve_terminal_results_in_generated_and_isolated_execution() {
-    let root = tempfile::tempdir().unwrap();
-    let definition = root.path().join("flow.json");
-    let binary = root.path().join("flow");
-    let build = root.path().join("build");
-    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/task-stream");
-    for streaming in [false, true] {
-        let mut document = json!({
-            "version":"2026-10-19",
-            "dependencies":{"fixture":{"package":"fixture-task-stream", "path":plugin}},
-            "nodes":[{"id":"count", "kind":"fixture.task_stream"}],
-            "outputs":[{"name":"result", "node":"count", "port":"total"}]
-        });
-        if streaming {
-            document["execution"] = json!({"mode":"stream"});
-        }
-        fs::write(&definition, document.to_string()).unwrap();
-        compile(&definition, &binary, &build, true);
-        assert_eq!(
-            result(run(&binary, &["--count.count=100"])),
-            json!({"result":100})
-        );
-        assert_eq!(
-            result(run(&binary, &["--node=count", "--count.count=200"])),
-            json!({"total":200})
-        );
-    }
 }

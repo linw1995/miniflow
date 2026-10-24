@@ -417,8 +417,5 @@
         "usages"
       ]
     }
-  ],
-  "execution": {
-    "mode": "stream"
-  }
+  ]
 }

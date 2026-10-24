@@ -413,7 +413,7 @@ fn exclusive_edge_syntax_is_strict_and_defaults_to_ordinary() {
 fn exclusive_candidates_cannot_cross_message_domains() {
     use mfn_core as _;
     let value = json!({
-        "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+        "version":"2026-10-03", "dependencies":{}, "execution":{},
         "nodes":[
             {"id":"source", "kind":"source.number"},
             {"id":"batch", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}},

@@ -2971,7 +2971,7 @@ mod tests {
         use std::{fs, os::unix::fs::PermissionsExt};
         let runner = directory.join("runner");
         let definition = serde_json::json!({"version":"2026-10-03", "dependencies":{},
-            "execution":{"mode":"stream"},
+            "execution":{},
             "nodes":[{"id":"source/id", "kind":"third-party.dynamic_source"}]});
         let mut stdin = serde_json::Map::new();
         if let Some(resource) = resource {

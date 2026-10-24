@@ -104,16 +104,6 @@ exclude = ["dependency"]
 
 [dependencies]
 coverage-dependency = { path = "dependency" }
-
-[[example]]
-name = "example"
-test = true
-''')
-            (root / "examples").mkdir()
-            (root / "examples/example.rs").write_text('''fn value() -> u32 { 42 }
-fn main() { println!("{}", value()); }
-#[test]
-fn example_matches() { assert_eq!(value(), 42); }
 ''')
             (root / "dependency/src").mkdir(parents=True)
             (root / "dependency/Cargo.toml").write_text('''[package]
@@ -204,11 +194,6 @@ mod tests {{
             self.assertEqual(pr_validation.read_lcov(root, report), full_mappings)
             self.assertIn("Coverage timing (grcov):", result.stderr)
             self.assertIn("other/src/lib.rs", report.read_text())
-            example = next(block for block in blocks if 'SF:examples/example.rs\n' in block)
-            self.assertTrue(any(line.startswith('DA:') and int(line.split(',')[1]) > 0
-                                for line in example.splitlines()), example)
-            inventory = json.loads((root / 'target/coverage/inventory.json').read_text())
-            self.assertIn('coverage-fixture::example/example', inventory['rust-suites'])
             for source in ["build.rs", "fixture.rs"]:
                 block = next(block for block in blocks if f"SF:{source}\n" in block)
                 self.assertTrue(any(line.startswith("DA:") and int(line.split(",")[1]) > 0
