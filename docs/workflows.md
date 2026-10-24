@@ -821,9 +821,35 @@ between invocations. `describe_workflow_inputs` inspects configured requirements
 
 Older single-run schemas keep their required-edge rules.
 
+## Combined terminal and incremental results
+
+A combined provider declares terminal and incremental ports separately and executes once. Use ordinary
+port references for both categories:
+
+```json
+{
+  "execution": {"mode": "stream"},
+  "outputs": [
+    {"name": "increments", "node": "group.count", "port": "delta"},
+    {"name": "total", "node": "group.count", "port": "total"}
+  ]
+}
+```
+
+This fragment assumes a combined provider named `group.count`, such as the counting provider in
+[node development](node-development.md#combined-task-and-stream-execution). Node IDs remain opaque;
+dots are not path separators. Incremental graph edges and output selections require streaming execution.
+Finite scopes and isolated Task targets retain terminal-only adaptation without an unread receiver.
+
+A combined node's terminal ports stay in its input domain; its incremental ports create a separate ordered
+domain. One consumer cannot implicitly correlate values from different domains. A workflow may select
+outputs from multiple domains, but each JSONL record contains only the fields selected in its own domain.
+Per-domain ordering and native delivery acknowledgment remain enforced. Successful workflow completion
+waits for connected work to drain, and terminal values are never reconstructed from increments.
+
 ## Streaming through the in-memory API
 
-Schemas `2026-10-03` and `2026-10-19` enable streams with `execution: {"mode": "stream"}` and optional limits. Initial
+Schemas `2026-10-03`, `2026-10-19`, and `2026-10-23` enable streams with `execution: {"mode": "stream"}` and optional limits. Initial
 nodes receive their workflow parameters once. Initial tasks and their ordinary dependencies execute in one
 startup frame; producers execute independently and emit messages into their own domains. An empty graph or a
 task-only graph finishes without external input. A producer reached through startup tasks also starts once.

@@ -88,6 +88,7 @@ binary_id(=mfn-test-affected::process) |
 )) |
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
+binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mf-compiler::single_node_runner) |
 binary_id(=mf-compiler::runner_signals) |
 (binary_id(=mf-compiler::parameters) & test(=standalone_parameters_share_transports_and_binding_rules)) |
@@ -184,6 +185,7 @@ binary_id(=mfn-test-affected::process) |
 )) |
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
+binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mf-compiler::single_node_runner) |
 binary_id(=mf-compiler::runner_signals) |
 (binary_id(=mf-compiler::parameters) & test(=standalone_parameters_share_transports_and_binding_rules)) |

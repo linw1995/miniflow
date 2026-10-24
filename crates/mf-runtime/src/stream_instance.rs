@@ -288,9 +288,14 @@ enum OperatorExecutor {
 }
 
 struct Producer {
-    node: Option<Box<dyn StreamNode>>,
+    node: Option<ProducerNode>,
     worker: Option<WorkerPool<ProducerJob>>,
     active: bool,
+}
+
+enum ProducerNode {
+    Stream(Box<dyn StreamNode>),
+    TaskStream(Box<crate::TaskStreamExecutor>),
 }
 
 struct ProducerJob {
@@ -391,6 +396,10 @@ fn capture_snapshot(
 }
 
 impl crate::EmissionSink for ProducerEmitter<'_> {
+    fn is_connected(&self) -> bool {
+        self.plan.has_emission_consumers(self.index)
+    }
+
     /// Wait for queue capacity and transfer one validated result to the runtime.
     /// Failure wakes waiting senders. Success does not imply downstream completion.
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
@@ -412,11 +421,6 @@ impl ProducerEmitter<'_> {
             }
             state = self.shared.changed.wait(state).unwrap();
         }
-        let captured_ports = self
-            .shared
-            .snapshots
-            .as_ref()
-            .map(|_| result.outputs.clone());
         let ports = result.outputs.keys().cloned().collect::<Vec<_>>();
         let admitted: Result<(), StreamError> = (|| {
             let emitted = self.emitted.checked_add(1).context(ResourceSnafu {
@@ -434,17 +438,6 @@ impl ProducerEmitter<'_> {
         }
         self.shared.changed.notify_all();
         drop(state);
-        if admitted.is_ok()
-            && let Some(ports) = captured_ports
-        {
-            capture_snapshot(
-                self.shared,
-                self.plan.nodes()[self.index].definition_id.as_str(),
-                &Inputs::new(),
-                &ports,
-                crate::SnapshotOutcome::Emitted,
-            );
-        }
         admitted
     }
 }
@@ -462,7 +455,7 @@ impl Producer {
             let plan = Arc::clone(plan);
             self.worker = Some(
                 WorkerPool::new(1, move |job| {
-                    run_producer(&mut **node.lock().unwrap(), job, &shared, &plan);
+                    run_producer(&mut node.lock().unwrap(), job, &shared, &plan);
                 })
                 .context(WorkerStartupSnafu)?,
             );
@@ -479,7 +472,7 @@ impl Producer {
 }
 
 fn run_producer(
-    node: &mut dyn StreamNode,
+    node: &mut ProducerNode,
     mut job: ProducerJob,
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
@@ -495,31 +488,41 @@ fn run_producer(
         publication_failed: false,
     };
     let failure = shared.state.lock().unwrap().failure.clone();
-    let mut emitter = Emitter::with_sink_validation(
-        plan.nodes()[index].definition_id.clone(),
-        &plan.nodes()[index].metadata.ports.outputs,
-        job.context.cancellation(),
-        &mut sink,
-    );
     let result = if let Some(error) = failure {
         Err(error)
     } else {
         if let Some(callback) = job.callback.as_mut() {
             callback.started();
         }
-        capture_snapshot(
-            shared,
-            plan.nodes()[index].definition_id.as_str(),
-            &job.inputs,
-            &crate::Outputs::new(),
-            crate::SnapshotOutcome::Started,
-        );
-        catch_unwind(AssertUnwindSafe(|| {
-            let result = node.execute(job.inputs, &mut job.context, &mut emitter);
-            if let Some(error) = job.context.cancellation().failure() {
-                return Err(error.into());
+        catch_unwind(AssertUnwindSafe(|| match node {
+            ProducerNode::Stream(node) => {
+                capture_snapshot(
+                    shared,
+                    plan.nodes()[index].definition_id.as_str(),
+                    &job.inputs,
+                    &crate::Outputs::new(),
+                    crate::SnapshotOutcome::Started,
+                );
+                job.context
+                    .with_node(plan.nodes()[index].definition_id.clone(), |context| {
+                        let mut emitter = Emitter::with_sink_validation(
+                            plan.nodes()[index].definition_id.clone(),
+                            &plan.emission_node(index).metadata.ports.outputs,
+                            context.cancellation(),
+                            &mut sink,
+                        );
+                        emitter.set_snapshot_context(context);
+                        let result = node.execute(job.inputs, context, &mut emitter);
+                        if let Some(error) = context.cancellation().failure() {
+                            return Err(error.into());
+                        }
+                        result
+                    })
             }
-            result
+            ProducerNode::TaskStream(node) => {
+                job.context
+                    .execute_task_stream(&plan.nodes()[index], node, job.inputs, &mut sink)
+            }
         }))
         .unwrap_or_else(|payload| Err(panic_error(payload).into()))
         .context(ProducerSnafu {
@@ -535,7 +538,19 @@ fn run_producer(
                 .map_or(Ok(()), Err)
         })
     };
-    drop(emitter);
+    if result.is_ok() && matches!(node, ProducerNode::TaskStream(_)) {
+        for port in &plan.nodes()[index].metadata.ports.outputs {
+            if matches!(
+                job.context.output(&crate::output_id(
+                    plan.nodes()[index].definition_id.as_str(),
+                    &port.name
+                )),
+                Ok(crate::ContextValue::Value(_))
+            ) {
+                sink.ports.insert(port.name.to_string());
+            }
+        }
+    }
     if let Some(callback) = job.callback {
         match &result {
             Ok(()) => callback.succeeded(sink.emitted, sink.ports.into_iter().collect()),
@@ -751,11 +766,16 @@ impl PreparedStream {
                     executor: match state {
                         NodeExecution::Event(state) => OperatorExecutor::Event(state),
                         NodeExecution::Stream(node) => OperatorExecutor::Producer(Producer {
-                            node: Some(node),
+                            node: Some(ProducerNode::Stream(node)),
                             worker: None,
                             active: false,
                         }),
-                        NodeExecution::Task(_) | NodeExecution::TaskStream(_) => {
+                        NodeExecution::TaskStream(node) => OperatorExecutor::Producer(Producer {
+                            node: Some(ProducerNode::TaskStream(node)),
+                            worker: None,
+                            active: false,
+                        }),
+                        NodeExecution::Task(_) => {
                             unreachable!("tasks remain in the plan")
                         }
                     },
@@ -862,7 +882,11 @@ impl StreamInstance {
             if let Some(error) = &state.failure {
                 return Err(error.clone());
             }
-            if let Some(output) = state.output.take() {
+            // The acknowledgement slot belongs to the coordinator until it releases the domain.
+            if !state.delivery_pending
+                && state.delivered.is_none()
+                && let Some(output) = state.output.take()
+            {
                 state.delivery_pending = true;
                 drop(state);
                 return Ok(Some(StreamDelivery {
@@ -1023,7 +1047,7 @@ fn coordinate(
                 if let OperatorExecutor::Producer(producer) = &mut operator.executor {
                     producer.active = false;
                 }
-                if completion.detached {
+                if completion.message.domain == 0 {
                     operator.closed = true;
                 }
             }
@@ -1167,11 +1191,10 @@ fn tick<'a>(
             continue;
         };
         let mut context =
-            ExecutionContext::for_message(&plan.nodes()[source], queued.emission.result).context(
-                WorkflowSnafu {
+            ExecutionContext::for_message(plan.emission_node(source), queued.emission.result)
+                .context(WorkflowSnafu {
                     message: queued.message,
-                },
-            )?;
+                })?;
         #[cfg(feature = "async")]
         context.set_future_executor(future_executor.clone());
         if let Some(capture) = &shared.snapshots {
@@ -1196,10 +1219,14 @@ fn tick<'a>(
             continue;
         };
         if frame.complete() {
+            if plan.selected_domains().contains(&message_domain) && guard.output.is_some() {
+                guard.domains[message_domain].frame = Some(frame);
+                continue;
+            }
             take_sequence(&mut guard.summary.completed_frames)?;
-            if plan.selected_domain() == Some(message_domain) {
+            if plan.selected_domains().contains(&message_domain) {
                 let mut outputs = FlowOutputs::new();
-                for output in plan.outputs() {
+                for output in plan.outputs_for_domain(message_domain) {
                     if let Some(value) = frame
                         .context
                         .select_output(
@@ -1298,7 +1325,8 @@ fn tick<'a>(
                             }
                         });
                         let context = frame.context.fork_stream(observation);
-                        let detached = message_domain == 0;
+                        let detached =
+                            message_domain == 0 && plan.stream_output_domain(index).is_none();
                         let operator = guard.operators[index].as_mut().unwrap();
                         let OperatorExecutor::Producer(producer) = &mut operator.executor else {
                             unreachable!("producer kind was checked above")
@@ -1391,10 +1419,14 @@ fn tick<'a>(
         }
 
         if frame.complete() {
+            if plan.selected_domains().contains(&message_domain) && guard.output.is_some() {
+                guard.domains[message_domain].frame = Some(frame);
+                continue;
+            }
             take_sequence(&mut guard.summary.completed_frames)?;
-            if plan.selected_domain() == Some(message_domain) {
+            if plan.selected_domains().contains(&message_domain) {
                 let mut outputs = FlowOutputs::new();
-                for output in plan.outputs() {
+                for output in plan.outputs_for_domain(message_domain) {
                     if let Some(value) = frame
                         .context
                         .select_output(
@@ -1663,8 +1695,10 @@ fn enqueue_emission(
     index: usize,
     emission: EventEmission,
 ) -> Result<MessageId, StreamError> {
-    let domain = plan.output_domain(index);
-    crate::ExecutionOutputs::validate_result(&plan.nodes()[index], &emission.result).context(
+    let domain = plan
+        .stream_output_domain(index)
+        .unwrap_or_else(|| plan.output_domain(index));
+    crate::ExecutionOutputs::validate_result(plan.emission_node(index), &emission.result).context(
         WorkflowSnafu {
             message: MessageId {
                 domain,
@@ -1674,6 +1708,9 @@ fn enqueue_emission(
     )?;
     let sequence = take_sequence(&mut state.sequences[domain])?;
     take_sequence(&mut state.summary.emitted_messages)?;
+    if !plan.has_emission_consumers(index) {
+        return Ok(MessageId { domain, sequence });
+    }
     state.operators[index]
         .as_mut()
         .unwrap()
@@ -1695,11 +1732,12 @@ fn apply_effects(
 ) -> Result<(), StreamError> {
     let operator = state.operators[index].as_mut().unwrap();
     ensure!(
-        effects
-            .emissions
-            .len()
-            .saturating_add(operator.pending.len())
-            <= plan.execution().limits.max_pending_messages,
+        !plan.has_emission_consumers(index)
+            || effects
+                .emissions
+                .len()
+                .saturating_add(operator.pending.len())
+                <= plan.execution().limits.max_pending_messages,
         ResourceSnafu {
             message: format!(
                 "node `{}` emitted too many pending messages",
@@ -1913,7 +1951,7 @@ mod tests {
             crate::MessageDomains::from_parts(
                 vec![None, Some(1)].into(),
                 vec![0, 1].into(),
-                None,
+                vec![].into(),
                 crate::ExecutionDomains::from_parts(
                     vec![
                         crate::ExecutionDomain {
@@ -2118,7 +2156,7 @@ mod tests {
             crate::MessageDomains::from_parts(
                 vec![None, Some(0)].into(),
                 vec![1, 1, 1, 1, 1, 1].into(),
-                Some(1),
+                vec![1].into(),
                 crate::ExecutionDomains::from_parts(
                     vec![
                         domain(0, 0, vec![], vec![1, 2, 3, 4], &[]),

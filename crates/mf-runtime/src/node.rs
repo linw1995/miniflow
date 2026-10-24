@@ -829,6 +829,10 @@ pub struct NodeMetadata {
 }
 
 impl NodeMetadata {
+    pub fn output_ports(&self) -> impl Iterator<Item = &PortSpec> {
+        self.ports.outputs.iter().chain(&self.stream_outputs)
+    }
+
     pub fn new(ports: NodePorts) -> Self {
         Self {
             ports,

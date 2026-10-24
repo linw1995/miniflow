@@ -1002,6 +1002,27 @@ impl CompiledWorkflow {
             let prepared = flow
                 .into_stream(execution.clone())
                 .map_err(crate::WorkflowBuildError::from)?;
+            let metadata_checks = prepared.plan().nodes().iter().enumerate().map(|(index, node)| {
+                let id = LitStr::new(node.definition_id.as_str(), Span::call_site());
+                let expected = LitStr::new(
+                    &serde_json::to_string(&node.metadata).context(SerializeSnafu)?,
+                    Span::call_site(),
+                );
+                Ok(quote! {
+                    let expected = serde_json::from_str(#expected).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
+                        definition_id: mf_runtime::DefinitionId::from(#id),
+                    })?;
+                    mf_runtime::verify_generated_metadata(&_prepared.plan().nodes()[#index].metadata, &expected)
+                        .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: mf_runtime::DefinitionId::from(#id) })?;
+                })
+            }).collect::<Result<Vec<_>, PlanError>>()?;
+            layouts.push(quote! {
+                pub fn verify_stream_metadata(_prepared: &mf_runtime::PreparedStream) -> Result<(), mf_compiler::WorkflowBuildError> {
+                    use snafu::ResultExt as _;
+                    #(#metadata_checks)*
+                    Ok(())
+                }
+            });
             let message = prepared.plan().message_domains();
             let sources = message.sources().iter().map(|source| match source {
                 Some(source) => quote! { Some(#source) },
@@ -1009,10 +1030,12 @@ impl CompiledWorkflow {
             });
             let outputs = self.definition.outputs.iter().map(output_definition_tokens);
             let output_domains = (0..order.len()).map(|index| message.output_domain(index));
-            let selected = match message.selected_domain() {
-                Some(selected) => quote! { Some(#selected) },
-                None => quote! { None },
-            };
+            let selected = message.selected_domains();
+            let stream_domains =
+                (0..order.len()).map(|index| match message.stream_output_domain(index) {
+                    Some(domain) => quote! { Some(#domain) },
+                    None => quote! { None },
+                });
             let executions = domain_tokens(message.execution_domains());
             let by_message = (0..message.sources().len()).map(|id| {
                 let values = message.execution_domains_for_message(id);
@@ -1024,10 +1047,11 @@ impl CompiledWorkflow {
             layouts.push(quote! {
                 pub static STREAM_DEPENDENCIES: &[std::borrow::Cow<'static, [mf_runtime::FlowDependency]>] = &[#(#dependencies),*];
                 pub static STREAM_OUTPUTS: &[mf_runtime::WorkflowOutputDefinition] = &[#(#outputs),*];
-                pub static STREAM_MESSAGE_DOMAINS: mf_runtime::MessageDomains = mf_runtime::MessageDomains::from_parts(
+                pub static STREAM_MESSAGE_DOMAINS: mf_runtime::MessageDomains = mf_runtime::MessageDomains::from_parts_with_streams(
                     std::borrow::Cow::Borrowed(&[#(#sources),*]),
                     std::borrow::Cow::Borrowed(&[#(#output_domains),*]),
-                    #selected, #executions,
+                    std::borrow::Cow::Borrowed(&[#(#stream_domains),*]),
+                    std::borrow::Cow::Borrowed(&[#(#selected),*]), #executions,
                     std::borrow::Cow::Borrowed(&[#(#by_message),*]),
                     std::borrow::Cow::Borrowed(&[#(#by_execution),*]),
                 );

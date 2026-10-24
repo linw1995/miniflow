@@ -6,7 +6,8 @@ use std::borrow::Cow;
 pub struct MessageDomains {
     sources: Cow<'static, [Option<usize>]>,
     output_domains: Cow<'static, [usize]>,
-    selected_domain: Option<usize>,
+    stream_output_domains: Cow<'static, [Option<usize>]>,
+    selected_domains: Cow<'static, [usize]>,
     execution_domains: ExecutionDomains,
     execution_domains_by_message: Cow<'static, [Cow<'static, [usize]>]>,
     message_domain_by_execution: Cow<'static, [usize]>,
@@ -17,7 +18,27 @@ impl MessageDomains {
     pub const fn from_parts(
         sources: Cow<'static, [Option<usize>]>,
         output_domains: Cow<'static, [usize]>,
-        selected_domain: Option<usize>,
+        selected_domains: Cow<'static, [usize]>,
+        execution_domains: ExecutionDomains,
+        execution_domains_by_message: Cow<'static, [Cow<'static, [usize]>]>,
+        message_domain_by_execution: Cow<'static, [usize]>,
+    ) -> Self {
+        Self::from_parts_with_streams(
+            sources,
+            output_domains,
+            Cow::Borrowed(&[]),
+            selected_domains,
+            execution_domains,
+            execution_domains_by_message,
+            message_domain_by_execution,
+        )
+    }
+
+    pub const fn from_parts_with_streams(
+        sources: Cow<'static, [Option<usize>]>,
+        output_domains: Cow<'static, [usize]>,
+        stream_output_domains: Cow<'static, [Option<usize>]>,
+        selected_domains: Cow<'static, [usize]>,
         execution_domains: ExecutionDomains,
         execution_domains_by_message: Cow<'static, [Cow<'static, [usize]>]>,
         message_domain_by_execution: Cow<'static, [usize]>,
@@ -25,7 +46,8 @@ impl MessageDomains {
         Self {
             sources,
             output_domains,
-            selected_domain,
+            stream_output_domains,
+            selected_domains,
             execution_domains,
             execution_domains_by_message,
             message_domain_by_execution,
@@ -41,8 +63,12 @@ impl MessageDomains {
         self.output_domains[node]
     }
 
-    pub fn selected_domain(&self) -> Option<usize> {
-        self.selected_domain
+    pub fn stream_output_domain(&self, node: usize) -> Option<usize> {
+        self.stream_output_domains.get(node).copied().flatten()
+    }
+
+    pub fn selected_domains(&self) -> &[usize] {
+        &self.selected_domains
     }
 
     pub fn execution_domains(&self) -> &ExecutionDomains {

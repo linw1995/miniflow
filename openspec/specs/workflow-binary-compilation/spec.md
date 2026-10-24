@@ -1064,3 +1064,22 @@ resource cleanup.
 
 - **WHEN** a runner receives SIGINT after registering handlers but before binding cancellation
 - **THEN** binding publishes the pending cancellation before returning
+
+### Requirement: Compile native combined output domains
+
+Generated streaming runners SHALL support combined nodes through the same message-domain plan as in-memory execution. Incremental and terminal output selections SHALL use ordinary output declarations. Each JSONL record SHALL contain only its domain's selected fields. Isolated combined targets SHALL execute through the terminal Task adapter.
+
+#### Scenario: Deliver an increment before completion
+
+- **WHEN** a combined provider emits a value before returning its final result
+- **THEN** the generated Stream runner delivers that selected increment before the provider finishes
+
+#### Scenario: Select several output domains
+
+- **WHEN** a workflow selects a combined node's increments and terminal result
+- **THEN** generated and in-memory execution preserve both routes without overwriting pending deliveries
+
+#### Scenario: Move a compiled streaming executable
+
+- **WHEN** a compiled native Stream workflow is moved and its build inputs are removed
+- **THEN** its manifest and incremental/terminal execution remain available without rebuilding

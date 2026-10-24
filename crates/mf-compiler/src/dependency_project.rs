@@ -172,6 +172,7 @@ fn execute_selected(
                 if let Some(observation) = state.observation_mut() { observation.preparation_failed_unattributed(error.to_string()); }
             })?;
             workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
+            workflow::verify_stream_metadata(&prepared)?;
             let task = target.bind_stream(&prepared)?;
             mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
         };
@@ -243,6 +244,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(u
             if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
         })?;
         workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
+        workflow::verify_stream_metadata(&prepared)?;
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };

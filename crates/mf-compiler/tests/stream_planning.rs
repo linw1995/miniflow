@@ -129,7 +129,7 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
             .collect::<Vec<_>>(),
         [1, 2, 2]
     );
-    assert_eq!(prepared.plan().selected_domain(), Some(2));
+    assert_eq!(prepared.plan().selected_domains(), &[2]);
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let plan = plan_definition(&definition).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -236,11 +236,9 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
 
     let mut selected = collect_graph();
     selected["outputs"] = json!([{"name":"item", "node":"feed", "port":"item"}, {"name":"batch", "node":"collect", "port":"items"}]);
-    assert!(
-        prepare(selected)
-            .unwrap_err()
-            .to_string()
-            .contains("selected output")
+    assert_eq!(
+        prepare(selected).unwrap().plan().selected_domains(),
+        &[1, 2]
     );
 }
 
@@ -273,7 +271,7 @@ fn controls_and_context_references_obey_the_message_boundary() {
         .unwrap()["config"]["branches"][0]["condition"] =
         json!({"source":{"output":"copy.value", "path":"/0"}, "operator":"eq", "value":1});
     value["outputs"] = json!([{"name":"selected", "node":"route", "port":"yes", "optional":true}]);
-    assert_eq!(prepare(value).unwrap().plan().selected_domain(), Some(2));
+    assert_eq!(prepare(value).unwrap().plan().selected_domains(), &[2]);
 }
 
 #[test]

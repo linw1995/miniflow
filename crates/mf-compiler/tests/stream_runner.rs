@@ -267,3 +267,73 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
         [json!({"batch":["[9]"]})]
     );
 }
+
+extern crate mfn_core as _;
+
+#[test]
+fn native_stdio_preserves_utf8_record_framing_and_acknowledges_delivery() {
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "native_stdio_probe", "--ignored", "--nocapture"])
+        .env("MF_NATIVE_STDIO_PROBE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut process = Process(Some(child));
+    process
+        .child()
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"line\\nvalue\ncaf\xc3\xa9\r\nlast")
+        .unwrap();
+    let output = process.finish();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records: Vec<Value> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.starts_with(b"{"))
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(
+        records,
+        [
+            json!({"value":"line\\nvalue"}),
+            json!({"value":"café"}),
+            json!({"value":"last"})
+        ]
+    );
+}
+
+#[test]
+#[ignore]
+fn native_stdio_probe() {
+    if std::env::var_os("MF_NATIVE_STDIO_PROBE").is_none() {
+        return;
+    }
+    let mut stdio = mf_runtime::StreamStdio::claim().unwrap();
+    let definition = serde_json::from_value(json!({
+        "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+        "nodes":[{"id":"read","kind":"builtin.readline"},{"id":"copy","kind":"builtin.identity"}],
+        "edges":[{"from_node":"read","from_output":"line","to_node":"copy","to_input":"input"}],
+        "outputs":[{"name":"value","node":"copy","port":"value"}]
+    }))
+    .unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
+    let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
+    let instance = mf_compiler::instantiate_stream(&plan, &registry)
+        .unwrap()
+        .start_with_options(mf_runtime::StreamOptions {
+            stdin: stdio.take_input(),
+            ..Default::default()
+        })
+        .unwrap();
+    let summary = stdio.run(instance).unwrap();
+    assert_eq!(summary.delivered_outputs, 3);
+    assert_eq!(summary.emitted_messages, 3);
+}
