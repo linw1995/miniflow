@@ -18,6 +18,65 @@ use std::{collections::BTreeMap, path::Path};
 #[cfg(test)]
 mod tests;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct CallTiming {
+    pub elapsed_us: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_us: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, NodeValue)]
+pub struct CallTokenRates {
+    pub end_to_end_tokens_per_second: Option<f64>,
+    pub generation_tokens_per_second: Option<f64>,
+}
+
+impl CallTiming {
+    pub fn is_valid(&self) -> bool {
+        self.elapsed_us >= 0
+            && self
+                .first_token_us
+                .is_none_or(|first| first >= 0 && first <= self.elapsed_us)
+    }
+
+    pub fn generation_us(&self) -> Option<i64> {
+        self.is_valid().then_some(())?;
+        self.elapsed_us.checked_sub(self.first_token_us?)
+    }
+
+    pub fn token_rates(&self, output_tokens: Option<i64>) -> CallTokenRates {
+        let rate = |duration: Option<i64>| {
+            let tokens = output_tokens.filter(|tokens| *tokens >= 0)?;
+            let duration = duration.filter(|duration| *duration > 0)?;
+            Some(tokens as f64 * 1_000_000.0 / duration as f64)
+        };
+        if !self.is_valid() {
+            return CallTokenRates::default();
+        }
+        CallTokenRates {
+            end_to_end_tokens_per_second: rate(Some(self.elapsed_us)),
+            generation_tokens_per_second: rate(self.generation_us()),
+        }
+    }
+}
+
+impl crate::CallUsage {
+    pub fn token_rates(&self) -> CallTokenRates {
+        if self.error.is_some() {
+            return CallTokenRates::default();
+        }
+        self.timing
+            .as_ref()
+            .map_or_else(CallTokenRates::default, |timing| {
+                timing.token_rates(
+                    self.usage
+                        .as_ref()
+                        .and_then(|usage| usage.get("output_tokens").copied()),
+                )
+            })
+    }
+}
+
 #[diesel::declare_sql_function]
 extern "SQL" {
     #[aggregate]

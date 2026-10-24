@@ -297,3 +297,13 @@ Each attempted provider operation SHALL emit request-started and request-finishe
 
 - **WHEN** a provider operation fails and the node returns a captured failure
 - **THEN** request observations retain the call identity and available facts without claiming successful throughput
+
+### Requirement: Keep application performance outside model execution
+
+Raw node usage contracts and observations SHALL contain provider call facts. Derived timing and token-rate types and calculations SHALL belong to the application. The model node MUST NOT depend on application performance models.
+
+#### Scenario: Leave performance measurements to the application
+
+- **WHEN** a model request completes
+- **THEN** node outputs and request observations expose provider call facts without application timing or rate fields
+- **AND** the application derives performance from source events and owns its enriched call model

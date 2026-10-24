@@ -10,7 +10,7 @@ enum Delivered {
     Succeeded(Completion),
     Failed {
         error: String,
-        usages: Vec<mfn_llm::CallUsage>,
+        usages: Vec<crate::CallUsage>,
     },
 }
 

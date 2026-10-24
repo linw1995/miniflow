@@ -26,7 +26,7 @@ use opentelemetry_proto::tonic::{
 };
 use prost::Message;
 use serde_json::{Map, Value};
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::{
     convert::Infallible,
     io,
@@ -428,12 +428,12 @@ fn receive_call_event(record: LogRecord, context: &Context) -> Result<(), Ingest
     let trace_context = if record.trace_id.is_empty() && record.span_id.is_empty() {
         None
     } else {
-        if record.trace_id.len() != 16 || record.span_id.len() != 8 {
-            return InvalidSnafu {
+        ensure!(
+            record.trace_id.len() == 16 && record.span_id.len() == 8,
+            InvalidSnafu {
                 message: "invalid call event trace context",
             }
-            .fail();
-        }
+        );
         let trace = TraceContext {
             trace_id: hex(&record.trace_id),
             span_id: hex(&record.span_id),

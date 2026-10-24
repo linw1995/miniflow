@@ -21,7 +21,7 @@ fn result(title: &str) -> ConversationResult {
     ConversationResult {
         text: "answer".into(),
         title: Some(title.into()),
-        usages: vec![mfn_llm::CallUsage {
+        usages: vec![crate::CallUsage {
             timing: None,
             attribution: Some(UsageAttribution {
                 purpose: Some("title".into()),

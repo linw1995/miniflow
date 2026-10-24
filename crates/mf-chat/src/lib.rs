@@ -18,8 +18,8 @@ pub use call_events::{CallEventCollector, CallEventError};
 pub mod workflow;
 
 pub use contract::{
-    Completion, ConversationContext, ConversationInputs, ConversationResult, TitleContext,
-    UncommittedCompletion,
+    CallUsage, Completion, ConversationContext, ConversationInputs, ConversationResult,
+    TitleContext, UncommittedCompletion,
 };
 pub use error::{BackendSnafu, CaptureSnafu, ChatError};
 pub use host::{ChatHost, ChatJob, HostConfig};
@@ -29,13 +29,10 @@ pub use storage::ChatDatabase;
 pub use turn::{Invocation, ModelIdentity};
 pub use usage::CallPurpose;
 pub use usage::{
-    LatencySummary, PerformanceSummary, TokenCounter, TokenRateSummary, UsageGroup, UsageGrouping,
-    UsageQuery, UsageStatistics, UsageSummary,
+    CallTiming, CallTokenRates, LatencySummary, PerformanceSummary, TokenCounter, TokenRateSummary,
+    UsageGroup, UsageGrouping, UsageQuery, UsageStatistics, UsageSummary,
 };
 
-pub use mfn_llm::{
-    CallTiming, CallTokenRates, CallUsage, MessageMetadata, TextDelta, UsageAttribution, UsageNode,
-    UsageScope,
-};
+pub use mfn_llm::{MessageMetadata, TextDelta, UsageAttribution, UsageNode, UsageScope};
 
 pub use workflow::{ConversationBackend, WorkflowProfile};

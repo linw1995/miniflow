@@ -40,21 +40,19 @@ fn performance_uses_paired_weighted_facts_and_survives_reopen_and_replay() {
     let usages = cases
         .into_iter()
         .enumerate()
-        .map(
-            |(index, (model, timing, tokens, error))| mfn_llm::CallUsage {
-                attribution: None,
-                started_at: Some(1000 + index as i64),
-                timing: timing.map(|(elapsed_us, first_token_us)| mfn_llm::CallTiming {
-                    elapsed_us,
-                    first_token_us,
-                }),
-                call_id: format!("call-{index}"),
-                node: None,
-                model: model.into(),
-                usage: tokens.map(|tokens| BTreeMap::from([("output_tokens".into(), tokens)])),
-                error: error.map(Into::into),
-            },
-        )
+        .map(|(index, (model, timing, tokens, error))| crate::CallUsage {
+            attribution: None,
+            started_at: Some(1000 + index as i64),
+            timing: timing.map(|(elapsed_us, first_token_us)| crate::CallTiming {
+                elapsed_us,
+                first_token_us,
+            }),
+            call_id: format!("call-{index}"),
+            node: None,
+            model: model.into(),
+            usage: tokens.map(|tokens| BTreeMap::from([("output_tokens".into(), tokens)])),
+            error: error.map(Into::into),
+        })
         .collect::<Vec<_>>();
     let in_memory = UsageSummary::from_calls(&usages).unwrap();
     let reply = ConversationResult {
@@ -147,7 +145,7 @@ fn invalid_timing_is_rejected_before_persistence_and_overflow_is_explicit() {
     let begun = database
         .begin_turn(&session.id, "question", identity(), None, 1024)
         .unwrap();
-    let mut usage = mfn_llm::CallUsage {
+    let mut usage = crate::CallUsage {
         attribution: None,
         started_at: None,
         timing: None,
@@ -158,7 +156,7 @@ fn invalid_timing_is_rejected_before_persistence_and_overflow_is_explicit() {
         error: None,
     };
     for (elapsed_us, first_token_us) in [(-1, None), (1, Some(-1)), (1, Some(2))] {
-        usage.timing = Some(mfn_llm::CallTiming {
+        usage.timing = Some(crate::CallTiming {
             elapsed_us,
             first_token_us,
         });
@@ -182,7 +180,7 @@ fn invalid_timing_is_rejected_before_persistence_and_overflow_is_explicit() {
                 .is_none()
         );
     }
-    usage.timing = Some(mfn_llm::CallTiming {
+    usage.timing = Some(crate::CallTiming {
         elapsed_us: i64::MAX,
         first_token_us: None,
     });
@@ -217,7 +215,7 @@ fn complete(
         .complete_turn(
             begun.invocation.clone(),
             ConversationResult {
-                usages: vec![mfn_llm::CallUsage {
+                usages: vec![crate::CallUsage {
                     timing: None,
                     attribution: None,
                     started_at: None,
@@ -426,7 +424,7 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
             .complete_turn(
                 begun.invocation,
                 ConversationResult {
-                    usages: vec![mfn_llm::CallUsage {
+                    usages: vec![crate::CallUsage {
                         timing: None,
                         attribution: None,
                         started_at: None,
@@ -492,4 +490,135 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
         }),
         Err(ChatError::Invalid { field: "after", .. })
     ));
+}
+
+#[test]
+fn historical_usage_keeps_unknown_timing_and_failure_rates_are_not_successes() {
+    let mut usage: crate::CallUsage = serde_json::from_value(serde_json::json!({
+        "call_id":"old-call", "model":"model", "usage":{"output_tokens":300}
+    }))
+    .unwrap();
+    assert!(usage.timing.is_none());
+    assert_eq!(usage.token_rates(), CallTokenRates::default());
+    assert!(
+        serde_json::to_value(&usage)
+            .unwrap()
+            .get("timing")
+            .is_none()
+    );
+    usage.timing = Some(CallTiming {
+        elapsed_us: 2_000_000,
+        first_token_us: Some(500_000),
+    });
+    assert_eq!(
+        usage.token_rates().end_to_end_tokens_per_second,
+        Some(150.0)
+    );
+    let restored: crate::CallUsage =
+        serde_json::from_slice(&serde_json::to_vec(&usage).unwrap()).unwrap();
+    assert_eq!(restored, usage);
+    usage.error = Some("provider failed".into());
+    assert_eq!(usage.token_rates(), CallTokenRates::default());
+    assert!(usage.timing.is_some());
+}
+
+#[test]
+fn rates_use_reported_tokens_and_distinct_observed_windows() {
+    let timing = CallTiming {
+        elapsed_us: 2_000_000,
+        first_token_us: Some(500_000),
+    };
+    assert_eq!(
+        timing.token_rates(Some(300)),
+        CallTokenRates {
+            end_to_end_tokens_per_second: Some(150.0),
+            generation_tokens_per_second: Some(200.0),
+        }
+    );
+    assert_eq!(
+        timing.token_rates(Some(0)).generation_tokens_per_second,
+        Some(0.0)
+    );
+    assert_eq!(timing.token_rates(None), CallTokenRates::default());
+    assert_eq!(timing.token_rates(Some(-1)), CallTokenRates::default());
+    let unary = CallTiming {
+        first_token_us: None,
+        ..timing.clone()
+    };
+    assert_eq!(
+        unary.token_rates(Some(300)).end_to_end_tokens_per_second,
+        Some(150.0)
+    );
+    assert_eq!(
+        unary.token_rates(Some(300)).generation_tokens_per_second,
+        None
+    );
+}
+
+#[test]
+fn invalid_and_zero_windows_do_not_invent_rates() {
+    for timing in [
+        CallTiming {
+            elapsed_us: -1,
+            first_token_us: None,
+        },
+        CallTiming {
+            elapsed_us: 1,
+            first_token_us: Some(-1),
+        },
+        CallTiming {
+            elapsed_us: 1,
+            first_token_us: Some(2),
+        },
+    ] {
+        assert!(!timing.is_valid());
+        assert_eq!(timing.token_rates(Some(1)), CallTokenRates::default());
+    }
+    let zero = CallTiming {
+        elapsed_us: 0,
+        first_token_us: Some(0),
+    };
+    assert!(zero.is_valid());
+    assert_eq!(zero.token_rates(Some(0)), CallTokenRates::default());
+    let single = CallTiming {
+        elapsed_us: 10,
+        first_token_us: Some(10),
+    };
+    assert_eq!(
+        single.token_rates(Some(1)).generation_tokens_per_second,
+        None
+    );
+}
+
+#[test]
+fn raw_call_facts_and_enriched_application_values_keep_the_flat_wire_contract() {
+    let raw_json = serde_json::json!({
+        "call_id":"call", "model":"fixture", "started_at":42,
+        "attribution":{"purpose":"conversation","profile":"fixture"},
+        "node":{"id":"model","kind":"builtin.llm","path":[{"node":"loop","index":1}]},
+        "usage":{"output_tokens":100}
+    });
+    let facts: mfn_llm::CallUsage = serde_json::from_value(raw_json.clone()).unwrap();
+    assert!(
+        mfn_llm::CallUsage::ports()
+            .iter()
+            .all(|port| port.name != "timing")
+    );
+    let mut usage = crate::CallUsage::from(facts);
+    assert!(usage.timing.is_none());
+    assert_eq!(serde_json::to_value(&usage).unwrap(), raw_json);
+    usage.timing = Some(CallTiming {
+        elapsed_us: 2_000_000,
+        first_token_us: Some(500_000),
+    });
+    let mut expected = raw_json;
+    expected["timing"] = serde_json::json!({"elapsed_us":2_000_000,"first_token_us":500_000});
+    assert_eq!(serde_json::to_value(&usage).unwrap(), expected);
+    let legacy: crate::CallUsage = serde_json::from_value(expected).unwrap();
+    assert_eq!(legacy, usage);
+    assert_eq!(
+        crate::CallUsage::from_values(usage.clone().into_values().unwrap()).unwrap(),
+        usage
+    );
+    assert_eq!(usage.token_rates().end_to_end_tokens_per_second, Some(50.0));
 }

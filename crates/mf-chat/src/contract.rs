@@ -27,13 +27,56 @@ pub struct ConversationInputs {
     pub context: Option<ConversationContext>,
 }
 
+/// Application-owned call facts enriched with event-derived performance measurements.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct CallUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<mfn_llm::UsageAttribution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<crate::CallTiming>,
+    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<mfn_llm::UsageNode>,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<BTreeMap<String, i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl From<mfn_llm::CallUsage> for CallUsage {
+    fn from(facts: mfn_llm::CallUsage) -> Self {
+        let mfn_llm::CallUsage {
+            attribution,
+            started_at,
+            call_id,
+            node,
+            model,
+            usage,
+            error,
+        } = facts;
+        Self {
+            attribution,
+            started_at,
+            call_id,
+            node,
+            model,
+            usage,
+            error,
+            timing: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct ConversationResult {
     pub status: String,
     #[value(default)]
     #[serde(default)]
     pub text: String,
-    pub usages: Vec<mfn_llm::CallUsage>,
+    pub usages: Vec<CallUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<mfn_llm::MessageMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

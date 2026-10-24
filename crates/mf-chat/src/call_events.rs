@@ -88,9 +88,9 @@ impl CallEventCollector {
         let usage = if event.name == mfn_llm::FIRST_TEXT_EVENT {
             None
         } else {
-            let mut usage: CallUsage =
+            let facts: mfn_llm::CallUsage =
                 serde_json::from_value(event.body.clone()).context(PayloadSnafu)?;
-            usage.timing = None;
+            let usage = CallUsage::from(facts);
             crate::turn::validate_usages(std::slice::from_ref(&usage)).context(FactsSnafu)?;
             Some(usage)
         };

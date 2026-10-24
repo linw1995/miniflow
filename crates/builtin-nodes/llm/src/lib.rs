@@ -2,10 +2,7 @@ mod streaming;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
 pub mod test_support;
-mod timing;
 mod transport;
-
-pub use timing::{CallTiming, CallTokenRates};
 
 use mf_runtime::{
     ConfigTemplate, ContextReference, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
@@ -66,8 +63,6 @@ pub struct CallUsage {
     pub attribution: Option<UsageAttribution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timing: Option<CallTiming>,
     pub call_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<UsageNode>,
@@ -76,23 +71,6 @@ pub struct CallUsage {
     pub usage: Option<BTreeMap<String, i64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-}
-
-impl CallUsage {
-    pub fn token_rates(&self) -> CallTokenRates {
-        if self.error.is_some() {
-            return CallTokenRates::default();
-        }
-        self.timing
-            .as_ref()
-            .map_or_else(CallTokenRates::default, |timing| {
-                timing.token_rates(
-                    self.usage
-                        .as_ref()
-                        .and_then(|usage| usage.get("output_tokens").copied()),
-                )
-            })
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
@@ -543,7 +521,6 @@ impl LlmNode {
             request = request.preamble(system);
         }
         let mut usage = CallUsage {
-            timing: None,
             attribution: config.attribution.clone(),
             started_at: None,
             call_id: uuid::Uuid::new_v4().to_string(),

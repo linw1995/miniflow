@@ -182,7 +182,9 @@ Filters accept session, profile, actual model name, purpose, and call start time
 
 Each token counter exposes `known_subtotal`, `reported_calls`, and `missing_calls`. A missing observation is not zero; an explicit zero is a reported observation. No observations yield an unknown subtotal. Treat a subtotal with missing observations as partial coverage. Attempt and status counts include begun failed, cancelled, and interrupted calls, but exclude never-started title requests.
 
-Each `CallUsage` can also retain `timing.elapsed_us` and optional `timing.first_token_us`.
+`mfn-llm::CallUsage` contains raw provider call facts. The application-owned `mf-chat::CallUsage`
+adds `timing.elapsed_us` and optional `timing.first_token_us` while preserving the flat JSON contract.
+Timing validation, token-rate calculation, and persistence belong to `mf-chat`; the LLM node has no metric model.
 The LLM node emits `llm.request.started`, `llm.response.first_text`, and `llm.request.finished` observations.
 The observation layer stamps source Unix nanoseconds once. LLM execution has no elapsed-time recorder.
 The first-text event precedes publication and backpressure; empty and metadata-only values do not emit it.

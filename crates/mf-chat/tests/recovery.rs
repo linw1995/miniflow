@@ -17,9 +17,9 @@ fn begin(database: &ChatDatabase) -> mf_chat::Invocation {
     assert_eq!(begun.invocation, invocation);
     invocation
 }
-fn usages() -> Vec<mfn_llm::CallUsage> {
-    vec![mfn_llm::CallUsage {
-        timing: Some(mfn_llm::CallTiming {
+fn usages() -> Vec<mf_chat::CallUsage> {
+    vec![mf_chat::CallUsage {
+        timing: Some(mf_chat::CallTiming {
             elapsed_us: 2_000_000,
             first_token_us: Some(500_000),
         }),
@@ -53,15 +53,12 @@ fn reply() -> ConversationResult {
 }
 fn stdout(text: &str) -> Vec<u8> {
     serde_json::to_vec(
-        &mfn_llm::LlmOutputs {
-            status: "succeeded".into(),
+        &ConversationResult {
             usages: usages(),
-            error: None,
             metadata: Some(metadata()),
             text: text.into(),
-            history: vec![],
-            usage: None,
             finish_reason: None,
+            ..Default::default()
         }
         .into_values()
         .unwrap(),

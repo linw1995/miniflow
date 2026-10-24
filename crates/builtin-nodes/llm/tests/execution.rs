@@ -702,7 +702,11 @@ fn request_events_observe_first_nonempty_stream_text_and_unary_unknowns() {
         assert_eq!(result["results"][0]["ok"], true, "{result}");
         let usage: mfn_llm::CallUsage =
             serde_json::from_value(result["results"][0]["outputs"]["usages"][0].clone()).unwrap();
-        assert!(usage.timing.is_none());
+        assert!(
+            result["results"][0]["outputs"]["usages"][0]
+                .get("timing")
+                .is_none()
+        );
         let events = result["results"][0]["events"].as_array().unwrap();
         let start = events.first().unwrap();
         let end = events.last().unwrap();
@@ -741,13 +745,17 @@ fn captured_stream_failures_retain_events_without_node_local_timing() {
         assert_eq!(output["status"], "failed", "{result}");
         let usage: mfn_llm::CallUsage =
             serde_json::from_value(output["usages"][0].clone()).unwrap();
-        assert!(usage.timing.is_none());
+        assert!(
+            result["results"][0]["outputs"]["usages"][0]
+                .get("timing")
+                .is_none()
+        );
         let events = result["results"][0]["events"].as_array().unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(events[1]["name"], mfn_llm::FIRST_TEXT_EVENT);
         assert_eq!(events[2]["name"], mfn_llm::REQUEST_FINISHED_EVENT);
         assert!(events[2]["body"]["error"].is_string());
-        assert_eq!(usage.token_rates(), mfn_llm::CallTokenRates::default());
+        assert!(usage.error.is_some());
         assert_eq!(server.requests().len(), 1);
     }
 }

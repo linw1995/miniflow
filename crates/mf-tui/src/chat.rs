@@ -474,9 +474,10 @@ impl Controller {
                     return Err(error);
                 }
                 if cancel.load(Ordering::Acquire) || closed.load(Ordering::Acquire) {
-                    return Err(mf_runtime::StreamError::Execution {
-                        message: "chat live delivery cancelled".into(),
-                    });
+                    return mf_runtime::StreamExecutionSnafu {
+                        message: "chat live delivery cancelled",
+                    }
+                    .fail();
                 }
                 // Consume and compact independently of terminal refresh or inspection.
                 preview.lock().unwrap().apply(&invocation, event)

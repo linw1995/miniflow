@@ -241,7 +241,7 @@ mod tests {
             let counters = BTreeMap::from([("input_tokens".into(), tokens)]);
             let metadata = (previous_version > 1)
                 .then(|| BTreeMap::from([("source".into(), "retained".into())]));
-            let reported = mfn_llm::CallUsage {
+            let reported = crate::CallUsage {
                 timing: None,
                 attribution: None,
                 started_at: Some(1),
@@ -301,7 +301,7 @@ mod tests {
             let expected = if has_list {
                 reported
             } else {
-                mfn_llm::CallUsage {
+                crate::CallUsage {
                     timing: None,
                     attribution: None,
                     started_at: original.started_at,
