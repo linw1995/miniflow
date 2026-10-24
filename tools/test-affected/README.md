@@ -86,7 +86,14 @@ workspace; when their owning package is absent from the compared head they are d
 forcing full-workspace fallback. Known shared executables select their consumers, while unknown
 inputs retain full-workspace fallback. Source diffs are the impact seed.
 
-A resolved coverage graph narrows each changed Rust file to the
+With test precision, syntax-tree comparison first selects only added or modified recognized
+test functions when all other source items remain unchanged, without requiring coverage history.
+Ordinary inline/external modules in library, binary, and integration-test targets are resolved
+to exact identities for `#[test]`, `#[tokio::test]`, and `#[async_std::test]`. Deleted/renamed tests,
+helper changes, unsupported attributes or module layouts, and tests called as helpers retain
+the existing graph/package fallback. Package precision disables this refinement.
+
+A resolved coverage graph narrows other changed Rust files to the
 exact tests covering its base-side line ranges. Files the graph predates (changed between the graph
 commit and the comparison base), files with uncovered changed ranges, and files absent from the graph
 widen back to the existing package plus reverse-dependency scope; every widening records its reason in
@@ -180,7 +187,7 @@ Local parameters:
 | `mode` | `worktree` | `worktree`, `commit`, `merge-base`, or `snapshot` |
 | `base` | null | Local base ref for merge-base or snapshot comparison |
 | `head` | `HEAD` | Commit or head ref to analyze |
-| `precision` | `tests` | `tests` permits coverage-graph narrowing; `packages` keeps package scope |
+| `precision` | `tests` | `tests` permits source and coverage-graph narrowing; `packages` keeps package scope |
 | `configuration` | `{}` | Local target/features/all-features/no-default-features settings |
 | `inventory` | null | Optional matching nextest inventory |
 | `artifacts` | null | Optional absolute snapshot directory |

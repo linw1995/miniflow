@@ -204,7 +204,7 @@ nix develop --command cargo run -p mf-cli --features development-support -- comp
 # Snapshot staged, unstaged, and nonignored untracked files without changing the index.
 nix develop --command cargo run -p mf-cli --features development-support -- run \
   ./target/test-affected-runner --params.mode worktree \
-  --params.precision packages > target/test-plan.json
+  --params.precision tests > target/test-plan.json
 
 # Execute the snapshot-bound selection, preserving empty and failed plans.
 nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.json
@@ -214,7 +214,7 @@ For planning and execution in one command, pass `--params.run true` to the same 
 
 ```bash
 nix develop --command cargo run -p mf-cli --features development-support -- run \
-  ./target/test-affected-runner --params.precision packages --params.run true
+  ./target/test-affected-runner --params.precision tests --params.run true
 ```
 
 Execution adds an `execution` report to the output. Test diagnostics use stderr; failure
@@ -232,10 +232,21 @@ checkout of the actual tested merge.
 The output contains `plan` and optional CI `validation` provenance. Plans report whole
 `packages`, exact `tests`, conservative `baseline_packages`, reasons, deferred
 `ignored_files`, and source/configuration identity. `packages` precision keeps package
-scope. `tests` precision may narrow through a compatible coverage graph. The consumer handles
+scope. `tests` precision narrows test-only source changes directly and may narrow other
+changes through a compatible coverage graph. The consumer handles
 both scopes and never turns an empty plan into unfiltered nextest execution.
 
-With `tests` precision, a compatible coverage graph can narrow production changes
+With `tests` precision (the default for local planning and enabled in PR CI), syntax-tree
+comparison first selects only added or modified test functions when all other source items
+remain unchanged. This works offline without a coverage graph. It resolves ordinary inline
+and external modules in library, binary, and integration-test targets, and recognizes
+`#[test]`, `#[tokio::test]`, and `#[async_std::test]`. Deleted or renamed tests, helper changes,
+unrecognized attributes, ambiguous module layouts (including `#[path]` and `include!`),
+and tests referenced as helpers retain the existing graph/package fallback. Exact identities
+are checked against the runnable head inventory before execution; mismatches restore the
+conservative baseline. Package precision disables both source and coverage refinement.
+
+A compatible coverage graph can also narrow production changes
 below package scope. Planning resolves the nearest compatible default-branch ancestor
 graph of the comparison base through the same lazy, bounded, ancestry-ordered artifact
 acquisition used for validation records, then maps each changed base-side line range to
@@ -249,7 +260,7 @@ unknown inputs still do. Graph-derived selectors flow through the
 same exact-filter consumers, so identity mismatches against
 the runnable inventory widen to the recorded baseline. Local planning acquires graphs only
 when `--params.github_repository` is supplied (authenticated through `GH_TOKEN`), and
-stays offline otherwise.
+stays offline otherwise; source-based test refinement remains available.
 
 The coverage script accepts whole packages and exact test identities and executes its
 current checkout; it does not implement the snapshot consumer. To reproduce a saved
@@ -275,6 +286,7 @@ Input classification has one owner in the shared Flow planner:
 
 | Input | PR Rust selection |
 | --- | --- |
+| Only added or modified recognized test functions, with source/module identity proved | Exact changed cases, without coverage history |
 | Files inside a workspace package, including manifests, fixture lockfiles, documentation, and deleted sources | Owner and transitive reverse dependencies |
 | Deleted sources whose base-side package is absent from the compared head | No additional packages; full main/nightly runs provide the backstop |
 | Root `Cargo.toml` / `Cargo.lock`, Flake/toolchain, Cargo and nextest configuration | No additional packages; full main/nightly runs provide the backstop |
@@ -298,8 +310,9 @@ mappings when shared executable inputs gain new users.
 Build scripts and generated runners can consume inputs beyond Cargo's declared
 graph, so selected scope is not a proof of semantic independence.
 
-Package-level planning is the default; test precision narrows through the coverage graph,
-whose unavailability retains conservative package scope. Invalid
+Test precision is the default; test-only changes narrow from source, and other Rust changes
+narrow through the coverage graph when available. Unproved changes retain conservative
+package scope. Invalid
 Git refs, missing required local history, mismatched snapshots, and failed Cargo metadata
 stop execution rather than produce an unreliable plan. Declared dependency closure is
 conservative, not a proof of arbitrary program effects or cross-platform independence.

@@ -91,8 +91,9 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     let summary = instance.join().unwrap();
     // The planning path is Task-only: no stream producer emits messages.
     assert_eq!(summary.emitted_messages, 0);
-    assert!(memory.tests.is_empty());
-    assert_eq!(memory.packages, ["sample-app", "sample-core"]);
+    assert_eq!(memory.tests.len(), 1);
+    assert_eq!(memory.tests[0].name, "tests::changed");
+    assert!(memory.packages.is_empty());
 
     let flow = root.join("target/test.flow.json");
     fs::write(&flow, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
@@ -138,7 +139,7 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     let mut execute = arguments.clone();
     execute["params.run"] = json!(true);
     let memory_execution = memory_result(&value, &execute).unwrap();
-    assert_eq!(memory_execution["execution"]["selected_count"], json!(4));
+    assert_eq!(memory_execution["execution"]["selected_count"], json!(1));
     assert_eq!(memory_execution["execution"]["executed"], json!(true));
     for empty in [false, true] {
         let mut execute = execute.clone();
@@ -159,7 +160,7 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
         assert_eq!(report["execution"]["executed"], json!(!empty));
         assert_eq!(
             report["execution"]["selected_count"],
-            json!(if empty { 0 } else { 4 })
+            json!(if empty { 0 } else { 1 })
         );
     }
 
@@ -670,40 +671,28 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
             }
             "graph_absent" => {
                 state["graph_runs"] = json!([]);
-                (
-                    Some("incremental"),
-                    vec!["sample-app"],
-                    newer_merge.as_str(),
-                )
+                (Some("incremental"), vec![], newer_merge.as_str())
             }
             "graph_incompatible" => {
                 for run in ["23", "29"] {
                     state["graphs"][run]["metadata"]["schema_version"] = json!(999);
                 }
-                (
-                    Some("incremental"),
-                    vec!["sample-app"],
-                    newer_merge.as_str(),
-                )
+                (Some("incremental"), vec![], newer_merge.as_str())
             }
             "graph_foreign" => {
                 // The nearest run's artifact binds a foreign commit; the
                 // search advances to the older eligible ancestor.
                 state["graphs"]["29"]["metadata"]["commit_sha"] = json!(base);
-                (
-                    Some("incremental"),
-                    vec!["sample-app"],
-                    newer_merge.as_str(),
-                )
+                (Some("incremental"), vec![], newer_merge.as_str())
             }
             "graph_narrows" => {
                 args["params.cumulative"] = json!(true);
                 // The graph at the comparison base covers the changed core
                 // line, narrowing the package to the covering test; the app
-                // change is absent from the graph and widens to its package.
+                // test-only change narrows independently from source.
                 state["graphs"]["23"]["sqlite"] =
                     json!(build_graph("narrowing", &base, 23, &[(1, 1)]));
-                (Some("cumulative"), vec!["sample-app"], base.as_str())
+                (Some("cumulative"), vec![], base.as_str())
             }
             "graph_lagging" => {
                 // The nearest graph predates the comparison base, which
@@ -731,11 +720,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 state["current"]["event"] = json!("workflow_dispatch");
                 (None, vec![], "")
             }
-            _ => (
-                Some("incremental"),
-                vec!["sample-app"],
-                newer_merge.as_str(),
-            ),
+            _ => (Some("incremental"), vec![], newer_merge.as_str()),
         };
         server.configure(&state);
         let memory = memory_result(&flow, &args);
@@ -809,38 +794,17 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 assert_eq!(graph["attempt"], 1, "{case}");
                 assert_eq!(graph["schema_version"], 1, "{case}");
                 assert!(graph["reason"].is_null(), "{case}");
-                // The default graphs know only core/src/lib.rs line 2, so the
-                // app change always widens as absent and the core change as
-                // uncovered, lagging, or narrowed.
+                // Test-only app changes do not query the graph. Production
+                // core changes still record uncovered or lagging ranges.
                 let widened = &graph["widened"];
                 let expected: Vec<(&str, &str, &str)> = match case {
-                    "graph_lagging" => vec![
-                        (
-                            "app/src/lib.rs",
-                            "sample-app",
-                            "absent from the coverage graph",
-                        ),
-                        (
-                            "core/src/lib.rs",
-                            "sample-core",
-                            "changed between the coverage graph commit",
-                        ),
-                    ],
-                    _ if expected_base == newer_merge || case == "graph_narrows" => {
-                        vec![(
-                            "app/src/lib.rs",
-                            "sample-app",
-                            "absent from the coverage graph",
-                        )]
-                    }
-                    _ => vec![
-                        (
-                            "app/src/lib.rs",
-                            "sample-app",
-                            "absent from the coverage graph",
-                        ),
-                        ("core/src/lib.rs", "sample-core", "no test covers"),
-                    ],
+                    "graph_lagging" => vec![(
+                        "core/src/lib.rs",
+                        "sample-core",
+                        "changed between the coverage graph commit",
+                    )],
+                    _ if expected_base == newer_merge || case == "graph_narrows" => vec![],
+                    _ => vec![("core/src/lib.rs", "sample-core", "no test covers")],
                 };
                 assert_eq!(widened.as_array().unwrap().len(), expected.len(), "{case}");
                 for (entry, (file, package, reason)) in
@@ -855,7 +819,16 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         if case == "graph_narrows" {
             assert_eq!(
                 generated["plan"]["tests"],
-                json!([{"package":"sample-core","binary":"sample-core","name":"tests::stable"}]),
+                json!([
+                    {"package":"sample-app","binary":"sample-app","name":"tests::changed"},
+                    {"package":"sample-core","binary":"sample-core","name":"tests::stable"}
+                ]),
+                "{case}"
+            );
+        } else if packages.is_empty() {
+            assert_eq!(
+                generated["plan"]["tests"],
+                json!([{"package":"sample-app","binary":"sample-app","name":"tests::changed"}]),
                 "{case}"
             );
         } else {
