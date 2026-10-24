@@ -7,6 +7,107 @@ use mf_compiler::{
 use mf_runtime::{StreamOptions, WorkflowArguments};
 use serde_json::json;
 
+#[derive(serde::Deserialize)]
+struct PortDeclarations {
+    outputs: Vec<String>,
+    stream_outputs: Vec<String>,
+}
+
+impl mf_runtime::NodePortContract for PortDeclarations {
+    fn ports(&self) -> mf_runtime::NodePorts {
+        mf_runtime::NodePorts {
+            inputs: Vec::new(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|name| {
+                    mf_runtime::PortSpec::owned(name.clone(), mf_runtime::ValueType::Int64, true)
+                })
+                .collect(),
+        }
+    }
+
+    fn stream_outputs(&self) -> Vec<mf_runtime::PortSpec> {
+        self.stream_outputs
+            .iter()
+            .map(|name| {
+                mf_runtime::PortSpec::owned(name.clone(), mf_runtime::ValueType::Int64, true)
+            })
+            .collect()
+    }
+}
+
+impl mf_runtime::TaskStreamNode for PortDeclarations {
+    fn execute(
+        &self,
+        _: mf_runtime::Inputs,
+        _: &mut mf_runtime::ExecutionContext,
+        _: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
+        panic!("invalid declarations must be rejected before execution")
+    }
+}
+
+fn declared_ports(
+    config: serde_json::Value,
+) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
+    let declarations: PortDeclarations = mf_runtime::deserialize_config(config)?;
+    mf_runtime::PreparedNode::task_stream(declarations, mf_runtime::NodeMetadata::default())
+}
+
+inventory::submit! {
+    mf_runtime::NodeRegistration {
+        kind: "test.task_stream_declarations",
+        factory: mf_runtime::NodeFactory::Plain(declared_ports),
+    }
+}
+
+#[test]
+fn compiler_rejects_duplicate_empty_and_colliding_output_declarations() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for (outputs, stream_outputs, diagnostic) in [
+        (
+            vec!["total"],
+            vec!["delta", "delta"],
+            "duplicate stream output port `delta`",
+        ),
+        (
+            vec!["total"],
+            vec![""],
+            "empty or duplicate stream output port ``",
+        ),
+        (
+            vec!["delta"],
+            vec!["delta"],
+            "terminal and stream outputs share port `delta`",
+        ),
+        (
+            vec!["total", "total"],
+            vec!["delta"],
+            "duplicate output port `total`",
+        ),
+    ] {
+        let config = json!({"outputs":outputs, "stream_outputs":stream_outputs});
+        registry
+            .get("test.task_stream_declarations")
+            .unwrap()
+            .instantiate(config.clone())
+            .unwrap();
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version":"2026-10-19", "dependencies":{},
+            "nodes":[{"id":"invalid", "kind":"test.task_stream_declarations", "config":config}],
+            "outputs":[]
+        }))
+        .unwrap();
+        let error = compile_definition(&definition, &registry).unwrap_err();
+        assert!(
+            matches!(error, mf_compiler::WorkflowCompileError::InvalidNodeMetadata { ref definition_id, ref message }
+                if definition_id.as_str() == "invalid" && message.contains(diagnostic)),
+            "{error}"
+        );
+    }
+}
+
 #[test]
 fn registered_external_provider_delivers_increments_and_one_terminal_result() {
     struct Collect(Vec<u64>);

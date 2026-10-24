@@ -341,31 +341,7 @@ impl mf_runtime::TaskStreamNode for Dynamic {
 }
 
 #[test]
-fn dynamic_contracts_reject_colliding_and_duplicate_stream_names() {
-    let collision = PreparedNode::task_stream(
-        Dynamic {
-            ports: Output::ports(),
-        },
-        NodeMetadata::default(),
-    )
-    .err()
-    .unwrap();
-    assert!(matches!(
-        collision,
-        NodeBuildError::OutputCategoryCollision { .. }
-    ));
-    let duplicate = PreparedNode::task_stream(
-        Dynamic {
-            ports: [Delta::ports(), Delta::ports()].concat(),
-        },
-        NodeMetadata::default(),
-    )
-    .err()
-    .unwrap();
-    assert!(matches!(
-        duplicate,
-        NodeBuildError::DuplicateStreamOutput { .. }
-    ));
+fn dynamic_preparation_reflects_output_categories_and_success_capabilities() {
     let prepared = PreparedNode::task_stream(
         Dynamic {
             ports: Delta::ports(),

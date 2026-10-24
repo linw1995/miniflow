@@ -614,7 +614,8 @@ Event, stream, and nested-scope execution retain the existing dynamic scheduler 
 Use `TypedTaskStreamNode` when one operation produces optional incremental values and a final Task result.
 `PreparedNode::typed_task_stream` reflects its associated `Input`, `Output`, and `Emission` contracts.
 Terminal fields remain in `metadata.ports.outputs`; incremental fields are in `metadata.stream_outputs`.
-The two output categories must have distinct names. Dynamic providers use `TaskStreamNode` and
+The compiler rejects empty or duplicate port names and requires distinct names across terminal and
+incremental outputs before execution. Dynamic providers use `TaskStreamNode` and
 `NodePortContract::stream_outputs` with `PreparedNode::task_stream`.
 
 ```rust

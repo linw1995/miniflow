@@ -27,19 +27,29 @@ methods or reconstruct the terminal result from emitted values.
 
 Typed combined providers SHALL declare associated input, terminal output, and emission value contracts.
 Dynamic providers SHALL reflect their input and terminal ports through `NodePortContract` and their
-incremental ports through its stream-output declaration. Preparation MUST NOT execute business logic.
-Terminal and incremental port names MUST be distinct, incremental names MUST be unique, and competing
-metadata declarations MUST fail during preparation.
-
-#### Scenario: Reject an ambiguous output category
-
-- **WHEN** terminal and incremental contracts use the same port name
-- **THEN** preparation fails with the conflicting port identity
+incremental ports through its stream-output declaration. Preparation MUST NOT execute business logic
+or accept competing reflected metadata declarations.
 
 #### Scenario: Reject competing declarations
 
 - **WHEN** caller-supplied metadata redeclares reflected incremental ports
 - **THEN** preparation fails before an executor is returned
+
+### Requirement: Validate port declarations in the compiler
+
+The compiler SHALL reject empty or duplicate port names and names shared across terminal and incremental
+outputs through its node metadata validation before execution. Node preparation SHALL reflect those
+declarations without executing the node. Invalid declarations MUST NOT reach business execution.
+
+#### Scenario: Reject an ambiguous output category
+
+- **WHEN** terminal and incremental contracts use the same port name
+- **THEN** compilation fails with the conflicting node and port identities before any executor runs
+
+#### Scenario: Reject duplicate or empty incremental names
+
+- **WHEN** a provider reflects duplicate or empty incremental port names
+- **THEN** compilation rejects the declarations through the same metadata validation as ordinary ports
 
 ### Requirement: Validate every attempted emission
 
