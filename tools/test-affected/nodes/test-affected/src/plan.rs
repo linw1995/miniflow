@@ -34,6 +34,9 @@ struct Dependency {
 #[derive(Deserialize)]
 struct Target {
     test: bool,
+    name: String,
+    kind: Vec<String>,
+    src_path: PathBuf,
 }
 
 fn workspace_packages(root: &Path) -> Result<BTreeMap<String, Package>, Error> {
@@ -152,6 +155,30 @@ pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestP
                 change.path
             ));
             if options.exact_tests
+                && let Some(selected) = crate::source_tests::select(
+                    comparison,
+                    change,
+                    &owner,
+                    packages[&owner]
+                        .targets
+                        .iter()
+                        .filter(|target| target.test)
+                        .map(|target| {
+                            (
+                                target.name.as_str(),
+                                target.kind.as_slice(),
+                                target.src_path.as_path(),
+                            )
+                        }),
+                )
+            {
+                reasons.entry(owner.clone()).or_default().push(format!(
+                    "Test-only source change: mapped {} to {} exact tests without coverage history",
+                    change.path,
+                    selected.len()
+                ));
+                tests.extend(selected);
+            } else if options.exact_tests
                 && change.path.ends_with(".rs")
                 && let Some(open) = graph.open.as_mut()
             {

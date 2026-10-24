@@ -10,6 +10,7 @@ pub mod model;
 mod plan;
 #[cfg(unix)]
 mod process;
+mod source_tests;
 
 pub use error::Error;
 pub use model::*;
