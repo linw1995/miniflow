@@ -14,29 +14,52 @@
     {
       "id": "source",
       "kind": "builtin.constant",
-      "config": { "value": [1, 2] }
+      "config": {
+        "value": [
+          1,
+          2
+        ]
+      }
     },
     {
       "id": "transform",
       "kind": "builtin.code",
       "config": {
         "language": "cel",
-        "inputs": { "items": { "list": "int" } },
-        "code": { "doubled": "items.map(x, x * 2)" }
+        "inputs": {
+          "items": {
+            "list": "int"
+          }
+        },
+        "code": {
+          "doubled": "items.map(x, x * 2)"
+        }
       },
       "inputs": {
-        "items": { "from": { "node": "source", "port": "value" } }
+        "items": {
+          "from": {
+            "node": "source",
+            "port": "value"
+          }
+        }
       }
     }
   ],
   "outputs": [
-    { "name": "doubled", "node": "transform", "port": "doubled" }
+    {
+      "name": "doubled",
+      "node": "transform",
+      "port": "doubled"
+    }
   ],
   "clusters": [
     {
       "label": "List computation",
       "annotation": "Transform a typed list with CEL and return the resulting values.",
-      "nodes": ["source", "transform"]
+      "nodes": [
+        "source",
+        "transform"
+      ]
     }
   ]
 }

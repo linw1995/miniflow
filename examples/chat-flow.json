@@ -62,9 +62,24 @@
         "capture_errors": true
       },
       "inputs": {
-        "prompt": { "from": { "node": "params", "port": "prompt" } },
-        "system": { "from": { "node": "params", "port": "system" } },
-        "history": { "from": { "node": "params", "port": "history" } }
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        }
       }
     }
   ],
@@ -107,7 +122,10 @@
     {
       "label": "Conversation",
       "annotation": "Resolve conversation parameters and produce one model response with captured errors and usage.",
-      "nodes": ["params", "chat"]
+      "nodes": [
+        "params",
+        "chat"
+      ]
     }
   ]
 }

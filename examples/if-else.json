@@ -46,14 +46,24 @@
       "id": "handle_accepted",
       "kind": "builtin.identity",
       "inputs": {
-        "input": { "from": { "node": "load_order", "port": "value" } }
+        "input": {
+          "from": {
+            "node": "load_order",
+            "port": "value"
+          }
+        }
       }
     },
     {
       "id": "handle_else",
       "kind": "builtin.identity",
       "inputs": {
-        "input": { "from": { "node": "load_order", "port": "value" } }
+        "input": {
+          "from": {
+            "node": "load_order",
+            "port": "value"
+          }
+        }
       }
     }
   ],
@@ -97,12 +107,19 @@
     {
       "label": "Order evaluation",
       "annotation": "Load the order, complete the audit prerequisite, and choose the first matching amount branch.",
-      "nodes": ["load_order", "audit", "route"]
+      "nodes": [
+        "load_order",
+        "audit",
+        "route"
+      ]
     },
     {
       "label": "Branch results",
       "annotation": "Forward the order through the selected branch and omit outputs from skipped handlers.",
-      "nodes": ["handle_accepted", "handle_else"]
+      "nodes": [
+        "handle_accepted",
+        "handle_else"
+      ]
     }
   ]
 }
