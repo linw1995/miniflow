@@ -15,6 +15,23 @@ spec.loader.exec_module(cache)
 
 
 class BuildCacheTests(unittest.TestCase):
+    def test_isolated_setup_prepares_sources_without_serial_compilation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metadata = {"packages": [{
+                "name": "mf-compiler",
+                "dependencies": [{"name": "serde_json", "req": "^1", "kind": None}],
+            }]}
+            with patch.object(cache.subprocess, "run") as run:
+                cache.prepare_cache(root, "/bin/cargo", metadata, root / "cache", True,
+                                    prewarm=False)
+            commands = [call.args[0][1] for call in run.call_args_list]
+            self.assertIn("vendor", commands)
+            self.assertIn("clean", commands)
+            self.assertNotIn("build", commands)
+            self.assertTrue((root / "cache/target/CACHEDIR.TAG").is_file())
+            self.assertTrue((root / "cache/source.toml").is_file())
+
     def test_optimized_setup_isolates_targets_sources_and_session(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -26,7 +43,8 @@ class BuildCacheTests(unittest.TestCase):
                 "MF_TEST_BUILD_CACHE_SESSION": "session",
             }
 
-            def prepare(workspace, cargo, metadata, target, persistent):
+            def prepare(workspace, cargo, metadata, target, persistent, prewarm=True):
+                self.assertFalse(prewarm)
                 (target / "target").mkdir(parents=True)
                 (target / "vendor").mkdir()
                 (target / "source.toml").write_text("fixture")
@@ -88,7 +106,7 @@ class BuildCacheTests(unittest.TestCase):
                 "MF_TEST_BUILD_CACHE_SESSION": "first-session",
             }
 
-            def prepare(*args):
+            def prepare(*args, **kwargs):
                 (target / "target").mkdir(parents=True, exist_ok=True)
                 (target / "vendor").mkdir(exist_ok=True)
                 (target / "source.toml").write_text("fixture")

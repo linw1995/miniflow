@@ -98,8 +98,10 @@ keeps dependency paths in the checkout; it deletes the copied workspace before
 running the relocated host. Ordinary generated builds use one serialized test group.
 The LTO/strip probe has its own optimized target, vendor tree, setup session, and
 serialized group, so it can overlap ordinary fixture tests without replacing their
-runners. Packaging remains serialized with ordinary builds while seeding its separate
-target. Packaging and LTO each reserve two nextest slots instead of blocking all tests.
+runners. Its setup prepares sources only; optimized compilation runs inside the test
+instead of serially delaying the entire suite. Packaging remains serialized with
+ordinary builds while seeding its separate target. Packaging and LTO each reserve
+two nextest slots instead of blocking all tests.
 Only release dependencies are prewarmed; obsolete dev artifacts are removed.
 Generated-runner behavior tests use the release profile with optimization level
 zero by default. This keeps release semantics and artifact paths while reducing

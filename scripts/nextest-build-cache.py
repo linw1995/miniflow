@@ -63,7 +63,8 @@ def main(optimized=False):
         path.exists() for path in [directory / "target", directory / "vendor", directory / "source.toml"]
     ):
         marker.unlink(missing_ok=True)
-        prepare_cache(workspace, cargo, metadata, directory, bool(cache_directory))
+        prepare_cache(workspace, cargo, metadata, directory, bool(cache_directory),
+                      prewarm=not optimized)
         if session:
             pending = marker.with_suffix(".tmp")
             pending.write_text(json.dumps(identity, sort_keys=True))
@@ -92,7 +93,7 @@ def main(optimized=False):
             output.write(f"{name}={value}\n")
 
 
-def prepare_cache(workspace, cargo, metadata, directory, persistent):
+def prepare_cache(workspace, cargo, metadata, directory, persistent, prewarm=True):
     project = directory / "warmup"
     target = directory / "target"
     (project / "src").mkdir(parents=True, exist_ok=True)
@@ -173,12 +174,15 @@ def prepare_cache(workspace, cargo, metadata, directory, persistent):
     if (target / "debug").exists():
         shutil.rmtree(target / "debug")
     # Preserve wrappers, flags, and coverage instrumentation used by the tests.
-    subprocess.run(
-        [cargo, "build", "--offline", "--release", "--config", str(source_config)],
-        cwd=project,
-        env=env,
-        check=True,
-    )
+    # Optimized builds belong to the isolated test, where they can overlap other tests.
+    if prewarm:
+        subprocess.run(
+            [cargo, "build", "--offline", "--release", "--config", str(source_config)],
+            cwd=project,
+            env=env,
+            check=True,
+        )
+    target.mkdir(parents=True, exist_ok=True)
     # Nested targets may omit this tag when an ancestor already has one.
     (target / "CACHEDIR.TAG").write_text(
         "Signature: 8a477f597d28d172789f06886806bc55\n"
