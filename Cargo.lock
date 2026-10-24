@@ -1718,6 +1718,7 @@ dependencies = [
 name = "mf-tui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "crossterm",
  "http-body-util",
  "hyper",
