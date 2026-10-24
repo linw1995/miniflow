@@ -78,6 +78,23 @@ fn prepare(value: Value) -> Result<mf_runtime::PreparedStream, mf_compiler::Work
     let plan = CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
     instantiate_stream(&plan, &registry)
 }
+fn output_channels(plan: &mf_runtime::StreamPlan) -> Vec<usize> {
+    let mut channels = vec![0; plan.nodes().len()];
+    for (message, entry) in plan.program().messages.iter().enumerate() {
+        for &domain in entry.schedule.domains.iter() {
+            for node in plan.execution_domain(domain).nodes.iter() {
+                channels[node.index()] = message;
+            }
+        }
+    }
+    for (node, binding) in plan.program().emissions.iter().enumerate() {
+        if let Some(binding) = binding.as_ref().filter(|binding| !binding.terminal) {
+            channels[node] = binding.message;
+        }
+    }
+    channels
+}
+
 fn collect_graph() -> Value {
     graph(
         json!([{"id":"collect", "kind":"test.collect"}, {"id":"copy", "kind":"builtin.identity"}]),
@@ -123,12 +140,7 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         ValueType::Array
     );
     assert_eq!(prepared.plan().message_sources(), [None, Some(0), Some(1)]);
-    assert_eq!(
-        (0..3)
-            .map(|node| prepared.plan().output_domain(node))
-            .collect::<Vec<_>>(),
-        [1, 2, 2]
-    );
+    assert_eq!(output_channels(prepared.plan()), [1, 2, 2]);
     assert_eq!(prepared.plan().selected_domains(), &[2]);
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let plan = plan_definition(&definition).unwrap();
@@ -186,7 +198,9 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
     let prepared = prepare(value).unwrap();
     assert_eq!(prepared.plan().message_sources().len(), 2);
     assert!(
-        (0..prepared.plan().nodes().len()).all(|node| prepared.plan().output_domain(node) == 1)
+        output_channels(prepared.plan())
+            .iter()
+            .all(|&channel| channel == 1)
     );
 
     let chained = graph(
@@ -201,12 +215,7 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
         prepared.plan().message_sources(),
         [None, Some(0), Some(1), Some(2)]
     );
-    assert_eq!(
-        (0..3)
-            .map(|node| prepared.plan().output_domain(node))
-            .collect::<Vec<_>>(),
-        [1, 2, 3]
-    );
+    assert_eq!(output_channels(prepared.plan()), [1, 2, 3]);
 
     let mut independent = graph(
         json!([

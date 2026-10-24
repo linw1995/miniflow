@@ -570,6 +570,17 @@ impl ExecutionContext {
         Ok((inputs, resolution))
     }
 
+    pub fn resolve_event_inputs<N>(
+        &mut self,
+        node: &FlowNode<N>,
+        resolve: impl FnOnce(&Self, &mut Inputs) -> Result<crate::InputResolution, WorkflowRunError>,
+    ) -> Result<(Inputs, crate::InputResolution), WorkflowRunError> {
+        self.reserve_step(node.definition_id.as_str())?;
+        let mut inputs = Inputs::new();
+        let resolution = resolve(self, &mut inputs)?;
+        Ok((inputs, resolution))
+    }
+
     pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
         self.snapshots = Some(recorder);
     }
@@ -803,7 +814,7 @@ impl ExecutionContext {
     }
 
     /// Selects through a precomputed `output_id` key, with the same instrumentation.
-    pub(crate) fn select_output_keyed(
+    pub fn select_output_keyed(
         &mut self,
         name: &str,
         node: &str,

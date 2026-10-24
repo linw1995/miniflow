@@ -329,8 +329,9 @@ fn planner_separates_terminal_and_stream_domains_and_rejects_implicit_joins() {
         .iter()
         .position(|node| node.definition_id.as_str() == "group.count")
         .unwrap();
-    assert_eq!(prepared.plan().output_domain(source), 0);
-    assert_eq!(prepared.plan().stream_output_domain(source), Some(1));
+    assert!(prepared.plan().selects_outputs(0));
+    assert!(prepared.plan().emission_binding(source).terminal);
+    assert_eq!(prepared.plan().emission_binding(source).message, 1);
     document.as_object_mut().unwrap().remove("execution");
     assert!(
         compile_definition(
@@ -654,5 +655,30 @@ fn direct_finite_builders_reject_stream_edges_and_context_reads() {
         assert!(
             matches!(builder.into_tasks(), Err(mf_compiler::FlowBuildError::SynchronousStreamEdge { port, .. }) if port == "delta")
         );
+    }
+}
+
+#[cfg(feature = "codegen")]
+#[test]
+fn generated_streams_bind_executable_functions_without_runtime_domain_tables() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for definition in [root_export(), stream_export()] {
+        let plan =
+            compile_definition(&serde_json::from_value(definition).unwrap(), &registry).unwrap();
+        let source = plan
+            .generate_execution_plans(&registry)
+            .unwrap()
+            .rust_source;
+        syn::parse_file(&source).unwrap();
+        assert!(!source.contains("MessageDomains"));
+        assert!(!source.contains("plan.dependencies("));
+        assert!(!source.contains("outputs_for_domain"));
+        assert!(source.contains("initialize_stream_message_0"));
+        assert!(source.contains("select_stream_outputs_"));
+        assert!(source.contains("group.count.delta"));
+        if plan.definition.nodes.len() > 1 {
+            assert!(source.contains("execute_stream_domain_"));
+            assert!(source.contains("resolve_stream_input_1(plan, ctx, inputs"));
+        }
     }
 }

@@ -181,6 +181,24 @@ fn generated_preparation_matches_memory_under_the_same_clock_and_inputs() {
             &RunnerOptions { telemetry: false },
         )
         .unwrap();
+        // Execution must keep working after the descriptive wiring tables are erased.
+        let workflow_path = project.join("src/workflow.rs");
+        let workflow_source = fs::read_to_string(&workflow_path).unwrap();
+        assert!(workflow_source.contains("std::borrow::Cow::Borrowed(STREAM_DEPENDENCIES)"));
+        assert!(workflow_source.contains("std::borrow::Cow::Borrowed(STREAM_OUTPUTS)"));
+        let workflow_source = workflow_source
+            .replace(
+                "std::borrow::Cow::Borrowed(STREAM_DEPENDENCIES)",
+                &format!(
+                    "std::borrow::Cow::Owned(vec![std::borrow::Cow::<[mf_runtime::FlowDependency]>::Borrowed(&[]); {}])",
+                    plan.execution_order.len()
+                ),
+            )
+            .replace(
+                "std::borrow::Cow::Borrowed(STREAM_OUTPUTS)",
+                "std::borrow::Cow::Borrowed(&[])",
+            );
+        fs::write(workflow_path, workflow_source).unwrap();
         fs::write(
             project.join("src/controlled.rs"),
             include_str!("fixtures/controlled_source.rs"),

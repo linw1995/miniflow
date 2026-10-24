@@ -1100,7 +1100,7 @@ pub fn build_message_domains(
     nodes: &[FlowNode],
     dependencies: &[Vec<FlowDependency>],
     outputs: &[WorkflowOutputDefinition],
-) -> Result<mf_runtime::MessageDomains, StreamBuildError> {
+) -> Result<crate::MessageDomains, StreamBuildError> {
     let mut indices = BTreeMap::new();
     let mut output_index = BTreeMap::new();
     for (index, node) in nodes.iter().enumerate() {
@@ -1352,7 +1352,7 @@ pub fn build_message_domains(
     let execution_domains = bind_domain_snapshots(execution_domains, nodes, |id| {
         sources[message_domain_by_execution[id]]
     });
-    Ok(mf_runtime::MessageDomains::from_parts_with_streams(
+    Ok(crate::MessageDomains::from_parts_with_streams(
         sources.into(),
         output_domains.into(),
         stream_output_domains.into(),
@@ -1363,7 +1363,6 @@ pub fn build_message_domains(
             .map(Cow::Owned)
             .collect::<Vec<_>>()
             .into(),
-        message_domain_by_execution.into(),
     ))
 }
 pub fn workflow_input_schema<'a, N: 'a>(
@@ -1609,11 +1608,12 @@ pub fn prepare_stream(
         .collect();
     let schema =
         stream_workflow_inputs(&nodes, &dependencies, &initial).context(WorkflowInputsSnafu)?;
+    let program = domains.lower(&nodes, &dependencies, &outputs);
     let prepared = mf_runtime::PreparedStream::from_plan(
         execution,
         nodes,
         dependencies.into(),
-        domains,
+        program,
         outputs.into(),
         schema,
     );

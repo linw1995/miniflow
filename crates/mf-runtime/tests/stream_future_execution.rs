@@ -2,10 +2,9 @@
 
 use mf_runtime::{
     Emitter, ExecutionContext, ExecutionDomain, ExecutionDomains, FlowDependency, FlowNode, Inputs,
-    MessageDomains, NodeExecution, NodeExecutionError, NodeId, NodePorts, NodeResult,
-    OutputVisibility, Outputs, PortSpec, PreparedNode, PreparedStream, StreamError,
-    StreamExecution, StreamLimits, StreamMode, StreamNode, TaskNode, ValueType,
-    WorkflowOutputDefinition,
+    NodeExecution, NodeExecutionError, NodeId, NodePorts, NodeResult, OutputVisibility, Outputs,
+    PortSpec, PreparedNode, PreparedStream, StreamError, StreamExecution, StreamLimits, StreamMode,
+    StreamNode, TaskNode, ValueType, WorkflowOutputDefinition,
 };
 use serde_json::json;
 use std::{
@@ -105,6 +104,74 @@ impl TaskNode for Inspect {
     }
 }
 
+fn program(execution_domains: ExecutionDomains) -> mf_runtime::StreamProgram {
+    use mf_runtime::{MessageSchedule, StreamEmissionBinding, StreamMessageProgram, StreamProgram};
+    StreamProgram {
+        execution_domains,
+        messages: vec![
+            StreamMessageProgram {
+                source: None,
+                schedule: MessageSchedule {
+                    domains: vec![0].into(),
+                    local: vec![0, usize::MAX].into(),
+                    initial_deps: vec![0].into(),
+                    successors: vec![Box::from([])].into(),
+                },
+                select_outputs: None,
+            },
+            StreamMessageProgram {
+                source: Some(0),
+                schedule: MessageSchedule {
+                    domains: vec![1].into(),
+                    local: vec![usize::MAX, 0].into(),
+                    initial_deps: vec![0].into(),
+                    successors: vec![Box::from([])].into(),
+                },
+                select_outputs: Some(Arc::new(|context| {
+                    let mut outputs = mf_runtime::FlowOutputs::new();
+                    for port in ["item", "backend"] {
+                        if let Some(value) = context.select_output(port, "inspect", port, false)? {
+                            outputs.insert(port.into(), value);
+                        }
+                    }
+                    Ok(outputs)
+                })),
+            },
+        ],
+        emissions: vec![
+            Some(StreamEmissionBinding {
+                message: 1,
+                connected: true,
+                terminal: false,
+                initialize: Arc::new(|plan, result| {
+                    ExecutionContext::for_message(plan.emission_node(0), result)
+                }),
+            }),
+            None,
+        ],
+        inputs: (0..2)
+            .map(|index| {
+                Arc::new(
+                    move |plan: &mf_runtime::StreamPlan,
+                          context: &ExecutionContext,
+                          inputs: &mut Inputs,
+                          causes| {
+                        context.resolve_node_inputs(
+                            &plan.nodes()[index],
+                            plan.dependencies(index)
+                                .iter()
+                                .map(FlowDependency::borrowed),
+                            &[],
+                            inputs,
+                            causes,
+                        )
+                    },
+                ) as Arc<mf_runtime::StreamInputResolver>
+            })
+            .collect(),
+    }
+}
+
 fn prepare(inspect: Inspect) -> PreparedStream {
     let ports = vec![
         PortSpec::new("item", ValueType::Int64, true),
@@ -156,31 +223,24 @@ fn prepare(inspect: Inspect) -> PreparedStream {
             ),
         ]
         .into(),
-        MessageDomains::from_parts(
-            vec![None, Some(0)].into(),
-            vec![1, 1].into(),
-            vec![1].into(),
-            ExecutionDomains::from_parts(
-                (0..2)
-                    .map(|id| ExecutionDomain {
-                        id,
-                        nodes: vec![NodeId::new(id)].into(),
-                        positions: vec![id].into(),
-                        predecessors: vec![].into(),
-                        successors: vec![].into(),
-                        first_position: id,
-                        snapshot_visibility: OutputVisibility::Borrowed(&[
-                            "source.backend",
-                            "source.item",
-                        ]),
-                    })
-                    .collect::<Vec<_>>()
-                    .into(),
-                vec![Cow::Owned(vec![]), Cow::Owned(vec![])].into(),
-            ),
-            vec![Cow::Owned(vec![0]), Cow::Owned(vec![1])].into(),
-            vec![0, 1].into(),
-        ),
+        program(ExecutionDomains::from_parts(
+            (0..2)
+                .map(|id| ExecutionDomain {
+                    id,
+                    nodes: vec![NodeId::new(id)].into(),
+                    positions: vec![id].into(),
+                    predecessors: vec![].into(),
+                    successors: vec![].into(),
+                    first_position: id,
+                    snapshot_visibility: OutputVisibility::Borrowed(&[
+                        "source.backend",
+                        "source.item",
+                    ]),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            vec![Cow::Owned(vec![]), Cow::Owned(vec![])].into(),
+        )),
         ["item", "backend"]
             .into_iter()
             .map(|port| WorkflowOutputDefinition {

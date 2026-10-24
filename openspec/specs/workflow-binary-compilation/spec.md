@@ -1083,3 +1083,20 @@ Generated streaming runners SHALL support combined nodes through the same messag
 
 - **WHEN** a compiled native Stream workflow is moved and its build inputs are removed
 - **THEN** its manifest and incremental/terminal execution remain available without rebuilding
+
+### Requirement: Generate executable stream wiring
+
+The compiler SHALL generate graph-specific input resolvers, message initializers, Task-domain functions,
+fixed emitter channel bindings, and output selectors. Generated data flow MUST NOT interpret a
+`MessageDomains` structure, search output ownership, or read descriptive connection/output tables during
+execution. The runtime SHALL own queue capacity, acknowledgment, cancellation, and scheduling mechanics.
+
+#### Scenario: Execute without descriptive wiring tables
+
+- **WHEN** a generated runner retains its executable bindings but its descriptive dependency and selected-output tables are empty
+- **THEN** input binding, branches, batching, nested workflows, failures, and selected outputs retain the same behavior
+
+#### Scenario: Execute combined incremental and terminal outputs
+
+- **WHEN** a compiled combined node emits increments and returns its terminal result
+- **THEN** compiler-fixed channel bindings deliver the increments and generated Task-domain functions continue the terminal path

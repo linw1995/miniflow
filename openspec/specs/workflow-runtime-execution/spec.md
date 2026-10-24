@@ -476,3 +476,21 @@ A combined node's validated return SHALL publish terminal outputs and permit ord
 
 - **WHEN** a combined node returns a valid terminal result while admitted emission records are still draining
 - **THEN** its terminal dependent can start and workflow success waits for both paths
+
+### Requirement: Bind executable stream programs before starting an instance
+
+Streaming execution SHALL receive executable input, message-initialization, domain-execution, and
+output-selection functions with fixed emission channels. `mf-runtime` MUST NOT define or retain
+`MessageDomains`. Compiler analysis MAY use message ownership to validate graph boundaries and lower
+in-memory hosts to equivalent bound functions during preparation. Scheduling MUST NOT reconstruct
+ownership or select output fields by interpreting graph tables for each message.
+
+#### Scenario: Prepare an in-memory workflow
+
+- **WHEN** the host prepares a streaming workflow
+- **THEN** compiler analysis binds its executable functions before any business invocation starts
+
+#### Scenario: Start a generated runner
+
+- **WHEN** a standalone runner starts
+- **THEN** it binds generated functions and fixed channels without rebuilding message ownership or graph routing

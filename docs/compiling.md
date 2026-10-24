@@ -230,6 +230,11 @@ completion before settling the workflow. Isolated Task targets retain one termin
 The manifest uses the ordinary workflow definition and startup interface. Native delivery uses the
 existing pending-message limits, cancellation, and acknowledgment.
 
+The compiler emits fixed input-binding functions, named Task-domain functions, emitter channel bindings,
+and output-selection functions for each graph. The runner executes these entry points without interpreting
+message-ownership or selected-output tables. `MessageDomains` belongs to compiler analysis and is absent
+from `mf-runtime`. Runtime queues, acknowledgment, cancellation, and backpressure remain shared mechanics.
+
 ## Streaming runners
 
 Use schema `2026-10-03` with `execution.mode` set to `stream`. Sources are explicit nodes. The repository

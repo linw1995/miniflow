@@ -696,6 +696,12 @@ Unconnected incremental ports use the discard sink and reserve no unread receive
 `is_connected()` to avoid incremental construction. Finite execution and isolated Task adaptation return
 the final Task result normally. There is no runtime publisher context or separate live-output protocol.
 
+The compiler resolves message ownership before binding a `StreamProgram`. Standalone runners generate
+fixed functions for inputs, message initialization, domain execution, and output selection. Hosts using
+in-memory preparation bind equivalent functions once during preparation. `mf-runtime` receives executable
+bindings and scheduling layouts; it does not retain or interpret `MessageDomains`. Port validation and
+observation remain runtime contracts, independent of the compiled graph wiring.
+
 ## Workflow observation context
 
 Observed execution activates the workflow's OTel context and a node span around dependency resolution, invocation, and output publication. A node using an application-provided OTel tracer can create child spans through the current context without changing its execution interface. The runtime does not install a global provider or configure a plugin's tracer. Threads created by plugins require explicit context propagation.

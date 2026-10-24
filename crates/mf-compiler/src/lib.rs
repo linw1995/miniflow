@@ -12,6 +12,7 @@ mod embedding;
 mod inputs;
 mod iteration;
 mod loops;
+mod message_domain;
 #[cfg(feature = "codegen")]
 mod pipeline;
 mod plan;
@@ -110,3 +111,5 @@ pub use mf_runtime::{
 
 mod dependencies;
 pub use dependencies::{ExecutionDependency, FlowDependency};
+
+pub use message_domain::MessageDomains;
