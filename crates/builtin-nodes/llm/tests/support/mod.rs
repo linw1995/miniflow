@@ -19,6 +19,8 @@ pub struct Reply {
     pub headers: Vec<(String, String)>,
     pub header_delay: Duration,
     pub body_delay: Duration,
+    pub fragments: Option<Vec<Vec<u8>>>,
+    pub fragment_delay: Duration,
 }
 
 impl Reply {
@@ -29,7 +31,20 @@ impl Reply {
             headers: vec![],
             header_delay: Duration::ZERO,
             body_delay: Duration::ZERO,
+            fragments: None,
+            fragment_delay: Duration::ZERO,
         }
+    }
+
+    pub fn stream_text(text: &str) -> Self {
+        let mut reply = Self::text(text);
+        let chunk = json!({"id":"mock-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]});
+        let finish = json!({"id":"mock-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+        reply.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+        reply
+            .headers
+            .push(("Content-Type".into(), "text/event-stream".into()));
+        reply
     }
 
     pub fn text(text: &str) -> Self {
@@ -118,8 +133,17 @@ impl Server {
                 });
                 index += 1;
                 thread::sleep(reply.header_delay);
+                let content_type = if reply
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                {
+                    ""
+                } else {
+                    "Content-Type: application/json\r\n"
+                };
                 let mut headers = format!(
-                    "HTTP/1.1 {} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    "HTTP/1.1 {} Mock\r\n{content_type}Content-Length: {}\r\nConnection: close\r\n",
                     reply.status,
                     reply.body.len()
                 );
@@ -129,7 +153,16 @@ impl Server {
                 headers.push_str("\r\n");
                 let _ = socket.write_all(headers.as_bytes());
                 thread::sleep(reply.body_delay);
-                let _ = socket.write_all(reply.body.as_bytes());
+                if let Some(fragments) = reply.fragments {
+                    for fragment in fragments {
+                        if socket.write_all(&fragment).is_err() {
+                            break;
+                        }
+                        thread::sleep(reply.fragment_delay);
+                    }
+                } else {
+                    let _ = socket.write_all(reply.body.as_bytes());
+                }
             }
         });
         Self {

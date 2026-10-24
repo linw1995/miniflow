@@ -218,6 +218,19 @@ This logical fixture demonstrates successful node completion:
 
 `WireRecord::decode` checks required fields and local event invariants. `LifecycleEvent::validate_for` additionally checks graph identity, event bounds, positions, kinds, ports, skip dependencies, and the visited prefix. Run identity matching and cross-record state reduction belong to the later receiver. `WireRecord::write_to` fills a fresh OTel record created by a caller-owned logger; it neither emits that record nor manages the provider.
 
+## Model request observations
+
+The `mf.observation` log scope carries `llm.request.started`, `llm.response.first_text`, and
+`llm.request.finished`. Each structured body identifies its `call_id`; request boundaries carry the model,
+node/scope attribution, and available call facts. Source timestamps and native trace/span correlation are retained
+unchanged by local collectors and OTel export. The first-text observation is emitted before downstream publication.
+These observations do not consume workflow lifecycle sequence numbers or change lifecycle schema versions.
+
+Application hosts derive request duration and first-text latency from corresponding event timestamps, then combine
+those windows with provider output-token counts. Their local event recorder operates independently of optional
+exporters; executable receivers consume the same observations from OTLP. Missing or inconsistent observations yield
+unknown timing rather than fallback receiver-time measurements. Diagnostic log retention does not gate aggregation.
+
 ## Sequences and acceptable loss
 
 Reserve sequences before serialization/enqueueing through `EventSequence`. A dropped record consumes
@@ -518,6 +531,14 @@ status and elapsed time from a state snapshot. Data edges default to cyan, outpu
 to yellow. Their labels distinguish prerequisites in monochrome. Connections join node borders through `├` output ports
 and `▶┤` input ports. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle
 loss remains visibly uncertain.
+
+LLM cards reserve two extra rows for FTT and Gen / E2E token rates, so receiving results does not move
+the graph. The node details explain the timing windows, report observation coverage, and list each
+call's model, purpose, and performance. Request events supply timing and provisional call facts before
+the node's `usages` snapshot arrives, correlated by the request-start event's exact trace/span identity.
+Repeated stream invocations and Loop passes retain their own identities; missing events or legacy
+telemetry display `—` rather than borrowing another invocation's results.
+Collapsed clusters retain their existing aggregate status without combining member performance.
 
 Edges use ordered integer channel tracks and reserved passages for connections spanning multiple layers.
 Obstacle-aware search and bounded local retries handle blocked routes. Completed routes avoid boxes,

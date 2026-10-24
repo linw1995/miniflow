@@ -80,6 +80,7 @@ fn parameter_templates_configure_memory_and_standalone_llm_requests() {
                 let usage = usage.as_object_mut().unwrap();
                 usage.remove("call_id");
                 usage.remove("started_at");
+                assert!(usage.remove("timing").is_none_or(|timing| timing.is_null()));
             }
         }
         outputs
@@ -487,5 +488,5 @@ fn composed_conversation_compiles_without_application_nodes() {
         serde_json::to_value(&arguments).unwrap()["input.history"],
         json!([])
     );
-    instantiate_compiled(&plan, &registry).unwrap();
+    instantiate_stream(&plan, &registry).unwrap();
 }

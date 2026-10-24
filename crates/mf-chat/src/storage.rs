@@ -241,7 +241,8 @@ mod tests {
             let counters = BTreeMap::from([("input_tokens".into(), tokens)]);
             let metadata = (previous_version > 1)
                 .then(|| BTreeMap::from([("source".into(), "retained".into())]));
-            let reported = mfn_llm::CallUsage {
+            let reported = crate::CallUsage {
+                timing: None,
                 attribution: None,
                 started_at: Some(1),
                 call_id: "reported-call".into(),
@@ -274,7 +275,7 @@ mod tests {
                     .execute(&mut connection)
                     .unwrap();
             }
-            for _ in previous_version..5 {
+            while connection.applied_migrations().unwrap().len() > previous_version {
                 connection.revert_last_migration(MIGRATIONS).unwrap();
             }
             assert_eq!(
@@ -300,7 +301,8 @@ mod tests {
             let expected = if has_list {
                 reported
             } else {
-                mfn_llm::CallUsage {
+                crate::CallUsage {
+                    timing: None,
                     attribution: None,
                     started_at: original.started_at,
                     call_id: original.id.clone(),
@@ -341,6 +343,9 @@ mod tests {
             assert_eq!(usage.overall.attempted_calls, 1);
             assert_eq!(usage.overall.input_tokens.known_subtotal, Some(tokens));
             assert_eq!(usage.overall.output_tokens.known_subtotal, None);
+            assert_eq!(usage.overall.performance.elapsed.reported_calls, 0);
+            assert_eq!(usage.overall.performance.first_token.mean_ms, None);
+            assert_eq!(usage.overall.performance.end_to_end.tokens_per_second, None);
         }
     }
 

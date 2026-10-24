@@ -18,6 +18,7 @@ mf-runtime = { workspace = true, features = ["async"] }
 
 # Provider protocol and configured native HTTP transport.
 bytes.workspace = true
+futures = { workspace = true, features = ["std"] }
 rig-core = { workspace = true, features = ["reqwest", "rustls"] }
 rig-reqwest = { workspace = true, features = ["rustls"] }
 reqwest = { workspace = true, features = ["rustls"] }

@@ -182,18 +182,112 @@ Filters accept session, profile, actual model name, purpose, and call start time
 
 Each token counter exposes `known_subtotal`, `reported_calls`, and `missing_calls`. A missing observation is not zero; an explicit zero is a reported observation. No observations yield an unknown subtotal. Treat a subtotal with missing observations as partial coverage. Attempt and status counts include begun failed, cancelled, and interrupted calls, but exclude never-started title requests.
 
+`mfn-llm::CallUsage` contains raw provider call facts. The application-owned `mf-chat::CallUsage`
+adds `timing.elapsed_us` and optional `timing.first_token_us` while preserving the flat JSON contract.
+Timing validation, token-rate calculation, and persistence belong to `mf-chat`; the LLM node has no metric model.
+The LLM node emits `llm.request.started`, `llm.response.first_text`, and `llm.request.finished` observations.
+The observation layer stamps source Unix nanoseconds once. LLM execution has no elapsed-time recorder.
+The first-text event precedes publication and backpressure; empty and metadata-only values do not emit it.
+`mf-chat` correlates events by `call_id` and derives microsecond differences before persistence. Its local collector
+works without external tracing exporters and follows execution contexts into concurrent and nested domains.
+Executable chat collects the same `mf.observation` events through OTLP and applies their source timestamps before
+settlement or save-only recovery. TUI graph cards use the same aggregation and can display event-derived call facts
+before business snapshots arrive. Unary calls have no first-text event. Missing, conflicting, or noncausal event
+sequences remain unknown; receiver arrival times are never substituted. Older stored timing remains readable.
+Raw standalone node outputs retain call facts without computing timing; the hosting application owns enrichment.
+
+`CallUsage::token_rates()` derives two optional rates from the saved output-token count and timing:
+
+- `end_to_end_tokens_per_second`: output tokens divided by the whole request duration.
+- `generation_tokens_per_second`: output tokens divided by request duration minus FTT.
+
+The counters are provider-reported completion tokens, never streamed chunk counts. Missing counters,
+failed calls, and zero-duration rate windows remain unknown; a reported zero token count yields zero
+when the window is positive. These are client-observed rates and include local stream backpressure.
+They are not server-only decoding measurements. Raw integer timing is stored with the response so a
+save-only retry preserves the original observations and does not recalculate elapsed time.
+
+`statistics.overall.performance` and every group's `performance` expose `elapsed` and `first_token`
+latencies (`total_us`, `mean_ms`), plus `end_to_end` and `generation` throughput (`output_tokens`,
+`elapsed_us`, `tokens_per_second`). Every measure includes `reported_calls` and `missing_calls`.
+Aggregated rates divide summed paired tokens by summed positive durations instead of averaging
+per-call rates. Filters and group pagination use the same persisted snapshot as token statistics.
+
 SQL computes aggregate facts without loading raw call history. Integer overflow fails explicitly. Calls from title generation remain attributed to `title`, including valid replies whose title update was stale or whose application title was rejected. Monetary estimates require separate pricing data and are not provided by the core.
+
+Completed assistant replies display a dim performance footer: `FTT 500ms · Gen 66.7 | E2E 50.0 tok/s`.
+FTT is time to the first nonempty text delta; Gen measures throughput after that delta; E2E includes
+the wait for the first delta. Narrow views prioritize FTT and Gen. Streaming previews show
+`Measuring...` until authoritative call facts arrive. Missing facts remain `—`.
+The footer includes conversation calls and calls without an explicit purpose; title and other explicit
+purposes are excluded. Multiple calls show mean FTT with observation coverage and paired weighted rates.
+Saved replies reload their committed call facts with each bounded message page in the same read
+transaction; user messages and legacy replies have no call facts. Complete unsaved replies retain their
+original facts during save-only recovery. `UsageSummary::from_calls` shares the persisted query's
+aggregation rules for callers presenting in-memory facts.
+
+Live answers appear as provisional segments, one per model call. Closing an answer stream does not
+finish the turn while title generation or other workflow work remains active. Successful terminal text replaces
+the preview, including any workflow postprocessing. Failed or cancelled prefixes remain visibly incomplete;
+a full uncommitted reply uses the existing save/discard actions.
+
+Capture consumes live records independently of drawing and the execution inspector. Presentation keeps at most
+32 segments and 128 KiB of UTF-8 text, with an explicit truncation notice. Exceeding the preview limit continues
+to drain and validate the protocol. Each refresh handles a bounded number of control events before keyboard
+and cancellation polling. Events from an older chat invocation cannot alter the active turn.
+
+## Optional live answer subscriptions
+
+`ChatHost::submit` and `retry` return terminal-only jobs and allocate no stream receiver. Subscribe before
+launch with `submit_stream` or `retry_stream`; drain the returned receiver concurrently with completion:
+
+```rust
+let (job, events) = host.submit_stream(&session.id, "Hello")?;
+let reader = std::thread::spawn(move || {
+    while let Ok(event) = events.recv() {
+        render_provisional(event);
+    }
+});
+let completion = job.join()?;
+reader.join().expect("reader panicked");
+```
+
+The public `answer` output carries objects with string `text` and `model_call_id` fields. It is selected through
+ordinary workflow outputs, independently of node kinds or graph topology. A node may emit zero fragments.
+Native output records carry deltas directly; completion is established by normal stream drain and process exit.
+Chat `Invocation.call_id` identifies the application turn. A delta's `model_call_id` identifies its model request
+and matches that request's terminal usage entry; a turn can contain several model calls.
+
+Subscribed queues apply bounded backpressure. Dropping a receiver with pending output fails delivery, and
+host shutdown interrupts blocked publishers. A completed job's `join` or drop does not cancel closed output.
+Only authoritative terminal results enter settlement. Preview fragments never become database messages or
+usage records. The application retains a valid reply before its mandatory final drain; a failed drain leaves
+that complete reply available for save-only retry without invoking the backend again.
 
 ## Executable conversation backend
 
-`mf_chat::contract::ChatContract` validates a finite executable's external conversation contract. Internal node kinds,
+`mf_chat::contract::ChatContract` validates an executable's external conversation contract. Internal node kinds,
 node counts, control edges, preprocessing, and loops are workflow implementation choices. Execute the whole
 workflow; there is no isolated-model execution mode or assumption that a workflow contains one LLM.
 
 The startup interface supplies an unambiguous `prompt` string and optionally `system`, `history`, and `context`.
 Their qualified names can belong to any startup node. Remaining declared inputs form `contract.parameters`;
 resolve them with `mf_runtime::resolve_workflow_inputs` before admission. The contract rejects ambiguous or
-mistyped conversation ports, stdin-dependent execution, and streaming output protocols.
+mistyped conversation ports and stdin-dependent execution.
+
+Finite executables keep their existing final JSON transport. Native streaming executables may select an
+ordinary output named `answer` containing `text` and `model_call_id`. The backend drains standard JSONL
+records, validates deltas, and retains the final conversation result until execution completes.
+
+`workflows/conversation.json` owns incremental processing: `begin` admits the turn, `workflow.invoke`
+emits application invocation events, and `route` publishes previews while retaining the final response.
+The route releases settlement inputs only after the backend producer closes successfully. Preview and
+settlement deliveries share one ordered message domain, so unread previews cannot be overtaken by a save.
+The host consumes these Flow outputs; it does not forward raw model events around the application graph.
+
+Preview delivery is independent of terminal rendering. Application events carry the chat invocation and
+actual model-call identity; they do not need runtime open/close envelopes. A complete result retained before
+a later failure remains available for explicit save-only recovery, while partial text never becomes history.
 
 The [single-call example](../examples/chat-flow.json), the
 [conversation and title example](../examples/chat-title-flow.json), and the

@@ -4,6 +4,12 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
+    #[snafu(transparent)]
+    Stream { source: mf_runtime::StreamError },
+    #[snafu(display("could not deliver conversation preview: {source}"))]
+    PreviewDelivery {
+        source: Box<dyn Error + Send + Sync>,
+    },
     #[snafu(display("conversation workflow failed: {message}"))]
     WorkflowFailure { message: String },
     #[snafu(transparent)]
@@ -35,9 +41,14 @@ pub enum ChatError {
     },
     #[snafu(transparent)]
     FlowBuild { source: mf_compiler::FlowBuildError },
+    #[snafu(transparent)]
+    StreamBuild {
+        source: mf_compiler::StreamBuildError,
+    },
     #[snafu(display("conversation backend failed: {source}"))]
     Backend {
         outcome: crate::contract::TurnExit,
+        reply: Option<Box<crate::ConversationResult>>,
         source: Box<dyn Error + Send + Sync>,
     },
     #[snafu(display("could not start chat worker: {source}"))]

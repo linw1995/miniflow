@@ -54,9 +54,11 @@ pub struct StreamPlan {
     dependencies: Cow<'static, [Cow<'static, [FlowDependency]>]>,
     domains: MessageDomains,
     outputs: Cow<'static, [WorkflowOutputDefinition]>,
+    selected_output_domains: Vec<usize>,
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
     schedules: Vec<MessageSchedule>,
+    emission_nodes: Vec<Option<FlowNode<()>>>,
 }
 
 pub struct PreparedStream {
@@ -69,12 +71,20 @@ impl std::fmt::Debug for PreparedStream {
         f.debug_struct("PreparedStream")
             .field("execution", &self.plan.execution)
             .field("message_sources", &self.plan.message_sources())
-            .field("selected_domain", &self.plan.selected_domain())
+            .field("selected_domains", &self.plan.selected_domains())
             .finish_non_exhaustive()
     }
 }
 
 impl PreparedStream {
+    pub fn task_node(&self, node: usize) -> Option<&dyn TaskNode> {
+        self.plan
+            .nodes
+            .get(node)?
+            .node
+            .as_deref()
+            .or_else(|| self.operator_states.get(node)?.as_ref()?.as_task_node())
+    }
     /// Binds executor state to an already validated executable layout.
     pub fn from_plan(
         execution: StreamExecution,
@@ -85,13 +95,43 @@ impl PreparedStream {
         input_schema: crate::WorkflowInputSchema,
     ) -> Self {
         let mut operator_states = Vec::with_capacity(nodes.len());
-        let nodes = nodes
+        let emission_nodes = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                if !matches!(
+                    node.node,
+                    Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
+                ) && domains.stream_output_domain(index).is_none()
+                {
+                    return None;
+                }
+                let mut metadata = node.metadata.clone();
+                if !metadata.stream_outputs.is_empty() {
+                    metadata.ports.outputs = std::mem::take(&mut metadata.stream_outputs);
+                    metadata.exclusive_outputs.clear();
+                }
+                Some(FlowNode {
+                    definition_id: node.definition_id.clone(),
+                    node: (),
+                    metadata,
+                    output_keys: Default::default(),
+                })
+            })
+            .collect();
+        let nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>> = nodes
             .into_iter()
-            .map(|node| {
+            .enumerate()
+            .map(|(index, node)| {
                 let (task, state) = match node.node {
                     Some(NodeExecution::Task(task)) => (Some(task), None),
-                    Some(NodeExecution::TaskStream(task)) => {
-                        (Some(task as Box<dyn TaskNode>), None)
+                    Some(NodeExecution::TaskStream(mut task)) => {
+                        task.set_stream_contract(&node.metadata.stream_outputs);
+                        if domains.stream_output_domain(index).is_some() {
+                            (None, Some(NodeExecution::TaskStream(task)))
+                        } else {
+                            (Some(task as Box<dyn TaskNode>), None)
+                        }
                     }
                     Some(state @ (NodeExecution::Event(_) | NodeExecution::Stream(_))) => {
                         (None, Some(state))
@@ -107,6 +147,27 @@ impl PreparedStream {
                 }
             })
             .collect();
+        let selected_output_domains = outputs
+            .iter()
+            .map(|output| {
+                let index = nodes
+                    .iter()
+                    .position(|node| node.definition_id == output.node)
+                    .expect("selected output source was validated");
+                if nodes[index]
+                    .metadata
+                    .stream_outputs
+                    .iter()
+                    .any(|port| port.name == output.port)
+                {
+                    domains
+                        .stream_output_domain(index)
+                        .expect("selected emission domain was planned")
+                } else {
+                    domains.output_domain(index)
+                }
+            })
+            .collect();
         let schedules = build_message_schedules(&domains);
         let plan = StreamPlan {
             execution,
@@ -114,9 +175,11 @@ impl PreparedStream {
             dependencies,
             domains,
             outputs,
+            selected_output_domains,
             input_schema,
             generated_domains: BTreeMap::new(),
             schedules,
+            emission_nodes,
         };
         Self {
             plan,
@@ -142,6 +205,22 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
+    pub(super) fn emission_node(&self, node: usize) -> &FlowNode<()> {
+        self.emission_nodes[node]
+            .as_ref()
+            .expect("message source has an emission contract")
+    }
+
+    pub fn has_emission_consumers(&self, node: usize) -> bool {
+        if self.nodes[node].node.is_some() {
+            return false;
+        }
+        let domain = self
+            .stream_output_domain(node)
+            .unwrap_or_else(|| self.output_domain(node));
+        self.selected_domains().contains(&domain)
+            || !self.execution_domains_for_message(domain).is_empty()
+    }
     pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
         &self.input_schema
     }
@@ -178,11 +257,25 @@ impl StreamPlan {
     pub fn output_domain(&self, node: usize) -> usize {
         self.domains.output_domain(node)
     }
+
+    pub fn stream_output_domain(&self, node: usize) -> Option<usize> {
+        self.domains.stream_output_domain(node)
+    }
     pub fn outputs(&self) -> &[WorkflowOutputDefinition] {
         &self.outputs
     }
-    pub fn selected_domain(&self) -> Option<usize> {
-        self.domains.selected_domain()
+    pub fn selected_domains(&self) -> &[usize] {
+        self.domains.selected_domains()
+    }
+
+    pub fn outputs_for_domain(
+        &self,
+        domain: usize,
+    ) -> impl Iterator<Item = &WorkflowOutputDefinition> {
+        self.outputs
+            .iter()
+            .zip(&self.selected_output_domains)
+            .filter_map(move |(output, selected)| (*selected == domain).then_some(output))
     }
 
     pub fn execute_resolved_position(

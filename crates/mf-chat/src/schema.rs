@@ -85,5 +85,7 @@ diesel::table! {
         input_tokens -> Nullable<BigInt>,
         output_tokens -> Nullable<BigInt>,
         total_tokens -> Nullable<BigInt>,
+        elapsed_us -> Nullable<BigInt>,
+        first_token_us -> Nullable<BigInt>,
     }
 }

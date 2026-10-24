@@ -117,9 +117,9 @@ pub struct ModelCall {
     pub result_text: Option<String>,
     pub disposition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[diesel(deserialize_as = crate::storage::StoredJson<Vec<mfn_llm::CallUsage>>)]
-    #[diesel(serialize_as = crate::storage::StoredJson<Vec<mfn_llm::CallUsage>>)]
-    pub usages: Option<Vec<mfn_llm::CallUsage>>,
+    #[diesel(deserialize_as = crate::storage::StoredJson<Vec<crate::CallUsage>>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<Vec<crate::CallUsage>>)]
+    pub usages: Option<Vec<crate::CallUsage>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[diesel(deserialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
     #[diesel(serialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]

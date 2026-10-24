@@ -185,31 +185,6 @@ fn terminal_task_adaptation_discards_without_an_unread_receiver() {
 }
 
 #[test]
-fn task_adapters_preserve_success_dependency_capabilities() {
-    for supported in [false, true] {
-        let mut node = combined(false, false, false);
-        node.supports_success = supported;
-        let prepared = PreparedNode::typed_task_stream(node, NodeMetadata::default()).unwrap();
-        assert_eq!(
-            prepared
-                .execution
-                .as_task_node()
-                .unwrap()
-                .supports_success_dependencies(),
-            supported
-        );
-        assert_eq!(
-            prepared
-                .execution
-                .into_task_node()
-                .unwrap()
-                .supports_success_dependencies(),
-            supported
-        );
-    }
-}
-
-#[test]
 fn propagated_encoding_failure_keeps_its_source_when_discarded() {
     let prepared =
         PreparedNode::typed_task_stream(combined(true, true, false), NodeMetadata::default())
@@ -456,10 +431,6 @@ impl mf_runtime::NodePortContract for Dynamic {
 }
 
 impl mf_runtime::TaskStreamNode for Dynamic {
-    fn supports_success_dependencies(&self) -> bool {
-        false
-    }
-
     fn execute(
         &self,
         _: Inputs,
@@ -486,13 +457,6 @@ fn dynamic_preparation_reflects_output_categories_and_success_capabilities() {
     assert_eq!(
         prepared.execution.stream_outputs(&prepared.metadata),
         Delta::ports()
-    );
-    assert!(
-        !prepared
-            .execution
-            .as_task_node()
-            .unwrap()
-            .supports_success_dependencies()
     );
 }
 
@@ -549,4 +513,69 @@ fn combined_emission_snapshots_are_redacted_independently_of_business_delivery()
         events.lock().unwrap()[0].snapshot.outcome,
         mf_runtime::SnapshotOutcome::Emitted
     ));
+}
+
+#[test]
+fn task_adapters_preserve_success_dependency_capabilities() {
+    for supported in [false, true] {
+        let mut node = combined(false, false, false);
+        node.supports_success = supported;
+        let prepared = PreparedNode::typed_task_stream(node, NodeMetadata::default()).unwrap();
+        assert_eq!(
+            prepared
+                .execution
+                .as_task_node()
+                .unwrap()
+                .supports_success_dependencies(),
+            supported
+        );
+        assert_eq!(
+            prepared
+                .execution
+                .into_task_node()
+                .unwrap()
+                .supports_success_dependencies(),
+            supported
+        );
+    }
+}
+
+#[test]
+fn publication_deadlines_are_scoped_to_a_send_without_poisoning_the_emitter() {
+    struct BlockOnce(bool);
+    impl EmissionSink for BlockOnce {
+        fn send(&mut self, _: NodeResult) -> Result<(), StreamError> {
+            Ok(())
+        }
+        fn send_with_cancellation(
+            &mut self,
+            result: NodeResult,
+            cancellation: &StreamCancellation,
+        ) -> Result<(), StreamError> {
+            if self.0 {
+                self.0 = false;
+                loop {
+                    if let Some(error) = cancellation.failure() {
+                        return Err(error);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+            self.send(result)
+        }
+    }
+    let cancellation = StreamCancellation::default();
+    let mut sink = BlockOnce(true);
+    let mut emitter = Emitter::new("source", &Delta::ports(), cancellation.clone(), &mut sink);
+    let result = || Delta { delta: 1.0 }.into_values().unwrap().into();
+    let error = emitter
+        .send_with_deadline(
+            result(),
+            std::time::Instant::now() + std::time::Duration::from_millis(20),
+        )
+        .unwrap_err();
+    assert!(has_source::<StreamError>(&error));
+    assert!(error.to_string().contains("publication deadline exceeded"));
+    assert!(cancellation.failure().is_none());
+    emitter.send(result()).unwrap();
 }

@@ -68,7 +68,7 @@ pub struct CompletionOutputs {
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct FailTurnInputs {
-    pub usages: Option<Vec<mfn_llm::CallUsage>>,
+    pub usages: Option<Vec<crate::CallUsage>>,
     pub database_path: String,
     pub invocation: Invocation,
     pub state: String,
@@ -77,7 +77,7 @@ pub struct FailTurnInputs {
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct FailCallInputs {
-    pub usages: Option<Vec<mfn_llm::CallUsage>>,
+    pub usages: Option<Vec<crate::CallUsage>>,
     pub database_path: String,
     pub call_id: String,
     pub state: String,
@@ -313,7 +313,7 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
     })
 }
 
-pub fn validate_usages(usages: &[mfn_llm::CallUsage]) -> Result<(), ChatError> {
+pub fn validate_usages(usages: &[crate::CallUsage]) -> Result<(), ChatError> {
     let mut identities = std::collections::BTreeSet::new();
     for usage in usages {
         if let Some(attribution) = &usage.attribution {
@@ -358,6 +358,16 @@ pub fn validate_usages(usages: &[mfn_llm::CallUsage]) -> Result<(), ChatError> {
             );
         }
         validate_usage(usage.usage.as_ref())?;
+        ensure!(
+            usage
+                .timing
+                .as_ref()
+                .is_none_or(crate::CallTiming::is_valid),
+            InvalidSnafu {
+                field: "call timing",
+                reason: "requires nonnegative durations with first token no later than completion"
+            }
+        );
     }
     Ok(())
 }
@@ -543,7 +553,7 @@ pub fn finalize_call(
     id: &str,
     state: &str,
     error: &str,
-    usages: Option<&[mfn_llm::CallUsage]>,
+    usages: Option<&[crate::CallUsage]>,
 ) -> Result<Changed, ChatError> {
     if let Some(usages) = usages {
         validate_usages(usages)?;
@@ -818,7 +828,7 @@ impl ChatDatabase {
         &self,
         invocation: Invocation,
         error: &str,
-        usages: Vec<mfn_llm::CallUsage>,
+        usages: Vec<crate::CallUsage>,
     ) -> Result<bool, ChatError> {
         let result: Changed = fail(FailTurnInputs {
             usages: Some(usages),
@@ -863,7 +873,7 @@ impl ChatDatabase {
         call_id: &str,
         state: &str,
         error: &str,
-        usages: Option<Vec<mfn_llm::CallUsage>>,
+        usages: Option<Vec<crate::CallUsage>>,
     ) -> Result<bool, ChatError> {
         let result: Changed = fail_call(FailCallInputs {
             usages,
@@ -917,7 +927,8 @@ mod tests {
     }
     fn reply(text: &str) -> ConversationResult {
         ConversationResult {
-            usages: vec![mfn_llm::CallUsage {
+            usages: vec![crate::CallUsage {
+                timing: None,
                 attribution: None,
                 started_at: None,
                 call_id: "reported-call".into(),

@@ -175,6 +175,157 @@ fn send(endpoint: &str, path: &str, content_type: &str, body: &[u8]) -> u16 {
 }
 
 #[test]
+fn graph_metrics_use_source_events_before_snapshots_and_keep_call_identity() {
+    use mf_telemetry::description::NodeDescription;
+    use mf_tui::graph::{GraphLayout, GraphView};
+    use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+    if !loopback_available() {
+        return;
+    }
+    let mut graph = graph();
+    graph.nodes.push(NodeDescription {
+        id: "model".into(),
+        kind: "builtin.llm".into(),
+    });
+    graph.execution_order.push("model".into());
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut receiver = LoopbackReceiver::bind(graph.clone(), run_id()).unwrap();
+    let mut started = record(2, false, &run_id().to_string(), 1);
+    started.event_name = "mf.node.started".into();
+    started.attributes.extend([
+        attribute("mf.node.id", string("model")),
+        attribute("mf.node.kind", string("builtin.llm")),
+    ]);
+    started.body = Some(body(&[("position", 0), ("elapsed_ns", 0)]));
+    started.trace_id = vec![1; 16];
+    started.span_id = vec![2; 8];
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &logs(vec![started])
+        ),
+        200
+    );
+    let reader = receiver.reader();
+    let render = || {
+        let snapshot = reader.snapshot_shared();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
+        GraphView::new(&layout)
+            .snapshot(&snapshot)
+            .reader(&reader)
+            .render(buffer.area, &mut buffer);
+        (0..20)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(render().contains("FTT —"));
+    let usage =
+        serde_json::json!({"call_id":"answer", "model":"fixture", "usage":{"output_tokens":100}});
+    let mut call_events = vec![];
+    for (name, timestamp, with_usage) in [
+        ("llm.request.finished", 12_000_000_000, true),
+        ("llm.response.first_text", 10_500_000_000, false),
+        ("llm.request.started", 10_000_000_000, true),
+    ] {
+        let mut fields = vec![attribute("call_id", string("answer"))];
+        if with_usage {
+            fields.push(attribute("model", string("fixture")));
+            fields.push(attribute("usage", body(&[("output_tokens", 100)])));
+        }
+        call_events.push(LogRecord {
+            event_name: name.into(),
+            time_unix_nano: timestamp,
+            observed_time_unix_nano: 90_000_000_000,
+            trace_id: vec![1; 16],
+            span_id: vec![2; 8],
+            attributes: vec![
+                attribute("mf.workflow.id", string(graph.workflow_id.as_str())),
+                attribute("mf.run.id", string(run_id().to_string())),
+            ],
+            body: Some(AnyValue {
+                value: Some(any_value::Value::KvlistValue(KeyValueList {
+                    values: fields,
+                })),
+            }),
+            ..Default::default()
+        });
+    }
+    let mut request = ExportLogsServiceRequest::decode(logs(call_events).as_slice()).unwrap();
+    request.resource_logs[0].scope_logs[0]
+        .scope
+        .as_mut()
+        .unwrap()
+        .name = mf_telemetry::events::SCOPE.into();
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec()
+        ),
+        200
+    );
+    let text = render();
+    assert!(text.contains("FTT 500ms"), "{text}");
+    assert!(text.contains("Gen 66.7 | E2E 50.0 tok/s"), "{text}");
+    let bodies = [
+        (
+            vec![2; 8],
+            serde_json::json!({"record":"header","version":mf_telemetry::capture::SNAPSHOT_VERSION}),
+        ),
+        (
+            vec![2; 8],
+            serde_json::json!({"record":"node","scope":[],"node":"model","inputs":{},"outputs":{"usages":[usage]},"skipped":[],"outcome":"succeeded"}),
+        ),
+        (
+            vec![3; 8],
+            serde_json::json!({"record":"node","scope":[],"node":"model","inputs":{},"outputs":{"usages":[]},"skipped":[],"outcome":"started"}),
+        ),
+        (vec![3; 8], serde_json::json!({"record":"end"})),
+    ];
+    let records = bodies
+        .into_iter()
+        .enumerate()
+        .flat_map(|(sequence, (span, body))| {
+            let workflow_id = graph.workflow_id.clone();
+            mf_telemetry::snapshot::packets(sequence, body)
+                .unwrap()
+                .map(move |packet| {
+                    let mut record =
+                        packet.into_log_record(workflow_id.as_str(), &run_id().to_string());
+                    record.trace_id = vec![1; 16];
+                    record.span_id = span.clone();
+                    record
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut request = ExportLogsServiceRequest::decode(logs(records).as_slice()).unwrap();
+    request.resource_logs[0].scope_logs[0]
+        .scope
+        .as_mut()
+        .unwrap()
+        .name = mf_telemetry::snapshot::SCOPE.into();
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec()
+        ),
+        200
+    );
+    let text = render();
+    assert!(text.contains("FTT 500ms"), "{text}");
+    assert!(text.contains("Gen 66.7 | E2E 50.0 tok/s"), "{text}");
+    receiver.finish();
+    assert!(render().contains("FTT 500ms"));
+}
+
+#[test]
 fn receives_protobuf_logs_and_traces_before_acknowledging() {
     if !loopback_available() {
         return;
@@ -752,4 +903,90 @@ fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
     let data = receiver.span_data(&[1; 16], &[2; 8]);
     assert!(data.node.is_some());
     assert_eq!(data.status, "Complete");
+}
+
+#[test]
+fn call_events_ignore_foreign_records_and_reject_malformed_source_metadata() {
+    if !loopback_available() {
+        return;
+    }
+    let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
+    let submit = |records| {
+        let mut request = ExportLogsServiceRequest::decode(logs(records).as_slice()).unwrap();
+        request.resource_logs[0].scope_logs[0]
+            .scope
+            .as_mut()
+            .unwrap()
+            .name = mf_telemetry::events::SCOPE.into();
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec(),
+        )
+    };
+    let mut started = record(0, false, &run_id().to_string(), 1);
+    started.event_name = "llm.request.started".into();
+    started.time_unix_nano = 1_000_000_000;
+    started.body = Some(AnyValue {
+        value: Some(any_value::Value::KvlistValue(KeyValueList {
+            values: vec![
+                attribute("call_id", string("call")),
+                attribute("model", string("fixture")),
+            ],
+        })),
+    });
+    let mut finished = started.clone();
+    finished.event_name = "llm.request.finished".into();
+    finished.time_unix_nano = 3_000_000_000;
+    assert_eq!(submit(vec![finished, started.clone()]), 200);
+    for key in ["mf.run.id", "mf.workflow.id"] {
+        let mut foreign = started.clone();
+        foreign
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.key == key)
+            .unwrap()
+            .value = Some(string("foreign"));
+        foreign.body = None;
+        assert_eq!(submit(vec![foreign]), 200);
+    }
+    let mut unrelated = started.clone();
+    unrelated.event_name = "future.observation".into();
+    unrelated.body = None;
+    assert_eq!(submit(vec![unrelated]), 200);
+    let mut missing = started.clone();
+    missing.body = None;
+    let mut wrong_width = started.clone();
+    wrong_width.trace_id = vec![1];
+    let mut zero_context = started.clone();
+    zero_context.trace_id = vec![0; 16];
+    zero_context.span_id = vec![0; 8];
+    let mut wrong_body = started.clone();
+    wrong_body.body = Some(string("invalid payload"));
+    let mut missing_timestamp = started;
+    missing_timestamp.time_unix_nano = 0;
+    missing_timestamp.observed_time_unix_nano = 99_000_000_000;
+    for malformed in [
+        missing,
+        wrong_width,
+        zero_context,
+        wrong_body,
+        missing_timestamp,
+    ] {
+        assert_eq!(submit(vec![malformed]), 400);
+    }
+    let mut usages = vec![
+        serde_json::from_value(serde_json::json!({"call_id":"call", "model":"fixture"})).unwrap(),
+    ];
+    receiver.reader().apply_call_timings(&mut usages);
+    assert_eq!(usages[0].timing.as_ref().unwrap().elapsed_us, 2_000_000);
+    assert_eq!(usages[0].timing.as_ref().unwrap().first_token_us, None);
+    assert!(
+        receiver
+            .reader()
+            .calls_for_span(&[1; 16], &[2; 8])
+            .is_empty()
+    );
+    receiver.finish();
 }

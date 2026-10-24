@@ -204,6 +204,7 @@ pub struct ExecutionContext {
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
+    events: Option<crate::EventRecorder>,
     scope_prefix: Vec<LoopPathEntry>,
     inputs: crate::ExecutionInputs,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
@@ -228,6 +229,7 @@ impl Default for ExecutionContext {
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
+            events: None,
             scope_prefix: Vec::new(),
             inputs: crate::ExecutionInputs::default(),
             stdin: None,
@@ -315,6 +317,7 @@ impl ExecutionContext {
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
+            events: self.events.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: crate::ExecutionInputs::default(),
             worker_handle: self.worker_handle.clone(),
@@ -507,6 +510,7 @@ impl ExecutionContext {
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
+            events: self.events.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: self.inputs.clone(),
             stdin: self.stdin.clone(),
@@ -570,8 +574,104 @@ impl ExecutionContext {
         Ok((inputs, resolution))
     }
 
+    pub fn set_event_recorder(&mut self, recorder: crate::EventRecorder) {
+        self.events = Some(recorder);
+    }
+
+    pub fn event_recorder(&self) -> Option<&crate::EventRecorder> {
+        self.events.as_ref()
+    }
+
+    pub fn with_event_recorder<T>(
+        &mut self,
+        recorder: crate::EventRecorder,
+        run: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        struct Restore<'a> {
+            context: &'a mut ExecutionContext,
+            previous: Option<crate::EventRecorder>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.context.events = self.previous.take();
+            }
+        }
+        let previous = self.events.replace(recorder);
+        let scope = Restore {
+            context: self,
+            previous,
+        };
+        run(scope.context)
+    }
+
+    pub fn record_event(&self, name: &'static str, body: serde_json::Value) -> Option<u64> {
+        let event = crate::EventRecord::now(name, body)?;
+        if let Some(recorder) = &self.events {
+            recorder.record(&event);
+        }
+        if let Some(observation) = &self.observation {
+            observation.record_event(name, &event);
+        } else if let Some(observation) = &self.body_observation {
+            observation.record_event(name, &event);
+        }
+        Some(event.time_unix_nano)
+    }
+
     pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
         self.snapshots = Some(recorder);
+    }
+
+    pub(super) fn execute_task_stream<N>(
+        &mut self,
+        node: &FlowNode<N>,
+        executor: &crate::TaskStreamExecutor,
+        inputs: Inputs,
+        sink: &mut dyn crate::EmissionSink,
+    ) -> Result<(), crate::NodeExecutionError> {
+        let snapshot_inputs = self.snapshots.as_ref().map(|_| inputs.clone());
+        self.capture_node(node, &inputs, None, crate::SnapshotOutcome::Started, None);
+        let result = self.with_node(node.definition_id.clone(), |context| {
+            executor.execute_with_sink(inputs, context, sink)
+        });
+        let result = result.and_then(|result| {
+            let snapshot = self.snapshots.as_ref().map(|_| result.clone());
+            self.publish(node, Some(result))?;
+            if let Some(inputs) = &snapshot_inputs {
+                self.capture_node(
+                    node,
+                    inputs,
+                    snapshot.as_ref(),
+                    crate::SnapshotOutcome::Succeeded,
+                    None,
+                );
+            }
+            Ok(())
+        });
+        if let Err(error) = &result
+            && let Some(inputs) = &snapshot_inputs
+        {
+            self.capture_node(
+                node,
+                inputs,
+                None,
+                crate::SnapshotOutcome::Failed,
+                Some(error),
+            );
+        }
+        result
+    }
+
+    pub(super) fn with_node<T, E>(
+        &mut self,
+        node: crate::DefinitionId,
+        invoke: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let previous = self.current_node.replace(node);
+        let guard = NodeInvocationGuard {
+            context: self,
+            previous,
+        };
+        invoke(guard.context)
     }
 
     pub fn snapshot_recorder(&self) -> Option<&crate::SnapshotRecorder> {
@@ -589,6 +689,7 @@ impl ExecutionContext {
             child.future_executor = self.future_executor.clone();
         }
         child.snapshots = self.snapshots.clone();
+        child.events = self.events.clone();
         child.scope_prefix = self.invocation_path();
         child
     }

@@ -59,7 +59,7 @@ pub use flow::{
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
 };
 #[cfg(feature = "async")]
-pub use future_execution::FutureExecutionError;
+pub use future_execution::{FutureExecutionError, check_limits as check_future_limits};
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
@@ -72,6 +72,7 @@ pub use loop_node::{
 pub use message_domain::MessageDomains;
 pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{NodeIdentity, SkipCause};
+pub use mf_telemetry::events::{EventRecord, EventRecorder};
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{

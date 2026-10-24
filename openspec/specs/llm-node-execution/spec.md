@@ -50,13 +50,13 @@ Node preparation and workflow build validation MUST NOT read credentials, initia
 
 ### Requirement: Send one text generation request
 
-Each invocation SHALL accept required nonempty string `prompt`, optional string `system`, and optional message-list `history`, and send one nonstreaming Chat Completions request. Request order SHALL be system instructions, supplied history, and the current prompt. The node MUST NOT execute tools, retain node-owned conversation state, follow redirects, or automatically retry requests.
+Each invocation SHALL accept nonempty string `prompt`, optional string `system`, and optional message-list `history`, then send one Chat Completions request ordered as system, history, prompt. Connected output SHALL stream; unconnected output SHALL permit unary execution with zero emissions. The node MUST NOT execute tools, retain conversation state, follow redirects, or retry requests.
 
 #### Scenario: Use an explicit compatible endpoint
 
 - **WHEN** an invocation supplies prompt and system inputs with a custom base URL
 - **THEN** one request reaches that prefix's `/chat/completions` route with the configured model, credentials, and text messages
-- **AND** no Responses API request or streaming response is requested
+- **AND** no Responses API request is made
 
 #### Scenario: Continue a conversation
 
@@ -73,6 +73,11 @@ Each invocation SHALL accept required nonempty string `prompt`, optional string 
 
 - **WHEN** the endpoint returns a rate limit, server failure, or redirect
 - **THEN** the invocation fails without resending the request or contacting the redirect target
+
+#### Scenario: Disconnect a streaming request
+
+- **WHEN** an active streaming request fails before valid completion
+- **THEN** the node does not retry as a nonstreaming request or report its delivered prefix as a successful answer
 
 ### Requirement: Validate explicit text conversation history
 
@@ -116,24 +121,24 @@ Each successful invocation SHALL return required message-list `history` containi
 
 ### Requirement: Publish a terminal text result atomically
 
-A successful invocation SHALL publish exactly one result containing complete string `text`, updated message-list `history`, succeeded status, a one-call usages list, and optional scalar `usage` and `finish_reason`. Text blocks SHALL retain response order. Conversion and validation MUST finish before publication. Empty text, unsupported output content, and invalid usage counts SHALL fail without any outputs by default or transcript mutation.
+Success SHALL publish one terminal result with complete string `text`, updated message-list `history`, succeeded status, one-call `usages`, and optional `usage` and `finish_reason`. Text blocks SHALL retain response order. Conversion and validation MUST precede publication. Empty text, unsupported content, and invalid counts SHALL fail without terminal outputs or transcript mutation by default. Earlier increments SHALL remain provisional.
 
 #### Scenario: Receive a complete text answer
 
 - **WHEN** a provider returns multiple text blocks and a terminal finish reason
-- **THEN** the node publishes their ordered concatenation, updated history, and finish reason in one task result
-- **AND** no intermediate chunks or incremental outputs are published
+- **THEN** the node publishes their ordered concatenation, updated history, and finish reason in one Task result
+- **AND** any earlier live increments do not create additional terminal results or history messages
 
 #### Scenario: Reject unsupported output
 
 - **WHEN** the reply has no nonempty text or contains a tool call or unsupported content
-- **THEN** with capture_errors disabled the invocation fails without publishing text, updated history, or metadata
+- **THEN** with capture_errors disabled the invocation fails without publishing terminal text, updated history, or metadata
 - **AND** supplied history remains unchanged
 
 #### Scenario: Preserve a large reply
 
 - **WHEN** valid generated text exceeds the former client-side output byte limit
-- **THEN** the node preserves the complete text and updated history without a byte-limit failure
+- **THEN** the node preserves the complete text, any live increments, and updated history without a byte-limit failure
 - **AND** provider token limits, timeout, cancellation, and output validation remain in effect
 
 #### Scenario: Complete at the token limit
@@ -244,3 +249,61 @@ final result, and MUST NOT be described as known zero remote usage.
 
 - **WHEN** a provider response reports counters but its text cannot be accepted
 - **THEN** the failed result retains those counters for workflow accounting
+
+### Requirement: Publish typed live text independently of final metadata
+
+Connected live text SHALL carry ordered text increments and the actual model-call identity through a declared stream port. Complete terminal text/history and usages SHALL remain directly available without collecting that stream. Only explicitly exported nodes SHALL become public chat streams; title and other internal model calls MUST NOT be selected by topology inference.
+
+#### Scenario: Stream an answer and generate a title
+
+- **WHEN** a workflow exports only its answer node and subsequently invokes a title model
+- **THEN** the public answer stream contains only answer increments while final usages can report both calls
+
+#### Scenario: Preserve sparse terminal usage
+
+- **WHEN** a streaming endpoint reports partial or no usage counters
+- **THEN** the final call record preserves reported counts and absent counts remain unknown
+
+### Requirement: Preserve streaming deadlines and captured failures
+
+The resolved request deadline SHALL cover setup, all streaming reads, and final conversion. Cancellation, malformed/truncated frames, and unsupported content SHALL stop publication. Existing captured-provider-failure policy SHALL retain reported call facts without making partial text successful. Delivery failure and cancellation MUST remain execution failures.
+
+#### Scenario: Handle a provider error after text
+
+- **WHEN** capture_errors is enabled and the provider reports a failure after live text
+- **THEN** the node can return its failed terminal result with reported usages while the live prefix remains provisional
+
+#### Scenario: Wait for a stalled stream
+
+- **WHEN** an endpoint sends an initial increment and then stalls beyond the total deadline
+- **THEN** the invocation terminates without a successful terminal answer and blocked consumers receive closure/failure
+
+### Requirement: Emit source-timestamped model request observations
+
+Each attempted provider operation SHALL emit request-started and request-finished observations with a call identity. Streaming calls SHALL emit one first-text observation before publishing the first nonempty text. The observation layer SHALL supply timestamps. LLM execution MUST NOT calculate request duration or first-text latency using a node-local timer.
+
+#### Scenario: Receive a streaming answer
+
+- **WHEN** a provider sends empty or metadata-only events before nonempty text
+- **THEN** the first-text event identifies the first nonempty decoded text before publication and backpressure
+- **AND** the request-finished event precedes terminal conversion or persistence
+
+#### Scenario: Complete without a stream subscription
+
+- **WHEN** the node executes its unary request path
+- **THEN** it emits request boundary observations without a first-text event
+
+#### Scenario: Capture a failed provider attempt
+
+- **WHEN** a provider operation fails and the node returns a captured failure
+- **THEN** request observations retain the call identity and available facts without claiming successful throughput
+
+### Requirement: Keep application performance outside model execution
+
+Raw node usage contracts and observations SHALL contain provider call facts. Derived timing and token-rate types and calculations SHALL belong to the application. The model node MUST NOT depend on application performance models.
+
+#### Scenario: Leave performance measurements to the application
+
+- **WHEN** a model request completes
+- **THEN** node outputs and request observations expose provider call facts without application timing or rate fields
+- **AND** the application derives performance from source events and owns its enriched call model

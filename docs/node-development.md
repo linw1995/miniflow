@@ -15,7 +15,7 @@ instance-specific typed inputs, and output types inferred by the CEL checker. A 
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
 The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with fixed typed prompt,
-system, history, and terminal output contracts. Select it explicitly to add its HTTP transport dependencies.
+system, history, terminal outputs, and an optional typed `delta` stream. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values).
 
@@ -670,11 +670,31 @@ contract violations use shared `WorkflowRunError` variants, and sink failures re
 There is no separate emission error type or remembered-error state. Cancellation is checked at
 invocation boundaries, and a failed native stream instance remains failed.
 
-Finite and streaming workflows currently consume the terminal outputs of a combined node through the
-ordinary Task path. Connecting its incremental ports inside a workflow or exporting them to a host
-requires the separate live-output planning support. Direct callers can already consume those values
-with `execute_with_sink`. Success dependencies retain the executor's declared
-`supports_success_dependencies` capability.
+### Consume native Stream outputs
+
+Connect incremental ports through ordinary graph edges or select them in workflow `outputs`. Streaming
+execution assigns increments their own message domain while terminal values remain in the input domain.
+One consumer cannot implicitly join values from different domains. Selected workflow outputs can span
+domains; each delivered record contains only its domain's selected fields.
+
+Use the prepared Stream instance's existing delivery API:
+
+```rust
+let instance = prepared.start()?;
+while let Some(delivery) = instance.receive()? {
+    handle_output(delivery.output());
+    delivery.acknowledge()?;
+}
+let summary = instance.join()?;
+```
+
+Acknowledgment releases the pending message. Hold the delivery while consuming its values to preserve
+backpressure. Cancellation or receiver drop interrupts blocked producers. Required emission fields apply
+to actual records; returning without an emission does not invent a value or invocation event.
+
+Unconnected incremental ports use the discard sink and reserve no unread receiver. Providers can check
+`is_connected()` to avoid incremental construction. Finite execution and isolated Task adaptation return
+the final Task result normally. There is no runtime publisher context or separate live-output protocol.
 
 ## Workflow observation context
 
@@ -794,7 +814,8 @@ settings for definitions constructed or deserialized by the host.
 
 Schema `2026-10-03` accepts `execution: {"mode": "stream"}`. Initial task and stream nodes receive
 workflow arguments once; ordinary edges retain their message identity, while producer/event outputs create
-a new domain. Nodes and selected outputs cannot join different domains. Initial EventNodes require an
+a new domain. Node inputs cannot implicitly join different domains. Selected outputs may span domains and
+each delivery contains only its own domain's fields. Initial EventNodes require an
 activation source, and nested synchronous bodies remain task-only.
 
 Embedded node construction in `mf-compiler` returns `WorkflowBuildError`, preserving configuration and factory error sources.
@@ -891,3 +912,8 @@ worker limit. The compiled target record carries the stream ceiling and rejects 
 Isolated context contracts compare complete reference IDs and resolved types. Provider diagnostic
 labels remain available in metadata but rewording them does not cause binding drift. Every declared
 external reference remains required.
+
+Providers with a total request deadline can use `TypedEmitter::send_with_deadline` (or the dynamic equivalent).
+Runtime graph and host sinks check the supplied cancellation handle while waiting for capacity or output I/O.
+Custom blocking sinks must implement `EmissionSink::send_with_cancellation` and check that handle during waits.
+A deadline on one send does not install a timer thread or change an unrelated invocation's deadline.

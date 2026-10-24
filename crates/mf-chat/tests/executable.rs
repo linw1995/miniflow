@@ -120,7 +120,9 @@ fn preflight_checks_transport_and_external_ports() {
     let mut streaming = original.clone();
     streaming.definition.execution =
         Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
-    for invalid in [wrong_type, missing, ambiguous, stdin, streaming] {
+    assert!(ChatContract::from_manifest(&streaming).unwrap().streaming);
+    assert!(!ChatContract::from_manifest(&original).unwrap().streaming);
+    for invalid in [wrong_type, missing, ambiguous, stdin] {
         assert!(ChatContract::from_manifest(&invalid).is_err());
     }
     for name in ["status", "text", "usages"] {
@@ -426,6 +428,7 @@ fn common_results_preserve_sparse_fields_across_typed_and_json_transports() {
     let result = mf_chat::ConversationResult {
         text: "answer".into(),
         usages: vec![mf_chat::CallUsage {
+            timing: None,
             call_id: "call".into(),
             model: "model".into(),
             started_at: None,

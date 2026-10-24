@@ -77,7 +77,10 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
             operation: "enable paste",
         })?;
         loop {
-            while let Some(event) = controller.try_event() {
+            for _ in 0..16 {
+                let Some(event) = controller.try_event() else {
+                    break;
+                };
                 view.event(event, &controller);
             }
             if signal.interrupted.swap(false, Ordering::Relaxed) {
@@ -244,6 +247,10 @@ struct ChatView {
     active: Option<(Invocation, String)>,
     retained: bool,
     unsaved: Option<String>,
+    final_reply: Option<String>,
+    reply_usages: Vec<mf_chat::CallUsage>,
+    preview: LivePreview,
+    latest_invocation: Option<Invocation>,
     observation: Option<LocalObservation>,
     show_execution: bool,
     inspector: ObservationView,
@@ -269,6 +276,10 @@ impl ChatView {
             active: None,
             retained: false,
             unsaved: None,
+            final_reply: None,
+            reply_usages: vec![],
+            preview: LivePreview::default(),
+            latest_invocation: None,
             observation: None,
             show_execution: true,
             inspector: ObservationView::new(description)?,
@@ -308,6 +319,10 @@ impl ChatView {
         self.editor = self.drafts.remove(&new).unwrap_or_default();
         self.session = session;
         self.page = None;
+        self.preview = LivePreview::default();
+        self.final_reply = None;
+        self.reply_usages.clear();
+        self.latest_invocation = None;
         self.earlier = false;
         self.observation = None;
         self.scroll = 0;
@@ -328,6 +343,7 @@ impl ChatView {
                 if self.session.as_ref().is_some_and(|s| s.id == session.id) {
                     self.session = Some(session);
                     self.page = Some(page);
+                    self.final_reply = None;
                     self.scroll = 0;
                 }
             }
@@ -340,6 +356,10 @@ impl ChatView {
                     self.editor = Editor::default();
                 }
                 self.session = Some(session);
+                self.latest_invocation = Some(invocation.clone());
+                self.preview = LivePreview::default();
+                self.final_reply = None;
+                self.reply_usages.clear();
                 self.active = Some((invocation, prompt));
                 self.observation = None;
                 self.unsaved = None;
@@ -347,13 +367,34 @@ impl ChatView {
                 self.notice = "Working... Ctrl+C to cancel".into();
                 self.scroll = 0;
             }
+            ChatEvent::Preview {
+                invocation,
+                preview,
+            } => {
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|(active, _)| active == &invocation)
+                {
+                    self.preview = preview;
+                }
+            }
             ChatEvent::Observing(observation) => self.observation = Some(observation),
             ChatEvent::Finished {
+                invocation,
                 resolution,
                 stderr,
                 capture_error,
                 ..
             } => {
+                if self
+                    .latest_invocation
+                    .as_ref()
+                    .is_some_and(|latest| latest != &invocation)
+                {
+                    return;
+                }
+                self.preview.incomplete = true;
                 self.active = None;
                 self.pending = None;
                 self.retained = false;
@@ -366,9 +407,16 @@ impl ChatView {
                             .map(ToString::to_string)
                             .collect();
                         match resolution.state {
-                            CompletionState::Committed(_) => self.notice = "Saved".into(),
+                            CompletionState::Committed(completion) => {
+                                self.preview = LivePreview::default();
+                                self.reply_usages = completion.result.usages;
+                                self.final_reply = Some(completion.result.text);
+                                self.notice = "Saved".into();
+                            }
                             CompletionState::Uncommitted(pending) => {
+                                self.preview = LivePreview::default();
                                 self.retained = true;
+                                self.reply_usages = pending.completion.result.usages;
                                 self.unsaved = Some(pending.completion.result.text);
                                 self.notice =
                                     "Reply not saved. Ctrl+P to save or discard it".into();
@@ -744,6 +792,15 @@ impl ChatView {
                 for line in safe(&record.message.content).split('\n') {
                     lines.push(Line::raw(line.to_owned()));
                 }
+                if record.message.role == "assistant" {
+                    let calls = crate::performance::conversation_calls(
+                        record.usages.as_deref().unwrap_or_default(),
+                    );
+                    lines.push(Line::styled(
+                        crate::performance::footer(&calls, body.width),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
                 if matches!(
                     record.turn_state.as_str(),
                     "failed" | "cancelled" | "interrupted"
@@ -766,6 +823,48 @@ impl ChatView {
                 Style::default().fg(Color::DarkGray),
             ));
         }
+        for (index, segment) in self.preview.segments.iter().enumerate() {
+            if segment.text.is_empty() {
+                continue;
+            }
+            let state = if self.preview.incomplete {
+                "incomplete"
+            } else {
+                "provisional"
+            };
+            lines.push(Line::styled(
+                format!("Assistant [{state}, segment {}]", index + 1),
+                Style::default().fg(Color::Yellow),
+            ));
+            for line in safe(&segment.text).split('\n') {
+                lines.push(Line::raw(line.to_owned()));
+            }
+            lines.push(Line::raw(""));
+        }
+        if self.active.is_some()
+            && self
+                .preview
+                .segments
+                .iter()
+                .any(|segment| !segment.text.is_empty())
+        {
+            lines.push(Line::styled(
+                "FTT / Gen / E2E: Measuring...",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if self.preview.omitted {
+            lines.push(Line::styled(
+                "[Preview limit reached; remaining output is still being received]",
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        if let Some(reply) = &self.final_reply {
+            lines.push(Line::styled("Assistant", Style::default().fg(Color::Cyan)));
+            for line in safe(reply).split('\n') {
+                lines.push(Line::raw(line.to_owned()));
+            }
+        }
         if let Some(reply) = &self.unsaved {
             lines.push(Line::styled(
                 "Assistant [not saved]",
@@ -774,6 +873,13 @@ impl ChatView {
             for line in safe(reply).split('\n') {
                 lines.push(Line::raw(line.to_owned()));
             }
+        }
+        if self.final_reply.is_some() || self.unsaved.is_some() {
+            let calls = crate::performance::conversation_calls(&self.reply_usages);
+            lines.push(Line::styled(
+                crate::performance::footer(&calls, body.width),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         if !self.outcome.is_empty() {
             for line in safe(&self.outcome).split('\n') {
@@ -903,6 +1009,94 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
     }
+    #[test]
+    fn metrics_follow_saved_unsaved_and_reloaded_replies() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let begun = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "question",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+                1024,
+            )
+            .unwrap();
+        let calls: Vec<mf_chat::CallUsage> = serde_json::from_value(serde_json::json!([
+            {"call_id":"answer", "model":"fixture", "timing":{"elapsed_us":2000000,"first_token_us":500000},"usage":{"output_tokens":100}},
+            {"call_id":"title", "model":"fixture", "timing":{"elapsed_us":10000,"first_token_us":1000},"usage":{"output_tokens":100},"attribution":{"purpose":"title"}}
+        ])).unwrap();
+        let response = mf_chat::ConversationResult {
+            text: "canonical answer".into(),
+            usages: calls,
+            ..Default::default()
+        };
+        view.session = Some(session.clone());
+        view.event(
+            ChatEvent::Finished {
+                invocation: begun.invocation.clone(),
+                resolution: Ok(ReconciledCompletion {
+                    state: CompletionState::Uncommitted(mf_chat::UncommittedCompletion {
+                        completion: mf_chat::Completion {
+                            invocation: begun.invocation.clone(),
+                            result: response.clone(),
+                        },
+                        database_path: controller._database.path().to_owned(),
+                    }),
+                    diagnostics: vec![],
+                }),
+                status: None,
+                stderr: String::new(),
+                capture_error: None,
+            },
+            &controller,
+        );
+        let text = render(&view, 100, 30);
+        assert!(text.contains("[not saved]"));
+        assert!(text.contains("FTT 500ms · Gen 66.7 | E2E 50.0 tok/s"));
+        assert!(!text.contains("Avg FTT"));
+        let completion = controller
+            ._database
+            .complete_turn(begun.invocation.clone(), response)
+            .unwrap();
+        view.event(
+            ChatEvent::Finished {
+                invocation: begun.invocation,
+                resolution: Ok(ReconciledCompletion {
+                    state: CompletionState::Committed(completion),
+                    diagnostics: vec![],
+                }),
+                status: None,
+                stderr: String::new(),
+                capture_error: None,
+            },
+            &controller,
+        );
+        assert!(render(&view, 100, 30).contains("FTT 500ms · Gen 66.7 | E2E 50.0 tok/s"));
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.event(ChatEvent::Loaded { session, page }, &controller);
+        assert!(view.final_reply.is_none());
+        let text = render(&view, 100, 30);
+        assert_eq!(text.matches("FTT 500ms").count(), 1);
+        assert!(text.contains("E2E 50.0 tok/s"));
+        assert!(!render(&view, 45, 30).contains("E2E"));
+        controller.close().unwrap();
+    }
+
     #[test]
     fn connection_shortcut_does_not_intercept_chat_prompt_editing() {
         let root = tempfile::tempdir().unwrap();
@@ -1475,5 +1669,161 @@ mod tests {
         let messages = database.messages(&session, 50, None).unwrap().messages;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].turn_state, "cancelled");
+    }
+    #[test]
+    fn canonical_results_replace_previews_and_stale_turn_events_are_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let invocation = Invocation::new(&session.id);
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: invocation.clone(),
+                prompt: "hello".into(),
+            },
+            &controller,
+        );
+        let mut preview = LivePreview::default();
+        preview.begin(invocation.clone());
+        preview
+            .apply(
+                &invocation,
+                mf_chat::PreviewEvent {
+                    invocation: invocation.clone(),
+                    delta: mf_chat::TextDelta {
+                        text: "draft prefix".into(),
+                        model_call_id: "model-call".into(),
+                    },
+                },
+            )
+            .unwrap();
+        view.event(
+            ChatEvent::Preview {
+                invocation: invocation.clone(),
+                preview: preview.clone(),
+            },
+            &controller,
+        );
+        assert!(render(&view, 100, 30).contains("draft prefix"));
+        let finish = |invocation: Invocation, text: &str| ChatEvent::Finished {
+            invocation: invocation.clone(),
+            resolution: Ok(ReconciledCompletion {
+                state: CompletionState::Committed(mf_chat::Completion {
+                    invocation,
+                    result: mf_chat::ConversationResult {
+                        text: text.into(),
+                        ..Default::default()
+                    },
+                }),
+                diagnostics: vec![],
+            }),
+            status: None,
+            stderr: String::new(),
+            capture_error: None,
+        };
+        view.event(finish(invocation.clone(), "canonical reply"), &controller);
+        let screen = render(&view, 100, 30);
+        assert!(screen.contains("canonical reply"));
+        assert!(!screen.contains("draft prefix"));
+        let next = Invocation::new(&session.id);
+        view.event(
+            ChatEvent::Submitted {
+                session,
+                invocation: next.clone(),
+                prompt: "next".into(),
+            },
+            &controller,
+        );
+        view.event(
+            ChatEvent::Preview {
+                invocation: invocation.clone(),
+                preview,
+            },
+            &controller,
+        );
+        view.event(finish(invocation, "stale final"), &controller);
+        assert_eq!(view.active.as_ref().unwrap().0, next);
+        assert!(!render(&view, 100, 30).contains("stale final"));
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn failed_prefixes_are_marked_incomplete_and_full_recovery_replies_replace_them() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let invocation = Invocation::new(&session.id);
+        view.event(
+            ChatEvent::Submitted {
+                session,
+                invocation: invocation.clone(),
+                prompt: "hello".into(),
+            },
+            &controller,
+        );
+        view.preview.begin(invocation.clone());
+        view.preview
+            .segments
+            .push(super::super::preview::PreviewSegment {
+                model_call_id: "model-call".into(),
+                text: "partial text".into(),
+            });
+        view.event(
+            ChatEvent::Finished {
+                invocation: invocation.clone(),
+                resolution: Ok(ReconciledCompletion {
+                    state: CompletionState::NotBegun,
+                    diagnostics: vec![],
+                }),
+                status: None,
+                stderr: String::new(),
+                capture_error: None,
+            },
+            &controller,
+        );
+        let screen = render(&view, 100, 30);
+        assert!(screen.contains("partial text"));
+        assert!(screen.contains("incomplete"));
+        view.event(
+            ChatEvent::Finished {
+                invocation: invocation.clone(),
+                resolution: Ok(ReconciledCompletion {
+                    state: CompletionState::Uncommitted(UncommittedCompletion {
+                        database_path: controller._database.path().to_owned(),
+                        completion: mf_chat::Completion {
+                            invocation,
+                            result: mf_chat::ConversationResult {
+                                text: "complete unsaved reply".into(),
+                                ..Default::default()
+                            },
+                        },
+                    }),
+                    diagnostics: vec![],
+                }),
+                status: None,
+                stderr: String::new(),
+                capture_error: None,
+            },
+            &controller,
+        );
+        let screen = render(&view, 100, 30);
+        assert!(screen.contains("complete unsaved reply"));
+        assert!(screen.contains("not saved"));
+        assert!(!screen.contains("partial text"));
+        assert!(view.retained);
+        controller.close().unwrap();
     }
 }

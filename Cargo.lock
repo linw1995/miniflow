@@ -1774,6 +1774,7 @@ name = "mfn-llm"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures",
  "inventory",
  "mf-runtime",
  "reqwest",

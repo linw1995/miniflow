@@ -1,3 +1,4 @@
+mod streaming;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
 pub mod test_support;
@@ -5,8 +6,8 @@ mod transport;
 
 use mf_runtime::{
     ConfigTemplate, ContextReference, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
-    NodeFactory, NodeMetadata, NodeRegistration, NodeValue, PreparedNode, Shared, TypedNodeResult,
-    TypedTaskNode, ValueRef, deserialize_config,
+    NodeFactory, NodeMetadata, NodeRegistration, NodeValue, PreparedNode, Shared, TypedEmitter,
+    TypedNodeResult, TypedTaskStreamNode, ValueRef, deserialize_config,
 };
 use rig_core::{
     completion::{AssistantContent, CompletionRequest, CompletionResponse, FinishReason, Message},
@@ -52,6 +53,10 @@ pub struct UsageAttribution {
     pub profile: Option<String>,
 }
 
+pub const REQUEST_STARTED_EVENT: &str = "llm.request.started";
+pub const FIRST_TEXT_EVENT: &str = "llm.response.first_text";
+pub const REQUEST_FINISHED_EVENT: &str = "llm.request.finished";
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
 pub struct CallUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +97,17 @@ pub struct LlmOutputs {
     pub usage: Option<BTreeMap<String, i64>>,
     pub finish_reason: Option<String>,
     pub metadata: Option<MessageMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
+pub struct TextDelta {
+    pub text: String,
+    pub model_call_id: String,
+}
+
+#[derive(Clone, Debug, NodeValue)]
+pub struct LlmEmission {
+    pub delta: TextDelta,
 }
 
 #[derive(mf_runtime::NodeInputs)]
@@ -313,10 +329,6 @@ fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
 
 #[derive(Snafu)]
 pub enum LlmExecutionError {
-    #[snafu(display("could not timestamp model invocation: {source}"))]
-    Clock { source: std::time::SystemTimeError },
-    #[snafu(display("model invocation timestamp exceeds the signed range: {source}"))]
-    TimestampRange { source: std::num::TryFromIntError },
     #[snafu(transparent)]
     Configuration { source: LlmConfigError },
     #[snafu(display("LLM input `{path}` requires {requirement}"))]
@@ -340,6 +352,8 @@ pub enum LlmExecutionError {
         #[snafu(source(from(ProviderError, Box::new)))]
         source: Box<ProviderError>,
     },
+    #[snafu(display("could not publish LLM text: {source}"))]
+    Publication { source: NodeExecutionError },
     #[snafu(display("LLM response contains unsupported nontext output"))]
     UnsupportedOutput,
     #[snafu(display("LLM response contains no nonempty text"))]
@@ -402,16 +416,18 @@ impl LlmNode {
     }
 }
 
-impl TypedTaskNode for LlmNode {
+impl TypedTaskStreamNode for LlmNode {
     type Input = LlmInputs;
     type Output = LlmOutputs;
+    type Emission = LlmEmission;
 
     fn execute(
         &self,
         inputs: Self::Input,
         context: &mut ExecutionContext,
+        emitter: &mut TypedEmitter<'_, '_, Self::Emission>,
     ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
-        let outputs = self.complete(inputs, context)?;
+        let outputs = self.complete(inputs, context, emitter)?;
         let skipped = [
             ("usage", outputs.usage.is_none()),
             ("finish_reason", outputs.finish_reason.is_none()),
@@ -435,10 +451,11 @@ impl LlmNode {
         &self,
         inputs: LlmInputs,
         context: &ExecutionContext,
+        emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
     ) -> Result<LlmOutputs, LlmExecutionError> {
-        let started = Instant::now();
+        let deadline_origin = Instant::now();
         let config = self.config.resolve(context)?;
-        let deadline = started
+        let deadline = deadline_origin
             .checked_add(Duration::from_millis(config.timeout_ms))
             .context(DeadlineRangeSnafu)?;
         context.check_future_limits(Some(deadline))?;
@@ -483,7 +500,8 @@ impl LlmNode {
             );
             key
         };
-        let transport = transport::TerminalTransport::new(self.client()?);
+        let transport =
+            transport::TerminalTransport::new(self.client()?, context.cancellation(), deadline);
         let model = OpenAIConfig::new(key)
             .with_base_url(&config.base_url)
             .connect(transport.clone())
@@ -504,15 +522,7 @@ impl LlmNode {
         }
         let mut usage = CallUsage {
             attribution: config.attribution.clone(),
-            started_at: Some(
-                i64::try_from(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .context(ClockSnafu)?
-                        .as_millis(),
-                )
-                .context(TimestampRangeSnafu)?,
-            ),
+            started_at: None,
             call_id: uuid::Uuid::new_v4().to_string(),
             node: context.current_node().map(|id| UsageNode {
                 id: id.into(),
@@ -530,20 +540,41 @@ impl LlmNode {
             usage: None,
             error: None,
         };
-        let response = context
-            .execute_future(model.call(request), Some(deadline))
-            .map_err(LlmExecutionError::from)
-            .and_then(|response| {
-                response.with_context(|source| ProviderSnafu {
-                    kind: source.kind().code(),
-                    status: source
-                        .provider_response_status()
-                        .map(|status| status.as_u16()),
+        usage.started_at = context
+            .record_event(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
+            .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
+        let response = if emitter.is_connected() {
+            streaming::complete(
+                model.stream(request),
+                emitter,
+                &usage.call_id,
+                deadline,
+                context,
+            )
+        } else {
+            context
+                .execute_future(model.call(request), Some(deadline))
+                .map_err(LlmExecutionError::from)
+                .and_then(|response| {
+                    response.with_context(|source| ProviderSnafu {
+                        kind: source.kind().code(),
+                        status: source
+                            .provider_response_status()
+                            .map(|status| status.as_u16()),
+                    })
                 })
-            });
+        };
         if let Some(reported) = transport.usage() {
             usage.usage = reported_usage(&reported).ok().flatten();
         }
+        if usage.usage.is_none()
+            && let Ok(response) = &response
+        {
+            usage.usage = reported_usage(&response.usage).ok().flatten();
+        }
+        let mut finished = usage.clone();
+        finished.error = response.as_ref().err().map(ToString::to_string);
+        context.record_event(REQUEST_FINISHED_EVENT, serde_json::json!(finished));
         let failure_history = if config.capture_errors {
             history.clone()
         } else {
@@ -563,7 +594,10 @@ impl LlmNode {
         });
         let mut result = match result {
             Ok(result) => result,
-            Err(error) if config.capture_errors => {
+            Err(error)
+                if config.capture_errors
+                    && !matches!(error, LlmExecutionError::Publication { .. }) =>
+            {
                 context.check_future_limits(None)?;
                 let error = error.to_string();
                 usage.error = Some(error.clone());
@@ -651,14 +685,14 @@ fn terminal_outputs(
     })
 }
 
-/// Prepares a complete terminal-generation task without acquiring execution resources.
+/// Prepares one optional text stream and its authoritative result without acquiring resources.
 pub fn prepare_llm(value: Value) -> Result<PreparedNode, NodeBuildError> {
     let config = PreparedConfig::parse(value)?;
     let metadata = NodeMetadata {
         context_references: config.references(),
         ..Default::default()
     };
-    PreparedNode::typed_task(
+    PreparedNode::typed_task_stream(
         LlmNode {
             config,
             client: OnceLock::new(),

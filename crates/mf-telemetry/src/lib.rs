@@ -3,6 +3,7 @@
 pub mod capture;
 pub mod description;
 pub mod event;
+pub mod events;
 pub mod identity;
 pub mod observation;
 #[cfg(feature = "otlp")]

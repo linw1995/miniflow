@@ -558,6 +558,7 @@ mod tests {
 
     fn observation(records: Arc<AtomicUsize>) -> StreamObservation {
         let observer = Observer(Arc::new(Backend {
+            emit_event: Box::new(|_, _, _, _| {}),
             tracer: opentelemetry::global::tracer("stream-test"),
             diagnostics: None,
             emit: Box::new(move |_| {
