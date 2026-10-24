@@ -368,7 +368,7 @@ The [answer-and-title example](../examples/chat-title-flow.json) declares only t
 Run the compiled example with `--output-format events-jsonl --stream-output answer`. The title call stays
 terminal-only, and the final `usages` includes both calls when title generation runs. Ordinary JSON invocation
 keeps both calls terminal-only. Loop and Iteration exports use their full source paths and per-invocation identities.
-`max_output_bytes` bounds decoded generated text, including live increments. SSE framing has no separate byte quota.
+Generated text and SSE framing have no client-side byte limits.
 The total deadline interrupts stalled reads and connected delivery under backpressure.
 Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
@@ -386,21 +386,17 @@ Static configuration has this shape:
   "api_key_env": "MODEL_API_KEY",
   "temperature": 0.2,
   "max_tokens": 256,
-  "timeout_ms": 60000,
-  "max_output_bytes": 1048576
+  "timeout_ms": 60000
 }
 ```
 
-`model` is required and nonblank. Defaults are the OpenAI API prefix, `OPENAI_API_KEY`, a 60000 millisecond deadline,
-and a 1048576-byte generated text limit.
-Optional `temperature` must be finite and between 0 and 2; optional `max_tokens` must be positive. Supplied numeric
-fields cannot be null. Deadlines and `max_output_bytes` must be positive integers. The text limit counts UTF-8 bytes
-of the new reply independently of existing history; it is not a hard transport-memory bound.
-`max_tokens` is forwarded to the provider to control generation size.
+`model` is required and nonblank. Defaults are the OpenAI API prefix, `OPENAI_API_KEY`, and a 60000 millisecond deadline.
+Generated text has no client-side byte limit. Optional `temperature` must be finite and between 0 and 2; optional `max_tokens`
+must be positive. Supplied numeric fields cannot be null. Deadlines must be positive integers.
 `base_url` is an HTTP or HTTPS API prefix without embedded credentials, query, or fragment. Configuration rejects
 unknown fields, including `stream` and provider-specific request overrides. Literal credentials are rejected.
 
-`model`, `base_url`, `temperature`, `max_tokens`, `timeout_ms`, and `max_output_bytes` also accept configuration
+`model`, `base_url`, `temperature`, `max_tokens`, and `timeout_ms` also accept configuration
 templates. Use `api_key` with a runtime reference to supply credentials from a parameter; it cannot be combined
 with `api_key_env`. The latter remains a literal environment-variable name for existing workflows.
 
@@ -452,10 +448,9 @@ finish reasons retain their provider value. Select optional metadata as optional
 omit it. Credential and provider errors retain typed sources while diagnostic display omits credential values and
 arbitrary remote bodies.
 
-The deadline covers setup and waiting for a terminal reply, and limit checks also run before returning converted data.
-Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot be forcibly
-preempted. The reply-byte limit is checked after unary buffering and decoding and does not bound transport memory or
-the full transcript. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
+The deadline covers setup and waiting for a terminal reply, with deadline and cancellation checks before returning
+converted data. Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot
+be forcibly preempted. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
 workflow thread. Async hosts use a blocking thread for synchronous workflow entry points.
 
 The [terminal example](../examples/llm-terminal.json) accepts startup prompt, system, and history inputs.

@@ -196,7 +196,6 @@ fn invalid_dynamic_configuration_retains_safe_typed_errors() {
         ("api_key", json!("")),
         ("max_tokens", json!(0)),
         ("timeout_ms", json!(0)),
-        ("max_output_bytes", json!(0)),
         ("attribution", json!({"profile":"synthetic-secret-value"})),
     ] {
         let mut definition = parameter_definition();
