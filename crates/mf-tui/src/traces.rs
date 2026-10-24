@@ -611,6 +611,17 @@ impl DataList {
     }
 }
 
+fn format_timestamp_ns(ns: u64) -> String {
+    if ns == 0 {
+        return "Not set".into();
+    }
+    // Split before converting: OTLP timestamps can exceed i64's nanosecond range.
+    chrono::DateTime::from_timestamp((ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as u32)
+        .expect("OTLP u64 nanoseconds fit Chrono's date range")
+        .format("%Y-%m-%d %H:%M:%S%.9f UTC")
+        .to_string()
+}
+
 fn data_row(entry: &crate::snapshots::SnapshotEntry, metadata: &SnapshotMetadata) -> String {
     let node = entry
         .snapshot
@@ -621,7 +632,7 @@ fn data_row(entry: &crate::snapshots::SnapshotEntry, metadata: &SnapshotMetadata
         metadata.sequence,
         label(&entry.node),
         node.outcome,
-        metadata.time_unix_nano
+        format_timestamp_ns(metadata.time_unix_nano)
     )
 }
 
@@ -754,11 +765,11 @@ fn log_preview(observation: &LogObservation) -> String {
     let result = (|| -> fmt::Result {
         writeln!(
             preview,
-            "LogRecord #{}\nEvent: {}\nTime (unix ns): {}\nObserved (unix ns): {}\nSeverity: {} ({})\nTrace ID: {}\nSpan ID: {}\nFlags: {}",
+            "LogRecord #{}\nEvent: {}\nTime: {}\nObserved: {}\nSeverity: {} ({})\nTrace ID: {}\nSpan ID: {}\nFlags: {}",
             observation.id + 1,
             record.event_name,
-            record.time_unix_nano,
-            record.observed_time_unix_nano,
+            format_timestamp_ns(record.time_unix_nano),
+            format_timestamp_ns(record.observed_time_unix_nano),
             record.severity_text,
             record.severity_number,
             hex(&record.trace_id),
@@ -891,7 +902,7 @@ fn span_preview(observation: &TraceSpan) -> String {
     let result = (|| -> fmt::Result {
         writeln!(
             preview,
-            "{}\nTrace ID: {}\nSpan ID: {}\nParent span ID: {}\nKind: {:?}\nStatus: {}\nStart (unix ns): {}\nEnd (unix ns): {}\nDuration: {}",
+            "{}\nTrace ID: {}\nSpan ID: {}\nParent span ID: {}\nKind: {:?}\nStatus: {}\nStart: {}\nEnd: {}\nDuration: {}",
             span.name,
             hex(&span.trace_id),
             hex(&span.span_id),
@@ -902,8 +913,8 @@ fn span_preview(observation: &TraceSpan) -> String {
             },
             SpanKind::try_from(span.kind).unwrap_or(SpanKind::Unspecified),
             observation.status(),
-            span.start_time_unix_nano,
-            span.end_time_unix_nano,
+            format_timestamp_ns(span.start_time_unix_nano),
+            format_timestamp_ns(span.end_time_unix_nano),
             format_duration_ns(
                 span.end_time_unix_nano
                     .saturating_sub(span.start_time_unix_nano)
@@ -1096,6 +1107,8 @@ mod tests {
             "Trace ID:",
             "Span ID:",
             "root",
+            "Start: 1970-01-01 00:00:00.000001000 UTC",
+            "End: 1970-01-01 00:00:00.000043000 UTC",
             "42.0µs",
             "ERROR",
             "request failed",
@@ -1468,6 +1481,10 @@ mod tests {
         );
         let rows = list.rows(true, None, &snapshot);
         assert_eq!(rows, [0, 1, 2]);
+        assert!(
+            data_row(&snapshot.entries[0], &snapshot.metadata[0])
+                .contains("t=1970-01-01 00:00:00.000000001 UTC")
+        );
         assert_eq!(list.position(&rows, &snapshot), 2);
         assert!(list.navigate(KeyCode::Home, &rows, &snapshot));
         assert!(list.navigate(KeyCode::Down, &rows, &snapshot));
@@ -1511,6 +1528,7 @@ mod tests {
             resource: None,
             scope: None,
             record: LogRecord {
+                time_unix_nano: 1_700_000_000_123_456_789,
                 body: Some(AnyValue {
                     value: Some(any_value::Value::KvlistValue(KeyValueList {
                         values: vec![KeyValue {
@@ -1534,7 +1552,10 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert!(log_preview(&observation).contains("{\"values\": [42, true]}"));
+        let preview = log_preview(&observation);
+        assert!(preview.contains("{\"values\": [42, true]}"));
+        assert!(preview.contains("Time: 2023-11-14 22:13:20.123456789 UTC"));
+        assert!(preview.contains("Observed: Not set"));
         observation.record.body = Some(AnyValue {
             value: Some(any_value::Value::StringValue("é".repeat(PREVIEW_BYTES))),
         });

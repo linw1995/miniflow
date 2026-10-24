@@ -16,6 +16,9 @@ mf-runtime = { workspace = true, features = ["tokio"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 snafu.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+syn = { workspace = true, features = ["full", "parsing", "printing"] }
 
 # Bounded platform reads and artifact decoding.
 reqwest = { workspace = true, features = ["rustls", "query"] }

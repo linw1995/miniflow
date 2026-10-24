@@ -132,8 +132,9 @@ fn combines_changed_packages_with_consumers_and_keeps_caller_checkout() {
     let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert_eq!(plan.baseline_packages, ["sample-app", "sample-core"]);
 
-    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
-    assert!(plan.tests.is_empty());
+    assert_eq!(plan.packages, ["sample-app"]);
+    assert_eq!(plan.tests.len(), 1);
+    assert_eq!(plan.tests[0].name, "tests::changed");
     assert!(plan.selected_count.is_none());
     let input = mfn_test_affected::PlanInput {
         context: mf_runtime::ValueRef::from(json!({"comparison":comparison,"options":{}}))
@@ -890,18 +891,18 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
     assert_eq!(provenance.widened[0].file, "core/src/extra.rs");
     assert!(provenance.widened[0].reason.contains("no test covers"));
 
-    // Test-body-only changes are ordinary graph queries now: with an empty
-    // graph the file is absent and widens to package scope.
+    // Test-only source changes refine independently of coverage history,
+    // even when a compatible graph contains no corresponding file.
     write(root, "app/src/lib.rs", &SOURCE.replace("1, 1", "9, 9"));
     let test_body = commit(root);
     let comparison = compare(root, &mixed, &test_body);
     let graph = write_graph(root, "test-body", &mixed, signature.clone(), vec![]);
     let plan = make_plan(&comparison, &graph_options(graph_source(graph, &mixed))).unwrap();
-    assert!(plan.tests.is_empty());
-    assert_eq!(plan.packages, ["sample-app"]);
+    assert_eq!(plan.tests.len(), 1);
+    assert_eq!(plan.tests[0].name, "tests::changed");
+    assert!(plan.packages.is_empty());
     let provenance = plan.coverage_graph.unwrap();
-    assert_eq!(provenance.widened.len(), 1);
-    assert_eq!(provenance.widened[0].file, "app/src/lib.rs");
+    assert!(provenance.widened.is_empty());
 
     // Unknown inputs keep the full-workspace fallback and clear graph
     // selectors; the graph provenance remains recorded.
