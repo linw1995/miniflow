@@ -247,3 +247,72 @@ fn nonblocking_preview_consumption_releases_native_settlement() {
     assert_eq!(events.len(), 2);
     assert_eq!(job.join().unwrap().result.text, "canonical");
 }
+
+struct RetryBackend(AtomicUsize);
+
+impl ConversationBackend for RetryBackend {
+    fn invoke(
+        &self,
+        _: &Invocation,
+        _: ConversationInputs,
+        _: &mut ExecutionContext,
+        preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), ChatError>>,
+        _: Option<&mf_telemetry::observation::Observer>,
+    ) -> Result<ConversationResult, ChatError> {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            return mf_chat::CaptureSnafu {
+                message: "injected backend failure",
+            }
+            .fail();
+        }
+        if let Some(consume) = preview {
+            consume(mf_chat::TextDelta {
+                text: "retried".into(),
+                model_call_id: "retry-model".into(),
+            })?;
+        }
+        Ok(ConversationResult {
+            text: "retried-final".into(),
+            ..Default::default()
+        })
+    }
+}
+
+#[test]
+fn streaming_retries_use_new_invocations_and_preserve_failed_history() {
+    let root = tempfile::tempdir().unwrap();
+    let backend = Arc::new(RetryBackend(AtomicUsize::new(0)));
+    let profile = WorkflowProfile::with_backend("retry", backend.clone()).unwrap();
+    let host = ChatHost::open(root.path().join("chat.sqlite"), HostConfig::new(profile)).unwrap();
+    let session = host.database().create_session("retry", None, None).unwrap();
+    let original = host.submit(&session.id, "hello").unwrap();
+    let failed = original.invocation().clone();
+    assert!(original.join().is_err());
+    assert!(
+        host.database()
+            .history(&session.id, 1024)
+            .unwrap()
+            .history
+            .is_empty()
+    );
+    let (retry, receiver) = host.retry_stream(&failed.turn_id).unwrap();
+    assert_ne!(retry.invocation().turn_id, failed.turn_id);
+    let event = receiver.recv().unwrap();
+    assert_eq!(&event.invocation, retry.invocation());
+    assert_eq!(event.delta.text, "retried");
+    assert!(receiver.recv().is_err());
+    assert_eq!(retry.join().unwrap().result.text, "retried-final");
+    assert_eq!(
+        host.database().turn(&failed.turn_id).unwrap().state,
+        "failed"
+    );
+    assert_eq!(
+        host.database()
+            .history(&session.id, 1024)
+            .unwrap()
+            .history
+            .len(),
+        2
+    );
+    assert_eq!(backend.0.load(Ordering::SeqCst), 2);
+}

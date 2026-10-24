@@ -556,3 +556,103 @@ fn finite_output_selection_cannot_consume_an_incremental_port() {
     let error = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap_err();
     assert!(error.to_string().contains("streaming execution"));
 }
+
+#[test]
+fn combined_snapshots_keep_emissions_separate_from_terminal_publication() {
+    use mf_runtime::{SnapshotOutcome, SnapshotRecorder};
+    use std::sync::{Arc, Mutex};
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for invalid in [false, true] {
+        let mut document = root_export();
+        if invalid {
+            document["nodes"][0]["kind"] = json!("fixture.task_stream_invalid_terminal");
+        }
+        let plan =
+            compile_definition(&serde_json::from_value(document).unwrap(), &registry).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let instance = instantiate_stream(&plan, &registry)
+            .unwrap()
+            .start_with_options(StreamOptions {
+                arguments: WorkflowArguments::from_json(br#"{"group.count.count":1}"#).unwrap(),
+                snapshots: Some(SnapshotRecorder::new(move |event| {
+                    recorded.lock().unwrap().push(event)
+                })),
+                ..Default::default()
+            })
+            .unwrap();
+        while let Ok(Some(_)) = instance.recv() {}
+        assert_eq!(instance.join().is_err(), invalid);
+        let events = seen.lock().unwrap();
+        let snapshots: Vec<_> = events
+            .iter()
+            .filter(|event| event.node.as_ref() == "group.count")
+            .map(|event| &event.snapshot)
+            .collect();
+        let started = snapshots
+            .iter()
+            .find(|snapshot| snapshot.outcome == SnapshotOutcome::Started)
+            .unwrap();
+        assert_eq!(started.inputs["count"].as_u64(), Some(1));
+        let emission = snapshots
+            .iter()
+            .find(|snapshot| snapshot.outcome == SnapshotOutcome::Emitted)
+            .unwrap();
+        assert_eq!(emission.outputs["delta"].as_u64(), Some(0));
+        let terminal = snapshots
+            .iter()
+            .find(|snapshot| {
+                snapshot.outcome
+                    == if invalid {
+                        SnapshotOutcome::Failed
+                    } else {
+                        SnapshotOutcome::Succeeded
+                    }
+            })
+            .unwrap();
+        if invalid {
+            assert!(terminal.error.as_ref().unwrap().contains("total"));
+            assert!(terminal.outputs.as_object().unwrap().is_empty());
+            assert!(
+                !snapshots
+                    .iter()
+                    .any(|snapshot| snapshot.outcome == SnapshotOutcome::Succeeded)
+            );
+        } else {
+            assert_eq!(terminal.outputs["total"].as_u64(), Some(1));
+            assert!(!terminal.outputs.as_object().unwrap().contains_key("delta"));
+        }
+    }
+}
+
+#[test]
+fn direct_finite_builders_reject_stream_edges_and_context_reads() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan =
+        compile_definition(&serde_json::from_value(stream_export()).unwrap(), &registry).unwrap();
+    for context_read in [false, true] {
+        let mut nodes = mf_compiler::resolve_nodes(&plan.definition, &registry).unwrap();
+        if context_read {
+            nodes
+                .iter_mut()
+                .find(|node| node.definition_id.as_str() == "consume")
+                .unwrap()
+                .metadata
+                .context_references
+                .push(mf_runtime::ContextReference::new(
+                    "group.count.delta",
+                    "stream condition",
+                ));
+        }
+        let builder = mf_compiler::FlowBuilder::prepare(
+            nodes,
+            plan.definition.edges.clone(),
+            plan.execution_order.clone(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            matches!(builder.into_tasks(), Err(mf_compiler::FlowBuildError::SynchronousStreamEdge { port, .. }) if port == "delta")
+        );
+    }
+}
