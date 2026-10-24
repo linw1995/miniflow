@@ -49,6 +49,7 @@ class CoverageTests(unittest.TestCase):
                 "CARGO", "CARGO_TARGET_DIR", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET",
                 "MF_TEST_SOURCE_CONFIG", "MF_TEST_TARGET_DIR", "RUSTFLAGS", "LLVM_PROFILE_FILE",
                 "NEXTEST_PROFILE", "MF_TEST_BUILD_CACHE_SESSION",
+                "MF_COVERAGE_REPORT_FORMAT",
             ]:
                 env.pop(name, None)
             env["MF_TEST_BUILD_CACHE_DIR"] = str(root / "target/fixture-cache")
@@ -183,6 +184,12 @@ mod tests {{
                     for line in block.splitlines()
                 ), block)
             self.assertGreater((root / "target/coverage/result/cobertura.xml").stat().st_size, 0)
+            full_mappings = pr_validation.read_lcov(root, report)
+            env["MF_COVERAGE_REPORT_FORMAT"] = "lcov"
+            result = execute("bash", "scripts/run-cov.sh", "--report")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(pr_validation.read_lcov(root, report), full_mappings)
+            self.assertIn("Coverage timing (grcov):", result.stderr)
             self.assertIn("other/src/lib.rs", report.read_text())
             for source in ["build.rs", "fixture.rs"]:
                 block = next(block for block in blocks if f"SF:{source}\n" in block)
@@ -227,6 +234,7 @@ mod tests {{
             result = execute("bash", "scripts/run-cov.sh", "--prepare")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(report.exists())
+            self.assertFalse(report.with_name("cobertura.xml").exists())
             result = execute("bash", "scripts/run-cov.sh", "--prune-cache")
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             session = root / "target/coverage/build-cache-session"

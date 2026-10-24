@@ -98,6 +98,11 @@ Caches accelerate compilation without changing which tests execute.
 
 ## Coverage step timings
 
+PR validation generates LCOV and selection/source metadata only. Main, nightly,
+and local runs retain HTML, Cobertura, LCOV, and Markdown reports by default.
+Set `MF_COVERAGE_REPORT_FORMAT=lcov` for compact local reports. Reporting logs
+separate timings for profile collection, binary preparation, grcov, and publication.
+
 CI and nightly prepare and build the selected packages together, run a separate
 `Coverage tests (<package>)` step for each workspace package, and generate one
 combined report after all selected suites pass. The shared build preserves Cargo

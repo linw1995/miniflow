@@ -93,6 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NEXTEST_PROFILE: ci
+      MF_COVERAGE_REPORT_FORMAT: ${{ (github.event_name == 'pull_request' || inputs.pr != '') && 'lcov' || 'full' }}
       MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
     steps:
       - uses: actions/checkout@v7
