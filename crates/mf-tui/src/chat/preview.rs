@@ -29,12 +29,8 @@ impl LivePreview {
         };
     }
 
-    pub fn apply(
-        &mut self,
-        invocation: &Invocation,
-        event: PreviewEvent,
-    ) -> Result<(), mf_chat::ChatError> {
-        if self.invocation.as_ref() != Some(invocation) || &event.invocation != invocation {
+    pub fn apply(&mut self, event: PreviewEvent) -> Result<(), mf_chat::ChatError> {
+        if self.invocation.as_ref() != Some(&event.invocation) {
             return Ok(());
         }
         event.validate()?;
@@ -90,16 +86,12 @@ mod tests {
         let mut preview = LivePreview::default();
         preview.begin(invocation.clone());
         for (call, text) in [("first", "one"), ("second", "two"), ("first", "-tail")] {
-            preview
-                .apply(&invocation, event(&invocation, call, text))
-                .unwrap();
+            preview.apply(event(&invocation, call, text)).unwrap();
         }
         assert_eq!(preview.segments[0].text, "one-tail");
         assert_eq!(preview.segments[1].text, "two");
         let other = Invocation::new("session");
-        preview
-            .apply(&invocation, event(&other, "third", "stale"))
-            .unwrap();
+        preview.apply(event(&other, "third", "stale")).unwrap();
         assert_eq!(preview.segments.len(), 2);
     }
 
@@ -109,18 +101,12 @@ mod tests {
         let mut preview = LivePreview::default();
         preview.begin(invocation.clone());
         preview
-            .apply(
-                &invocation,
-                event(&invocation, "first", &"é".repeat(MAX_PREVIEW_BYTES)),
-            )
+            .apply(event(&invocation, "first", &"é".repeat(MAX_PREVIEW_BYTES)))
             .unwrap();
         assert_eq!(preview.segments[0].text.len(), MAX_PREVIEW_BYTES);
         for index in 0..MAX_PREVIEW_SEGMENTS + 2 {
             preview
-                .apply(
-                    &invocation,
-                    event(&invocation, &format!("call-{index}"), "x"),
-                )
+                .apply(event(&invocation, &format!("call-{index}"), "x"))
                 .unwrap();
         }
         assert!(preview.omitted);

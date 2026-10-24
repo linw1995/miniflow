@@ -468,7 +468,6 @@ impl Flow {
                 workflow_outputs.insert(output.name.clone().into_owned(), value);
             }
         }
-
         Ok(workflow_outputs)
     }
 

@@ -62,7 +62,7 @@ pub enum StreamError {
         #[snafu(source(from(crate::WorkflowRunError, Arc::new)))]
         source: Arc<crate::WorkflowRunError>,
     },
-    #[snafu(display("stream output failed: {message}"), visibility(pub(super)))]
+    #[snafu(display("stream output failed: {message}"))]
     Output { message: String },
     #[snafu(display("stream output failed: {source}"), visibility(pub))]
     OutputWrite {
@@ -96,10 +96,7 @@ pub enum StreamError {
         #[snafu(source(from(crate::NodeExecutionError, Arc::new)))]
         source: Arc<crate::NodeExecutionError>,
     },
-    #[snafu(
-        display("stream producer node `{definition_id}` failed: {source}"),
-        visibility(pub(super))
-    )]
+    #[snafu(display("stream producer node `{definition_id}` failed: {source}"))]
     Producer {
         definition_id: crate::DefinitionId,
         #[snafu(source(from(NodeExecutionError, Arc::new)))]
@@ -421,15 +418,16 @@ impl crate::EmissionSink for ProducerEmitter<'_> {
     /// Wait for queue capacity and transfer one validated result to the runtime.
     /// Failure wakes waiting senders. Success does not imply downstream completion.
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
-        self.admit(result, &self.shared.cancellation.clone())
+        self.admit(result, &self.shared.cancellation.clone(), None)
     }
 
-    fn send_with_cancellation(
+    fn send_with_deadline(
         &mut self,
         result: NodeResult,
+        deadline: Instant,
         cancellation: &crate::StreamCancellation,
     ) -> Result<(), StreamError> {
-        self.admit(result, cancellation)
+        self.admit(result, cancellation, Some(deadline))
     }
 }
 
@@ -438,12 +436,17 @@ impl ProducerEmitter<'_> {
         &mut self,
         result: NodeResult,
         cancellation: &crate::StreamCancellation,
+        deadline: Option<Instant>,
     ) -> Result<(), StreamError> {
         let mut state = self.shared.state.lock().unwrap();
         loop {
             if let Some(error) = cancellation.failure() {
                 return Err(error);
             }
+            ensure!(
+                deadline.is_none_or(|deadline| Instant::now() < deadline),
+                PublicationDeadlineSnafu
+            );
             if let Some(error) = &state.failure {
                 return Err(error.clone());
             }

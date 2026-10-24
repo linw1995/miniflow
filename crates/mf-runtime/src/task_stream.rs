@@ -45,14 +45,19 @@ pub trait EmissionSink {
 
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError>;
 
-    fn send_with_cancellation(
+    fn send_with_deadline(
         &mut self,
         result: NodeResult,
+        deadline: std::time::Instant,
         cancellation: &StreamCancellation,
     ) -> Result<(), StreamError> {
         if let Some(error) = cancellation.failure() {
             return Err(error);
         }
+        ensure!(
+            std::time::Instant::now() < deadline,
+            crate::stream_instance::PublicationDeadlineSnafu
+        );
         self.send(result)
     }
 }
@@ -119,8 +124,16 @@ impl<'a> Emitter<'a> {
     }
 
     pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
+        self.publish(result, None)
+    }
+
+    fn publish(
+        &mut self,
+        result: NodeResult,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), NodeExecutionError> {
         let snapshot = self.snapshot.as_ref().map(|_| result.outputs.clone());
-        self.admit(result)?;
+        self.admit(result, deadline)?;
         if let (Some((recorder, scope)), Some(outputs)) = (&self.snapshot, snapshot) {
             recorder.record(crate::SnapshotEvent {
                 scope: scope.clone(),
@@ -142,11 +155,7 @@ impl<'a> Emitter<'a> {
         result: NodeResult,
         deadline: std::time::Instant,
     ) -> Result<(), NodeExecutionError> {
-        let original = self.cancellation.clone();
-        self.cancellation = original.with_deadline(deadline);
-        let result = self.send(result);
-        self.cancellation = original;
-        result
+        self.publish(result, Some(deadline))
     }
 
     pub fn set_snapshot_context(&mut self, context: &ExecutionContext) {
@@ -155,7 +164,11 @@ impl<'a> Emitter<'a> {
             .map(|recorder| (recorder.clone(), context.invocation_path()));
     }
 
-    fn admit(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
+    fn admit(
+        &mut self,
+        result: NodeResult,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), NodeExecutionError> {
         self.check_cancellation()?;
         let node = self.contract.definition_id.as_str();
         if !self.sink_validates {
@@ -170,9 +183,13 @@ impl<'a> Emitter<'a> {
                 );
             }
         }
-        Ok(self
-            .sink
-            .send_with_cancellation(result, &self.cancellation)?)
+        match deadline {
+            Some(deadline) => self
+                .sink
+                .send_with_deadline(result, deadline, &self.cancellation)?,
+            None => self.sink.send(result)?,
+        };
+        Ok(())
     }
 
     fn check_cancellation(&self) -> Result<(), NodeExecutionError> {

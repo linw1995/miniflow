@@ -96,9 +96,10 @@ impl mf_runtime::EmissionSink for DeltaSink {
         Ok(())
     }
 
-    fn send_with_cancellation(
+    fn send_with_deadline(
         &mut self,
         result: mf_runtime::NodeResult,
+        deadline: std::time::Instant,
         cancellation: &StreamCancellation,
     ) -> Result<(), StreamError> {
         self.send(result)?;
@@ -109,6 +110,9 @@ impl mf_runtime::EmissionSink for DeltaSink {
             loop {
                 if let Some(error) = cancellation.failure() {
                     return Err(error);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(StreamError::PublicationDeadline);
                 }
                 thread::sleep(Duration::from_millis(2));
             }

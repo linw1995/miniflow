@@ -432,7 +432,7 @@ impl Controller {
     ) -> Result<(), ChatRunError> {
         ensure!(self.retained.is_none(), BusySnafu);
         let invocation = Invocation::new(&session.id);
-        if self.launch.contract.answer_stream.is_some() {
+        if self.launch.contract.answer_stream {
             self.preview.lock().unwrap().begin(invocation.clone());
         }
         let captured = Arc::new(Mutex::new(None));
@@ -466,12 +466,11 @@ impl Controller {
             retry_of,
             max_history_bytes: mf_chat::DEFAULT_HISTORY_BYTES,
         };
-        let preview_consumer = self.launch.contract.answer_stream.as_ref().map(|_| {
+        let preview_consumer = self.launch.contract.answer_stream.then(|| {
             let outer_cancellation = cancellation.clone();
             let preview = self.preview.clone();
             let closed = self.closed.clone();
             let cancel = self.cancel.clone();
-            let invocation = invocation.clone();
             mf_chat::PreviewConsumer::new(move |event, cancellation| {
                 if let Some(error) = cancellation.failure() {
                     return Err(error.into());
@@ -484,7 +483,7 @@ impl Controller {
                         .into());
                 }
                 // Consume and compact independently of terminal refresh or inspection.
-                preview.lock().unwrap().apply(&invocation, event)
+                preview.lock().unwrap().apply(event)
             })
         });
         let resolution = mf_chat::workflow::run_conversation_with_preview(
@@ -716,14 +715,7 @@ impl ExternalBackend {
         let run_id = mf_telemetry::identity::RunId::new();
         let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);
         let mut run = if self.launch.contract.streaming {
-            LocalRun::start_stream(
-                command,
-                description,
-                run_id,
-                crate::run::StreamCaptureOptions {
-                    cancellation: context.cancellation(),
-                },
-            )?
+            LocalRun::start_stream(command, description, run_id, context.cancellation())?
         } else {
             LocalRun::start(
                 command,

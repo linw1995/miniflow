@@ -327,10 +327,6 @@ pub enum CaptureFailure {
     OpenPipe,
 }
 
-pub struct StreamCaptureOptions {
-    pub cancellation: mf_runtime::StreamCancellation,
-}
-
 #[derive(Default)]
 struct NativeOutputDecoder {
     pending: Vec<u8>,
@@ -400,14 +396,14 @@ impl LocalRun {
         command: Command,
         description: WorkflowDescription,
         run_id: RunId,
-        options: StreamCaptureOptions,
+        cancellation: mf_runtime::StreamCancellation,
     ) -> Result<Self, RunError> {
         Self::start_inner(
             command,
             description,
             run_id,
             MAX_STDOUT_BYTES,
-            Some(options),
+            Some(cancellation),
         )
     }
 
@@ -416,12 +412,12 @@ impl LocalRun {
         description: WorkflowDescription,
         run_id: RunId,
         stdout_limit: u64,
-        stream: Option<StreamCaptureOptions>,
+        stream: Option<mf_runtime::StreamCancellation>,
     ) -> Result<Self, RunError> {
         let (records, stream) = stream
-            .map(|options| {
+            .map(|parent| {
                 let cancellation = mf_runtime::StreamCancellation::default();
-                options.cancellation.forward_to(&cancellation);
+                parent.forward_to(&cancellation);
                 let (sender, receiver) = std::sync::mpsc::sync_channel(64);
                 (
                     receiver,
@@ -2399,15 +2395,9 @@ mod tests {
         let release = root.path().join("release");
         let mut command = Command::new("python3");
         command.arg("-c").arg("import os,sys,time;print('{\"value\":1}',flush=True)\nwhile not os.path.exists(sys.argv[1]): time.sleep(0.005)\nprint('{\"value\":2}',flush=True)").arg(&release);
-        let mut run = LocalRun::start_stream(
-            command,
-            scope_fixture(),
-            RunId::new(),
-            StreamCaptureOptions {
-                cancellation: Default::default(),
-            },
-        )
-        .unwrap();
+        let mut run =
+            LocalRun::start_stream(command, scope_fixture(), RunId::new(), Default::default())
+                .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let first = loop {
             if let Ok(record) = run.try_record() {
@@ -2433,15 +2423,9 @@ mod tests {
         command
             .arg("-c")
             .arg("print('{\"value\":1}');print('invalid-json')");
-        let mut run = LocalRun::start_stream(
-            command,
-            scope_fixture(),
-            RunId::new(),
-            StreamCaptureOptions {
-                cancellation: Default::default(),
-            },
-        )
-        .unwrap();
+        let mut run =
+            LocalRun::start_stream(command, scope_fixture(), RunId::new(), Default::default())
+                .unwrap();
         let outcome = wait_for_outcome(&mut run);
         assert!(matches!(
             outcome.capture_failure.as_deref(),
@@ -2490,15 +2474,9 @@ mod tests {
         let mut command = Command::new("python3");
         command.arg("-c").arg("import json,time;[print(json.dumps({'value':i}),flush=True) for i in range(1000)];time.sleep(20)");
         let cancellation = mf_runtime::StreamCancellation::default();
-        let mut run = LocalRun::start_stream(
-            command,
-            scope_fixture(),
-            RunId::new(),
-            StreamCaptureOptions {
-                cancellation: cancellation.clone(),
-            },
-        )
-        .unwrap();
+        let mut run =
+            LocalRun::start_stream(command, scope_fixture(), RunId::new(), cancellation.clone())
+                .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !run.capture.processing() {
             assert!(Instant::now() < deadline);

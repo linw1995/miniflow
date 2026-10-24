@@ -170,7 +170,7 @@ pub use recovery::{
 #[derive(Clone, Debug)]
 pub struct ChatContract {
     pub parameters: WorkflowInputSchema,
-    pub answer_stream: Option<mf_runtime::WorkflowOutputDefinition>,
+    pub answer_stream: bool,
     pub streaming: bool,
     inputs: BTreeMap<String, String>,
 }
@@ -240,10 +240,9 @@ impl ChatContract {
             .definition
             .outputs
             .iter()
-            .find(|output| output.name == "answer")
-            .cloned();
+            .any(|output| output.name == "answer");
         ensure!(
-            answer_stream.is_none() || streaming,
+            !answer_stream || streaming,
             InvalidSnafu {
                 field: "answer stream",
                 reason: "requires native streaming execution"
@@ -390,7 +389,7 @@ pub struct ConversationOutputDecoder {
 impl ConversationOutputDecoder {
     pub fn new(contract: &ChatContract) -> Self {
         Self {
-            answer: contract.answer_stream.is_some(),
+            answer: contract.answer_stream,
             result: None,
         }
     }
@@ -454,10 +453,7 @@ mod output_tests {
     fn decoder(answer: bool) -> ConversationOutputDecoder {
         ConversationOutputDecoder::new(&ChatContract {
             parameters: Default::default(),
-            answer_stream: answer.then(|| {
-                serde_json::from_value(json!({"name":"answer","node":"model","port":"delta"}))
-                    .unwrap()
-            }),
+            answer_stream: answer,
             streaming: true,
             inputs: Default::default(),
         })

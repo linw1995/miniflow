@@ -1693,16 +1693,13 @@ mod tests {
         let mut preview = LivePreview::default();
         preview.begin(invocation.clone());
         preview
-            .apply(
-                &invocation,
-                mf_chat::PreviewEvent {
-                    invocation: invocation.clone(),
-                    delta: mf_chat::TextDelta {
-                        text: "draft prefix".into(),
-                        model_call_id: "model-call".into(),
-                    },
+            .apply(mf_chat::PreviewEvent {
+                invocation: invocation.clone(),
+                delta: mf_chat::TextDelta {
+                    text: "draft prefix".into(),
+                    model_call_id: "model-call".into(),
                 },
-            )
+            })
             .unwrap();
         view.event(
             ChatEvent::Preview {

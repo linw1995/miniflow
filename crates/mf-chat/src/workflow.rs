@@ -277,13 +277,10 @@ impl TypedStreamNode for InvokeWorkflow {
         }
         let calls = Arc::new(Mutex::new(crate::CallEventCollector::default()));
         let collected = calls.clone();
-        let previous = context.event_recorder().cloned();
         let recorder = mf_runtime::EventRecorder::new(move |event| {
-            if let Some(previous) = &previous {
-                previous.record(event);
-            }
             let _ = collected.lock().unwrap().observe(event);
         });
+        context.set_event_recorder(recorder);
         let response = {
             let invocation = input.invocation.clone();
             let mut consume = |delta| -> Result<(), ChatError> {
@@ -304,15 +301,13 @@ impl TypedStreamNode for InvokeWorkflow {
             let preview = self.previews.then_some(
                 &mut consume as &mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>,
             );
-            context.with_event_recorder(recorder, |context| {
-                self.backend.invoke(
-                    &input.invocation,
-                    input.request,
-                    context,
-                    preview,
-                    self.observer.as_ref(),
-                )
-            })
+            self.backend.invoke(
+                &input.invocation,
+                input.request,
+                context,
+                preview,
+                self.observer.as_ref(),
+            )
         };
         if let Err(error) = &response {
             let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
@@ -500,7 +495,7 @@ pub fn run_conversation_with_preview(
         turn_id: request.turn_id.clone(),
         call_id: request.call_id.clone(),
     };
-    let plan = flows::conversation::plan()?;
+    let mut plan = flows::conversation::plan()?;
     let registry = NodeRegistry::from_inventory()?;
     let delivered = Arc::new(Mutex::new(None));
     let mut nodes = mf_compiler::resolve_nodes(&plan.definition, &registry)?;
@@ -521,6 +516,7 @@ pub fn run_conversation_with_preview(
         .find(|node| node.definition_id.as_str() == "workflow")
         .expect("embedded conversation declares the invocation node");
     *node = FlowNode::new(node.definition_id.clone(), bound);
+    plan.definition = mf_compiler::resolve_execution(&plan.definition, &nodes)?;
     let flow = FlowBuilder::prepare(
         nodes,
         plan.definition.edges.clone(),
@@ -560,7 +556,8 @@ pub fn run_conversation_with_preview(
             if let Some(event) = outputs.remove("preview") {
                 let event = PreviewOutput::from_values([("preview".into(), event)].into())?.preview;
                 if let Some(consumer) = &preview {
-                    consumer.send(event, &runtime_cancellation)?;
+                    consumer.send(event, delivery, &runtime_cancellation)?;
+                    continue;
                 }
             }
             if outputs.contains_key("settlement") {

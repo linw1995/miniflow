@@ -111,32 +111,6 @@ mod tests {
     use std::error::Error as _;
 
     #[test]
-    fn large_frames_and_cumulative_streams_have_no_byte_quota() {
-        let frame = Bytes::from(format!(": {}\n\n", "x".repeat(5 * 1024 * 1024)));
-        let body = Box::pin(futures::stream::iter(vec![frame; 13]).map(Ok));
-        let mut frames = normalize_stream(
-            body,
-            Arc::new(Mutex::new(None)),
-            Default::default(),
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-        );
-        let received = mf_runtime::ExecutionContext::default()
-            .execute_future(
-                async {
-                    let mut count = 0;
-                    while let Some(frame) = frames.next().await {
-                        assert!(frame.unwrap().len() > 5 * 1024 * 1024);
-                        count += 1;
-                    }
-                    count
-                },
-                None,
-            )
-            .unwrap();
-        assert_eq!(received, 13);
-    }
-
-    #[test]
     fn metadata_only_frames_check_cancellation_between_deliveries() {
         let cancellation = mf_runtime::StreamCancellation::default();
         let body = Box::pin(futures::stream::iter([

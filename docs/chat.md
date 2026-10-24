@@ -258,7 +258,7 @@ Native output records carry deltas directly; completion is established by normal
 Chat `Invocation.call_id` identifies the application turn. A delta's `model_call_id` identifies its model request
 and matches that request's terminal usage entry; a turn can contain several model calls.
 
-Subscribed queues apply bounded backpressure. Dropping a receiver with pending output fails delivery, and
+Subscribed previews retain the native delivery receipt until consumed, preserving backpressure and settlement order. Dropping a receiver with pending output fails delivery, and
 host shutdown interrupts blocked publishers. A completed job's `join` or drop does not cancel closed output.
 Only authoritative terminal results enter settlement. Preview fragments never become database messages or
 usage records. The application retains a valid reply before its mandatory final drain; a failed drain leaves

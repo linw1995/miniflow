@@ -582,28 +582,6 @@ impl ExecutionContext {
         self.events.as_ref()
     }
 
-    pub fn with_event_recorder<T>(
-        &mut self,
-        recorder: crate::EventRecorder,
-        run: impl FnOnce(&mut Self) -> T,
-    ) -> T {
-        struct Restore<'a> {
-            context: &'a mut ExecutionContext,
-            previous: Option<crate::EventRecorder>,
-        }
-        impl Drop for Restore<'_> {
-            fn drop(&mut self) {
-                self.context.events = self.previous.take();
-            }
-        }
-        let previous = self.events.replace(recorder);
-        let scope = Restore {
-            context: self,
-            previous,
-        };
-        run(scope.context)
-    }
-
     pub fn record_event(&self, name: &'static str, body: serde_json::Value) -> Option<u64> {
         let event = crate::EventRecord::now(name, body)?;
         if let Some(recorder) = &self.events {

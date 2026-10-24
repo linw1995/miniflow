@@ -1,11 +1,7 @@
 use crate::{ChatError, Invocation, TextDelta, error::*};
-use mf_runtime::{NodeValue, StreamCancellation};
+use mf_runtime::{NodeValue, StreamCancellation, StreamDelivery};
 use snafu::{ResultExt, ensure};
-use std::{
-    error::Error,
-    sync::{Arc, mpsc},
-    time::Duration,
-};
+use std::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
 pub struct PreviewEvent {
@@ -30,14 +26,15 @@ impl PreviewEvent {
     }
 }
 
-type Consume = dyn Fn(PreviewEvent, &StreamCancellation) -> Result<(), ChatError> + Send + Sync;
+type Consume = dyn Fn(PreviewEvent, StreamDelivery, &StreamCancellation) -> Result<(), ChatError>
+    + Send
+    + Sync;
 
-#[derive(Clone)]
-pub struct PreviewConsumer(Arc<Consume>);
+pub struct PreviewConsumer(Box<Consume>);
 
 struct Delivery {
     event: PreviewEvent,
-    received: mpsc::SyncSender<()>,
+    receipt: StreamDelivery,
 }
 
 pub struct PreviewReceiver(mpsc::Receiver<Delivery>);
@@ -55,50 +52,33 @@ impl PreviewConsumer {
         + Sync
         + 'static,
     ) -> Self {
-        Self(Arc::new(consume))
+        Self(Box::new(move |event, receipt, cancellation| {
+            consume(event, cancellation)?;
+            receipt.acknowledge()?;
+            Ok(())
+        }))
     }
 
     pub fn send(
         &self,
         event: PreviewEvent,
+        receipt: StreamDelivery,
         cancellation: &StreamCancellation,
     ) -> Result<(), ChatError> {
         check_cancellation(cancellation)?;
-        (self.0)(event, cancellation)?;
+        (self.0)(event, receipt, cancellation)?;
         check_cancellation(cancellation)
     }
 
     pub fn channel() -> (Self, PreviewReceiver) {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let consumer = Self::new(move |event, cancellation| {
-            let (received, receipt) = mpsc::sync_channel(1);
-            let mut delivery = Delivery { event, received };
-            loop {
-                check_cancellation(cancellation)?;
-                match sender.try_send(delivery) {
-                    Ok(()) => break,
-                    Err(mpsc::TrySendError::Full(pending)) => delivery = pending,
-                    Err(error) => {
-                        return Err(Box::<dyn Error + Send + Sync>::from(error))
-                            .context(PreviewDeliverySnafu);
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            // Keep the native Stream delivery unacknowledged until the caller
-            // takes the preview, so settlement cannot overtake unread data.
-            loop {
-                check_cancellation(cancellation)?;
-                match receipt.recv_timeout(Duration::from_millis(10)) {
-                    Ok(()) => return Ok(()),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(error) => {
-                        return Err(Box::<dyn Error + Send + Sync>::from(error))
-                            .context(PreviewDeliverySnafu);
-                    }
-                }
-            }
-        });
+        // Native receipts permit only one outstanding preview per invocation.
+        let (sender, receiver) = mpsc::channel();
+        let consumer = Self(Box::new(move |event, receipt, _| {
+            sender
+                .send(Delivery { event, receipt })
+                .boxed()
+                .context(PreviewDeliverySnafu)
+        }));
         (consumer, PreviewReceiver(receiver))
     }
 }
@@ -121,7 +101,7 @@ impl PreviewReceiver {
 }
 
 fn consume(delivery: Delivery) -> PreviewEvent {
-    // A cancelled producer may have stopped waiting for this receipt.
-    let _ = delivery.received.try_send(());
+    // Acknowledgement releases the native message domain after the caller takes its preview.
+    let _ = delivery.receipt.acknowledge();
     delivery.event
 }

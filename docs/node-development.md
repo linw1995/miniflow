@@ -925,5 +925,5 @@ external reference remains required.
 
 Providers with a total request deadline can use `TypedEmitter::send_with_deadline` (or the dynamic equivalent).
 Runtime graph and host sinks check the supplied cancellation handle while waiting for capacity or output I/O.
-Custom blocking sinks must implement `EmissionSink::send_with_cancellation` and check that handle during waits.
-A deadline on one send does not install a timer thread or change an unrelated invocation's deadline.
+Custom blocking sinks must implement `EmissionSink::send_with_deadline` and check both the deadline and cancellation during waits.
+Publication deadlines are passed directly to the sink; the cancellation token only carries cancellation.
