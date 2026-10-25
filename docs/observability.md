@@ -603,7 +603,12 @@ for the remaining shortcuts, and `?` or Esc to dismiss help. Help consumes navig
 The header keeps the observed workflow outcome separate from the child process result. Arrow keys
 pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. `e` cycles connection views.
 Declared node clusters show a labeled boundary and a wrapped annotation inside the graph and in Details.
+Cluster boundaries, member node borders, and labels share a stable color from a six-color palette.
+Node titles and status markers retain their execution-state colors. Annotations wrap at word boundaries;
+words wider than the available line are split at grapheme boundaries. Explicit newlines and initial indentation are preserved.
 Expanded cluster labels stay at the top of their visible region while panning, clipping to the available width.
+The graph hides a cluster's annotation while its label is displaced from its original position.
+Aligned ports use a straight connection when collision checks allow it, including connections spanning multiple columns.
 Press `c` to collapse or
 expand the selected node's cluster; collapsed clusters render as one aggregate node, remap external
 connections, and hide internal connections. On a node with a described body, `l` opens

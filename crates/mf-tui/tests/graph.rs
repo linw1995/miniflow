@@ -224,6 +224,61 @@ fn cluster_titles_follow_both_scroll_axes() {
 }
 
 #[test]
+fn cluster_annotations_hide_only_while_the_label_is_repositioned() {
+    let mut graph = fan_graph(1);
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    let annotation = "abcdefghijklmnopqrstuv";
+    graph.clusters = vec![ClusterDescription {
+        label: "Group".into(),
+        annotation: annotation.into(),
+        nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
+    }];
+    let layout = GraphLayout::new(&graph).unwrap();
+    let cluster = layout.clusters()[0].rect;
+    let node = layout.nodes()[layout.display_index_for_node_id("source").unwrap()].rect;
+    for (x, y, hidden) in [
+        (0, 0, false),
+        (cluster.x + 2, 0, false),
+        (cluster.x + 3, 0, true),
+        (0, cluster.y + 1, true),
+        (cluster.x + 3, cluster.y + 1, true),
+        (0, 0, false),
+    ] {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 64, 12));
+        GraphView::new(&layout)
+            .offset(x, y)
+            .render(buffer.area, &mut buffer);
+        assert!(buffer_text(&buffer).contains("Group"));
+        let label_x = (cluster.x + 2).max(x);
+        let label_y = cluster.y.max(y);
+        for (column, expected) in annotation.chars().enumerate() {
+            let column = node.x + 1 + column as u32;
+            if column < x
+                || column >= x + 64
+                || (node.y == label_y && (label_x..label_x + 7).contains(&column))
+            {
+                continue;
+            }
+            let cell = buffer
+                .cell(Position::new((column - x) as u16, (node.y - y) as u16))
+                .unwrap();
+            assert_eq!(
+                cell.symbol(),
+                if hidden {
+                    " ".into()
+                } else {
+                    expected.to_string()
+                },
+                "offset ({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
 fn pinned_cluster_titles_clip_to_narrow_nonzero_viewports() {
     let mut graph = fan_graph(1);
     graph.version = WorkflowDescriptionVersion::V2026_10_23;
@@ -303,6 +358,49 @@ fn cluster_titles_disappear_when_the_cluster_leaves_the_viewport() {
             .offset(x, y)
             .render(buffer.area, &mut buffer);
         assert!(!buffer_text(&buffer).contains("Computation"));
+    }
+}
+
+#[test]
+fn chat_title_usage_connections_stay_straight_only_when_the_path_is_clear() {
+    let definition = mf_compiler::WorkflowDefinition::from_json(include_str!(
+        "../../../examples/chat-title-flow.json"
+    ))
+    .unwrap();
+    let graph = mf_compiler::describe_compiled(&mf_compiler::plan_definition(&definition).unwrap())
+        .unwrap();
+    for view in [
+        mf_tui::graph::ConnectionView::Execution,
+        mf_tui::graph::ConnectionView::Dependencies,
+        mf_tui::graph::ConnectionView::Ports,
+    ] {
+        let layout = GraphLayout::with_view(&graph, view).unwrap();
+        let edge = layout
+            .edges()
+            .iter()
+            .position(|edge| {
+                layout.nodes()[edge.from].id == "conversation_usages"
+                    && layout.nodes()[edge.to].id == "usages"
+            })
+            .unwrap();
+        let route = &layout.routes()[edge];
+        assert!(route.unresolved.is_none());
+        let start = *route.points.first().unwrap();
+        let end = *route.points.last().unwrap();
+        assert_eq!(start.y, end.y);
+        let direct = mf_tui::graph::routing::Segment { start, end };
+        if view == mf_tui::graph::ConnectionView::Execution {
+            assert_eq!(route.points.len(), 2);
+        } else {
+            let obstacle = layout
+                .nodes()
+                .iter()
+                .find(|node| node.id == "combined_usages")
+                .unwrap();
+            assert!(direct.intersects_rect(obstacle.rect));
+            assert!(route.points.len() > 2);
+        }
+        assert_completed_geometry_is_safe(&layout);
     }
 }
 
@@ -471,6 +569,100 @@ fn long_cluster_labels_fit_expanded_and_collapsed_geometry() {
 }
 
 #[test]
+fn cluster_colors_match_borders_and_labels_across_views_and_folds() {
+    let mut graph = description();
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.clusters = vec![
+        ClusterDescription {
+            label: "Input".into(),
+            annotation: "Read the source and forward its value.".into(),
+            nodes: vec!["source".into(), "router".into()],
+        },
+        ClusterDescription {
+            label: "Output".into(),
+            annotation: "Merge the branch results.".into(),
+            nodes: vec!["left".into(), "join".into()],
+        },
+    ];
+    let mut observations: Vec<_> = graph
+        .nodes
+        .iter()
+        .map(|node| NodeObservation::pending(&node.id, &node.kind))
+        .collect();
+    observations[0].status = NodeStatus::Failed;
+    let mut expected_colors = Vec::new();
+    for view in [
+        mf_tui::graph::ConnectionView::Execution,
+        mf_tui::graph::ConnectionView::Dependencies,
+        mf_tui::graph::ConnectionView::Ports,
+    ] {
+        for collapsed in [
+            BTreeSet::new(),
+            BTreeSet::from([0]),
+            BTreeSet::from([1]),
+            BTreeSet::from([0, 1]),
+        ] {
+            let layout = GraphLayout::with_view_and_collapsed(&graph, view, &collapsed).unwrap();
+            let (width, height) = layout.size();
+            let mut buffer = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
+            let selected = layout.display_index_for_node_id("source").unwrap();
+            GraphView::new(&layout)
+                .nodes(&observations)
+                .selected(selected)
+                .render(buffer.area, &mut buffer);
+            let mut colors = Vec::new();
+            for (index, cluster) in layout.clusters().iter().enumerate() {
+                let label_position = if cluster.collapsed {
+                    Position::new((cluster.rect.x + 3) as u16, (cluster.rect.y + 1) as u16)
+                } else {
+                    Position::new((cluster.rect.x + 3) as u16, cluster.rect.y as u16)
+                };
+                let color = buffer.cell(label_position).unwrap().fg;
+                colors.push(color);
+                let corner = buffer
+                    .cell(Position::new(cluster.rect.x as u16, cluster.rect.y as u16))
+                    .unwrap();
+                assert_eq!(corner.fg, color);
+                for node in 0..layout.nodes().len() {
+                    if layout.cluster_of(node) != Some(index) {
+                        continue;
+                    }
+                    let rect = layout.nodes()[node].rect;
+                    let corner = buffer
+                        .cell(Position::new(
+                            rect.x as u16,
+                            (rect.y + rect.height - 1) as u16,
+                        ))
+                        .unwrap();
+                    assert_eq!(corner.fg, color);
+                }
+            }
+            assert_ne!(colors[0], colors[1]);
+            if expected_colors.is_empty() {
+                expected_colors = colors;
+            } else {
+                assert_eq!(colors, expected_colors);
+            }
+            let rect = layout.nodes()[selected].rect;
+            let title_y = if collapsed.contains(&0) {
+                rect.y + 1
+            } else {
+                // The annotation occupies two lines plus one blank row above the node card.
+                rect.y + 4
+            };
+            let marker = buffer
+                .cell(Position::new((rect.x + 1) as u16, title_y as u16))
+                .unwrap();
+            assert_eq!(marker.fg, Color::Red);
+            assert!(marker.modifier.contains(Modifier::REVERSED));
+        }
+    }
+}
+
+#[test]
 fn cluster_annotations_wrap_in_the_graph_and_stay_clear_of_connections() {
     let mut graph = description();
     graph.version = WorkflowDescriptionVersion::V2026_10_23;
@@ -528,6 +720,13 @@ fn cluster_annotations_wrap_in_the_graph_and_stay_clear_of_connections() {
                         && (cluster.rect.x + 2..cluster.rect.x + 2 + label_width as u32)
                             .contains(&u32::from(x))
                     {
+                        continue;
+                    }
+                    if collapsed.is_empty()
+                        && (node.rect.x + 1..node.rect.x + node.rect.width - 1)
+                            .contains(&u32::from(x))
+                    {
+                        assert_eq!(clipped.cell(Position::new(x, y)).unwrap().symbol(), " ");
                         continue;
                     }
                     assert_eq!(
