@@ -17,6 +17,8 @@ chrono = { workspace = true, features = ["std"] }
 crossterm.workspace = true
 ratatui = { workspace = true, features = ["crossterm", "unstable-rendered-line-info"] }
 rust-sugiyama.workspace = true
+pulldown-cmark.workspace = true
+syntect = { workspace = true, features = ["parsing", "default-syntaxes", "default-themes", "regex-fancy"] }
 
 # Local OTLP HTTP receiver and protobuf decoding.
 http-body-util.workspace = true

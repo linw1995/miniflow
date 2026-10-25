@@ -25,6 +25,7 @@ use std::{
 
 mod preview;
 pub use preview::LivePreview;
+mod transcript;
 mod ui;
 pub use ui::run_chat;
 const QUEUE_CAPACITY: usize = 16;

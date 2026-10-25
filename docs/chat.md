@@ -493,6 +493,18 @@ supplies its name. Existing conversations remain available
 through the session picker. New chats use no terminal-supplied system instructions; resumed sessions retain their
 stored instructions. Provider configuration remains in the workflow and its declared parameters.
 
+Assistant messages render Markdown in saved history, live previews, and retained replies. Headings,
+emphasis, lists, task lists, block quotes, links, tables, and code blocks are supported. Fenced code
+blocks use their language label for syntax highlighting, including while output is streaming;
+unrecognized or missing labels fall back to plain code. HTML and images use literal text fallbacks.
+Prompts and diagnostics remain plain text, and stored message content is unchanged.
+
+Unchanged Markdown blocks and wrapped lines are cached; resizing reflows text without repeating
+syntax highlighting. Code highlighting resumes from complete lines and recalculates the unfinished
+last line. An excessively long code line or a highlighting error falls back to plain code for the
+remainder of that block. Scrolling up anchors the viewed content while new output arrives; scrolling
+back to the bottom resumes following output.
+
 | Interaction | Key |
 | --- | --- |
 | Send the prompt | Alt+Enter, or Esc then Enter |
