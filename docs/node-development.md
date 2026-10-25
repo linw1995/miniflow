@@ -15,7 +15,7 @@ instance-specific typed inputs, and output types inferred by the CEL checker. A 
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
 The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with fixed typed prompt,
-system, history, and terminal output contracts. Select it explicitly to add its HTTP transport dependencies.
+system, history, terminal outputs, and an optional typed `delta` stream. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values).
 
@@ -922,3 +922,6 @@ worker limit. The compiled target record carries the stream ceiling and rejects 
 Isolated context contracts compare complete reference IDs and resolved types. Provider diagnostic
 labels remain available in metadata but rewording them does not cause binding drift. Every declared
 external reference remains required.
+
+`Emitter::send` waits for native queue capacity. Consumer failures, dropped pending deliveries, and explicit
+cancellation wake blocked producers. Consumers and hosts own the policy for stalled delivery.

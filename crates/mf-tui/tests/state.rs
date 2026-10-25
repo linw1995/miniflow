@@ -14,6 +14,35 @@ use mf_tui::state::{Admission, Completeness, NodeStatus, SessionState};
 use std::sync::Arc;
 
 #[test]
+fn node_correlation_follows_latest_admitted_evidence() {
+    let mut state = state();
+    let terminal = node_success(3, "a", "fixture.source", 0);
+    let current = Some((vec![1; 16], vec![2; 8]));
+    state
+        .apply_observed(terminal.clone(), current.clone())
+        .unwrap();
+    state
+        .apply_observed(
+            node_start(2, "a", "fixture.source", 0),
+            Some((vec![3; 16], vec![4; 8])),
+        )
+        .unwrap();
+    assert_eq!(state.snapshot().nodes[0].correlation, current);
+    assert_eq!(
+        state.apply_observed(terminal, None).unwrap(),
+        Admission::Duplicate
+    );
+    assert_eq!(state.snapshot().nodes[0].correlation, current);
+    assert_eq!(
+        state
+            .apply_observed(node_success(4, "a", "fixture.source", 0), None)
+            .unwrap(),
+        Admission::Conflict
+    );
+    assert_eq!(state.snapshot().nodes[0].correlation, current);
+}
+
+#[test]
 fn latest_node_event_ignores_late_duplicate_and_conflicting_records() {
     let mut state = state();
     assert!(state.snapshot().latest_node_event.is_none());

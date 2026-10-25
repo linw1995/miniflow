@@ -230,6 +230,8 @@ completion before settling the workflow. Isolated Task targets retain one termin
 
 The manifest uses the ordinary workflow definition and startup interface. Native delivery uses the
 existing pending-message limits, cancellation, and acknowledgment.
+JSON-lines capture validates unique keys and preserves typed decode failures without treating a prefix
+as a successful final result.
 
 The compiler emits fixed input-binding functions, named Task-domain functions, emitter channel bindings,
 and output-selection functions for each graph. The runner executes these entry points without interpreting

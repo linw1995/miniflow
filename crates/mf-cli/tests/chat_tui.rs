@@ -32,9 +32,9 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
 
     let root = tempfile::tempdir().unwrap();
     let server = Server::start(vec![
-        Reply::text("first answer"),
+        Reply::stream_text("first answer"),
         Reply::text("Generated title"),
-        Reply::text("second answer"),
+        Reply::stream_text("second answer"),
     ]);
     let binary = compiled(root.path(), &server, "chat-title-flow.json");
     let path = root.path().join("chat.sqlite");
@@ -68,6 +68,9 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
             assert!(Instant::now() < deadline, "conversation did not finish");
             match controller.try_event() {
                 Some(ChatEvent::Submitted { session, .. }) => session_id = Some(session.id),
+                Some(ChatEvent::Preview { preview, .. }) => {
+                    assert!(preview.segments.len() <= 32);
+                }
                 Some(ChatEvent::Observing(_)) | None => thread::sleep(Duration::from_millis(10)),
                 Some(ChatEvent::Finished { resolution, .. }) => {
                     let resolution = resolution.unwrap();
@@ -81,6 +84,13 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
                     };
                     assert_eq!(completion.result.text, expected);
                     assert_eq!(completion.result.usages.len(), calls);
+                    for usage in &completion.result.usages {
+                        let timing = usage
+                            .timing
+                            .as_ref()
+                            .expect("runner request events populate timing");
+                        assert!(timing.is_valid() && timing.elapsed_us > 0);
+                    }
                     assert_eq!(
                         completion.result.title.as_deref(),
                         (calls == 2).then_some("Generated title")
@@ -413,6 +423,17 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     let usage = database.usage(Default::default()).unwrap();
     assert_eq!(usage.overall.attempted_calls, 6);
     assert_eq!(usage.overall.total_tokens.missing_calls, 1);
+    assert_eq!(usage.overall.performance.elapsed.reported_calls, 6);
+    let retained = transcript
+        .iter()
+        .find(|message| message.message.content == "retained reply")
+        .unwrap();
+    assert!(retained.usages.as_ref().unwrap().iter().all(|usage| {
+        usage
+            .timing
+            .as_ref()
+            .is_some_and(|timing| timing.is_valid() && timing.elapsed_us > 0)
+    }));
     assert!(
         sessions
             .iter()
@@ -690,6 +711,12 @@ fn loop_conversations() {
         assert_eq!(usages.len(), 2);
         assert_ne!(usages[0].call_id, usages[1].call_id);
         assert!(usages.iter().all(|usage| usage.model == "loop-model"));
+        assert!(usages.iter().all(|usage| {
+            usage
+                .timing
+                .as_ref()
+                .is_some_and(|timing| timing.is_valid() && timing.elapsed_us > 0)
+        }));
         assert_ne!(
             usages[0].node.as_ref().unwrap().path,
             usages[1].node.as_ref().unwrap().path

@@ -487,5 +487,5 @@ fn composed_conversation_compiles_without_application_nodes() {
         serde_json::to_value(&arguments).unwrap()["input.history"],
         json!([])
     );
-    instantiate_compiled(&plan, &registry).unwrap();
+    instantiate_stream(&plan, &registry).unwrap();
 }

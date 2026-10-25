@@ -373,6 +373,11 @@
       "node": "title",
       "port": "value",
       "optional": true
+    },
+    {
+      "name": "answer",
+      "node": "model",
+      "port": "delta"
     }
   ],
   "clusters": [

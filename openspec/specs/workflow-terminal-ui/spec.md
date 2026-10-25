@@ -1013,3 +1013,66 @@ The TUI SHALL advance elapsed time while a local run is active. Once completion 
 
 - **WHEN** the child exits without sending terminal telemetry and the user keeps its completed view open
 - **THEN** elapsed time remains fixed across subsequent refreshes using the observed process exit time
+
+### Requirement: Display provisional streamed chat replies
+
+The chat terminal SHALL consume application preview outputs from the conversation Flow before final settlement. Records SHALL be processed independently of rendering. Presentation state SHALL be bounded and grouped by actual model-call identity. A preview MUST NOT imply conversation success, and unrelated internal model output MUST NOT become answer text.
+
+#### Scenario: Wait for title generation
+
+- **WHEN** answer previews arrive while the backend continues title generation
+- **THEN** the terminal keeps them provisional and indicates remaining work
+
+#### Scenario: Receive no increments
+
+- **WHEN** the backend completes without answer deltas
+- **THEN** the terminal displays its final response without requiring open or close events
+
+### Requirement: Replace previews with authoritative completion state
+
+The terminal SHALL reconcile live text against the final result. Successful persisted text SHALL become the canonical assistant reply. Failed or cancelled partial text SHALL be marked incomplete and excluded from successful history. A complete reply that could not be saved SHALL retain existing save/discard actions without repeating generation. Stale events MUST NOT modify a different turn.
+
+#### Scenario: Display postprocessed final text
+
+- **WHEN** the final selected text differs from its live preview and persistence succeeds
+- **THEN** the terminal displays the authoritative saved text as the completed reply
+
+#### Scenario: Cancel after receiving partial text
+
+- **WHEN** a user cancels an active turn after visible increments
+- **THEN** the terminal marks that text incomplete and preserves existing cancellation and retry behavior
+
+#### Scenario: Retain a reply after storage failure
+
+- **WHEN** a valid final result exists but its storage transaction fails
+- **THEN** the terminal retains the complete unsaved reply and saving it does not invoke the model again
+
+#### Scenario: Receive an event for a finished turn
+
+- **WHEN** a queued event belongs to an earlier invocation than the active turn
+- **THEN** it cannot append text to or change the completion state of the active turn
+
+### Requirement: Present model call performance beside replies and LLM nodes
+
+Completed assistant replies and LLM graph cards SHALL present FTT, Gen, and E2E throughput from authoritative call facts. Narrow chat views MAY omit E2E. Previews SHALL show a measuring indicator until final facts arrive. Missing data SHALL remain unknown. Reply summaries SHALL exclude explicitly attributed non-conversation calls, use mean observed FTT, and weight rates by paired tokens and durations.
+
+#### Scenario: Reload a completed reply
+
+- **WHEN** a saved assistant reply is loaded from a bounded message page
+- **THEN** its footer uses the original committed call facts and preserves unknown legacy timing
+
+#### Scenario: Recover a complete unsaved reply
+
+- **WHEN** a complete reply cannot be saved
+- **THEN** its performance footer retains the original facts during save-only recovery
+
+#### Scenario: Inspect a repeated LLM invocation
+
+- **WHEN** an LLM node runs repeatedly or inside a Loop
+- **THEN** its graph card uses only snapshots correlated to the displayed invocation, with stable space reserved for FTT and both rates
+- **AND** details explain both rate windows and report per-call facts and observation coverage
+
+#### Scenario: Observe missing call data
+
+- **WHEN** an LLM snapshot or provider token count is unavailable
+- **THEN** the card displays unknown values without estimating tokens or borrowing another invocation's data

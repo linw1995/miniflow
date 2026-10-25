@@ -167,3 +167,85 @@ fn compiled_stream_contract_drift_fails_before_business_work() {
     assert!(!marker.exists());
     assert!(String::from_utf8_lossy(&output.stderr).contains("metadata"));
 }
+
+#[test]
+fn answer_and_title_share_one_result_while_only_answer_is_streamed() {
+    use mfn_llm::test_support::{Reply, Server};
+    let text = json!({"id":"answer","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"content":"Live answer"},"finish_reason":null}]});
+    let finish = json!({"id":"answer","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+    let mut streamed = Reply::text("unused");
+    streamed
+        .headers
+        .push(("Content-Type".into(), "text/event-stream".into()));
+    streamed.body = format!("data: {text}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    let server = Server::start(vec![
+        streamed,
+        Reply::text("Generated title"),
+        Reply::text("Live answer"),
+        Reply::text("Generated title"),
+    ]);
+    for streaming in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let mut definition: serde_json::Value =
+            serde_json::from_str(include_str!("../../../examples/chat-title-flow.json")).unwrap();
+        for (alias, path) in [("core", "core"), ("code", "code"), ("llm", "llm")] {
+            definition["dependencies"][alias]["path"] =
+                json!(crates_dir().join("builtin-nodes").join(path));
+        }
+        if !streaming {
+            definition.as_object_mut().unwrap().remove("execution");
+            definition["outputs"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|output| output["name"] != "answer");
+        }
+        let executable = compile(root.path(), definition);
+        let output = Command::new(&executable)
+            .args([
+                "--input.prompt",
+                "Hello",
+                "--input.base_url",
+                &server.base_url,
+            ])
+            .env("MODEL_API_KEY", "synthetic-key")
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = if streaming {
+            let mut result = None;
+            let mut deltas = 0;
+            for line in output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                let record: serde_json::Value = serde_json::from_slice(line).unwrap();
+                if let Some(delta) = record.get("answer") {
+                    assert_eq!(delta["text"], "Live answer");
+                    deltas += 1;
+                } else {
+                    assert!(result.replace(record).is_none());
+                }
+            }
+            assert_eq!(deltas, 1);
+            result.unwrap()
+        } else {
+            serde_json::from_slice(&output.stdout).unwrap()
+        };
+        assert_eq!(result["text"], "Live answer");
+        assert_eq!(result["title"], "Generated title");
+        assert_eq!(result["usages"].as_array().unwrap().len(), 2);
+    }
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].body["stream"], true);
+    for request in &requests[1..] {
+        assert_ne!(request.body["stream"], true);
+    }
+}

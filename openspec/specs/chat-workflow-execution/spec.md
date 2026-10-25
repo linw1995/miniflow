@@ -167,3 +167,35 @@ Shutdown SHALL stop accepting requests, cancel or complete active workflows, fin
 - **WHEN** the host closes while composed conversation workflows are running
 - **THEN** their local execution is joined and database ownership is released only after finalization is attempted
 - **AND** unresolved work is recoverable as interrupted on the next open
+
+### Requirement: Route incremental events through the conversation Flow
+
+The application-owned conversation JSON SHALL admit, invoke, route, and settle the turn. Backend deltas SHALL enter the invocation node's ordinary Stream output. An Event node SHALL publish application previews and retain the final response until successful upstream close. Hosts MUST NOT forward model deltas around this graph.
+
+#### Scenario: Receive previews before title completion
+
+- **WHEN** a backend emits answer text while later work remains active
+- **THEN** the conversation Flow delivers previews and defers settlement until backend success
+
+#### Scenario: Fail after a provisional prefix
+
+- **WHEN** the backend fails before producing a successful final event
+- **THEN** the route does not release settlement inputs and no partial assistant message is saved
+
+### Requirement: Acknowledge application preview delivery before settlement
+
+Preview and settlement outputs SHALL share one ordered application message domain. Hosts SHALL acknowledge each native preview delivery only after its consumer receives it. Terminal-only submissions SHALL allocate no unread preview receiver. Cancellation and receiver closure SHALL interrupt blocked delivery and host teardown SHALL join active instances before releasing storage.
+
+#### Scenario: Drop an unread preview
+
+- **WHEN** a subscribed preview receiver closes before consuming pending text
+- **THEN** settlement cannot overtake that delivery and a retained complete reply remains eligible for save-only recovery
+
+### Requirement: Preserve application and model identities in previews
+
+Application previews SHALL identify their owning chat invocation and actual model call. Distinct model calls SHALL remain separate presentation segments. Runtime-specific stream lifetimes and node paths MUST NOT be required by the chat preview protocol.
+
+#### Scenario: Repeat a model call within one turn
+
+- **WHEN** answer events carry different actual model-call identities
+- **THEN** the application preserves their distinction within the same chat invocation

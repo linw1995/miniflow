@@ -338,10 +338,15 @@ impl GraphLayout {
         for id in &description.execution_order {
             let node_index = node_index[id.as_str()];
             let node = &description.nodes[node_index];
-            let width = node_cluster[node_index].map_or(NODE_WIDTH, |cluster| {
+            let base_width = if node.kind == "builtin.llm" {
+                40
+            } else {
+                NODE_WIDTH
+            };
+            let width = node_cluster[node_index].map_or(base_width, |cluster| {
                 let label_width =
                     ratatui::text::Span::raw(&description.clusters[cluster].label).width() as u32;
-                NODE_WIDTH.max(label_width + 4)
+                base_width.max(label_width + 4)
             });
             if let Some(cluster) = node_cluster[node_index]
                 && collapsed.contains(&cluster)
@@ -585,8 +590,14 @@ impl GraphLayout {
             });
             // Annotation rows stay inside the routing obstacle, above the first expanded member
             // or below the collapsed title, so connections cannot overwrite cluster text.
-            node.rect.height =
-                NODE_HEIGHT.max(outgoing_height).max(incoming_height) + annotation_heights[index];
+            node.rect.height = (if node.kind == "builtin.llm" {
+                6
+            } else {
+                NODE_HEIGHT
+            })
+            .max(outgoing_height)
+            .max(incoming_height)
+                + annotation_heights[index];
         }
 
         let vertices: Vec<_> = (0..nodes.len())
@@ -1155,6 +1166,7 @@ pub struct GraphView<'a> {
     selected: Option<usize>,
     offset: (u32, u32),
     elapsed_ns: u64,
+    reader: Option<&'a crate::receiver::ObservationReader>,
 }
 
 impl<'a> GraphView<'a> {
@@ -1165,7 +1177,13 @@ impl<'a> GraphView<'a> {
             selected: None,
             offset: (0, 0),
             elapsed_ns: 0,
+            reader: None,
         }
+    }
+
+    pub fn reader(mut self, reader: &'a crate::receiver::ObservationReader) -> Self {
+        self.reader = Some(reader);
+        self
     }
 
     pub fn snapshot(mut self, snapshot: &'a StateSnapshot) -> Self {
@@ -1658,6 +1676,26 @@ impl<'a> GraphView<'a> {
             &detail,
             Style::default().fg(Color::Gray),
         );
+        if node.kind == "builtin.llm" && !collapsed {
+            let calls = self
+                .reader
+                .zip(observed)
+                .map_or_else(Vec::new, |(reader, observed)| {
+                    crate::performance::node_calls(reader, observed)
+                });
+            for (row, line) in crate::performance::card_lines(&calls).iter().enumerate() {
+                self.text(
+                    area,
+                    buffer,
+                    GraphRect {
+                        y: title_rect.y + 2 + row as u32,
+                        ..title_rect
+                    },
+                    line,
+                    Style::default().fg(Color::DarkGray),
+                );
+            }
+        }
         for (row, line) in annotation.iter().enumerate() {
             self.text(
                 area,

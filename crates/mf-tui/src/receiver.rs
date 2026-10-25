@@ -26,7 +26,7 @@ use opentelemetry_proto::tonic::{
 };
 use prost::Message;
 use serde_json::{Map, Value};
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::{
     convert::Infallible,
     io,
@@ -67,6 +67,8 @@ enum IngestError {
     Snapshot {
         source: Arc<crate::snapshots::CaptureError>,
     },
+    #[snafu(transparent)]
+    CallEvent { source: mf_chat::CallEventError },
     #[snafu(display("{message}"))]
     Invalid { message: String },
 }
@@ -76,6 +78,7 @@ struct Context {
     snapshots: Mutex<SnapshotCapture>,
     traces: Mutex<TraceStore>,
     logs: Mutex<LogStore>,
+    calls: Mutex<mf_chat::CallEventCollector>,
     workflow_id: WorkflowId,
     run_id: String,
 }
@@ -108,6 +111,7 @@ impl LoopbackReceiver {
             snapshots: Mutex::new(SnapshotCapture::default()),
             traces: Mutex::new(TraceStore::default()),
             logs: Mutex::new(LogStore::default()),
+            calls: Mutex::new(mf_chat::CallEventCollector::default()),
             workflow_id,
             run_id: run_id.to_string(),
         });
@@ -234,6 +238,30 @@ impl ObservationReader {
             .lock()
             .expect("snapshot capture was not poisoned")
             .snapshot()
+    }
+
+    pub fn call_events(&self) -> mf_chat::CallEventCollector {
+        self.context
+            .calls
+            .lock()
+            .expect("call observations were not poisoned")
+            .clone()
+    }
+
+    pub fn apply_call_timings(&self, usages: &mut [mf_chat::CallUsage]) {
+        self.context
+            .calls
+            .lock()
+            .expect("call observations were not poisoned")
+            .apply(usages);
+    }
+
+    pub fn calls_for_span(&self, trace: &[u8], span: &[u8]) -> Vec<mf_chat::CallUsage> {
+        self.context
+            .calls
+            .lock()
+            .expect("call observations were not poisoned")
+            .usages_for_span(&hex(trace), &hex(span))
     }
 
     pub fn span_data(&self, trace_id: &[u8], span_id: &[u8]) -> SpanData {
@@ -389,6 +417,51 @@ fn response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
         .expect("static HTTP response is valid")
 }
 
+fn receive_call_event(record: LogRecord, context: &Context) -> Result<(), IngestError> {
+    if string_attribute(&record.attributes, "mf.run.id") != Some(context.run_id.as_str())
+        || string_attribute(&record.attributes, "mf.workflow.id")
+            != Some(context.workflow_id.as_str())
+        || !mf_chat::CallEventCollector::recognizes(&record.event_name)
+    {
+        return Ok(());
+    }
+    let trace_context = if record.trace_id.is_empty() && record.span_id.is_empty() {
+        None
+    } else {
+        ensure!(
+            record.trace_id.len() == 16 && record.span_id.len() == 8,
+            InvalidSnafu {
+                message: "invalid call event trace context",
+            }
+        );
+        let trace = TraceContext {
+            trace_id: hex(&record.trace_id),
+            span_id: hex(&record.span_id),
+            trace_flags: (record.flags & 0xff) as u8,
+        };
+        trace.validate()?;
+        Some(trace)
+    };
+    let body = record.body.ok_or_else(|| {
+        InvalidSnafu {
+            message: "missing model call event payload",
+        }
+        .build()
+    })?;
+    let event = mf_telemetry::events::EventRecord {
+        name: record.event_name,
+        time_unix_nano: record.time_unix_nano,
+        body: value(&body, 0)?,
+        trace_context,
+    };
+    context
+        .calls
+        .lock()
+        .expect("call observations were not poisoned")
+        .observe(&event)?;
+    Ok(())
+}
+
 fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
     let request = ExportLogsServiceRequest::decode(bytes).inspect_err(|_| {
         note_error(context, "invalid OTLP logs protobuf");
@@ -453,11 +526,17 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
                 }
                 if !matches!(
                     scope_name,
-                    Some(INSTRUMENTATION_SCOPE | mf_telemetry::snapshot::SCOPE)
+                    Some(
+                        INSTRUMENTATION_SCOPE
+                            | mf_telemetry::snapshot::SCOPE
+                            | mf_telemetry::events::SCOPE
+                    )
                 ) {
                     continue;
                 }
-                let result = if scope_name == Some(mf_telemetry::snapshot::SCOPE) {
+                let result = if scope_name == Some(mf_telemetry::events::SCOPE) {
+                    receive_call_event(record, context)
+                } else if scope_name == Some(mf_telemetry::snapshot::SCOPE) {
                     receive_snapshot(record, context)
                 } else {
                     receive_log(record, context)
@@ -569,6 +648,9 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
             trace_flags: (record.flags & 0xff) as u8,
         })
     };
+    let correlation = trace_context
+        .as_ref()
+        .map(|_| (record.trace_id.clone(), record.span_id.clone()));
     let wire = WireRecord {
         scope: INSTRUMENTATION_SCOPE.into(),
         event_name: record.event_name,
@@ -607,14 +689,14 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
                 .state
                 .lock()
                 .expect("receiver state was not poisoned")
-                .apply_stream(event)?)
+                .apply_stream_observed(event, correlation)?)
         } else {
             let event = wire.decode()?;
             Ok(context
                 .state
                 .lock()
                 .expect("receiver state was not poisoned")
-                .apply(event)?)
+                .apply_observed(event, correlation)?)
         }
     })()
     .inspect_err(|_| {

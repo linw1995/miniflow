@@ -191,6 +191,7 @@ impl StreamState {
         &mut self,
         description: &WorkflowDescription,
         record: StreamRecord,
+        correlation: Option<crate::traces::SpanKey>,
     ) -> Result<Admission, StateError> {
         let wire = record.to_wire(0, None).context(EventSnafu)?;
         validate_graph(description, &record)?;
@@ -240,7 +241,7 @@ impl StreamState {
                 return Err(invalid("stream reorder window exhausted"));
             }
         }
-        let admission = self.apply_payload(description, &record)?;
+        let admission = self.apply_payload(description, &record, correlation)?;
         self.witnesses.insert(sequence, signature);
         while let Some(next) = self.watermark.checked_add(1) {
             if !self.witnesses.contains_key(&next) {
@@ -259,6 +260,7 @@ impl StreamState {
         &mut self,
         description: &WorkflowDescription,
         record: &StreamRecord,
+        correlation: Option<crate::traces::SpanKey>,
     ) -> Result<Admission, StateError> {
         match &record.payload {
             StreamPayload::Control(StreamEvent::Started { .. }) => Ok(Admission::Applied),
@@ -295,7 +297,7 @@ impl StreamState {
                 Ok(Admission::Applied)
             }
             StreamPayload::Execution(event) if event.node().is_some() => {
-                self.apply_node(description, record, event)
+                self.apply_node(description, record, event, correlation)
             }
             StreamPayload::Control(
                 StreamEvent::Buffered {
@@ -399,6 +401,7 @@ impl StreamState {
         description: &WorkflowDescription,
         record: &StreamRecord,
         event: &Event,
+        correlation: Option<crate::traces::SpanKey>,
     ) -> Result<Admission, StateError> {
         let (node, _) = event.node().expect("node event");
         let admission = self.ensure_invocation(record, node)?;
@@ -489,6 +492,9 @@ impl StreamState {
         };
         if let Some(message) = violation {
             return Ok(self.conflict(message));
+        }
+        if observed.started_sequence.max(observed.terminal_sequence) == Some(record.sequence) {
+            observed.correlation = correlation;
         }
         invocation.last_sequence = invocation.last_sequence.max(record.sequence);
         if node.path.is_empty() {
@@ -1472,6 +1478,50 @@ mod tests {
             node(run, 7, 0, true, true),
             finish(run, 8, 2),
         ]
+    }
+
+    #[test]
+    fn repeated_invocations_retain_exact_correlation_despite_late_events() {
+        let run = RunId::new();
+        for reverse in [false, true] {
+            let mut state = SessionState::new(description(), run).unwrap();
+            let mut records = events(run);
+            if reverse {
+                records.reverse();
+            }
+            for record in records {
+                let correlation = record
+                    .identity
+                    .as_ref()
+                    .map(|_| (vec![1; 16], vec![record.sequence.get() as u8; 8]));
+                state.apply_stream_observed(record, correlation).unwrap();
+            }
+            let snapshot = state.snapshot();
+            assert_eq!(
+                snapshot.nodes[1].correlation,
+                Some((vec![1; 16], vec![6; 8]))
+            );
+            let invocations = &snapshot.stream.as_ref().unwrap().invocations;
+            assert_eq!(
+                invocations
+                    .iter()
+                    .find(|i| i.identity.invocation == 1)
+                    .unwrap()
+                    .node
+                    .correlation,
+                Some((vec![1; 16], vec![4; 8]))
+            );
+            assert_eq!(
+                state
+                    .apply_stream_observed(node(run, 4, 1, false, true), None)
+                    .unwrap(),
+                Admission::Duplicate
+            );
+            assert_eq!(
+                state.snapshot().nodes[1].correlation,
+                snapshot.nodes[1].correlation
+            );
+        }
     }
 
     #[test]

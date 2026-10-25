@@ -37,6 +37,8 @@ use diagnostics::Diagnostics;
 
 type EmitLog = dyn Fn(&WireRecord) -> Result<(), ContractError> + Send + Sync;
 type EmitNestedLog = dyn Fn(NestedLog) + Send + Sync;
+type EmitEvent =
+    dyn Fn(&'static str, &crate::events::EventRecord, &WorkflowId, RunId) + Send + Sync;
 type FailureState = Option<(Option<String>, Failure)>;
 
 struct NestedLog {
@@ -50,6 +52,7 @@ struct Backend {
     diagnostics: Option<Diagnostics>,
     emit: Box<EmitLog>,
     emit_nested: Box<EmitNestedLog>,
+    emit_event: Box<EmitEvent>,
 }
 
 impl Backend {
@@ -95,6 +98,7 @@ impl Observer {
     {
         let logger = logs.logger(INSTRUMENTATION_SCOPE);
         let nested_logger = logs.logger("mf.iteration");
+        let event_logger = logs.logger(crate::events::SCOPE);
         Self(Arc::new(Backend {
             tracer: BoxedTracer::new(Box::new(traces.tracer(INSTRUMENTATION_SCOPE))),
             diagnostics: (verbose > 0)
@@ -113,6 +117,19 @@ impl Observer {
                     .then(|| Context::new().attach());
                 logger.emit(record);
                 Ok(())
+            }),
+            emit_event: Box::new(move |name, event, workflow, run| {
+                if Context::is_current_telemetry_suppressed() {
+                    return;
+                }
+                let mut record = event_logger.create_log_record();
+                if event.write_to(name, workflow, run, &mut record).is_ok() {
+                    let _context = event
+                        .trace_context
+                        .is_none()
+                        .then(|| Context::new().attach());
+                    event_logger.emit(record);
+                }
             }),
             emit_nested: Box::new(move |log| {
                 if Context::is_current_telemetry_suppressed() {
@@ -152,6 +169,13 @@ impl Observer {
             &opentelemetry::logs::NoopLoggerProvider::new(),
             verbose,
         )
+    }
+
+    fn event_context(&self, context: Context, workflow: WorkflowId, run: RunId) -> Context {
+        let backend = self.0.clone();
+        crate::events::with_emitter(context, move |name, event| {
+            (backend.emit_event)(name, event, &workflow, run);
+        })
     }
 
     pub fn start(
@@ -240,7 +264,7 @@ impl Observer {
                 KeyValue::new("mf.run.id", run_id.to_string()),
             ])
             .start_with_context(&self.0.tracer, &parent);
-        let context = parent.with_span(span);
+        let context = self.event_context(parent.with_span(span), workflow_id.clone(), run_id);
         let mut run = RunObservation {
             backend: self.0.clone(),
             workflow_id,

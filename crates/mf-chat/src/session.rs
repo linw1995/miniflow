@@ -1,7 +1,7 @@
 use crate::{
     ChatDatabase, ChatError, Message, Session,
     error::*,
-    schema::{messages, sessions, turns},
+    schema::{messages, model_calls, sessions, turns},
     storage,
 };
 use diesel::prelude::*;
@@ -83,6 +83,8 @@ pub struct MessagesInputs {
 pub struct MessageRecord {
     pub message: Message,
     pub turn_state: String,
+    #[value(default)]
+    pub usages: Option<Vec<crate::CallUsage>>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -361,36 +363,62 @@ fn list(input: ListSessionsInputs) -> Result<SessionPageOutputs, ChatError> {
 fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> {
     validate_page(input.limit)?;
     let mut connection = storage::connect(Path::new(&input.database_path))?;
-    load(&mut connection, &input.session_id)?;
-    let after = input.after_sequence.unwrap_or(-1);
-    let mut rows: Vec<(Message, String)> = messages::table
-        .inner_join(turns::table)
-        .filter(messages::session_id.eq(&input.session_id))
-        .filter(messages::sequence.gt(after))
-        .order(messages::sequence.asc())
-        .limit((input.limit + 1) as i64)
-        .select((Message::as_select(), turns::state))
-        .load(&mut connection)
-        .context(DatabaseSnafu {
-            operation: "list chat messages",
-        })?;
-    let next_after = if rows.len() > input.limit {
-        rows.truncate(input.limit);
-        rows.last().map(|row| row.0.sequence)
-    } else {
-        None
-    };
-    Ok(MessagePageOutputs {
-        page: MessagePage {
-            messages: rows
-                .into_iter()
-                .map(|(message, turn_state)| MessageRecord {
-                    message,
-                    turn_state,
-                })
-                .collect(),
-            next_after,
-        },
+    connection.transaction(|connection| {
+        load(connection, &input.session_id)?;
+        let after = input.after_sequence.unwrap_or(-1);
+        let mut rows: Vec<(Message, String)> = messages::table
+            .inner_join(turns::table)
+            .filter(messages::session_id.eq(&input.session_id))
+            .filter(messages::sequence.gt(after))
+            .order(messages::sequence.asc())
+            .limit((input.limit + 1) as i64)
+            .select((Message::as_select(), turns::state))
+            .load(connection)
+            .context(DatabaseSnafu {
+                operation: "list chat messages",
+            })?;
+        let next_after = if rows.len() > input.limit {
+            rows.truncate(input.limit);
+            rows.last().map(|row| row.0.sequence)
+        } else {
+            None
+        };
+        let turn_ids: Vec<_> = rows
+            .iter()
+            .filter(|(message, _)| message.role == "assistant")
+            .map(|(message, _)| &message.turn_id)
+            .collect();
+        let calls = model_calls::table
+            .filter(model_calls::session_id.eq(&input.session_id))
+            .filter(model_calls::turn_id.eq_any(turn_ids))
+            .filter(model_calls::purpose.eq("conversation"))
+            .filter(model_calls::disposition.eq("committed"))
+            .select((model_calls::turn_id, model_calls::usages))
+            .load::<(Option<String>, storage::StoredJson<Vec<crate::CallUsage>>)>(connection)
+            .context(DatabaseSnafu {
+                operation: "load message call facts",
+            })?;
+        let mut usages: std::collections::BTreeMap<_, _> = calls
+            .into_iter()
+            .filter_map(|(turn_id, usages)| turn_id.map(|id| (id, Option::from(usages))))
+            .collect();
+        Ok(MessagePageOutputs {
+            page: MessagePage {
+                messages: rows
+                    .into_iter()
+                    .map(|(message, turn_state)| MessageRecord {
+                        usages: if message.role == "assistant" {
+                            usages.remove(&message.turn_id).flatten()
+                        } else {
+                            None
+                        },
+                        message,
+                        turn_state,
+                    })
+                    .collect(),
+                next_after,
+            },
+        })
     })
 }
 

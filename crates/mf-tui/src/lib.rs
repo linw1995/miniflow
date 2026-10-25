@@ -11,6 +11,7 @@ pub mod graph;
 pub mod logs;
 #[cfg(unix)]
 pub mod manifest;
+mod performance;
 pub mod receiver;
 #[cfg(unix)]
 pub mod run;

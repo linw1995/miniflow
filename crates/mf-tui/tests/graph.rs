@@ -75,6 +75,20 @@ fn description() -> WorkflowDescription {
 }
 
 #[test]
+fn llm_cards_reserve_stable_metric_rows_before_data_arrives() {
+    let mut graph = description();
+    graph.nodes[0].kind = "builtin.llm".into();
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_eq!(layout.nodes()[0].rect.width, 40);
+    assert!(layout.nodes()[0].rect.height >= 6);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 200, 100));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("FTT —"));
+    assert!(text.contains("Gen — | E2E — tok/s"));
+}
+
+#[test]
 fn clusters_render_expanded_bounds_and_collapse_to_one_node() {
     let mut graph = description();
     graph.version = WorkflowDescriptionVersion::V2026_10_23;

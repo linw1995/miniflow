@@ -64,6 +64,7 @@ pub struct NodeObservation {
     pub omitted_input_selections: usize,
     pub id: String,
     pub kind: String,
+    pub correlation: Option<crate::traces::SpanKey>,
     pub status: NodeStatus,
     pub last_known: Option<NodeStatus>,
     pub conflicted: bool,
@@ -397,6 +398,14 @@ impl SessionState {
         &mut self,
         record: mf_telemetry::stream::StreamRecord,
     ) -> Result<Admission, StateError> {
+        self.apply_stream_observed(record, None)
+    }
+
+    pub fn apply_stream_observed(
+        &mut self,
+        record: mf_telemetry::stream::StreamRecord,
+        correlation: Option<crate::traces::SpanKey>,
+    ) -> Result<Admission, StateError> {
         if self.closed {
             return ClosedSnafu.fail();
         }
@@ -421,7 +430,7 @@ impl SessionState {
         }
         .cloned();
         let sequence = record.sequence;
-        let admission = stream.apply(&self.description, record)?;
+        let admission = stream.apply(&self.description, record, correlation)?;
         if admission == Admission::Applied {
             self.record_node_focus(sequence, node.as_ref());
         }
@@ -429,6 +438,14 @@ impl SessionState {
     }
 
     pub fn apply(&mut self, event: LifecycleEvent) -> Result<Admission, StateError> {
+        self.apply_observed(event, None)
+    }
+
+    pub fn apply_observed(
+        &mut self,
+        event: LifecycleEvent,
+        correlation: Option<crate::traces::SpanKey>,
+    ) -> Result<Admission, StateError> {
         if self.stream.is_some() {
             return InvalidEventSnafu {
                 message: "finite event in a stream session".to_owned(),
@@ -528,6 +545,23 @@ impl SessionState {
         if conflicted {
             Ok(Admission::Conflict)
         } else {
+            if let Some((identity, _)) = event.event.node() {
+                let observed = if identity.path.is_empty() {
+                    self.node_positions
+                        .get(&identity.id)
+                        .map(|&index| &mut self.nodes[index])
+                } else {
+                    self.pass_states
+                        .get_mut(&identity.path)
+                        .and_then(|pass| pass.nodes.get_mut(&identity.id))
+                };
+                if let Some(observed) = observed
+                    && observed.started_sequence.max(observed.terminal_sequence)
+                        == Some(event.sequence)
+                {
+                    observed.correlation = correlation;
+                }
+            }
             self.record_node_focus(event.sequence, event.event.node().map(|(node, _)| node));
             Ok(Admission::Applied)
         }
@@ -1275,6 +1309,7 @@ fn pending_node_parts(id: &str, kind: &str) -> NodeObservation {
         omitted_input_selections: 0,
         id: id.into(),
         kind: kind.into(),
+        correlation: None,
         status: NodeStatus::Pending,
         last_known: None,
         conflicted: false,

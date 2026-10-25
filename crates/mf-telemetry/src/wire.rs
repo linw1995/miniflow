@@ -25,7 +25,7 @@ impl TraceContext {
     pub fn validate(&self) -> Result<(), ContractError> {
         self.ids().map(|_| ())
     }
-    fn ids(&self) -> Result<(TraceId, SpanId), ContractError> {
+    pub(crate) fn ids(&self) -> Result<(TraceId, SpanId), ContractError> {
         let trace = TraceId::from_hex(&self.trace_id).context(crate::TraceIdSnafu)?;
         let span = SpanId::from_hex(&self.span_id).context(crate::SpanIdSnafu)?;
         require(
@@ -334,7 +334,7 @@ pub fn validate_event_version(event: &Event, schema_version: i64) -> Result<(), 
     Ok(())
 }
 
-fn any_value(value: Value) -> Result<AnyValue, ContractError> {
+pub(crate) fn any_value(value: Value) -> Result<AnyValue, ContractError> {
     Ok(match value {
         Value::String(value) => value.into(),
         Value::Bool(value) => value.into(),

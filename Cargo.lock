@@ -1774,8 +1774,10 @@ name = "mfn-llm"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures",
  "inventory",
  "mf-runtime",
+ "mf-telemetry",
  "reqwest",
  "rig-core",
  "rig-reqwest",

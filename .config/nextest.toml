@@ -43,6 +43,7 @@ run-wrapper = 'per-test-profraw'
 platform = 'cfg(unix)'
 # Keep this selection identical to the shared-cargo override below.
 filter = '''
+binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mfn-test-affected::flow) |
 binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-chat::packaging) & (
@@ -140,6 +141,7 @@ setup = "package-dependencies"
 platform = 'cfg(unix)'
 # Serialize generated builds that share the prewarmed Cargo target.
 filter = '''
+binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mfn-test-affected::flow) |
 binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-chat::packaging) & (

@@ -1103,3 +1103,7 @@ execution. The runtime SHALL own queue capacity, acknowledgment, cancellation, a
 
 - **WHEN** a compiled combined node emits increments and returns its terminal result
 - **THEN** compiler-fixed channel bindings deliver the increments and generated Task-domain functions continue the terminal path
+
+### Requirement: Use standard Stream records for executable chat
+
+Executable chat streaming SHALL use ordinary native JSONL records and the existing manifest. Business interpretation SHALL belong to the conversation contract. Runtime MUST NOT introduce a separate live publisher, bounded live channel, scoped export schema, or versioned live envelope. Finite and isolated Task JSON execution SHALL remain available.

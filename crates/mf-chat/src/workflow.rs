@@ -1,7 +1,8 @@
 //! Application workflow hosting over the shared conversation protocol.
 
 use crate::{
-    ChatDatabase, ChatError, Completion, ConversationInputs, ConversationResult, Invocation, Turn,
+    ChatDatabase, ChatError, Completion, ConversationInputs, ConversationResult, Invocation,
+    PreviewConsumer, PreviewEvent, Turn,
     contract::{ChatContract, CompletionState, ReconciledCompletion, TurnExit},
     error::*,
     flows,
@@ -10,19 +11,33 @@ use crate::{
 use mf_compiler::{CompiledWorkflow, FlowBuilder, WorkflowDefinition};
 use mf_runtime::{
     ExecutionContext, FlowNode, FlowRuntime, NodeMetadata, NodeRegistry, NodeValue, PreparedNode,
-    StreamCancellation, TypedNodeResult, TypedTaskNode, WorkflowArguments,
+    StreamCancellation, TypedNodeResult, TypedStreamNode, WorkflowArguments,
 };
 use mf_telemetry::{identity::RunId, observation::Observer};
-use snafu::{IntoError, ResultExt, ensure};
-use std::sync::{Arc, Mutex};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
+use std::{
+    sync::{Arc, Mutex},
+    task::{Wake, Waker},
+};
 
-/// Supplies one final protocol result. Transport and model composition belong to the backend.
+struct CancelWorkflow(StreamCancellation);
+
+impl Wake for CancelWorkflow {
+    fn wake(self: Arc<Self>) {
+        self.0.cancel(mf_runtime::StreamError::Execution {
+            message: "conversation cancelled by host".into(),
+        });
+    }
+}
+
+/// Invokes one backend and forwards optional text deltas into the conversation Flow.
 pub trait ConversationBackend: Send + Sync {
     fn invoke(
         &self,
         invocation: &Invocation,
         request: ConversationInputs,
         context: &mut ExecutionContext,
+        preview: Option<&mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>>,
         observer: Option<&Observer>,
     ) -> Result<ConversationResult, ChatError>;
 }
@@ -88,36 +103,76 @@ impl ConversationBackend for EmbeddedBackend {
         _: &Invocation,
         request: ConversationInputs,
         context: &mut ExecutionContext,
+        mut preview: Option<&mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>>,
         observer: Option<&Observer>,
     ) -> Result<ConversationResult, ChatError> {
-        let observation = observer
-            .map(|observer| self.plan.start_observation(observer, RunId::new()))
-            .transpose()?;
-        // Application and user graphs may reuse node IDs; expose only protocol inputs.
-        let mut child =
-            context.fork_domain_snapshot(observation, mf_runtime::OutputVisibility::Borrowed(&[]));
-        let _span = child.observation().map(mf_runtime::RunObservation::enter);
-        let result = (|| -> Result<_, ChatError> {
-            child.set_workflow_arguments(self.contract.arguments(request, &self.parameters)?);
-            let registry = NodeRegistry::from_inventory()?;
-            let flow = mf_compiler::instantiate_compiled_with_observation(
-                &self.plan,
-                &registry,
-                child.observation_mut(),
-            )?;
-            ConversationResult::decode(
-                FlowRuntime::default().execute_in_context(&flow, &mut child)?,
-            )
-        })();
-        if let Some(run) = child.observation_mut() {
-            run.finish(
-                result
-                    .as_ref()
-                    .err()
-                    .map(|error| error as &dyn std::fmt::Display),
-            );
+        let arguments = self.contract.arguments(request, &self.parameters)?;
+        let registry = NodeRegistry::from_inventory()?;
+        if self.contract.streaming {
+            let observation = observer
+                .map(|observer| self.plan.start_stream_observation(observer, RunId::new()))
+                .transpose()?;
+            let prepared = mf_compiler::instantiate_stream(&self.plan, &registry)?;
+            if let Some(error) = context.cancellation().failure() {
+                return Err(error.into());
+            }
+            let instance = prepared.start_with_options(mf_runtime::StreamOptions {
+                arguments,
+                observation,
+                ..Default::default()
+            })?;
+            context
+                .cancellation()
+                .register(Waker::from(Arc::new(CancelWorkflow(
+                    instance.cancellation(),
+                ))));
+            let mut decoder = crate::contract::ConversationOutputDecoder::new(&self.contract);
+            let result = (|| -> Result<(), ChatError> {
+                while let Some(delivery) = instance.receive()? {
+                    if let Some(delta) = decoder.accept(delivery.output().outputs.clone())?
+                        && let Some(consume) = preview.as_mut()
+                    {
+                        consume(delta)?;
+                    }
+                    delivery.acknowledge()?;
+                }
+                instance.join()?;
+                Ok(())
+            })();
+            result.boxed().context(BackendSnafu {
+                outcome: TurnExit::Failed,
+                reply: decoder.result().cloned().map(Box::new),
+            })?;
+            decoder.finish()
+        } else {
+            let observation = observer
+                .map(|observer| self.plan.start_observation(observer, RunId::new()))
+                .transpose()?;
+            // Keep application admission and persistence outside the user graph.
+            let mut child = context
+                .fork_domain_snapshot(observation, mf_runtime::OutputVisibility::Borrowed(&[]));
+            let _span = child.observation().map(mf_runtime::RunObservation::enter);
+            let result = (|| -> Result<_, ChatError> {
+                child.set_workflow_arguments(arguments);
+                let flow = mf_compiler::instantiate_compiled_with_observation(
+                    &self.plan,
+                    &registry,
+                    child.observation_mut(),
+                )?;
+                ConversationResult::decode(
+                    FlowRuntime::default().execute_in_context(&flow, &mut child)?,
+                )
+            })();
+            if let Some(run) = child.observation_mut() {
+                run.finish(
+                    result
+                        .as_ref()
+                        .err()
+                        .map(|error| error as &dyn std::fmt::Display),
+                );
+            }
+            result
         }
-        result
     }
 }
 
@@ -173,17 +228,31 @@ register_operation!(
     settle
 );
 
+#[derive(Clone, Debug, NodeValue)]
+struct InvocationEvent {
+    preview: Option<PreviewEvent>,
+    response: Option<CompleteTurnInputs>,
+}
+
+#[derive(Clone, Debug, NodeValue)]
+struct InvocationEmission {
+    event: InvocationEvent,
+}
+
 struct UnboundWorkflow;
 
-impl TypedTaskNode for UnboundWorkflow {
+impl TypedStreamNode for UnboundWorkflow {
     type Input = TurnStarted;
-    type Output = CompleteTurnInputs;
+    type Output = InvocationEmission;
 
     fn execute(
-        &self,
+        &mut self,
         _: Self::Input,
         _: &mut ExecutionContext,
-    ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
+        _: &mut dyn FnMut(
+            TypedNodeResult<Self::Output>,
+        ) -> Result<(), mf_runtime::NodeExecutionError>,
+    ) -> Result<(), mf_runtime::NodeExecutionError> {
         Err(InvalidSnafu {
             field: "conversation backend",
             reason: "must be bound by the application host",
@@ -193,46 +262,211 @@ impl TypedTaskNode for UnboundWorkflow {
     }
 }
 
-register_task!("mf_chat.workflow.invoke", UnboundWorkflow);
+inventory::submit! {
+    mf_runtime::NodeRegistration {
+        kind: "mf_chat.workflow.invoke",
+        factory: mf_runtime::NodeFactory::Plain(|_| {
+            PreparedNode::typed_stream(UnboundWorkflow, NodeMetadata::default())
+        }),
+    }
+}
 
 struct InvokeWorkflow {
     backend: Arc<dyn ConversationBackend>,
     automatic_titles: bool,
-    observer: Option<Observer>,
+    observer: Observer,
+    calls: Arc<Mutex<crate::CallEventCollector>>,
     delivered: Arc<Mutex<Option<ConversationResult>>>,
+    previews: bool,
 }
 
-impl TypedTaskNode for InvokeWorkflow {
+impl TypedStreamNode for InvokeWorkflow {
     type Input = TurnStarted;
-    type Output = CompleteTurnInputs;
+    type Output = InvocationEmission;
 
     fn execute(
-        &self,
+        &mut self,
         mut input: Self::Input,
         context: &mut ExecutionContext,
-    ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
+        emit: &mut dyn FnMut(
+            TypedNodeResult<Self::Output>,
+        ) -> Result<(), mf_runtime::NodeExecutionError>,
+    ) -> Result<(), mf_runtime::NodeExecutionError> {
         if let Some(context) = &mut input.request.context {
             context.title.enabled = self.automatic_titles;
         }
-        let response = self.backend.invoke(
-            &input.invocation,
-            input.request,
-            context,
-            self.observer.as_ref(),
-        )?;
+        let calls = &self.calls;
+        let response = {
+            let invocation = input.invocation.clone();
+            let mut consume = |delta| -> Result<(), ChatError> {
+                emit(
+                    InvocationEmission {
+                        event: InvocationEvent {
+                            preview: Some(PreviewEvent {
+                                invocation: invocation.clone(),
+                                delta,
+                            }),
+                            response: None,
+                        },
+                    }
+                    .into(),
+                )?;
+                Ok(())
+            };
+            let preview = self.previews.then_some(
+                &mut consume as &mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>,
+            );
+            self.backend.invoke(
+                &input.invocation,
+                input.request,
+                context,
+                preview,
+                Some(&self.observer),
+            )
+        };
+        if let Err(error) = &response {
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+            while let Some(error) = cause {
+                if let Some(ChatError::Backend {
+                    reply: Some(reply), ..
+                }) = error.downcast_ref::<ChatError>()
+                {
+                    let mut reply = (**reply).clone();
+                    calls.lock().unwrap().apply(&mut reply.usages);
+                    *self.delivered.lock().unwrap() = Some(reply);
+                    break;
+                }
+                cause = error.source();
+            }
+        }
+        let mut response = response?;
+        calls.lock().unwrap().apply(&mut response.usages);
         response.validate()?;
-        // Retain only the backend's final protocol result for save-only recovery.
         *self
             .delivered
             .lock()
             .expect("delivery state was not poisoned") = Some(response.clone());
-        Ok(CompleteTurnInputs {
-            database_path: input.database_path,
-            invocation: input.invocation,
-            response,
-        }
-        .into())
+        emit(
+            InvocationEmission {
+                event: InvocationEvent {
+                    preview: None,
+                    response: Some(CompleteTurnInputs {
+                        database_path: input.database_path,
+                        invocation: input.invocation,
+                        response,
+                    }),
+                },
+            }
+            .into(),
+        )
     }
+}
+
+#[derive(Debug, NodeValue)]
+struct RoutedEvent {
+    preview: Option<PreviewEvent>,
+    database_path: Option<String>,
+    invocation: Option<Invocation>,
+    response: Option<ConversationResult>,
+}
+
+#[derive(Default)]
+struct RouteInvocation {
+    response: Option<CompleteTurnInputs>,
+}
+
+impl mf_runtime::TypedEventNode for RouteInvocation {
+    type Input = InvocationEmission;
+    type Output = RoutedEvent;
+
+    fn on_event(
+        &mut self,
+        event: mf_runtime::NodeEvent<Self::Input>,
+        _: &mf_runtime::EventContext<'_>,
+    ) -> Result<mf_runtime::EventEffects<Self::Output>, mf_runtime::NodeExecutionError> {
+        let (outputs, skipped) = match event {
+            mf_runtime::NodeEvent::Input(input) => {
+                ensure!(
+                    self.response.is_none(),
+                    InvalidSnafu {
+                        field: "conversation event",
+                        reason: "cannot follow the final response"
+                    }
+                );
+                ensure!(
+                    input.event.preview.is_some() != input.event.response.is_some(),
+                    InvalidSnafu {
+                        field: "conversation event",
+                        reason: "requires exactly one preview or final response"
+                    }
+                );
+                if let Some(preview) = input.event.preview {
+                    preview.validate()?;
+                    (
+                        RoutedEvent {
+                            preview: Some(preview),
+                            database_path: None,
+                            invocation: None,
+                            response: None,
+                        },
+                        vec![
+                            "database_path".into(),
+                            "invocation".into(),
+                            "response".into(),
+                        ],
+                    )
+                } else {
+                    self.response = input.event.response;
+                    return Ok(Default::default());
+                }
+            }
+            mf_runtime::NodeEvent::UpstreamClosed => {
+                let response = self.response.take().context(InvalidSnafu {
+                    field: "conversation event",
+                    reason: "ended without a final response",
+                })?;
+                (
+                    RoutedEvent {
+                        preview: None,
+                        database_path: Some(response.database_path),
+                        invocation: Some(response.invocation),
+                        response: Some(response.response),
+                    },
+                    vec!["preview".into()],
+                )
+            }
+            mf_runtime::NodeEvent::Timer => return Ok(Default::default()),
+        };
+        Ok(mf_runtime::EventEffects {
+            emissions: vec![
+                TypedNodeResult {
+                    outputs,
+                    skipped: skipped.into_iter().collect(),
+                    loop_summary: None,
+                }
+                .into(),
+            ],
+            timer: Default::default(),
+        })
+    }
+
+    fn buffered_items(&self) -> Option<usize> {
+        Some(usize::from(self.response.is_some()))
+    }
+}
+
+inventory::submit! {
+    mf_runtime::NodeRegistration {
+        kind: "mf_chat.conversation.route",
+        factory: mf_runtime::NodeFactory::Plain(|_| {
+            PreparedNode::typed_event(RouteInvocation::default(), NodeMetadata::default())
+        }),
+    }
+}
+
+#[derive(NodeValue)]
+struct PreviewOutput {
+    preview: PreviewEvent,
 }
 
 /// Executes the application-owned admission, invocation, and persistence graph.
@@ -243,6 +477,26 @@ pub fn run_conversation(
     cancellation: StreamCancellation,
     automatic_titles: bool,
     observer: Option<&Observer>,
+) -> Result<ReconciledCompletion, ChatError> {
+    run_conversation_with_preview(
+        database,
+        request,
+        backend,
+        cancellation,
+        automatic_titles,
+        observer,
+        None,
+    )
+}
+
+pub fn run_conversation_with_preview(
+    database: &ChatDatabase,
+    request: BeginTurnInputs,
+    backend: Arc<dyn ConversationBackend>,
+    cancellation: StreamCancellation,
+    automatic_titles: bool,
+    observer: Option<&Observer>,
+    preview: Option<PreviewConsumer>,
 ) -> Result<ReconciledCompletion, ChatError> {
     ensure!(
         std::path::Path::new(&request.database_path) == database.path(),
@@ -256,17 +510,25 @@ pub fn run_conversation(
         turn_id: request.turn_id.clone(),
         call_id: request.call_id.clone(),
     };
-    let plan = flows::conversation::plan()?;
+    let calls = Arc::new(Mutex::new(crate::CallEventCollector::default()));
+    let collected = calls.clone();
+    let _events = mf_telemetry::events::collect(move |event| {
+        let _ = collected.lock().unwrap().observe(event);
+    });
+    let observer = observer.cloned().unwrap_or_else(|| Observer::stderr(0));
+    let mut plan = flows::conversation::plan()?;
     let registry = NodeRegistry::from_inventory()?;
     let delivered = Arc::new(Mutex::new(None));
     let mut nodes = mf_compiler::resolve_nodes(&plan.definition, &registry)?;
     let order = plan.execution_order.clone();
-    let bound = PreparedNode::typed_task(
+    let bound = PreparedNode::typed_stream(
         InvokeWorkflow {
             backend,
             automatic_titles,
-            observer: observer.cloned(),
+            observer: observer.clone(),
+            calls,
             delivered: Arc::clone(&delivered),
+            previews: preview.is_some(),
         },
         NodeMetadata::default(),
     )
@@ -276,6 +538,7 @@ pub fn run_conversation(
         .find(|node| node.definition_id.as_str() == "workflow")
         .expect("embedded conversation declares the invocation node");
     *node = FlowNode::new(node.definition_id.clone(), bound);
+    plan.definition = mf_compiler::resolve_execution(&plan.definition, &nodes)?;
     let flow = FlowBuilder::prepare(
         nodes,
         plan.definition.edges.clone(),
@@ -285,24 +548,64 @@ pub fn run_conversation(
     .with_control_edges(plan.definition.control_edges.clone())?
     .with_order_edges(plan.definition.order_edges.clone())?
     .with_workflow_inputs()?
-    .into_tasks()?;
+    .into_stream(
+        plan.definition
+            .execution
+            .clone()
+            .expect("conversation is a Stream Flow"),
+    )?;
     let mut arguments = WorkflowArguments::default();
     for (name, value) in request.into_values()? {
         arguments
             .0
             .insert(mf_runtime::output_id("begin", &name), value);
     }
-    let observation = observer
-        .map(|observer| plan.start_observation(observer, RunId::new()))
-        .transpose()?;
-    let result = ExecutionContext::run(observation, |context| -> Result<_, ChatError> {
-        context.set_cancellation(cancellation.clone());
-        context.set_workflow_arguments(arguments);
-        Ok(FlowRuntime::default().execute_in_context(&flow, context)?)
-    });
+    let observation = Some(plan.start_stream_observation(&observer, RunId::new())?);
+    let result = (|| -> Result<Settlement, ChatError> {
+        if let Some(error) = cancellation.failure() {
+            return Err(error.into());
+        }
+        let instance = flow.start_with_options(mf_runtime::StreamOptions {
+            arguments,
+            observation,
+            ..Default::default()
+        })?;
+        let runtime_cancellation = instance.cancellation();
+        cancellation.register(Waker::from(Arc::new(CancelWorkflow(
+            runtime_cancellation.clone(),
+        ))));
+        let mut settlement = None;
+        while let Some(delivery) = instance.receive()? {
+            let mut outputs = delivery.output().outputs.clone();
+            if let Some(event) = outputs.remove("preview") {
+                let event = PreviewOutput::from_values([("preview".into(), event)].into())?.preview;
+                if let Some(consumer) = &preview {
+                    consumer.send(event, delivery, &runtime_cancellation)?;
+                    continue;
+                }
+            }
+            if outputs.contains_key("settlement") {
+                ensure!(
+                    settlement.is_none(),
+                    InvalidSnafu {
+                        field: "conversation settlement",
+                        reason: "must occur exactly once"
+                    }
+                );
+                settlement = Some(SettlementOutputs::from_values(outputs)?.settlement);
+            }
+            delivery.acknowledge()?;
+        }
+        instance.join()?;
+        settlement.ok_or_else(|| {
+            CaptureSnafu {
+                message: "conversation ended without settlement",
+            }
+            .build()
+        })
+    })();
     match result {
-        Ok(outputs) => {
-            let settlement = SettlementOutputs::from_values(outputs)?.settlement;
+        Ok(settlement) => {
             let state = if let Some(completion) = settlement.completion {
                 CompletionState::Committed(completion)
             } else {
@@ -327,6 +630,7 @@ pub fn run_conversation(
             while let Some(error) = cause {
                 if let Some(ChatError::Backend { outcome: exit, .. }) =
                     error.downcast_ref::<ChatError>()
+                    && cancellation.failure().is_none()
                 {
                     outcome = *exit;
                     break;
@@ -363,6 +667,7 @@ pub fn run_conversation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mf_runtime::TypedTaskNode;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct ReadContext;
@@ -427,6 +732,7 @@ mod tests {
                 },
                 &mut context,
                 None,
+                None,
             )
             .unwrap();
         assert_eq!(result.text, "isolated");
@@ -441,6 +747,7 @@ mod tests {
             _: &Invocation,
             input: ConversationInputs,
             _: &mut ExecutionContext,
+            _: Option<&mut dyn FnMut(crate::TextDelta) -> Result<(), ChatError>>,
             _: Option<&Observer>,
         ) -> Result<ConversationResult, ChatError> {
             assert!(input.context.is_some());
@@ -450,6 +757,114 @@ mod tests {
                 ..Default::default()
             })
         }
+    }
+
+    fn final_event() -> InvocationEmission {
+        InvocationEmission {
+            event: InvocationEvent {
+                preview: None,
+                response: Some(CompleteTurnInputs {
+                    database_path: "chat.sqlite".into(),
+                    invocation: Invocation::new("session"),
+                    response: ConversationResult {
+                        text: "canonical".into(),
+                        ..Default::default()
+                    },
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn conversation_route_waits_for_normal_close_before_releasing_settlement() {
+        use mf_runtime::{EventContext, NodeEvent, TypedEventNode};
+        let context = EventContext {
+            now: Default::default(),
+            input: None,
+        };
+        let mut route = RouteInvocation::default();
+        let preview = PreviewEvent {
+            invocation: Invocation::new("session"),
+            delta: crate::TextDelta {
+                text: "prefix".into(),
+                model_call_id: "model".into(),
+            },
+        };
+        let effects = route
+            .on_event(
+                NodeEvent::Input(InvocationEmission {
+                    event: InvocationEvent {
+                        preview: Some(preview.clone()),
+                        response: None,
+                    },
+                }),
+                &context,
+            )
+            .unwrap();
+        assert_eq!(effects.emissions.len(), 1);
+        assert_eq!(effects.emissions[0].result.outputs.preview, Some(preview));
+        assert!(effects.emissions[0].result.skipped.contains("response"));
+        assert!(
+            route
+                .on_event(NodeEvent::Input(final_event()), &context)
+                .unwrap()
+                .emissions
+                .is_empty()
+        );
+        assert_eq!(route.buffered_items(), Some(1));
+        assert!(
+            route
+                .on_event(NodeEvent::Timer, &context)
+                .unwrap()
+                .emissions
+                .is_empty()
+        );
+        let effects = route.on_event(NodeEvent::UpstreamClosed, &context).unwrap();
+        assert_eq!(effects.emissions.len(), 1);
+        assert_eq!(
+            effects.emissions[0]
+                .result
+                .outputs
+                .response
+                .as_ref()
+                .unwrap()
+                .text,
+            "canonical"
+        );
+        assert!(effects.emissions[0].result.skipped.contains("preview"));
+        assert_eq!(route.buffered_items(), Some(0));
+    }
+
+    #[test]
+    fn conversation_route_rejects_missing_final_and_events_after_final() {
+        use mf_runtime::{EventContext, NodeEvent, TypedEventNode};
+        let context = EventContext {
+            now: Default::default(),
+            input: None,
+        };
+        let mut route = RouteInvocation::default();
+        assert!(route.on_event(NodeEvent::UpstreamClosed, &context).is_err());
+        assert!(
+            route
+                .on_event(
+                    NodeEvent::Input(InvocationEmission {
+                        event: InvocationEvent {
+                            preview: None,
+                            response: None
+                        },
+                    }),
+                    &context
+                )
+                .is_err()
+        );
+        route
+            .on_event(NodeEvent::Input(final_event()), &context)
+            .unwrap();
+        assert!(
+            route
+                .on_event(NodeEvent::Input(final_event()), &context)
+                .is_err()
+        );
     }
 
     #[test]
@@ -497,7 +912,7 @@ mod tests {
             },
         };
         let error = UnboundWorkflow
-            .execute(input, &mut ExecutionContext::default())
+            .execute(input, &mut ExecutionContext::default(), &mut |_| Ok(()))
             .err()
             .unwrap();
         assert!(error.to_string().contains("must be bound"));

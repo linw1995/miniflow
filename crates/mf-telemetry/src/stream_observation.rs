@@ -76,13 +76,18 @@ impl Observer {
                 })
                 .collect(),
         );
+        let context = self.event_context(
+            parent.with_span(span),
+            description.workflow_id.clone(),
+            run_id,
+        );
         let observation = StreamObservation(Arc::new(StreamInner {
             backend: Arc::clone(&self.0),
             description: Arc::new(description),
             nodes,
             run_id,
             started: Instant::now(),
-            context: parent.with_span(span),
+            context,
             counters: Mutex::new(Counters {
                 sequence: 0,
                 invocation: 0,
@@ -558,6 +563,7 @@ mod tests {
 
     fn observation(records: Arc<AtomicUsize>) -> StreamObservation {
         let observer = Observer(Arc::new(Backend {
+            emit_event: Box::new(|_, _, _, _| {}),
             tracer: opentelemetry::global::tracer("stream-test"),
             diagnostics: None,
             emit: Box::new(move |_| {

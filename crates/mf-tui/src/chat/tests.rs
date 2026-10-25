@@ -428,3 +428,244 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
         );
     }
 }
+
+fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf) {
+    let mut launch = launch(directory);
+    launch.manifest.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
+    launch.manifest.definition.outputs.push(
+        serde_json::from_value(json!({"name":"answer","node":"start","port":"delta"})).unwrap(),
+    );
+    launch.contract = ChatContract::from_manifest(&launch.manifest).unwrap();
+    let gate = directory.join("release");
+    let records = json!([
+        {"answer":{"text":"provisional","model_call_id":"model-call"}},
+        {"status":"succeeded","text":"canonical","usages":[]}
+    ]);
+    // Exceed preview and queue limits without turning delivery checks into a throughput benchmark.
+    let flood_chunk_bytes = 2048;
+    let flood_records = (super::preview::MAX_PREVIEW_BYTES * 2).div_ceil(flood_chunk_bytes);
+    let script = format!(
+        r#"#!/usr/bin/env python3
+import json, os, sys, time
+records = json.loads({records:?})
+mode = {mode:?}
+if mode == 'flood':
+    records[0]['answer']['text'] = 'x' * {flood_chunk_bytes}
+    records = [records[0].copy() for _ in range({flood_records})] + records[-1:]
+if mode == 'empty':
+    records = records[-1:]
+split = 0 if mode == 'empty' else 1
+for record in records[:split]:
+    print(json.dumps(record), flush=True)
+if mode == 'gated':
+    while not os.path.exists({gate:?}): time.sleep(0.01)
+if mode == 'prefix': sys.exit(2)
+for record in records[split:]: print(json.dumps(record), flush=True)
+if mode == 'late':
+    print('late diagnostic', flush=True)
+    sys.exit(13)
+"#,
+        records = serde_json::to_string(&records).unwrap(),
+        gate = gate.to_str().unwrap()
+    );
+    fs::write(&launch.executable, script).unwrap();
+    (launch, gate)
+}
+
+#[test]
+fn executable_live_previews_arrive_before_authoritative_settlement() {
+    let root = tempfile::tempdir().unwrap();
+    let (launch, gate) = live_launch(root.path(), "gated");
+    let controller = ChatController::open(launch).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "hello".into(),
+        })
+        .unwrap();
+    let invocation = loop {
+        if let ChatEvent::Preview {
+            invocation,
+            preview,
+        } = next(&controller)
+            && preview
+                .segments
+                .iter()
+                .any(|segment| !segment.text.is_empty())
+        {
+            break invocation;
+        }
+    };
+    assert!(controller.busy());
+    assert_eq!(
+        controller
+            ._database
+            .messages(&invocation.session_id, 50, None)
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    fs::write(gate, "release").unwrap();
+    loop {
+        if let ChatEvent::Finished { resolution, .. } = next(&controller) {
+            let CompletionState::Committed(completion) = resolution.unwrap().state else {
+                panic!("expected saved final")
+            };
+            assert_eq!(completion.result.text, "canonical");
+            break;
+        }
+    }
+    controller.close().unwrap();
+}
+
+#[test]
+fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes() {
+    for mode in ["late", "prefix", "empty"] {
+        let root = tempfile::tempdir().unwrap();
+        let (launch, _) = live_launch(root.path(), mode);
+        let controller = ChatController::open(launch).unwrap();
+        controller
+            .send(ChatCommand::Submit {
+                session_id: None,
+                prompt: "hello".into(),
+            })
+            .unwrap();
+        loop {
+            if let ChatEvent::Finished {
+                resolution,
+                capture_error,
+                ..
+            } = next(&controller)
+            {
+                let resolution = resolution.unwrap();
+                match resolution.state {
+                    CompletionState::Uncommitted(pending) => {
+                        assert_eq!(mode, "late");
+                        assert_eq!(pending.completion.result.text, "canonical");
+                        assert!(capture_error.is_some());
+                        controller.send(ChatCommand::Save).unwrap();
+                        loop {
+                            if let ChatEvent::Finished { resolution, .. } = next(&controller) {
+                                assert!(matches!(
+                                    resolution.unwrap().state,
+                                    CompletionState::Committed(_)
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                    CompletionState::Committed(completion) => {
+                        assert_eq!(mode, "empty");
+                        assert_eq!(completion.result.text, "canonical");
+                    }
+                    CompletionState::Finished(turn) => {
+                        assert_eq!(mode, "prefix");
+                        assert_eq!(turn.state, "failed");
+                        let typed = resolution.diagnostics.iter().any(|diagnostic| {
+                            let mut cause: Option<&(dyn std::error::Error + 'static)> =
+                                Some(diagnostic);
+                            while let Some(error) = cause {
+                                if matches!(
+                                    error.downcast_ref::<mf_chat::ChatError>(),
+                                    Some(mf_chat::ChatError::Capture { .. })
+                                ) {
+                                    return true;
+                                }
+                                cause = error.source();
+                            }
+                            false
+                        });
+                        assert!(
+                            typed,
+                            "missing terminal replies must keep their typed application error"
+                        );
+                    }
+                    _ => panic!("unexpected settlement"),
+                }
+                break;
+            }
+        }
+        controller.close().unwrap();
+    }
+}
+
+#[test]
+fn answer_selection_requires_native_streaming_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut launch, _) = live_launch(root.path(), "prefix");
+    launch.manifest.definition.execution = None;
+    assert!(ChatContract::from_manifest(&launch.manifest).is_err());
+}
+
+#[test]
+fn paused_rendering_keeps_capture_draining_with_bounded_previews() {
+    let root = tempfile::tempdir().unwrap();
+    let (launch, _) = live_launch(root.path(), "flood");
+    let controller = ChatController::open(launch).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "hello".into(),
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while controller.busy() {
+        assert!(
+            Instant::now() < deadline,
+            "capture stalled behind paused rendering"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let preview = controller.preview.lock().unwrap().clone();
+    assert_eq!(preview.segments.len(), 1);
+    assert_eq!(
+        preview.segments[0].text.len(),
+        super::preview::MAX_PREVIEW_BYTES
+    );
+    assert!(preview.omitted);
+    let mut saw_preview = false;
+    loop {
+        match next(&controller) {
+            ChatEvent::Preview { .. } => saw_preview = true,
+            ChatEvent::Finished { resolution, .. } => {
+                assert!(saw_preview);
+                assert!(matches!(
+                    resolution.unwrap().state,
+                    CompletionState::Committed(_)
+                ));
+                break;
+            }
+            _ => {}
+        }
+    }
+    controller.close().unwrap();
+}
+
+#[test]
+fn closing_a_live_controller_reaps_a_child_without_rendering() {
+    let root = tempfile::tempdir().unwrap();
+    let (launch, _) = live_launch(root.path(), "gated");
+    let controller = ChatController::open(launch).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "hello".into(),
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while controller
+        .preview
+        .lock()
+        .unwrap()
+        .segments
+        .iter()
+        .all(|segment| segment.text.is_empty())
+    {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let started = Instant::now();
+    controller.close().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(4));
+}

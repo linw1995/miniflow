@@ -341,7 +341,7 @@ and outputs are also redacted. Literal configuration and parameter defaults rema
 
 ### LLM configuration and conversation values
 
-The opt-in `mfn-llm` package registers `builtin.llm`, an ordinary task producing one terminal result:
+The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing one authoritative terminal result and optional text deltas:
 
 | Direction | Port | Type | Required |
 | --- | --- | --- | --- |
@@ -352,6 +352,26 @@ The opt-in `mfn-llm` package registers `builtin.llm`, an ordinary task producing
 | Output | `history` | `List(Object)` | Yes |
 | Output | `usage` | `Map(Int64)` | No |
 | Output | `finish_reason` | `string` | No |
+| Stream output | `delta` | `Object` | Yes, per emission |
+
+The `delta` payload contains `text` and `model_call_id`. A connected graph edge or selected native output
+selects one streaming request; an unconsumed invocation sends one ordinary request and emits nothing.
+There is no per-node streaming flag or fallback request. Terminal text, history, finish reason, and usages
+come from the completed provider response. Delivered prefixes remain provisional on failure or cancellation.
+
+The [answer-and-title example](../examples/chat-title-flow.json) declares only the answer as public:
+
+```json
+"outputs": [{"name": "answer", "node": "model", "port": "delta"}]
+```
+
+Selecting the answer delta infers streaming execution and ordinary JSONL output. The title call stays terminal-only,
+and final `usages` includes both calls when title generation runs. A finite workflow selecting only terminal
+ports keeps ordinary JSON execution. Distinct actual model calls carry their own `model_call_id`.
+Generated text and SSE framing have no client-side byte limits.
+The request deadline bounds provider setup and reads. Emission waits follow native backpressure and stop
+when the consumer fails or the host cancels.
+Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
 Each history object has exactly two required string fields, `role` and `content`. Conversation roles are `user`
 and `assistant`, with nonempty text. The current `prompt` is also nonempty. System instructions use the separate
@@ -429,10 +449,9 @@ finish reasons retain their provider value. Select optional metadata as optional
 omit it. Credential and provider errors retain typed sources while diagnostic display omits credential values and
 arbitrary remote bodies.
 
-The deadline covers setup and waiting for a terminal reply, and limit checks also run before returning converted data.
-Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot be forcibly
-preempted. The reply-byte limit is checked after unary buffering and decoding and does not bound transport memory or
-the full transcript. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
+The deadline covers setup and waiting for a terminal reply, with deadline and cancellation checks before returning
+converted data. Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot
+be forcibly preempted. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
 workflow thread. Async hosts use a blocking thread for synchronous workflow entry points.
 
 The [terminal example](../examples/llm-terminal.json) accepts startup prompt, system, and history inputs.
@@ -846,6 +865,10 @@ domain. One consumer cannot implicitly correlate values from different domains. 
 outputs from multiple domains, but each JSONL record contains only the fields selected in its own domain.
 Per-domain ordering and native delivery acknowledgment remain enforced. Successful workflow completion
 waits for connected work to drain, and terminal values are never reconstructed from increments.
+
+Use application event nodes when several delivery kinds must share one ordered protocol. The conversation
+Flow routes preview events and releases final settlement inputs on upstream close, so the graph owns their
+ordering.
 
 ## Streaming through the in-memory API
 
