@@ -96,8 +96,25 @@ fn configuration_and_graph_placement_are_validated_without_reading_sources() {
         .push(json!({"id":"before", "kind":"builtin.constant", "config":{"value":"text"}}));
     value["edges"] =
         json!([{"from_node":"before", "from_output":"value", "to_node":"params", "to_input":"x"}]);
-    let error = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap_err();
-    assert!(error.to_string().contains("top-level initial node"));
+    for secret in [false, true] {
+        let mut connected = value.clone();
+        connected["nodes"][0]["config"]["parameters"]["x"]["secret"] = json!(secret);
+        let plan =
+            compile_definition(&serde_json::from_value(connected).unwrap(), &registry).unwrap();
+        let output = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute()
+            .unwrap();
+        assert_eq!(output["x"].as_str(), Some("text"));
+        assert_eq!(output["x"].is_secret(), secret);
+    }
+    for (source, binding) in [("env", json!(TOKEN)), ("default", json!("fallback"))] {
+        let mut connected = value.clone();
+        connected["nodes"][0]["config"]["parameters"]["x"][source] = binding;
+        let error =
+            compile_definition(&serde_json::from_value(connected).unwrap(), &registry).unwrap_err();
+        assert!(error.to_string().contains("top-level initial node"));
+    }
 }
 
 #[test]
