@@ -160,44 +160,34 @@ mod tests {
 
     #[test]
     fn builtin_catalog_rejects_duplicate_and_blank_names() {
-        static FIRST: BuiltinFlowRegistration = BuiltinFlowRegistration {
-            package: "first-package",
-            name: "flow",
-            definition: builtin_definition,
-        };
-        static SECOND: BuiltinFlowRegistration = BuiltinFlowRegistration {
-            package: "first-package",
-            name: "flow",
-            definition: builtin_definition,
-        };
-        static BLANK: BuiltinFlowRegistration = BuiltinFlowRegistration {
-            package: "first-package",
-            name: " ",
-            definition: builtin_definition,
-        };
+        static REGISTRATIONS: std::sync::LazyLock<[BuiltinFlowRegistration; 5]> =
+            std::sync::LazyLock::new(|| {
+                [
+                    BuiltinFlowRegistration::new("first-package", "flow", builtin_definition),
+                    BuiltinFlowRegistration::new("first-package", "flow", builtin_definition),
+                    BuiltinFlowRegistration::new("first-package", " ", builtin_definition),
+                    BuiltinFlowRegistration::new("second-package", "flow", builtin_definition),
+                    BuiltinFlowRegistration::new(
+                        "first-package",
+                        "other-package.flow",
+                        builtin_definition,
+                    ),
+                ]
+            });
+        let [first, duplicate, blank, other_package, qualified] = &*REGISTRATIONS;
         assert!(matches!(
-            BuiltinFlowRegistry::from_registrations([&FIRST, &SECOND]),
-            Err(BuiltinFlowRegistryError::DuplicateName { .. })
+            BuiltinFlowRegistry::from_registrations([first, duplicate]),
+            Err(BuiltinFlowRegistryError::DuplicateName { name }) if name == "first-package.flow"
         ));
         assert!(matches!(
-            BuiltinFlowRegistry::from_registrations([&BLANK]),
+            BuiltinFlowRegistry::from_registrations([blank]),
             Err(BuiltinFlowRegistryError::BlankName)
         ));
-        static OTHER_PACKAGE: BuiltinFlowRegistration = BuiltinFlowRegistration {
-            package: "second-package",
-            name: "flow",
-            definition: builtin_definition,
-        };
-        static QUALIFIED: BuiltinFlowRegistration = BuiltinFlowRegistration {
-            package: "first-package",
-            name: "other-package.flow",
-            definition: builtin_definition,
-        };
         assert!(matches!(
-            BuiltinFlowRegistry::from_registrations([&QUALIFIED]),
+            BuiltinFlowRegistry::from_registrations([qualified]),
             Err(BuiltinFlowRegistryError::QualifiedLocalName { .. })
         ));
-        let registry = BuiltinFlowRegistry::from_registrations([&FIRST, &OTHER_PACKAGE]).unwrap();
+        let registry = BuiltinFlowRegistry::from_registrations([first, other_package]).unwrap();
         assert!(registry.get("missing").is_none());
         assert!(registry.get("flow").is_none());
         assert!(registry.get("second-package.flow").is_some());

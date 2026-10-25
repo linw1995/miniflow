@@ -160,7 +160,20 @@ fn secret_input_boundaries_keep_dynamic_marking_and_reject_unknown_ports() {
                 .to_string()
                 .contains("require a top-level initial node")
         );
+        let node =
+            mf_runtime::FlowNode::new("boundary", factory(json!({"binding":binding})).unwrap());
+        let error = mf_compiler::workflow_input_schema([(&node, false)], |_, _| true).unwrap_err();
+        assert!(error.to_string().contains("require an initial node"));
     }
+    let mut invalid = chain();
+    invalid["nodes"][0]["config"] = json!({"binding":{"default":42}});
+    let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
+    let error =
+        compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err();
+    assert!(matches!(
+        error,
+        mf_compiler::WorkflowCompileError::WorkflowInputs { .. }
+    ));
 }
 
 #[test]
