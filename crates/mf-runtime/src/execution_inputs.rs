@@ -142,6 +142,16 @@ impl ExecutionInputs {
         mut causes: BTreeSet<SkipCause>,
     ) -> Result<InputResolution, WorkflowRunError> {
         *inputs = self.initial(node, in_scope);
+        for (name, value) in inputs.iter_mut() {
+            if node
+                .metadata
+                .input_bindings
+                .get(name)
+                .is_some_and(|binding| binding.secret)
+            {
+                *value = value.clone().into_secret();
+            }
+        }
         let id = node.definition_id.as_str();
         let mut selected = Vec::new();
         let mut groups: BTreeMap<&str, CandidateValues> = BTreeMap::new();
@@ -183,7 +193,17 @@ impl ExecutionInputs {
             match value {
                 Some(ContextValue::Value(value)) => {
                     if let Some(input) = dependency.input {
-                        inputs.insert(input.to_owned(), value.clone());
+                        let value = if node
+                            .metadata
+                            .input_bindings
+                            .get(input)
+                            .is_some_and(|binding| binding.secret)
+                        {
+                            value.clone().into_secret()
+                        } else {
+                            value.clone()
+                        };
+                        inputs.insert(input.to_owned(), value);
                     }
                 }
                 Some(ContextValue::Skipped) => {
@@ -205,6 +225,16 @@ impl ExecutionInputs {
                         .expect("exclusive output source")
                         .into(),
                 });
+                let value = if node
+                    .metadata
+                    .input_bindings
+                    .get(input)
+                    .is_some_and(|binding| binding.secret)
+                {
+                    value.into_secret()
+                } else {
+                    value
+                };
                 inputs.insert(input.to_owned(), value);
             } else {
                 causes.extend(group.skipped);

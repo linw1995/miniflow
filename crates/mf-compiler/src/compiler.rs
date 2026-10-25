@@ -653,6 +653,23 @@ fn validate_base_metadata(
     let mut output_index = BTreeMap::new();
     for node in nodes {
         let ports = registrations[&node.definition_id];
+        for (name, binding) in &ports.input_bindings {
+            let port = ports
+                .ports
+                .inputs
+                .iter()
+                .find(|port| port.name == *name)
+                .ok_or_else(|| {
+                    invalid(
+                        &node.definition_id,
+                        "input binding names an unknown port".into(),
+                    )
+                })?;
+            binding.validate(
+                &mf_runtime::output_id(node.definition_id.as_str(), name),
+                &port.value_type,
+            )?;
+        }
         ensure!(
             ports.stream_outputs.is_empty()
                 || matches!(node.node, Some(mf_runtime::NodeExecution::TaskStream(_))),
@@ -661,12 +678,16 @@ fn validate_base_metadata(
                 message: "separate stream outputs require a combined executor",
             }
         );
-        if !node.metadata.input_bindings.is_empty()
+        if node
+            .metadata
+            .input_bindings
+            .values()
+            .any(|binding| binding.env.is_some() || binding.default.is_some())
             && (!startup || incoming.contains_key(node.definition_id.as_str()))
         {
             return Err(invalid(
                 &node.definition_id,
-                "input bindings require a top-level initial node".into(),
+                "environment and default bindings require a top-level initial node".into(),
             ));
         }
         if let Some(generation) = &node.metadata.typed_generation {
