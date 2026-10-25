@@ -2,7 +2,7 @@ use mf_chat::{
     ChatError, ChatHost, ConversationBackend, ConversationInputs, ConversationResult, HostConfig,
     Invocation, WorkflowProfile,
 };
-use mf_runtime::{ExecutionContext, StreamCancellation};
+use mf_runtime::{ExecutionContext, StreamCancellation, StreamError};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -195,15 +195,19 @@ fn embedded(_: serde_json::Value) -> Result<mf_runtime::PreparedNode, mf_runtime
 }
 inventory::submit! { mf_runtime::NodeRegistration { kind: "test.chat.streaming", factory: mf_runtime::NodeFactory::Plain(embedded) } }
 
-#[test]
-fn embedded_exports_preserve_user_identity_and_hide_colliding_application_context() {
-    let root = tempfile::tempdir().unwrap();
+fn embedded_profile() -> WorkflowProfile {
     let definition = mf_compiler::WorkflowDefinition::from_json(&serde_json::json!({
         "version":"2026-10-23", "dependencies":{},
         "nodes":[{"id":"begin","kind":"test.chat.streaming"}],
         "outputs":[{"name":"answer","node":"begin","port":"delta"},{"name":"status","node":"begin","port":"status"},{"name":"text","node":"begin","port":"text"},{"name":"usages","node":"begin","port":"usages"}]
     }).to_string()).unwrap();
-    let profile = WorkflowProfile::new("embedded", definition, Default::default()).unwrap();
+    WorkflowProfile::new("embedded", definition, Default::default()).unwrap()
+}
+
+#[test]
+fn embedded_exports_preserve_user_identity_and_hide_colliding_application_context() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = embedded_profile();
     let host = ChatHost::open(root.path().join("chat.sqlite"), HostConfig::new(profile)).unwrap();
     let session = host
         .database()
@@ -223,6 +227,65 @@ fn embedded_exports_preserve_user_identity_and_hide_colliding_application_contex
     let usage = &completion.result.usages[0];
     assert_eq!(Some(&usage.call_id), model_call.as_ref());
     assert!(usage.timing.as_ref().unwrap().first_token_us.is_some());
+}
+
+#[test]
+fn pre_cancelled_requests_do_not_begin_application_or_embedded_flows() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = embedded_profile();
+    let backend = profile.backend();
+    let host = ChatHost::open(root.path().join("chat.sqlite"), HostConfig::new(profile)).unwrap();
+    let database = host.database();
+    let session = database.create_session("embedded", None, None).unwrap();
+    let invocation = Invocation::new(&session.id);
+    let cancellation = StreamCancellation::default();
+    cancellation.cancel(StreamError::Execution {
+        message: "cancelled before dispatch".into(),
+    });
+    let result = mf_chat::workflow::run_conversation(
+        database,
+        mf_chat::nodes::BeginTurnInputs {
+            database_path: database.path().to_str().unwrap().into(),
+            session_id: session.id,
+            turn_id: invocation.turn_id.clone(),
+            call_id: invocation.call_id.clone(),
+            prompt: "hello".into(),
+            model: mf_chat::ModelIdentity {
+                profile: "embedded".into(),
+                model: None,
+            },
+            retry_of: None,
+            max_history_bytes: mf_chat::DEFAULT_HISTORY_BYTES,
+        },
+        backend.clone(),
+        cancellation.clone(),
+        false,
+        None,
+    );
+    assert!(matches!(result,
+        Err(ChatError::Stream { source: StreamError::Execution { message } })
+            if message == "cancelled before dispatch"
+    ));
+    assert!(database.turn(&invocation.turn_id).is_err());
+
+    let mut context = ExecutionContext::default();
+    context.set_cancellation(cancellation);
+    let result = backend.invoke(
+        &invocation,
+        ConversationInputs {
+            prompt: "hello".into(),
+            system: None,
+            history: None,
+            context: None,
+        },
+        &mut context,
+        Some(&mut |_| panic!("a cancelled request must not deliver previews")),
+        None,
+    );
+    assert!(matches!(result,
+        Err(ChatError::Stream { source: StreamError::Execution { message } })
+            if message == "cancelled before dispatch"
+    ));
 }
 
 #[test]
