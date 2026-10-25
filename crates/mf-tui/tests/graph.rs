@@ -193,6 +193,120 @@ fn cluster_titles_preserve_the_remaining_top_border() {
 }
 
 #[test]
+fn cluster_titles_follow_both_scroll_axes() {
+    let mut graph = fan_graph(3);
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    for label in ["Computation", "Compute a\u{301} with 🦀"] {
+        graph.clusters = vec![ClusterDescription {
+            label: label.into(),
+            annotation: "Read the source and forward its value.".into(),
+            nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
+        }];
+        let layout = GraphLayout::new(&graph).unwrap();
+        let rect = layout.clusters()[0].rect;
+        for x in [0, rect.x + 4] {
+            for y in [0, rect.y + 1, layout.nodes()[0].rect.y + 1] {
+                let mut buffer = Buffer::empty(Rect::new(0, 0, 64, 6));
+                GraphView::new(&layout)
+                    .offset(x, y)
+                    .render(buffer.area, &mut buffer);
+                let row = rect.y.saturating_sub(y) as u16;
+                let rendered: String = (0..buffer.area.width)
+                    .map(|column| buffer.cell(Position::new(column, row)).unwrap().symbol())
+                    .collect();
+                assert!(rendered.contains(label), "offset ({x}, {y}): {rendered}");
+            }
+        }
+    }
+}
+
+#[test]
+fn pinned_cluster_titles_clip_to_narrow_nonzero_viewports() {
+    let mut graph = fan_graph(1);
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.clusters = vec![ClusterDescription {
+        label: "Compute a\u{301} 🦀 result".into(),
+        annotation: "Forward the source value.".into(),
+        nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
+    }];
+    let layout = GraphLayout::new(&graph).unwrap();
+    let rect = layout.clusters()[0].rect;
+    for width in [0, 1, 2, 3, 4, 12, 13, 14, 24] {
+        let area = Rect::new(3, 2, width, 1);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 30, 4));
+        for cell in &mut buffer.content {
+            cell.set_symbol("#");
+        }
+        GraphView::new(&layout)
+            .offset(rect.x + 4, rect.y + 1)
+            .render(area, &mut buffer);
+
+        let mut expected = Buffer::empty(Rect::new(0, 0, width, 1));
+        let label = if width < 3 {
+            graph.clusters[0].label.clone()
+        } else {
+            format!(" {} ", graph.clusters[0].label)
+        };
+        let label_width = ratatui::text::Span::raw(&label).width().min(width as usize) as u16;
+        expected.set_stringn(
+            0,
+            0,
+            label,
+            width as usize,
+            ratatui::style::Style::default(),
+        );
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let actual = buffer.cell(Position::new(x, y)).unwrap().symbol();
+                if area.contains(Position::new(x, y)) {
+                    if x - area.x < label_width {
+                        assert_eq!(
+                            actual,
+                            expected
+                                .cell(Position::new(x - area.x, 0))
+                                .unwrap()
+                                .symbol(),
+                            "width {width}, column {x}"
+                        );
+                    }
+                } else {
+                    assert_eq!(actual, "#", "width {width}, position ({x}, {y})");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cluster_titles_disappear_when_the_cluster_leaves_the_viewport() {
+    let mut graph = fan_graph(1);
+    graph.version = WorkflowDescriptionVersion::V2026_10_23;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.clusters = vec![ClusterDescription {
+        label: "Computation".into(),
+        annotation: "Forward the source value.".into(),
+        nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
+    }];
+    let layout = GraphLayout::new(&graph).unwrap();
+    let rect = layout.clusters()[0].rect;
+    for (x, y) in [(rect.x + rect.width, 0), (0, rect.y + rect.height)] {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 6));
+        GraphView::new(&layout)
+            .offset(x, y)
+            .render(buffer.area, &mut buffer);
+        assert!(!buffer_text(&buffer).contains("Computation"));
+    }
+}
+
+#[test]
 fn chat_title_clusters_stay_disjoint_across_every_fold_and_connection_view() {
     let definition = mf_compiler::WorkflowDefinition::from_json(include_str!(
         "../../../examples/chat-title-flow.json"
@@ -404,8 +518,18 @@ fn cluster_annotations_wrap_in_the_graph_and_stay_clear_of_connections() {
             GraphView::new(&layout)
                 .offset(0, start_y + 1)
                 .render(clipped.area, &mut clipped);
+            let cluster = &layout.clusters()[0];
+            let label_width = ratatui::text::Span::raw(format!(" {} ", cluster.label)).width();
             for y in 0..2 {
                 for x in 0..width as u16 {
+                    // The expanded cluster title overlays only its cells on the first visible row.
+                    if collapsed.is_empty()
+                        && y == 0
+                        && (cluster.rect.x + 2..cluster.rect.x + 2 + label_width as u32)
+                            .contains(&u32::from(x))
+                    {
+                        continue;
+                    }
                     assert_eq!(
                         clipped.cell(Position::new(x, y)),
                         full.cell(Position::new(x, start_y as u16 + 1 + y))

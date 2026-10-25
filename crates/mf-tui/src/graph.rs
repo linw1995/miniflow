@@ -1565,15 +1565,46 @@ impl<'a> GraphView<'a> {
         ] {
             self.put(area, buffer, x, y, symbol, style);
         }
-        let label = format!(" {} ", display_line(&cluster.label));
+    }
+
+    fn draw_cluster_label(&self, area: Rect, buffer: &mut Buffer, cluster: &GraphCluster) {
+        let rect = cluster.rect;
+        if cluster.collapsed || rect.width < 3 || rect.height < 2 {
+            return;
+        }
+        let left = rect.x.max(self.offset.0);
+        let top = rect.y.max(self.offset.1);
+        let right = (rect.x + rect.width).min(self.offset.0.saturating_add(u32::from(area.width)));
+        let bottom =
+            (rect.y + rect.height).min(self.offset.1.saturating_add(u32::from(area.height)));
+        if left >= right || top >= bottom {
+            return;
+        }
+
+        // Preserve the border padding when possible, but use the last visible cell in tiny views.
+        let x = (rect.x + 2).max(left).min(right - 1);
+        let width = (rect.x + rect.width - 2).min(right).max(x + 1) - x;
+        let label = display_line(&cluster.label);
+        let label = if width < 3 {
+            label
+        } else {
+            format!(" {label} ")
+        };
         let label_rect = GraphRect {
-            x: rect.x + 2,
-            y: rect.y,
-            width: (ratatui::text::Span::raw(&label).width() as u32)
-                .min(rect.width.saturating_sub(4)),
+            x,
+            y: top,
+            width: (ratatui::text::Span::raw(&label).width() as u32).min(width),
             height: 1,
         };
-        self.text(area, buffer, label_rect, &label, style);
+        self.text(
+            area,
+            buffer,
+            label_rect,
+            &label,
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        );
     }
 
     fn draw_node(&self, area: Rect, buffer: &mut Buffer, index: usize, node: &GraphNode) {
@@ -1729,6 +1760,10 @@ impl Widget for GraphView<'_> {
         }
         for index in 0..self.layout.edges.len() {
             self.draw_ports(area, buffer, index);
+        }
+        // Pinned labels must remain readable over nodes and connections after panning.
+        for cluster in self.layout.clusters() {
+            self.draw_cluster_label(area, buffer, cluster);
         }
     }
 }
