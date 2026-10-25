@@ -1178,7 +1178,14 @@ pub fn compile_definition(
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
     let resolved = crate::resolve_flows(definition, None)?;
-    let definition = &resolved.definition;
+    compile_resolved_definition(&resolved.definition, registry)
+}
+
+/// Prepares a frozen definition whose sources and dependency ownership are already resolved.
+pub fn compile_resolved_definition(
+    definition: &WorkflowDefinition,
+    registry: &NodeRegistry,
+) -> Result<CompiledWorkflow, WorkflowCompileError> {
     let (nodes, execution_order) = prepare_definition(definition, registry)?;
     let definition = resolve_execution(definition, &nodes)?;
     let flow = crate::FlowBuilder::prepare(

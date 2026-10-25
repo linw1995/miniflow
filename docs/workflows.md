@@ -81,8 +81,13 @@ Iteration body retain its task-only restriction and cannot hide another Loop or 
 All referenced providers join the root dependency build and adjacent lock. Each child's provider paths
 resolve against its own file. Compatible declarations of the same package combine features and default
 features; different source declarations fail explicitly. Built-ins use matching caller-selected provider
-packages when available and otherwise select the compiler's exact release version. In a development
+packages when available and retain the Flow provider's declared requirements otherwise. In a development
 checkout, declare the built-in's local providers explicitly, as in the nested title example.
+
+Built-in names come from linked `BuiltinFlowRegistration` providers. The compiler resolves this generic
+catalog without owning application definitions. `mf-chat` owns `workflows/title.json` and registers
+`chat-title`; the CLI already links that provider. Custom hosts must link the provider before source
+resolution. Standalone runners contain the expanded graph and need only its node packages.
 
 The built-in `chat-title` Flow takes `input.prompt`, `input.text`, `input.status`, `input.context`,
 `input.model`, `input.base_url`, and `input.api_key`. It checks the title policy in `context.title`,
@@ -96,6 +101,9 @@ Rust callers loading local references use `mf_compiler::load_workflow(path)?.def
 `resolve_flows(&definition, Some(directory))?.definition` before preparing the graph. Definitions with
 only built-in references can also use the existing planning and compilation entry points directly.
 `embed_workflows` resolves sources and emits Cargo rebuild dependencies for every referenced file.
+For host-owned Cargo dependencies, use `load_embedded_workflow` followed by
+`compile_resolved_definition`; provider declarations remain provenance and their paths need not exist.
+`mf_chat::WorkflowProfile::from_path` provides this path-loading behavior for chat profiles.
 
 ## Node clusters
 

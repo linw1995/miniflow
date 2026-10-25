@@ -2,6 +2,56 @@ use crate::NodeRegistration;
 use snafu::Snafu;
 use std::collections::BTreeMap;
 
+/// Keeps application-owned Flow definitions discoverable without compiler dependencies on providers.
+pub struct BuiltinFlowRegistration {
+    pub name: &'static str,
+    pub definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+}
+
+inventory::collect!(BuiltinFlowRegistration);
+
+#[derive(Debug, Snafu)]
+pub enum BuiltinFlowRegistryError {
+    #[snafu(display("built-in Flow name must not be blank"))]
+    BlankName,
+    #[snafu(display("built-in Flow `{name}` is registered more than once"))]
+    DuplicateName { name: String },
+}
+
+#[derive(Default)]
+pub struct BuiltinFlowRegistry {
+    registrations: BTreeMap<&'static str, &'static BuiltinFlowRegistration>,
+}
+
+impl BuiltinFlowRegistry {
+    pub fn from_inventory() -> Result<Self, BuiltinFlowRegistryError> {
+        Self::from_registrations(inventory::iter::<BuiltinFlowRegistration>)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&'static BuiltinFlowRegistration> {
+        self.registrations.get(name).copied()
+    }
+
+    fn from_registrations(
+        registrations: impl IntoIterator<Item = &'static BuiltinFlowRegistration>,
+    ) -> Result<Self, BuiltinFlowRegistryError> {
+        let mut registry = Self::default();
+        for registration in registrations {
+            snafu::ensure!(!registration.name.trim().is_empty(), BlankNameSnafu);
+            snafu::ensure!(
+                registry
+                    .registrations
+                    .insert(registration.name, registration)
+                    .is_none(),
+                DuplicateNameSnafu {
+                    name: registration.name
+                }
+            );
+        }
+        Ok(registry)
+    }
+}
+
 #[derive(Debug, Snafu)]
 pub enum NodeRegistryError {
     #[snafu(display("node kind `{kind}` is registered more than once"))]
@@ -68,6 +118,44 @@ mod tests {
     use serde_json::Value;
 
     struct FirstTestNode;
+
+    fn builtin_definition() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError> {
+        crate::WorkflowDefinition::from_json(
+            r#"{"version":"2026-10-25","dependencies":{},"nodes":[]}"#,
+        )
+    }
+
+    #[test]
+    fn builtin_catalog_rejects_duplicate_and_blank_names() {
+        static FIRST: BuiltinFlowRegistration = BuiltinFlowRegistration {
+            name: "test.flow",
+            definition: builtin_definition,
+        };
+        static SECOND: BuiltinFlowRegistration = BuiltinFlowRegistration {
+            name: "test.flow",
+            definition: builtin_definition,
+        };
+        static BLANK: BuiltinFlowRegistration = BuiltinFlowRegistration {
+            name: " ",
+            definition: builtin_definition,
+        };
+        assert!(matches!(
+            BuiltinFlowRegistry::from_registrations([&FIRST, &SECOND]),
+            Err(BuiltinFlowRegistryError::DuplicateName { .. })
+        ));
+        assert!(matches!(
+            BuiltinFlowRegistry::from_registrations([&BLANK]),
+            Err(BuiltinFlowRegistryError::BlankName)
+        ));
+        let registry = BuiltinFlowRegistry::from_registrations([&FIRST]).unwrap();
+        assert!(registry.get("missing").is_none());
+        assert!(
+            (registry.get("test.flow").unwrap().definition)()
+                .unwrap()
+                .nodes
+                .is_empty()
+        );
+    }
 
     impl TaskNode for FirstTestNode {
         fn execute(

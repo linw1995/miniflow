@@ -5,7 +5,7 @@ The resolver reads paths relative to their owning canonical file, detects cycles
 and records all source files. It lowers each call to a self-contained definition in its configuration
 and merges provider dependencies into the standalone root build. Conflicting package sources fail explicitly;
 compatible features are combined. Built-in definitions use caller-selected provider packages when
-available, otherwise the matching release version. Compiled runners never read Flow source files.
+available, otherwise the owning Flow provider's declared versions. Compiled runners never read Flow source files.
 
 Rust embedding resolves Flow files but leaves provider declarations as provenance. The host Cargo
 manifest owns provider sources and features, including providers used by nested bodies. Root read and
@@ -34,4 +34,6 @@ without emitting fake Loop lifecycle events. Old definitions retain their existi
 The title Flow owns eligibility, prompt construction, captured provider failures, and title selection.
 It always publishes title usages, including an empty list when ineligible. Its optional title is absent
 on skips or captured failures. The caller combines usage lists; chat storage retains admission and title
-revision checks. Built-in source is shipped with the compiler and uses no repository-relative paths.
+revision checks. `mf-chat/workflows/title.json` owns the source and `mf_chat::flows` registers its
+metadata factory. The runtime owns the generic catalog contract, and the compiler has no chat-specific
+name, source, or dependency version policy. Referenced definitions are frozen before node execution.

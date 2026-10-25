@@ -220,6 +220,14 @@ declarations remain provenance in this mode: the helper does not resolve their p
 requirements into Cargo. This also applies to providers used by nested bodies.
 
 For dynamic embedding, load definitions containing local Flow references with
-`mf_compiler::load_workflow(path)?.definition`. `resolve_flows` accepts an explicit source directory
-when the root definition already exists in memory. Calls use the same preparation, input binding,
+`mf_compiler::load_embedded_workflow(path)?.definition`, then use `compile_resolved_definition`
+with the host registry. Provider declarations retain the same host-owned dependency policy.
+`load_workflow` instead prepares sources and provider paths for standalone compilation. Calls use the same preparation, input binding,
 shared values, and isolated scope contracts in both execution backends.
+
+Built-in Flow definitions are registered by their owning packages through
+`mf_runtime::BuiltinFlowRegistration`. Link those packages in the build script as build dependencies
+when `embed_workflows` resolves their names. For example, `mf-chat` provides `chat-title` from its own
+`workflows/title.json`; the compiler does not depend on the chat package. Source factories return
+metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
+catalog to prepare or execute its nodes.

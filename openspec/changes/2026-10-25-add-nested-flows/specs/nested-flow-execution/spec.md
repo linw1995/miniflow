@@ -46,3 +46,15 @@ SHALL retain usage and omit the title without failing a successful conversation.
 
 - **WHEN** title generation reports a captured provider failure
 - **THEN** the composed flow returns the original answer and both recorded call usages without a title
+
+### Requirement: Keep built-in definitions with their owning providers
+
+The runtime SHALL expose a generic linked Flow catalog with unique nonblank names. The compiler SHALL
+resolve registered metadata factories without depending on application packages. `mf-chat` SHALL own
+and register the chat title definition and its dependency version policy. Resolved executables SHALL
+not require application catalog providers to execute generic nodes.
+
+#### Scenario: Compile a chat-provided title Flow
+
+- **WHEN** a host links `mf-chat` and resolves the `chat-title` name
+- **THEN** the compiler freezes the chat-owned definition and the runner links only its node providers

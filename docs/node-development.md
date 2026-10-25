@@ -931,3 +931,16 @@ external reference remains required.
 
 `Emitter::send` waits for native queue capacity. Consumer failures, dropped pending deliveries, and explicit
 cancellation wake blocked producers. Consumers and hosts own the policy for stalled delivery.
+
+## Register reusable Flow definitions
+
+A package can register `mf_runtime::BuiltinFlowRegistration` with a unique nonblank name and a pure
+factory returning `WorkflowDefinition`. The factory owns its JSON and dependency version policy;
+source resolution must not execute the Flow or perform business I/O. The runtime validates catalog
+names, and the compiler only looks up the linked provider and freezes its definition. Caller-selected
+package sources retain the factory's required features and default features.
+
+`mf-chat` registers its title Flow in `mf_chat::flows`, using JSON from its own `workflows/` directory.
+The CLI links that package for source resolution. A custom Rust build script must link any catalog
+providers it uses as build dependencies. Generated and embedded graphs do not require the catalog
+after their sources have been resolved.

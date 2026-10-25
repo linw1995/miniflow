@@ -43,7 +43,6 @@
               ./examples
               ./tools/test-affected
               ./crates/mf-chat/migrations
-              ./crates/mf-compiler/flows
               ./crates/mf-chat/workflows
               ./crates/mf-chat/tests/fixtures
               ./crates/mf-telemetry/tests/fixtures

@@ -1,6 +1,8 @@
 mod calls;
 mod flow_sources;
-pub use flow_sources::{FlowResolutionError, ResolvedWorkflow, load_workflow, resolve_flows};
+pub use flow_sources::{
+    FlowResolutionError, ResolvedWorkflow, load_embedded_workflow, load_workflow, resolve_flows,
+};
 #[cfg(feature = "codegen")]
 mod cache;
 #[cfg(feature = "codegen")]
@@ -49,8 +51,8 @@ pub use cache::{BuildDirectory, CacheError, default_build_directory};
 pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
 pub use compiler::{
     CyclePath, DescriptionError, TypeInferenceState, WorkflowCompileError, WorkflowExecutionError,
-    compile_definition, describe_compiled, describe_interface, describe_workflow_inputs,
-    execute_compiled, execute_compiled_with_inputs, instantiate_compiled,
+    compile_definition, compile_resolved_definition, describe_compiled, describe_interface,
+    describe_workflow_inputs, execute_compiled, execute_compiled_with_inputs, instantiate_compiled,
     instantiate_compiled_with_observation, plan_definition, resolve_execution, resolve_nodes,
     structural_order, topological_order, validate_definition,
 };

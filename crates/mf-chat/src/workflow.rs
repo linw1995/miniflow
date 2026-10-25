@@ -56,7 +56,27 @@ impl WorkflowProfile {
     ) -> Result<Self, ChatError> {
         let registry = NodeRegistry::from_inventory()?;
         let plan = mf_compiler::compile_definition(&definition, &registry)?;
-        let contract = ChatContract::from_manifest(&plan.manifest(&registry)?)?;
+        Self::from_plan(name, plan, &registry, parameters)
+    }
+
+    pub fn from_path(
+        name: impl Into<String>,
+        path: impl AsRef<std::path::Path>,
+        parameters: WorkflowArguments,
+    ) -> Result<Self, ChatError> {
+        let definition = mf_compiler::load_embedded_workflow(path.as_ref())?.definition;
+        let registry = NodeRegistry::from_inventory()?;
+        let plan = mf_compiler::compile_resolved_definition(&definition, &registry)?;
+        Self::from_plan(name, plan, &registry, parameters)
+    }
+
+    fn from_plan(
+        name: impl Into<String>,
+        plan: CompiledWorkflow,
+        registry: &NodeRegistry,
+        parameters: WorkflowArguments,
+    ) -> Result<Self, ChatError> {
+        let contract = ChatContract::from_manifest(&plan.manifest(registry)?)?;
         let parameters =
             mf_runtime::resolve_workflow_inputs(&contract.parameters, &parameters, |name| {
                 std::env::var_os(name)

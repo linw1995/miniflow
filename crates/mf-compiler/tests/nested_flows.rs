@@ -1,14 +1,11 @@
 extern crate mfn_code as _;
 extern crate mfn_core as _;
-extern crate mfn_llm as _;
 
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 mod common;
 #[path = "fixtures/controlled_source.rs"]
 mod controlled;
-#[path = "fixtures/multi-nodes/src/context_fixture.rs"]
-mod fixture;
 
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
 use mf_runtime::{ExecutionContext, ValueRef, WorkflowArguments};
@@ -37,6 +34,64 @@ fn child() -> WorkflowDefinition {
 
 fn call(id: &str, body: &WorkflowDefinition) -> Value {
     json!({"id":id,"kind":"workflow.call","config":{"flow":"child","definition":body}})
+}
+
+fn builtin_echo() -> Result<WorkflowDefinition, mf_runtime::DefinitionParseError> {
+    let mut definition = child();
+    definition.dependencies.insert(
+        "provider".into(),
+        serde_json::from_value(
+            json!({"package":"test-provider","version":"=1","features":["required"]}),
+        )
+        .unwrap(),
+    );
+    Ok(definition)
+}
+
+inventory::submit! {
+    mf_runtime::BuiltinFlowRegistration { name:"test.echo", definition:builtin_echo }
+}
+
+#[test]
+fn builtin_sources_are_resolved_from_linked_providers() {
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-25", "dependencies":{"provider":{"package":"test-provider","version":"=2","features":["selected"],"default-features":false}},
+        "flows":{"echo":{"builtin":"test.echo"}},
+        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"echo"}}],
+        "outputs":[{"name":"value","node":"invoke","port":"value"}]
+    })).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    assert_eq!(
+        plan.definition.dependencies["provider"].version.as_deref(),
+        Some("=2")
+    );
+    assert_eq!(
+        plan.definition.dependencies["provider"].features,
+        ["required", "selected"]
+    );
+    assert!(plan.definition.dependencies["provider"].default_features);
+    assert_eq!(
+        instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute()
+            .unwrap()["value"]
+            .as_str(),
+        Some("fallback")
+    );
+    let mut unknown = definition;
+    unknown.flows.insert(
+        "echo".into(),
+        mf_runtime::FlowSource::Builtin {
+            builtin: "missing".into(),
+        },
+    );
+    assert!(
+        compile_definition(&unknown, &registry)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown built-in Flow")
+    );
 }
 
 #[test]
@@ -318,130 +373,6 @@ fn call_rejects_stdin_and_streaming_children() {
     );
     let definition = graph(json!([call("call", &body)]), json!([]));
     assert!(compile_definition(&definition, &registry).is_err());
-}
-
-#[test]
-fn ineligible_builtin_title_returns_no_title_and_empty_usage() {
-    let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-10-25","dependencies":{},"flows":{"title":{"builtin":"chat-title"}},
-        "nodes":[{"id":"title","kind":"workflow.call","config":{"flow":"title"}}],
-        "outputs":[{"name":"title","node":"title","port":"title","optional":true},{"name":"usages","node":"title","port":"usages"}]
-    })).unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let flow = instantiate_compiled(
-        &compile_definition(&definition, &registry).unwrap(),
-        &registry,
-    )
-    .unwrap();
-    let outputs = flow.execute_with_inputs(WorkflowArguments::try_from(json!({
-        "title.input.prompt":"Hello", "title.input.text":"Answer", "title.input.status":"succeeded", "title.input.api_key":"synthetic-key",
-        "title.input.context":{"title":{"enabled":false,"source":"provisional","attempted":false}}
-    })).unwrap()).unwrap();
-    assert!(!outputs.contains_key("title"));
-    assert_eq!(serde_json::to_value(&outputs["usages"]).unwrap(), json!([]));
-}
-
-#[test]
-fn nested_title_composition_preserves_answers_and_usage_after_provider_failure() {
-    use mfn_llm::test_support::{Reply, Server};
-    for failed in [false, true] {
-        let mut title = if failed {
-            Reply::json(json!({"error":{"message":"title failed"}}))
-        } else {
-            Reply::text("Generated title")
-        };
-        if failed {
-            title.status = 500;
-        }
-        let server = Server::start(vec![Reply::text("Primary answer"), title]);
-        let mut definition = WorkflowDefinition::from_json(include_str!(
-            "../../../examples/chat-nested-title-flow.json"
-        ))
-        .unwrap();
-        definition.outputs.retain(|output| output.name != "answer");
-        let registry = NodeRegistry::from_inventory().unwrap();
-        let plan = compile_definition(&definition, &registry).unwrap();
-        let outputs = instantiate_compiled(&plan, &registry).unwrap().execute_with_inputs(WorkflowArguments::try_from(json!({
-            "input.prompt":"Hello", "input.model":"example-model", "input.base_url":server.base_url, "input.api_key":"synthetic-key"
-        })).unwrap()).unwrap();
-        assert_eq!(outputs["text"].as_str(), Some("Primary answer"));
-        assert_eq!(outputs.contains_key("title"), !failed);
-        let usages = serde_json::to_value(&outputs["usages"]).unwrap();
-        assert_eq!(usages.as_array().unwrap().len(), 2);
-        assert_eq!(usages[1]["attribution"]["purpose"], "title");
-        assert_eq!(usages[1]["node"]["path"][0]["node"], "title");
-        assert_eq!(server.requests().len(), 2);
-    }
-}
-
-#[test]
-fn builtin_title_policy_preserves_captured_failure_usage_without_a_title() {
-    for failed in [false, true] {
-        let authored = WorkflowDefinition::from_json(include_str!(
-            "../../../examples/chat-nested-title-flow.json"
-        ))
-        .unwrap();
-        let mut definition = mf_compiler::resolve_flows(&authored, None)
-            .unwrap()
-            .definition;
-        definition.outputs.retain(|output| output.name != "answer");
-        let mut child: WorkflowDefinition = serde_json::from_value(
-            definition
-                .nodes
-                .iter()
-                .find(|node| node.id.as_str() == "title")
-                .unwrap()
-                .config["definition"]
-                .clone(),
-        )
-        .unwrap();
-        let usage = |purpose: &str| json!({"attribution":{"purpose":purpose},"model":"fixture-model","call_id":purpose});
-        let replace =
-            |node: &mut mf_runtime::NodeDefinition, status: &str, text: &str, purpose: &str| {
-                node.kind = "fixture.context".into();
-                node.config = json!({
-                    "inputs":["prompt","system","history"],
-                    "ports":["status","text","usages","error","metadata","finish_reason"],
-                    "outputs":{"status":status,"text":text,"usages":[usage(purpose)]},
-                    "skipped":["error","metadata","finish_reason"]
-                });
-            };
-        replace(
-            child
-                .nodes
-                .iter_mut()
-                .find(|node| node.id.as_str() == "title_model")
-                .unwrap(),
-            if failed { "failed" } else { "succeeded" },
-            "Generated title",
-            "title",
-        );
-        for node in &mut definition.nodes {
-            if node.id.as_str() == "model" {
-                replace(node, "succeeded", "Primary answer", "conversation");
-            }
-            if node.id.as_str() == "title" {
-                node.config["definition"] = serde_json::to_value(&child).unwrap();
-            }
-        }
-        let registry = NodeRegistry::from_inventory().unwrap();
-        let plan = compile_definition(&definition, &registry).unwrap();
-        let outputs = instantiate_compiled(&plan, &registry)
-            .unwrap()
-            .execute_with_inputs(
-                WorkflowArguments::try_from(
-                    json!({"input.prompt":"Hello","input.api_key":"synthetic-key"}),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        assert_eq!(outputs["text"].as_str(), Some("Primary answer"));
-        assert_eq!(outputs.contains_key("title"), !failed);
-        assert_eq!(
-            serde_json::to_value(&outputs["usages"]).unwrap(),
-            json!([usage("conversation"), usage("title")])
-        );
-    }
 }
 
 #[test]

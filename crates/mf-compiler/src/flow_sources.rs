@@ -9,6 +9,10 @@ use std::{
 
 #[derive(Debug, Snafu)]
 pub enum FlowResolutionError {
+    #[snafu(transparent)]
+    BuiltinRegistry {
+        source: mf_runtime::BuiltinFlowRegistryError,
+    },
     #[snafu(display("could not resolve Flow source {path:?}: {source}"))]
     Source {
         path: PathBuf,
@@ -73,6 +77,19 @@ pub fn load_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResolutionErro
     let mut resolver = Resolver::default();
     let mut definition = resolver.file(path, &BTreeMap::new(), 0)?;
     resolver.finish(&mut definition);
+    Ok(ResolvedWorkflow {
+        definition,
+        sources: resolver.sources,
+    })
+}
+
+/// Loads Flow files while the embedding host retains authority over provider dependencies.
+pub fn load_embedded_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResolutionError> {
+    let mut resolver = Resolver {
+        host_dependencies: true,
+        ..Default::default()
+    };
+    let definition = resolver.file(path, &BTreeMap::new(), 0)?;
     Ok(ResolvedWorkflow {
         definition,
         sources: resolver.sources,
@@ -332,27 +349,26 @@ impl Resolver {
                             self.file(&directory.join(path), available, depth + 1)?
                         }
                         FlowSource::Builtin { builtin } => {
-                            ensure!(
-                                builtin == "chat-title",
-                                InvalidSnafu {
-                                    reference: builtin,
-                                    message: "unknown built-in Flow"
-                                }
-                            );
-                            let mut definition = WorkflowDefinition::from_json(include_str!(
-                                "../flows/chat-title.json"
-                            ))
-                            .context(ParseSnafu {
-                                path: PathBuf::from("builtin:chat-title"),
-                            })?;
+                            let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
+                            let registration = registry.get(builtin).ok_or_else(|| InvalidSnafu {
+                                reference: builtin, message: "unknown built-in Flow; link its provider before resolving sources"
+                            }.build())?;
+                            let mut definition =
+                                (registration.definition)().context(ParseSnafu {
+                                    path: PathBuf::from(format!("builtin:{builtin}")),
+                                })?;
                             for dependency in definition.dependencies.values_mut() {
-                                dependency.version =
-                                    Some(format!("={}", env!("CARGO_PKG_VERSION")));
                                 if let Some(selected) = available
                                     .values()
                                     .find(|selected| selected.package == dependency.package)
                                 {
+                                    let features = std::mem::take(&mut dependency.features);
+                                    let default_features = dependency.default_features;
                                     *dependency = selected.clone();
+                                    dependency.features.extend(features);
+                                    dependency.features.sort();
+                                    dependency.features.dedup();
+                                    dependency.default_features |= default_features;
                                 }
                             }
                             self.definition(&mut definition, None, available, depth + 1, builtin)?;

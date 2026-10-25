@@ -5,6 +5,10 @@ use std::{error::Error, io, path::PathBuf};
 #[snafu(visibility(pub))]
 pub enum ChatError {
     #[snafu(transparent)]
+    FlowResolution {
+        source: mf_compiler::FlowResolutionError,
+    },
+    #[snafu(transparent)]
     Stream { source: mf_runtime::StreamError },
     #[snafu(display("could not deliver conversation preview: {source}"))]
     PreviewDelivery {

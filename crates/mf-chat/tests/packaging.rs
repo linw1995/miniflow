@@ -88,6 +88,7 @@ fn packaged_inputs_include_workflows_migrations_and_host_fixture() {
     let files = String::from_utf8(output.stdout).unwrap();
     for required in [
         "workflows/conversation.json",
+        "workflows/title.json",
         "migrations/00000000000001_chat_storage/up.sql",
         "migrations/00000000000001_chat_storage/down.sql",
         "tests/fixtures/host/src/main.rs",

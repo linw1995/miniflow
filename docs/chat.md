@@ -104,7 +104,7 @@ Configure the model and endpoint in the supplied workflow. The example prints co
 ## Session title summaries
 
 For a compact reusable composition, use the [nested title Flow](../examples/chat-nested-title-flow.json).
-It calls the shipped `chat-title` Flow through `workflow.call`; the parent retains primary answer
+It calls the `mf-chat`-owned `chat-title` Flow through `workflow.call`; the parent retains primary answer
 streaming and combines both usage lists. See [reusable Flows](workflows.md#reusable-flows) for its
 interface and local-source support.
 
