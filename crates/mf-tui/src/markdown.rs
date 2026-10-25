@@ -53,12 +53,13 @@ struct CachedLine {
     text: Line<'static>,
     width: Option<u16>,
     rows: Vec<VisualRow>,
+    continuation: usize,
 }
 
 impl CachedLine {
     fn layout(&mut self, width: u16) {
         if self.width != Some(width) {
-            self.rows = wrap(&self.text, width);
+            self.rows = wrap(&self.text, width, self.continuation);
             self.width = Some(width);
         }
     }
@@ -81,9 +82,21 @@ impl Block {
         if self.events == events {
             return;
         }
-        let lines = render(&events, &mut self.code);
+        let rendered = render(&events, &mut self.code);
         self.events = events;
-        self.set_lines(lines);
+        self.set_lines(rendered.lines);
+        for (index, line) in self.lines.iter_mut().enumerate() {
+            let continuation = rendered
+                .continuations
+                .get(&index)
+                .copied()
+                .unwrap_or_default();
+            if line.continuation != continuation {
+                line.continuation = continuation;
+                line.width = None;
+                self.dirty = true;
+            }
+        }
     }
 
     fn set_lines(&mut self, lines: Vec<Line<'static>>) {
@@ -293,7 +306,7 @@ fn push_span(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
     }
 }
 
-fn wrap(line: &Line<'static>, width: u16) -> Vec<VisualRow> {
+fn wrap(line: &Line<'static>, width: u16, continuation: usize) -> Vec<VisualRow> {
     if width == 0 {
         return vec![];
     }
@@ -302,8 +315,13 @@ fn wrap(line: &Line<'static>, width: u16) -> Vec<VisualRow> {
     let mut start = 0;
     let mut byte = 0;
     while start < graphemes.len() {
+        let indent = if start == 0 {
+            0
+        } else {
+            continuation.min(width.saturating_sub(1) as usize)
+        };
         let mut end = start;
-        let mut cells = 0;
+        let mut cells = indent;
         let mut boundary = None;
         let mut has_text = false;
         while end < graphemes.len() {
@@ -324,7 +342,11 @@ fn wrap(line: &Line<'static>, width: u16) -> Vec<VisualRow> {
         {
             end = boundary;
         }
-        let mut spans = vec![];
+        let mut spans = if indent == 0 {
+            vec![]
+        } else {
+            vec![Span::raw(" ".repeat(indent))]
+        };
         let row_byte = byte;
         if end == start {
             // A wide grapheme cannot fit in a one-cell viewport.
@@ -465,6 +487,8 @@ struct Renderer {
     current: Vec<Span<'static>>,
     containers: Vec<Container>,
     styles: Vec<Style>,
+    continuation: usize,
+    continuations: std::collections::BTreeMap<usize, usize>,
 }
 
 impl Renderer {
@@ -510,13 +534,22 @@ impl Renderer {
 
     fn newline(&mut self, force: bool) {
         if force || !self.current.is_empty() {
+            if self.continuation > 0 {
+                self.continuations
+                    .insert(self.lines.len(), self.continuation);
+            }
             self.lines
                 .push(Line::from(std::mem::take(&mut self.current)));
         }
     }
 }
 
-fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Vec<Line<'static>> {
+struct Rendered {
+    lines: Vec<Line<'static>>,
+    continuations: std::collections::BTreeMap<usize, usize>,
+}
+
+fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Rendered {
     let mut r = Renderer::default();
     let mut code_index = 0;
     let mut index = 0;
@@ -574,9 +607,18 @@ fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Vec<Line<'sta
                     Tag::Emphasis => style.add_modifier(Modifier::ITALIC),
                     Tag::Strong | Tag::TableHead => style.add_modifier(Modifier::BOLD),
                     Tag::Strikethrough => style.add_modifier(Modifier::CROSSED_OUT),
-                    Tag::Heading { .. } => {
+                    Tag::Heading { level, .. } => {
                         r.newline(false);
-                        style.fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                        r.text(
+                            &format!("#{} ", *level as u8),
+                            Style::default().fg(Color::DarkGray),
+                        );
+                        r.continuation = r.current.iter().map(Span::width).sum();
+                        match *level as u8 {
+                            1 | 2 => style.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            3 => style.add_modifier(Modifier::BOLD),
+                            _ => style,
+                        }
                     }
                     Tag::Link { .. } => style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
                     Tag::Image { .. } => {
@@ -647,6 +689,7 @@ fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Vec<Line<'sta
             Event::End(TagEnd::Heading(_)) => {
                 r.styles.pop();
                 r.newline(false);
+                r.continuation = 0;
             }
             Event::End(TagEnd::Paragraph | TagEnd::HtmlBlock | TagEnd::TableRow) => {
                 r.newline(false)
@@ -677,7 +720,10 @@ fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Vec<Line<'sta
     }
     code.truncate(code_index);
     r.newline(false);
-    r.lines
+    Rendered {
+        lines: r.lines,
+        continuations: r.continuations,
+    }
 }
 
 #[cfg(test)]
@@ -849,7 +895,7 @@ mod tests {
             Span::raw("\u{4e16}\u{754c} 👩‍💻 e\u{301} end"),
         ]);
         for width in [1, 2, 7, 12, 100] {
-            let wrapped = wrap(&line, width);
+            let wrapped = wrap(&line, width, 0);
             assert!(wrapped.iter().all(|row| row.line.width() <= width as usize));
             if width >= 2 {
                 assert_eq!(
@@ -878,6 +924,37 @@ mod tests {
         let height = document.layout(12);
         for row in 0..height {
             assert_eq!(document.locate(document.row(row).unwrap().0), row);
+        }
+    }
+
+    #[test]
+    fn headings_show_all_six_levels_and_align_wrapped_continuations() {
+        let mut document = Document::default();
+        document.update("# First\n\n## Second\n\n### Third\n\n#### Fourth\n\n##### Fifth\n\n###### Sixth\n\nSetext\n======\n\nSubtitle\n--------");
+        let output = text(&mut document);
+        for expected in [
+            "#1 First",
+            "#2 Second",
+            "#3 Third",
+            "#4 Fourth",
+            "#5 Fifth",
+            "#6 Sixth",
+            "#1 Setext",
+            "#2 Subtitle",
+        ] {
+            assert!(output.contains(expected), "{output}");
+        }
+        document.update("### A longer heading that wraps");
+        let wrapped = rows(&mut document, 12);
+        assert_eq!(wrapped[0].to_string(), "#3 A longer ");
+        assert!(
+            wrapped
+                .iter()
+                .skip(1)
+                .all(|line| line.to_string().starts_with("   "))
+        );
+        for width in [0, 1, 2, 3] {
+            rows(&mut document, width);
         }
     }
 

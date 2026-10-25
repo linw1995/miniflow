@@ -498,6 +498,8 @@ emphasis, lists, task lists, block quotes, links, tables, and code blocks are su
 blocks use their language label for syntax highlighting, including while output is streaming;
 unrecognized or missing labels fall back to plain code. HTML and images use literal text fallbacks.
 Prompts and diagnostics remain plain text, and stored message content is unchanged.
+Headings display an explicit level marker (`#1` through `#6`), including Setext headings.
+Wrapped heading lines align with the title text; color and weight reinforce the heading hierarchy.
 
 Unchanged Markdown blocks and wrapped lines are cached; resizing reflows text without repeating
 syntax highlighting. Code highlighting resumes from complete lines and recalculates the unfinished
