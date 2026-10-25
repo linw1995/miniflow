@@ -1,0 +1,272 @@
+{
+  "version": "2026-10-25",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "version": "=0.1.0"
+    },
+    "code": {
+      "package": "mfn-code",
+      "version": "=0.1.0"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "version": "=0.1.0"
+    }
+  },
+  "nodes": [
+    {
+      "id": "input",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "prompt": {
+            "type": "string"
+          },
+          "context": {
+            "type": "object",
+            "default": {
+              "title": {
+                "source": "provisional",
+                "revision": 0,
+                "attempted": false,
+                "enabled": true
+              }
+            }
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "MODEL_API_KEY"
+          },
+          "text": {
+            "type": "string",
+            "secret": false
+          },
+          "status": {
+            "type": "string",
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "eligible",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "context": "object",
+          "status": "string"
+        },
+        "code": {
+          "value": "status == 'succeeded' && context.title.enabled && context.title.source == 'provisional' && !context.title.attempted"
+        }
+      },
+      "inputs": {
+        "context": {
+          "from": {
+            "node": "input",
+            "port": "context"
+          }
+        },
+        "status": {
+          "from": {
+            "node": "input",
+            "port": "status"
+          }
+        }
+      }
+    },
+    {
+      "id": "title_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "eligible.value",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "title_prompt",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "text": "string"
+        },
+        "code": {
+          "value": "'user: ' + prompt + '\\nassistant: ' + text"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "input",
+            "port": "prompt"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "input",
+            "port": "text"
+          }
+        }
+      }
+    },
+    {
+      "id": "title_system",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "Summarize this conversation as a concise single-line title in its language. Return only the title, at most 120 characters."
+      }
+    },
+    {
+      "id": "title_model",
+      "kind": "builtin.llm",
+      "config": {
+        "model": {
+          "$ref": "input.model"
+        },
+        "capture_errors": true,
+        "attribution": {
+          "purpose": "title"
+        },
+        "base_url": {
+          "$ref": "input.base_url"
+        },
+        "api_key": {
+          "$ref": "input.api_key"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "title_prompt",
+            "port": "value"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "title_system",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "title_success",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "title_model.status",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": "succeeded"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "title",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "title_model",
+            "port": "text"
+          }
+        }
+      }
+    },
+    {
+      "id": "no_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "usages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "title_model",
+              "port": "usages"
+            },
+            {
+              "node": "no_usages",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "eligible",
+      "to_node": "title_route"
+    },
+    {
+      "from_node": "title_route",
+      "to_node": "title_prompt",
+      "from_output": "yes"
+    },
+    {
+      "from_node": "title_model",
+      "to_node": "title_success"
+    },
+    {
+      "from_node": "title_success",
+      "to_node": "title",
+      "from_output": "yes"
+    },
+    {
+      "from_node": "title_route",
+      "from_output": "else",
+      "to_node": "no_usages"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "title",
+      "node": "title",
+      "port": "value",
+      "optional": true
+    },
+    {
+      "name": "usages",
+      "node": "usages",
+      "port": "value"
+    }
+  ]
+}

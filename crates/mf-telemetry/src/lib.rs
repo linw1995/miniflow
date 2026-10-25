@@ -102,3 +102,6 @@ pub fn maximum_event_count(node_count: Count) -> Result<Count, ContractError> {
 pub fn maximum_loop_event_count() -> Count {
     Count(4 * MAX_LOOP_SCHEDULED_STEPS + 4)
 }
+
+/// Combined static nesting bound for ordinary calls and Loop scopes.
+pub const MAX_SCOPE_DEPTH: usize = 20;

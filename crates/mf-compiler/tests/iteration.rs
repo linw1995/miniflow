@@ -926,7 +926,7 @@ fn snapshots_retain_every_iteration_item_in_sequential_and_parallel_runs() {
         let outputs = flow.execute_in_context(&mut context).unwrap();
         assert_eq!(outputs["results"], json!([2, null, 8]));
         for (index, input) in [1, 0, 3].into_iter().enumerate() {
-            let scope = vec![mf_telemetry::event::LoopPathEntry {
+            let scope = vec![mf_telemetry::event::LoopPathEntry::Loop {
                 loop_id: "iteration".into(),
                 index: mf_telemetry::Count::try_from(index as i64).unwrap(),
             }];

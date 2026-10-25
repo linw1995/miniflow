@@ -521,6 +521,7 @@ impl StreamRecord {
             .transpose()?;
         let payload = if wire.event_name.starts_with("mf.node.")
             || wire.event_name.starts_with("mf.loop.pass.")
+            || wire.event_name.starts_with("mf.call.")
         {
             let mut legacy = wire.clone();
             legacy.body = Value::Object(body);

@@ -209,3 +209,17 @@ isolated-node execution still accepts resolved inputs without running predecesso
 Execution is inferred when the host registry resolves node contracts. Embedded modules expose both
 `prepare_workflow` and `prepare_stream`; finite preparation rejects graphs that require streaming.
 Standalone Cargo runners resolve this choice during their build and compile one fixed execution path.
+
+## Referenced Flow sources
+
+`embed_workflows` resolves local and built-in `flows` before generating Rust and tracks every referenced
+JSON file with `cargo:rerun-if-changed`. Relative paths belong to the canonical file that declares them.
+All child bodies and their interfaces are frozen into the generated module; execution never loads them
+from disk. The host still links all required node crates through its normal Cargo dependencies. Provider source
+declarations remain provenance in this mode: the helper does not resolve their paths or merge provider
+requirements into Cargo. This also applies to providers used by nested bodies.
+
+For dynamic embedding, load definitions containing local Flow references with
+`mf_compiler::load_workflow(path)?.definition`. `resolve_flows` accepts an explicit source directory
+when the root definition already exists in memory. Calls use the same preparation, input binding,
+shared values, and isolated scope contracts in both execution backends.

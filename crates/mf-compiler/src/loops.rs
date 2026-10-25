@@ -64,6 +64,7 @@ pub fn body_definition(
     WorkflowDefinition {
         version,
         execution: None,
+        flows: Default::default(),
         dependencies: dependencies.clone(),
         nodes,
         edges: body.edges.clone(),

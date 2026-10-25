@@ -203,6 +203,7 @@ pub struct ExecutionContext {
     current_node: Option<crate::DefinitionId>,
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
+    call_steps: Option<Arc<AtomicUsize>>,
     snapshots: Option<crate::SnapshotRecorder>,
     scope_prefix: Vec<LoopPathEntry>,
     inputs: crate::ExecutionInputs,
@@ -227,6 +228,7 @@ impl Default for ExecutionContext {
             current_node: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
+            call_steps: None,
             snapshots: None,
             scope_prefix: Vec::new(),
             inputs: crate::ExecutionInputs::default(),
@@ -305,6 +307,7 @@ impl ExecutionContext {
         Self {
             outputs: self.outputs.clone(),
             remaining_steps: self.remaining_steps.clone(),
+            call_steps: self.call_steps.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
             observation,
@@ -506,6 +509,7 @@ impl ExecutionContext {
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
+            call_steps: self.call_steps.clone(),
             snapshots: self.snapshots.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: self.inputs.clone(),
@@ -657,6 +661,58 @@ impl ExecutionContext {
         child
     }
 
+    /// Isolates a call's values and loop control while charging work to the caller's budget.
+    pub fn run_call<T>(
+        &mut self,
+        id: &str,
+        arguments: crate::WorkflowArguments,
+        nodes: &[crate::NodeIdentity],
+        run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
+    ) -> Result<T, WorkflowRunError> {
+        snafu::ensure!(
+            !id.trim().is_empty() && self.invocation_path().len() < mf_telemetry::MAX_SCOPE_DEPTH,
+            ContextSnafu {
+                definition_id: id,
+                message: "invalid or excessively nested Flow call scope"
+            }
+        );
+        let body_observation = self
+            .body_observation
+            .as_ref()
+            .map(|observation| observation.for_call(id, nodes));
+        let mut child = self.fork_body(body_observation);
+        child.remaining_steps = self.remaining_steps.clone();
+        child.observation = self.observation.clone();
+        child
+            .scope_prefix
+            .push(LoopPathEntry::Call { call_id: id.into() });
+        child.set_workflow_arguments(arguments);
+        let path = child.invocation_path();
+        let steps = Arc::new(AtomicUsize::new(0));
+        child.call_steps = Some(steps.clone());
+        if let Some(observation) = child
+            .observation
+            .as_mut()
+            .filter(|observation| observation.supports_loops())
+        {
+            observation.call_started(path.clone());
+        }
+        let result = run(&mut child);
+        let visited = steps.load(Ordering::Acquire);
+        if let Some(observation) = child
+            .observation
+            .as_mut()
+            .filter(|observation| observation.supports_loops())
+        {
+            observation.call_finished(
+                path,
+                mf_telemetry::Count::try_from(visited as i64).expect("step budget is bounded"),
+                result.is_err(),
+            );
+        }
+        result
+    }
+
     /// Includes enclosing body scopes even when observation and snapshots are disabled.
     pub fn invocation_path(&self) -> Vec<LoopPathEntry> {
         let mut path = self.scope_prefix.clone();
@@ -722,7 +778,7 @@ impl ExecutionContext {
     pub fn scope_path(&self) -> Vec<LoopPathEntry> {
         self.scopes
             .iter()
-            .map(|scope| LoopPathEntry {
+            .map(|scope| LoopPathEntry::Loop {
                 loop_id: scope.node_id.clone(),
                 index: mf_telemetry::Count::try_from(scope.index as i64)
                     .expect("scope index is bounded"),
@@ -957,6 +1013,11 @@ impl ExecutionContext {
 
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
         self.remaining_steps.reserve(id)?;
+        if self.scopes.is_empty()
+            && let Some(steps) = &self.call_steps
+        {
+            steps.fetch_add(1, Ordering::AcqRel);
+        }
         if let Some(frame) = self.scopes.last_mut() {
             frame.visited_steps.fetch_add(1, Ordering::AcqRel);
         }
@@ -1148,7 +1209,7 @@ pub fn execute_resolved_node_in_context<N>(
     let id = node.definition_id.as_str();
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
-    let path = ctx.observation.as_ref().map(|_| ctx.scope_path());
+    let path = ctx.observation.as_ref().map(|_| ctx.invocation_path());
     let mut step = if let Some(run) = ctx.observation.as_mut() {
         let path = path.expect("observation has a scope path");
         if path.is_empty() {
@@ -1310,6 +1371,62 @@ mod tests {
     };
 
     struct EmitNode(Outputs);
+
+    #[test]
+    fn call_failure_and_unwinding_preserve_parent_state_and_charge_shared_resources() {
+        let mut context = ExecutionContext::default();
+        context
+            .outputs
+            .set_value("parent.value".into(), json!(1).into());
+        context.current_node = Some("caller".into());
+        let workers = context.worker_scope();
+        for unwinds in [false, true] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                context.run_call(
+                    "child",
+                    Default::default(),
+                    &[],
+                    |child| -> Result<(), WorkflowRunError> {
+                        assert!(child.output("parent.value").is_err());
+                        assert_eq!(child.current_node(), None);
+                        assert!(Arc::ptr_eq(&workers, &child.worker_scope()));
+                        child.reserve_step("work")?;
+                        child
+                            .outputs
+                            .set_value("parent.value".into(), json!(2).into());
+                        if unwinds {
+                            panic!("call unwound");
+                        }
+                        Err(WorkflowRunError::NodeExecution {
+                            definition_id: "work".into(),
+                            source: Box::<dyn Error + Send + Sync>::from(std::io::Error::other(
+                                "call failed",
+                            ))
+                            .into(),
+                        })
+                    },
+                )
+            }));
+            if unwinds {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_err());
+            }
+            assert_eq!(
+                context
+                    .select_output("value", "parent", "value", false)
+                    .unwrap()
+                    .unwrap(),
+                json!(1)
+            );
+            assert_eq!(context.current_node(), Some("caller"));
+            assert!(context.invocation_path().is_empty());
+        }
+        assert_eq!(
+            context.remaining_steps.0.load(Ordering::Acquire),
+            crate::MAX_SCHEDULED_STEPS - 2
+        );
+    }
 
     #[test]
     fn worker_scope_is_lazy_shared_and_closed_at_execution_end() {
@@ -1479,7 +1596,7 @@ mod tests {
                     let path = child.invocation_path();
                     assert_eq!(
                         path.iter()
-                            .map(|entry| (entry.loop_id.as_str(), entry.index.get()))
+                            .map(|entry| (entry.node_id(), entry.index().get()))
                             .collect::<Vec<_>>(),
                         [("outer", 2), ("inner", 3)]
                     );

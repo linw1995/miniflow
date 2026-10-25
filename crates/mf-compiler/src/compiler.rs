@@ -37,6 +37,33 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(transparent)]
+    FlowResolution { source: crate::FlowResolutionError },
+    #[snafu(
+        display("invalid Flow call `{definition_id}`: {message}"),
+        visibility(pub)
+    )]
+    InvalidCall {
+        definition_id: DefinitionId,
+        message: String,
+    },
+    #[snafu(
+        display("invalid Flow call `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    CallConfiguration {
+        definition_id: DefinitionId,
+        source: serde_json::Error,
+    },
+    #[snafu(
+        display("invalid Flow call `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    CallBody {
+        definition_id: DefinitionId,
+        #[snafu(source(from(WorkflowCompileError, Box::new)))]
+        source: Box<WorkflowCompileError>,
+    },
     #[snafu(display("invalid node-success dependency: {message}"))]
     InvalidSuccessDependency { message: String },
     #[snafu(transparent)]
@@ -654,6 +681,17 @@ fn validate_base_metadata(
     for node in nodes {
         let ports = registrations[&node.definition_id];
         ensure!(
+            ports.secret_inputs.iter().all(|name| ports
+                .ports
+                .inputs
+                .iter()
+                .any(|port| port.name == *name)),
+            InvalidNodeMetadataSnafu {
+                definition_id: node.definition_id.clone(),
+                message: "secret input names an unknown port"
+            }
+        );
+        ensure!(
             ports.stream_outputs.is_empty()
                 || matches!(node.node, Some(mf_runtime::NodeExecution::TaskStream(_))),
             InvalidNodeMetadataSnafu {
@@ -1139,6 +1177,8 @@ pub fn compile_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
+    let resolved = crate::resolve_flows(definition, None)?;
+    let definition = &resolved.definition;
     let (nodes, execution_order) = prepare_definition(definition, registry)?;
     let definition = resolve_execution(definition, &nodes)?;
     let flow = crate::FlowBuilder::prepare(
@@ -1198,6 +1238,14 @@ pub fn resolve_execution(
 pub fn plan_definition(
     definition: &WorkflowDefinition,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
+    let resolved = crate::resolve_flows(definition, None)?;
+    let definition = &resolved.definition;
+    plan_resolved_definition(definition)
+}
+
+pub fn plan_resolved_definition(
+    definition: &WorkflowDefinition,
+) -> Result<CompiledWorkflow, WorkflowCompileError> {
     for node in &definition.nodes {
         if node.kind == ITERATION_INPUT_KIND {
             return InvalidIterationSnafu {
@@ -1228,6 +1276,14 @@ pub fn normalize_plan(
         if node.kind == ITERATION_KIND {
             node.config = normalize_config(definition, node)?;
         }
+        if node.kind == mf_runtime::CALL_KIND {
+            let body = crate::calls::body_definition(node)?;
+            let normalized = plan_resolved_definition(&body)?.definition;
+            node.config["definition"] =
+                serde_json::to_value(normalized).context(CallConfigurationSnafu {
+                    definition_id: node.id.clone(),
+                })?;
+        }
     }
     let mut edges = definition.edges.clone();
     edges.sort_by(|left, right| {
@@ -1255,6 +1311,7 @@ pub fn normalize_plan(
         definition: WorkflowDefinition {
             version: definition.version,
             execution: definition.execution.clone(),
+            flows: definition.flows.clone(),
             dependencies: definition.dependencies.clone(),
             nodes,
             edges,
@@ -1472,8 +1529,7 @@ pub fn loop_execution_orders(
         definition,
         &mut Vec::new(),
         &mut orders,
-        definition.has_order_edges()
-            || definition.version == crate::WorkflowDefinitionVersion::V2026_10_23,
+        definition.has_order_edges() || definition.version.supports_clusters(),
     )?;
     Ok(orders)
 }
@@ -1491,6 +1547,9 @@ fn collect_loop_execution_orders(
                 &definition.dependencies,
                 definition.version,
             )
+        } else if node.kind == mf_runtime::CALL_KIND {
+            crate::calls::body_definition(node)
+                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?
         } else if include_iterations && node.kind == ITERATION_KIND {
             let config = parse_config(node)
                 .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
@@ -1550,6 +1609,8 @@ pub fn resolve_nodes(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
+    let resolved = crate::resolve_flows(definition, None)?;
+    let definition = &resolved.definition;
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
     resolve_nodes_in_scope(
@@ -1586,6 +1647,13 @@ fn bind_subgraph_node(
     allow_iteration_input: bool,
     options: Value,
 ) -> Result<FlowNode, WorkflowCompileError> {
+    ensure!(
+        preparation.path.len() < mf_telemetry::MAX_SCOPE_DEPTH,
+        InvalidCallSnafu {
+            definition_id: node.id.clone(),
+            message: "combined container nesting exceeds twenty scopes"
+        }
+    );
     let registration = registration_for(node, preparation.registry)?;
     preparation.path.push(node.id.clone());
     let prepared = prepare_graph(body, preparation, enclosing, allow_iteration_input);
@@ -1598,11 +1666,24 @@ fn bind_subgraph_node(
         prepared.context(LoopBodySnafu {
             path: format!("{:?}", node.id),
         })?
+    } else if node.kind == mf_runtime::CALL_KIND {
+        prepared.context(CallBodySnafu {
+            definition_id: node.id.clone(),
+        })?
     } else {
         prepared.context(IterationBodySnafu {
             definition_id: node.id.clone(),
         })?
     };
+    if node.kind == mf_runtime::CALL_KIND {
+        ensure!(
+            resolve_execution(body, &nodes)?.execution.is_none(),
+            InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "Flow calls require terminal child ports"
+            }
+        );
+    }
     let outputs = body
         .outputs
         .iter()
@@ -1635,11 +1716,18 @@ fn bind_subgraph_node(
             path: Vec::new(),
         })
         .collect();
-    let flow = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
-        .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
-        .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
-        .and_then(|flow| flow.into_tasks())
-        .context(FlowConstructionSnafu)?;
+    let builder =
+        crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
+            .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
+            .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
+            .context(FlowConstructionSnafu)?;
+    let builder = if node.kind == mf_runtime::CALL_KIND {
+        builder.with_workflow_inputs()?
+    } else {
+        builder
+    };
+    let flow = builder.into_tasks().context(FlowConstructionSnafu)?;
+    let input_schema = flow.input_schema().clone();
     if let Some(layouts) = preparation.body_layouts.as_mut() {
         layouts.insert(
             path.expect("layout collection has a body path"),
@@ -1648,7 +1736,8 @@ fn bind_subgraph_node(
     }
     let body = PreparedSubgraph::new(identities, outputs, move |state| {
         flow.execute_in_context(state)
-    });
+    })
+    .with_input_schema(input_schema);
     let instance = registration
         .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
         .context(NodeConstructionSnafu {
@@ -1668,6 +1757,14 @@ fn resolve_nodes_in_scope(
         .nodes
         .iter()
         .map(|node| {
+            if node.kind == mf_runtime::CALL_KIND {
+                let body = crate::calls::body_definition(node)?;
+                ensure!(!allow_iteration_input || !crate::calls::contains_iteration_containers(&body)?, InvalidCallSnafu {
+                    definition_id: node.id.clone(), message: "calls inside Iteration cannot contain Loop or Iteration constructs"
+                });
+                crate::loops::validate_structure(&body)?;
+                return bind_subgraph_node(node, preparation, &body, None, false, Value::Null);
+            }
             match node.kind.as_str() {
                 crate::LOOP_KIND => {
                     let loop_definition = node.loop_definition.as_deref().expect("validated Loop");

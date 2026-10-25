@@ -1513,6 +1513,13 @@ pub fn workflow_input_schema<'a, N: 'a>(
                 port.value_type
                     .check_depth()
                     .context(mf_runtime::WorkflowInputTypeDepthSnafu { path: path.clone() })?;
+                let mut binding = node
+                    .metadata
+                    .input_bindings
+                    .get(port.name.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
+                binding.secret |= node.metadata.secret_inputs.contains(port.name.as_ref());
                 if port.name.is_empty()
                     || ports
                         .insert(
@@ -1520,12 +1527,7 @@ pub fn workflow_input_schema<'a, N: 'a>(
                             WorkflowInput {
                                 value_type: port.value_type.clone(),
                                 required: port.required,
-                                binding: node
-                                    .metadata
-                                    .input_bindings
-                                    .get(port.name.as_ref())
-                                    .cloned()
-                                    .unwrap_or_default(),
+                                binding,
                             },
                         )
                         .is_some()

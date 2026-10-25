@@ -148,7 +148,11 @@ impl WireRecord {
             .clone();
         require(
             !body.contains_key("node")
-                && (!body.contains_key("outcome") || self.event_name == "mf.loop.pass.finished"),
+                && (!body.contains_key("outcome")
+                    || matches!(
+                        self.event_name.as_str(),
+                        "mf.loop.pass.finished" | "mf.call.finished"
+                    )),
             "routing fields belong in attributes",
         )?;
         if self.event_name.starts_with("mf.node.") {
@@ -306,7 +310,10 @@ pub fn validate_event_version(event: &Event, schema_version: i64) -> Result<(), 
         require(
             !matches!(
                 event,
-                Event::LoopPassStarted { .. } | Event::LoopPassFinished { .. }
+                Event::LoopPassStarted { .. }
+                    | Event::LoopPassFinished { .. }
+                    | Event::CallStarted { .. }
+                    | Event::CallFinished { .. }
             ),
             "old event schema cannot contain Loop passes",
         )?;

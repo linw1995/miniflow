@@ -57,6 +57,18 @@ fn decode_scope(
         return Ok(());
     };
     ensure!(
+        version == WorkflowDefinitionVersion::V2026_10_25
+            || (!scope.contains_key("flows")
+                && scope
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .is_none_or(|nodes| nodes.iter().all(|node| node["kind"] != crate::CALL_KIND))),
+        InvalidSnafu {
+            path,
+            message: "nested flows require version 2026-10-25"
+        }
+    );
+    ensure!(
         !scope.contains_key("order_edges"),
         InvalidSnafu {
             path,
@@ -193,6 +205,18 @@ fn encode_scope(
     let Some(scope) = value.as_object_mut() else {
         return Ok(());
     };
+    ensure!(
+        version == WorkflowDefinitionVersion::V2026_10_25
+            || (!scope.contains_key("flows")
+                && scope
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .is_none_or(|nodes| nodes.iter().all(|node| node["kind"] != crate::CALL_KIND))),
+        InvalidSnafu {
+            path,
+            message: "nested flows require version 2026-10-25"
+        }
+    );
     ensure!(
         scope
             .get("clusters")

@@ -1039,7 +1039,7 @@ impl ViewState {
             .path
             .iter()
             .zip(path)
-            .all(|(id, entry)| *id == entry.loop_id)
+            .all(|(id, entry)| *id == entry.node_id())
             || self.path.len() > path.len()
         {
             return;
@@ -1047,7 +1047,7 @@ impl ViewState {
         // Keep the inspected scope; descendants focus their visible enclosing Loop.
         let id = path
             .get(self.path.len())
-            .map_or(&latest.node.id, |entry| &entry.loop_id);
+            .map_or(latest.node.id.as_str(), |entry| entry.node_id());
         if let Some(selected) = layout.display_index_for_node_id(id) {
             if self.selected != selected {
                 self.details_offset = 0;
@@ -1104,7 +1104,7 @@ impl ViewState {
             .filter(|pass| {
                 pass.path
                     .iter()
-                    .map(|entry| &entry.loop_id)
+                    .map(|entry| entry.node_id())
                     .eq(self.path.iter())
             })
             .collect();
@@ -1139,7 +1139,10 @@ impl ViewState {
             }
             KeyCode::Char('l') => {
                 if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
-                    && matches!(node.kind.as_str(), "workflow.loop" | "builtin.iteration")
+                    && matches!(
+                        node.kind.as_str(),
+                        "workflow.loop" | "builtin.iteration" | "workflow.call"
+                    )
                 {
                     let mut child = self.path.clone();
                     child.push(node.id.clone());
@@ -1168,7 +1171,7 @@ impl ViewState {
                     .filter(|pass| {
                         pass.path
                             .iter()
-                            .map(|entry| &entry.loop_id)
+                            .map(|entry| entry.node_id())
                             .eq(self.path.iter())
                     })
                     .count();
@@ -1337,10 +1340,11 @@ fn draw(
             format!("{:?}", view_state.path)
         };
         let pass_label = if static_body { "  |  Static body; item execution in spans".into() } else { pass.map_or(String::new(), |pass| {
-            let index = pass.path.last().map_or(0, |entry| entry.index.get());
+            let index = pass.path.last().map_or(0, |entry| entry.index().get());
+            let scope_label = if pass.path.last().is_some_and(mf_telemetry::event::LoopPathEntry::is_call) { "Call".to_owned() } else { format!("Pass: {index}") };
             match pass.stream_invocation {
-                Some(owner) => format!("  |  Invocation: {owner}  |  Pass: {index}"),
-                None => format!("  |  Pass: {index}"),
+                Some(owner) => format!("  |  Invocation: {owner}  |  {scope_label}"),
+                None => format!("  |  {scope_label}"),
             }
         }) };
         frame.render_widget(Paragraph::new(format!(
@@ -2653,7 +2657,7 @@ mod tests {
             node: mf_telemetry::event::NodeIdentity {
                 id: "target".into(),
                 kind: "fixture.task".into(),
-                path: vec![LoopPathEntry {
+                path: vec![LoopPathEntry::Loop {
                     loop_id: "second".into(),
                     index: Count::ZERO,
                 }],
@@ -2681,7 +2685,10 @@ mod tests {
         assert_eq!(view.state.selected, 0);
         view.state.pass_offset = 0;
         snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(5).unwrap();
-        snapshot.latest_node_event.as_mut().unwrap().node.path[0].loop_id = "first".into();
+        snapshot.latest_node_event.as_mut().unwrap().node.path[0] = LoopPathEntry::Loop {
+            loop_id: "first".into(),
+            index: mf_telemetry::Count::ZERO,
+        };
         view.state.follow_latest(&snapshot, layout);
         assert_eq!(view.state.selected, 0);
     }
@@ -2934,7 +2941,7 @@ mod tests {
             run_id: RunId::new(),
             sequence: Count::try_from(2).unwrap(),
             event: LifecycleKind::LoopPassStarted {
-                path: vec![LoopPathEntry {
+                path: vec![LoopPathEntry::Loop {
                     loop_id: "first".into(),
                     index: Count::ZERO,
                 }],
@@ -3347,7 +3354,7 @@ mod tests {
             (
                 2,
                 LifecycleKind::LoopPassStarted {
-                    path: vec![LoopPathEntry {
+                    path: vec![LoopPathEntry::Loop {
                         loop_id: "repeat".into(),
                         index: Count::ZERO,
                     }],
@@ -3357,7 +3364,7 @@ mod tests {
             (
                 3,
                 LifecycleKind::LoopPassStarted {
-                    path: vec![LoopPathEntry {
+                    path: vec![LoopPathEntry::Loop {
                         loop_id: "repeat".into(),
                         index: count(1),
                     }],
@@ -3389,7 +3396,7 @@ mod tests {
         );
         assert_eq!(view.path, ["repeat"]);
         assert_eq!(view.layout(&root, &bodies).nodes()[0].id, "%loop");
-        assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
+        assert_eq!(view.pass(&snapshot).unwrap().path[0].index().get(), 1);
         view.handle_key(
             KeyCode::Char('['),
             &snapshot,
@@ -3398,7 +3405,7 @@ mod tests {
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
-        assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 0);
+        assert_eq!(view.pass(&snapshot).unwrap().path[0].index().get(), 0);
         assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(10));
         assert_eq!(view.layout(&root, &bodies).nodes(), before_nodes);
         assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
@@ -3411,7 +3418,7 @@ mod tests {
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
-        assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
+        assert_eq!(view.pass(&snapshot).unwrap().path[0].index().get(), 1);
         assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(11));
         assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
         view.handle_key(

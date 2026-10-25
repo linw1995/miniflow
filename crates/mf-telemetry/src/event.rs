@@ -38,10 +38,33 @@ pub struct NodeIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct LoopPathEntry {
-    pub loop_id: String,
-    pub index: Count,
+#[serde(untagged, deny_unknown_fields)]
+pub enum ScopePathEntry {
+    Loop { loop_id: String, index: Count },
+    Call { call_id: String },
 }
+
+impl ScopePathEntry {
+    pub fn node_id(&self) -> &str {
+        match self {
+            Self::Loop { loop_id, .. } => loop_id,
+            Self::Call { call_id } => call_id,
+        }
+    }
+
+    pub fn index(&self) -> Count {
+        match self {
+            Self::Loop { index, .. } => *index,
+            Self::Call { .. } => Count::ZERO,
+        }
+    }
+
+    pub fn is_call(&self) -> bool {
+        matches!(self, Self::Call { .. })
+    }
+}
+
+pub type LoopPathEntry = ScopePathEntry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -180,6 +203,18 @@ pub enum Event {
         visited_node_count: Count,
         outcome: LoopPassOutcome,
     },
+    #[serde(rename = "mf.call.started")]
+    CallStarted {
+        path: Vec<LoopPathEntry>,
+        elapsed_ns: Count,
+    },
+    #[serde(rename = "mf.call.finished")]
+    CallFinished {
+        path: Vec<LoopPathEntry>,
+        elapsed_ns: Count,
+        visited_node_count: Count,
+        outcome: LoopPassOutcome,
+    },
     #[serde(rename = "mf.workflow.finished")]
     WorkflowFinished {
         final_sequence: Count,
@@ -205,6 +240,8 @@ impl Event {
             Self::LoopPassStarted { .. } => "mf.loop.pass.started",
             Self::LoopPassFinished { .. } => "mf.loop.pass.finished",
             Self::WorkflowFinished { .. } => "mf.workflow.finished",
+            Self::CallStarted { .. } => "mf.call.started",
+            Self::CallFinished { .. } => "mf.call.finished",
         }
     }
 
@@ -366,9 +403,25 @@ impl Event {
                     }
                 }
             }
+            Self::CallStarted { path, .. } | Self::CallFinished { path, .. } => {
+                validate_path(path)?;
+                require(
+                    path.last().is_some_and(LoopPathEntry::is_call),
+                    "call scope requires a call path entry",
+                )?;
+                if let Self::CallFinished { outcome, .. } = self {
+                    require(
+                        *outcome != LoopPassOutcome::Exit,
+                        "a call cannot exit a Loop",
+                    )?;
+                }
+            }
             Self::LoopPassStarted { path, .. } => {
                 validate_path(path)?;
-                require(!path.is_empty(), "Loop pass requires a path")?;
+                require(
+                    path.last().is_some_and(|entry| !entry.is_call()),
+                    "Loop pass requires a Loop path entry",
+                )?;
             }
             Self::LoopPassFinished {
                 path,
@@ -376,7 +429,10 @@ impl Event {
                 ..
             } => {
                 validate_path(path)?;
-                require(!path.is_empty(), "Loop pass requires a path")?;
+                require(
+                    path.last().is_some_and(|entry| !entry.is_call()),
+                    "Loop pass requires a Loop path entry",
+                )?;
                 maximum_event_count(*visited_node_count)?;
             }
             Self::NodeStarted { .. } => {}
@@ -387,13 +443,13 @@ impl Event {
 
 fn validate_path(path: &[LoopPathEntry]) -> Result<(), ContractError> {
     require(
-        path.len() <= crate::MAX_LOOP_DEPTH,
+        path.len() <= crate::MAX_SCOPE_DEPTH,
         "Loop path exceeds nesting limit",
     )?;
     for entry in path {
         require(
-            !entry.loop_id.trim().is_empty()
-                && entry.index.get() < i64::from(crate::MAX_LOOP_ITERATIONS),
+            !entry.node_id().trim().is_empty()
+                && entry.index().get() < i64::from(crate::MAX_LOOP_ITERATIONS),
             "invalid Loop path entry",
         )?;
     }
@@ -485,6 +541,7 @@ impl LifecycleEvent {
             "sequence exceeds graph event bound",
         )?;
         if let Some((identity, position)) = self.event.node() {
+            graph.validate_scope_path(&identity.path)?;
             require(
                 loop_schema || identity.path.is_empty(),
                 "old event has a Loop path",
@@ -492,7 +549,7 @@ impl LifecycleEvent {
             let static_path: Vec<_> = identity
                 .path
                 .iter()
-                .map(|entry| entry.loop_id.clone())
+                .map(|entry| entry.node_id().to_owned())
                 .collect();
             let (nodes, data_edges, control_edges, order_edges, order) = if static_path.is_empty() {
                 (
@@ -569,13 +626,23 @@ impl LifecycleEvent {
             Event::WorkflowStarted { node_count, .. } => {
                 require(*node_count == count, "node count mismatch")?
             }
-            Event::LoopPassStarted { path, .. } | Event::LoopPassFinished { path, .. } => {
+            Event::LoopPassStarted { path, .. }
+            | Event::LoopPassFinished { path, .. }
+            | Event::CallStarted { path, .. }
+            | Event::CallFinished { path, .. } => {
+                graph.validate_scope_path(path)?;
                 require(loop_schema, "old event schema cannot contain Loop passes")?;
-                let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+                let static_path: Vec<_> = path
+                    .iter()
+                    .map(|entry| entry.node_id().to_owned())
+                    .collect();
                 let body = graph
                     .loop_body(&static_path)
                     .ok_or_else(|| crate::invalid("unknown Loop pass path"))?;
                 if let Event::LoopPassFinished {
+                    visited_node_count, ..
+                }
+                | Event::CallFinished {
                     visited_node_count, ..
                 } = &self.event
                 {

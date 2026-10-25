@@ -822,6 +822,9 @@ pub struct NodeMetadata {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclusive_outputs: Vec<String>,
     pub input_bindings: std::collections::BTreeMap<String, crate::InputBinding>,
+    /// Marks boundary inputs before validation, observation, or nested execution.
+    #[serde(skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub secret_inputs: std::collections::BTreeSet<String>,
     pub output_derivations: Vec<OutputDerivation>,
     pub context_references: Vec<ContextReference>,
     pub stdin: Option<crate::StdinRequirement>,

@@ -83,6 +83,12 @@ and isolated task contract; preparation must never read the environment. Runtime
 resolves sources and marks secret values before input observation. Ordinary nodes without
 bindings keep their existing argument behavior. See [`builtin.parameters`](workflows.md#parameters).
 
+`NodeMetadata.secret_inputs` marks declared input ports before dependency/type failure snapshots and
+invocation observation. This sensitivity-only policy is valid at ordinary node boundaries and does not
+resolve environment values or defaults. `workflow.call` derives it from the child input schema so a
+child's secret contract also protects the outer call. Inputs with this policy retain dynamic conversion
+when typed connection optimization would bypass marking.
+
 ## Instance metadata
 
 Ports reflect the node's actual input and output contracts before execution. Fixed interfaces use

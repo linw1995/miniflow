@@ -787,3 +787,17 @@ group members in Details. Exclusive connections use magenta and an `exclusive` l
 Iteration body logs carry the same identities in `mf.input.selections`. Values and secrets are
 not copied into these records. Selection belongs to the consumer's frame or body invocation.
 An unselected candidate is not a skip cause when another candidate successfully binds the input.
+
+## Nested Flow calls
+
+Description version `2026-10-25` includes `workflow.call` bodies alongside Loop and Iteration bodies.
+Call invocation paths use `{"call_id":"title"}` entries; Loop entries retain their existing
+`loop_id` and `index` shape. `mf.call.started` and `mf.call.finished` bound a terminal child invocation,
+and child node lifecycle events retain that call path. A call completion reports its direct visited
+node count, while nested calls continue charging the caller budget. Existing Iteration item budget policy is
+preserved. Calls do not emit Loop passes
+or Loop summaries. Stream observations retain the parent message and invocation identity.
+
+TUI body navigation opens call graphs and shows their node outcomes. Snapshot scope paths distinguish
+repeated call occurrences and nested calls without exposing secret values. Calls inside Iteration items
+use nested `mf.call.node.*` spans and logs carrying `mf.scope.path`, alongside the containing item.

@@ -2,7 +2,7 @@
 
 ## JSON format
 
-Use version `2026-10-23` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+Use version `2026-10-25` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
 `outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
 display-only [node clusters](#node-clusters).
@@ -34,6 +34,68 @@ Input names must match the provider's ports. Duplicate keys, unknown fields, nul
 fail. A connected optional input still skips its consumer when its source skips. Unbound inputs keep their existing
 required, optional, and startup parameter rules. Loop and Iteration bodies use the root version and the same binding
 syntax within their existing scope and message-domain restrictions.
+
+## Reusable Flows
+
+Version `2026-10-25` adds `workflow.call`, a terminal node supplied by `mfn-core`. Declare reusable
+sources in `flows`; Cargo node packages remain in `dependencies`:
+
+```json
+{
+  "flows": {
+    "normalize": { "path": "./flows/normalize.json" },
+    "title": { "builtin": "chat-title" }
+  },
+  "nodes": [
+    {
+      "id": "normalize",
+      "kind": "workflow.call",
+      "config": { "flow": "normalize" },
+      "inputs": {
+        "input.text": { "from": { "node": "read", "port": "text" } }
+      }
+    }
+  ]
+}
+```
+
+The snippet omits the surrounding graph. Each source accepts exactly one `path` or `builtin`.
+Paths resolve relative to their owning canonical definition file. Sources can call other sources;
+recursive references and more than sixteen nested calls fail. The combined Call/Loop/Iteration
+container depth is bounded at twenty. The compiler freezes resolved bodies in the executable; running,
+inspecting, and isolating a compiled call do not require the original JSON files.
+
+A call exposes the child startup interface using qualified port names such as `input.text`, and
+exposes its selected outputs using `outputs.name`. These names form the reusable Flow's public
+contract. Input and output types are checked during preparation. Explicit call inputs override child
+environment bindings and defaults. A connected skipped producer skips the call, even when that input
+has a default. Child optional outputs retain normal skipped-port semantics. Shared values and secret
+markers cross the boundary without JSON conversion. Configuration references stay local to each graph.
+
+Calls have isolated input bindings, outputs, and Loop state. They share cancellation, bounded workers,
+future driving, and the caller's remaining step budget. Provider failures retain their typed error
+chains with call context. Children cannot consume stdin or expose stream ports in this version;
+terminal LLM calls are supported, and a parent may independently stream its answer. Calls inside an
+Iteration body retain its task-only restriction and cannot hide another Loop or Iteration.
+
+All referenced providers join the root dependency build and adjacent lock. Each child's provider paths
+resolve against its own file. Compatible declarations of the same package combine features and default
+features; different source declarations fail explicitly. Built-ins use matching caller-selected provider
+packages when available and otherwise select the compiler's exact release version. In a development
+checkout, declare the built-in's local providers explicitly, as in the nested title example.
+
+The built-in `chat-title` Flow takes `input.prompt`, `input.text`, `input.status`, `input.context`,
+`input.model`, `input.base_url`, and `input.api_key`. It checks the title policy in `context.title`,
+captures provider failures, and returns optional `title` and required `usages`. An ineligible call
+returns no title and an empty usage list; a failed provider attempt retains its usage without a title.
+The [nested chat example](../examples/chat-nested-title-flow.json) combines the returned usage with the
+conversation call and streams only the primary answer. The older flat title example remains available
+for inspecting the equivalent composition.
+
+Rust callers loading local references use `mf_compiler::load_workflow(path)?.definition` or
+`resolve_flows(&definition, Some(directory))?.definition` before preparing the graph. Definitions with
+only built-in references can also use the existing planning and compilation entry points directly.
+`embed_workflows` resolves sources and emits Cargo rebuild dependencies for every referenced file.
 
 ## Node clusters
 

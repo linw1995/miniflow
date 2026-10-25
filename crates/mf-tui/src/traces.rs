@@ -691,11 +691,15 @@ fn data_preview(
         let metadata = &snapshot.metadata[index];
         text.push_str(&format!("{}\n", data_row(entry, metadata)));
         for scope in &entry.scope {
-            text.push_str(&format!(
-                "Scope: {}[{}]\n",
-                label(&scope.loop_id),
-                scope.index.get()
-            ));
+            if scope.is_call() {
+                text.push_str(&format!("Call: {}\n", label(scope.node_id())));
+            } else {
+                text.push_str(&format!(
+                    "Scope: {}[{}]\n",
+                    label(scope.node_id()),
+                    scope.index().get()
+                ));
+            }
         }
         if let Some((trace, span)) = &metadata.correlation {
             text.push_str(&format!("Trace={} span={}\n", hex(trace), hex(span)));
@@ -1429,7 +1433,7 @@ mod tests {
         let recording = crate::snapshots::TestHistory::memory();
         for value in [42, 73, 99] {
             recording.record(
-                vec![mf_telemetry::event::LoopPathEntry {
+                vec![mf_telemetry::event::LoopPathEntry::Loop {
                     loop_id: "repeat".into(),
                     index: 2_i64.try_into().unwrap(),
                 }],

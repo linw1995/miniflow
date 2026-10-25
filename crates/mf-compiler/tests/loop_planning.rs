@@ -632,18 +632,18 @@ fn loop_observation_identifies_each_pass_and_body_invocation() {
         event.validate_for(&description).unwrap();
         match event.event {
             Event::LoopPassStarted { path, .. } => {
-                assert_eq!(path.last().unwrap().loop_id, "repeat");
+                assert_eq!(path.last().unwrap().node_id(), "repeat");
                 pass_starts += 1;
             }
             Event::LoopPassFinished { path, outcome, .. } => {
-                assert_eq!(path.last().unwrap().loop_id, "repeat");
+                assert_eq!(path.last().unwrap().node_id(), "repeat");
                 assert_eq!(outcome, LoopPassOutcome::Completed);
                 pass_finishes += 1;
             }
             Event::NodeFinished {
                 node, loop_summary, ..
             } if node.id == "increment" => {
-                increments.push(node.path.last().unwrap().index.get());
+                increments.push(node.path.last().unwrap().index().get());
                 assert!(loop_summary.is_none());
             }
             Event::NodeFinished {
@@ -800,7 +800,7 @@ fn snapshots_preserve_inputs_and_outputs_from_all_loop_passes() {
     );
     let root = recorder.current();
     for index in 0..3 {
-        let path = vec![mf_telemetry::event::LoopPathEntry {
+        let path = vec![mf_telemetry::event::LoopPathEntry::Loop {
             loop_id: "repeat".into(),
             index: mf_telemetry::Count::try_from(index).unwrap(),
         }];

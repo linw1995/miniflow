@@ -21,6 +21,8 @@ pub enum WorkflowDescriptionVersion {
     V2026_10_19,
     #[serde(rename = "2026-10-23")]
     V2026_10_23,
+    #[serde(rename = "2026-10-25")]
+    V2026_10_25,
 }
 
 impl WorkflowDescriptionVersion {
@@ -32,15 +34,21 @@ impl WorkflowDescriptionVersion {
     }
 
     pub fn supports_iteration_bodies(self) -> bool {
-        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+        matches!(
+            self,
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
+        )
     }
 
     pub fn supports_clusters(self) -> bool {
-        self == Self::V2026_10_23
+        matches!(self, Self::V2026_10_23 | Self::V2026_10_25)
     }
 
     pub fn uses_node_success_edges(self) -> bool {
-        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+        matches!(
+            self,
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
+        )
     }
 }
 
@@ -199,9 +207,43 @@ impl WorkflowDescription {
         self.loop_bodies.iter().find(|body| body.path == path)
     }
 
-    /// Lifecycle paths contain Loop scopes only; Iteration items use separate detail spans.
+    pub fn validate_scope_path(
+        &self,
+        path: &[crate::event::ScopePathEntry],
+    ) -> Result<(), ContractError> {
+        let mut parent = &self.nodes;
+        let mut static_path = Vec::new();
+        for entry in path {
+            let container = parent
+                .iter()
+                .find(|node| node.id == entry.node_id())
+                .ok_or_else(|| crate::invalid("unknown scope container"))?;
+            require(
+                if entry.is_call() {
+                    self.version == WorkflowDescriptionVersion::V2026_10_25
+                        && container.kind == "workflow.call"
+                } else {
+                    container.kind == "workflow.loop"
+                },
+                "scope path kind disagrees with its container",
+            )?;
+            static_path.push(entry.node_id().to_owned());
+            parent = &self
+                .body(&static_path)
+                .ok_or_else(|| crate::invalid("unknown scope body"))?
+                .nodes;
+        }
+        Ok(())
+    }
+
+    /// Lifecycle paths contain Loop and Call scopes; Iteration items use separate detail spans.
     pub fn loop_body(&self, path: &[String]) -> Option<&LoopBodyDescription> {
-        if path.len() > crate::MAX_LOOP_DEPTH {
+        let maximum = if self.version == WorkflowDescriptionVersion::V2026_10_25 {
+            crate::MAX_SCOPE_DEPTH
+        } else {
+            crate::MAX_LOOP_DEPTH
+        };
+        if path.len() > maximum {
             return None;
         }
         let (id, parent) = path.split_last()?;
@@ -212,7 +254,12 @@ impl WorkflowDescription {
         };
         nodes
             .iter()
-            .any(|node| node.id == *id && node.kind == "workflow.loop")
+            .any(|node| {
+                node.id == *id
+                    && (node.kind == "workflow.loop"
+                        || (self.version == WorkflowDescriptionVersion::V2026_10_25
+                            && node.kind == "workflow.call"))
+            })
             .then(|| self.body(path))
             .flatten()
     }
@@ -232,6 +279,7 @@ impl WorkflowDescription {
             WorkflowDescriptionVersion::V2026_10_03
                 | WorkflowDescriptionVersion::V2026_10_19
                 | WorkflowDescriptionVersion::V2026_10_23
+                | WorkflowDescriptionVersion::V2026_10_25
         ) {
             require(
                 self.execution.is_some(),
@@ -337,7 +385,13 @@ impl WorkflowDescription {
         bodies.sort_by_key(|body| body.path.len());
         for body in bodies {
             require(
-                !body.path.is_empty() && body.path.len() <= crate::MAX_LOOP_DEPTH,
+                !body.path.is_empty()
+                    && body.path.len()
+                        <= if self.version == WorkflowDescriptionVersion::V2026_10_25 {
+                            crate::MAX_SCOPE_DEPTH
+                        } else {
+                            crate::MAX_LOOP_DEPTH
+                        },
                 "invalid Loop body path",
             )?;
             let (loop_id, parent_path) = body.path.split_last().expect("path is nonempty");
@@ -350,12 +404,14 @@ impl WorkflowDescription {
                 .ok_or_else(|| crate::invalid("unknown body container"))?;
             let iteration =
                 self.version.supports_iteration_bodies() && container.kind == "builtin.iteration";
+            let call = self.version == WorkflowDescriptionVersion::V2026_10_25
+                && container.kind == "workflow.call";
             require(
-                container.kind == "workflow.loop" || iteration,
+                container.kind == "workflow.loop" || iteration || call,
                 "body path does not name a supported container",
             )?;
             require(
-                body.nodes.iter().any(|node| {
+                call || body.nodes.iter().any(|node| {
                     if iteration {
                         node.id == "%iteration" && node.kind == "builtin.iteration_input"
                     } else {

@@ -47,6 +47,7 @@ pub struct WorkflowDefinition {
     pub version: WorkflowDefinitionVersion,
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
+    pub flows: BTreeMap<String, FlowSource>,
     pub nodes: Vec<NodeDefinition>,
     pub edges: Vec<EdgeDefinition>,
     pub control_edges: Vec<ControlEdgeDefinition>,
@@ -69,6 +70,8 @@ struct DefinitionFields {
     pub execution: Option<crate::StreamExecution>,
     #[serde(deserialize_with = "deserialize_dependencies")]
     pub dependencies: BTreeMap<String, NodeDependency>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub flows: BTreeMap<String, FlowSource>,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -117,25 +120,48 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_19,
     #[serde(rename = "2026-10-23")]
     V2026_10_23,
+    #[serde(rename = "2026-10-25")]
+    V2026_10_25,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_23;
+    pub const CURRENT: Self = Self::V2026_10_25;
 
     pub fn supports_startup_inputs(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_03 | Self::V2026_10_19 | Self::V2026_10_23
+            Self::V2026_10_03 | Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
         )
     }
 
     pub fn supports_node_success_edges(self) -> bool {
-        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+        matches!(
+            self,
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
+        )
     }
 
     pub fn supports_clusters(self) -> bool {
-        self == Self::V2026_10_23
+        matches!(self, Self::V2026_10_23 | Self::V2026_10_25)
     }
+}
+
+pub const CALL_KIND: &str = "workflow.call";
+pub const MAX_CALL_DEPTH: usize = 16;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum FlowSource {
+    Path { path: PathBuf },
+    Builtin { builtin: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallConfig {
+    pub flow: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<Box<WorkflowDefinition>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

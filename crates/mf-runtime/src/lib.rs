@@ -42,13 +42,13 @@ pub use context::{
     execute_resolved_node_in_context, select_context_output,
 };
 pub use definition::{
-    ClusterDefinition, ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND,
-    EdgeDefinition, ExclusiveInputError, InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND,
-    LOOP_SOURCE_ID, LoopBodyDefinition, LoopComparisonOperator, LoopConditionDefinition,
-    LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS,
-    MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency, OrderEdgeDefinition,
-    OutputReferenceDefinition, WorkflowDefinition, WorkflowDefinitionVersion,
-    WorkflowOutputDefinition, validate_exclusive_inputs,
+    CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
+    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, FlowSource,
+    InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
+    LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
+    MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
+    NodeDependency, OrderEdgeDefinition, OutputReferenceDefinition, WorkflowDefinition,
+    WorkflowDefinitionVersion, WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{ExecutionInputs, InputResolution, resolve_workflow_inputs};
@@ -69,7 +69,7 @@ pub use loop_node::{
     prepared_scope_source,
 };
 pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
-pub use mf_telemetry::event::{NodeIdentity, SkipCause};
+pub use mf_telemetry::event::{NodeIdentity, ScopePathEntry, SkipCause};
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{

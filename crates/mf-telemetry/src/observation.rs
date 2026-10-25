@@ -364,7 +364,10 @@ impl RunObservation {
         if path.is_empty() {
             self.nodes.get(id)?;
         } else {
-            let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+            let static_path: Vec<_> = path
+                .iter()
+                .map(|entry| entry.node_id().to_owned())
+                .collect();
             self.description
                 .as_ref()?
                 .loop_body(&static_path)?
@@ -448,7 +451,10 @@ impl RunObservation {
             return None;
         }
         let description = self.description.as_ref()?;
-        let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+        let static_path: Vec<_> = path
+            .iter()
+            .map(|entry| entry.node_id().to_owned())
+            .collect();
         let body = description.loop_body(&static_path)?;
         let position = body.execution_order.iter().position(|node| node == id)?;
         let kind = body.nodes.iter().find(|node| node.id == id)?.kind.clone();
@@ -614,6 +620,37 @@ impl RunObservation {
             .and_then(|node_id| self.node_failures.lock().unwrap().get(node_id).cloned())
             .unwrap_or(Failure { phase, message });
         *self.failure.lock().unwrap() = Some((node_id, failure));
+    }
+
+    pub fn call_started(&mut self, path: Vec<LoopPathEntry>) {
+        self.record(
+            Event::CallStarted {
+                path,
+                elapsed_ns: self.elapsed(),
+            },
+            Some(&Context::current()),
+        );
+    }
+
+    pub fn call_finished(
+        &mut self,
+        path: Vec<LoopPathEntry>,
+        visited_node_count: Count,
+        failed: bool,
+    ) {
+        self.record(
+            Event::CallFinished {
+                path,
+                elapsed_ns: self.elapsed(),
+                visited_node_count,
+                outcome: if failed {
+                    LoopPassOutcome::Failed
+                } else {
+                    LoopPassOutcome::Completed
+                },
+            },
+            Some(&Context::current()),
+        );
     }
 
     pub fn loop_pass_started(&mut self, path: Vec<LoopPathEntry>) {
@@ -958,12 +995,39 @@ impl fmt::Debug for BodyObservation {
 }
 
 impl BodyObservation {
+    pub fn for_call(&self, id: &str, nodes: &[NodeIdentity]) -> Self {
+        let mut child = self.clone();
+        let mut path = self
+            .body_nodes
+            .values()
+            .next()
+            .map(|node| node.path.clone())
+            .unwrap_or_default();
+        path.push(LoopPathEntry::Call { call_id: id.into() });
+        child.context = Context::current();
+        child.body_nodes = Arc::new(
+            nodes
+                .iter()
+                .cloned()
+                .map(|mut node| {
+                    node.path = path.clone();
+                    (node.id.clone(), node)
+                })
+                .collect(),
+        );
+        child
+    }
+
     pub fn begin_node(&self, id: &str) -> Option<BodyNodeObservation> {
         let node = self.body_nodes.get(id)?.clone();
         let span = self
             .backend
             .tracer
-            .span_builder("mf.iteration.node")
+            .span_builder(if node.path.is_empty() {
+                "mf.iteration.node"
+            } else {
+                "mf.call.node"
+            })
             .with_attributes([
                 KeyValue::new("mf.workflow.id", self.workflow_id.to_string()),
                 KeyValue::new("mf.run.id", self.run_id.to_string()),
@@ -1107,12 +1171,32 @@ impl BodyNodeObservation {
     }
 
     fn emit(&self, name: &'static str, attributes: Vec<(String, AnyValue)>) {
+        let name = if self.node.path.is_empty() {
+            name
+        } else {
+            match name {
+                "mf.iteration.node.started" => "mf.call.node.started",
+                "mf.iteration.node.finished" => "mf.call.node.finished",
+                "mf.iteration.node.skipped" => "mf.call.node.skipped",
+                _ => name,
+            }
+        };
         let mut common = nested_attributes(
             &self.workflow_id,
             self.run_id,
             &self.iteration_id,
             self.index,
         );
+        if !self.node.path.is_empty() {
+            common.push((
+                "mf.scope.path".into(),
+                AnyValue::String(
+                    serde_json::to_string(&self.node.path)
+                        .expect("scope identities serialize")
+                        .into(),
+                ),
+            ));
+        }
         common.push((
             "mf.node.id".into(),
             AnyValue::String(self.node.id.clone().into()),

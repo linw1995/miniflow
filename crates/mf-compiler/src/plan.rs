@@ -179,7 +179,7 @@ impl CompiledWorkflow {
                 clusters: Vec::new(),
             };
             if original.version.supports_clusters() {
-                description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23;
+                description.version = original.version;
                 description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
             } else if description.loop_bodies.iter().any(|body| !body.order_edges.is_empty() || body.nodes.iter().any(|node| node.id == mf_runtime::ITERATION_INPUT_ID)) {
                 description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_19;
@@ -598,6 +598,7 @@ fn generate_stream_artifacts(
 enum ScopeBuild<'a> {
     PreparationOnly,
     Dynamic,
+    Call,
     Typed(&'a BTreeMap<DefinitionId, (TokenStream, LitStr)>),
 }
 
@@ -636,7 +637,10 @@ fn generate_scope(
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         let bindings = dependency_tokens(dependencies);
-        if matches!(node.kind.as_str(), crate::LOOP_KIND | ITERATION_KIND) {
+        if matches!(
+            node.kind.as_str(),
+            crate::LOOP_KIND | ITERATION_KIND | mf_runtime::CALL_KIND
+        ) {
             preparations.push(subgraph_preparation(
                 definition,
                 node,
@@ -759,7 +763,8 @@ fn generate_scope(
     if !matches!(build, ScopeBuild::PreparationOnly) {
         let nodes = node_idents.iter();
         let plan_ident = format_ident!("FLOW_PLAN_{}", scope.to_uppercase());
-        let bind_inputs = scope == "root" && definition.version.supports_startup_inputs();
+        let bind_inputs = (scope == "root" || matches!(build, ScopeBuild::Call))
+            && definition.version.supports_startup_inputs();
         let initial = initial_nodes(definition, order);
         let flow_binding = if bind_inputs {
             quote! { let mut #flow_ident = mf_runtime::Flow::from_plan(
@@ -840,6 +845,14 @@ fn subgraph_preparation(
             Some(definition),
             None,
         )
+    } else if node.kind == mf_runtime::CALL_KIND {
+        body_static_scope.push(node.id.to_string());
+        (
+            crate::calls::body_definition(node)?,
+            serde_json::Value::Null,
+            None,
+            None,
+        )
     } else {
         let invalid = |message| PlanError::Iteration {
             definition_id: node.id.clone(),
@@ -860,6 +873,10 @@ fn subgraph_preparation(
         order.context(crate::compiler::LoopBodySnafu {
             path: format!("{:?}", node.id),
         })?
+    } else if node.kind == mf_runtime::CALL_KIND {
+        order.context(crate::compiler::CallBodySnafu {
+            definition_id: node.id.clone(),
+        })?
     } else {
         order.context(crate::compiler::IterationBodySnafu {
             definition_id: node.id.clone(),
@@ -873,7 +890,11 @@ fn subgraph_preparation(
         &body_static_scope,
         enclosing,
         preparation_error.as_ref(),
-        ScopeBuild::Dynamic,
+        if node.kind == mf_runtime::CALL_KIND {
+            ScopeBuild::Call
+        } else {
+            ScopeBuild::Dynamic
+        },
     )?;
     let nodes = body.nodes.iter()
         .filter(|node| node.kind != ITERATION_INPUT_KIND && node.kind != crate::LOOP_SOURCE_ID)
@@ -934,6 +955,7 @@ fn subgraph_preparation(
             #(#preparations)*
             Ok(#body_flow)
         })().context(mf_compiler::WorkflowSubgraphSnafu { definition_id: #outer_id })?;
+        let input_schema = #body_flow.input_schema().clone();
         let #body_ident = mf_runtime::PreparedSubgraph::new(
             vec![#(#nodes),*], vec![#(#outputs),*],
             move |state| {
@@ -941,6 +963,7 @@ fn subgraph_preparation(
                 #(#execution)*
             },
         );
+        let #body_ident = #body_ident.with_input_schema(input_schema);
         let mut #node_ident = mf_compiler::instantiate_subgraph_with_metadata(
             registry, #outer_id, #kind, #config, #options, #body_ident,
         )
@@ -1534,6 +1557,8 @@ fn collect_body_layouts(
                 &definition.dependencies,
                 definition.version,
             )
+        } else if node.kind == mf_runtime::CALL_KIND {
+            crate::calls::body_definition(node)?
         } else if node.kind == ITERATION_KIND {
             let invalid = |message| {
                 IterationSnafu {

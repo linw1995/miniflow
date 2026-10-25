@@ -7,7 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow = std::env::args_os()
         .nth(2)
         .ok_or("provide a conversation workflow JSON path")?;
-    let definition = serde_json::from_str(&std::fs::read_to_string(workflow)?)?;
+    let definition = mf_compiler::load_workflow(std::path::Path::new(&workflow))?.definition;
     let profile = mf_chat::WorkflowProfile::new("default", definition, Default::default())?;
     let host = ChatHost::open(path, HostConfig::new(profile))?;
     let session = host

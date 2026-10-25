@@ -116,7 +116,7 @@ fn late_pass_start_updates_recent_history_without_changing_older_snapshots() {
             .apply(event(
                 index * 3 + 3,
                 Event::LoopPassFinished {
-                    path: vec![LoopPathEntry {
+                    path: vec![LoopPathEntry::Loop {
                         loop_id: "repeat".into(),
                         index: count(index),
                     }],
@@ -128,13 +128,19 @@ fn late_pass_start_updates_recent_history_without_changing_older_snapshots() {
             .unwrap();
     }
     let previous = state.snapshot_shared();
-    assert_eq!(previous.loop_passes.first().unwrap().path[0].index.get(), 6);
-    assert_eq!(previous.loop_passes.last().unwrap().path[0].index.get(), 69);
+    assert_eq!(
+        previous.loop_passes.first().unwrap().path[0].index().get(),
+        6
+    );
+    assert_eq!(
+        previous.loop_passes.last().unwrap().path[0].index().get(),
+        69
+    );
     state
         .apply(event(
             2,
             Event::LoopPassStarted {
-                path: vec![LoopPathEntry {
+                path: vec![LoopPathEntry::Loop {
                     loop_id: "repeat".into(),
                     index: count(69),
                 }],
@@ -143,11 +149,20 @@ fn late_pass_start_updates_recent_history_without_changing_older_snapshots() {
         ))
         .unwrap();
     let current = state.snapshot_shared();
-    assert_eq!(current.loop_passes.first().unwrap().path[0].index.get(), 5);
-    assert_eq!(current.loop_passes.last().unwrap().path[0].index.get(), 68);
+    assert_eq!(
+        current.loop_passes.first().unwrap().path[0].index().get(),
+        5
+    );
+    assert_eq!(
+        current.loop_passes.last().unwrap().path[0].index().get(),
+        68
+    );
     assert_eq!(current.total_loop_passes, 70);
     assert_eq!(current.hidden_loop_passes, 6);
-    assert_eq!(previous.loop_passes.last().unwrap().path[0].index.get(), 69);
+    assert_eq!(
+        previous.loop_passes.last().unwrap().path[0].index().get(),
+        69
+    );
 }
 
 fn count(value: i64) -> Count {
@@ -263,6 +278,113 @@ fn state() -> SessionState {
     SessionState::new(graph(), run_id()).unwrap()
 }
 
+#[test]
+fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
+    let mut description = graph();
+    description.version = WorkflowDescriptionVersion::V2026_10_25;
+    description.execution = Some(mf_telemetry::description::ExecutionDescription {
+        mode: mf_telemetry::description::ExecutionMode::Single,
+    });
+    description.loop_bodies = vec![LoopBodyDescription {
+        path: vec!["call".into()],
+        nodes: description.nodes.clone(),
+        data_edges: description.data_edges.clone(),
+        control_edges: vec![],
+        order_edges: vec![],
+        execution_order: description.execution_order.clone(),
+        clusters: vec![],
+    }];
+    description.nodes = vec![NodeDescription {
+        id: "call".into(),
+        kind: "workflow.call".into(),
+    }];
+    description.execution_order = vec!["call".into()];
+    description.data_edges.clear();
+    let mut state = SessionState::new(description.clone(), run_id()).unwrap();
+    let path = vec![LoopPathEntry::Call {
+        call_id: "call".into(),
+    }];
+    let mut events = vec![
+        event(
+            1,
+            Event::WorkflowStarted {
+                node_count: count(3),
+                elapsed_ns: count(0),
+            },
+        ),
+        node_start(2, "call", "workflow.call", 0),
+        event(
+            3,
+            Event::CallStarted {
+                path: path.clone(),
+                elapsed_ns: count(10),
+            },
+        ),
+    ];
+    for mut child in [
+        node_start(4, "a", "fixture.source", 0),
+        node_success(5, "a", "fixture.source", 0),
+        node_start(6, "b", "fixture.sink", 1),
+        node_success(7, "b", "fixture.sink", 1),
+    ] {
+        match &mut child.event {
+            Event::NodeStarted { node, .. } | Event::NodeFinished { node, .. } => {
+                node.path = path.clone()
+            }
+            _ => unreachable!(),
+        }
+        events.push(child);
+    }
+    events.extend([
+        event(
+            8,
+            Event::CallFinished {
+                path: path.clone(),
+                elapsed_ns: count(80),
+                visited_node_count: count(2),
+                outcome: LoopPassOutcome::Completed,
+            },
+        ),
+        node_success(9, "call", "workflow.call", 0),
+        event(
+            10,
+            Event::WorkflowFinished {
+                final_sequence: count(10),
+                elapsed_ns: count(100),
+                visited_node_count: count(3),
+                top_level_visited_count: Some(count(1)),
+                outcome: Outcome::Succeeded,
+                failure: None,
+                failure_node_id: None,
+            },
+        ),
+    ]);
+    events.swap(3, 4);
+    for event in events {
+        assert_eq!(state.apply(event).unwrap(), Admission::Applied);
+    }
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
+    assert_eq!(snapshot.loop_passes[0].path, path);
+    assert!(
+        snapshot.loop_passes[0]
+            .nodes
+            .iter()
+            .all(|node| node.status == NodeStatus::Succeeded)
+    );
+    let forged = event(
+        11,
+        Event::CallStarted {
+            path: vec![LoopPathEntry::Loop {
+                loop_id: "call".into(),
+                index: count(0),
+            }],
+            elapsed_ns: count(100),
+        },
+    );
+    assert!(forged.validate_for(&description).is_err());
+}
+
 fn loop_graph() -> WorkflowDescription {
     WorkflowDescription {
         order_edges: Vec::new(),
@@ -305,7 +427,7 @@ fn loop_graph() -> WorkflowDescription {
 }
 
 fn complete_loop_events() -> Vec<LifecycleEvent> {
-    let path = vec![LoopPathEntry {
+    let path = vec![LoopPathEntry::Loop {
         loop_id: "repeat".into(),
         index: count(0),
     }];
@@ -462,7 +584,7 @@ fn loop_passes_keep_independent_node_outcomes_and_bounded_history() {
             .apply(event(
                 index + 2,
                 Event::LoopPassStarted {
-                    path: vec![LoopPathEntry {
+                    path: vec![LoopPathEntry::Loop {
                         loop_id: "repeat".into(),
                         index: count(index),
                     }],
@@ -475,8 +597,14 @@ fn loop_passes_keep_independent_node_outcomes_and_bounded_history() {
     assert_eq!(snapshot.total_loop_passes, 70);
     assert_eq!(snapshot.loop_passes.len(), 64);
     assert_eq!(snapshot.hidden_loop_passes, 6);
-    assert_eq!(snapshot.loop_passes.first().unwrap().path[0].index.get(), 6);
-    assert_eq!(snapshot.loop_passes.last().unwrap().path[0].index.get(), 69);
+    assert_eq!(
+        snapshot.loop_passes.first().unwrap().path[0].index().get(),
+        6
+    );
+    assert_eq!(
+        snapshot.loop_passes.last().unwrap().path[0].index().get(),
+        69
+    );
 }
 
 #[test]
@@ -585,7 +713,7 @@ fn duplicate_delivery_and_a_new_pass_have_distinct_identities() {
         event(
             sequence,
             Event::LoopPassStarted {
-                path: vec![LoopPathEntry {
+                path: vec![LoopPathEntry::Loop {
                     loop_id: "repeat".into(),
                     index: count(index),
                 }],
@@ -602,7 +730,7 @@ fn duplicate_delivery_and_a_new_pass_have_distinct_identities() {
 #[test]
 fn live_body_start_shows_running_in_the_active_pass() {
     let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
-    let path = vec![LoopPathEntry {
+    let path = vec![LoopPathEntry::Loop {
         loop_id: "repeat".into(),
         index: count(2),
     }];
@@ -657,7 +785,7 @@ fn live_body_start_shows_running_in_the_active_pass() {
 #[test]
 fn early_exit_marks_only_the_unvisited_body_suffix_not_run() {
     let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
-    let path = vec![LoopPathEntry {
+    let path = vec![LoopPathEntry::Loop {
         loop_id: "repeat".into(),
         index: Count::ZERO,
     }];
@@ -707,7 +835,7 @@ fn conflicting_body_event_does_not_mark_a_same_named_root_node() {
     let identity = NodeIdentity {
         id: "repeat".into(),
         kind: "fixture.sink".into(),
-        path: vec![LoopPathEntry {
+        path: vec![LoopPathEntry::Loop {
             loop_id: "repeat".into(),
             index: Count::ZERO,
         }],
