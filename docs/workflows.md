@@ -369,7 +369,8 @@ Selecting the answer delta infers streaming execution and ordinary JSONL output.
 and final `usages` includes both calls when title generation runs. A finite workflow selecting only terminal
 ports keeps ordinary JSON execution. Distinct actual model calls carry their own `model_call_id`.
 Generated text and SSE framing have no client-side byte limits.
-The total deadline interrupts stalled reads and connected delivery under backpressure.
+The request deadline bounds provider setup and reads. Emission waits follow native backpressure and stop
+when the consumer fails or the host cancels.
 Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
 Each history object has exactly two required string fields, `role` and `content`. Conversation roles are `user`

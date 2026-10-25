@@ -923,7 +923,5 @@ Isolated context contracts compare complete reference IDs and resolved types. Pr
 labels remain available in metadata but rewording them does not cause binding drift. Every declared
 external reference remains required.
 
-Providers with a total request deadline can use `TypedEmitter::send_with_deadline` (or the dynamic equivalent).
-Runtime graph and host sinks check the supplied cancellation handle while waiting for capacity or output I/O.
-Custom blocking sinks must implement `EmissionSink::send_with_deadline` and check both the deadline and cancellation during waits.
-Publication deadlines are passed directly to the sink; the cancellation token only carries cancellation.
+`Emitter::send` waits for native queue capacity. Consumer failures, dropped pending deliveries, and explicit
+cancellation wake blocked producers. Consumers and hosts own the policy for stalled delivery.

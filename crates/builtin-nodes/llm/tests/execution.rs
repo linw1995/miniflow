@@ -79,9 +79,9 @@ fn failure(error: mf_runtime::NodeExecutionError) -> Value {
 
 struct DeltaSink {
     values: Vec<Value>,
-    block: bool,
     disconnect: bool,
     cancel_after_prefix: bool,
+    cancellation: StreamCancellation,
 }
 
 impl mf_runtime::EmissionSink for DeltaSink {
@@ -93,29 +93,12 @@ impl mf_runtime::EmissionSink for DeltaSink {
                 message: "receiver disconnected".into(),
             });
         }
-        Ok(())
-    }
-
-    fn send_with_deadline(
-        &mut self,
-        result: mf_runtime::NodeResult,
-        deadline: std::time::Instant,
-        cancellation: &StreamCancellation,
-    ) -> Result<(), StreamError> {
-        self.send(result)?;
         if self.cancel_after_prefix {
-            cancellation.cancel_with_message("cancelled after prefix");
+            self.cancellation
+                .cancel_with_message("cancelled after prefix");
         }
-        if self.block {
-            loop {
-                if let Some(error) = cancellation.failure() {
-                    return Err(error);
-                }
-                if std::time::Instant::now() >= deadline {
-                    return Err(StreamError::PublicationDeadline);
-                }
-                thread::sleep(Duration::from_millis(2));
-            }
+        if let Some(error) = self.cancellation.failure() {
+            return Err(error);
         }
         Ok(())
     }
@@ -181,9 +164,9 @@ fn execution_probe() {
             });
             let mut sink = DeltaSink {
                 values: vec![],
-                block: parameters["block_delivery"] == true,
                 disconnect: parameters["disconnect"] == true,
                 cancel_after_prefix: parameters["cancel_after_prefix"] == true,
+                cancellation: cancellation.clone(),
             };
             let executed = if parameters["stream"] == true {
                 let mf_runtime::NodeExecution::TaskStream(combined) = &prepared.execution else {
@@ -841,11 +824,10 @@ fn streaming_failures_and_capture_policy_never_retry_as_unary() {
 }
 
 #[test]
-fn delivery_deadline_and_cancellation_cannot_become_captured_success() {
+fn delivery_failures_and_cancellation_cannot_become_captured_success() {
     for parameters in [
-        json!({"block_delivery":true}),
         json!({"disconnect":true}),
-        json!({"block_delivery":true,"cancel_after_prefix":true}),
+        json!({"cancel_after_prefix":true}),
     ] {
         let server = Server::start(vec![streaming_reply(
             &["prefix"],
@@ -858,11 +840,7 @@ fn delivery_deadline_and_cancellation_cannot_become_captured_success() {
             .as_object_mut()
             .unwrap()
             .extend(parameters.as_object().unwrap().clone());
-        let result = probe(
-            &server,
-            input,
-            json!({"timeout_ms":3000,"capture_errors":true}),
-        );
+        let result = probe(&server, input, json!({"capture_errors":true}));
         assert_eq!(result["results"][0]["ok"], false, "{result}");
         assert_eq!(server.requests().len(), 1);
     }

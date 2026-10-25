@@ -76,11 +76,6 @@ pub enum StreamError {
     },
     #[snafu(display("stream execution failed: {message}"), visibility(pub))]
     Execution { message: String },
-    #[snafu(
-        display("stream publication deadline exceeded"),
-        visibility(pub(super))
-    )]
-    PublicationDeadline,
     #[snafu(display(
         "stream execution failed in domain {} message {}: {source}",
         message.domain, message.sequence
@@ -116,10 +111,7 @@ impl StreamError {
             Self::InputFailure { .. } | Self::InputRecord { .. } | Self::InputValidation { .. } => {
                 "input"
             }
-            Self::Output { .. }
-            | Self::OutputWrite { .. }
-            | Self::OutputEncode { .. }
-            | Self::PublicationDeadline => "output",
+            Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
                 execution_error_phase(source.as_ref())
@@ -415,35 +407,14 @@ impl crate::EmissionSink for ProducerEmitter<'_> {
     /// Wait for queue capacity and transfer one validated result to the runtime.
     /// Failure wakes waiting senders. Success does not imply downstream completion.
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
-        self.admit(result, &self.shared.cancellation.clone(), None)
-    }
-
-    fn send_with_deadline(
-        &mut self,
-        result: NodeResult,
-        deadline: Instant,
-        cancellation: &crate::StreamCancellation,
-    ) -> Result<(), StreamError> {
-        self.admit(result, cancellation, Some(deadline))
+        self.admit(result)
     }
 }
 
 impl ProducerEmitter<'_> {
-    fn admit(
-        &mut self,
-        result: NodeResult,
-        cancellation: &crate::StreamCancellation,
-        deadline: Option<Instant>,
-    ) -> Result<(), StreamError> {
+    fn admit(&mut self, result: NodeResult) -> Result<(), StreamError> {
         let mut state = self.shared.state.lock().unwrap();
         loop {
-            if let Some(error) = cancellation.failure() {
-                return Err(error);
-            }
-            ensure!(
-                deadline.is_none_or(|deadline| Instant::now() < deadline),
-                PublicationDeadlineSnafu
-            );
             if let Some(error) = &state.failure {
                 return Err(error.clone());
             }
@@ -452,12 +423,7 @@ impl ProducerEmitter<'_> {
             {
                 break;
             }
-            state = self
-                .shared
-                .changed
-                .wait_timeout(state, Duration::from_millis(20))
-                .unwrap()
-                .0;
+            state = self.shared.changed.wait(state).unwrap();
         }
         let ports = result.outputs.keys().cloned().collect::<Vec<_>>();
         let admitted: Result<(), StreamError> = (|| {

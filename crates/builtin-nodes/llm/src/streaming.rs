@@ -1,6 +1,6 @@
 use crate::{LlmEmission, LlmExecutionError, TextDelta};
 use futures::StreamExt;
-use mf_runtime::{TypedEmitter, TypedNodeResult};
+use mf_runtime::TypedEmitter;
 use rig_core::{
     completion::CompletionResponse,
     error::ProviderError,
@@ -45,15 +45,12 @@ pub fn complete(
                 first_text = false;
             }
             emitter
-                .send_with_deadline(
-                    TypedNodeResult::from(LlmEmission {
-                        delta: TextDelta {
-                            text,
-                            model_call_id: call_id.into(),
-                        },
-                    }),
-                    deadline,
-                )
+                .send(LlmEmission {
+                    delta: TextDelta {
+                        text,
+                        model_call_id: call_id.into(),
+                    },
+                })
                 .context(crate::PublicationSnafu)?;
         }
     }

@@ -266,7 +266,7 @@ Connected live text SHALL carry ordered text increments and the actual model-cal
 
 ### Requirement: Preserve streaming deadlines and captured failures
 
-The resolved request deadline SHALL cover setup, all streaming reads, and final conversion. Cancellation, malformed/truncated frames, and unsupported content SHALL stop publication. Existing captured-provider-failure policy SHALL retain reported call facts without making partial text successful. Delivery failure and cancellation MUST remain execution failures.
+The resolved request deadline SHALL cover setup, all streaming reads, and final conversion. Cancellation, malformed/truncated frames, and unsupported content SHALL stop publication. Existing captured-provider-failure policy SHALL retain reported call facts without making partial text successful. Delivery failure and cancellation MUST remain execution failures. Emission waits SHALL follow native backpressure and terminate through consumer failure or host cancellation without a publication deadline.
 
 #### Scenario: Handle a provider error after text
 

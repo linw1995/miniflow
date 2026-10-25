@@ -44,22 +44,6 @@ pub trait EmissionSink {
     }
 
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError>;
-
-    fn send_with_deadline(
-        &mut self,
-        result: NodeResult,
-        deadline: std::time::Instant,
-        cancellation: &StreamCancellation,
-    ) -> Result<(), StreamError> {
-        if let Some(error) = cancellation.failure() {
-            return Err(error);
-        }
-        ensure!(
-            std::time::Instant::now() < deadline,
-            crate::stream_instance::PublicationDeadlineSnafu
-        );
-        self.send(result)
-    }
 }
 
 pub struct DiscardSink;
@@ -124,16 +108,8 @@ impl<'a> Emitter<'a> {
     }
 
     pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
-        self.publish(result, None)
-    }
-
-    fn publish(
-        &mut self,
-        result: NodeResult,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(), NodeExecutionError> {
         let snapshot = self.snapshot.as_ref().map(|_| result.outputs.clone());
-        self.admit(result, deadline)?;
+        self.admit(result)?;
         if let (Some((recorder, scope)), Some(outputs)) = (&self.snapshot, snapshot) {
             recorder.record(crate::SnapshotEvent {
                 scope: scope.clone(),
@@ -150,25 +126,13 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
-    pub fn send_with_deadline(
-        &mut self,
-        result: NodeResult,
-        deadline: std::time::Instant,
-    ) -> Result<(), NodeExecutionError> {
-        self.publish(result, Some(deadline))
-    }
-
     pub fn set_snapshot_context(&mut self, context: &ExecutionContext) {
         self.snapshot = context
             .snapshot_recorder()
             .map(|recorder| (recorder.clone(), context.invocation_path()));
     }
 
-    fn admit(
-        &mut self,
-        result: NodeResult,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(), NodeExecutionError> {
+    fn admit(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
         self.check_cancellation()?;
         let node = self.contract.definition_id.as_str();
         if !self.sink_validates {
@@ -183,13 +147,7 @@ impl<'a> Emitter<'a> {
                 );
             }
         }
-        match deadline {
-            Some(deadline) => self
-                .sink
-                .send_with_deadline(result, deadline, &self.cancellation)?,
-            None => self.sink.send(result)?,
-        };
-        Ok(())
+        Ok(self.sink.send(result)?)
     }
 
     fn check_cancellation(&self) -> Result<(), NodeExecutionError> {
@@ -215,15 +173,6 @@ impl<'a, 'sink, O: crate::NodeOutputs> TypedEmitter<'a, 'sink, O> {
 
     pub fn is_connected(&self) -> bool {
         self.emitter.is_connected()
-    }
-
-    pub fn send_with_deadline(
-        &mut self,
-        result: impl Into<TypedNodeResult<O>>,
-        deadline: std::time::Instant,
-    ) -> Result<(), NodeExecutionError> {
-        let result = crate::encode_typed_result(result.into())?;
-        self.emitter.send_with_deadline(result, deadline)
     }
 
     pub fn send(
