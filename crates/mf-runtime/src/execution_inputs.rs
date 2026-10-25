@@ -143,7 +143,12 @@ impl ExecutionInputs {
     ) -> Result<InputResolution, WorkflowRunError> {
         *inputs = self.initial(node, in_scope);
         for (name, value) in inputs.iter_mut() {
-            if node.metadata.secret_inputs.contains(name) {
+            if node
+                .metadata
+                .input_bindings
+                .get(name)
+                .is_some_and(|binding| binding.secret)
+            {
                 *value = value.clone().into_secret();
             }
         }
@@ -188,7 +193,12 @@ impl ExecutionInputs {
             match value {
                 Some(ContextValue::Value(value)) => {
                     if let Some(input) = dependency.input {
-                        let value = if node.metadata.secret_inputs.contains(input) {
+                        let value = if node
+                            .metadata
+                            .input_bindings
+                            .get(input)
+                            .is_some_and(|binding| binding.secret)
+                        {
                             value.clone().into_secret()
                         } else {
                             value.clone()
@@ -215,7 +225,12 @@ impl ExecutionInputs {
                         .expect("exclusive output source")
                         .into(),
                 });
-                let value = if node.metadata.secret_inputs.contains(input) {
+                let value = if node
+                    .metadata
+                    .input_bindings
+                    .get(input)
+                    .is_some_and(|binding| binding.secret)
+                {
                     value.into_secret()
                 } else {
                     value

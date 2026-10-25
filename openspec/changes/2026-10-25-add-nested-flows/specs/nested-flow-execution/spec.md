@@ -49,6 +49,10 @@ SHALL retain usage and omit the title without failing a successful conversation.
 
 ### Requirement: Keep built-in definitions with their owning providers
 
+Registration SHALL capture the providing Cargo package automatically. The registry SHALL combine that
+namespace with a local Flow name, reject local names containing dots, and reject duplicate local names
+within a package while allowing the same local name in different packages.
+
 The runtime SHALL expose a generic linked Flow catalog with unique nonblank names. The compiler SHALL
 resolve registered metadata factories without depending on application packages. `mf-chat` SHALL own
 and register the chat title definition and its dependency version policy. Resolved executables SHALL

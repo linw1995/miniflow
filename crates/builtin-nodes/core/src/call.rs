@@ -102,7 +102,7 @@ fn factory(
             message: "Flow calls cannot read stdin"
         }
     );
-    let secret_inputs = body
+    let input_bindings = body
         .inputs
         .inputs
         .iter()
@@ -110,7 +110,15 @@ fn factory(
             ports
                 .iter()
                 .filter(|(_, input)| input.binding.secret)
-                .map(move |(name, _)| mf_runtime::output_id(node, name))
+                .map(move |(name, _)| {
+                    (
+                        mf_runtime::output_id(node, name),
+                        mf_runtime::InputBinding {
+                            secret: true,
+                            ..Default::default()
+                        },
+                    )
+                })
         })
         .collect();
     PreparedNode::new(
@@ -120,7 +128,7 @@ fn factory(
             body,
         },
         NodeMetadata {
-            secret_inputs,
+            input_bindings,
             ..Default::default()
         },
     )

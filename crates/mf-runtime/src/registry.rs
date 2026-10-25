@@ -4,8 +4,34 @@ use std::collections::BTreeMap;
 
 /// Keeps application-owned Flow definitions discoverable without compiler dependencies on providers.
 pub struct BuiltinFlowRegistration {
-    pub name: &'static str,
+    package: &'static str,
+    name: &'static str,
     pub definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+}
+
+impl BuiltinFlowRegistration {
+    #[doc(hidden)]
+    pub const fn new(
+        package: &'static str,
+        name: &'static str,
+        definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+    ) -> Self {
+        Self {
+            package,
+            name,
+            definition,
+        }
+    }
+}
+
+/// Registers a local Flow name under the calling Cargo package's namespace.
+#[macro_export]
+macro_rules! register_builtin_flow {
+    ($name:expr, $definition:path $(,)?) => {
+        $crate::__submit_builtin_flow! {
+            $crate::BuiltinFlowRegistration::new(env!("CARGO_PKG_NAME"), $name, $definition)
+        }
+    };
 }
 
 inventory::collect!(BuiltinFlowRegistration);
@@ -14,13 +40,15 @@ inventory::collect!(BuiltinFlowRegistration);
 pub enum BuiltinFlowRegistryError {
     #[snafu(display("built-in Flow name must not be blank"))]
     BlankName,
+    #[snafu(display("built-in Flow local name `{name}` must not contain a namespace separator"))]
+    QualifiedLocalName { name: String },
     #[snafu(display("built-in Flow `{name}` is registered more than once"))]
     DuplicateName { name: String },
 }
 
 #[derive(Default)]
 pub struct BuiltinFlowRegistry {
-    registrations: BTreeMap<&'static str, &'static BuiltinFlowRegistration>,
+    registrations: BTreeMap<String, &'static BuiltinFlowRegistration>,
 }
 
 impl BuiltinFlowRegistry {
@@ -39,13 +67,18 @@ impl BuiltinFlowRegistry {
         for registration in registrations {
             snafu::ensure!(!registration.name.trim().is_empty(), BlankNameSnafu);
             snafu::ensure!(
-                registry
-                    .registrations
-                    .insert(registration.name, registration)
-                    .is_none(),
-                DuplicateNameSnafu {
+                !registration.name.contains('.'),
+                QualifiedLocalNameSnafu {
                     name: registration.name
                 }
+            );
+            let name = format!("{}.{}", registration.package, registration.name);
+            snafu::ensure!(
+                registry
+                    .registrations
+                    .insert(name.clone(), registration)
+                    .is_none(),
+                DuplicateNameSnafu { name }
             );
         }
         Ok(registry)
@@ -128,14 +161,17 @@ mod tests {
     #[test]
     fn builtin_catalog_rejects_duplicate_and_blank_names() {
         static FIRST: BuiltinFlowRegistration = BuiltinFlowRegistration {
-            name: "test.flow",
+            package: "first-package",
+            name: "flow",
             definition: builtin_definition,
         };
         static SECOND: BuiltinFlowRegistration = BuiltinFlowRegistration {
-            name: "test.flow",
+            package: "first-package",
+            name: "flow",
             definition: builtin_definition,
         };
         static BLANK: BuiltinFlowRegistration = BuiltinFlowRegistration {
+            package: "first-package",
             name: " ",
             definition: builtin_definition,
         };
@@ -147,10 +183,26 @@ mod tests {
             BuiltinFlowRegistry::from_registrations([&BLANK]),
             Err(BuiltinFlowRegistryError::BlankName)
         ));
-        let registry = BuiltinFlowRegistry::from_registrations([&FIRST]).unwrap();
+        static OTHER_PACKAGE: BuiltinFlowRegistration = BuiltinFlowRegistration {
+            package: "second-package",
+            name: "flow",
+            definition: builtin_definition,
+        };
+        static QUALIFIED: BuiltinFlowRegistration = BuiltinFlowRegistration {
+            package: "first-package",
+            name: "other-package.flow",
+            definition: builtin_definition,
+        };
+        assert!(matches!(
+            BuiltinFlowRegistry::from_registrations([&QUALIFIED]),
+            Err(BuiltinFlowRegistryError::QualifiedLocalName { .. })
+        ));
+        let registry = BuiltinFlowRegistry::from_registrations([&FIRST, &OTHER_PACKAGE]).unwrap();
         assert!(registry.get("missing").is_none());
+        assert!(registry.get("flow").is_none());
+        assert!(registry.get("second-package.flow").is_some());
         assert!(
-            (registry.get("test.flow").unwrap().definition)()
+            (registry.get("first-package.flow").unwrap().definition)()
                 .unwrap()
                 .nodes
                 .is_empty()

@@ -74,18 +74,18 @@ The [multi-node fixture](../crates/mf-compiler/tests/fixtures/multi-nodes/) demo
 
 See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependency license auditing](licensing.md) before distributing additional plugins.
 
-## Startup input bindings
+## Input bindings
 
 `NodeMetadata.input_bindings` associates input port names with `InputBinding` declarations
-for environment fallback, a typed JSON default, and secret marking. Bindings are limited
-to top-level initial nodes. The compiler includes them in the frozen startup interface
+for environment fallback, a typed JSON default, and secret marking. Environment and default
+sources are limited to top-level initial nodes. The compiler includes their bindings in the frozen startup interface
 and isolated task contract; preparation must never read the environment. Runtime binding
 resolves sources and marks secret values before input observation. Ordinary nodes without
 bindings keep their existing argument behavior. See [`builtin.parameters`](workflows.md#parameters).
 
-`NodeMetadata.secret_inputs` marks declared input ports before dependency/type failure snapshots and
-invocation observation. This sensitivity-only policy is valid at ordinary node boundaries and does not
-resolve environment values or defaults. `workflow.call` derives it from the child input schema so a
+The `secret` flag in `input_bindings` marks declared input ports before dependency/type failure snapshots
+and invocation observation. Bindings containing only this flag are also valid at ordinary node boundaries.
+`workflow.call` derives these bindings from the child input schema so a
 child's secret contract also protects the outer call. Inputs with this policy retain dynamic conversion
 when typed connection optimization would bypass marking.
 
@@ -934,10 +934,12 @@ cancellation wake blocked producers. Consumers and hosts own the policy for stal
 
 ## Register reusable Flow definitions
 
-A package can register `mf_runtime::BuiltinFlowRegistration` with a unique nonblank name and a pure
-factory returning `WorkflowDefinition`. Use the qualified form `<package>.<flow>`, such as
-`mf-chat.chat-title`, to avoid collisions between providers. Catalog lookup matches the complete
-qualified name exactly. The factory owns its JSON and dependency version policy;
+A package registers a pure factory returning `WorkflowDefinition` with
+`mf_runtime::register_builtin_flow!("chat-title", title_definition)`. The macro captures the calling
+Cargo package name, and the registry generates `<package>.<flow>` automatically. Providers supply
+only a nonblank local name without dots. Names from different packages cannot collide; duplicate
+local names within one package fail registration. Catalog lookup matches the complete qualified name,
+such as `mf-chat.chat-title`. The factory owns its JSON and dependency version policy;
 source resolution must not execute the Flow or perform business I/O. The runtime validates catalog
 names, and the compiler only looks up the linked provider and freezes its definition. Caller-selected
 package sources retain the factory's required features and default features.

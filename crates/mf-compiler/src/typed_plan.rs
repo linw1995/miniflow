@@ -131,10 +131,13 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
         if domain_of[source] != domain_of[target] {
             return Some(DomainBoundary);
         }
-        if [source, target]
-            .into_iter()
-            .any(|index| !nodes[index].metadata.secret_inputs.is_empty())
-        {
+        if [source, target].into_iter().any(|index| {
+            nodes[index]
+                .metadata
+                .input_bindings
+                .values()
+                .any(|binding| binding.secret)
+        }) {
             return Some(SecretInput);
         }
         let (Some(from), Some(to)) = (

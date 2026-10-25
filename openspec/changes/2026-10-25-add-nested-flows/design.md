@@ -40,5 +40,12 @@ normal Cargo dependencies, with workspace inheritance resolved by Cargo. This do
 provider versions equal the chat package version, and embedded defaults do not retain checkout paths.
 The runtime owns the generic catalog contract, and the compiler has no chat-specific
 name, source, or dependency version policy. Referenced definitions are frozen before node execution.
-Built-in names use the provider-qualified form `<package>.<flow>`, with `mf-chat.chat-title` as the
-shipped chat definition. The registry compares complete names, so providers can reuse local Flow names.
+The registration macro captures the calling Cargo package. The registry automatically combines that
+namespace with the provider's local Flow name to form `<package>.<flow>`, with `mf-chat.chat-title` as
+the shipped chat definition. Providers can reuse local Flow names across packages. Local names cannot
+contain dots, and duplicate names within a package fail registration.
+
+Call input sensitivity comes from `NodeMetadata.input_bindings` and its existing `InputBinding.secret`
+flag. Only sensitivity is propagated to the call boundary; child environment and default resolution
+remains in the child startup schema. Ordinary node inputs may declare sensitivity, while environment
+and default bindings remain restricted to top-level initial nodes.

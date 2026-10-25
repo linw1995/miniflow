@@ -34,11 +34,20 @@ fn prepare<T: mf_runtime::TypedField + 'static>(
     config: &Value,
 ) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
     let mut metadata = NodeMetadata::new(NodePorts::default());
-    if config["secret"] == true {
-        metadata.secret_inputs.insert("value".into());
+    if let Some(binding) = config.get("binding") {
+        metadata.input_bindings.insert(
+            "value".into(),
+            mf_runtime::deserialize_config(binding.clone())?,
+        );
     }
-    if config["invalid_secret"] == true {
-        metadata.secret_inputs.insert("missing".into());
+    if config["invalid_binding"] == true {
+        metadata.input_bindings.insert(
+            "missing".into(),
+            mf_runtime::InputBinding {
+                secret: true,
+                ..Default::default()
+            },
+        );
     }
     if config["read"] == true {
         metadata
@@ -112,7 +121,7 @@ fn secret_input_boundaries_keep_dynamic_marking_and_reject_unknown_ports() {
     for node in value["nodes"].as_array_mut().unwrap() {
         node["config"] = json!({"type":"shared"});
     }
-    value["nodes"][1]["config"]["secret"] = json!(true);
+    value["nodes"][1]["config"]["binding"] = json!({"secret":true});
     let (flow, plan) = planned(value);
     assert!(plan.segments.is_empty());
     assert!(
@@ -128,15 +137,30 @@ fn secret_input_boundaries_keep_dynamic_marking_and_reject_unknown_ports() {
     assert!(output["result"].is_secret());
     assert_eq!(output["result"].as_str(), Some("credential"));
     let mut invalid = chain();
-    invalid["nodes"][1]["config"] = json!({"invalid_secret":true});
+    invalid["nodes"][1]["config"] = json!({"invalid_binding":true});
     let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
     let error =
         compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("secret input names an unknown port")
+            .contains("input binding names an unknown port")
     );
+    for binding in [
+        json!({"env":"MF_TYPED_SECRET"}),
+        json!({"default":"credential"}),
+    ] {
+        let mut invalid = chain();
+        invalid["nodes"][1]["config"] = json!({"binding":binding});
+        let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
+        let error =
+            compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("require a top-level initial node")
+        );
+    }
 }
 
 #[test]

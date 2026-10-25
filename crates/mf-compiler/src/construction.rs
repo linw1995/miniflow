@@ -1484,10 +1484,16 @@ pub fn workflow_input_schema<'a, N: 'a>(
     let mut names = BTreeSet::new();
     for (node, initial) in nodes {
         let id = node.definition_id.as_str();
-        if !initial && !node.metadata.input_bindings.is_empty() {
+        if !initial
+            && node
+                .metadata
+                .input_bindings
+                .values()
+                .any(|binding| binding.env.is_some() || binding.default.is_some())
+        {
             return Err(input_schema_error(
                 input_pointer("", id),
-                "input bindings require an initial node",
+                "environment and default bindings require an initial node",
             ));
         }
         for (name, binding) in &node.metadata.input_bindings {
@@ -1513,13 +1519,12 @@ pub fn workflow_input_schema<'a, N: 'a>(
                 port.value_type
                     .check_depth()
                     .context(mf_runtime::WorkflowInputTypeDepthSnafu { path: path.clone() })?;
-                let mut binding = node
+                let binding = node
                     .metadata
                     .input_bindings
                     .get(port.name.as_ref())
                     .cloned()
                     .unwrap_or_default();
-                binding.secret |= node.metadata.secret_inputs.contains(port.name.as_ref());
                 if port.name.is_empty()
                     || ports
                         .insert(

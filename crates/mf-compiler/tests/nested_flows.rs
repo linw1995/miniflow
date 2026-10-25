@@ -163,15 +163,13 @@ fn builtin_echo() -> Result<WorkflowDefinition, mf_runtime::DefinitionParseError
     Ok(definition)
 }
 
-inventory::submit! {
-    mf_runtime::BuiltinFlowRegistration { name:"test.echo", definition:builtin_echo }
-}
+mf_runtime::register_builtin_flow!("echo", builtin_echo);
 
 #[test]
 fn builtin_sources_are_resolved_from_linked_providers() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25", "dependencies":{"provider":{"package":"test-provider","version":"=2","features":["selected"],"default-features":false}},
-        "flows":{"echo":{"builtin":"test.echo"}},
+        "flows":{"echo":{"builtin":"mf-compiler.echo"}},
         "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"echo"}}],
         "outputs":[{"name":"value","node":"invoke","port":"value"}]
     })).unwrap();
@@ -217,7 +215,7 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
     old_sources.flows.insert(
         "echo".into(),
         mf_runtime::FlowSource::Builtin {
-            builtin: "test.echo".into(),
+            builtin: "mf-compiler.echo".into(),
         },
     );
     assert!(
@@ -254,7 +252,7 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
     blank_source.flows.insert(
         " ".into(),
         mf_runtime::FlowSource::Builtin {
-            builtin: "test.echo".into(),
+            builtin: "mf-compiler.echo".into(),
         },
     );
     let mut blank_call = base.clone();

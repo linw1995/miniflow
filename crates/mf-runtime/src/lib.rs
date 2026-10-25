@@ -59,6 +59,8 @@ pub use flow::{
 };
 #[cfg(feature = "async")]
 pub use future_execution::FutureExecutionError;
+#[doc(hidden)]
+pub use inventory::submit as __submit_builtin_flow;
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,

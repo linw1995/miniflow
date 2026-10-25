@@ -85,7 +85,8 @@ packages when available and retain the Flow provider's declared requirements oth
 checkout, declare the built-in's local providers explicitly, as in the nested title example.
 
 Built-in names use `<package>.<flow>` to avoid collisions across providers, and lookup matches the
-complete qualified name. Names come from linked `BuiltinFlowRegistration` providers. The compiler resolves this generic
+complete qualified name. `register_builtin_flow!` captures the provider's Cargo package automatically,
+and the registry qualifies each local Flow name. The compiler resolves this generic
 catalog without owning application definitions. `mf-chat` owns `workflows/title.json` and registers
 `mf-chat.chat-title`; the CLI already links that provider. Custom hosts must link the provider before source
 resolution. Standalone runners contain the expanded graph and need only its node packages.
