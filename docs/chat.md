@@ -493,6 +493,34 @@ supplies its name. Existing conversations remain available
 through the session picker. New chats use no terminal-supplied system instructions; resumed sessions retain their
 stored instructions. Provider configuration remains in the workflow and its declared parameters.
 
+Assistant messages render Markdown in saved history, live previews, and retained replies. Headings,
+emphasis, lists, task lists, block quotes, links, tables, and code blocks are supported. Fenced code
+blocks use their language label for syntax highlighting, including while output is streaming;
+unrecognized or missing labels fall back to plain code. HTML is displayed literally.
+Prompts and diagnostics remain plain text, and stored message content is unchanged.
+Headings display an explicit level marker (`#1` through `#6`), including Setext headings.
+Wrapped heading lines align with the title text; color and weight reinforce the heading hierarchy.
+
+Unchanged Markdown blocks and wrapped lines are cached; resizing reflows text without repeating
+syntax highlighting. Code highlighting resumes from complete lines and recalculates the unfinished
+last line. An excessively long code line or a highlighting error falls back to plain code for the
+remainder of that block. Scrolling up anchors the viewed content while new output arrives; scrolling
+back to the bottom resumes following output.
+
+Markdown images render inside the conversation, including live previews. Local paths and `file:`,
+`http:`, and `https:` URLs support PNG, JPEG, and WebP. Relative paths resolve against the working
+directory where chat started. Images load when they enter the viewport; loading and failure messages
+retain their alt text. Downloads, decoding, and resizing run in the background. Resources are limited
+to 8 MiB and 4 megapixels, with a bounded cache. A new execution or final settlement refreshes images,
+so a workflow can replace a file at the same path.
+
+Ghostty and Kitty use the Kitty graphics protocol with Unicode placeholders; other terminals use
+colored half-block characters. Terminal identity comes from `TERM_PROGRAM`, `TERM`, and
+`KITTY_WINDOW_ID`. Cell pixel dimensions come from the terminal window size, with an 8 by 16 fallback.
+Detection does not consume keyboard input or write queries to stdout. Images preserve aspect ratio,
+fit within 120 columns and 40 rows, and are clipped while scrolling. Popups temporarily hide images;
+session changes, cache eviction, and exit release owned terminal image resources.
+
 | Interaction | Key |
 | --- | --- |
 | Send the prompt | Alt+Enter, or Esc then Enter |

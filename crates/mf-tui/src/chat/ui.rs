@@ -16,6 +16,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListState, Paragraph, Wrap},
 };
 use std::{
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     io::{IsTerminal, Write},
 };
@@ -63,6 +64,17 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
     let guard = TerminalGuard::enter().context(IoSnafu {
         operation: "enter terminal",
     })?;
+    view.transcript
+        .borrow_mut()
+        .enable_images(
+            std::env::current_dir().context(IoSnafu {
+                operation: "resolve image base directory",
+            })?,
+            crate::images::terminal_picker(),
+        )
+        .context(IoSnafu {
+            operation: "start image worker",
+        })?;
     let mut terminal = Terminal::with_options(
         CrosstermBackend::new(Box::new(io::stderr()) as Box<dyn Write>),
         TerminalOptions {
@@ -96,6 +108,9 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
                 operation: "read terminal",
             })? {
                 Event::Resize(width, height) => {
+                    view.transcript
+                        .borrow_mut()
+                        .update_image_picker(crate::images::terminal_picker());
                     terminal
                         .resize(Rect::new(0, 0, width, height))
                         .context(IoSnafu {
@@ -118,10 +133,15 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
     })();
     *terminal.backend_mut() = CrosstermBackend::new(Box::new(io::sink()));
     let cleanup = controller.close();
+    view.transcript.borrow_mut().clear_images();
+    let image_cleanup = view.transcript.borrow_mut().flush_images(&mut io::stderr());
     let _ = execute!(io::stderr(), DisableBracketedPaste);
     drop(terminal);
     drop(guard);
     cleanup?;
+    image_cleanup.context(IoSnafu {
+        operation: "release terminal images",
+    })?;
     result?;
     Ok(0)
 }
@@ -254,7 +274,8 @@ struct ChatView {
     observation: Option<LocalObservation>,
     show_execution: bool,
     inspector: ObservationView,
-    scroll: u16,
+    scroll: Cell<usize>,
+    transcript: RefCell<super::transcript::Transcript>,
     notice: String,
     outcome: String,
 }
@@ -283,7 +304,8 @@ impl ChatView {
             observation: None,
             show_execution: true,
             inspector: ObservationView::new(description)?,
-            scroll: 0,
+            scroll: Cell::new(0),
+            transcript: RefCell::default(),
             notice: "Start a conversation, or Ctrl+S to resume one".into(),
             outcome: String::new(),
         })
@@ -318,6 +340,7 @@ impl ChatView {
         let new = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
         self.editor = self.drafts.remove(&new).unwrap_or_default();
         self.session = session;
+        self.transcript.get_mut().clear_images();
         self.page = None;
         self.preview = LivePreview::default();
         self.final_reply = None;
@@ -325,7 +348,7 @@ impl ChatView {
         self.latest_invocation = None;
         self.earlier = false;
         self.observation = None;
-        self.scroll = 0;
+        self.scroll.set(0);
         self.outcome.clear();
         self.notice.clear();
         self.mode = Mode::Input;
@@ -344,7 +367,7 @@ impl ChatView {
                     self.session = Some(session);
                     self.page = Some(page);
                     self.final_reply = None;
-                    self.scroll = 0;
+                    self.scroll.set(0);
                 }
             }
             ChatEvent::Submitted {
@@ -355,6 +378,7 @@ impl ChatView {
                 if self.pending.take() == Some(Some(self.editor.revision)) {
                     self.editor = Editor::default();
                 }
+                self.transcript.get_mut().clear_images();
                 self.session = Some(session);
                 self.latest_invocation = Some(invocation.clone());
                 self.preview = LivePreview::default();
@@ -365,7 +389,7 @@ impl ChatView {
                 self.unsaved = None;
                 self.outcome.clear();
                 self.notice = "Working... Ctrl+C to cancel".into();
-                self.scroll = 0;
+                self.scroll.set(0);
             }
             ChatEvent::Preview {
                 invocation,
@@ -394,6 +418,7 @@ impl ChatView {
                 {
                     return;
                 }
+                self.transcript.get_mut().clear_images();
                 self.preview.incomplete = true;
                 self.active = None;
                 self.pending = None;
@@ -657,17 +682,21 @@ impl ChatView {
                     self.submit(controller)
                 }
                 KeyCode::Enter => self.editor.insert("\n"),
-                KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
-                KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
+                KeyCode::PageUp => self.scroll.set(self.scroll.get().saturating_add(10)),
+                KeyCode::PageDown => self.scroll.set(self.scroll.get().saturating_sub(10)),
                 _ => self.editor.key(key),
             },
             Mode::Browse => match key.code {
                 KeyCode::Enter => self.submit(controller),
                 KeyCode::Char('i') | KeyCode::Esc => self.mode = Mode::Input,
-                KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_add(1),
-                KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_sub(1),
-                KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
-                KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.scroll.set(self.scroll.get().saturating_add(1))
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.scroll.set(self.scroll.get().saturating_sub(1))
+                }
+                KeyCode::PageUp => self.scroll.set(self.scroll.get().saturating_add(10)),
+                KeyCode::PageDown => self.scroll.set(self.scroll.get().saturating_sub(10)),
                 _ => {}
             },
         }
@@ -715,6 +744,12 @@ impl ChatView {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     ) -> Result<(), ChatRunError> {
+        self.transcript
+            .get_mut()
+            .flush_images(&mut io::stderr())
+            .context(IoSnafu {
+                operation: "release retired terminal images",
+            })?;
         if self.mode == Mode::Inspect {
             if let Some(observation) = &self.observation {
                 return self
@@ -775,28 +810,36 @@ impl ChatView {
         } else {
             body
         };
-        let mut lines = vec![];
+        let mut transcript = self.transcript.borrow_mut();
+        transcript.begin(body.width);
         if let Some(page) = &self.page {
             for record in &page.messages {
-                let label = if record.message.role == "assistant" {
-                    "Assistant"
+                let key = format!("message:{}", record.message.id);
+                let assistant = record.message.role == "assistant";
+                transcript.plain(
+                    format!("{key}:label"),
+                    vec![Line::styled(
+                        if assistant { "Assistant" } else { "You" },
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )],
+                );
+                if assistant {
+                    transcript.markdown(format!("{key}:body"), &record.message.content);
                 } else {
-                    "You"
-                };
-                lines.push(Line::styled(
-                    label,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                for line in safe(&record.message.content).split('\n') {
-                    lines.push(Line::raw(line.to_owned()));
+                    transcript.literal(
+                        format!("{key}:body"),
+                        &record.message.content,
+                        Style::default(),
+                    );
                 }
-                if record.message.role == "assistant" {
+                let mut metadata = vec![];
+                if assistant {
                     let calls = crate::performance::conversation_calls(
                         record.usages.as_deref().unwrap_or_default(),
                     );
-                    lines.push(Line::styled(
+                    metadata.push(Line::styled(
                         crate::performance::footer(&calls, body.width),
                         Style::default().fg(Color::DarkGray),
                     ));
@@ -805,42 +848,56 @@ impl ChatView {
                     record.turn_state.as_str(),
                     "failed" | "cancelled" | "interrupted"
                 ) {
-                    lines.push(Line::styled(
+                    metadata.push(Line::styled(
                         format!("[{}]", record.turn_state),
                         Style::default().fg(Color::Yellow),
                     ));
                 }
-                lines.push(Line::raw(""));
+                metadata.push(Line::default());
+                transcript.plain(format!("{key}:metadata"), metadata);
             }
         }
-        if let Some((_, prompt)) = &self.active {
-            lines.push(Line::styled("You", Style::default().fg(Color::Cyan)));
-            for line in safe(prompt).split('\n') {
-                lines.push(Line::raw(line.to_owned()));
-            }
-            lines.push(Line::styled(
-                "Working...",
-                Style::default().fg(Color::DarkGray),
-            ));
+        if let Some((invocation, prompt)) = &self.active {
+            let key = format!("active:{}", invocation.call_id);
+            transcript.plain(
+                format!("{key}:label"),
+                vec![Line::styled("You", Style::default().fg(Color::Cyan))],
+            );
+            transcript.literal(format!("{key}:prompt"), prompt, Style::default());
+            transcript.plain(
+                format!("{key}:status"),
+                vec![Line::styled(
+                    "Working...",
+                    Style::default().fg(Color::DarkGray),
+                )],
+            );
         }
         for (index, segment) in self.preview.segments.iter().enumerate() {
             if segment.text.is_empty() {
                 continue;
             }
+            let invocation = self
+                .preview
+                .invocation
+                .as_ref()
+                .map_or("", |invocation| invocation.call_id.as_str());
+            let key = format!("preview:{invocation}:{}", segment.model_call_id);
             let state = if self.preview.incomplete {
                 "incomplete"
             } else {
                 "provisional"
             };
-            lines.push(Line::styled(
-                format!("Assistant [{state}, segment {}]", index + 1),
-                Style::default().fg(Color::Yellow),
-            ));
-            for line in safe(&segment.text).split('\n') {
-                lines.push(Line::raw(line.to_owned()));
-            }
-            lines.push(Line::raw(""));
+            transcript.plain(
+                format!("{key}:label"),
+                vec![Line::styled(
+                    format!("Assistant [{state}, segment {}]", index + 1),
+                    Style::default().fg(Color::Yellow),
+                )],
+            );
+            transcript.markdown(format!("{key}:body"), &segment.text);
+            transcript.plain(format!("{key}:gap"), vec![Line::default()]);
         }
+        let mut status = vec![];
         if self.active.is_some()
             && self
                 .preview
@@ -848,62 +905,72 @@ impl ChatView {
                 .iter()
                 .any(|segment| !segment.text.is_empty())
         {
-            lines.push(Line::styled(
+            status.push(Line::styled(
                 "FTT / Gen / E2E: Measuring...",
                 Style::default().fg(Color::DarkGray),
             ));
         }
         if self.preview.omitted {
-            lines.push(Line::styled(
+            status.push(Line::styled(
                 "[Preview limit reached; remaining output is still being received]",
                 Style::default().fg(Color::Yellow),
             ));
         }
+        transcript.plain("preview-status".into(), status);
+        let invocation = self
+            .latest_invocation
+            .as_ref()
+            .map_or("", |invocation| invocation.call_id.as_str());
         if let Some(reply) = &self.final_reply {
-            lines.push(Line::styled("Assistant", Style::default().fg(Color::Cyan)));
-            for line in safe(reply).split('\n') {
-                lines.push(Line::raw(line.to_owned()));
-            }
+            transcript.plain(
+                "final-label".into(),
+                vec![Line::styled("Assistant", Style::default().fg(Color::Cyan))],
+            );
+            transcript.markdown(format!("final:{invocation}"), reply);
         }
         if let Some(reply) = &self.unsaved {
-            lines.push(Line::styled(
-                "Assistant [not saved]",
-                Style::default().fg(Color::Yellow),
-            ));
-            for line in safe(reply).split('\n') {
-                lines.push(Line::raw(line.to_owned()));
-            }
+            transcript.plain(
+                "unsaved-label".into(),
+                vec![Line::styled(
+                    "Assistant [not saved]",
+                    Style::default().fg(Color::Yellow),
+                )],
+            );
+            transcript.markdown(format!("unsaved:{invocation}"), reply);
         }
         if self.final_reply.is_some() || self.unsaved.is_some() {
             let calls = crate::performance::conversation_calls(&self.reply_usages);
-            lines.push(Line::styled(
-                crate::performance::footer(&calls, body.width),
-                Style::default().fg(Color::DarkGray),
-            ));
+            transcript.plain(
+                "reply-metrics".into(),
+                vec![Line::styled(
+                    crate::performance::footer(&calls, body.width),
+                    Style::default().fg(Color::DarkGray),
+                )],
+            );
         }
         if !self.outcome.is_empty() {
-            for line in safe(&self.outcome).split('\n') {
-                lines.push(Line::styled(
-                    line.to_owned(),
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
+            transcript.literal(
+                "outcome".into(),
+                &self.outcome,
+                Style::default().fg(Color::Yellow),
+            );
         }
-        if lines.is_empty() {
-            lines.push(Line::styled(
-                "What would you like to work on?",
-                Style::default().fg(Color::DarkGray),
-            ));
+        if transcript.is_empty() {
+            transcript.plain(
+                "welcome".into(),
+                vec![Line::styled(
+                    "What would you like to work on?",
+                    Style::default().fg(Color::DarkGray),
+                )],
+            );
         }
-        let transcript = Paragraph::new(lines).wrap(Wrap { trim: false });
-        let tail = transcript
-            .line_count(body.width)
-            .saturating_sub(body.height as usize)
-            .min(u16::MAX as usize) as u16;
-        frame.render_widget(
-            transcript.scroll((tail.saturating_sub(self.scroll), 0)),
+        self.scroll.set(transcript.render_images(
+            frame,
             body,
-        );
+            self.scroll.get(),
+            !matches!(self.mode, Mode::Commands | Mode::Sessions),
+        ));
+        drop(transcript);
         let hint = match self.mode {
             Mode::Input => " Alt+Enter send | Enter newline | Esc browse ",
             Mode::Browse => " Enter send | i edit | arrows scroll ",
@@ -1551,7 +1618,7 @@ mod tests {
         ] {
             view.key(KeyEvent::new(key, KeyModifiers::NONE), &controller);
         }
-        assert_eq!(view.scroll, 0);
+        assert_eq!(view.scroll.get(), 0);
         assert!(render(&view, 80, 24).contains("Enter send"));
         view.key(
             KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
@@ -1696,7 +1763,7 @@ mod tests {
             .apply(mf_chat::PreviewEvent {
                 invocation: invocation.clone(),
                 delta: mf_chat::TextDelta {
-                    text: "draft prefix".into(),
+                    text: "**draft prefix**".into(),
                     model_call_id: "model-call".into(),
                 },
             })
@@ -1725,9 +1792,14 @@ mod tests {
             stderr: String::new(),
             capture_error: None,
         };
-        view.event(finish(invocation.clone(), "canonical reply"), &controller);
+        view.event(
+            finish(invocation.clone(), "**canonical reply**"),
+            &controller,
+        );
         let screen = render(&view, 100, 30);
         assert!(screen.contains("canonical reply"));
+        assert!(!screen.contains("**"));
+        assert_eq!(view.final_reply.as_deref(), Some("**canonical reply**"));
         assert!(!screen.contains("draft prefix"));
         let next = Invocation::new(&session.id);
         view.event(
