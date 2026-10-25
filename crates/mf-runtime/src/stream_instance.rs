@@ -172,7 +172,6 @@ pub struct StreamOptions {
     pub snapshots: Option<crate::SnapshotRecorder>,
     pub arguments: crate::WorkflowArguments,
     pub stdin: Option<crate::TextInput>,
-    pub cancellation: Option<crate::StreamCancellation>,
 }
 impl Default for StreamOptions {
     fn default() -> Self {
@@ -182,7 +181,6 @@ impl Default for StreamOptions {
             snapshots: None,
             arguments: crate::WorkflowArguments::default(),
             stdin: None,
-            cancellation: None,
         }
     }
 }
@@ -744,9 +742,6 @@ impl PreparedStream {
         let worker_limit = std::num::NonZeroUsize::new(domain_limit)
             .expect("validated stream worker limit is positive");
         let mut context = ExecutionContext::default();
-        if let Some(cancellation) = options.cancellation {
-            context.set_cancellation(cancellation);
-        }
         if let Some(capture) = &options.snapshots {
             context.set_snapshot_recorder(capture.clone());
         }

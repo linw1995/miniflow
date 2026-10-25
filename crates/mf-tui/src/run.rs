@@ -30,7 +30,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
-use snafu::{IntoError, ResultExt, Snafu};
+use snafu::{IntoError, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     env,
@@ -315,6 +315,8 @@ pub enum CaptureFailure {
         #[snafu(source(from(mf_runtime::StreamError, Arc::new)))]
         source: Arc<mf_runtime::StreamError>,
     },
+    #[snafu(display("workflow output capture stopped"))]
+    OutputStopped,
     #[snafu(display("stdout {operation} failed: {source}"))]
     Io {
         operation: &'static str,
@@ -415,9 +417,7 @@ impl LocalRun {
         stream: Option<mf_runtime::StreamCancellation>,
     ) -> Result<Self, RunError> {
         let (records, stream) = stream
-            .map(|parent| {
-                let cancellation = mf_runtime::StreamCancellation::default();
-                parent.forward_to(&cancellation);
+            .map(|cancellation| {
                 let (sender, receiver) = std::sync::mpsc::sync_channel(64);
                 (
                     receiver,
@@ -560,8 +560,7 @@ impl LocalRun {
         }
         // Reap descendants even when they have already closed their inherited streams.
         let _ = self.child.child.start_kill();
-        self.capture
-            .stop_with_abort(view.stdout_open || view.stderr_open);
+        self.capture.stop();
         let mut capture = self
             .capture
             .capture
@@ -722,7 +721,6 @@ struct CaptureWorker {
     worker: Option<JoinHandle<()>>,
     cancellation: Option<mf_runtime::StreamCancellation>,
     record_processing: Arc<AtomicBool>,
-    publishing_done: Arc<AtomicBool>,
     record_mode: bool,
     progress: Arc<Mutex<Instant>>,
 }
@@ -738,14 +736,12 @@ impl CaptureWorker {
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let processing = Arc::new(AtomicBool::new(false));
-        let publishing_done = Arc::new(AtomicBool::new(stream.is_none()));
         let progress = Arc::new(Mutex::new(Instant::now()));
         let cancellation = stream.as_ref().map(|stream| stream.cancellation.clone());
         let record_mode = stream.is_some();
         let shared_capture = Arc::clone(&capture);
         let shared_stop = Arc::clone(&stop);
         let shared_processing = Arc::clone(&processing);
-        let shared_done = Arc::clone(&publishing_done);
         let shared_progress = Arc::clone(&progress);
         let worker = thread::spawn(move || {
             let mut codec_done = stream.is_none();
@@ -773,6 +769,7 @@ impl CaptureWorker {
                     let cancellation = stream.cancellation.clone();
                     let mut emit = |mut values| -> Result<(), CaptureFailure> {
                         loop {
+                            ensure!(!shared_stop.load(Ordering::Relaxed), OutputStoppedSnafu);
                             if let Some(error) = cancellation.failure() {
                                 return Err(error).context(OutputCancelledSnafu);
                             }
@@ -793,7 +790,6 @@ impl CaptureWorker {
                     if result.is_ok() && stdout_closed {
                         result = stream.decoder.finish(&mut emit);
                         codec_done = true;
-                        shared_done.store(true, Ordering::Release);
                     }
                     if let Err(error) = result {
                         codec_done = true;
@@ -821,16 +817,13 @@ impl CaptureWorker {
             worker: Some(worker),
             cancellation,
             record_processing: processing,
-            publishing_done,
             record_mode,
             progress,
         }
     }
 
     fn cancel(&self) {
-        if let Some(cancellation) = &self.cancellation {
-            cancellation.cancel_with_message("workflow capture stopped");
-        }
+        self.stop.store(true, Ordering::Relaxed);
     }
 
     fn cancelled(&self) -> bool {
@@ -856,15 +849,8 @@ impl CaptureWorker {
     }
 
     fn stop(&mut self) {
-        self.stop_with_abort(true);
-    }
-
-    fn stop_with_abort(&mut self, abort: bool) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
-            if abort && !self.publishing_done.load(Ordering::Acquire) {
-                self.cancel();
-            }
             let _ = worker.join();
         }
     }
@@ -2470,22 +2456,35 @@ mod tests {
     }
 
     #[test]
-    fn parent_cancellation_interrupts_native_capture_under_receiver_pressure() {
-        let mut command = Command::new("python3");
-        command.arg("-c").arg("import json,time;[print(json.dumps({'value':i}),flush=True) for i in range(1000)];time.sleep(20)");
-        let cancellation = mf_runtime::StreamCancellation::default();
-        let mut run =
-            LocalRun::start_stream(command, scope_fixture(), RunId::new(), cancellation.clone())
-                .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !run.capture.processing() {
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(5));
+    fn cancellation_interrupts_native_capture_under_receiver_pressure() {
+        for parent in [false, true] {
+            let mut command = Command::new("python3");
+            command.arg("-c").arg("import json,time;[print(json.dumps({'value':i}),flush=True) for i in range(1000)];time.sleep(20)");
+            let cancellation = mf_runtime::StreamCancellation::default();
+            let mut run = LocalRun::start_stream(
+                command,
+                scope_fixture(),
+                RunId::new(),
+                cancellation.clone(),
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !run.capture.processing() {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+            if parent {
+                cancellation.cancel(mf_runtime::StreamError::Execution {
+                    message: "host cancelled".into(),
+                });
+            } else {
+                run.cancel();
+            }
+            let outcome = wait_for_outcome(&mut run);
+            assert!(outcome.interrupted);
+            assert!(outcome.stdout.is_empty());
+            assert_eq!(cancellation.failure().is_some(), parent);
         }
-        cancellation.cancel_with_message("host cancelled");
-        let outcome = wait_for_outcome(&mut run);
-        assert!(outcome.interrupted);
-        assert!(outcome.stdout.is_empty());
     }
     use mf_runtime::StdinRequirement;
     use mf_telemetry::{

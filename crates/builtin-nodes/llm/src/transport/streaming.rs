@@ -6,10 +6,6 @@ use snafu::{Snafu, ensure};
 #[derive(Debug, Snafu)]
 pub enum StreamingTransportError {
     #[snafu(transparent)]
-    Future {
-        source: mf_runtime::FutureExecutionError,
-    },
-    #[snafu(transparent)]
     Http {
         #[snafu(source(from(Error, Box::new)))]
         source: Box<Error>,
@@ -29,8 +25,6 @@ struct Frames {
     pending: Bytes,
     frame: Vec<u8>,
     usage: Arc<Mutex<Option<Usage>>>,
-    cancellation: mf_runtime::StreamCancellation,
-    deadline: std::time::Instant,
 }
 
 fn normalize_event(
@@ -59,25 +53,28 @@ fn normalize_event(
     Ok(Bytes::from(event))
 }
 
-pub fn normalize_stream(
-    body: BoxedStream,
-    usage: Arc<Mutex<Option<Usage>>>,
-    cancellation: mf_runtime::StreamCancellation,
-    deadline: std::time::Instant,
-) -> BoxedStream {
+pub fn normalize_stream(body: BoxedStream, usage: Arc<Mutex<Option<Usage>>>) -> BoxedStream {
     Box::pin(futures::stream::try_unfold(
         Frames {
             body,
             pending: Bytes::new(),
             frame: Vec::new(),
             usage,
-            cancellation,
-            deadline,
         },
         |mut state| async move {
             let next = async move {
                 loop {
-                    mf_runtime::check_future_limits(&state.cancellation, Some(state.deadline))?;
+                    // Ready-only SSE traffic must yield so the executor can observe cancellation.
+                    let mut yielded = false;
+                    futures::future::poll_fn(|context| {
+                        if std::mem::replace(&mut yielded, true) {
+                            std::task::Poll::Ready(())
+                        } else {
+                            context.waker().wake_by_ref();
+                            std::task::Poll::Pending
+                        }
+                    })
+                    .await;
                     if state.pending.is_empty() {
                         let Some(chunk) = state.body.next().await else {
                             ensure!(state.frame.is_empty(), TruncatedEventSnafu);
@@ -108,65 +105,47 @@ pub fn normalize_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error as _;
+    use mf_runtime::{ExecutionContext, FutureExecutionError, StreamCancellation, StreamError};
+    use std::time::{Duration, Instant};
 
     #[test]
-    fn metadata_only_frames_check_cancellation_between_deliveries() {
-        let cancellation = mf_runtime::StreamCancellation::default();
-        let body = Box::pin(futures::stream::iter([
-            Ok(Bytes::from_static(b": heartbeat\n\n")),
-            Ok(Bytes::from_static(b": heartbeat\n\n")),
-        ]));
-        let mut frames = normalize_stream(
-            body,
-            Arc::new(Mutex::new(None)),
-            cancellation.clone(),
-            std::time::Instant::now() + std::time::Duration::from_secs(5),
+    fn ready_metadata_frames_allow_executor_cancellation() {
+        let cancellation = StreamCancellation::default();
+        let mut context = ExecutionContext::default();
+        context.set_cancellation(cancellation.clone());
+        let mut count = 0;
+        let body = Box::pin(
+            futures::stream::repeat(Bytes::from_static(b": heartbeat\n\n"))
+                .inspect(move |_| {
+                    count += 1;
+                    if count == 2 {
+                        cancellation.cancel(StreamError::Execution {
+                            message: "stop metadata stream".into(),
+                        });
+                    }
+                })
+                .map(Ok),
         );
-        let result = mf_runtime::ExecutionContext::default()
-            .execute_future(
-                async {
-                    assert!(frames.next().await.unwrap().is_ok());
-                    cancellation.cancel_with_message("stop metadata stream");
-                    frames.next().await.unwrap().unwrap_err()
-                },
-                None,
-            )
-            .unwrap();
-        assert!(result.source().unwrap().is::<StreamingTransportError>());
+        let mut frames = normalize_stream(body, Arc::new(Mutex::new(None)));
+        let result = context.execute_future(async { while frames.next().await.is_some() {} }, None);
         assert!(matches!(
-            result
-                .source()
-                .unwrap()
-                .downcast_ref::<StreamingTransportError>(),
-            Some(StreamingTransportError::Future {
-                source: mf_runtime::FutureExecutionError::Cancelled { .. }
-            })
+            result,
+            Err(FutureExecutionError::Cancelled { .. })
         ));
     }
 
     #[test]
-    fn metadata_only_frames_check_the_total_deadline_before_reading() {
-        let body = Box::pin(futures::stream::iter([Ok(Bytes::from_static(
-            b": heartbeat\n\n",
-        ))]));
-        let mut frames = normalize_stream(
-            body,
-            Arc::new(Mutex::new(None)),
-            Default::default(),
-            std::time::Instant::now() - std::time::Duration::from_millis(1),
+    fn ready_metadata_frames_allow_executor_deadline_checks() {
+        let body =
+            Box::pin(futures::stream::repeat(Bytes::from_static(b": heartbeat\n\n")).map(Ok));
+        let mut frames = normalize_stream(body, Arc::new(Mutex::new(None)));
+        let result = ExecutionContext::default().execute_future(
+            async { while frames.next().await.is_some() {} },
+            Some(Instant::now() + Duration::from_millis(10)),
         );
-        let result = mf_runtime::ExecutionContext::default()
-            .execute_future(async { frames.next().await.unwrap().unwrap_err() }, None)
-            .unwrap();
         assert!(matches!(
-            result
-                .source()
-                .unwrap()
-                .downcast_ref::<StreamingTransportError>(),
-            Some(StreamingTransportError::Future {
-                source: mf_runtime::FutureExecutionError::DeadlineExceeded
-            })
+            result,
+            Err(FutureExecutionError::DeadlineExceeded)
         ));
     }
 }

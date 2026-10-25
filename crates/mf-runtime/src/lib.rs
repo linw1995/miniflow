@@ -58,7 +58,7 @@ pub use flow::{
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
 };
 #[cfg(feature = "async")]
-pub use future_execution::{FutureExecutionError, check_limits as check_future_limits};
+pub use future_execution::FutureExecutionError;
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,

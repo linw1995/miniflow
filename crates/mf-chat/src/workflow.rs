@@ -15,7 +15,20 @@ use mf_runtime::{
 };
 use mf_telemetry::{identity::RunId, observation::Observer};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    task::{Wake, Waker},
+};
+
+struct CancelWorkflow(StreamCancellation);
+
+impl Wake for CancelWorkflow {
+    fn wake(self: Arc<Self>) {
+        self.0.cancel(mf_runtime::StreamError::Execution {
+            message: "conversation cancelled by host".into(),
+        });
+    }
+}
 
 /// Invokes one backend and forwards optional text deltas into the conversation Flow.
 pub trait ConversationBackend: Send + Sync {
@@ -100,12 +113,19 @@ impl ConversationBackend for EmbeddedBackend {
                 .map(|observer| self.plan.start_stream_observation(observer, RunId::new()))
                 .transpose()?;
             let prepared = mf_compiler::instantiate_stream(&self.plan, &registry)?;
+            if let Some(error) = context.cancellation().failure() {
+                return Err(error.into());
+            }
             let instance = prepared.start_with_options(mf_runtime::StreamOptions {
                 arguments,
                 observation,
-                cancellation: Some(context.cancellation()),
                 ..Default::default()
             })?;
+            context
+                .cancellation()
+                .register(Waker::from(Arc::new(CancelWorkflow(
+                    instance.cancellation(),
+                ))));
             let mut decoder = crate::contract::ConversationOutputDecoder::new(&self.contract);
             let result = (|| -> Result<(), ChatError> {
                 while let Some(delivery) = instance.receive()? {
@@ -541,15 +561,19 @@ pub fn run_conversation_with_preview(
             .insert(mf_runtime::output_id("begin", &name), value);
     }
     let observation = Some(plan.start_stream_observation(&observer, RunId::new())?);
-    let runtime_cancellation = StreamCancellation::default();
-    cancellation.forward_to(&runtime_cancellation);
     let result = (|| -> Result<Settlement, ChatError> {
+        if let Some(error) = cancellation.failure() {
+            return Err(error.into());
+        }
         let instance = flow.start_with_options(mf_runtime::StreamOptions {
             arguments,
             observation,
-            cancellation: Some(runtime_cancellation.clone()),
             ..Default::default()
         })?;
+        let runtime_cancellation = instance.cancellation();
+        cancellation.register(Waker::from(Arc::new(CancelWorkflow(
+            runtime_cancellation.clone(),
+        ))));
         let mut settlement = None;
         while let Some(delivery) = instance.receive()? {
             let mut outputs = delivery.output().outputs.clone();

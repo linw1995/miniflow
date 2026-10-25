@@ -94,8 +94,9 @@ impl mf_runtime::EmissionSink for DeltaSink {
             });
         }
         if self.cancel_after_prefix {
-            self.cancellation
-                .cancel_with_message("cancelled after prefix");
+            self.cancellation.cancel(StreamError::Execution {
+                message: "cancelled after prefix".into(),
+            });
         }
         if let Some(error) = self.cancellation.failure() {
             return Err(error);

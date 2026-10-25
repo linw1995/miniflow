@@ -476,7 +476,9 @@ impl Controller {
                     return Err(error.into());
                 }
                 if cancel.load(Ordering::Acquire) || closed.load(Ordering::Acquire) {
-                    outer_cancellation.cancel_with_message("chat request cancelled");
+                    outer_cancellation.cancel(mf_runtime::StreamError::Execution {
+                        message: "chat request cancelled".into(),
+                    });
                     return Err(outer_cancellation
                         .failure()
                         .expect("cancellation was recorded")
@@ -733,7 +735,9 @@ impl ExternalBackend {
         loop {
             if self.cancel.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
                 self.cancellation
-                    .cancel_with_message("chat request cancelled");
+                    .cancel(mf_runtime::StreamError::Execution {
+                        message: "chat request cancelled".into(),
+                    });
                 run.cancel();
             }
             if context.cancellation().failure().is_some() {
