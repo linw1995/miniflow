@@ -40,3 +40,5 @@ normal Cargo dependencies, with workspace inheritance resolved by Cargo. This do
 provider versions equal the chat package version, and embedded defaults do not retain checkout paths.
 The runtime owns the generic catalog contract, and the compiler has no chat-specific
 name, source, or dependency version policy. Referenced definitions are frozen before node execution.
+Built-in names use the provider-qualified form `<package>.<flow>`, with `mf-chat.chat-title` as the
+shipped chat definition. The registry compares complete names, so providers can reuse local Flow names.

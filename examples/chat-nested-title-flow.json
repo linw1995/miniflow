@@ -16,7 +16,7 @@
   },
   "flows": {
     "title": {
-      "builtin": "chat-title"
+      "builtin": "mf-chat.chat-title"
     }
   },
   "nodes": [

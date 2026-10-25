@@ -6,7 +6,7 @@ use serde_json::json;
 #[test]
 fn ineligible_builtin_title_returns_no_title_and_empty_usage() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-10-25","dependencies":{},"flows":{"title":{"builtin":"chat-title"}},
+        "version":"2026-10-25","dependencies":{},"flows":{"title":{"builtin":"mf-chat.chat-title"}},
         "nodes":[{"id":"title","kind":"workflow.call","config":{"flow":"title"}}],
         "outputs":[{"name":"title","node":"title","port":"title","optional":true},{"name":"usages","node":"title","port":"usages"}]
     })).unwrap();
@@ -137,7 +137,7 @@ fn builtin_title_policy_preserves_captured_failure_usage_without_a_title() {
 #[test]
 fn title_definition_is_owned_and_registered_by_chat() {
     let registry = mf_runtime::BuiltinFlowRegistry::from_inventory().unwrap();
-    let definition = (registry.get("chat-title").unwrap().definition)().unwrap();
+    let definition = (registry.get("mf-chat.chat-title").unwrap().definition)().unwrap();
     assert_eq!(definition, mf_chat::flows::title_definition().unwrap());
     assert!(
         definition

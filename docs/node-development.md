@@ -935,7 +935,9 @@ cancellation wake blocked producers. Consumers and hosts own the policy for stal
 ## Register reusable Flow definitions
 
 A package can register `mf_runtime::BuiltinFlowRegistration` with a unique nonblank name and a pure
-factory returning `WorkflowDefinition`. The factory owns its JSON and dependency version policy;
+factory returning `WorkflowDefinition`. Use the qualified form `<package>.<flow>`, such as
+`mf-chat.chat-title`, to avoid collisions between providers. Catalog lookup matches the complete
+qualified name exactly. The factory owns its JSON and dependency version policy;
 source resolution must not execute the Flow or perform business I/O. The runtime validates catalog
 names, and the compiler only looks up the linked provider and freezes its definition. Caller-selected
 package sources retain the factory's required features and default features.

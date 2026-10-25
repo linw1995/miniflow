@@ -44,7 +44,7 @@ sources in `flows`; Cargo node packages remain in `dependencies`:
 {
   "flows": {
     "normalize": { "path": "./flows/normalize.json" },
-    "title": { "builtin": "chat-title" }
+    "title": { "builtin": "mf-chat.chat-title" }
   },
   "nodes": [
     {
@@ -84,12 +84,13 @@ features; different source declarations fail explicitly. Built-ins use matching 
 packages when available and retain the Flow provider's declared requirements otherwise. In a development
 checkout, declare the built-in's local providers explicitly, as in the nested title example.
 
-Built-in names come from linked `BuiltinFlowRegistration` providers. The compiler resolves this generic
+Built-in names use `<package>.<flow>` to avoid collisions across providers, and lookup matches the
+complete qualified name. Names come from linked `BuiltinFlowRegistration` providers. The compiler resolves this generic
 catalog without owning application definitions. `mf-chat` owns `workflows/title.json` and registers
-`chat-title`; the CLI already links that provider. Custom hosts must link the provider before source
+`mf-chat.chat-title`; the CLI already links that provider. Custom hosts must link the provider before source
 resolution. Standalone runners contain the expanded graph and need only its node packages.
 
-The built-in `chat-title` Flow takes `input.prompt`, `input.text`, `input.status`, `input.context`,
+The built-in `mf-chat.chat-title` Flow takes `input.prompt`, `input.text`, `input.status`, `input.context`,
 `input.model`, `input.base_url`, and `input.api_key`. It checks the title policy in `context.title`,
 captures provider failures, and returns optional `title` and required `usages`. An ineligible call
 returns no title and an empty usage list; a failed provider attempt retains its usage without a title.

@@ -56,5 +56,5 @@ not require application catalog providers to execute generic nodes.
 
 #### Scenario: Compile a chat-provided title Flow
 
-- **WHEN** a host links `mf-chat` and resolves the `chat-title` name
+- **WHEN** a host links `mf-chat` and resolves the `mf-chat.chat-title` name
 - **THEN** the compiler freezes the chat-owned definition and the runner links only its node providers

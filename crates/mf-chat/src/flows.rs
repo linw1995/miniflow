@@ -6,5 +6,5 @@ pub fn title_definition() -> Result<mf_runtime::WorkflowDefinition, mf_runtime::
 }
 
 inventory::submit! {
-    mf_runtime::BuiltinFlowRegistration { name: "chat-title", definition: title_definition }
+    mf_runtime::BuiltinFlowRegistration { name: "mf-chat.chat-title", definition: title_definition }
 }
