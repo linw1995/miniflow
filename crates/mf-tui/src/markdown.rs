@@ -1,5 +1,6 @@
 //! Cached Markdown presentation, independent of chat persistence and terminal I/O.
 
+use crate::images::{ImageRef, Images};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -54,10 +55,53 @@ struct CachedLine {
     width: Option<u16>,
     rows: Vec<VisualRow>,
     continuation: usize,
+    image: Option<ImageSlot>,
+    image_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ImageSlot {
+    reference: ImageRef,
+    indent: usize,
 }
 
 impl CachedLine {
-    fn layout(&mut self, width: u16) {
+    fn layout(&mut self, width: u16, images: &mut Images) {
+        if width == 0 {
+            self.rows.clear();
+            self.width = Some(0);
+            return;
+        }
+        if let Some(image) = &self.image {
+            if self.width == Some(width) && self.image_revision == images.revision() {
+                return;
+            }
+            let indent = image.indent.min(width.saturating_sub(1) as usize);
+            let presentation =
+                images.prepare(&image.reference, width.saturating_sub(indent as u16));
+            let mut caption = presentation.caption;
+            caption.spans.insert(0, Span::raw(" ".repeat(indent)));
+            self.rows = if presentation.ready || presentation.height > 1 {
+                (0..presentation.height)
+                    .map(|row| VisualRow {
+                        byte: row,
+                        line: if row == 0 {
+                            caption.clone()
+                        } else {
+                            Line::default()
+                        },
+                    })
+                    .collect()
+            } else {
+                wrap(&caption, width, indent)
+            };
+            for (index, row) in self.rows.iter_mut().enumerate() {
+                row.byte = index;
+            }
+            self.width = Some(width);
+            self.image_revision = images.revision();
+            return;
+        }
         if self.width != Some(width) {
             self.rows = wrap(&self.text, width, self.continuation);
             self.width = Some(width);
@@ -75,6 +119,7 @@ struct Block {
     width: Option<u16>,
     dirty: bool,
     line_ends: Vec<usize>,
+    image_revision: u64,
 }
 
 impl Block {
@@ -93,6 +138,12 @@ impl Block {
                 .unwrap_or_default();
             if line.continuation != continuation {
                 line.continuation = continuation;
+                line.width = None;
+                self.dirty = true;
+            }
+            let image = rendered.images.get(&index).cloned();
+            if line.image != image {
+                line.image = image;
                 line.width = None;
                 self.dirty = true;
             }
@@ -121,16 +172,17 @@ impl Block {
         }
     }
 
-    fn layout(&mut self, width: u16) {
-        if self.width == Some(width) && !self.dirty {
+    fn layout(&mut self, width: u16, images: &mut Images) {
+        if self.width == Some(width) && !self.dirty && self.image_revision == images.revision() {
             return;
         }
         self.width = Some(width);
+        self.image_revision = images.revision();
         self.dirty = false;
         self.height = 0;
         self.line_ends.clear();
         for line in &mut self.lines {
-            line.layout(width);
+            line.layout(width, images);
             self.height += line.rows.len();
             self.line_ends.push(self.height);
         }
@@ -201,6 +253,13 @@ impl Document {
         block.events.clear();
         block.code.clear();
         block.set_lines(lines);
+        for line in &mut block.lines {
+            if line.image.take().is_some() || line.continuation != 0 {
+                line.continuation = 0;
+                line.width = None;
+                block.dirty = true;
+            }
+        }
     }
 
     pub fn literal(&mut self, source: &str, style: Style) {
@@ -217,15 +276,33 @@ impl Document {
         self.literal_style = Some(style);
     }
 
+    #[cfg(test)]
     pub fn layout(&mut self, width: u16) -> usize {
+        self.layout_images(width, &mut Images::default())
+    }
+
+    pub fn layout_images(&mut self, width: u16, images: &mut Images) -> usize {
         self.ends.clear();
         let mut height = 0;
         for (index, block) in self.blocks.iter_mut().enumerate() {
-            block.layout(width);
+            block.layout(width, images);
             height += block.height + usize::from(index > 0);
             self.ends.push(height);
         }
         height
+    }
+
+    pub fn image(&self, position: Position) -> Option<(&ImageRef, usize, usize)> {
+        if position.gap {
+            return None;
+        }
+        let block = self
+            .blocks
+            .iter()
+            .find(|block| block.source.start == position.block_start)?;
+        let line = block.lines.get(position.line)?;
+        let image = line.image.as_ref()?;
+        Some((&image.reference, image.indent, line.rows.len()))
     }
 
     pub fn row(&self, row: usize) -> Option<(Position, &Line<'static>)> {
@@ -489,6 +566,7 @@ struct Renderer {
     styles: Vec<Style>,
     continuation: usize,
     continuations: std::collections::BTreeMap<usize, usize>,
+    images: std::collections::BTreeMap<usize, ImageSlot>,
 }
 
 impl Renderer {
@@ -547,6 +625,7 @@ impl Renderer {
 struct Rendered {
     lines: Vec<Line<'static>>,
     continuations: std::collections::BTreeMap<usize, usize>,
+    images: std::collections::BTreeMap<usize, ImageSlot>,
 }
 
 fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Rendered {
@@ -558,6 +637,41 @@ fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Rendered {
         index += 1;
         let style = r.style();
         match event {
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                r.newline(false);
+                let mut alt = String::new();
+                let mut depth = 1usize;
+                while index < events.len() {
+                    match &events[index] {
+                        Event::Start(Tag::Image { .. }) => depth += 1,
+                        Event::End(TagEnd::Image) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                index += 1;
+                                break;
+                            }
+                        }
+                        Event::Text(text) | Event::Code(text) => alt.push_str(text),
+                        Event::SoftBreak | Event::HardBreak => alt.push(' '),
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                let prefix = r.prefix();
+                let indent = Span::raw(&prefix).width();
+                let reference = ImageRef {
+                    source: dest_url.to_string(),
+                    alt,
+                };
+                r.current.push(Span::raw(prefix));
+                r.text(
+                    &format!("[image] {}", reference.alt),
+                    style.fg(Color::DarkGray),
+                );
+                r.images
+                    .insert(r.lines.len(), ImageSlot { reference, indent });
+                r.newline(true);
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
                 r.newline(false);
                 let language = match kind {
@@ -600,7 +714,6 @@ fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Rendered {
                 | Tag::Strikethrough
                 | Tag::Heading { .. }
                 | Tag::Link { .. }
-                | Tag::Image { .. }
                 | Tag::TableHead),
             ) => {
                 let style = match tag {
@@ -621,17 +734,11 @@ fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Rendered {
                         }
                     }
                     Tag::Link { .. } => style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
-                    Tag::Image { .. } => {
-                        r.text("[image] ", style);
-                        style
-                    }
                     _ => style,
                 };
                 r.styles.push(style);
             }
-            Event::End(
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Image,
-            ) => {
+            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
                 r.styles.pop();
             }
             Event::End(TagEnd::Link) => {
@@ -723,6 +830,7 @@ fn render(events: &[Event<'static>], code: &mut Vec<CodeCache>) -> Rendered {
     Rendered {
         lines: r.lines,
         continuations: r.continuations,
+        images: r.images,
     }
 }
 

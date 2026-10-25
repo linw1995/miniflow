@@ -1,6 +1,14 @@
-use crate::markdown::{Document, Position};
+use crate::{
+    images::Images,
+    markdown::{Document, Position},
+};
 use ratatui::{Frame, layout::Rect, style::Style, text::Line};
-use std::collections::BTreeMap;
+use ratatui_image::picker::Picker;
+use std::{
+    collections::BTreeMap,
+    io::{self, Write},
+    path::PathBuf,
+};
 
 #[derive(Default)]
 struct Entry {
@@ -16,10 +24,29 @@ pub struct Transcript {
     width: u16,
     anchor: Option<(String, Position)>,
     requested_scroll: usize,
+    images: Images,
 }
 
 impl Transcript {
+    pub fn enable_images(&mut self, root: PathBuf, picker: Picker) -> io::Result<()> {
+        self.images.enable(root, picker)
+    }
+
+    pub fn update_image_picker(&mut self, picker: Picker) {
+        self.images.update_picker(picker);
+    }
+
+    pub fn clear_images(&mut self) {
+        self.images.clear();
+    }
+
+    pub fn flush_images(&mut self, writer: &mut dyn Write) -> io::Result<()> {
+        self.images.poll();
+        self.images.flush_retired(writer)
+    }
+
     pub fn begin(&mut self, width: u16) {
+        self.images.begin_frame();
         self.width = width;
         self.order.clear();
         self.ends.clear();
@@ -58,7 +85,7 @@ impl Transcript {
     fn push(&mut self, key: String) {
         let entry = self.entries.get_mut(&key).unwrap();
         entry.seen = true;
-        let height = entry.document.layout(self.width);
+        let height = entry.document.layout_images(self.width, &mut self.images);
         self.ends
             .push(self.ends.last().copied().unwrap_or_default() + height);
         self.order.push(key);
@@ -111,12 +138,50 @@ impl Transcript {
         top
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, scroll: usize) -> usize {
+    pub fn render_images(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        scroll: usize,
+        show_images: bool,
+    ) -> usize {
         let top = self.top(area.height, scroll);
-        for offset in 0..area.height {
+        let mut offset = 0;
+        while offset < area.height {
+            let image = self
+                .row(top + offset as usize)
+                .and_then(|(key, position, _)| {
+                    self.entries[key]
+                        .document
+                        .image(position)
+                        .map(|(image, indent, height)| {
+                            (image.clone(), indent, height, position.byte)
+                        })
+                });
+            if let Some((image, indent, height, skip)) = image {
+                let indent = indent.min(area.width.saturating_sub(1) as usize) as u16;
+                let visible = height
+                    .saturating_sub(skip)
+                    .min((area.height - offset) as usize)
+                    .max(1) as u16;
+                let rect = Rect::new(
+                    area.x + indent,
+                    area.y + offset,
+                    area.width.saturating_sub(indent),
+                    visible,
+                );
+                if show_images {
+                    self.images.request(&image, rect.width);
+                    if self.images.render(&image, rect.width, frame, rect, skip) {
+                        offset += visible;
+                        continue;
+                    }
+                }
+            }
             if let Some((_, _, line)) = self.row(top + offset as usize) {
                 frame.render_widget(line, Rect::new(area.x, area.y + offset, area.width, 1));
             }
+            offset += 1;
         }
         self.requested_scroll
     }
@@ -125,6 +190,8 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::time::{Duration, Instant};
 
     fn screen(transcript: &Transcript, top: usize, height: usize) -> Vec<String> {
         (top..top + height)
@@ -215,5 +282,105 @@ mod tests {
         let top = transcript.top(1, 0);
         assert!(top > u16::MAX as usize);
         assert_eq!(screen(&transcript, top, 1), ["last"]);
+    }
+
+    #[test]
+    fn images_participate_in_scrolling_resizing_and_popup_visibility() {
+        let root = tempfile::tempdir().unwrap();
+        image::RgbImage::from_pixel(64, 128, image::Rgb([40u8, 120, 200]))
+            .save(root.path().join("chart.png"))
+            .unwrap();
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        let mut transcript = Transcript::default();
+        transcript
+            .enable_images(root.path().to_owned(), picker)
+            .unwrap();
+        let source = "Before\n\n![chart](chart.png)\n\nAfter";
+        let mut terminal = Terminal::new(TestBackend::new(12, 5)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            transcript.begin(12);
+            transcript.markdown("reply".into(), source);
+            terminal
+                .draw(|frame| {
+                    transcript.render_images(frame, frame.area(), 0, true);
+                })
+                .unwrap();
+            if terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol().contains('\u{10eeee}'))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "A")
+        );
+        transcript.begin(12);
+        transcript.markdown("reply".into(), source);
+        terminal
+            .draw(|frame| {
+                transcript.render_images(frame, frame.area(), 0, false);
+            })
+            .unwrap();
+        assert!(
+            !terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol().contains('\u{10eeee}')
+                    || cell.symbol().contains("\u{1b}_G"))
+        );
+        terminal
+            .draw(|frame| {
+                transcript.render_images(frame, frame.area(), 0, true);
+            })
+            .unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol().contains('\u{10eeee}'))
+        );
+        std::fs::remove_file(root.path().join("chart.png")).unwrap();
+        terminal.resize(Rect::new(0, 0, 4, 5)).unwrap();
+        loop {
+            transcript.begin(4);
+            transcript.markdown("reply".into(), source);
+            terminal
+                .draw(|frame| {
+                    transcript.render_images(frame, frame.area(), 0, true);
+                })
+                .unwrap();
+            if terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol().contains('\u{10eeee}'))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        transcript.clear_images();
+        let mut cleanup = vec![];
+        transcript.flush_images(&mut cleanup).unwrap();
+        assert!(String::from_utf8(cleanup).unwrap().contains("a=d,d=I"));
     }
 }

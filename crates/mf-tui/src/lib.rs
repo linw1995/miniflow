@@ -8,9 +8,12 @@
 pub mod chat;
 mod duration;
 pub mod graph;
+#[cfg(unix)]
+mod images;
 pub mod logs;
 #[cfg(unix)]
 pub mod manifest;
+#[cfg(unix)]
 mod markdown;
 mod performance;
 pub mod receiver;

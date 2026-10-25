@@ -64,6 +64,17 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
     let guard = TerminalGuard::enter().context(IoSnafu {
         operation: "enter terminal",
     })?;
+    view.transcript
+        .borrow_mut()
+        .enable_images(
+            std::env::current_dir().context(IoSnafu {
+                operation: "resolve image base directory",
+            })?,
+            crate::images::terminal_picker(),
+        )
+        .context(IoSnafu {
+            operation: "start image worker",
+        })?;
     let mut terminal = Terminal::with_options(
         CrosstermBackend::new(Box::new(io::stderr()) as Box<dyn Write>),
         TerminalOptions {
@@ -97,6 +108,9 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
                 operation: "read terminal",
             })? {
                 Event::Resize(width, height) => {
+                    view.transcript
+                        .borrow_mut()
+                        .update_image_picker(crate::images::terminal_picker());
                     terminal
                         .resize(Rect::new(0, 0, width, height))
                         .context(IoSnafu {
@@ -119,10 +133,15 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
     })();
     *terminal.backend_mut() = CrosstermBackend::new(Box::new(io::sink()));
     let cleanup = controller.close();
+    view.transcript.borrow_mut().clear_images();
+    let image_cleanup = view.transcript.borrow_mut().flush_images(&mut io::stderr());
     let _ = execute!(io::stderr(), DisableBracketedPaste);
     drop(terminal);
     drop(guard);
     cleanup?;
+    image_cleanup.context(IoSnafu {
+        operation: "release terminal images",
+    })?;
     result?;
     Ok(0)
 }
@@ -321,6 +340,7 @@ impl ChatView {
         let new = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
         self.editor = self.drafts.remove(&new).unwrap_or_default();
         self.session = session;
+        self.transcript.get_mut().clear_images();
         self.page = None;
         self.preview = LivePreview::default();
         self.final_reply = None;
@@ -358,6 +378,7 @@ impl ChatView {
                 if self.pending.take() == Some(Some(self.editor.revision)) {
                     self.editor = Editor::default();
                 }
+                self.transcript.get_mut().clear_images();
                 self.session = Some(session);
                 self.latest_invocation = Some(invocation.clone());
                 self.preview = LivePreview::default();
@@ -397,6 +418,7 @@ impl ChatView {
                 {
                     return;
                 }
+                self.transcript.get_mut().clear_images();
                 self.preview.incomplete = true;
                 self.active = None;
                 self.pending = None;
@@ -722,6 +744,12 @@ impl ChatView {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     ) -> Result<(), ChatRunError> {
+        self.transcript
+            .get_mut()
+            .flush_images(&mut io::stderr())
+            .context(IoSnafu {
+                operation: "release retired terminal images",
+            })?;
         if self.mode == Mode::Inspect {
             if let Some(observation) = &self.observation {
                 return self
@@ -936,8 +964,12 @@ impl ChatView {
                 )],
             );
         }
-        self.scroll
-            .set(transcript.render(frame, body, self.scroll.get()));
+        self.scroll.set(transcript.render_images(
+            frame,
+            body,
+            self.scroll.get(),
+            !matches!(self.mode, Mode::Commands | Mode::Sessions),
+        ));
         drop(transcript);
         let hint = match self.mode {
             Mode::Input => " Alt+Enter send | Enter newline | Esc browse ",

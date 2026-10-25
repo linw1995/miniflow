@@ -17,8 +17,14 @@ chrono = { workspace = true, features = ["std"] }
 crossterm.workspace = true
 ratatui = { workspace = true, features = ["crossterm", "unstable-rendered-line-info"] }
 rust-sugiyama.workspace = true
+
+# Markdown presentation and background image resources.
 pulldown-cmark.workspace = true
 syntect = { workspace = true, features = ["parsing", "default-syntaxes", "default-themes", "regex-fancy"] }
+image = { workspace = true, features = ["png", "jpeg", "webp"] }
+ratatui-image.workspace = true
+reqwest = { workspace = true, features = ["blocking", "rustls"] }
+url.workspace = true
 
 # Local OTLP HTTP receiver and protobuf decoding.
 http-body-util.workspace = true
