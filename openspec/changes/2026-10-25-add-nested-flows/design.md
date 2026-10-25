@@ -35,5 +35,8 @@ The title Flow owns eligibility, prompt construction, captured provider failures
 It always publishes title usages, including an empty list when ineligible. Its optional title is absent
 on skips or captured failures. The caller combines usage lists; chat storage retains admission and title
 revision checks. `mf-chat/workflows/title.json` owns the source and `mf_chat::flows` registers its
-metadata factory. The runtime owns the generic catalog contract, and the compiler has no chat-specific
+metadata factory. Its build derives provider version requirements and feature policy from `mf-chat`'s
+normal Cargo dependencies, with workspace inheritance resolved by Cargo. This does not assume that
+provider versions equal the chat package version, and embedded defaults do not retain checkout paths.
+The runtime owns the generic catalog contract, and the compiler has no chat-specific
 name, source, or dependency version policy. Referenced definitions are frozen before node execution.

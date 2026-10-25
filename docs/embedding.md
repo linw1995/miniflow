@@ -228,6 +228,9 @@ shared values, and isolated scope contracts in both execution backends.
 Built-in Flow definitions are registered by their owning packages through
 `mf_runtime::BuiltinFlowRegistration`. Link those packages in the build script as build dependencies
 when `embed_workflows` resolves their names. For example, `mf-chat` provides `chat-title` from its own
-`workflows/title.json`; the compiler does not depend on the chat package. Source factories return
+`workflows/title.json`; the compiler does not depend on the chat package. The title source declares
+its provider packages, and the chat build fills their version requirements and feature policy from
+Cargo's resolved manifest declarations, including workspace inheritance. The embedded definition
+retains portable registry requirements rather than checkout paths. Source factories return
 metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
 catalog to prepare or execute its nodes.
