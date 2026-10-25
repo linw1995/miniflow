@@ -68,7 +68,10 @@ fn main() -> PreviewResult<()> {
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<()> {
-    let description = preview_description(description());
+    let description = preview_description(
+        description(),
+        std::env::args().any(|arg| arg == "--clusters"),
+    );
     let layout = GraphLayout::new(&description)?;
     let run_id = RunId::new();
     let mut state = SessionState::new(description.clone(), run_id)?;
@@ -157,8 +160,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
     }
 }
 
-fn preview_description(mut fixture: WorkflowDescription) -> WorkflowDescription {
-    if std::env::args().any(|arg| arg == "--clusters") {
+fn preview_description(mut fixture: WorkflowDescription, clusters: bool) -> WorkflowDescription {
+    if clusters {
         fixture.version = WorkflowDescriptionVersion::V2026_10_23;
         fixture.execution = Some(ExecutionDescription {
             mode: ExecutionMode::Single,
@@ -490,7 +493,7 @@ fn dump_graph() -> PreviewResult<()> {
             })
             .collect();
     }
-    let mut fixture = preview_description(fixture);
+    let mut fixture = preview_description(fixture, std::env::args().any(|arg| arg == "--clusters"));
     let view = match std::env::args()
         .find_map(|arg| arg.strip_prefix("--view=").map(str::to_owned))
         .as_deref()
@@ -541,4 +544,35 @@ fn dump_graph() -> PreviewResult<()> {
         println!("{}", row.trim_end());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_modes_complete_with_valid_cluster_and_lifecycle_contracts() {
+        for clusters in [false, true] {
+            let fixture = preview_description(description(), clusters);
+            let layout = GraphLayout::new(&fixture).unwrap();
+            assert_eq!(layout.nodes().len(), fixture.nodes.len());
+            assert_eq!(layout.clusters().len(), if clusters { 2 } else { 0 });
+            assert_eq!(layout.unresolved_count(), 0);
+            let body = body_description(&fixture);
+            assert_eq!(body.clusters.len(), layout.clusters().len());
+
+            let run_id = RunId::new();
+            let mut state = SessionState::new(fixture.clone(), run_id).unwrap();
+            for (_, event) in scheduled_events(&fixture, run_id) {
+                state.apply(event).unwrap();
+            }
+            let snapshot = state.snapshot();
+            assert_eq!(snapshot.workflow_outcome, Some(Outcome::Succeeded));
+            assert_eq!(
+                snapshot.nodes[0].status,
+                mf_tui::state::NodeStatus::Succeeded
+            );
+            assert_eq!(snapshot.nodes[3].status, mf_tui::state::NodeStatus::Skipped);
+        }
+    }
 }
