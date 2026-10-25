@@ -1514,7 +1514,7 @@ impl<'a> GraphView<'a> {
         Style::default().fg(default)
     }
 
-    fn draw_cluster(&self, area: Rect, buffer: &mut Buffer, cluster: &GraphCluster) {
+    fn draw_cluster(&self, area: Rect, buffer: &mut Buffer, index: usize, cluster: &GraphCluster) {
         if cluster.collapsed {
             return;
         }
@@ -1522,9 +1522,7 @@ impl<'a> GraphView<'a> {
         if rect.width < 3 || rect.height < 2 {
             return;
         }
-        let style = Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::BOLD);
+        let style = cluster_style(index);
         self.horizontal(
             area,
             buffer,
@@ -1565,15 +1563,51 @@ impl<'a> GraphView<'a> {
         ] {
             self.put(area, buffer, x, y, symbol, style);
         }
-        let label = format!(" {} ", display_line(&cluster.label));
-        let label_rect = GraphRect {
-            x: rect.x + 2,
-            y: rect.y,
-            width: (ratatui::text::Span::raw(&label).width() as u32)
-                .min(rect.width.saturating_sub(4)),
+    }
+
+    fn cluster_label_rect(&self, area: Rect, cluster: &GraphCluster) -> Option<GraphRect> {
+        let rect = cluster.rect;
+        if cluster.collapsed || rect.width < 3 || rect.height < 2 {
+            return None;
+        }
+        let left = rect.x.max(self.offset.0);
+        let top = rect.y.max(self.offset.1);
+        let right = (rect.x + rect.width).min(self.offset.0.saturating_add(u32::from(area.width)));
+        let bottom =
+            (rect.y + rect.height).min(self.offset.1.saturating_add(u32::from(area.height)));
+        if left >= right || top >= bottom {
+            return None;
+        }
+
+        // Preserve the border padding when possible, but use the last visible cell in tiny views.
+        let x = (rect.x + 2).max(left).min(right - 1);
+        let width = (rect.x + rect.width - 2).min(right).max(x + 1) - x;
+        Some(GraphRect {
+            x,
+            y: top,
+            width,
             height: 1,
+        })
+    }
+
+    fn draw_cluster_label(
+        &self,
+        area: Rect,
+        buffer: &mut Buffer,
+        index: usize,
+        cluster: &GraphCluster,
+    ) {
+        let Some(mut label_rect) = self.cluster_label_rect(area, cluster) else {
+            return;
         };
-        self.text(area, buffer, label_rect, &label, style);
+        let label = display_line(&cluster.label);
+        let label = if label_rect.width < 3 {
+            label
+        } else {
+            format!(" {label} ")
+        };
+        label_rect.width = (ratatui::text::Span::raw(&label).width() as u32).min(label_rect.width);
+        self.text(area, buffer, label_rect, &label, cluster_style(index));
     }
 
     fn draw_node(&self, area: Rect, buffer: &mut Buffer, index: usize, node: &GraphNode) {
@@ -1606,13 +1640,14 @@ impl<'a> GraphView<'a> {
             observed.map_or(NodeStatus::Pending, |item| item.status)
         };
         let style = node_style(status);
+        let border_style = self.layout.cluster_of(index).map_or(style, cluster_style);
         self.horizontal(
             area,
             buffer,
             rect.x + 1..=rect.x + rect.width - 2,
             rect.y,
             "─",
-            style,
+            border_style,
         );
         self.horizontal(
             area,
@@ -1620,7 +1655,7 @@ impl<'a> GraphView<'a> {
             rect.x + 1..=rect.x + rect.width - 2,
             rect.y + rect.height - 1,
             "─",
-            style,
+            border_style,
         );
         self.vertical(
             area,
@@ -1628,7 +1663,7 @@ impl<'a> GraphView<'a> {
             rect.x,
             rect.y + 1..=rect.y + rect.height - 2,
             "│",
-            style,
+            border_style,
         );
         self.vertical(
             area,
@@ -1636,7 +1671,7 @@ impl<'a> GraphView<'a> {
             rect.x + rect.width - 1,
             rect.y + 1..=rect.y + rect.height - 2,
             "│",
-            style,
+            border_style,
         );
         for (x, y, symbol) in [
             (rect.x, rect.y, "┌"),
@@ -1644,7 +1679,7 @@ impl<'a> GraphView<'a> {
             (rect.x, rect.y + rect.height - 1, "└"),
             (rect.x + rect.width - 1, rect.y + rect.height - 1, "┘"),
         ] {
-            self.put(area, buffer, x, y, symbol, style);
+            self.put(area, buffer, x, y, symbol, border_style);
         }
 
         let marker = status_marker(status, observed, self.elapsed_ns);
@@ -1666,6 +1701,24 @@ impl<'a> GraphView<'a> {
             style
         };
         self.text(area, buffer, title_rect, &title, title_style);
+        if collapsed {
+            let label_style = if self.selected == Some(index) {
+                border_style.add_modifier(Modifier::REVERSED)
+            } else {
+                border_style
+            };
+            self.text(
+                area,
+                buffer,
+                GraphRect {
+                    x: title_rect.x + 2,
+                    width: title_rect.width.saturating_sub(2),
+                    ..title_rect
+                },
+                &display_line(&node.id),
+                label_style,
+            );
+        }
         self.text(
             area,
             buffer,
@@ -1696,6 +1749,15 @@ impl<'a> GraphView<'a> {
                 );
             }
         }
+        if let Some(cluster) = self.layout.cluster_of(index) {
+            let cluster = &self.layout.clusters()[cluster];
+            if self
+                .cluster_label_rect(area, cluster)
+                .is_some_and(|label| label.x != cluster.rect.x + 2 || label.y != cluster.rect.y)
+            {
+                return;
+            }
+        }
         for (row, line) in annotation.iter().enumerate() {
             self.text(
                 area,
@@ -1715,8 +1777,8 @@ impl<'a> GraphView<'a> {
 
 impl Widget for GraphView<'_> {
     fn render(self, area: Rect, buffer: &mut Buffer) {
-        for cluster in self.layout.clusters() {
-            self.draw_cluster(area, buffer, cluster);
+        for (index, cluster) in self.layout.clusters().iter().enumerate() {
+            self.draw_cluster(area, buffer, index, cluster);
         }
         for index in 0..self.layout.edges.len() {
             self.draw_edge(area, buffer, index);
@@ -1729,6 +1791,10 @@ impl Widget for GraphView<'_> {
         }
         for index in 0..self.layout.edges.len() {
             self.draw_ports(area, buffer, index);
+        }
+        // Pinned labels must remain readable over nodes and connections after panning.
+        for (index, cluster) in self.layout.clusters().iter().enumerate() {
+            self.draw_cluster_label(area, buffer, index, cluster);
         }
     }
 }
@@ -1749,6 +1815,20 @@ fn merge_status(left: NodeStatus, right: NodeStatus) -> NodeStatus {
     } else {
         left
     }
+}
+
+fn cluster_style(index: usize) -> Style {
+    const COLORS: [Color; 6] = [
+        Color::LightCyan,
+        Color::LightMagenta,
+        Color::LightBlue,
+        Color::LightGreen,
+        Color::LightYellow,
+        Color::LightRed,
+    ];
+    Style::default()
+        .fg(COLORS[index % COLORS.len()])
+        .add_modifier(Modifier::BOLD)
 }
 
 fn node_style(status: NodeStatus) -> Style {
@@ -1830,19 +1910,55 @@ fn display_line(value: &str) -> String {
 fn wrap_annotation(text: &str, width: u32) -> Vec<String> {
     let mut lines = Vec::new();
     for source in text.split('\n') {
+        let source_start = lines.len();
         let span = ratatui::text::Span::raw(source.replace('\t', "    "));
         let mut line = String::new();
         let mut used = 0;
+        let mut word_start = None;
+        let mut previous_whitespace = false;
+        let mut has_word = false;
+        let mut continuation = false;
         for grapheme in span.styled_graphemes(Style::default()) {
             let cells = ratatui::text::Span::raw(grapheme.symbol).width() as u32;
+            let whitespace = grapheme.is_whitespace();
+            if !whitespace && previous_whitespace && has_word {
+                word_start = Some(line.len());
+            }
             if used + cells > width && !line.is_empty() {
+                // Move the whole pending word before falling back to grapheme-safe hard wrapping.
+                let word = if whitespace {
+                    None
+                } else {
+                    word_start.take().map(|start| line.split_off(start))
+                };
+                line.truncate(
+                    line.trim_end_matches(|ch: char| {
+                        ch.is_whitespace() && ch != '\u{a0}' || ch == '\u{200b}'
+                    })
+                    .len(),
+                );
                 lines.push(std::mem::take(&mut line));
-                used = 0;
+                line = word.unwrap_or_default();
+                used = ratatui::text::Span::raw(&line).width() as u32;
+                if used + cells > width && !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                    used = 0;
+                }
+                word_start = None;
+                has_word = !line.is_empty();
+                continuation = true;
+            }
+            previous_whitespace = whitespace;
+            if whitespace && line.is_empty() && continuation {
+                continue;
             }
             line.push_str(grapheme.symbol);
             used += cells;
+            has_word |= !whitespace;
         }
-        lines.push(line);
+        if !line.is_empty() || lines.len() == source_start {
+            lines.push(line);
+        }
     }
     lines
 }
@@ -1851,6 +1967,44 @@ fn wrap_annotation(text: &str, width: u32) -> Vec<String> {
 mod rendering_tests {
     use super::*;
     use routing::{Point, RoutingStats};
+
+    #[test]
+    fn annotations_prefer_word_boundaries_and_preserve_explicit_lines() {
+        for (text, width, expected) in [
+            (
+                "Read the source and forward its value.",
+                22,
+                vec!["Read the source and", "forward its value."],
+            ),
+            ("alpha beta gamma", 10, vec!["alpha beta", "gamma"]),
+            ("alpha beta gamma", 11, vec!["alpha beta", "gamma"]),
+            ("alpha beta gamma", 9, vec!["alpha", "beta", "gamma"]),
+            ("one  two three", 8, vec!["one  two", "three"]),
+            ("abcdefghijklmno", 6, vec!["abcdef", "ghijkl", "mno"]),
+            ("a\u{a0}b", 2, vec!["a\u{a0}", "b"]),
+            (
+                "a\u{301}b\u{301}c\u{301} 🦀🦀",
+                4,
+                vec!["a\u{301}b\u{301}c\u{301}", "🦀🦀"],
+            ),
+            ("alpha\n\n  beta", 8, vec!["alpha", "", "  beta"]),
+            (
+                "\tKeep a\u{301} and 🦀.",
+                22,
+                vec!["    Keep a\u{301} and 🦀."],
+            ),
+            ("alpha ", 5, vec!["alpha"]),
+            ("", 22, vec![""]),
+        ] {
+            let actual = wrap_annotation(text, width);
+            assert_eq!(actual, expected, "{text:?}, width {width}");
+            assert!(
+                actual
+                    .iter()
+                    .all(|line| ratatui::text::Span::raw(line).width() <= width as usize)
+            );
+        }
+    }
 
     #[test]
     fn incomplete_node_details_distinguish_last_known_status_from_missing_history() {

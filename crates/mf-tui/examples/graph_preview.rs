@@ -9,7 +9,8 @@ use crossterm::{
 use mf_telemetry::{
     Count,
     description::{
-        ControlEdge, DataEdge, NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
+        ClusterDescription, ControlEdge, DataEdge, ExecutionDescription, ExecutionMode,
+        NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
     },
     event::{Event, LifecycleEvent, NodeIdentity, Outcome, SkipCause},
     identity::{RunId, WorkflowId},
@@ -67,7 +68,10 @@ fn main() -> PreviewResult<()> {
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<()> {
-    let description = description();
+    let description = preview_description(
+        description(),
+        std::env::args().any(|arg| arg == "--clusters"),
+    );
     let layout = GraphLayout::new(&description)?;
     let run_id = RunId::new();
     let mut state = SessionState::new(description.clone(), run_id)?;
@@ -156,6 +160,35 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
     }
 }
 
+fn preview_description(mut fixture: WorkflowDescription, clusters: bool) -> WorkflowDescription {
+    if clusters {
+        fixture.version = WorkflowDescriptionVersion::V2026_10_23;
+        fixture.execution = Some(ExecutionDescription {
+            mode: ExecutionMode::Single,
+        });
+        let middle = fixture.nodes.len().div_ceil(2);
+        fixture.clusters = vec![
+            ClusterDescription {
+                label: "Input preparation".into(),
+                annotation: "Fetch the input and transform the source before publishing.".into(),
+                nodes: fixture.nodes[..middle]
+                    .iter()
+                    .map(|node| node.id.clone())
+                    .collect(),
+            },
+            ClusterDescription {
+                label: "Output delivery".into(),
+                annotation: "Publish the result or archive the original response.".into(),
+                nodes: fixture.nodes[middle..]
+                    .iter()
+                    .map(|node| node.id.clone())
+                    .collect(),
+            },
+        ];
+    }
+    fixture
+}
+
 pub fn description() -> WorkflowDescription {
     WorkflowDescription {
         order_edges: Vec::new(),
@@ -217,7 +250,7 @@ pub fn body_description(
         data_edges: fixture.data_edges.clone(),
         control_edges: fixture.control_edges.clone(),
         execution_order: fixture.execution_order.clone(),
-        clusters: Vec::new(),
+        clusters: fixture.clusters.clone(),
     }
 }
 
@@ -351,7 +384,10 @@ fn scheduled_events(
                 outcome: Outcome::Succeeded,
                 failure_node_id: None,
                 failure: None,
-                top_level_visited_count: None,
+                top_level_visited_count: description
+                    .version
+                    .supports_iteration_bodies()
+                    .then_some(count(4)),
             },
         ),
     ]
@@ -457,6 +493,7 @@ fn dump_graph() -> PreviewResult<()> {
             })
             .collect();
     }
+    let mut fixture = preview_description(fixture, std::env::args().any(|arg| arg == "--clusters"));
     let view = match std::env::args()
         .find_map(|arg| arg.strip_prefix("--view=").map(str::to_owned))
         .as_deref()
@@ -468,7 +505,9 @@ fn dump_graph() -> PreviewResult<()> {
     };
     let layout = if std::env::args().any(|arg| arg == "--body") {
         let body = body_description(&fixture);
-        fixture.version = WorkflowDescriptionVersion::V2026_09_29;
+        if fixture.clusters.is_empty() {
+            fixture.version = WorkflowDescriptionVersion::V2026_09_29;
+        }
         fixture.nodes = vec![NodeDescription {
             id: "repeat".into(),
             kind: "workflow.loop".into(),
@@ -477,6 +516,7 @@ fn dump_graph() -> PreviewResult<()> {
         fixture.data_edges.clear();
         fixture.control_edges.clear();
         fixture.loop_bodies = vec![body];
+        fixture.clusters.clear();
         GraphLayout::from_body_with_view(&fixture, &["repeat".into()], view)?
     } else {
         GraphLayout::with_view(&fixture, view)?
@@ -504,4 +544,35 @@ fn dump_graph() -> PreviewResult<()> {
         println!("{}", row.trim_end());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_modes_complete_with_valid_cluster_and_lifecycle_contracts() {
+        for clusters in [false, true] {
+            let fixture = preview_description(description(), clusters);
+            let layout = GraphLayout::new(&fixture).unwrap();
+            assert_eq!(layout.nodes().len(), fixture.nodes.len());
+            assert_eq!(layout.clusters().len(), if clusters { 2 } else { 0 });
+            assert_eq!(layout.unresolved_count(), 0);
+            let body = body_description(&fixture);
+            assert_eq!(body.clusters.len(), layout.clusters().len());
+
+            let run_id = RunId::new();
+            let mut state = SessionState::new(fixture.clone(), run_id).unwrap();
+            for (_, event) in scheduled_events(&fixture, run_id) {
+                state.apply(event).unwrap();
+            }
+            let snapshot = state.snapshot();
+            assert_eq!(snapshot.workflow_outcome, Some(Outcome::Succeeded));
+            assert_eq!(
+                snapshot.nodes[0].status,
+                mf_tui::state::NodeStatus::Succeeded
+            );
+            assert_eq!(snapshot.nodes[3].status, mf_tui::state::NodeStatus::Skipped);
+        }
+    }
 }

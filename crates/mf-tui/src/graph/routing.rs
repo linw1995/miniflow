@@ -1507,6 +1507,21 @@ pub fn route_all(
         }
     }
     for &edge in &order {
+        // A clear aligned span does not need the conservative cross-column passage.
+        if routes[edge].points.len() > 2
+            && let (Some(&start), Some(&end)) =
+                (routes[edge].points.first(), routes[edge].points.last())
+            && start.y == end.y
+            && start.x < end.x
+        {
+            let mut direct = EdgeRoute::from_points([start, end]);
+            direct.label = routes[edge].label.clone();
+            if let Ok(crossings) = router.validate(edge, &direct) {
+                router.insert(edge, &direct, crossings);
+                routes[edge] = direct;
+                continue;
+            }
+        }
         let result = if routes[edge]
             .points
             .iter()
