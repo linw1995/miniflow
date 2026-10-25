@@ -929,3 +929,28 @@ external reference remains required.
 
 `Emitter::send` waits for native queue capacity. Consumer failures, dropped pending deliveries, and explicit
 cancellation wake blocked producers. Consumers and hosts own the policy for stalled delivery.
+
+## Register reusable Flow definitions
+
+Packages can expose pure factories returning `WorkflowDefinition` through the runtime catalog:
+
+```rust
+use mf_runtime::{DefinitionParseError, WorkflowDefinition};
+
+fn definition() -> Result<WorkflowDefinition, DefinitionParseError> {
+    WorkflowDefinition::from_json(include_str!("../workflows/example.json"))
+}
+
+mf_runtime::register_builtin_flow!("example", definition);
+```
+
+The macro captures the calling Cargo package name. The registry combines it with the local
+Flow name as `<package>.<flow>`, so package `my-provider` registers `my-provider.example`.
+Local names must be nonblank and cannot contain dots. Different packages may reuse a local name;
+duplicate names within one package fail catalog construction.
+
+Hosts construct `BuiltinFlowRegistry::from_inventory()` and look up the complete qualified name.
+Catalog construction validates registrations without invoking their factories. The host decides when
+to request a definition and handles its typed `DefinitionParseError`. Each provider owns its source
+and dependency declarations. Factories must not execute the Flow or perform business I/O.
+The catalog exposes definitions independently of compilation and execution.

@@ -2,6 +2,89 @@ use crate::NodeRegistration;
 use snafu::Snafu;
 use std::collections::BTreeMap;
 
+/// Keeps application-owned Flow definitions discoverable without compiler dependencies on providers.
+pub struct BuiltinFlowRegistration {
+    package: &'static str,
+    name: &'static str,
+    pub definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+}
+
+impl BuiltinFlowRegistration {
+    #[doc(hidden)]
+    pub const fn new(
+        package: &'static str,
+        name: &'static str,
+        definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+    ) -> Self {
+        Self {
+            package,
+            name,
+            definition,
+        }
+    }
+}
+
+/// Registers a local Flow name under the calling Cargo package's namespace.
+#[macro_export]
+macro_rules! register_builtin_flow {
+    ($name:expr, $definition:path $(,)?) => {
+        $crate::__submit_builtin_flow! {
+            $crate::BuiltinFlowRegistration::new(env!("CARGO_PKG_NAME"), $name, $definition)
+        }
+    };
+}
+
+inventory::collect!(BuiltinFlowRegistration);
+
+#[derive(Debug, Snafu)]
+pub enum BuiltinFlowRegistryError {
+    #[snafu(display("built-in Flow name must not be blank"))]
+    BlankName,
+    #[snafu(display("built-in Flow local name `{name}` must not contain a namespace separator"))]
+    QualifiedLocalName { name: String },
+    #[snafu(display("built-in Flow `{name}` is registered more than once"))]
+    DuplicateName { name: String },
+}
+
+#[derive(Default)]
+pub struct BuiltinFlowRegistry {
+    registrations: BTreeMap<String, &'static BuiltinFlowRegistration>,
+}
+
+impl BuiltinFlowRegistry {
+    pub fn from_inventory() -> Result<Self, BuiltinFlowRegistryError> {
+        Self::from_registrations(inventory::iter::<BuiltinFlowRegistration>)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&'static BuiltinFlowRegistration> {
+        self.registrations.get(name).copied()
+    }
+
+    fn from_registrations(
+        registrations: impl IntoIterator<Item = &'static BuiltinFlowRegistration>,
+    ) -> Result<Self, BuiltinFlowRegistryError> {
+        let mut registry = Self::default();
+        for registration in registrations {
+            snafu::ensure!(!registration.name.trim().is_empty(), BlankNameSnafu);
+            snafu::ensure!(
+                !registration.name.contains('.'),
+                QualifiedLocalNameSnafu {
+                    name: registration.name
+                }
+            );
+            let name = format!("{}.{}", registration.package, registration.name);
+            snafu::ensure!(
+                registry
+                    .registrations
+                    .insert(name.clone(), registration)
+                    .is_none(),
+                DuplicateNameSnafu { name }
+            );
+        }
+        Ok(registry)
+    }
+}
+
 #[derive(Debug, Snafu)]
 pub enum NodeRegistryError {
     #[snafu(display("node kind `{kind}` is registered more than once"))]
@@ -68,6 +151,53 @@ mod tests {
     use serde_json::Value;
 
     struct FirstTestNode;
+
+    fn builtin_definition() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError> {
+        crate::WorkflowDefinition::from_json(
+            r#"{"version":"2026-10-23","dependencies":{},"nodes":[]}"#,
+        )
+    }
+
+    #[test]
+    fn builtin_catalog_rejects_duplicate_and_blank_names() {
+        static REGISTRATIONS: std::sync::LazyLock<[BuiltinFlowRegistration; 5]> =
+            std::sync::LazyLock::new(|| {
+                [
+                    BuiltinFlowRegistration::new("first-package", "flow", builtin_definition),
+                    BuiltinFlowRegistration::new("first-package", "flow", builtin_definition),
+                    BuiltinFlowRegistration::new("first-package", " ", builtin_definition),
+                    BuiltinFlowRegistration::new("second-package", "flow", builtin_definition),
+                    BuiltinFlowRegistration::new(
+                        "first-package",
+                        "other-package.flow",
+                        builtin_definition,
+                    ),
+                ]
+            });
+        let [first, duplicate, blank, other_package, qualified] = &*REGISTRATIONS;
+        assert!(matches!(
+            BuiltinFlowRegistry::from_registrations([first, duplicate]),
+            Err(BuiltinFlowRegistryError::DuplicateName { name }) if name == "first-package.flow"
+        ));
+        assert!(matches!(
+            BuiltinFlowRegistry::from_registrations([blank]),
+            Err(BuiltinFlowRegistryError::BlankName)
+        ));
+        assert!(matches!(
+            BuiltinFlowRegistry::from_registrations([qualified]),
+            Err(BuiltinFlowRegistryError::QualifiedLocalName { .. })
+        ));
+        let registry = BuiltinFlowRegistry::from_registrations([first, other_package]).unwrap();
+        assert!(registry.get("missing").is_none());
+        assert!(registry.get("flow").is_none());
+        assert!(registry.get("second-package.flow").is_some());
+        assert!(
+            (registry.get("first-package.flow").unwrap().definition)()
+                .unwrap()
+                .nodes
+                .is_empty()
+        );
+    }
 
     impl TaskNode for FirstTestNode {
         fn execute(

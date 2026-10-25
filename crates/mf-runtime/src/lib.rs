@@ -59,6 +59,8 @@ pub use flow::{
 };
 #[cfg(feature = "async")]
 pub use future_execution::FutureExecutionError;
+#[doc(hidden)]
+pub use inventory::submit as __submit_builtin_flow;
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
@@ -91,7 +93,10 @@ pub use node_target::{
     NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget, target_ports,
 };
 pub use number::{compare_json_numbers, number_to_f64, number_to_i64, number_to_u64};
-pub use registry::{NodeRegistry, NodeRegistryError};
+pub use registry::{
+    BuiltinFlowRegistration, BuiltinFlowRegistry, BuiltinFlowRegistryError, NodeRegistry,
+    NodeRegistryError,
+};
 pub use runner::{SuccessDependencySnafu, WorkflowRunError};
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
