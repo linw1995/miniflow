@@ -1594,22 +1594,39 @@ mod tests {
 
     #[test]
     fn event_and_generated_inputs_share_skip_errors_and_partial_failure_snapshots() {
-        let node = FlowNode {
-            definition_id: "target".into(),
-            node: (),
-            metadata: crate::NodeMetadata::new(NodePorts {
-                inputs: vec![port("value", ValueType::Int64, true)],
-                outputs: vec![],
-            }),
-            output_keys: Default::default(),
-        };
-        for case in ["ready", "skipped", "missing", "wrong_type"] {
+        for (case, boundary_marking) in ["ready", "skipped", "missing", "wrong_type"]
+            .into_iter()
+            .flat_map(|case| [false, true].map(|marking| (case, marking)))
+        {
+            let mut node = FlowNode {
+                definition_id: "target".into(),
+                node: (),
+                metadata: crate::NodeMetadata::new(NodePorts {
+                    inputs: vec![port("value", ValueType::Int64, true)],
+                    outputs: vec![],
+                }),
+                output_keys: Default::default(),
+            };
+            if boundary_marking {
+                node.metadata.input_bindings.insert(
+                    "value".into(),
+                    crate::InputBinding {
+                        secret: true,
+                        ..Default::default()
+                    },
+                );
+            }
             let value = if case == "ready" {
                 Value::from(42)
             } else {
                 Value::from("wrong type")
-            }
-            .into_secret();
+            };
+            let value = if boundary_marking {
+                value
+            } else {
+                value.into_secret()
+            };
+            let expected = value.clone().into_secret();
             let mut context = ExecutionContext::default();
             context
                 .outputs
@@ -1659,7 +1676,7 @@ mod tests {
                 &[],
                 |inputs, _| {
                     assert_eq!(case, "ready");
-                    assert!(inputs["value"].ptr_eq(&value));
+                    assert!(inputs["value"].ptr_eq(&expected));
                     Ok(GeneratedNodeResult::Dynamic(Outputs::new().into()))
                 },
             );
@@ -1668,7 +1685,7 @@ mod tests {
             match (event, task) {
                 (Ok(Some(inputs)), Ok(())) => {
                     assert_eq!(case, "ready");
-                    assert!(inputs["value"].ptr_eq(&value));
+                    assert!(inputs["value"].ptr_eq(&expected));
                     assert_eq!(snapshot.outcome, crate::SnapshotOutcome::Succeeded);
                 }
                 (Ok(None), Ok(())) => {
