@@ -129,3 +129,40 @@ fn factory(
 inventory::submit! {
     NodeRegistration { kind: mf_runtime::CALL_KIND, factory: NodeFactory::Subgraph(factory) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn body() -> PreparedSubgraph {
+        PreparedSubgraph::new(vec![], vec![], |_| Ok(Default::default()))
+    }
+
+    #[test]
+    fn direct_call_factories_reject_blank_names_and_stdin_before_execution() {
+        assert!(
+            factory("invoke", json!({"flow":" "}), Value::Null, body())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("must not be blank")
+        );
+        let mut inputs = mf_runtime::WorkflowInputSchema::default();
+        inputs
+            .stdin
+            .insert("read".into(), mf_runtime::StdinRequirement::Always);
+        assert!(
+            factory(
+                "invoke",
+                json!({"flow":"child"}),
+                Value::Null,
+                body().with_input_schema(inputs)
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("cannot read stdin")
+        );
+    }
+}

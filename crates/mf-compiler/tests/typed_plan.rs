@@ -34,6 +34,12 @@ fn prepare<T: mf_runtime::TypedField + 'static>(
     config: &Value,
 ) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
     let mut metadata = NodeMetadata::new(NodePorts::default());
+    if config["secret"] == true {
+        metadata.secret_inputs.insert("value".into());
+    }
+    if config["invalid_secret"] == true {
+        metadata.secret_inputs.insert("missing".into());
+    }
     if config["read"] == true {
         metadata
             .context_references
@@ -98,6 +104,39 @@ fn plans_maximal_chains_without_repartitioning_domains() {
     assert!(plan.connections.iter().all(|edge| edge.fallback.is_none()));
     assert!(plan_typed_segments(&flow, false, true).segments.is_empty());
     assert!(plan_typed_segments(&flow, true, false).segments.is_empty());
+}
+
+#[test]
+fn secret_input_boundaries_keep_dynamic_marking_and_reject_unknown_ports() {
+    let mut value = chain();
+    for node in value["nodes"].as_array_mut().unwrap() {
+        node["config"] = json!({"type":"shared"});
+    }
+    value["nodes"][1]["config"]["secret"] = json!(true);
+    let (flow, plan) = planned(value);
+    assert!(plan.segments.is_empty());
+    assert!(
+        plan.connections
+            .iter()
+            .all(|edge| edge.fallback == Some(TypedFallbackReason::SecretInput))
+    );
+    let output = flow
+        .execute_with_inputs(
+            mf_runtime::WorkflowArguments::try_from(json!({"a.value":"credential"})).unwrap(),
+        )
+        .unwrap();
+    assert!(output["result"].is_secret());
+    assert_eq!(output["result"].as_str(), Some("credential"));
+    let mut invalid = chain();
+    invalid["nodes"][1]["config"] = json!({"invalid_secret":true});
+    let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
+    let error =
+        compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("secret input names an unknown port")
+    );
 }
 
 #[test]

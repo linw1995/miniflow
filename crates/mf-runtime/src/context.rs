@@ -1375,6 +1375,23 @@ mod tests {
     #[test]
     fn call_failure_and_unwinding_preserve_parent_state_and_charge_shared_resources() {
         let mut context = ExecutionContext::default();
+        assert!(
+            context
+                .run_call(" ", Default::default(), &[], |_| Ok(()))
+                .is_err()
+        );
+        context.scope_prefix = vec![
+            LoopPathEntry::Call {
+                call_id: "parent".into()
+            };
+            mf_telemetry::MAX_SCOPE_DEPTH
+        ];
+        assert!(
+            context
+                .run_call("child", Default::default(), &[], |_| Ok(()))
+                .is_err()
+        );
+        context.scope_prefix.clear();
         context
             .outputs
             .set_value("parent.value".into(), json!(1).into());

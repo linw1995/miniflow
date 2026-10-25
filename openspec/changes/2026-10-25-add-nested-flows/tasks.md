@@ -9,4 +9,4 @@
 
 ## External validation
 
-- [ ] Run TCP-backed acceptance tests in an environment that permits local loopback listeners.
+- [x] Run TCP-backed acceptance tests in an environment that permits local loopback listeners.

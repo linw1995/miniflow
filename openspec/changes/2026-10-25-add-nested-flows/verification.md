@@ -21,8 +21,9 @@ suites passed after fixing the embedding compatibility regression it also identi
 title-composition test could not run. An in-process provider double verifies the shipped
 title policy's success and captured-failure branches, answer preservation, and exact usage merging.
 
-Full TCP-backed acceptance is being rerun after enabling local listeners and network access. Local logs
-and affected-test plans remain under the Git-ignored `target/` directory.
+After enabling local listeners and network access, the complete affected suite passed 1,064 tests
+with five skipped. This includes TCP-backed acceptance. Local logs and affected-test plans remain
+under the Git-ignored `target/` directory.
 
 ## Provider ownership correction
 
@@ -33,4 +34,9 @@ policy. Chat profile path loading retains host-owned Cargo dependencies.
 The generic nested-call suite, chat title suite, catalog validation, copied-workflow packaging, and
 all documented example executions passed with network access enabled. The first unrestricted affected
 run exposed the copied-provider-path and missing-example-case regressions; both have focused passing
-regressions. The complete affected suite and remote CI are being rerun on the corrected implementation.
+regressions. The complete affected suite passed on the corrected implementation. Additional passing
+regressions cover calls inside sequential and parallel Iteration, frozen-plan corruption, unsupported
+interfaces, source overwrite protection, and secret-input propagation. All repository hooks passed.
+
+Remote Rust tests, lint, and Linux builds passed. The initial incremental coverage gate identified
+uncovered boundary paths; coverage validation is being repeated after adding these regressions.

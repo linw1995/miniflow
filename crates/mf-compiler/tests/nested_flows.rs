@@ -1,5 +1,6 @@
 extern crate mfn_code as _;
 extern crate mfn_core as _;
+extern crate mfn_llm as _;
 
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
@@ -34,6 +35,120 @@ fn child() -> WorkflowDefinition {
 
 fn call(id: &str, body: &WorkflowDefinition) -> Value {
     json!({"id":id,"kind":"workflow.call","config":{"flow":"child","definition":body}})
+}
+
+fn iteration_call_graph(body: &WorkflowDefinition, mode: &str) -> WorkflowDefinition {
+    let mut invocation = call("invoke", body);
+    invocation["inputs"] =
+        json!({"inner.input.value":{"from":{"node":"%iteration","port":"item"}}});
+    graph(
+        json!([
+            {"id":"items","kind":"builtin.constant","config":{"value":["first","second"]}},
+            {"id":"each","kind":"builtin.iteration","config":{"mode":mode,"body":{
+                "nodes":[invocation],"result":{"node":"invoke","port":"value"}
+            }},"inputs":{"items":{"from":{"node":"items","port":"value"}}}}
+        ]),
+        json!([{"name":"results","node":"each","port":"results"}]),
+    )
+}
+
+#[test]
+fn iteration_calls_isolate_item_bindings_and_observe_nested_skips() {
+    let mut leaf = child();
+    leaf.nodes.extend(serde_json::from_value::<Vec<mf_runtime::NodeDefinition>>(json!([
+        {"id":"route","kind":"builtin.if_else","config":{"branches":[{"id":"yes","condition":{"source":{"output":"input.value","path":""},"operator":"eq","value":"first"}}]}},
+        {"id":"gated","kind":"builtin.identity"}
+    ])).unwrap());
+    leaf.edges.push(mf_runtime::EdgeDefinition {
+        exclusive: false,
+        from_node: "input".into(),
+        from_output: "value".into(),
+        to_node: "gated".into(),
+        to_input: "input".into(),
+    });
+    leaf.order_edges.push(mf_runtime::OrderEdgeDefinition {
+        from_node: "input".into(),
+        to_node: "route".into(),
+    });
+    leaf.control_edges.push(mf_runtime::ControlEdgeDefinition {
+        from_node: "route".into(),
+        from_output: "yes".into(),
+        to_node: "gated".into(),
+    });
+    leaf.outputs.push(mf_runtime::WorkflowOutputDefinition {
+        name: "optional".into(),
+        node: "gated".into(),
+        port: "value".into(),
+        optional: true,
+    });
+    let body = graph(
+        json!([call("inner", &leaf)]),
+        json!([{"name":"value","node":"inner","port":"value"}]),
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for mode in ["sequential", "parallel"] {
+        let definition = iteration_call_graph(&body, mode);
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let harness = capture::Harness::new(true);
+        let observation = plan
+            .start_observation(&harness.observer(), Default::default())
+            .unwrap();
+        let output = mf_compiler::execute_compiled(&plan, &registry, Some(observation)).unwrap();
+        assert_eq!(
+            serde_json::to_value(output).unwrap(),
+            json!({"results":["first","second"]})
+        );
+        let records = harness.records();
+        assert!(
+            records
+                .iter()
+                .any(|record| record.event_name == "mf.call.node.skipped")
+        );
+        let scope = records
+            .iter()
+            .find(|record| record.event_name == "mf.call.node.started")
+            .unwrap()
+            .attributes["mf.scope.path"]
+            .as_str()
+            .unwrap();
+        assert!(scope.contains("invoke"));
+        harness.traces.force_flush().unwrap();
+        assert!(
+            harness
+                .spans
+                .get_finished_spans()
+                .unwrap()
+                .iter()
+                .any(|span| span.name == "mf.call.node")
+        );
+    }
+}
+
+#[test]
+fn iteration_calls_cannot_hide_loop_containers_from_either_preparation_path() {
+    let loop_body: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-25","dependencies":{},
+        "nodes":[{"id":"repeat","kind":"workflow.loop","loop":{"max_iterations":1,"variables":[{"name":"value","type":"string"}],"body":{"nodes":[]}}}],
+        "outputs":[{"name":"value","node":"repeat","port":"value"}]
+    })).unwrap();
+    let body = graph(
+        json!([call("inner", &loop_body)]),
+        json!([{"name":"value","node":"inner","port":"value"}]),
+    );
+    let definition = iteration_call_graph(&body, "sequential");
+    let registry = NodeRegistry::from_inventory().unwrap();
+    assert!(
+        compile_definition(&definition, &registry)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot contain Loop or Iteration")
+    );
+    assert!(
+        mf_compiler::plan_definition(&definition)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot contain Loop or Iteration")
+    );
 }
 
 fn builtin_echo() -> Result<WorkflowDefinition, mf_runtime::DefinitionParseError> {
@@ -92,6 +207,170 @@ fn builtin_sources_are_resolved_from_linked_providers() {
             .to_string()
             .contains("unknown built-in Flow")
     );
+}
+
+#[test]
+fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes() {
+    let base = graph(json!([call("invoke", &child())]), json!([]));
+    let mut old_sources = base.clone();
+    old_sources.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_23;
+    old_sources.flows.insert(
+        "echo".into(),
+        mf_runtime::FlowSource::Builtin {
+            builtin: "test.echo".into(),
+        },
+    );
+    assert!(
+        mf_compiler::resolve_flows(&old_sources, None)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Flow sources require")
+    );
+    let mut old_call = base.clone();
+    old_call.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_23;
+    assert!(
+        mf_compiler::resolve_flows(&old_call, None)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Flow calls require")
+    );
+    assert!(
+        serde_json::to_value(&old_call)
+            .unwrap_err()
+            .to_string()
+            .contains("nested flows require")
+    );
+    let mut old_wire = serde_json::to_value(&base).unwrap();
+    old_wire["version"] = json!("2026-10-23");
+    assert!(
+        serde_json::from_value::<WorkflowDefinition>(old_wire)
+            .unwrap_err()
+            .to_string()
+            .contains("nested flows require")
+    );
+    let mut blank_source = base.clone();
+    blank_source.flows.insert(
+        " ".into(),
+        mf_runtime::FlowSource::Builtin {
+            builtin: "test.echo".into(),
+        },
+    );
+    let mut blank_call = base.clone();
+    blank_call.nodes[0].config["flow"] = json!("");
+    for definition in [blank_source, blank_call] {
+        assert!(
+            mf_compiler::resolve_flows(&definition, None)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("must not be blank")
+        );
+    }
+    let mut deep = child();
+    for _ in 0..=mf_runtime::MAX_CALL_DEPTH {
+        deep = graph(json!([call("invoke", &deep)]), json!([]));
+    }
+    assert!(
+        mf_compiler::resolve_flows(&deep, None)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("exceeds sixteen")
+    );
+    let mut streaming_child = child();
+    streaming_child.execution = Some(Default::default());
+    let streaming = graph(json!([call("invoke", &streaming_child)]), json!([]));
+    assert!(
+        mf_compiler::resolve_flows(&streaming, None)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("terminal child interface")
+    );
+    let delta_child = graph(
+        json!([{"id":"model","kind":"builtin.llm","config":{"model":"fixture-model","api_key_env":"MF_NESTED_TEST_KEY"}}]),
+        json!([{"name":"delta","node":"model","port":"delta"}]),
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let error = compile_definition(
+        &graph(json!([call("invoke", &delta_child)]), json!([])),
+        &registry,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("terminal child ports"),
+        "{error}"
+    );
+}
+
+#[test]
+fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(
+        &graph(json!([call("invoke", &child())]), json!([])),
+        &registry,
+    )
+    .unwrap();
+    for config in [json!({"flow":1}), json!({"flow":"child"})] {
+        let mut corrupt = plan.clone();
+        corrupt.definition.nodes[0].config = config;
+        assert!(instantiate_compiled(&corrupt, &registry).is_err());
+        assert!(corrupt.generate_runner_artifacts().is_err());
+    }
+    let mut manifest = plan.manifest(&registry).unwrap();
+    manifest.definition.nodes[0]
+        .config
+        .as_object_mut()
+        .unwrap()
+        .remove("definition");
+    assert!(manifest.validate().is_err());
+    let mut cycle = child();
+    cycle.edges.push(mf_runtime::EdgeDefinition {
+        exclusive: false,
+        from_node: "echo".into(),
+        from_output: "value".into(),
+        to_node: "input".into(),
+        to_input: "value".into(),
+    });
+    let mut invalid = plan;
+    invalid.definition.nodes[0].config["definition"] = serde_json::to_value(cycle).unwrap();
+    assert!(
+        invalid
+            .generate_runner_artifacts()
+            .unwrap_err()
+            .to_string()
+            .contains("Flow call")
+    );
+}
+
+#[test]
+fn compilation_cannot_replace_referenced_sources_with_outputs_or_locks() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("parent.json");
+    let bytes = serde_json::to_vec(&child()).unwrap();
+    for name in ["child.json", "parent.lock"] {
+        let child_path = root.path().join(name);
+        fs::write(&child_path, &bytes).unwrap();
+        fs::write(&parent,json!({"version":"2026-10-25","dependencies":{},"flows":{"child":{"path":name}},"nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"child"}}]}).to_string()).unwrap();
+        let output = if name == "child.json" {
+            child_path.clone()
+        } else {
+            root.path().join("runner")
+        };
+        let request = mf_compiler::CompileRequest {
+            definition: &parent,
+            output: &output,
+            locked: false,
+            build_dir: None,
+            support: &mf_compiler::SupportPackages::Registry,
+        };
+        let error = mf_compiler::compile_project(&request).unwrap_err();
+        assert_eq!(error.stage, "output validation");
+        assert_eq!(fs::read(&child_path).unwrap(), bytes);
+        assert!(!root.path().join("parent.lock.guard").exists());
+    }
 }
 
 #[test]
@@ -174,6 +453,46 @@ fn child_secret_contract_redacts_the_call_boundary_before_observation() {
             .unwrap()
             .contains("unmarked-credential")
     );
+}
+
+#[test]
+fn exclusive_call_inputs_retain_child_sensitivity_after_branch_convergence() {
+    let mut invocation = call("invoke", &child());
+    invocation["inputs"] = json!({"input.value":{"exclusive":[{"node":"left","port":"value"},{"node":"right","port":"value"}]}});
+    let mut definition = graph(
+        json!([
+            {"id":"which","kind":"builtin.constant","config":{"value":true}},
+            {"id":"route","kind":"builtin.if_else","config":{"branches":[{"id":"yes","condition":{"source":{"output":"which.value","path":""},"operator":"eq","value":true}}]}},
+            {"id":"left","kind":"builtin.constant","config":{"value":"credential"}},
+            {"id":"right","kind":"builtin.constant","config":{"value":"other"}}, invocation
+        ]),
+        json!([{"name":"value","node":"invoke","port":"value"}]),
+    );
+    definition
+        .order_edges
+        .push(mf_runtime::OrderEdgeDefinition {
+            from_node: "which".into(),
+            to_node: "route".into(),
+        });
+    definition
+        .control_edges
+        .extend([("yes", "left"), ("else", "right")].map(|(port, node)| {
+            mf_runtime::ControlEdgeDefinition {
+                from_node: "route".into(),
+                from_output: port.into(),
+                to_node: node.into(),
+            }
+        }));
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let result = instantiate_compiled(
+        &compile_definition(&definition, &registry).unwrap(),
+        &registry,
+    )
+    .unwrap()
+    .execute()
+    .unwrap();
+    assert_eq!(result["value"].as_str(), Some("credential"));
+    assert!(result["value"].is_secret());
 }
 
 #[test]
@@ -428,6 +747,14 @@ fn generated_calls_match_memory_without_flow_sources() {
         .unwrap()
         .execute()
         .unwrap();
+    let execution = plan.generate_runner_execution_plans(&registry).unwrap();
+    let frozen = mf_runtime::WorkflowManifest::from_bytes(&execution.manifest_bytes).unwrap();
+    assert_eq!(frozen.definition, plan.definition);
+    let targets: Vec<mf_runtime::NodeTarget> =
+        serde_json::from_str(&execution.node_targets_json).unwrap();
+    assert_eq!(targets[0].id, "outer");
+    let artifacts = plan.generate_runner_artifacts().unwrap();
+    assert!(!artifacts.rust_source.is_empty());
     let project = root.path().join("build");
     mf_compiler::write_dependency_project(
         &project,
