@@ -1,6 +1,7 @@
 //! Bounded, transport-independent state reduction for one workflow run.
 
 mod stream;
+pub use mf_telemetry::transport::MissingRange;
 pub use stream::{StreamInvocationObservation, StreamNodeMetrics, StreamSnapshot};
 
 use mf_telemetry::{
@@ -12,6 +13,7 @@ use mf_telemetry::{
     },
     identity::RunId,
     maximum_event_count, maximum_loop_event_count,
+    transport::{DeliveryAdmission, DeliveryError, DeliveryTracker},
 };
 use sha2::{Digest, Sha256};
 use snafu::{ResultExt, Snafu};
@@ -88,12 +90,6 @@ pub enum Completeness {
     Complete,
     Incomplete,
     UnverifiedTail,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MissingRange {
-    pub first: i64,
-    pub last: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -251,6 +247,8 @@ pub enum StateError {
     Description { source: ContractError },
     #[snafu(display("invalid lifecycle event: {source}"))]
     Event { source: ContractError },
+    #[snafu(transparent)]
+    Delivery { source: DeliveryError },
     #[snafu(display("could not encode lifecycle event: {source}"))]
     Serialize { source: serde_json::Error },
     #[snafu(display("lifecycle event exceeded the {limit}-byte admission limit"))]
@@ -275,7 +273,7 @@ pub struct SessionState {
     nodes: Vec<NodeObservation>,
     latest_node_event: Option<NodeEventFocus>,
     max_sequence: Count,
-    received: BTreeMap<i64, SequenceWitness>,
+    delivery: DeliveryTracker<SequenceWitness>,
     final_boundary: Option<FinalBoundary>,
     local_lifecycle_drops: u64,
     protocol_conflicts: u64,
@@ -311,6 +309,7 @@ struct FinalBoundary {
     failure: Option<Failure>,
 }
 
+#[derive(PartialEq)]
 struct SequenceWitness {
     signature: [u8; 32],
     node: Option<(Vec<LoopPathEntry>, String)>,
@@ -374,7 +373,7 @@ impl SessionState {
             nodes,
             latest_node_event: None,
             max_sequence,
-            received: BTreeMap::new(),
+            delivery: DeliveryTracker::new(max_sequence.get() as usize),
             final_boundary: None,
             local_lifecycle_drops: 0,
             protocol_conflicts: 0,
@@ -476,50 +475,42 @@ impl SessionState {
             });
         }
         let signature: [u8; 32] = Sha256::digest(&encoded).into();
-        let sequence = event.sequence.get();
-        if let Some(existing) = self.received.get(&sequence) {
-            if existing.signature == signature {
+        let witness = SequenceWitness {
+            signature,
+            node: event
+                .event
+                .node()
+                .map(|(node, _)| (node.path.clone(), node.id.clone())),
+        };
+        let terminal = matches!(&event.event, Event::WorkflowFinished { .. });
+        match self.delivery.receive(event.sequence, witness, terminal)? {
+            DeliveryAdmission::Duplicate | DeliveryAdmission::UnverifiedDuplicate => {
                 return Ok(Admission::Duplicate);
             }
-            let previous_node = existing.node.clone();
-            self.conflict(
-                "same sequence carried conflicting lifecycle records",
-                event.event.node(),
-            );
-            if let Some((path, id)) = previous_node {
-                if path.is_empty() {
-                    if let Some(&position) = self.node_positions.get(&id) {
-                        self.nodes[position].conflicted = true;
+            DeliveryAdmission::Conflict => {
+                let previous_node = self
+                    .delivery
+                    .witness(event.sequence)
+                    .and_then(|witness| witness.node.clone());
+                self.conflict("conflicting lifecycle transport record", event.event.node());
+                if let Some((path, id)) = previous_node {
+                    if path.is_empty() {
+                        if let Some(&position) = self.node_positions.get(&id) {
+                            self.nodes[position].conflicted = true;
+                        }
+                    } else if let Some(node) = self
+                        .pass_states
+                        .get_mut(&path)
+                        .and_then(|pass| pass.nodes.get_mut(&id))
+                    {
+                        node.conflicted = true;
                     }
-                } else if let Some(node) = self
-                    .pass_states
-                    .get_mut(&path)
-                    .and_then(|pass| pass.nodes.get_mut(&id))
-                {
-                    node.conflicted = true;
                 }
+                return Ok(Admission::Conflict);
             }
-            return Ok(Admission::Conflict);
-        }
-        if self
-            .final_boundary
-            .as_ref()
-            .is_some_and(|boundary| event.sequence > boundary.sequence)
-        {
-            self.conflict("event followed the final sequence", event.event.node());
-            return Ok(Admission::Conflict);
+            DeliveryAdmission::New => {}
         }
         self.invalidate_snapshot();
-        self.received.insert(
-            sequence,
-            SequenceWitness {
-                signature,
-                node: event
-                    .event
-                    .node()
-                    .map(|(node, _)| (node.path.clone(), node.id.clone())),
-            },
-        );
         let conflicted = if matches!(
             &event.event,
             Event::LoopPassStarted { .. } | Event::LoopPassFinished { .. }
@@ -763,39 +754,7 @@ impl SessionState {
         if let Some(stream) = &self.stream {
             return stream.integrity(self);
         }
-        let upper = self.final_boundary.as_ref().map_or_else(
-            || {
-                self.received
-                    .last_key_value()
-                    .map_or(0, |(sequence, _)| *sequence)
-            },
-            |boundary| boundary.sequence.get(),
-        );
-        let mut cursor = 1;
-        let mut known_missing_count = 0u64;
-        let mut ranges = Vec::new();
-        let mut omitted_missing_ranges = 0;
-        for &sequence in self.received.keys().filter(|&&sequence| sequence <= upper) {
-            if sequence > cursor {
-                add_gap(
-                    cursor,
-                    sequence - 1,
-                    &mut ranges,
-                    &mut omitted_missing_ranges,
-                    &mut known_missing_count,
-                );
-            }
-            cursor = sequence.saturating_add(1);
-        }
-        if cursor <= upper {
-            add_gap(
-                cursor,
-                upper,
-                &mut ranges,
-                &mut omitted_missing_ranges,
-                &mut known_missing_count,
-            );
-        }
+        let delivery = self.delivery.snapshot(MAX_MISSING_RANGES);
         let mut unresolved_visited_nodes = self.final_boundary.as_ref().map_or(0, |boundary| {
             self.nodes
                 .iter()
@@ -857,7 +816,7 @@ impl SessionState {
             (None, true) => Completeness::UnverifiedTail,
             (None, false) => Completeness::Collecting,
             (Some(_), _)
-                if known_missing_count == 0
+                if delivery.is_complete()
                     && unresolved_visited_nodes == 0
                     && self.local_lifecycle_drops == 0
                     && self.protocol_conflicts == 0
@@ -870,13 +829,10 @@ impl SessionState {
         };
         LifecycleIntegrity {
             completeness,
-            known_missing_count,
-            known_missing_ranges: ranges,
-            omitted_missing_ranges,
-            final_sequence: self
-                .final_boundary
-                .as_ref()
-                .map(|boundary| boundary.sequence),
+            known_missing_count: delivery.known_missing_count,
+            known_missing_ranges: delivery.known_missing_ranges,
+            omitted_missing_ranges: delivery.omitted_missing_ranges,
+            final_sequence: delivery.final_sequence,
             unresolved_visited_nodes,
             local_drops: self.local_lifecycle_drops,
             protocol_conflicts: self.protocol_conflicts,
@@ -1325,21 +1281,6 @@ fn pending_node_parts(id: &str, kind: &str) -> NodeObservation {
         omitted_skip_causes: 0,
         started_sequence: None,
         terminal_sequence: None,
-    }
-}
-
-fn add_gap(
-    first: i64,
-    last: i64,
-    ranges: &mut Vec<MissingRange>,
-    omitted: &mut usize,
-    count: &mut u64,
-) {
-    *count = count.saturating_add((last - first + 1) as u64);
-    if ranges.len() == MAX_MISSING_RANGES {
-        *omitted += 1;
-    } else {
-        ranges.push(MissingRange { first, last });
     }
 }
 

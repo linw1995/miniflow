@@ -242,6 +242,18 @@ permit at most `4 * 10,000 + 4`: two node records and two pass boundaries per sc
 room for one pass that fails before its first step after budget exhaustion. The sequence helper does
 not execute nodes or enforce a scheduler.
 
+`mf-telemetry::transport::DeliveryTracker` owns delivery evidence for both finite and streaming
+lifecycle transports. It uses the reserved sequence, a payload witness, and the terminal marker to
+track gaps, reordered deliveries, duplicates, conflicting retransmissions, and the verified contiguous
+prefix. It has no knowledge of nodes, Loop passes, or execution outcomes. Its witness window and
+reported gap ranges are bounded independently; exhausting the reorder window retains an explicit
+verification failure. A terminal marker cannot truncate an already observed suffix.
+
+The TUI consumes this transport report rather than maintaining its own sequence-loss algorithms.
+Node and Loop consistency checks remain separate application validation: a contiguous transport
+does not prove that a producer emitted semantically valid lifecycle events. Neither those checks
+nor local diagnostic output can establish delivery of an unobserved record.
+
 Observation loss is acceptable. Consumers must expose gaps and local drops, and must not claim completeness without evidence:
 
 - While active, collect events and show any pending gaps; late arrival can close a gap.

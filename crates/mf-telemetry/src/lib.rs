@@ -11,6 +11,7 @@ pub mod otlp;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
 pub mod stream;
+pub mod transport;
 pub mod wire;
 
 pub const SNAPSHOT_CAPTURE_ENV: &str = "MF_CAPTURE_SNAPSHOTS";

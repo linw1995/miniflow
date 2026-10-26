@@ -104,7 +104,6 @@ struct RootState {
 }
 
 struct Boundary {
-    sequence: Count,
     outcome: Outcome,
     counts: StreamCounts,
     failure: Option<StreamFailure>,
@@ -113,9 +112,7 @@ struct Boundary {
 pub struct StreamState {
     roots: Vec<RootState>,
     positions: BTreeMap<String, usize>,
-    witnesses: BTreeMap<i64, [u8; 32]>,
-    watermark: i64,
-    highest: i64,
+    delivery: DeliveryTracker<[u8; 32]>,
     invocations: BTreeMap<u64, Invocation>,
     retired: BTreeMap<NodeKey, u64>,
     recent: VecDeque<StreamInvocationObservation>,
@@ -124,7 +121,6 @@ pub struct StreamState {
     conflicts: u64,
     lost_evidence: bool,
     hidden_invocations: u64,
-    old_retransmissions: u64,
     diagnostics: VecDeque<String>,
     dropped_diagnostics: u64,
     passes: BTreeMap<(u64, Vec<LoopPathEntry>), StreamPass>,
@@ -150,9 +146,7 @@ impl StreamState {
                 })
                 .collect(),
             positions,
-            witnesses: BTreeMap::new(),
-            watermark: 0,
-            highest: 0,
+            delivery: DeliveryTracker::new(MAX_WITNESSES),
             invocations: BTreeMap::new(),
             retired: BTreeMap::new(),
             recent: VecDeque::new(),
@@ -161,7 +155,6 @@ impl StreamState {
             conflicts: 0,
             lost_evidence: false,
             hidden_invocations: 0,
-            old_retransmissions: 0,
             diagnostics: VecDeque::new(),
             dropped_diagnostics: 0,
             passes: BTreeMap::new(),
@@ -203,55 +196,29 @@ impl StreamState {
             .fail();
         }
         let signature: [u8; 32] = Sha256::digest(bytes).into();
-        let sequence = record.sequence.get();
-        if let Some(previous) = self.witnesses.get(&sequence) {
-            return Ok(if *previous == signature {
-                Admission::Duplicate
-            } else {
-                self.conflict("conflicting stream records share a sequence")
-            });
-        }
-        if sequence <= self.watermark {
-            self.old_retransmissions = self.old_retransmissions.saturating_add(1);
-            if self.old_retransmissions == 1 {
-                self.note("old retransmission payload is outside retained verification coverage");
+        let terminal = matches!(
+            &record.payload,
+            StreamPayload::Control(StreamEvent::Finished { .. })
+        );
+        let admission = self
+            .delivery
+            .receive(record.sequence, signature, terminal)?;
+        match admission {
+            DeliveryAdmission::Duplicate => return Ok(Admission::Duplicate),
+            DeliveryAdmission::UnverifiedDuplicate => {
+                if self.delivery.unverified_retransmissions() == 1 {
+                    self.note(
+                        "old retransmission payload is outside retained verification coverage",
+                    );
+                }
+                return Ok(Admission::Duplicate);
             }
-            return Ok(Admission::Duplicate);
-        }
-        if self
-            .final_boundary
-            .as_ref()
-            .is_some_and(|boundary| sequence > boundary.sequence.get())
-        {
-            return Ok(self.conflict("stream record followed its final sequence"));
-        }
-        self.highest = self.highest.max(sequence);
-        if self.witnesses.len() == MAX_WITNESSES {
-            if self
-                .witnesses
-                .first_key_value()
-                .is_some_and(|(sequence, _)| *sequence <= self.watermark)
-            {
-                self.witnesses.pop_first();
-            } else if self.watermark.checked_add(1) != Some(sequence) {
-                self.lost_evidence = true;
-                self.note(
-                    "stream reorder window exhausted; observation verification is incomplete",
-                );
-                return Err(invalid("stream reorder window exhausted"));
+            DeliveryAdmission::Conflict => {
+                return Ok(self.conflict("conflicting stream transport record"));
             }
+            DeliveryAdmission::New => {}
         }
         let admission = self.apply_payload(description, &record, correlation)?;
-        self.witnesses.insert(sequence, signature);
-        while let Some(next) = self.watermark.checked_add(1) {
-            if !self.witnesses.contains_key(&next) {
-                break;
-            }
-            self.watermark = next;
-        }
-        while self.witnesses.len() > MAX_WITNESSES {
-            self.witnesses.pop_first();
-        }
         self.retire();
         Ok(admission)
     }
@@ -270,16 +237,12 @@ impl StreamState {
                 failure,
                 ..
             }) => {
-                if self.final_boundary.is_some() || self.highest > record.sequence.get() {
-                    return Ok(self.conflict("stream has incompatible final boundaries"));
-                }
                 let failure = failure.as_ref().map(|failure| StreamFailure {
                     phase: failure.phase.clone(),
                     node: failure.node.clone(),
                     message: truncate_utf8(&failure.message, MAX_FAILURE_MESSAGE_BYTES).0,
                 });
                 self.final_boundary = Some(Boundary {
-                    sequence: record.sequence,
                     outcome: match outcome {
                         mf_telemetry::stream::StreamOutcome::Succeeded => Outcome::Succeeded,
                         mf_telemetry::stream::StreamOutcome::Failed => Outcome::Failed,
@@ -549,7 +512,7 @@ impl StreamState {
             .invocations
             .iter()
             .filter(|(_, invocation)| {
-                invocation.complete() && invocation.last_sequence.get() <= self.watermark
+                invocation.complete() && invocation.last_sequence.get() <= self.delivery.watermark()
             })
             .map(|(id, invocation)| (invocation.last_sequence, *id))
             .collect();
@@ -989,7 +952,7 @@ impl StreamState {
         let oldest = self
             .passes
             .iter()
-            .filter(|(_, pass)| pass.complete() && pass.latest.get() <= self.watermark)
+            .filter(|(_, pass)| pass.complete() && pass.latest.get() <= self.delivery.watermark())
             .min_by_key(|(_, pass)| pass.latest)
             .map(|(key, _)| key.clone());
         if let Some(key) = oldest {
@@ -1021,33 +984,7 @@ impl StreamState {
 
 impl StreamState {
     pub fn integrity(&self, session: &SessionState) -> LifecycleIntegrity {
-        let upper = self
-            .final_boundary
-            .as_ref()
-            .map_or(self.highest, |boundary| boundary.sequence.get());
-        let mut cursor = self.watermark.checked_add(1);
-        let mut count = 0;
-        let mut ranges = Vec::new();
-        let mut omitted = 0;
-        if self.watermark < upper {
-            for &sequence in self
-                .witnesses
-                .keys()
-                .filter(|&&sequence| sequence > self.watermark && sequence <= upper)
-            {
-                if let Some(cursor) = cursor
-                    && sequence > cursor
-                {
-                    add_gap(cursor, sequence - 1, &mut ranges, &mut omitted, &mut count);
-                }
-                cursor = sequence.checked_add(1);
-            }
-            if let Some(cursor) = cursor
-                && cursor <= upper
-            {
-                add_gap(cursor, upper, &mut ranges, &mut omitted, &mut count);
-            }
-        }
+        let delivery = self.delivery.snapshot(MAX_MISSING_RANGES);
         let unresolved = if self.final_boundary.is_some() {
             self.invocations
                 .iter()
@@ -1060,9 +997,9 @@ impl StreamState {
         let conflicts = session.protocol_conflicts.saturating_add(self.conflicts);
         let errors = session
             .observation_errors
-            .saturating_add(u64::from(self.lost_evidence));
+            .saturating_add(u64::from(self.lost_evidence || delivery.verification_lost));
         let completeness = if self.final_boundary.is_some() {
-            if count == 0
+            if delivery.is_complete()
                 && unresolved == 0
                 && conflicts == 0
                 && errors == 0
@@ -1081,13 +1018,10 @@ impl StreamState {
         };
         LifecycleIntegrity {
             completeness,
-            known_missing_count: count,
-            known_missing_ranges: ranges,
-            omitted_missing_ranges: omitted,
-            final_sequence: self
-                .final_boundary
-                .as_ref()
-                .map(|boundary| boundary.sequence),
+            known_missing_count: delivery.known_missing_count,
+            known_missing_ranges: delivery.known_missing_ranges,
+            omitted_missing_ranges: delivery.omitted_missing_ranges,
+            final_sequence: delivery.final_sequence,
             unresolved_visited_nodes: unresolved,
             local_drops: session.local_lifecycle_drops,
             protocol_conflicts: conflicts,
@@ -1111,6 +1045,7 @@ impl StreamState {
             });
             node.possibly_missing_events = incomplete
                 || self.lost_evidence
+                || lifecycle.observation_errors != 0
                 || self.conflicts != 0
                 || lifecycle.known_missing_count != 0;
             if session.closed || self.final_boundary.is_some() {
@@ -1313,7 +1248,7 @@ impl StreamState {
                     .as_ref()
                     .and_then(|boundary| boundary.failure.clone()),
                 hidden_invocations: self.hidden_invocations,
-                unverified_retransmissions: self.old_retransmissions,
+                unverified_retransmissions: self.delivery.unverified_retransmissions(),
             }),
         }
     }
@@ -1640,7 +1575,7 @@ mod tests {
                 .unwrap();
         }
         let stream = state.stream.as_ref().unwrap();
-        assert!(stream.witnesses.len() <= MAX_WITNESSES);
+        assert!(stream.delivery.retained_witnesses() <= MAX_WITNESSES);
         assert_eq!(stream.recent.len(), MAX_RECENT_INVOCATIONS);
         assert_eq!(stream.invocations.len(), 1);
         assert_eq!(state.apply_stream(source).unwrap(), Admission::Duplicate);
@@ -2073,7 +2008,7 @@ mod tests {
                 .apply_stream(node(run, 4099, 2049, false, false))
                 .is_err()
         );
-        assert!(state.stream.as_ref().unwrap().witnesses.len() <= MAX_WITNESSES);
+        assert!(state.stream.as_ref().unwrap().delivery.retained_witnesses() <= MAX_WITNESSES);
         state.apply_stream(start(run)).unwrap();
         state.apply_stream(node(run, 2, 0, true, false)).unwrap();
         state
