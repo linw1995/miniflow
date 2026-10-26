@@ -88,11 +88,15 @@ class ValidationTests(unittest.TestCase):
 
     def test_nonexecutable_proof_does_not_hide_functions_or_custom_macros(self):
         for source in ['// Documentation\n', 'mod model;\npub use model::{Item, Other as Alias};',
+                       '#[doc(hidden)]\npub use inventory::submit as __submit_builtin_flow;',
                        '#[cfg(all(test, unix))]\n#[path = "../tests/common.rs"]\nmod support;',
                        '#[macro_use]\npub mod nodes;\nextern crate sample as _;']:
             with self.subTest(source=source): self.assertTrue(validation.declarations_only(source))
         for source in ['fn execute() {}', 'pub mod inner { pub fn execute() {} }',
                        '#[custom_attribute]\npub mod model;', 'inventory::submit! { Item }',
+                       '#[doc(hidden)]\nfn hidden() {}',
+                       '#[doc(hidden)]\ninventory::submit! { Item }',
+                       '#[doc(hidden)]\n#[custom_attribute]\npub use model::Item;',
                        '#[doc = r#"[ \" //"#]\nfn hidden() {}',
                        '#[path = "//"] fn hidden() {}', 'pub static VALUE: u32 = run();']:
             with self.subTest(source=source): self.assertFalse(validation.declarations_only(source))
@@ -131,7 +135,7 @@ class ValidationTests(unittest.TestCase):
         for body in bodies:
             with self.subTest(body=body):
                 before = 'pub use old::{Item, Other};\n' + body
-                after = 'pub use new::{Item, Other};\n' + body + '\nmod added;'
+                after = '#[doc(hidden)]\npub use new::{Item, Other};\n' + body + '\nmod added;'
                 self.assertTrue(validation.declaration_changes_only(before, after))
                 self.assertFalse(validation.declaration_changes_only(before, after.replace(body, body + '\nfn added() {}')))
                 self.assertFalse(validation.declaration_changes_only(before, after.replace(body, body.replace('{', '{ changed();', 1))))

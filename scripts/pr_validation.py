@@ -152,7 +152,7 @@ def declarations_only(contents):
     # Prove a deliberately small Rust grammar: imports and out-of-line modules.
     # Unknown attributes, macros, inline modules, and executable items stay unmapped.
     source = re.sub(r"(?m)^[ \t]*//[^\n]*$", "", contents)
-    attribute = r'(?m)^[ \t]*#!?\[(?:macro_use|cfg\((?:[A-Za-z0-9_, ()=]|"[^"\\\r\n]*")*\)|path[ \t]*=[ \t]*"[^"\\\r\n]*")\][ \t]*$'
+    attribute = r'(?m)^[ \t]*#!?\[(?:macro_use|doc\(hidden\)|cfg\((?:[A-Za-z0-9_, ()=]|"[^"\\\r\n]*")*\)|path[ \t]*=[ \t]*"[^"\\\r\n]*")\][ \t]*$'
     source = re.sub(attribute, "", source)
     visibility = r"(?:pub(?:\((?:crate|super|self)\))?\s+)?"
     declaration = re.compile(r"\s*(?:" + visibility + r"mod\s+[A-Za-z_]\w*\s*;|"
