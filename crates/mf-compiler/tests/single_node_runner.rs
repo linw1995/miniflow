@@ -142,7 +142,7 @@ fn finite_runner_isolates_noisy_plugins_and_survives_without_build_inputs() {
                     1
                 );
             } else {
-                assert!(stderr.contains("workflow started (nodes: 1"));
+                assert!(stderr.contains("workflow started (run: "));
                 assert!(stderr.contains("node \"copy.part\""));
             }
             assert_eq!(result(output), json!({"value":42}));
@@ -232,7 +232,7 @@ fn streaming_binary_selects_finite_typed_tasks_and_rejects_producers_and_events(
             &["--node=copy", "--copy.input=\"selected\"", "-vv"],
         );
         let stderr = String::from_utf8_lossy(&verbose.stderr);
-        assert!(stderr.contains("workflow started (nodes: 1"));
+        assert!(stderr.contains("workflow started (run: "));
         assert!(stderr.contains("node \"copy\""));
         assert!(!stderr.contains("node \"read\"") && !stderr.contains("node \"batch\""));
         assert_eq!(result(verbose), json!({"value":"selected"}));
