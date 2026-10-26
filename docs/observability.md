@@ -249,15 +249,17 @@ prefix. It has no knowledge of nodes, Loop passes, or execution outcomes. Its wi
 reported gap ranges are bounded independently; exhausting the reorder window retains an explicit
 verification failure. A terminal marker cannot truncate an already observed suffix.
 
-The TUI consumes this transport report rather than maintaining its own sequence-loss algorithms.
-Node and Loop consistency checks remain separate application validation: a contiguous transport
-does not prove that a producer emitted semantically valid lifecycle events. Neither those checks
-nor local diagnostic output can establish delivery of an unobserved record.
+The tracker also owns collection closure, local rejection counts, and the resulting `Completeness`
+state. The TUI exposes its `DeliverySnapshot` directly as `LifecycleIntegrity`. Node and Loop protocol
+conflicts, observation errors, and display-retention overflows are reported separately through
+`StateSnapshot.observation`; they do not change transport completeness. Execution counters and node
+states remain business facts for rendering and validation. A producer that never emits a business
+event leaves no transport evidence for that event.
 
 Observation loss is acceptable. Consumers must expose gaps and local drops, and must not claim completeness without evidence:
 
 - While active, collect events and show any pending gaps; late arrival can close a gap.
-- After bounded draining, a valid final record and every applied sequence through it can establish lifecycle completeness.
+- After bounded draining, a valid final record and every received sequence through it can establish lifecycle completeness.
 - Remaining gaps or local lifecycle drops mean incomplete observation.
 - A missing final record means an unverified tail and unknown total loss, including when no telemetry arrived at all.
 - A wholly lost suffix during a long-running node cannot be detected immediately without later evidence. Keep completeness unconfirmed.
@@ -275,7 +277,11 @@ or failed. A successful Loop node finish carries `loop_summary` with the number 
 reason of `condition`, `maximum`, or `exit`. No record carries loop variable values or node
 configuration.
 
-Schema 2's workflow final record reports the actual number of scheduled steps and the outer graph's visited prefix. The TUI compares the actual step count with observed pass prefixes, so a missing pass cannot look complete merely because the remaining records have contiguous sequence numbers. A known missing body outcome remains unknown after later passes complete; receiving that delayed record can close the gap. The old description and event versions remain supported for existing binaries.
+Schema 2's workflow final record reports the actual number of scheduled steps and the outer graph's
+visited prefix. These counters describe execution and help render node state. They do not establish
+transport loss or replace sequence evidence. A known missing body outcome remains unknown after
+later passes complete; receiving its delayed record can close the transport gap. The old description
+and event versions remain supported for existing binaries.
 
 ## Iteration observation
 
@@ -334,9 +340,11 @@ Each node retains at most 32 produced and 32 skipped port names of 128 bytes eac
 failure text. Omitted display metadata is counted separately from lifecycle loss. The receiver rejects records that
 exceed admission limits rather than allocating memory proportional to untrusted decoded content indefinitely.
 
-Completeness stays Collecting while the run is active and gaps may still close. A final record with every sequence
-applied, every visited node outcome justified, and no local lifecycle loss, observation error, or conflict is Complete. Remaining gaps or local lifecycle
-drops after bounded collection are Incomplete. If the final record is absent, the tail is UnverifiedTail and its total
+Completeness stays Collecting while transport evidence is unresolved and late records may still arrive.
+A final record with every sequence received and no local lifecycle drops, conflicting transport
+identities, or exhausted transport evidence is Complete. Remaining transport gaps or rejections after
+bounded collection are Incomplete. Business outcomes may remain Unknown even when transport is
+Complete; protocol diagnostics remain visible independently. If the final record is absent, the tail is UnverifiedTail and its total
 missing count is unknown, even when no telemetry arrived. Known missing ranges and local drop counts may overlap and
 must be shown separately. Observed span count, trace drops, and diagnostic truncation are separate indicators; none
 proves lifecycle loss. There is no replay, persistence, reconnect, retry scheduling, or workflow restart.
@@ -747,7 +755,8 @@ completed invocations, and 64 Loop pass details. Each retained pass has compact 
 to 64 detailed node records. Contiguous verified sequences and completed Loop prefixes compact into
 counters. Losing old display detail does not invalidate lifecycle completeness. An ancient retransmission
 outside the witness window is ignored and counted as unverified; its payload cannot be compared with
-retired evidence. Exhausting an unresolved retention window permanently marks observation incomplete.
+retired evidence. Exhausting the transport reorder window permanently prevents verified completeness.
+Display-retention overflows are reported separately and preserve already received transport evidence.
 Repeated node invocations keep separate identities; node totals describe observed activity, while final
 workflow totals come from the terminal record. Missing outcomes remain visible even after later successes.
 

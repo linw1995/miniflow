@@ -1,6 +1,6 @@
 use mf_telemetry::{
     Count,
-    transport::{DeliveryAdmission, DeliveryError, DeliveryTracker, MissingRange},
+    transport::{Completeness, DeliveryAdmission, DeliveryError, DeliveryTracker, MissingRange},
 };
 
 fn count(value: i64) -> Count {
@@ -166,4 +166,43 @@ fn sequence_limits_do_not_wrap_gap_counts_or_accept_zero() {
         }]
     );
     assert!(!snapshot.is_complete());
+}
+
+#[test]
+fn closing_collection_distinguishes_a_known_gap_from_an_unverified_tail() {
+    let mut delivery = DeliveryTracker::new(4);
+    delivery.receive(count(1), (), false).unwrap();
+    assert_eq!(delivery.snapshot(64).completeness, Completeness::Collecting);
+    delivery.receive(count(3), (), true).unwrap();
+    assert_eq!(delivery.snapshot(64).completeness, Completeness::Collecting);
+    delivery.close();
+    let snapshot = delivery.snapshot(64);
+    assert_eq!(snapshot.completeness, Completeness::Incomplete);
+    assert_eq!(snapshot.known_missing_count, 1);
+    assert!(matches!(
+        delivery.receive(count(2), (), false),
+        Err(DeliveryError::Closed)
+    ));
+
+    let mut abandoned = DeliveryTracker::new(4);
+    abandoned.receive(count(1), (), false).unwrap();
+    abandoned.close();
+    let snapshot = abandoned.snapshot(64);
+    assert_eq!(snapshot.completeness, Completeness::UnverifiedTail);
+    assert_eq!(snapshot.known_missing_count, 0);
+}
+
+#[test]
+fn local_rejections_remain_separate_from_sequence_gaps() {
+    let mut delivery = DeliveryTracker::new(4);
+    delivery.receive(count(1), (), false).unwrap();
+    delivery.receive(count(2), (), true).unwrap();
+    assert!(delivery.snapshot(64).is_complete());
+    delivery.record_local_drop(2);
+    assert_eq!(delivery.snapshot(64).completeness, Completeness::Collecting);
+    delivery.close();
+    let snapshot = delivery.snapshot(64);
+    assert_eq!(snapshot.completeness, Completeness::Incomplete);
+    assert_eq!(snapshot.local_drops, 2);
+    assert_eq!(snapshot.known_missing_count, 0);
 }

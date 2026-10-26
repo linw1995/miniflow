@@ -1,7 +1,9 @@
 //! Bounded, transport-independent state reduction for one workflow run.
 
 mod stream;
-pub use mf_telemetry::transport::MissingRange;
+pub use mf_telemetry::transport::{
+    Completeness, DeliverySnapshot as LifecycleIntegrity, MissingRange,
+};
 pub use stream::{StreamInvocationObservation, StreamNodeMetrics, StreamSnapshot};
 
 use mf_telemetry::{
@@ -84,25 +86,11 @@ pub struct NodeObservation {
     terminal_sequence: Option<Count>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Completeness {
-    Collecting,
-    Complete,
-    Incomplete,
-    UnverifiedTail,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LifecycleIntegrity {
-    pub completeness: Completeness,
-    pub known_missing_count: u64,
-    pub known_missing_ranges: Vec<MissingRange>,
-    pub omitted_missing_ranges: usize,
-    pub final_sequence: Option<Count>,
-    pub unresolved_visited_nodes: usize,
-    pub local_drops: u64,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ObservationDiagnostics {
     pub protocol_conflicts: u64,
-    pub observation_errors: u64,
+    pub errors: u64,
+    pub retention_overflows: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -124,6 +112,7 @@ pub struct StateSnapshot {
     pub workflow_outcome: Option<Outcome>,
     pub workflow_failure: Option<FailureSummary>,
     pub lifecycle: LifecycleIntegrity,
+    pub observation: ObservationDiagnostics,
     pub traces: TraceAvailability,
     pub diagnostic_bytes_dropped: u64,
     pub diagnostics: Vec<String>,
@@ -275,7 +264,6 @@ pub struct SessionState {
     max_sequence: Count,
     delivery: DeliveryTracker<SequenceWitness>,
     final_boundary: Option<FinalBoundary>,
-    local_lifecycle_drops: u64,
     protocol_conflicts: u64,
     observation_errors: u64,
     traces: TraceAvailability,
@@ -303,7 +291,6 @@ struct PassState {
 struct FinalBoundary {
     sequence: Count,
     visited: Count,
-    visited_steps: Option<Count>,
     outcome: Outcome,
     failure_node_id: Option<String>,
     failure: Option<Failure>,
@@ -375,7 +362,6 @@ impl SessionState {
             max_sequence,
             delivery: DeliveryTracker::new(max_sequence.get() as usize),
             final_boundary: None,
-            local_lifecycle_drops: 0,
             protocol_conflicts: 0,
             observation_errors: 0,
             traces: TraceAvailability::default(),
@@ -492,7 +478,8 @@ impl SessionState {
                     .delivery
                     .witness(event.sequence)
                     .and_then(|witness| witness.node.clone());
-                self.conflict("conflicting lifecycle transport record", event.event.node());
+                self.mark_conflicted(event.event.node());
+                self.note("conflicting lifecycle transport record");
                 if let Some((path, id)) = previous_node {
                     if path.is_empty() {
                         if let Some(&position) = self.node_positions.get(&id) {
@@ -574,7 +561,11 @@ impl SessionState {
 
     pub fn record_local_lifecycle_drop(&mut self, count: u64, reason: &str) {
         self.invalidate_snapshot();
-        self.local_lifecycle_drops = self.local_lifecycle_drops.saturating_add(count);
+        if let Some(stream) = &mut self.stream {
+            stream.record_local_drop(count);
+        } else {
+            self.delivery.record_local_drop(count);
+        }
         self.note(reason);
     }
 
@@ -614,6 +605,11 @@ impl SessionState {
         }
         self.invalidate_snapshot();
         self.closed = true;
+        if let Some(stream) = &mut self.stream {
+            stream.close();
+        } else {
+            self.delivery.close();
+        }
         if self.final_boundary.is_none() {
             for node in &mut self.nodes {
                 match node.status {
@@ -675,6 +671,11 @@ impl SessionState {
                 .and_then(|boundary| boundary.failure.as_ref())
                 .map(bounded_failure),
             lifecycle,
+            observation: ObservationDiagnostics {
+                protocol_conflicts: self.protocol_conflicts,
+                errors: self.observation_errors,
+                retention_overflows: 0,
+            },
             traces: self.traces,
             diagnostic_bytes_dropped: self.diagnostic_bytes_dropped,
             diagnostics: self.diagnostics.iter().cloned().collect(),
@@ -752,91 +753,9 @@ impl SessionState {
 
     pub fn integrity(&self) -> LifecycleIntegrity {
         if let Some(stream) = &self.stream {
-            return stream.integrity(self);
-        }
-        let delivery = self.delivery.snapshot(MAX_MISSING_RANGES);
-        let mut unresolved_visited_nodes = self.final_boundary.as_ref().map_or(0, |boundary| {
-            self.nodes
-                .iter()
-                .take(boundary.visited.get() as usize)
-                .filter(|node| {
-                    !matches!(
-                        node.status,
-                        NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Skipped
-                    )
-                })
-                .count()
-        });
-        if self.final_boundary.is_some() {
-            for (path, state) in &self.pass_states {
-                if state.started_sequence.is_none()
-                    || (path.len() > 1 && !self.pass_states.contains_key(&path[..path.len() - 1]))
-                {
-                    unresolved_visited_nodes += 1;
-                }
-                let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
-                let body = self
-                    .description
-                    .loop_body(&static_path)
-                    .expect("validated pass path has a body");
-                if let Some(visited) = state.visited_node_count {
-                    unresolved_visited_nodes += body
-                        .execution_order
-                        .iter()
-                        .take(visited.get() as usize)
-                        .filter(|id| {
-                            state.nodes.get(*id).is_none_or(|node| {
-                                !matches!(
-                                    node.status,
-                                    NodeStatus::Succeeded
-                                        | NodeStatus::Failed
-                                        | NodeStatus::Skipped
-                                )
-                            })
-                        })
-                        .count();
-                } else {
-                    unresolved_visited_nodes += 1;
-                }
-            }
-            if let Some(boundary) = &self.final_boundary
-                && let Some(expected) = boundary.visited_steps
-            {
-                let observed = boundary.visited.get()
-                    + self
-                        .pass_states
-                        .values()
-                        .filter_map(|pass| pass.visited_node_count)
-                        .map(Count::get)
-                        .sum::<i64>();
-                unresolved_visited_nodes += expected.get().abs_diff(observed) as usize;
-            }
-        }
-        let completeness = match (&self.final_boundary, self.closed) {
-            (None, true) => Completeness::UnverifiedTail,
-            (None, false) => Completeness::Collecting,
-            (Some(_), _)
-                if delivery.is_complete()
-                    && unresolved_visited_nodes == 0
-                    && self.local_lifecycle_drops == 0
-                    && self.protocol_conflicts == 0
-                    && self.observation_errors == 0 =>
-            {
-                Completeness::Complete
-            }
-            (Some(_), true) => Completeness::Incomplete,
-            (Some(_), false) => Completeness::Collecting,
-        };
-        LifecycleIntegrity {
-            completeness,
-            known_missing_count: delivery.known_missing_count,
-            known_missing_ranges: delivery.known_missing_ranges,
-            omitted_missing_ranges: delivery.omitted_missing_ranges,
-            final_sequence: delivery.final_sequence,
-            unresolved_visited_nodes,
-            local_drops: self.local_lifecycle_drops,
-            protocol_conflicts: self.protocol_conflicts,
-            observation_errors: self.observation_errors,
+            stream.integrity()
+        } else {
+            self.delivery.snapshot(MAX_MISSING_RANGES)
         }
     }
 
@@ -1154,7 +1073,6 @@ impl SessionState {
                 self.final_boundary = Some(FinalBoundary {
                     sequence: *final_sequence,
                     visited: top_level_visited_count.unwrap_or(*visited_node_count),
-                    visited_steps: top_level_visited_count.map(|_| *visited_node_count),
                     outcome: *outcome,
                     failure_node_id: failure_node_id.clone(),
                     failure: failure.clone(),
@@ -1223,6 +1141,11 @@ impl SessionState {
         node: Option<(&mf_telemetry::event::NodeIdentity, Count)>,
     ) {
         self.protocol_conflicts = self.protocol_conflicts.saturating_add(1);
+        self.mark_conflicted(node);
+        self.note(message);
+    }
+
+    fn mark_conflicted(&mut self, node: Option<(&NodeIdentity, Count)>) {
         if let Some((identity, _)) = node {
             if identity.path.is_empty() {
                 if let Some(&position) = self.node_positions.get(&identity.id) {
@@ -1236,7 +1159,6 @@ impl SessionState {
                 observed.conflicted = true;
             }
         }
-        self.note(message);
     }
 
     fn note(&mut self, message: &str) {

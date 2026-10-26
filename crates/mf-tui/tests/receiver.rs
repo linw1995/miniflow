@@ -430,7 +430,7 @@ fn iteration_detail_logs_leave_outer_lifecycle_complete() {
     let snapshot = receiver.finish();
     assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
     assert_eq!(snapshot.lifecycle.local_drops, 0);
-    assert_eq!(snapshot.lifecycle.observation_errors, 0);
+    assert_eq!(snapshot.observation.errors, 0);
 }
 
 #[test]
@@ -457,7 +457,7 @@ fn unrelated_and_malformed_requests_are_visible_without_fabricating_events() {
         200
     );
     assert_eq!(receiver.snapshot().lifecycle.known_missing_count, 0);
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 0);
+    assert_eq!(receiver.snapshot().observation.errors, 0);
     assert_eq!(
         send(
             receiver.endpoint(),
@@ -488,7 +488,7 @@ fn unrelated_and_malformed_requests_are_visible_without_fabricating_events() {
         ),
         400
     );
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 1);
+    assert_eq!(receiver.snapshot().observation.errors, 1);
     assert_eq!(
         send(
             receiver.endpoint(),
@@ -499,7 +499,7 @@ fn unrelated_and_malformed_requests_are_visible_without_fabricating_events() {
         400
     );
     assert_eq!(receiver.snapshot().traces.local_drops, 1);
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 1);
+    assert_eq!(receiver.snapshot().observation.errors, 1);
     let valid = logs(vec![
         record(1, false, &run_id().to_string(), 1),
         record(2, true, &run_id().to_string(), 1),
@@ -547,7 +547,7 @@ fn rejects_oversized_and_non_protobuf_requests() {
             .unwrap()
             .starts_with("HTTP/1.1 413")
     );
-    assert_eq!(receiver.finish().lifecycle.observation_errors, 2);
+    assert_eq!(receiver.finish().observation.errors, 2);
 }
 
 #[test]
@@ -575,7 +575,7 @@ fn rejects_a_batch_above_the_record_budget_without_applying_a_prefix() {
         400
     );
     assert_eq!(receiver.snapshot().lifecycle.local_drops, 0);
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 0);
+    assert_eq!(receiver.snapshot().observation.errors, 0);
     let oversized = logs(vec![
         record(1, false, &run_id().to_string(), 1);
         mf_tui::receiver::MAX_RECORDS_PER_REQUEST + 1
@@ -594,7 +594,7 @@ fn rejects_a_batch_above_the_record_budget_without_applying_a_prefix() {
         snapshot.lifecycle.local_drops,
         (mf_tui::receiver::MAX_RECORDS_PER_REQUEST + 1) as u64
     );
-    assert_eq!(snapshot.lifecycle.observation_errors, 0);
+    assert_eq!(snapshot.observation.errors, 0);
     assert_eq!(
         snapshot.lifecycle.completeness,
         Completeness::UnverifiedTail
@@ -811,7 +811,7 @@ fn retains_session_logs_before_spans_and_ignores_other_runs() {
         retained.records[0].scope.as_ref().unwrap().name,
         "custom.scope"
     );
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 0);
+    assert_eq!(receiver.snapshot().observation.errors, 0);
 }
 
 #[test]
@@ -897,7 +897,7 @@ fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
     let state = receiver.finish();
     assert_eq!(state.lifecycle.completeness, Completeness::Complete);
     assert_eq!(state.lifecycle.local_drops, 0);
-    assert_eq!(state.lifecycle.observation_errors, 0);
+    assert_eq!(state.observation.errors, 0);
     assert_eq!(receiver.log_snapshot().records.len(), 4096);
     assert_eq!(receiver.log_snapshot().local_drops, expected_drops);
     let data = receiver.span_data(&[1; 16], &[2; 8]);

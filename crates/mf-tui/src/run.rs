@@ -1415,9 +1415,9 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | d details | ? help | {controls}",
+            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | d details | ? help | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
-            lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
+            snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
         draw_help(frame, view_state);
     }).context(TerminalSnafu)?;
@@ -1910,6 +1910,12 @@ fn details_text(
             failure.phase, failure.message
         ));
     }
+    if snapshot.observation.retention_overflows != 0 {
+        details.push_str(&format!(
+            "Observation retention limit reached: {}\n",
+            snapshot.observation.retention_overflows
+        ));
+    }
     if snapshot.traces.local_drops != 0 {
         details.push_str(&format!("Trace drops: {}\n", snapshot.traces.local_drops));
     }
@@ -2304,11 +2310,8 @@ impl ObservationView {
             graph,
         );
         frame.render_widget(
-            Paragraph::new(format!(
-                "Observation: {:?}",
-                snapshot.lifecycle.completeness
-            ))
-            .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!("Delivery: {:?}", snapshot.lifecycle.completeness))
+                .style(Style::default().fg(Color::DarkGray)),
             footer,
         );
     }

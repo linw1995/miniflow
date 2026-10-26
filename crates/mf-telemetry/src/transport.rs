@@ -5,6 +5,14 @@ use snafu::{Snafu, ensure};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completeness {
+    Collecting,
+    Complete,
+    Incomplete,
+    UnverifiedTail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MissingRange {
     pub first: i64,
     pub last: i64,
@@ -12,6 +20,7 @@ pub struct MissingRange {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliverySnapshot {
+    pub completeness: Completeness,
     pub known_missing_count: u64,
     pub known_missing_ranges: Vec<MissingRange>,
     pub omitted_missing_ranges: usize,
@@ -19,15 +28,13 @@ pub struct DeliverySnapshot {
     pub verification_lost: bool,
     pub protocol_conflicts: u64,
     pub unverified_retransmissions: u64,
+    pub local_drops: u64,
 }
 
 impl DeliverySnapshot {
     /// Absence of gaps alone cannot verify a wholly missing suffix.
     pub fn is_complete(&self) -> bool {
-        self.final_sequence.is_some()
-            && self.known_missing_count == 0
-            && !self.verification_lost
-            && self.protocol_conflicts == 0
+        self.completeness == Completeness::Complete
     }
 }
 
@@ -41,6 +48,8 @@ pub enum DeliveryAdmission {
 
 #[derive(Debug, Snafu)]
 pub enum DeliveryError {
+    #[snafu(display("transport has finished collecting"))]
+    Closed,
     #[snafu(display("transport sequences must be positive"))]
     InvalidSequence,
     #[snafu(display("transport reorder window exhausted"))]
@@ -60,6 +69,8 @@ pub struct DeliveryTracker<W> {
     verification_lost: bool,
     protocol_conflicts: u64,
     unverified_retransmissions: u64,
+    local_drops: u64,
+    closed: bool,
 }
 
 impl<W: PartialEq> DeliveryTracker<W> {
@@ -74,6 +85,8 @@ impl<W: PartialEq> DeliveryTracker<W> {
             verification_lost: false,
             protocol_conflicts: 0,
             unverified_retransmissions: 0,
+            local_drops: 0,
+            closed: false,
         }
     }
 
@@ -93,6 +106,14 @@ impl<W: PartialEq> DeliveryTracker<W> {
         self.unverified_retransmissions
     }
 
+    pub fn record_local_drop(&mut self, count: u64) {
+        self.local_drops = self.local_drops.saturating_add(count);
+    }
+
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
     fn check(
         &self,
         sequence: Count,
@@ -100,6 +121,7 @@ impl<W: PartialEq> DeliveryTracker<W> {
         terminal: bool,
     ) -> Result<DeliveryAdmission, DeliveryError> {
         let sequence = sequence.get();
+        ensure!(!self.closed, ClosedSnafu);
         ensure!(sequence > 0, InvalidSequenceSnafu);
         if let Some(previous) = self.witnesses.get(&sequence) {
             return Ok(
@@ -185,6 +207,7 @@ impl<W: PartialEq> DeliveryTracker<W> {
     pub fn snapshot(&self, maximum_ranges: usize) -> DeliverySnapshot {
         let upper = self.final_sequence.map_or(self.highest, Count::get);
         let mut snapshot = DeliverySnapshot {
+            completeness: Completeness::Collecting,
             known_missing_count: 0,
             known_missing_ranges: Vec::new(),
             omitted_missing_ranges: 0,
@@ -192,6 +215,7 @@ impl<W: PartialEq> DeliveryTracker<W> {
             verification_lost: self.verification_lost,
             protocol_conflicts: self.protocol_conflicts,
             unverified_retransmissions: self.unverified_retransmissions,
+            local_drops: self.local_drops,
         };
         let mut gap = |first, last| {
             snapshot.known_missing_count += (last - first + 1) as u64;
@@ -209,14 +233,26 @@ impl<W: PartialEq> DeliveryTracker<W> {
                 if sequence > cursor {
                     gap(cursor, sequence - 1);
                 }
-                // The last sequence may be i64::MAX.
-                if sequence == upper {
-                    return snapshot;
-                }
-                cursor = sequence + 1;
+                cursor = sequence.saturating_add(1);
             }
-            gap(cursor, upper);
+            if !self.witnesses.contains_key(&upper) {
+                gap(cursor, upper);
+            }
         }
+        snapshot.completeness = match (snapshot.final_sequence, self.closed) {
+            (None, false) => Completeness::Collecting,
+            (None, true) => Completeness::UnverifiedTail,
+            (Some(_), _)
+                if snapshot.known_missing_count == 0
+                    && snapshot.local_drops == 0
+                    && !snapshot.verification_lost
+                    && snapshot.protocol_conflicts == 0 =>
+            {
+                Completeness::Complete
+            }
+            (Some(_), false) => Completeness::Collecting,
+            (Some(_), true) => Completeness::Incomplete,
+        };
         snapshot
     }
 }

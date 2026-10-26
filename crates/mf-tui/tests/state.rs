@@ -489,7 +489,6 @@ fn a_late_body_outcome_closes_the_gap_without_inventing_success() {
     }
     let before = state.snapshot();
     assert_eq!(before.lifecycle.known_missing_count, 1);
-    assert_eq!(before.lifecycle.unresolved_visited_nodes, 1);
     assert_eq!(
         before.loop_passes[0]
             .nodes
@@ -503,12 +502,11 @@ fn a_late_body_outcome_closes_the_gap_without_inventing_success() {
     state.apply(late).unwrap();
     let after = state.snapshot();
     assert_eq!(after.lifecycle.known_missing_count, 0);
-    assert_eq!(after.lifecycle.unresolved_visited_nodes, 0);
     assert_eq!(after.lifecycle.completeness, Completeness::Complete);
 }
 
 #[test]
-fn final_step_count_cannot_hide_an_unreported_pass() {
+fn business_step_counts_do_not_infer_transport_loss() {
     let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
     state
         .apply(event(
@@ -565,8 +563,7 @@ fn final_step_count_cannot_hide_an_unreported_pass() {
         .unwrap();
     let integrity = state.integrity();
     assert_eq!(integrity.known_missing_count, 0);
-    assert_eq!(integrity.unresolved_visited_nodes, 2);
-    assert_ne!(integrity.completeness, Completeness::Complete);
+    assert_eq!(integrity.completeness, Completeness::Complete);
 }
 
 #[test]
@@ -813,7 +810,8 @@ fn duplicate_and_conflicting_events_never_regress_terminal_nodes() {
     state.apply(success()).unwrap();
     state.close();
     assert_eq!(state.integrity().completeness, Completeness::Incomplete);
-    assert!(state.integrity().protocol_conflicts >= 2);
+    assert_eq!(state.integrity().protocol_conflicts, 1);
+    assert!(state.snapshot().observation.protocol_conflicts >= 1);
 }
 
 #[test]
@@ -1023,7 +1021,7 @@ fn late_start_can_fill_timing_for_a_failure_proven_by_final_boundary() {
 }
 
 #[test]
-fn a_contiguous_stream_without_visited_node_outcomes_is_not_complete() {
+fn contiguous_delivery_preserves_unknown_business_outcomes() {
     let mut state = state();
     state.apply(start()).unwrap();
     state
@@ -1043,9 +1041,8 @@ fn a_contiguous_stream_without_visited_node_outcomes_is_not_complete() {
     state.close();
     let snapshot = state.snapshot();
     assert_eq!(snapshot.lifecycle.known_missing_count, 0);
-    assert_eq!(snapshot.lifecycle.unresolved_visited_nodes, 2);
     assert_eq!(snapshot.workflow_outcome, Some(Outcome::Succeeded));
-    assert_eq!(snapshot.lifecycle.completeness, Completeness::Incomplete);
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
     assert!(
         snapshot
             .nodes
@@ -1281,10 +1278,11 @@ fn late_node_failure_cannot_confirm_a_successful_final_boundary() {
         .unwrap();
     let snapshot = state.snapshot();
     assert_eq!(snapshot.lifecycle.known_missing_count, 0);
-    assert_eq!(snapshot.lifecycle.completeness, Completeness::Collecting);
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
     assert!(snapshot.nodes[0].conflicted);
     state.close();
-    assert_eq!(state.integrity().completeness, Completeness::Incomplete);
+    assert_eq!(state.integrity().completeness, Completeness::Complete);
+    assert!(state.snapshot().observation.protocol_conflicts > 0);
 }
 
 #[test]
