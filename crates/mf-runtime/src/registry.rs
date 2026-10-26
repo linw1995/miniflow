@@ -154,7 +154,7 @@ mod tests {
 
     fn builtin_definition() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError> {
         crate::WorkflowDefinition::from_json(
-            r#"{"version":"2026-10-25","dependencies":{},"nodes":[]}"#,
+            r#"{"version":"2026-10-23","dependencies":{},"nodes":[]}"#,
         )
     }
 

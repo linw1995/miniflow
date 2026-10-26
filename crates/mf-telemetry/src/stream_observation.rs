@@ -6,7 +6,7 @@ use crate::stream::{
 use std::sync::Mutex;
 
 struct Counters {
-    sequence: i64,
+    sequence: EventSequence,
     invocation: u64,
     closed: bool,
     exhausted: bool,
@@ -55,7 +55,6 @@ impl Observer {
                 KeyValue::new("mf.run.id", run_id.to_string()),
             ])
             .start_with_context(&self.0.tracer, &parent);
-        let count = description.static_node_count()?;
         let nodes = Arc::new(
             description
                 .nodes
@@ -89,7 +88,7 @@ impl Observer {
             started: Instant::now(),
             context,
             counters: Mutex::new(Counters {
-                sequence: 0,
+                sequence: EventSequence::new(),
                 invocation: 0,
                 closed: false,
                 exhausted: false,
@@ -97,7 +96,6 @@ impl Observer {
         }));
         observation.record(
             StreamPayload::Control(StreamEvent::Started {
-                node_count: count,
                 elapsed_ns: Count::ZERO,
             }),
             None,
@@ -137,13 +135,9 @@ impl StreamObservation {
             workflow_id: self.0.description.workflow_id.clone(),
             run_id: self.0.run_id,
             nodes: Arc::clone(&self.0.nodes),
-            sequence: Arc::new(Mutex::new(EventSequence::with_maximum(
-                Count::try_from(i64::MAX).unwrap(),
-            ))),
+            sequence: None,
             started: self.0.started,
             context: self.0.context.clone(),
-            visited: Arc::new(AtomicI64::new(0)),
-            visited_steps: Arc::new(AtomicI64::new(0)),
             description: Some(Arc::clone(&self.0.description)),
             failure: Arc::new(Mutex::new(None)),
             node_failures: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
@@ -167,7 +161,7 @@ impl StreamObservation {
         if self.0.counters.lock().unwrap().closed {
             return None;
         }
-        let mut run = self.frame_inner(message, trigger);
+        let run = self.frame_inner(message, trigger);
         let _parent = run.enter();
         let step = run.begin_node(node)?;
         Some(StreamCallback {
@@ -214,18 +208,11 @@ impl StreamObservation {
         if counters.closed || counters.exhausted {
             return;
         }
-        let Some(sequence) = counters.sequence.checked_add(1) else {
+        let Ok(sequence) = counters.sequence.reserve() else {
             counters.exhausted = true;
             return;
         };
-        counters.sequence = sequence;
-        self.emit(
-            Count::try_from(sequence).unwrap(),
-            payload,
-            identity,
-            emission_count,
-            context,
-        );
+        self.emit(sequence, payload, identity, emission_count, context);
     }
 
     fn emit(
@@ -247,7 +234,6 @@ impl StreamObservation {
             return;
         };
         let record = StreamRecord {
-            schema_version: self.0.description.event_schema_version(),
             workflow_id: self.0.description.workflow_id.clone(),
             run_id: self.0.run_id,
             sequence,
@@ -290,14 +276,11 @@ impl StreamObservation {
             },
         ));
         if !counters.exhausted
-            && let Some(sequence) = counters.sequence.checked_add(1)
+            && let Ok(sequence) = counters.sequence.finish()
         {
-            counters.sequence = sequence;
-            let sequence = Count::try_from(sequence).unwrap();
             self.emit(
                 sequence,
                 StreamPayload::Control(StreamEvent::Finished {
-                    final_sequence: sequence,
                     elapsed_ns: self.elapsed(),
                     outcome,
                     counts,
@@ -596,10 +579,17 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_counters_never_wrap_or_claim_a_complete_terminal_stream() {
+    fn closed_or_exhausted_counters_never_emit_a_false_terminal_boundary() {
         let records = Arc::new(AtomicUsize::new(0));
         let observation = observation(Arc::clone(&records));
-        observation.0.counters.lock().unwrap().sequence = i64::MAX;
+        observation
+            .0
+            .counters
+            .lock()
+            .unwrap()
+            .sequence
+            .finish()
+            .unwrap();
         let mut callback = observation
             .callback(
                 "%input",
@@ -614,7 +604,16 @@ mod tests {
         callback.succeeded(0, Vec::new());
         observation.finish(StreamCounts::default(), None);
         assert_eq!(records.load(Ordering::SeqCst), 1);
-        assert_eq!(observation.0.counters.lock().unwrap().sequence, i64::MAX);
+        assert!(
+            observation
+                .0
+                .counters
+                .lock()
+                .unwrap()
+                .sequence
+                .reserve()
+                .is_err()
+        );
 
         let records = Arc::new(AtomicUsize::new(0));
         let observation = self::observation(Arc::clone(&records));

@@ -4,7 +4,6 @@ use mf_telemetry::stream::{
 };
 use snafu::ResultExt;
 
-const MAX_WITNESSES: usize = 4096;
 const MAX_INVOCATIONS: usize = 4096;
 const MAX_RECENT_INVOCATIONS: usize = 64;
 
@@ -37,7 +36,6 @@ pub struct StreamSnapshot {
     pub counts: Option<StreamCounts>,
     pub failure: Option<StreamFailure>,
     pub hidden_invocations: u64,
-    pub unverified_retransmissions: u64,
 }
 
 struct Invocation {
@@ -45,16 +43,14 @@ struct Invocation {
     path: Vec<LoopPathEntry>,
     node: NodeObservation,
     last_sequence: Count,
-    needs_start: bool,
     loop_summary: Option<LoopSummary>,
     closed_prefix: i64,
     closed_passes: BTreeSet<Count>,
 }
 
 impl Invocation {
-    fn complete(&self) -> bool {
+    fn is_finished(&self) -> bool {
         self.node.terminal_sequence.is_some()
-            && (!self.needs_start || self.node.started_sequence.is_some())
     }
     fn has_closed_pass(&self, index: Count) -> bool {
         index.get() < self.closed_prefix || self.closed_passes.contains(&index)
@@ -70,18 +66,13 @@ impl Invocation {
     }
     fn view(&self, closed: bool, final_seen: bool, newer: bool) -> StreamInvocationObservation {
         let mut node = self.node.clone();
-        if !self.complete() {
-            node.possibly_missing_events =
-                node.terminal_sequence.is_some() || closed || final_seen || newer;
-            if closed || final_seen || newer {
-                node.last_known = Some(node.status);
-                node.status =
-                    if closed && !final_seen && !newer && node.status == NodeStatus::Running {
-                        NodeStatus::Interrupted
-                    } else {
-                        NodeStatus::Unknown
-                    };
-            }
+        if !self.is_finished() && (closed || final_seen || newer) {
+            node.last_known = Some(node.status);
+            node.status = if closed && !final_seen && !newer && node.status == NodeStatus::Running {
+                NodeStatus::Interrupted
+            } else {
+                NodeStatus::Unknown
+            };
         }
         StreamInvocationObservation {
             identity: self.identity.clone(),
@@ -104,7 +95,6 @@ struct RootState {
 }
 
 struct Boundary {
-    sequence: Count,
     outcome: Outcome,
     counts: StreamCounts,
     failure: Option<StreamFailure>,
@@ -113,18 +103,16 @@ struct Boundary {
 pub struct StreamState {
     roots: Vec<RootState>,
     positions: BTreeMap<String, usize>,
-    witnesses: BTreeMap<i64, [u8; 32]>,
-    watermark: i64,
-    highest: i64,
+    delivery: DeliveryTracker<[u8; 32]>,
     invocations: BTreeMap<u64, Invocation>,
     retired: BTreeMap<NodeKey, u64>,
     recent: VecDeque<StreamInvocationObservation>,
     final_boundary: Option<Boundary>,
     failed_invocation: bool,
-    conflicts: u64,
-    lost_evidence: bool,
+    protocol_conflicts: u64,
+    errors: u64,
+    retention_overflows: u64,
     hidden_invocations: u64,
-    old_retransmissions: u64,
     diagnostics: VecDeque<String>,
     dropped_diagnostics: u64,
     passes: BTreeMap<(u64, Vec<LoopPathEntry>), StreamPass>,
@@ -150,18 +138,16 @@ impl StreamState {
                 })
                 .collect(),
             positions,
-            witnesses: BTreeMap::new(),
-            watermark: 0,
-            highest: 0,
+            delivery: DeliveryTracker::new(MAX_WITNESSES),
             invocations: BTreeMap::new(),
             retired: BTreeMap::new(),
             recent: VecDeque::new(),
             final_boundary: None,
             failed_invocation: false,
-            conflicts: 0,
-            lost_evidence: false,
+            protocol_conflicts: 0,
+            errors: 0,
+            retention_overflows: 0,
             hidden_invocations: 0,
-            old_retransmissions: 0,
             diagnostics: VecDeque::new(),
             dropped_diagnostics: 0,
             passes: BTreeMap::new(),
@@ -182,7 +168,7 @@ impl StreamState {
     }
 
     fn conflict(&mut self, message: &str) -> Admission {
-        self.conflicts = self.conflicts.saturating_add(1);
+        self.protocol_conflicts = self.protocol_conflicts.saturating_add(1);
         self.note(message);
         Admission::Conflict
     }
@@ -194,7 +180,6 @@ impl StreamState {
         correlation: Option<crate::traces::SpanKey>,
     ) -> Result<Admission, StateError> {
         let wire = record.to_wire(0, None).context(EventSnafu)?;
-        validate_graph(description, &record)?;
         let bytes = serde_json::to_vec(&wire).context(SerializeSnafu)?;
         if bytes.len() > MAX_EVENT_BYTES {
             return TooLargeSnafu {
@@ -203,55 +188,32 @@ impl StreamState {
             .fail();
         }
         let signature: [u8; 32] = Sha256::digest(bytes).into();
-        let sequence = record.sequence.get();
-        if let Some(previous) = self.witnesses.get(&sequence) {
-            return Ok(if *previous == signature {
-                Admission::Duplicate
-            } else {
-                self.conflict("conflicting stream records share a sequence")
-            });
-        }
-        if sequence <= self.watermark {
-            self.old_retransmissions = self.old_retransmissions.saturating_add(1);
-            if self.old_retransmissions == 1 {
-                self.note("old retransmission payload is outside retained verification coverage");
+        let terminal = matches!(
+            &record.payload,
+            StreamPayload::Control(StreamEvent::Finished { .. })
+        );
+        let admission = self
+            .delivery
+            .receive(record.sequence, signature, terminal)?;
+        match admission {
+            DeliveryAdmission::Duplicate | DeliveryAdmission::UnverifiedDuplicate => {
+                return Ok(Admission::Duplicate);
             }
-            return Ok(Admission::Duplicate);
-        }
-        if self
-            .final_boundary
-            .as_ref()
-            .is_some_and(|boundary| sequence > boundary.sequence.get())
-        {
-            return Ok(self.conflict("stream record followed its final sequence"));
-        }
-        self.highest = self.highest.max(sequence);
-        if self.witnesses.len() == MAX_WITNESSES {
-            if self
-                .witnesses
-                .first_key_value()
-                .is_some_and(|(sequence, _)| *sequence <= self.watermark)
-            {
-                self.witnesses.pop_first();
-            } else if self.watermark.checked_add(1) != Some(sequence) {
-                self.lost_evidence = true;
-                self.note(
-                    "stream reorder window exhausted; observation verification is incomplete",
-                );
-                return Err(invalid("stream reorder window exhausted"));
+            DeliveryAdmission::Conflict => {
+                self.note("conflicting stream transport record");
+                return Ok(Admission::Conflict);
             }
+            DeliveryAdmission::New => {}
         }
-        let admission = self.apply_payload(description, &record, correlation)?;
-        self.witnesses.insert(sequence, signature);
-        while let Some(next) = self.watermark.checked_add(1) {
-            if !self.witnesses.contains_key(&next) {
-                break;
-            }
-            self.watermark = next;
-        }
-        while self.witnesses.len() > MAX_WITNESSES {
-            self.witnesses.pop_first();
-        }
+        validate_graph(description, &record).inspect_err(|_| {
+            self.errors = self.errors.saturating_add(1);
+            self.note("stream event disagrees with the workflow description");
+        })?;
+        let admission = self
+            .apply_payload(description, &record, correlation)
+            .inspect_err(|_| {
+                self.errors = self.errors.saturating_add(1);
+            })?;
         self.retire();
         Ok(admission)
     }
@@ -270,16 +232,12 @@ impl StreamState {
                 failure,
                 ..
             }) => {
-                if self.final_boundary.is_some() || self.highest > record.sequence.get() {
-                    return Ok(self.conflict("stream has incompatible final boundaries"));
-                }
                 let failure = failure.as_ref().map(|failure| StreamFailure {
                     phase: failure.phase.clone(),
                     node: failure.node.clone(),
                     message: truncate_utf8(&failure.message, MAX_FAILURE_MESSAGE_BYTES).0,
                 });
                 self.final_boundary = Some(Boundary {
-                    sequence: record.sequence,
                     outcome: match outcome {
                         mf_telemetry::stream::StreamOutcome::Succeeded => Outcome::Succeeded,
                         mf_telemetry::stream::StreamOutcome::Failed => Outcome::Failed,
@@ -372,7 +330,7 @@ impl StreamState {
             return Ok(self.conflict("a retired stream invocation received new lifecycle records"));
         }
         if self.invocations.len() == MAX_INVOCATIONS {
-            self.lost_evidence = true;
+            self.retention_overflows = self.retention_overflows.saturating_add(1);
             self.note("stream active invocation limit exhausted");
             return Err(invalid("stream invocation limit exhausted"));
         }
@@ -383,7 +341,6 @@ impl StreamState {
                 path: node.path.clone(),
                 node: NodeObservation::pending(&node.id, &node.kind),
                 last_sequence: record.sequence,
-                needs_start: false,
                 loop_summary: None,
                 closed_prefix: 0,
                 closed_passes: BTreeSet::new(),
@@ -417,7 +374,7 @@ impl StreamState {
                     || observed
                         .terminal_sequence
                         .is_some_and(|end| record.sequence >= end)
-                    || (observed.terminal_sequence.is_some() && !invocation.needs_start)
+                    || (observed.terminal_sequence.is_some() && observed.duration_ns.is_none())
                 {
                     Some("stream invocation started twice or contradicts its outcome")
                 } else {
@@ -449,7 +406,6 @@ impl StreamState {
                 {
                     Some("stream invocation has conflicting terminal evidence")
                 } else {
-                    invocation.needs_start = needs_start;
                     invocation.loop_summary = loop_summary.clone();
                     observed.terminal_sequence = Some(record.sequence);
                     observed.terminal_elapsed_ns = Some(*elapsed_ns);
@@ -519,7 +475,7 @@ impl StreamState {
                     .saturating_add(record.emission_count.map_or(0, |count| count.get() as u64));
             }
         }
-        let conflicts = self.conflicts;
+        let conflicts = self.protocol_conflicts;
         if matches!(
             event,
             Event::NodeFinished {
@@ -537,7 +493,7 @@ impl StreamState {
             }
         }
         self.update_pass_node(description, record, event);
-        Ok(if self.conflicts == conflicts {
+        Ok(if self.protocol_conflicts == conflicts {
             Admission::Applied
         } else {
             Admission::Conflict
@@ -549,15 +505,13 @@ impl StreamState {
             .invocations
             .iter()
             .filter(|(_, invocation)| {
-                invocation.complete() && invocation.last_sequence.get() <= self.watermark
+                invocation.is_finished()
+                    && invocation.last_sequence.get() <= self.delivery.watermark()
             })
             .map(|(id, invocation)| (invocation.last_sequence, *id))
             .collect();
         ready.sort();
         for (_, id) in ready {
-            if !self.loop_complete(id) {
-                continue;
-            }
             let invocation = self.invocations.remove(&id).unwrap();
             self.retired
                 .entry(invocation.key())
@@ -576,9 +530,6 @@ fn validate_graph(
     description: &WorkflowDescription,
     record: &StreamRecord,
 ) -> Result<(), StateError> {
-    if record.schema_version != description.event_schema_version() {
-        return Err(invalid("stream record and description protocols disagree"));
-    }
     if let Some(identity) = &record.identity
         && let Some(message) = identity.message
         && (message.domain == 0 || message.domain > description.nodes.len())
@@ -588,13 +539,7 @@ fn validate_graph(
         ));
     }
     match &record.payload {
-        StreamPayload::Control(StreamEvent::Started { node_count, .. }) => {
-            if *node_count != description.static_node_count().context(EventSnafu)? {
-                return Err(invalid(
-                    "stream start node count disagrees with description",
-                ));
-            }
-        }
+        StreamPayload::Control(StreamEvent::Started { .. }) => {}
         StreamPayload::Control(StreamEvent::Finished { failure, .. }) => {
             if failure
                 .as_ref()
@@ -641,7 +586,7 @@ fn validate_graph(
                     )
                 } else {
                     let body = description
-                        .loop_body(&path)
+                        .body(&path)
                         .ok_or_else(|| invalid("unknown stream Loop body"))?;
                     (
                         &body.nodes,
@@ -693,29 +638,6 @@ fn validate_graph(
             | Event::CallFinished { path, .. } = event
             {
                 description.validate_scope_path(path).context(EventSnafu)?;
-                let path: Vec<_> = path
-                    .iter()
-                    .map(|entry| entry.node_id().to_owned())
-                    .collect();
-                let body = description
-                    .loop_body(&path)
-                    .ok_or_else(|| invalid("unknown stream Loop pass"))?;
-                if let Event::LoopPassFinished {
-                    visited_node_count,
-                    outcome,
-                    ..
-                }
-                | Event::CallFinished {
-                    visited_node_count,
-                    outcome,
-                    ..
-                } = event
-                    && (visited_node_count.get() > body.nodes.len() as i64
-                        || (*outcome == LoopPassOutcome::Completed
-                            && visited_node_count.get() != body.nodes.len() as i64))
-                {
-                    return Err(invalid("stream Loop visited prefix disagrees with body"));
-                }
             }
         }
     }
@@ -729,25 +651,16 @@ struct StreamPass {
     path: Vec<LoopPathEntry>,
     started: Option<Count>,
     finished: Option<Count>,
-    visited: Option<Count>,
     outcome: Option<LoopPassOutcome>,
     latest: Count,
     statuses: Vec<Option<NodeStatus>>,
     invocations: Vec<Option<u64>>,
-    verified: Vec<bool>,
     details: BTreeMap<String, NodeObservation>,
 }
 
 impl StreamPass {
-    fn complete(&self) -> bool {
-        self.started.is_some()
-            && self.finished.is_some()
-            && self.visited.is_some_and(|visited| {
-                self.verified
-                    .iter()
-                    .take(visited.get() as usize)
-                    .all(|verified| *verified)
-            })
+    fn is_finished(&self) -> bool {
+        self.finished.is_some()
     }
 }
 
@@ -808,12 +721,10 @@ impl StreamState {
                     path: path.clone(),
                     started: None,
                     finished: None,
-                    visited: None,
                     outcome: None,
                     latest: record.sequence,
                     statuses: vec![None; body.nodes.len()],
                     invocations: vec![None; body.nodes.len()],
-                    verified: vec![false; body.nodes.len()],
                     details: BTreeMap::new(),
                 },
             );
@@ -839,29 +750,14 @@ impl StreamState {
                     false
                 }
             }
-            Event::LoopPassFinished {
-                visited_node_count,
-                outcome,
-                ..
-            }
-            | Event::CallFinished {
-                visited_node_count,
-                outcome,
-                ..
-            } => {
+            Event::LoopPassFinished { outcome, .. } | Event::CallFinished { outcome, .. } => {
                 if pass.finished.is_some()
                     || pass.started.is_some_and(|start| record.sequence <= start)
                     || pass.latest > record.sequence
-                    || pass
-                        .statuses
-                        .iter()
-                        .skip(visited_node_count.get() as usize)
-                        .any(Option::is_some)
                 {
                     true
                 } else {
                     pass.finished = Some(record.sequence);
-                    pass.visited = Some(*visited_node_count);
                     pass.outcome = Some(*outcome);
                     false
                 }
@@ -888,8 +784,7 @@ impl StreamState {
         }
         let identity = record.identity.as_ref().unwrap();
         let Some(owner) = identity.parent else {
-            self.lost_evidence = true;
-            self.note("body invocation omitted its containing Loop invocation");
+            self.conflict("body invocation omitted its containing Loop invocation");
             return;
         };
         let key = (owner, node.path.clone());
@@ -942,18 +837,15 @@ impl StreamState {
                     path: node.path.clone(),
                     started: None,
                     finished: None,
-                    visited: None,
                     outcome: None,
                     latest: record.sequence,
                     statuses: vec![None; body.nodes.len()],
                     invocations: vec![None; body.nodes.len()],
-                    verified: vec![false; body.nodes.len()],
                     details: BTreeMap::new(),
                 },
             );
         }
         let invocation = &self.invocations[&identity.invocation];
-        let verified = invocation.complete();
         let observed = invocation.node.clone();
         if let Some(pass) = self.passes.get_mut(&key) {
             if pass.message != identity.message || pass.trigger != identity.trigger {
@@ -965,17 +857,12 @@ impl StreamState {
                 return;
             }
             let index = position.get() as usize;
-            if pass
-                .visited
-                .is_some_and(|visited| index >= visited.get() as usize)
-                || pass.invocations[index].is_some_and(|previous| previous != identity.invocation)
-            {
+            if pass.invocations[index].is_some_and(|previous| previous != identity.invocation) {
                 self.conflict("body invocation contradicts its Loop pass traversal");
                 return;
             }
             pass.invocations[index] = Some(identity.invocation);
             pass.statuses[index] = Some(observed.status);
-            pass.verified[index] = verified;
             pass.latest = pass.latest.max(record.sequence);
             pass.details.insert(node.id.clone(), observed);
             if pass.details.len() > MAX_RECENT_INVOCATIONS {
@@ -993,7 +880,7 @@ impl StreamState {
 
     fn refresh_loop_counts(&mut self) {
         for ((owner, path), pass) in &self.passes {
-            if pass.complete()
+            if pass.is_finished()
                 && let Some(invocation) = self.invocations.get_mut(owner)
             {
                 let index = path.last().unwrap().index();
@@ -1004,7 +891,7 @@ impl StreamState {
                 } else if index.get() >= invocation.closed_prefix
                     && !invocation.closed_passes.contains(&index)
                 {
-                    self.lost_evidence = true;
+                    self.retention_overflows = self.retention_overflows.saturating_add(1);
                 }
                 while invocation
                     .closed_passes
@@ -1022,7 +909,9 @@ impl StreamState {
         let oldest = self
             .passes
             .iter()
-            .filter(|(_, pass)| pass.complete() && pass.latest.get() <= self.watermark)
+            .filter(|(_, pass)| {
+                pass.is_finished() && pass.latest.get() <= self.delivery.watermark()
+            })
             .min_by_key(|(_, pass)| pass.latest)
             .map(|(key, _)| key.clone());
         if let Some(key) = oldest {
@@ -1030,129 +919,44 @@ impl StreamState {
             self.hidden_passes = self.hidden_passes.saturating_add(1);
             Ok(())
         } else {
-            self.lost_evidence = true;
+            self.retention_overflows = self.retention_overflows.saturating_add(1);
             self.note("unresolved Loop pass detail exceeded its retention limit");
             Err(invalid("stream Loop pass limit exhausted"))
         }
     }
-
-    fn loop_complete(&self, owner: u64) -> bool {
-        let invocation = &self.invocations[&owner];
-        if self
-            .passes
-            .iter()
-            .any(|((id, _), pass)| *id == owner && !pass.complete())
-        {
-            return false;
-        }
-        invocation.loop_summary.as_ref().is_none_or(|summary| {
-            invocation.closed_prefix == summary.pass_count.get()
-                && invocation.closed_passes.is_empty()
-        })
-    }
 }
 
 impl StreamState {
-    pub fn integrity(&self, session: &SessionState) -> LifecycleIntegrity {
-        let upper = self
-            .final_boundary
-            .as_ref()
-            .map_or(self.highest, |boundary| boundary.sequence.get());
-        let mut cursor = self.watermark.checked_add(1);
-        let mut count = 0;
-        let mut ranges = Vec::new();
-        let mut omitted = 0;
-        if self.watermark < upper {
-            for &sequence in self
-                .witnesses
-                .keys()
-                .filter(|&&sequence| sequence > self.watermark && sequence <= upper)
-            {
-                if let Some(cursor) = cursor
-                    && sequence > cursor
-                {
-                    add_gap(cursor, sequence - 1, &mut ranges, &mut omitted, &mut count);
-                }
-                cursor = sequence.checked_add(1);
-            }
-            if let Some(cursor) = cursor
-                && cursor <= upper
-            {
-                add_gap(cursor, upper, &mut ranges, &mut omitted, &mut count);
-            }
-        }
-        let unresolved = if self.final_boundary.is_some() {
-            self.invocations
-                .iter()
-                .filter(|(id, invocation)| !invocation.complete() || !self.loop_complete(**id))
-                .count()
-                + self.passes.values().filter(|pass| !pass.complete()).count()
-        } else {
-            0
-        };
-        let conflicts = session.protocol_conflicts.saturating_add(self.conflicts);
-        let errors = session
-            .observation_errors
-            .saturating_add(u64::from(self.lost_evidence));
-        let completeness = if self.final_boundary.is_some() {
-            if count == 0
-                && unresolved == 0
-                && conflicts == 0
-                && errors == 0
-                && session.local_lifecycle_drops == 0
-            {
-                Completeness::Complete
-            } else if session.closed {
-                Completeness::Incomplete
-            } else {
-                Completeness::Collecting
-            }
-        } else if session.closed {
-            Completeness::UnverifiedTail
-        } else {
-            Completeness::Collecting
-        };
-        LifecycleIntegrity {
-            completeness,
-            known_missing_count: count,
-            known_missing_ranges: ranges,
-            omitted_missing_ranges: omitted,
-            final_sequence: self
-                .final_boundary
-                .as_ref()
-                .map(|boundary| boundary.sequence),
-            unresolved_visited_nodes: unresolved,
-            local_drops: session.local_lifecycle_drops,
-            protocol_conflicts: conflicts,
-            observation_errors: errors,
-        }
+    pub fn record_local_drop(&mut self, count: u64) {
+        self.delivery.record_local_drop(count);
+    }
+
+    pub fn close(&mut self) {
+        self.delivery.close();
+    }
+
+    pub fn integrity(&self) -> LifecycleIntegrity {
+        self.delivery.snapshot(MAX_MISSING_RANGES)
     }
 
     pub fn snapshot(&self, session: &SessionState) -> StateSnapshot {
-        let lifecycle = self.integrity(session);
+        let lifecycle = self.integrity();
         let mut nodes: Vec<_> = self.roots.iter().map(|root| root.node.clone()).collect();
         for node in &mut nodes {
-            let incomplete = self.invocations.values().any(|invocation| {
-                invocation.path.is_empty()
-                    && invocation.node.id == node.id
-                    && !invocation.complete()
-                    && (session.closed
-                        || self.final_boundary.is_some()
-                        || self.roots[self.positions[&node.id]]
-                            .invocation
-                            .is_some_and(|latest| latest > invocation.identity.invocation))
-            });
-            node.possibly_missing_events = incomplete
-                || self.lost_evidence
-                || self.conflicts != 0
-                || lifecycle.known_missing_count != 0;
+            node.possibly_missing_events = (lifecycle.known_missing_count != 0
+                || lifecycle.local_drops != 0
+                || lifecycle.verification_lost
+                || lifecycle.protocol_conflicts != 0)
+                && matches!(
+                    node.status,
+                    NodeStatus::Pending
+                        | NodeStatus::Running
+                        | NodeStatus::Unknown
+                        | NodeStatus::Interrupted
+                );
             if session.closed || self.final_boundary.is_some() {
                 if node.status == NodeStatus::Pending {
-                    node.status = if lifecycle.completeness == Completeness::Complete {
-                        NodeStatus::NotRun
-                    } else {
-                        NodeStatus::Unknown
-                    };
+                    node.status = NodeStatus::Unknown;
                 } else if node.status == NodeStatus::Running {
                     node.last_known = Some(NodeStatus::Running);
                     node.status = if self.final_boundary.is_none() {
@@ -1170,11 +974,16 @@ impl StreamState {
                     .invocation
                     .is_some_and(|latest| latest > invocation.identity.invocation);
             let mut view = invocation.view(session.closed, self.final_boundary.is_some(), newer);
+            view.node.possibly_missing_events = !invocation.is_finished()
+                && (lifecycle.known_missing_count != 0
+                    || lifecycle.local_drops != 0
+                    || lifecycle.verification_lost
+                    || lifecycle.protocol_conflicts != 0);
             view.active_pass = self
                 .passes
                 .iter()
                 .filter(|((owner, _), pass)| {
-                    *owner == invocation.identity.invocation && !pass.complete()
+                    *owner == invocation.identity.invocation && !pass.is_finished()
                 })
                 .max_by_key(|(_, pass)| pass.latest)
                 .and_then(|((_, path), _)| path.last().map(|entry| entry.index()));
@@ -1225,15 +1034,9 @@ impl StreamState {
                     .collect(),
                 started: pass.started.is_some(),
                 outcome: pass.outcome,
-                visited_node_count: pass.visited,
                 interrupted: session.closed && self.final_boundary.is_none(),
                 stream_invocation: Some(*owner),
-                compact_statuses: pass
-                    .statuses
-                    .iter()
-                    .zip(&pass.verified)
-                    .map(|(status, verified)| if *verified { *status } else { None })
-                    .collect(),
+                compact_statuses: pass.statuses.clone(),
             })
             .collect();
         let mut overviews: BTreeMap<(Vec<LoopPathEntry>, String), (u64, LoopOverview)> =
@@ -1261,7 +1064,7 @@ impl StreamState {
             }
             let (current, overview) = overviews.get_mut(&key).unwrap();
             if *current == *owner {
-                if pass.complete() {
+                if pass.is_finished() {
                     overview.completed_passes += 1;
                 } else {
                     overview.active_index = Some(last.index());
@@ -1324,6 +1127,13 @@ impl StreamState {
                 .map(|boundary| boundary.outcome),
             workflow_failure: None,
             lifecycle,
+            observation: ObservationDiagnostics {
+                protocol_conflicts: session
+                    .protocol_conflicts
+                    .saturating_add(self.protocol_conflicts),
+                errors: session.observation_errors.saturating_add(self.errors),
+                retention_overflows: self.retention_overflows,
+            },
             traces: session.traces,
             diagnostic_bytes_dropped: dropped,
             diagnostics: diagnostics.into_iter().collect(),
@@ -1346,7 +1156,6 @@ impl StreamState {
                     .as_ref()
                     .and_then(|boundary| boundary.failure.clone()),
                 hidden_invocations: self.hidden_invocations,
-                unverified_retransmissions: self.old_retransmissions,
             }),
         }
     }
@@ -1403,7 +1212,6 @@ mod tests {
         payload: StreamPayload,
     ) -> StreamRecord {
         StreamRecord {
-            schema_version: 4,
             workflow_id: description().workflow_id,
             run_id: run,
             sequence: count(sequence),
@@ -1418,7 +1226,6 @@ mod tests {
             1,
             None,
             StreamPayload::Control(StreamEvent::Started {
-                node_count: count(2),
                 elapsed_ns: Count::ZERO,
             }),
         )
@@ -1486,7 +1293,6 @@ mod tests {
             sequence,
             None,
             StreamPayload::Control(StreamEvent::Finished {
-                final_sequence: count(sequence),
                 elapsed_ns: count(sequence),
                 outcome: StreamOutcome::Succeeded,
                 counts: StreamCounts {
@@ -1494,7 +1300,6 @@ mod tests {
                     emitted_messages: messages,
                     completed_frames: messages + 1,
                     delivered_outputs: messages,
-                    ..Default::default()
                 },
                 failure: None,
             }),
@@ -1673,7 +1478,6 @@ mod tests {
                 .unwrap();
         }
         let stream = state.stream.as_ref().unwrap();
-        assert!(stream.witnesses.len() <= MAX_WITNESSES);
         assert_eq!(stream.recent.len(), MAX_RECENT_INVOCATIONS);
         assert_eq!(stream.invocations.len(), 1);
         assert_eq!(state.apply_stream(source).unwrap(), Admission::Duplicate);
@@ -1687,7 +1491,7 @@ mod tests {
             snapshot.stream.as_ref().unwrap().nodes[1].observed_completions,
             10_000
         );
-        assert_eq!(snapshot.stream.unwrap().unverified_retransmissions, 1);
+        assert_eq!(snapshot.lifecycle.unverified_retransmissions, 1);
     }
 
     #[test]
@@ -1749,7 +1553,6 @@ mod tests {
                 1,
                 None,
                 StreamPayload::Control(StreamEvent::Started {
-                    node_count: count(3),
                     elapsed_ns: Count::ZERO,
                 }),
             ),
@@ -1842,7 +1645,6 @@ mod tests {
                         Event::LoopPassFinished {
                             path,
                             elapsed_ns: count(sequence + 4),
-                            visited_node_count: count(1),
                             outcome: LoopPassOutcome::Completed,
                         },
                     ),
@@ -1921,6 +1723,106 @@ mod tests {
     }
 
     #[test]
+    fn call_scopes_isolate_messages_and_retain_reordered_duplicate_evidence() {
+        let run = RunId::new();
+        let (mut graph, mut records) = loop_records(run, 1, 2);
+        graph.version = WorkflowDescriptionVersion::V2026_10_23;
+        graph.nodes[1].kind = "workflow.call".into();
+        graph.loop_bodies[0].nodes[0] = NodeDescription {
+            id: "leaf".into(),
+            kind: "fixture.task".into(),
+        };
+        graph.loop_bodies[0].execution_order = vec!["leaf".into()];
+        let path = vec![LoopPathEntry::Call {
+            call_id: "repeat".into(),
+        }];
+        for record in &mut records {
+            let StreamPayload::Execution(event) = &mut record.payload else {
+                continue;
+            };
+            match event {
+                Event::NodeStarted { node, .. } | Event::NodeFinished { node, .. } => {
+                    if node.id == "repeat" {
+                        node.kind = "workflow.call".into();
+                    }
+                    if !node.path.is_empty() {
+                        node.path = path.clone();
+                        node.id = "leaf".into();
+                        node.kind = "fixture.task".into();
+                    }
+                    if let Event::NodeFinished { loop_summary, .. } = event {
+                        *loop_summary = None;
+                    }
+                }
+                Event::LoopPassStarted { elapsed_ns, .. } => {
+                    *event = Event::CallStarted {
+                        path: path.clone(),
+                        elapsed_ns: *elapsed_ns,
+                    };
+                }
+                Event::LoopPassFinished {
+                    elapsed_ns,
+                    outcome,
+                    ..
+                } => {
+                    *event = Event::CallFinished {
+                        path: path.clone(),
+                        elapsed_ns: *elapsed_ns,
+                        outcome: *outcome,
+                    };
+                }
+                _ => {}
+            }
+        }
+        graph.validate().unwrap();
+        for reverse in [false, true] {
+            let mut state = SessionState::new(graph.clone(), run).unwrap();
+            let mut ordered = records.clone();
+            if reverse {
+                ordered.reverse();
+            }
+            for record in ordered {
+                assert_eq!(
+                    state.apply_stream(record.clone()).unwrap(),
+                    Admission::Applied
+                );
+                assert_eq!(state.apply_stream(record).unwrap(), Admission::Duplicate);
+            }
+            let snapshot = state.snapshot();
+            assert_eq!(
+                snapshot.lifecycle.completeness,
+                Completeness::Complete,
+                "{snapshot:?}"
+            );
+            assert_eq!(snapshot.loop_passes.len(), 2);
+            assert_ne!(
+                snapshot.loop_passes[0].stream_invocation,
+                snapshot.loop_passes[1].stream_invocation
+            );
+            for pass in &snapshot.loop_passes {
+                assert_eq!(pass.path, path);
+                assert_eq!(pass.nodes[0].status, NodeStatus::Succeeded);
+            }
+        }
+        let mut forged = records.iter().find(|record| matches!(
+            &record.payload,
+            StreamPayload::Execution(Event::NodeStarted { node, .. }) if !node.path.is_empty()
+        )).unwrap().clone();
+        if let StreamPayload::Execution(Event::NodeStarted { node, .. }) = &mut forged.payload {
+            node.path = vec![LoopPathEntry::Loop {
+                loop_id: "repeat".into(),
+                index: Count::ZERO,
+            }];
+        }
+        assert!(
+            SessionState::new(graph, run)
+                .unwrap()
+                .apply_stream(forged)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn long_loop_runs_compact_verified_passes_without_lifecycle_loss() {
         let run = RunId::new();
         let (graph, records) = loop_records(run, 1000, 1);
@@ -1961,12 +1863,12 @@ mod tests {
         state.apply_stream(finish(run, 4, 0)).unwrap();
         let snapshot = state.snapshot();
         assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
-        assert_eq!(snapshot.nodes[1].status, NodeStatus::NotRun);
+        assert_eq!(snapshot.nodes[1].status, NodeStatus::Unknown);
         assert_eq!(snapshot.stream.unwrap().nodes[0].observed_results, 0);
     }
 
     #[test]
-    fn invocation_overflow_and_invalid_loop_parents_remain_bounded() {
+    fn retention_limits_preserve_transport_evidence_and_reject_invalid_parents() {
         let run = RunId::new();
         let mut state = SessionState::new(description(), run).unwrap();
         state.apply_stream(start(run)).unwrap();
@@ -1990,6 +1892,11 @@ mod tests {
             state.stream.as_ref().unwrap().invocations.len(),
             MAX_INVOCATIONS
         );
+        state.apply_stream(finish(run, 4099, 0)).unwrap();
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
+        assert_eq!(snapshot.lifecycle.known_missing_count, 0);
+        assert_eq!(snapshot.observation.retention_overflows, 1);
         let (graph, records) = loop_records(run, 1, 1);
         let mut state = SessionState::new(graph, run).unwrap();
         let mut invalid = records[4].clone();
@@ -2074,53 +1981,6 @@ mod tests {
             state.apply_stream(records[3].clone()).unwrap(),
             Admission::Conflict
         );
-        assert_eq!(state.snapshot().lifecycle.protocol_conflicts, 1);
-    }
-
-    #[test]
-    fn reorder_overflow_never_becomes_complete_after_recovery() {
-        let run = RunId::new();
-        let mut state = SessionState::new(description(), run).unwrap();
-        for invocation in 1..=2048 {
-            state
-                .apply_stream(node(
-                    run,
-                    2 * invocation as i64 + 1,
-                    invocation,
-                    false,
-                    false,
-                ))
-                .unwrap();
-            state
-                .apply_stream(node(
-                    run,
-                    2 * invocation as i64 + 2,
-                    invocation,
-                    false,
-                    true,
-                ))
-                .unwrap();
-        }
-        assert!(
-            state
-                .apply_stream(node(run, 4099, 2049, false, false))
-                .is_err()
-        );
-        assert!(state.stream.as_ref().unwrap().witnesses.len() <= MAX_WITNESSES);
-        state.apply_stream(start(run)).unwrap();
-        state.apply_stream(node(run, 2, 0, true, false)).unwrap();
-        state
-            .apply_stream(node(run, 4099, 2049, false, false))
-            .unwrap();
-        state
-            .apply_stream(node(run, 4100, 2049, false, true))
-            .unwrap();
-        state.apply_stream(node(run, 4101, 0, true, true)).unwrap();
-        state.apply_stream(finish(run, 4102, 2049)).unwrap();
-        state.close();
-        assert_eq!(
-            state.snapshot().lifecycle.completeness,
-            Completeness::Incomplete
-        );
+        assert_eq!(state.snapshot().observation.protocol_conflicts, 1);
     }
 }

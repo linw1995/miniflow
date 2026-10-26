@@ -263,9 +263,7 @@ pub fn describe_definition(
     );
     let description = WorkflowDescription {
         order_edges: order_edges(&definition.order_edges),
-        version: if definition.version == crate::WorkflowDefinitionVersion::V2026_10_25 {
-            WorkflowDescriptionVersion::V2026_10_25
-        } else if definition.version == crate::WorkflowDefinitionVersion::V2026_10_23 {
+        version: if definition.version.supports_clusters() {
             WorkflowDescriptionVersion::V2026_10_23
         } else if definition.has_order_edges() {
             WorkflowDescriptionVersion::V2026_10_19

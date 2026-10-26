@@ -32,19 +32,28 @@ runs:
           coverage-deps-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
           coverage-deps-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', '.github/actions/cache-coverage/action.yaml') }}-
           coverage-deps-v3-${{ runner.os }}-${{ runner.arch }}-
-    - name: Cache generated-project fixtures
+    - name: Cache generated-project dependencies
       uses: actions/cache@v6
       with:
         path: |
           target/coverage-fixtures/target
-          target/coverage-fixtures/packaged-target
           target/coverage-fixtures/vendor
-        # Packaged workspace crates are validated by source digest before reuse.
-        key: coverage-fixtures-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+        # Preparation removes checkout artifacts; dependency seeds do not vary by commit.
+        key: coverage-fixture-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
         restore-keys: |
-          coverage-fixtures-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
-          coverage-fixtures-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-
-          coverage-fixtures-v3-${{ runner.os }}-${{ runner.arch }}-
+          coverage-fixture-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-
+          coverage-fixture-deps-v4-${{ runner.os }}-${{ runner.arch }}-
+    - name: Cache packaged-project builds
+      uses: actions/cache@v6
+      with:
+        path: |
+          target/coverage-fixtures/packaged-target
+        # Packaged workspace crates are validated by source digest before reuse.
+        key: coverage-packaged-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ hashFiles('crates/**', 'examples/**', 'tools/test-affected/**') }}
+        restore-keys: |
+          coverage-packaged-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+          coverage-packaged-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh', 'scripts/nextest-build-cache.py', 'scripts/nextest-cargo.sh', 'scripts/cargo_cache.py', '.github/actions/cache-coverage/action.yaml') }}-
+          coverage-packaged-v4-${{ runner.os }}-${{ runner.arch }}-
     - name: Cache optimized dependencies
       uses: actions/cache@v6
       with:

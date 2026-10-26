@@ -786,6 +786,73 @@ fn generated_calls_match_memory_without_flow_sources() {
 }
 
 #[test]
+fn call_loop_call_execution_preserves_complete_observation_paths() {
+    use mf_telemetry::event::{Event, ScopePathEntry};
+    let body = graph(
+        json!([{"id":"repeat","kind":"workflow.loop","loop":{
+            "max_iterations":1,"variables":[{"name":"value","type":"string"}],
+            "body":{"nodes":[call("inner", &child())]}
+        }}]),
+        json!([{"name":"value","node":"repeat","port":"value"}]),
+    );
+    let definition = graph(
+        json!([call("outer", &body)]),
+        json!([{"name":"value","node":"outer","port":"value"}]),
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(
+        description.version,
+        mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23
+    );
+    let harness = capture::Harness::new(true);
+    let observation = plan
+        .start_observation(&harness.observer(), Default::default())
+        .unwrap();
+    let output = ExecutionContext::run(Some(observation), |context| {
+        context.set_workflow_arguments(
+            WorkflowArguments::try_from(json!({"outer.repeat.value":"seed"})).unwrap(),
+        );
+        instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_in_context(context)
+    })
+    .unwrap();
+    assert_eq!(output["value"].as_str(), Some("seed"));
+    let events: Vec<_> = harness
+        .records()
+        .into_iter()
+        .map(|record| record.decode().unwrap())
+        .collect();
+    for event in &events {
+        event.validate_for(&description).unwrap();
+    }
+    let loop_path = vec![
+        ScopePathEntry::Call {
+            call_id: "outer".into(),
+        },
+        ScopePathEntry::Loop {
+            loop_id: "repeat".into(),
+            index: mf_telemetry::Count::ZERO,
+        },
+    ];
+    let mut leaf_path = loop_path.clone();
+    leaf_path.push(ScopePathEntry::Call {
+        call_id: "inner".into(),
+    });
+    assert!(events.iter().any(|record| matches!(&record.event,
+        Event::LoopPassStarted { path, .. } if path == &loop_path
+    )));
+    assert!(events.iter().any(|record| matches!(&record.event,
+        Event::NodeStarted { node, .. } if node.id == "echo" && node.path == leaf_path
+    )));
+    assert!(events.iter().any(|record| matches!(&record.event,
+        Event::CallFinished { path, .. } if path == &leaf_path
+    )));
+}
+
+#[test]
 fn calls_inside_loops_share_the_callers_step_budget_and_cancellation() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut body = child();

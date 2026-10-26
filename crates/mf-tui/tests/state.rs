@@ -121,7 +121,6 @@ fn late_pass_start_updates_recent_history_without_changing_older_snapshots() {
                         index: count(index),
                     }],
                     elapsed_ns: count(index * 3 + 3),
-                    visited_node_count: Count::ZERO,
                     outcome: LoopPassOutcome::Exit,
                 },
             ))
@@ -224,7 +223,6 @@ fn start() -> LifecycleEvent {
     event(
         1,
         Event::WorkflowStarted {
-            node_count: count(2),
             elapsed_ns: count(0),
         },
     )
@@ -263,13 +261,10 @@ fn success() -> LifecycleEvent {
     event(
         6,
         Event::WorkflowFinished {
-            final_sequence: count(6),
             elapsed_ns: count(60),
-            visited_node_count: count(2),
             outcome: Outcome::Succeeded,
             failure_node_id: None,
             failure: None,
-            top_level_visited_count: None,
         },
     )
 }
@@ -281,7 +276,7 @@ fn state() -> SessionState {
 #[test]
 fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
     let mut description = graph();
-    description.version = WorkflowDescriptionVersion::V2026_10_25;
+    description.version = WorkflowDescriptionVersion::V2026_10_23;
     description.execution = Some(mf_telemetry::description::ExecutionDescription {
         mode: mf_telemetry::description::ExecutionMode::Single,
     });
@@ -308,7 +303,6 @@ fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
         event(
             1,
             Event::WorkflowStarted {
-                node_count: count(3),
                 elapsed_ns: count(0),
             },
         ),
@@ -341,7 +335,7 @@ fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
             Event::CallFinished {
                 path: path.clone(),
                 elapsed_ns: count(80),
-                visited_node_count: count(2),
+
                 outcome: LoopPassOutcome::Completed,
             },
         ),
@@ -349,10 +343,8 @@ fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
         event(
             10,
             Event::WorkflowFinished {
-                final_sequence: count(10),
                 elapsed_ns: count(100),
-                visited_node_count: count(3),
-                top_level_visited_count: Some(count(1)),
+
                 outcome: Outcome::Succeeded,
                 failure: None,
                 failure_node_id: None,
@@ -360,6 +352,39 @@ fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
         ),
     ]);
     events.swap(3, 4);
+    for mode in ["missing", "unemitted"] {
+        let mut partial = SessionState::new(description.clone(), run_id()).unwrap();
+        for mut record in events
+            .iter()
+            .filter(|event| !matches!(event.sequence.get(), 6 | 7))
+            .cloned()
+        {
+            if mode == "unemitted" && record.sequence.get() > 7 {
+                record.sequence = count(record.sequence.get() - 2);
+            }
+            partial.apply(record).unwrap();
+        }
+        partial.close();
+        let snapshot = partial.snapshot();
+        let nodes = snapshot.loop_passes[0].display_nodes(
+            description.loop_bodies[0]
+                .nodes
+                .iter()
+                .map(|node| (node.id.as_str(), node.kind.as_str())),
+        );
+        assert_eq!(nodes[1].status, NodeStatus::Unknown);
+        assert_eq!(
+            snapshot.loop_passes[0].outcome,
+            Some(LoopPassOutcome::Completed)
+        );
+        assert_eq!(snapshot.observation.protocol_conflicts, 0);
+        if mode == "missing" {
+            assert_eq!(snapshot.lifecycle.completeness, Completeness::Incomplete);
+            assert_eq!(snapshot.lifecycle.known_missing_count, 2);
+        } else {
+            assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
+        }
+    }
     for event in events {
         assert_eq!(state.apply(event).unwrap(), Admission::Applied);
     }
@@ -440,7 +465,6 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
         event(
             1,
             Event::WorkflowStarted {
-                node_count: count(3),
                 elapsed_ns: count(0),
             },
         ),
@@ -511,7 +535,6 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
             Event::LoopPassFinished {
                 path: path.clone(),
                 elapsed_ns: count(7),
-                visited_node_count: count(2),
                 outcome: LoopPassOutcome::Completed,
             },
         ),
@@ -535,10 +558,7 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
         event(
             10,
             Event::WorkflowFinished {
-                final_sequence: count(10),
                 elapsed_ns: count(9),
-                visited_node_count: count(3),
-                top_level_visited_count: Some(count(1)),
                 outcome: Outcome::Succeeded,
                 failure_node_id: None,
                 failure: None,
@@ -574,7 +594,6 @@ fn loop_passes_keep_independent_node_outcomes_and_bounded_history() {
         .apply(event(
             1,
             Event::WorkflowStarted {
-                node_count: count(3),
                 elapsed_ns: count(0),
             },
         ))
@@ -617,7 +636,6 @@ fn a_late_body_outcome_closes_the_gap_without_inventing_success() {
     }
     let before = state.snapshot();
     assert_eq!(before.lifecycle.known_missing_count, 1);
-    assert_eq!(before.lifecycle.unresolved_visited_nodes, 1);
     assert_eq!(
         before.loop_passes[0]
             .nodes
@@ -631,18 +649,16 @@ fn a_late_body_outcome_closes_the_gap_without_inventing_success() {
     state.apply(late).unwrap();
     let after = state.snapshot();
     assert_eq!(after.lifecycle.known_missing_count, 0);
-    assert_eq!(after.lifecycle.unresolved_visited_nodes, 0);
     assert_eq!(after.lifecycle.completeness, Completeness::Complete);
 }
 
 #[test]
-fn final_step_count_cannot_hide_an_unreported_pass() {
+fn loop_summary_does_not_infer_unobserved_pass_records() {
     let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
     state
         .apply(event(
             1,
             Event::WorkflowStarted {
-                node_count: count(3),
                 elapsed_ns: count(0),
             },
         ))
@@ -681,10 +697,7 @@ fn final_step_count_cannot_hide_an_unreported_pass() {
         .apply(event(
             4,
             Event::WorkflowFinished {
-                final_sequence: count(4),
                 elapsed_ns: count(3),
-                visited_node_count: count(3),
-                top_level_visited_count: Some(count(1)),
                 outcome: Outcome::Succeeded,
                 failure_node_id: None,
                 failure: None,
@@ -693,8 +706,7 @@ fn final_step_count_cannot_hide_an_unreported_pass() {
         .unwrap();
     let integrity = state.integrity();
     assert_eq!(integrity.known_missing_count, 0);
-    assert_eq!(integrity.unresolved_visited_nodes, 2);
-    assert_ne!(integrity.completeness, Completeness::Complete);
+    assert_eq!(integrity.completeness, Completeness::Complete);
 }
 
 #[test]
@@ -704,7 +716,6 @@ fn duplicate_delivery_and_a_new_pass_have_distinct_identities() {
         .apply(event(
             1,
             Event::WorkflowStarted {
-                node_count: count(3),
                 elapsed_ns: Count::ZERO,
             },
         ))
@@ -738,7 +749,6 @@ fn live_body_start_shows_running_in_the_active_pass() {
         event(
             1,
             Event::WorkflowStarted {
-                node_count: count(3),
                 elapsed_ns: Count::ZERO,
             },
         ),
@@ -783,7 +793,7 @@ fn live_body_start_shows_running_in_the_active_pass() {
 }
 
 #[test]
-fn early_exit_marks_only_the_unvisited_body_suffix_not_run() {
+fn early_exit_preserves_unknown_outcomes_without_visit_metadata() {
     let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
     let path = vec![LoopPathEntry::Loop {
         loop_id: "repeat".into(),
@@ -793,7 +803,6 @@ fn early_exit_marks_only_the_unvisited_body_suffix_not_run() {
         event(
             1,
             Event::WorkflowStarted {
-                node_count: count(3),
                 elapsed_ns: Count::ZERO,
             },
         ),
@@ -809,7 +818,6 @@ fn early_exit_marks_only_the_unvisited_body_suffix_not_run() {
             Event::LoopPassFinished {
                 path,
                 elapsed_ns: count(2),
-                visited_node_count: count(1),
                 outcome: LoopPassOutcome::Exit,
             },
         ),
@@ -819,8 +827,8 @@ fn early_exit_marks_only_the_unvisited_body_suffix_not_run() {
     let snapshot = state.snapshot();
     let nodes =
         snapshot.loop_passes[0].display_nodes([("%loop", "%loop"), ("step", "fixture.sink")]);
-    assert_eq!(nodes[0].status, NodeStatus::Pending);
-    assert_eq!(nodes[1].status, NodeStatus::NotRun);
+    assert_eq!(nodes[0].status, NodeStatus::Unknown);
+    assert_eq!(nodes[1].status, NodeStatus::Unknown);
     assert_eq!(snapshot.total_loop_passes, 1);
 }
 
@@ -941,11 +949,12 @@ fn duplicate_and_conflicting_events_never_regress_terminal_nodes() {
     state.apply(success()).unwrap();
     state.close();
     assert_eq!(state.integrity().completeness, Completeness::Incomplete);
-    assert!(state.integrity().protocol_conflicts >= 2);
+    assert_eq!(state.integrity().protocol_conflicts, 1);
+    assert!(state.snapshot().observation.protocol_conflicts >= 1);
 }
 
 #[test]
-fn final_prefix_and_missing_tail_keep_unknowns_explicit() {
+fn final_boundary_and_missing_tail_keep_unknowns_explicit() {
     let mut empty = state();
     empty.close();
     assert_eq!(empty.integrity().completeness, Completeness::UnverifiedTail);
@@ -980,20 +989,17 @@ fn final_prefix_and_missing_tail_keep_unknowns_explicit() {
         .apply(event(
             2,
             Event::WorkflowFinished {
-                final_sequence: count(2),
                 elapsed_ns: count(3),
-                visited_node_count: count(0),
                 outcome: Outcome::Failed,
                 failure_node_id: Some("b".into()),
                 failure: Some(Failure {
                     phase: FailurePhase::Preparation,
                     message: "bad config".into(),
                 }),
-                top_level_visited_count: None,
             },
         ))
         .unwrap();
-    assert_eq!(preparation.snapshot().nodes[0].status, NodeStatus::NotRun);
+    assert_eq!(preparation.snapshot().nodes[0].status, NodeStatus::Unknown);
     assert_eq!(preparation.snapshot().nodes[1].status, NodeStatus::Failed);
     preparation.close();
     assert_eq!(
@@ -1078,7 +1084,7 @@ fn a_known_gap_marks_only_unresolved_nodes_as_possibly_stale() {
 }
 
 #[test]
-fn visited_prefix_uses_execution_order_and_final_failure_identity() {
+fn terminal_failure_uses_explicit_node_identity_and_preserves_unknowns() {
     let mut description = graph();
     description.nodes.reverse();
     let mut state = SessionState::new(description, run_id()).unwrap();
@@ -1090,16 +1096,13 @@ fn visited_prefix_uses_execution_order_and_final_failure_identity() {
         .apply(event(
             3,
             Event::WorkflowFinished {
-                final_sequence: count(3),
                 elapsed_ns: count(30),
-                visited_node_count: count(1),
                 outcome: Outcome::Failed,
                 failure_node_id: Some("a".into()),
                 failure: Some(Failure {
                     phase: FailurePhase::Execution,
                     message: "execution failed".into(),
                 }),
-                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -1112,7 +1115,7 @@ fn visited_prefix_uses_execution_order_and_final_failure_identity() {
         "execution failed"
     );
     assert_eq!(snapshot.nodes[1].id, "b");
-    assert_eq!(snapshot.nodes[1].status, NodeStatus::NotRun);
+    assert_eq!(snapshot.nodes[1].status, NodeStatus::Unknown);
     assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
 }
 
@@ -1123,16 +1126,13 @@ fn late_start_can_fill_timing_for_a_failure_proven_by_final_boundary() {
         .apply(event(
             3,
             Event::WorkflowFinished {
-                final_sequence: count(3),
                 elapsed_ns: count(30),
-                visited_node_count: count(1),
                 outcome: Outcome::Failed,
                 failure_node_id: Some("a".into()),
                 failure: Some(Failure {
                     phase: FailurePhase::Execution,
                     message: "execution failed".into(),
                 }),
-                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -1151,29 +1151,25 @@ fn late_start_can_fill_timing_for_a_failure_proven_by_final_boundary() {
 }
 
 #[test]
-fn a_contiguous_stream_without_visited_node_outcomes_is_not_complete() {
+fn contiguous_delivery_preserves_unknown_business_outcomes() {
     let mut state = state();
     state.apply(start()).unwrap();
     state
         .apply(event(
             2,
             Event::WorkflowFinished {
-                final_sequence: count(2),
                 elapsed_ns: count(20),
-                visited_node_count: count(2),
                 outcome: Outcome::Succeeded,
                 failure_node_id: None,
                 failure: None,
-                top_level_visited_count: None,
             },
         ))
         .unwrap();
     state.close();
     let snapshot = state.snapshot();
     assert_eq!(snapshot.lifecycle.known_missing_count, 0);
-    assert_eq!(snapshot.lifecycle.unresolved_visited_nodes, 2);
     assert_eq!(snapshot.workflow_outcome, Some(Outcome::Succeeded));
-    assert_eq!(snapshot.lifecycle.completeness, Completeness::Incomplete);
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
     assert!(
         snapshot
             .nodes
@@ -1183,15 +1179,15 @@ fn a_contiguous_stream_without_visited_node_outcomes_is_not_complete() {
 }
 
 #[test]
-fn unrelated_runs_and_out_of_range_sequences_do_not_change_state() {
+fn unrelated_runs_are_ignored_and_sequences_are_independent_of_graph_size() {
     let mut state = state();
     let mut unrelated = start();
     unrelated.run_id = RunId::new();
     assert_eq!(state.apply(unrelated).unwrap(), Admission::UnrelatedRun);
     assert_eq!(state.integrity().known_missing_count, 0);
-    let out_of_range = node_start(7, "a", "fixture.source", 0);
-    assert!(state.apply(out_of_range).is_err());
-    assert_eq!(state.integrity().known_missing_count, 0);
+    let sparse = node_start(50_000, "a", "fixture.source", 0);
+    assert_eq!(state.apply(sparse).unwrap(), Admission::Applied);
+    assert_eq!(state.integrity().known_missing_count, 49_999);
 }
 
 #[test]
@@ -1294,19 +1290,20 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
     {
         *source_output = "not-connected".into();
     }
-    assert!(state.apply(wrong).is_err());
+    let mut rejected = SessionState::new(graph(), run_id()).unwrap();
+    assert!(rejected.apply(wrong).is_err());
+    assert_eq!(rejected.snapshot().observation.errors, 1);
+    assert_eq!(rejected.apply(skip.clone()).unwrap(), Admission::Conflict);
+    assert_eq!(rejected.integrity().protocol_conflicts, 1);
     state.apply(skip).unwrap();
     state
         .apply(event(
             5,
             Event::WorkflowFinished {
-                final_sequence: count(5),
                 elapsed_ns: count(50),
-                visited_node_count: count(2),
                 outcome: Outcome::Succeeded,
                 failure_node_id: None,
                 failure: None,
-                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -1348,13 +1345,10 @@ fn failure_and_diagnostic_text_have_independent_display_limits() {
         .apply(event(
             4,
             Event::WorkflowFinished {
-                final_sequence: count(4),
                 elapsed_ns: count(40),
-                visited_node_count: count(1),
                 outcome: Outcome::Failed,
                 failure_node_id: Some("a".into()),
                 failure: Some(failure),
-                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -1409,10 +1403,11 @@ fn late_node_failure_cannot_confirm_a_successful_final_boundary() {
         .unwrap();
     let snapshot = state.snapshot();
     assert_eq!(snapshot.lifecycle.known_missing_count, 0);
-    assert_eq!(snapshot.lifecycle.completeness, Completeness::Collecting);
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
     assert!(snapshot.nodes[0].conflicted);
     state.close();
-    assert_eq!(state.integrity().completeness, Completeness::Incomplete);
+    assert_eq!(state.integrity().completeness, Completeness::Complete);
+    assert!(state.snapshot().observation.protocol_conflicts > 0);
 }
 
 #[test]
@@ -1426,7 +1421,7 @@ fn unchanged_admissions_and_repeated_close_reuse_the_snapshot() {
     state.record_diagnostic_truncation(0);
     assert!(Arc::ptr_eq(&before, &state.snapshot_shared()));
     let mut invalid = node_start(2, "a", "fixture.source", 0);
-    invalid.sequence = count(10000);
+    invalid.sequence = Count::ZERO;
     assert!(state.apply(invalid).is_err());
     assert!(Arc::ptr_eq(&before, &state.snapshot_shared()));
     state.close();
@@ -1471,7 +1466,6 @@ fn finite_and_stream_success_causes_are_validated_against_order_edges() {
         };
         if streaming {
             let record = |sequence, identity, payload| StreamRecord {
-                schema_version: mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION,
                 workflow_id: description.workflow_id.clone(),
                 run_id: run_id(),
                 sequence: count(sequence),
@@ -1484,7 +1478,6 @@ fn finite_and_stream_success_causes_are_validated_against_order_edges() {
                     1,
                     None,
                     StreamPayload::Control(StreamEvent::Started {
-                        node_count: count(2),
                         elapsed_ns: Count::ZERO,
                     }),
                 ))

@@ -47,7 +47,7 @@ fn compiled_manifests_derive_views_from_original_facts() {
     let description = decoded.description().unwrap();
     assert_eq!(
         description.event_schema_version(),
-        mf_telemetry::LOOP_EVENT_SCHEMA_VERSION
+        mf_telemetry::EVENT_SCHEMA_VERSION
     );
     assert!(
         serde_json::to_value(&description).unwrap()["execution"]

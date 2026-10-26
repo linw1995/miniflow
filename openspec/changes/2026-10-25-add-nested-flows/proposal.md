@@ -13,6 +13,7 @@ concrete example: eligibility, prompting, error handling, and usage accounting o
 
 ## Impact
 
-Extend workflow authoring and observation versions, compiler resolution and generation, runtime scope
-mechanics, core node providers, embedding, and the chat examples. Streaming ports across a call boundary
-and recursive Flow invocation are outside this change.
+Extend workflow authoring, compiler resolution and generation, runtime scope execution, core node
+providers, embedding, and the chat examples. Reuse the existing input-binding sensitivity, provider
+registration, Call observation, and transport contracts. Streaming ports across a call boundary and
+recursive Flow invocation are outside this change.

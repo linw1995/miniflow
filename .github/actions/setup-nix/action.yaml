@@ -5,14 +5,21 @@ inputs:
     description: Cache key namespace.
     required: false
     default: ""
+  cache-source:
+    description: Include repository sources when caching Nix build results.
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
     - uses: nixbuild/nix-quick-install-action@v35
     - uses: nix-community/cache-nix-action@v7
       with:
-        primary-key: nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '.pre-commit-config.yaml', '.markdownlint.yaml', 'src/**', 'crates/**', 'scripts/**', '.github/**/*.yaml') }}
+        primary-key: nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-${{ hashFiles('rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-nix/action.yaml') }}-${{ inputs.cache-source == 'true' && hashFiles('Cargo.lock', 'Cargo.toml', '.pre-commit-config.yaml', '.markdownlint.yaml', 'src/**', 'crates/**', 'scripts/**', '.github/**/*.yaml') || 'environment' }}
         # Nix validates store paths, so older sources and toolchains are safe seeds.
-        restore-prefixes-first-match: nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-
+        restore-prefixes-first-match: |
+          nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-
+          ${{ inputs.cache-key-name == 'environment' && format('nix-store-{0}-{1}-coverage-', runner.os, runner.arch) || '' }}
+          ${{ inputs.cache-key-name == 'test' && format('nix-store-{0}-{1}-check-', runner.os, runner.arch) || '' }}
         gc-max-store-size-linux: 8G
         gc-max-store-size-macos: 8G

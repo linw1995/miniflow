@@ -26,7 +26,6 @@ pub struct ExecutionScope {
     types: BTreeMap<String, crate::ValueType>,
     index: usize,
     exit_requested: bool,
-    visited_steps: Arc<AtomicUsize>,
 }
 
 impl ExecutionScope {
@@ -47,7 +46,6 @@ impl ExecutionScope {
             types,
             index,
             exit_requested: false,
-            visited_steps: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -203,7 +201,6 @@ pub struct ExecutionContext {
     current_node: Option<crate::DefinitionId>,
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
-    call_steps: Option<Arc<AtomicUsize>>,
     snapshots: Option<crate::SnapshotRecorder>,
     scope_prefix: Vec<LoopPathEntry>,
     inputs: crate::ExecutionInputs,
@@ -228,7 +225,6 @@ impl Default for ExecutionContext {
             current_node: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
-            call_steps: None,
             snapshots: None,
             scope_prefix: Vec::new(),
             inputs: crate::ExecutionInputs::default(),
@@ -307,7 +303,6 @@ impl ExecutionContext {
         Self {
             outputs: self.outputs.clone(),
             remaining_steps: self.remaining_steps.clone(),
-            call_steps: self.call_steps.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
             observation,
@@ -509,7 +504,6 @@ impl ExecutionContext {
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
-            call_steps: self.call_steps.clone(),
             snapshots: self.snapshots.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: self.inputs.clone(),
@@ -688,8 +682,6 @@ impl ExecutionContext {
             .push(LoopPathEntry::Call { call_id: id.into() });
         child.set_workflow_arguments(arguments);
         let path = child.invocation_path();
-        let steps = Arc::new(AtomicUsize::new(0));
-        child.call_steps = Some(steps.clone());
         if let Some(observation) = child
             .observation
             .as_mut()
@@ -698,17 +690,12 @@ impl ExecutionContext {
             observation.call_started(path.clone());
         }
         let result = run(&mut child);
-        let visited = steps.load(Ordering::Acquire);
         if let Some(observation) = child
             .observation
             .as_mut()
             .filter(|observation| observation.supports_loops())
         {
-            observation.call_finished(
-                path,
-                mf_telemetry::Count::try_from(visited as i64).expect("step budget is bounded"),
-                result.is_err(),
-            );
+            observation.call_finished(path, result.is_err());
         }
         result
     }
@@ -956,12 +943,6 @@ impl ExecutionContext {
         self.scopes.last().is_some_and(|frame| frame.exit_requested)
     }
 
-    pub fn scope_visited_steps(&self) -> usize {
-        self.scopes
-            .last()
-            .map_or(0, |scope| scope.visited_steps.load(Ordering::Acquire))
-    }
-
     pub(crate) fn stage_scope_write(
         &mut self,
         variable: &str,
@@ -1012,16 +993,7 @@ impl ExecutionContext {
     }
 
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
-        self.remaining_steps.reserve(id)?;
-        if self.scopes.is_empty()
-            && let Some(steps) = &self.call_steps
-        {
-            steps.fetch_add(1, Ordering::AcqRel);
-        }
-        if let Some(frame) = self.scopes.last_mut() {
-            frame.visited_steps.fetch_add(1, Ordering::AcqRel);
-        }
-        Ok(())
+        self.remaining_steps.reserve(id)
     }
 
     fn commit_pending_loop_write(&mut self) {
@@ -1728,22 +1700,39 @@ mod tests {
 
     #[test]
     fn event_and_generated_inputs_share_skip_errors_and_partial_failure_snapshots() {
-        let node = FlowNode {
-            definition_id: "target".into(),
-            node: (),
-            metadata: crate::NodeMetadata::new(NodePorts {
-                inputs: vec![port("value", ValueType::Int64, true)],
-                outputs: vec![],
-            }),
-            output_keys: Default::default(),
-        };
-        for case in ["ready", "skipped", "missing", "wrong_type"] {
+        for (case, boundary_marking) in ["ready", "skipped", "missing", "wrong_type"]
+            .into_iter()
+            .flat_map(|case| [false, true].map(|marking| (case, marking)))
+        {
+            let mut node = FlowNode {
+                definition_id: "target".into(),
+                node: (),
+                metadata: crate::NodeMetadata::new(NodePorts {
+                    inputs: vec![port("value", ValueType::Int64, true)],
+                    outputs: vec![],
+                }),
+                output_keys: Default::default(),
+            };
+            if boundary_marking {
+                node.metadata.input_bindings.insert(
+                    "value".into(),
+                    crate::InputBinding {
+                        secret: true,
+                        ..Default::default()
+                    },
+                );
+            }
             let value = if case == "ready" {
                 Value::from(42)
             } else {
                 Value::from("wrong type")
-            }
-            .into_secret();
+            };
+            let value = if boundary_marking {
+                value
+            } else {
+                value.into_secret()
+            };
+            let expected = value.clone().into_secret();
             let mut context = ExecutionContext::default();
             context
                 .outputs
@@ -1793,7 +1782,7 @@ mod tests {
                 &[],
                 |inputs, _| {
                     assert_eq!(case, "ready");
-                    assert!(inputs["value"].ptr_eq(&value));
+                    assert!(inputs["value"].ptr_eq(&expected));
                     Ok(GeneratedNodeResult::Dynamic(Outputs::new().into()))
                 },
             );
@@ -1802,7 +1791,7 @@ mod tests {
             match (event, task) {
                 (Ok(Some(inputs)), Ok(())) => {
                     assert_eq!(case, "ready");
-                    assert!(inputs["value"].ptr_eq(&value));
+                    assert!(inputs["value"].ptr_eq(&expected));
                     assert_eq!(snapshot.outcome, crate::SnapshotOutcome::Succeeded);
                 }
                 (Ok(None), Ok(())) => {

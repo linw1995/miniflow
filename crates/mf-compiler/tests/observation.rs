@@ -65,9 +65,13 @@ fn execution_matches_unobserved_results_with_skips_and_native_span_parentage() {
     for (index, record) in records.iter().enumerate() {
         assert_eq!(record.decode().unwrap().sequence.get(), index as i64 + 1);
     }
-    assert!(
-        matches!(finish(&records), Event::WorkflowFinished { outcome: Outcome::Succeeded, visited_node_count, final_sequence, .. } if visited_node_count.get() == 3 && final_sequence.get() == 7)
-    );
+    assert!(matches!(
+        finish(&records),
+        Event::WorkflowFinished {
+            outcome: Outcome::Succeeded,
+            ..
+        }
+    ));
     let skipped = records
         .iter()
         .find(|r| r.event_name == "mf.node.skipped")
@@ -152,42 +156,36 @@ fn noop_tracers_leave_logs_without_invalid_native_correlation() {
 
 #[test]
 fn failures_report_real_phases_and_never_publish_a_success_first() {
-    for (config, phase, visited, starts) in [
-        (json!(42), "preparation", 0, 0),
+    for (config, phase, starts) in [
+        (json!(42), "preparation", 0),
         (
             json!({"ports":["value","value","inactive"]}),
             "preparation",
-            0,
             0,
         ),
         (
             json!({"ports":["value","inactive"],"required":"inactive","outputs":{"value":1},"skipped":["inactive"]}),
             "publication",
             1,
-            1,
         ),
         (
             json!({"ports":["value","inactive"],"outputs":{"value":1,"inactive":1},"skipped":["inactive"]}),
             "publication",
-            1,
             1,
         ),
         (
             json!({"ports":["value","inactive"],"fail":true}),
             "execution",
             1,
-            1,
         ),
         (
             json!({"ports":["value","inactive"],"outputs":{"undeclared":1}}),
             "publication",
             1,
-            1,
         ),
         (
             json!({"ports":["value","inactive"],"outputs":{},"skipped":["inactive"]}),
             "dependency",
-            3,
             1,
         ),
     ] {
@@ -200,7 +198,6 @@ fn failures_report_real_phases_and_never_publish_a_success_first() {
         let records = harness.records();
         let last = records.last().unwrap();
         assert_eq!(last.attributes["mf.failure.phase"], phase);
-        assert_eq!(last.body["visited_node_count"], visited);
         assert_eq!(
             records
                 .iter()
@@ -259,7 +256,6 @@ fn output_selection_failure_preserves_prior_node_outcomes() {
         records.last().unwrap().attributes["mf.failure.phase"],
         "output_selection"
     );
-    assert_eq!(records.last().unwrap().body["visited_node_count"], 3);
     assert!(
         !records
             .iter()
@@ -550,7 +546,6 @@ fn preparation_errors_without_a_node_still_close_the_run() {
     assert_eq!(records.len(), 2);
     assert_eq!(records[1].attributes["mf.failure.phase"], "preparation");
     assert!(records[1].body.get("failure_node_id").is_none());
-    assert_eq!(records[1].body["visited_node_count"], 0);
 }
 
 #[test]
@@ -604,7 +599,6 @@ fn an_embedded_run_closes_preparation_errors_and_restores_its_caller() {
     let records = harness.records();
     assert_eq!(records.len(), 3);
     assert_eq!(records[1].attributes["mf.failure.phase"], "preparation");
-    assert_eq!(records[2].body["visited_node_count"], 0);
 }
 
 fn semantic_records(records: &[WireRecord]) -> Vec<Value> {
@@ -730,5 +724,25 @@ fn main() {
             value["spans"],
             harness.spans.get_finished_spans().unwrap().len()
         );
+    }
+}
+
+#[test]
+fn emitted_business_payloads_exclude_visit_accounting_and_duplicate_transport_fields() {
+    let (result, harness) = run(&plan(success_config()), true);
+    result.unwrap();
+    for record in harness.records() {
+        for field in [
+            "visited_node_count",
+            "top_level_visited_count",
+            "node_count",
+            "final_sequence",
+        ] {
+            assert!(
+                record.body.get(field).is_none(),
+                "{} contains {field}",
+                record.event_name
+            );
+        }
     }
 }

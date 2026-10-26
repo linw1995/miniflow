@@ -1,4 +1,5 @@
 #![cfg(feature = "codegen")]
+extern crate mfn_core as _;
 use mf_compiler::{
     NodeRegistry, TypedFallbackReason, WorkflowDefinition, compile_definition,
     instantiate_compiled, plan_typed_segments,
@@ -174,6 +175,69 @@ fn secret_input_boundaries_keep_dynamic_marking_and_reject_unknown_ports() {
         error,
         mf_compiler::WorkflowCompileError::WorkflowInputs { .. }
     ));
+}
+
+#[test]
+fn exclusive_inputs_apply_boundary_sensitivity_before_snapshots() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for selected in [true, false] {
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version":"2026-10-03", "dependencies":{},
+            "nodes":[
+                {"id":"condition", "kind":"builtin.constant", "config":{"value":selected}},
+                {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{
+                    "id":"left", "condition":{"source":{"output":"condition.value", "path":""}, "operator":"eq", "value":true}
+                }]}},
+                {"id":"left", "kind":"builtin.constant", "config":{"value":"left-credential"}},
+                {"id":"right", "kind":"builtin.constant", "config":{"value":"right-credential"}},
+                {"id":"consume", "kind":"test.generated_plan", "config":{"type":"shared", "binding":{"secret":true}}}
+            ],
+            "control_edges":[
+                {"from_node":"condition", "from_output":"value", "to_node":"route"},
+                {"from_node":"route", "from_output":"left", "to_node":"left"},
+                {"from_node":"route", "from_output":"else", "to_node":"right"}
+            ],
+            "edges":[
+                {"from_node":"left", "from_output":"value", "to_node":"consume", "to_input":"value", "exclusive":true},
+                {"from_node":"right", "from_output":"value", "to_node":"consume", "to_input":"value", "exclusive":true}
+            ],
+            "outputs":[{"name":"result", "node":"consume", "port":"value"}]
+        })).unwrap();
+        let compiled = compile_definition(&definition, &registry).unwrap();
+        let flow = instantiate_compiled(&compiled, &registry).unwrap();
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = snapshots.clone();
+        let mut context = mf_runtime::ExecutionContext::default();
+        context.set_snapshot_recorder(mf_runtime::SnapshotRecorder::new(move |event| {
+            captured.lock().unwrap().push(event);
+        }));
+        let output = flow.execute_in_context(&mut context).unwrap();
+        assert!(output["result"].is_secret());
+        assert_eq!(
+            output["result"].as_str(),
+            Some(if selected {
+                "left-credential"
+            } else {
+                "right-credential"
+            })
+        );
+        let snapshots = snapshots.lock().unwrap();
+        let boundary: Vec<_> = snapshots
+            .iter()
+            .filter(|event| event.node.as_ref() == "consume")
+            .collect();
+        assert!(!boundary.is_empty());
+        for event in boundary {
+            assert_eq!(event.snapshot.inputs["value"], json!("[REDACTED]"));
+            if event.snapshot.outcome == mf_runtime::SnapshotOutcome::Succeeded {
+                assert_eq!(event.snapshot.outputs["value"], json!("[REDACTED]"));
+            }
+        }
+        let source = if selected { "left" } else { "right" };
+        assert!(snapshots.iter().any(|event| event.node.as_ref() == source
+            && event.snapshot.outcome == mf_runtime::SnapshotOutcome::Succeeded
+            && event.snapshot.outputs["value"].as_str() != Some("[REDACTED]")));
+    }
 }
 
 #[test]

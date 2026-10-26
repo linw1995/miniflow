@@ -78,16 +78,14 @@ See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependenc
 
 `NodeMetadata.input_bindings` associates input port names with `InputBinding` declarations
 for environment fallback, a typed JSON default, and secret marking. Environment and default
-sources are limited to top-level initial nodes. The compiler includes their bindings in the frozen startup interface
+sources are limited to top-level initial nodes. The compiler includes them in the frozen startup interface
 and isolated task contract; preparation must never read the environment. Runtime binding
 resolves sources and marks secret values before input observation. Ordinary nodes without
 bindings keep their existing argument behavior. See [`builtin.parameters`](workflows.md#parameters).
 
-The `secret` flag in `input_bindings` marks declared input ports before dependency/type failure snapshots
-and invocation observation. Bindings containing only this flag are also valid at ordinary node boundaries.
-`workflow.call` derives these bindings from the child input schema so a
-child's secret contract also protects the outer call. Inputs with this policy retain dynamic conversion
-when typed connection optimization would bypass marking.
+Bindings containing only `secret: true` are also valid at ordinary node boundaries. The runtime
+marks direct inputs, dependency values, and selected exclusive inputs before validation and
+observation. Typed connections retain dynamic conversion when optimization would bypass marking.
 
 ## Instance metadata
 
@@ -934,17 +932,25 @@ cancellation wake blocked producers. Consumers and hosts own the policy for stal
 
 ## Register reusable Flow definitions
 
-A package registers a pure factory returning `WorkflowDefinition` with
-`mf_runtime::register_builtin_flow!("chat-title", title_definition)`. The macro captures the calling
-Cargo package name, and the registry generates `<package>.<flow>` automatically. Providers supply
-only a nonblank local name without dots. Names from different packages cannot collide; duplicate
-local names within one package fail registration. Catalog lookup matches the complete qualified name,
-such as `mf-chat.chat-title`. The factory owns its JSON and dependency version policy;
-source resolution must not execute the Flow or perform business I/O. The runtime validates catalog
-names, and the compiler only looks up the linked provider and freezes its definition. Caller-selected
-package sources retain the factory's required features and default features.
+Packages can expose pure factories returning `WorkflowDefinition` through the runtime catalog:
 
-`mf-chat` registers its title Flow in `mf_chat::flows`, using JSON from its own `workflows/` directory.
-The CLI links that package for source resolution. A custom Rust build script must link any catalog
-providers it uses as build dependencies. Generated and embedded graphs do not require the catalog
-after their sources have been resolved.
+```rust
+use mf_runtime::{DefinitionParseError, WorkflowDefinition};
+
+fn definition() -> Result<WorkflowDefinition, DefinitionParseError> {
+    WorkflowDefinition::from_json(include_str!("../workflows/example.json"))
+}
+
+mf_runtime::register_builtin_flow!("example", definition);
+```
+
+The macro captures the calling Cargo package name. The registry combines it with the local
+Flow name as `<package>.<flow>`, so package `my-provider` registers `my-provider.example`.
+Local names must be nonblank and cannot contain dots. Different packages may reuse a local name;
+duplicate names within one package fail catalog construction.
+
+Hosts construct `BuiltinFlowRegistry::from_inventory()` and look up the complete qualified name.
+Catalog construction validates registrations without invoking their factories. The host decides when
+to request a definition and handles its typed `DefinitionParseError`. Each provider owns its source
+and dependency declarations. Factories must not execute the Flow or perform business I/O.
+The catalog exposes definitions independently of compilation and execution.

@@ -621,7 +621,7 @@ fn loop_observation_identifies_each_pass_and_body_invocation() {
     assert!(
         records
             .iter()
-            .all(|record| record.schema_version().unwrap() == 2)
+            .all(|record| record.schema_version().unwrap() == mf_telemetry::EVENT_SCHEMA_VERSION)
     );
     let mut pass_starts = 0;
     let mut pass_finishes = 0;

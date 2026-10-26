@@ -679,10 +679,7 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
     let admission = (|| -> Result<Admission, IngestError> {
         if matches!(
             schema_version,
-            Some(
-                mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
-                    | mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
-            )
+            Some(mf_telemetry::STREAM_EVENT_SCHEMA_VERSION)
         ) {
             let event = mf_telemetry::stream::StreamRecord::decode(&wire)?;
             Ok(context
@@ -699,12 +696,22 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
                 .apply_observed(event, correlation)?)
         }
     })()
-    .inspect_err(|_| {
-        context
-            .state
-            .lock()
-            .expect("receiver state was not poisoned")
-            .record_local_lifecycle_drop(1, "lifecycle schema or admission rejected a record");
+    .inspect_err(|error| {
+        if !matches!(
+            error,
+            IngestError::State {
+                source: StateError::Event { .. } | StateError::InvalidEvent { .. }
+            }
+        ) {
+            context
+                .state
+                .lock()
+                .expect("receiver state was not poisoned")
+                .record_local_lifecycle_drop(
+                    1,
+                    "lifecycle schema or transport admission rejected a record",
+                );
+        }
     })?;
     let _ = admission;
     Ok(())

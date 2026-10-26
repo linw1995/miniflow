@@ -197,7 +197,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | Package | Kind | Configuration | Input ports | Output ports |
 | --- | --- | --- | --- | --- |
 | `mfn-core` | `builtin.constant` | Required `value`: any JSON value | None | `value`: inferred from the configured value |
-| `mfn-core` | [`builtin.parameters`](#parameters) | Named parameters with types, optional `env` and `default`, and `secret` (default `true`) | One typed startup input per parameter | One matching typed output per parameter |
+| `mfn-core` | [`builtin.parameters`](#parameters) | Named parameters with types, optional `env` and `default`, and `secret` (default `true`) | One typed input per parameter; exposed at startup when initial | One matching typed output per parameter |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by execution prerequisites | One boolean activation output per branch, plus `else` |
 | `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
@@ -327,9 +327,11 @@ An assertion on a skipped branch is itself skipped and does not activate its suc
 
 ### Parameters
 
-`builtin.parameters` declares a typed startup interface shared by runner arguments,
-environment variables, and configured defaults. It must be a top-level initial node,
-without incoming data or execution dependencies; Loop and Iteration bodies cannot declare it.
+`builtin.parameters` declares typed inputs shared by runner arguments, environment variables,
+and configured defaults. Environment and default sources require a top-level initial node,
+without incoming data or execution dependencies; Loop and Iteration bodies cannot declare these sources.
+Without environment or default sources, the node may consume upstream inputs and apply its
+`secret` policy at that boundary. Only initial nodes expose their inputs as workflow startup parameters.
 
 ```json
 {

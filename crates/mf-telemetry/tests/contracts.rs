@@ -1,9 +1,9 @@
 use mf_telemetry::{
     Count,
     description::WorkflowDescription,
-    event::{Event, EventSequence, LifecycleEvent, LoopPathEntry},
+    event::{Event, LifecycleEvent, LoopPathEntry},
     identity::{RunId, WorkflowId},
-    maximum_event_count,
+    transport::EventSequence,
     wire::{TraceContext, WireRecord},
 };
 use serde_json::{Value, json};
@@ -117,7 +117,7 @@ fn all_event_fixtures_round_trip_with_exact_attribute_and_body_mapping() {
 }
 
 #[test]
-fn loop_pass_wire_records_require_the_new_schema() {
+fn loop_pass_wire_records_use_the_current_schema_and_reject_retired_formats() {
     let event = LifecycleEvent {
         workflow_id: graph().workflow_id,
         run_id: RunId::new(),
@@ -130,9 +130,16 @@ fn loop_pass_wire_records_require_the_new_schema() {
             elapsed_ns: Count::try_from(1).unwrap(),
         },
     };
-    assert!(WireRecord::from_event(&event, 1, None).is_err());
-    let wire = WireRecord::from_event_with_version(&event, 2, 1, None).unwrap();
-    assert_eq!(wire.schema_version().unwrap(), 2);
+    let wire = WireRecord::from_event(&event, 1, None).unwrap();
+    assert_eq!(
+        wire.schema_version().unwrap(),
+        mf_telemetry::EVENT_SCHEMA_VERSION
+    );
+    for version in 1..=6 {
+        let mut retired = wire.clone();
+        retired.attributes["mf.schema.version"] = json!(version);
+        assert!(retired.decode().is_err());
+    }
     assert_eq!(wire.decode().unwrap(), event);
 }
 
@@ -304,8 +311,6 @@ fn terminal_contract_rejects_ambiguous_success_and_invalid_failure_context() {
         ),
         ("failure", "duration_ns", json!(0)),
         ("failure", "produced_ports", json!(["value.part"])),
-        ("finish", "final_sequence", json!(99)),
-        ("failed-finish", "visited_node_count", json!(1)),
         ("skip", "causes", json!([])),
         ("start", "elapsed_ns", json!(1)),
     ];
@@ -323,18 +328,16 @@ fn terminal_contract_rejects_ambiguous_success_and_invalid_failure_context() {
 
 #[test]
 fn dropped_reservations_leave_gaps_and_finish_closes_the_sequence() {
-    let mut sequence = EventSequence::new(Count::try_from(1).unwrap()).unwrap();
+    let mut sequence = EventSequence::new();
     assert!(sequence.finish().is_err());
     assert_eq!(sequence.reserve().unwrap().get(), 1);
     let dropped = sequence.reserve().unwrap();
     assert_eq!(dropped.get(), 2);
     assert_eq!(sequence.reserve().unwrap().get(), 3);
-    assert!(sequence.reserve().is_err());
     assert_eq!(sequence.finish().unwrap().get(), 4);
     assert!(sequence.reserve().is_err());
     assert!(sequence.finish().is_err());
-    assert!(maximum_event_count(Count::try_from(i64::MAX).unwrap()).is_err());
-    let mut empty = EventSequence::new(Count::ZERO).unwrap();
+    let mut empty = EventSequence::new();
     assert_eq!(empty.reserve().unwrap().get(), 1);
     assert_eq!(empty.finish().unwrap().get(), 2);
 }
@@ -384,27 +387,26 @@ fn description_validates_order_endpoints_and_opaque_edge_names() {
 }
 
 #[test]
-fn graph_relative_event_validation_rejects_wrong_nodes_and_out_of_range_evidence() {
-    for (name, field, value) in [
-        ("node-start", "position", json!(1)),
-        ("start", "node_count", json!(2)),
-        ("finish", "visited_node_count", json!(0)),
-        ("finish", "visited_node_count", json!(2)),
-    ] {
-        let mut wire = record(name);
-        wire.body[field] = value;
-        assert!(wire.decode().unwrap().validate_for(&graph()).is_err());
-    }
+fn graph_validation_checks_node_facts_without_bounding_transport_sequences() {
+    let mut wrong_position = record("node-start");
+    wrong_position.body["position"] = json!(1);
+    assert!(
+        wrong_position
+            .decode()
+            .unwrap()
+            .validate_for(&graph())
+            .is_err()
+    );
     let mut wrong = record("node-start");
     wrong
         .attributes
         .insert("mf.node.kind".into(), json!("another.kind"));
     assert!(wrong.decode().unwrap().validate_for(&graph()).is_err());
-    let mut wrong = record("success");
-    wrong
+    let mut unbounded = record("success");
+    unbounded
         .attributes
         .insert("mf.event.sequence".into(), json!(i64::MAX));
-    assert!(wrong.decode().unwrap().validate_for(&graph()).is_err());
+    unbounded.decode().unwrap().validate_for(&graph()).unwrap();
     let mut wire = record("success");
     wire.body["produced_ports"] = json!(["unconnected.dynamic"]);
     wire.decode().unwrap().validate_for(&graph()).unwrap();
@@ -479,7 +481,7 @@ fn skip_metadata_matches_real_dependencies_without_a_full_port_table() {
 }
 
 #[test]
-fn all_failure_phases_preserve_invocation_and_visited_prefix_boundaries() {
+fn all_failure_phases_preserve_node_identity_without_visit_accounting() {
     for phase in ["preparation", "dependency", "execution", "publication"] {
         let mut node = record("failure");
         node.attributes
@@ -492,22 +494,25 @@ fn all_failure_phases_preserve_invocation_and_visited_prefix_boundaries() {
         finish
             .attributes
             .insert("mf.failure.phase".into(), json!(phase));
-        finish.body["visited_node_count"] = json!(if phase == "preparation" { 0 } else { 1 });
         finish
             .decode()
             .unwrap()
             .validate_for(&branch_graph())
             .unwrap();
+        finish.body["failure_node_id"] = json!("unknown.node");
+        assert!(
+            finish
+                .decode()
+                .unwrap()
+                .validate_for(&branch_graph())
+                .is_err()
+        );
         if phase != "preparation" {
-            finish.body["failure_node_id"] = json!("branch/target");
-            assert!(
-                finish
-                    .decode()
-                    .unwrap()
-                    .validate_for(&branch_graph())
-                    .is_err()
-            );
-            finish.body["visited_node_count"] = json!(0);
+            finish
+                .body
+                .as_object_mut()
+                .unwrap()
+                .remove("failure_node_id");
             assert!(finish.decode().is_err());
         }
     }
@@ -520,14 +525,6 @@ fn all_failure_phases_preserve_invocation_and_visited_prefix_boundaries() {
         .as_object_mut()
         .unwrap()
         .remove("failure_node_id");
-    assert!(
-        output_failure
-            .decode()
-            .unwrap()
-            .validate_for(&graph())
-            .is_err()
-    );
-    output_failure.body["visited_node_count"] = json!(1);
     output_failure
         .decode()
         .unwrap()

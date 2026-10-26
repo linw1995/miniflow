@@ -11,6 +11,7 @@ pub mod otlp;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
 pub mod stream;
+pub mod transport;
 pub mod wire;
 
 pub const SNAPSHOT_CAPTURE_ENV: &str = "MF_CAPTURE_SNAPSHOTS";
@@ -18,15 +19,12 @@ pub const SNAPSHOT_CAPTURE_ENV: &str = "MF_CAPTURE_SNAPSHOTS";
 use snafu::{Snafu, ensure};
 
 pub const INSTRUMENTATION_SCOPE: &str = "mf.workflow";
-pub const EVENT_SCHEMA_VERSION: i64 = 1;
-pub const LOOP_EVENT_SCHEMA_VERSION: i64 = 2;
-pub const LEGACY_STREAM_EVENT_SCHEMA_VERSION: i64 = 3;
-pub const STREAM_EVENT_SCHEMA_VERSION: i64 = 4;
-pub const SUCCESS_EVENT_SCHEMA_VERSION: i64 = 5;
-pub const SUCCESS_STREAM_EVENT_SCHEMA_VERSION: i64 = 6;
+pub const EVENT_SCHEMA_VERSION: i64 = 7;
+pub const STREAM_EVENT_SCHEMA_VERSION: i64 = 8;
+/// Combined static nesting bound for ordinary calls and Loop scopes.
+pub const MAX_SCOPE_DEPTH: usize = 20;
 pub const MAX_LOOP_DEPTH: usize = 4;
 pub const MAX_LOOP_ITERATIONS: u16 = 1000;
-pub const MAX_LOOP_SCHEDULED_STEPS: i64 = 10_000;
 
 #[derive(Debug, Snafu)]
 pub enum ContractError {
@@ -89,19 +87,3 @@ impl From<Count> for i64 {
         value.0
     }
 }
-
-pub fn maximum_event_count(node_count: Count) -> Result<Count, ContractError> {
-    node_count
-        .0
-        .checked_mul(2)
-        .and_then(|n| n.checked_add(2))
-        .map(Count)
-        .ok_or_else(|| invalid("node count exceeds lifecycle sequence capacity"))
-}
-
-pub fn maximum_loop_event_count() -> Count {
-    Count(4 * MAX_LOOP_SCHEDULED_STEPS + 4)
-}
-
-/// Combined static nesting bound for ordinary calls and Loop scopes.
-pub const MAX_SCOPE_DEPTH: usize = 20;

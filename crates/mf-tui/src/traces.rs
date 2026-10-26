@@ -1433,10 +1433,18 @@ mod tests {
         let recording = crate::snapshots::TestHistory::memory();
         for value in [42, 73, 99] {
             recording.record(
-                vec![mf_telemetry::event::LoopPathEntry::Loop {
-                    loop_id: "repeat".into(),
-                    index: 2_i64.try_into().unwrap(),
-                }],
+                vec![
+                    mf_telemetry::event::LoopPathEntry::Loop {
+                        loop_id: "repeat".into(),
+                        index: 2_i64.try_into().unwrap(),
+                    },
+                    mf_telemetry::event::LoopPathEntry::Call {
+                        call_id: "outer".into(),
+                    },
+                    mf_telemetry::event::LoopPathEntry::Call {
+                        call_id: "inner".into(),
+                    },
+                ],
                 "same",
                 mf_runtime::NodeSnapshot {
                     inputs: mf_runtime::ValueRef::object([]),
@@ -1512,6 +1520,8 @@ mod tests {
         assert!(
             text.contains("73")
                 && text.contains("Scope: repeat[2]")
+                && text.contains("Call: outer")
+                && text.contains("Call: inner")
                 && text.contains("incomplete")
                 && text.contains("Inspecting selection"),
             "{text}"

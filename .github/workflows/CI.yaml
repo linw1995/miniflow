@@ -38,7 +38,8 @@ jobs:
           ref: ${{ inputs.merge_sha || github.sha }}
       - uses: ./.github/actions/setup-nix
         with:
-          cache-key-name: lint
+          cache-key-name: environment
+          cache-source: "false"
       - name: Run repository hooks
         run: |
           # Flake checks cover Rust formatting, compilation, Clippy, and workflows.
@@ -102,7 +103,8 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/setup-nix
         with:
-          cache-key-name: coverage
+          cache-key-name: environment
+          cache-source: "false"
       - name: Prepare planning Flow
         if: github.event_name == 'pull_request' || inputs.pr != ''
         uses: ./.github/actions/setup-test-planner

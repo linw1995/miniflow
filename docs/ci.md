@@ -54,6 +54,10 @@ complete macOS test execution runs in nightly.
 Nix prepares separate dependency artifacts for the release CLI build, workspace
 Clippy checks, and full nextest suite. Each preparation runs only the Cargo phase
 its consumer needs, with matching package, target, feature, and profile settings.
+Lint and coverage share a Nix development-environment cache keyed by the toolchain,
+flake, and setup action, independent of repository sources. Build checks retain
+source-keyed stores. Nightly first restores its test store, then falls back to the
+same platform's check store to reuse package and Clippy artifacts on a cold run.
 
 Coverage dependencies and generated-project builds use persistent caches.
 Coverage preparation defaults dev/test debug information to zero while retaining
@@ -62,8 +66,10 @@ applied after recording caller inputs, just like coverage instrumentation, so
 default CI and local graph signatures remain compatible.
 Instrumented dependency caches are keyed by toolchain, manifests, coverage settings,
 and compiled package scope; exact hits avoid uploading the same dependencies again.
-Source-dependent generated-project fixtures have a separate per-commit cache under
-`target/coverage-fixtures`, outside the instrumented target's identity cleanup.
+Generated-project dependency and vendor seeds under `target/coverage-fixtures` use
+stable toolchain, manifest, and cache-layout keys. Packaged-project builds use a
+separate source-keyed cache, so source changes do not re-upload the dependency seed.
+Both remain outside the instrumented target's identity cleanup.
 Older caches within the same layout version and runner platform remain dependency
 seeds. Compiler/flag identities, Cargo fingerprints, workspace cleanup, and packaged
 source digests still validate their contents before reuse.
@@ -126,7 +132,8 @@ Caches accelerate compilation without changing which tests execute.
 PR validation generates LCOV and selection/source metadata only. Main, nightly,
 and local runs retain HTML, Cobertura, LCOV, and Markdown reports by default.
 Set `MF_COVERAGE_REPORT_FORMAT=lcov` for compact local reports. Reporting logs
-separate timings for profile collection, binary preparation, grcov, and publication.
+separate timings for profile collection, binary preparation, grcov, publication,
+and removal of the temporary binary view.
 
 CI and nightly prepare and build the selected packages together, run a separate
 `Coverage tests (<package>)` step for each workspace package, and generate one
@@ -280,7 +287,11 @@ A compatible coverage graph can also narrow production changes
 below package scope. Planning resolves the nearest compatible default-branch ancestor
 graph of the comparison base through the same lazy, bounded, ancestry-ordered artifact
 acquisition used for validation records, then maps each changed base-side line range to
-the exact tests that covered it. Files that changed between the graph commit and the
+the exact tests that covered it. Discovery inspects up to the latest 100 successful
+main runs; a full page remains usable, and only candidates within that window are
+considered. Missing compatible evidence still widens conservatively. The CI summary
+includes graph provenance or the acquisition failure reason.
+Files that changed between the graph commit and the
 comparison base, changed ranges with no covering test, and files absent from the graph
 widen back to package plus reverse-dependency scope with per-file reasons. The plan
 records graph provenance (commit, run, attempt, schema version) and every widening under
@@ -391,6 +402,8 @@ source, manifest, definition, and pinned-toolchain identity; cache misses rebuil
 cannot alter selected scope. A separate cache retains Cargo dependencies for both the CLI
 and generated planning runner across source revisions. It prefers matching manifests and
 lockfiles, then falls back within the same pinned toolchain and build configuration.
+Its key excludes the commit SHA because saved checkout artifacts are pruned; exact
+dependency hits avoid re-uploading the same seed after source-only changes.
 The generated project's ownership marker travels with its target directory; CLI version
 and build-layout inputs partition every dependency-cache restore prefix.
 Restored checkout artifacts are removed before building; workspace artifacts and generated

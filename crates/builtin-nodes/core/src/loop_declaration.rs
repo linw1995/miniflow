@@ -164,10 +164,8 @@ impl TaskNode for LoopNode {
                     } else {
                         LoopPassOutcome::Completed
                     };
-                    let visited = Count::try_from(state.scope_visited_steps() as i64)
-                        .expect("scope budget bounds visits");
                     if let Some(run) = state.observation_mut().filter(|run| run.supports_loops()) {
-                        run.loop_pass_finished(path, visited, outcome);
+                        run.loop_pass_finished(path, outcome);
                     }
                     result
                 })

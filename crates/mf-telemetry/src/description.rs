@@ -21,8 +21,6 @@ pub enum WorkflowDescriptionVersion {
     V2026_10_19,
     #[serde(rename = "2026-10-23")]
     V2026_10_23,
-    #[serde(rename = "2026-10-25")]
-    V2026_10_25,
 }
 
 impl WorkflowDescriptionVersion {
@@ -34,21 +32,15 @@ impl WorkflowDescriptionVersion {
     }
 
     pub fn supports_iteration_bodies(self) -> bool {
-        matches!(
-            self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
-        )
+        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
     }
 
     pub fn supports_clusters(self) -> bool {
-        matches!(self, Self::V2026_10_23 | Self::V2026_10_25)
+        self == Self::V2026_10_23
     }
 
     pub fn uses_node_success_edges(self) -> bool {
-        matches!(
-            self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
-        )
+        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
     }
 }
 
@@ -142,26 +134,11 @@ impl WorkflowDescription {
     }
 
     pub fn event_schema_version(&self) -> i64 {
-        if self.version.uses_node_success_edges() {
-            return if self.is_streaming() {
-                crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
-            } else {
-                crate::SUCCESS_EVENT_SCHEMA_VERSION
-            };
+        if self.is_streaming() {
+            crate::STREAM_EVENT_SCHEMA_VERSION
+        } else {
+            crate::EVENT_SCHEMA_VERSION
         }
-        self.execution.as_ref().map_or_else(
-            || match self.version {
-                WorkflowDescriptionVersion::V2026_09_27 => crate::EVENT_SCHEMA_VERSION,
-                WorkflowDescriptionVersion::V2026_10_02 => {
-                    crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION
-                }
-                _ => crate::LOOP_EVENT_SCHEMA_VERSION,
-            },
-            |execution| match execution.mode {
-                ExecutionMode::Single => crate::LOOP_EVENT_SCHEMA_VERSION,
-                ExecutionMode::Stream => crate::STREAM_EVENT_SCHEMA_VERSION,
-            },
-        )
     }
 
     pub fn from_json(input: &[u8]) -> Result<Self, ContractError> {
@@ -211,6 +188,10 @@ impl WorkflowDescription {
         &self,
         path: &[crate::event::ScopePathEntry],
     ) -> Result<(), ContractError> {
+        require(
+            path.is_empty() || self.version.supports_loops(),
+            "scope paths require a description with subgraph support",
+        )?;
         let mut parent = &self.nodes;
         let mut static_path = Vec::new();
         for entry in path {
@@ -220,8 +201,7 @@ impl WorkflowDescription {
                 .ok_or_else(|| crate::invalid("unknown scope container"))?;
             require(
                 if entry.is_call() {
-                    self.version == WorkflowDescriptionVersion::V2026_10_25
-                        && container.kind == "workflow.call"
+                    container.kind == "workflow.call"
                 } else {
                     container.kind == "workflow.loop"
                 },
@@ -238,30 +218,27 @@ impl WorkflowDescription {
 
     /// Lifecycle paths contain Loop and Call scopes; Iteration items use separate detail spans.
     pub fn loop_body(&self, path: &[String]) -> Option<&LoopBodyDescription> {
-        let maximum = if self.version == WorkflowDescriptionVersion::V2026_10_25 {
-            crate::MAX_SCOPE_DEPTH
-        } else {
-            crate::MAX_LOOP_DEPTH
-        };
-        if path.len() > maximum {
+        if path.len() > crate::MAX_SCOPE_DEPTH {
             return None;
         }
-        let (id, parent) = path.split_last()?;
-        let nodes = if parent.is_empty() {
-            &self.nodes
-        } else {
-            &self.loop_body(parent)?.nodes
-        };
-        nodes
-            .iter()
-            .any(|node| {
-                node.id == *id
-                    && (node.kind == "workflow.loop"
-                        || (self.version == WorkflowDescriptionVersion::V2026_10_25
-                            && node.kind == "workflow.call"))
-            })
-            .then(|| self.body(path))
-            .flatten()
+        let mut nodes = &self.nodes;
+        let mut body = None;
+        let mut has_call = false;
+        for (index, id) in path.iter().enumerate() {
+            let container = nodes.iter().find(|node| node.id == *id)?;
+            match container.kind.as_str() {
+                "workflow.call" => has_call = true,
+                "workflow.loop" => {}
+                _ => return None,
+            }
+            if !has_call && index >= crate::MAX_LOOP_DEPTH {
+                return None;
+            }
+            let next = self.body(&path[..=index])?;
+            nodes = &next.nodes;
+            body = Some(next);
+        }
+        body
     }
 
     pub fn validate(&self) -> Result<(), ContractError> {
@@ -279,7 +256,6 @@ impl WorkflowDescription {
             WorkflowDescriptionVersion::V2026_10_03
                 | WorkflowDescriptionVersion::V2026_10_19
                 | WorkflowDescriptionVersion::V2026_10_23
-                | WorkflowDescriptionVersion::V2026_10_25
         ) {
             require(
                 self.execution.is_some(),
@@ -291,11 +267,7 @@ impl WorkflowDescription {
                 "old descriptions cannot declare execution metadata",
             )?;
         }
-        if self.is_streaming() {
-            self.node_count()?;
-        } else {
-            crate::maximum_event_count(self.node_count()?)?;
-        }
+        self.node_count()?;
         if self.version == WorkflowDescriptionVersion::V2026_09_27 {
             require(
                 self.loop_bodies.is_empty(),
@@ -379,23 +351,17 @@ impl WorkflowDescription {
             )?;
             require(orders.insert(edge), "duplicate node-success edge")?;
         }
-        let mut scopes: BTreeMap<Vec<String>, Vec<NodeDescription>> = BTreeMap::new();
-        scopes.insert(Vec::new(), self.nodes.clone());
+        let mut scopes: BTreeMap<Vec<String>, (Vec<NodeDescription>, bool)> = BTreeMap::new();
+        scopes.insert(Vec::new(), (self.nodes.clone(), false));
         let mut bodies: Vec<_> = self.loop_bodies.iter().collect();
         bodies.sort_by_key(|body| body.path.len());
         for body in bodies {
             require(
-                !body.path.is_empty()
-                    && body.path.len()
-                        <= if self.version == WorkflowDescriptionVersion::V2026_10_25 {
-                            crate::MAX_SCOPE_DEPTH
-                        } else {
-                            crate::MAX_LOOP_DEPTH
-                        },
+                !body.path.is_empty() && body.path.len() <= crate::MAX_SCOPE_DEPTH,
                 "invalid Loop body path",
             )?;
             let (loop_id, parent_path) = body.path.split_last().expect("path is nonempty");
-            let parent = scopes
+            let (parent, parent_has_call) = scopes
                 .get(parent_path)
                 .ok_or_else(|| crate::invalid("unknown parent Loop scope"))?;
             let container = parent
@@ -404,8 +370,12 @@ impl WorkflowDescription {
                 .ok_or_else(|| crate::invalid("unknown body container"))?;
             let iteration =
                 self.version.supports_iteration_bodies() && container.kind == "builtin.iteration";
-            let call = self.version == WorkflowDescriptionVersion::V2026_10_25
-                && container.kind == "workflow.call";
+            let call = container.kind == "workflow.call";
+            let has_call = *parent_has_call || call;
+            require(
+                has_call || body.path.len() <= crate::MAX_LOOP_DEPTH,
+                "invalid Loop body path",
+            )?;
             require(
                 container.kind == "workflow.loop" || iteration || call,
                 "body path does not name a supported container",
@@ -443,7 +413,7 @@ impl WorkflowDescription {
             scope.validate()?;
             require(
                 scopes
-                    .insert(body.path.clone(), body.nodes.clone())
+                    .insert(body.path.clone(), (body.nodes.clone(), has_call))
                     .is_none(),
                 "duplicate Loop body path",
             )?;

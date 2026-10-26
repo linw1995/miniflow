@@ -1419,9 +1419,9 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | d details | ? help | {controls}",
+            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | d details | ? help | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
-            lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
+            snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
         draw_help(frame, view_state);
     }).context(TerminalSnafu)?;
@@ -1884,12 +1884,6 @@ fn details_text(
                 stream.hidden_invocations
             ));
         }
-        if stream.unverified_retransmissions != 0 {
-            details.push_str(&format!(
-                "Retransmissions outside verification coverage: {}\n",
-                stream.unverified_retransmissions
-            ));
-        }
         let unresolved = stream
             .invocations
             .iter()
@@ -1905,6 +1899,12 @@ fn details_text(
             snapshot.hidden_loop_passes
         ));
     }
+    if snapshot.lifecycle.unverified_retransmissions != 0 {
+        details.push_str(&format!(
+            "Retransmissions outside verification coverage: {}\n",
+            snapshot.lifecycle.unverified_retransmissions
+        ));
+    }
     if snapshot.lifecycle.final_sequence.is_none() {
         details.push_str("Final lifecycle boundary missing\n");
     }
@@ -1912,6 +1912,12 @@ fn details_text(
         details.push_str(&format!(
             "Workflow failure ({:?}): {}\n",
             failure.phase, failure.message
+        ));
+    }
+    if snapshot.observation.retention_overflows != 0 {
+        details.push_str(&format!(
+            "Observation retention limit reached: {}\n",
+            snapshot.observation.retention_overflows
         ));
     }
     if snapshot.traces.local_drops != 0 {
@@ -2268,10 +2274,7 @@ impl ObservationView {
             .filter(|node| {
                 matches!(
                     node.status,
-                    NodeStatus::Succeeded
-                        | NodeStatus::Failed
-                        | NodeStatus::Skipped
-                        | NodeStatus::NotRun
+                    NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Skipped
                 )
             })
             .count();
@@ -2308,11 +2311,8 @@ impl ObservationView {
             graph,
         );
         frame.render_widget(
-            Paragraph::new(format!(
-                "Observation: {:?}",
-                snapshot.lifecycle.completeness
-            ))
-            .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!("Delivery: {:?}", snapshot.lifecycle.completeness))
+                .style(Style::default().fg(Color::DarkGray)),
             footer,
         );
     }
@@ -2721,6 +2721,7 @@ mod tests {
             }],
             ..Default::default()
         });
+        snapshot.lifecycle.unverified_retransmissions = 1;
         let capture = CaptureView {
             stdout_open: false,
             stderr_open: false,
@@ -2729,6 +2730,7 @@ mod tests {
             error: None,
         };
         let text = details_text(snapshot.nodes.first(), None, &snapshot, &capture, "");
+        assert!(text.contains("Retransmissions outside verification coverage: 1"));
         assert!(text.contains("Status: Interrupted"));
         assert!(text.contains("Node observation may be incomplete"));
         assert!(text.contains("Unresolved invocation outcomes: 1"));
@@ -2736,6 +2738,10 @@ mod tests {
         let text = details_text(None, None, &snapshot, &capture, "");
         assert!(!text.contains("Node observation may be incomplete"));
         assert!(text.contains("Unresolved invocation outcomes: 1"));
+
+        snapshot.stream = None;
+        let text = details_text(None, None, &snapshot, &capture, "");
+        assert!(text.contains("Retransmissions outside verification coverage: 1"));
     }
 
     #[test]
@@ -3293,6 +3299,94 @@ mod tests {
     }
 
     #[test]
+    fn call_views_navigate_and_follow_child_node_identity() {
+        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "c".repeat(64)),
+            "execution":{"mode":"single"}, "nodes":[{"id":"call", "kind":"workflow.call"}],
+            "execution_order":["call"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[{
+                "path":["call"], "nodes":[{"id":"leaf", "kind":"fixture.task"}],
+                "execution_order":["leaf"], "data_edges":[], "control_edges":[]
+            }]
+        }))
+        .unwrap();
+        let root = GraphLayout::new(&description).unwrap();
+        let path = vec!["call".to_owned()];
+        let bodies = BTreeMap::from([(
+            path.clone(),
+            GraphLayout::from_loop_body(&description, &path).unwrap(),
+        )]);
+        let run = RunId::new();
+        let mut session = crate::state::SessionState::new(description.clone(), run).unwrap();
+        let scope = vec![LoopPathEntry::Call {
+            call_id: "call".into(),
+        }];
+        for (sequence, event) in [
+            (
+                1,
+                LifecycleKind::WorkflowStarted {
+                    elapsed_ns: Count::ZERO,
+                },
+            ),
+            (
+                2,
+                LifecycleKind::CallStarted {
+                    path: scope.clone(),
+                    elapsed_ns: Count::ZERO,
+                },
+            ),
+            (
+                3,
+                LifecycleKind::NodeStarted {
+                    node: mf_telemetry::event::NodeIdentity {
+                        id: "leaf".into(),
+                        kind: "fixture.task".into(),
+                        path: scope,
+                    },
+                    position: Count::ZERO,
+                    elapsed_ns: Count::ZERO,
+                    selected_inputs: vec![],
+                },
+            ),
+        ] {
+            session
+                .apply(LifecycleEvent {
+                    workflow_id: description.workflow_id.clone(),
+                    run_id: run,
+                    sequence: Count::try_from(sequence).unwrap(),
+                    event,
+                })
+                .unwrap();
+        }
+        let snapshot = session.snapshot();
+        let mut view = ViewState::default();
+        view.handle_key(
+            KeyCode::Char('l'),
+            &snapshot,
+            &root,
+            &bodies,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(view.path, path);
+        assert!(view.pass(&snapshot).unwrap().path[0].is_call());
+        view.follow_latest(&snapshot, view.layout(&root, &bodies));
+        assert_eq!(
+            view.layout(&root, &bodies).nodes()[view.selected].id,
+            "leaf"
+        );
+        view.handle_key(
+            KeyCode::Char('h'),
+            &snapshot,
+            &root,
+            &bodies,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert!(view.path.is_empty());
+    }
+
+    #[test]
     fn loop_views_preserve_navigation_and_compacted_stream_totals() {
         let description = WorkflowDescription {
             order_edges: Vec::new(),
@@ -3347,7 +3441,6 @@ mod tests {
             (
                 1,
                 LifecycleKind::WorkflowStarted {
-                    node_count: count(3),
                     elapsed_ns: Count::ZERO,
                 },
             ),

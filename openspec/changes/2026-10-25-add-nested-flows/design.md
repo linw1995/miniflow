@@ -25,9 +25,14 @@ Dynamic execution and generated calls use the same prepared-body interface and i
 
 ## Observation and compatibility
 
-The new description version recognizes call bodies. Invocation paths distinguish calls from loop passes;
-container node lifecycle bounds the child scope. Captures and TUI graph navigation retain nested identity
-without emitting fake Loop lifecycle events. Old definitions retain their existing format and behavior.
+Workflow definitions use version 2026-10-25 for Flow sources and calls, while descriptions reuse the
+existing 2026-10-23 schema and its Call scope support. Invocation paths include every enclosing Call
+and Loop. Container node lifecycle bounds the child scope, and Iteration calls retain their detail
+spans. Captures and TUI navigation consume the existing scope contracts.
+
+Transport owns sequence and delivery integrity. Call execution does not maintain observation-only
+visited counters or restore legacy lifecycle fields. The shared scheduled-step budget remains an
+execution resource limit, independent of transport completeness.
 
 ## Built-in title Flow
 
