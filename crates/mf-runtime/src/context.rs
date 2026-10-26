@@ -26,7 +26,6 @@ pub struct ExecutionScope {
     types: BTreeMap<String, crate::ValueType>,
     index: usize,
     exit_requested: bool,
-    visited_steps: Arc<AtomicUsize>,
 }
 
 impl ExecutionScope {
@@ -47,7 +46,6 @@ impl ExecutionScope {
             types,
             index,
             exit_requested: false,
-            visited_steps: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -900,12 +898,6 @@ impl ExecutionContext {
         self.scopes.last().is_some_and(|frame| frame.exit_requested)
     }
 
-    pub fn scope_visited_steps(&self) -> usize {
-        self.scopes
-            .last()
-            .map_or(0, |scope| scope.visited_steps.load(Ordering::Acquire))
-    }
-
     pub(crate) fn stage_scope_write(
         &mut self,
         variable: &str,
@@ -956,11 +948,7 @@ impl ExecutionContext {
     }
 
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
-        self.remaining_steps.reserve(id)?;
-        if let Some(frame) = self.scopes.last_mut() {
-            frame.visited_steps.fetch_add(1, Ordering::AcqRel);
-        }
-        Ok(())
+        self.remaining_steps.reserve(id)
     }
 
     fn commit_pending_loop_write(&mut self) {

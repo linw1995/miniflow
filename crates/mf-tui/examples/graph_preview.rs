@@ -280,7 +280,6 @@ fn scheduled_events(
             0,
             1,
             Event::WorkflowStarted {
-                node_count: count(4),
                 elapsed_ns: count(0),
             },
         ),
@@ -378,16 +377,10 @@ fn scheduled_events(
             3500,
             9,
             Event::WorkflowFinished {
-                final_sequence: count(9),
                 elapsed_ns: count(3_500_000_000),
-                visited_node_count: count(4),
                 outcome: Outcome::Succeeded,
                 failure_node_id: None,
                 failure: None,
-                top_level_visited_count: description
-                    .version
-                    .supports_iteration_bodies()
-                    .then_some(count(4)),
             },
         ),
     ]

@@ -1,6 +1,6 @@
 //! Bounded delivery evidence for a single sequenced transport stream.
 
-use crate::Count;
+use crate::{ContractError, Count, require};
 use snafu::{Snafu, ensure};
 use std::collections::BTreeMap;
 
@@ -254,5 +254,66 @@ impl<W: PartialEq> DeliveryTracker<W> {
             (Some(_), true) => Completeness::Incomplete,
         };
         snapshot
+    }
+}
+
+/// Reserves delivery identity before encoding, independently of workflow structure.
+#[derive(Debug)]
+pub struct EventSequence {
+    next: Option<i64>,
+    closed: bool,
+}
+
+impl Default for EventSequence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventSequence {
+    pub fn new() -> Self {
+        Self {
+            next: Some(1),
+            closed: false,
+        }
+    }
+
+    pub fn reserve(&mut self) -> Result<Count, ContractError> {
+        require(!self.closed, "delivery sequence is closed")?;
+        let value = self
+            .next
+            .ok_or_else(|| crate::invalid("delivery sequence is exhausted"))?;
+        self.next = value.checked_add(1);
+        Count::try_from(value)
+    }
+
+    pub fn finish(&mut self) -> Result<Count, ContractError> {
+        require(self.next != Some(1), "delivery sequence has not started")?;
+        let sequence = self.reserve()?;
+        self.closed = true;
+        Ok(sequence)
+    }
+}
+
+#[cfg(test)]
+mod sequence_tests {
+    use super::*;
+
+    #[test]
+    fn finalizes_or_reports_exhaustion_without_wrapping() {
+        let mut terminal = EventSequence {
+            next: Some(i64::MAX),
+            closed: false,
+        };
+        assert_eq!(terminal.finish().unwrap().get(), i64::MAX);
+        assert!(terminal.reserve().is_err());
+        assert!(terminal.finish().is_err());
+        let mut exhausted = EventSequence {
+            next: Some(i64::MAX),
+            closed: false,
+        };
+        assert_eq!(exhausted.reserve().unwrap().get(), i64::MAX);
+        assert!(exhausted.reserve().is_err());
+        assert!(exhausted.finish().is_err());
     }
 }

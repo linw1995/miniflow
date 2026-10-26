@@ -411,7 +411,7 @@ fn startup_loop_observation_needs_no_synthetic_message_or_source() {
     let events = records(&harness);
     for (index, event) in events.iter().enumerate() {
         assert_eq!(event.sequence.get(), index as i64 + 1);
-        assert_eq!(event.schema_version, 4);
+
         if let Some(identity) = &event.identity {
             assert_eq!(identity.trigger, StreamTrigger::Startup);
             assert!(identity.message.is_none());
@@ -801,7 +801,7 @@ fn stream_sequences_outlive_the_legacy_run_budget_and_close_exactly_once() {
         .filter(|record| record.scope == INSTRUMENTATION_SCOPE);
     assert_eq!(events.clone().count(), 40_022);
     let last = StreamRecord::decode(events.next_back().unwrap()).unwrap();
-    assert!(last.sequence > mf_telemetry::maximum_loop_event_count());
+    assert_eq!(last.sequence.get(), 40_022);
     let wire = captured.last().unwrap();
     assert_eq!(StreamRecord::decode(wire).unwrap(), last);
     assert!(wire.decode().is_err());

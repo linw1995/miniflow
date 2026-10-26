@@ -2270,10 +2270,7 @@ impl ObservationView {
             .filter(|node| {
                 matches!(
                     node.status,
-                    NodeStatus::Succeeded
-                        | NodeStatus::Failed
-                        | NodeStatus::Skipped
-                        | NodeStatus::NotRun
+                    NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Skipped
                 )
             })
             .count();
@@ -3343,7 +3340,6 @@ mod tests {
             (
                 1,
                 LifecycleKind::WorkflowStarted {
-                    node_count: count(3),
                     elapsed_ns: Count::ZERO,
                 },
             ),

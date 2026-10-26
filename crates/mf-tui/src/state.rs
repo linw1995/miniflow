@@ -14,7 +14,6 @@ use mf_telemetry::{
         LoopStopReason, LoopSummary, NodeIdentity, Outcome, SkipCause,
     },
     identity::RunId,
-    maximum_event_count, maximum_loop_event_count,
     transport::{DeliveryAdmission, DeliveryError, DeliveryTracker},
 };
 use sha2::{Digest, Sha256};
@@ -31,6 +30,7 @@ const MAX_VISIBLE_PORTS: usize = 32;
 const MAX_PORT_NAME_BYTES: usize = 128;
 const MAX_FAILURE_MESSAGE_BYTES: usize = 4096;
 const MAX_MISSING_RANGES: usize = 64;
+const MAX_WITNESSES: usize = 4096;
 pub const MAX_SESSION_NODES: usize = 10_000;
 const MAX_RECENT_LOOP_PASSES: usize = 64;
 
@@ -41,17 +41,13 @@ pub enum NodeStatus {
     Succeeded,
     Failed,
     Skipped,
-    NotRun,
     Unknown,
     Interrupted,
 }
 
 impl NodeStatus {
     fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Succeeded | Self::Failed | Self::Skipped | Self::NotRun
-        )
+        matches!(self, Self::Succeeded | Self::Failed | Self::Skipped)
     }
 }
 
@@ -129,7 +125,6 @@ pub struct LoopPassObservation {
     pub nodes: Vec<NodeObservation>,
     pub started: bool,
     pub outcome: Option<LoopPassOutcome>,
-    pub visited_node_count: Option<Count>,
     pub interrupted: bool,
     pub stream_invocation: Option<u64>,
     pub compact_statuses: Vec<Option<NodeStatus>>,
@@ -156,21 +151,11 @@ impl LoopPassObservation {
                 if !observed.contains_key(id) {
                     if let Some(Some(status)) = self.compact_statuses.get(position) {
                         node.status = *status;
-                    } else if self.stream_invocation.is_some()
-                        && self
-                            .visited_node_count
-                            .is_some_and(|visited| (position as i64) < visited.get())
-                    {
+                    } else if self.outcome.is_some() || self.interrupted {
                         node.status = NodeStatus::Unknown;
                     }
                 }
-                if self
-                    .visited_node_count
-                    .is_some_and(|visited| position as i64 >= visited.get())
-                    && node.status == NodeStatus::Pending
-                {
-                    node.status = NodeStatus::NotRun;
-                } else if self.interrupted {
+                if self.interrupted {
                     if node.status == NodeStatus::Pending {
                         node.status = NodeStatus::Unknown;
                     } else if node.status == NodeStatus::Running {
@@ -228,8 +213,6 @@ pub enum Admission {
 
 #[derive(Debug, Snafu)]
 pub enum StateError {
-    #[snafu(display("streaming observation requires a compatible streaming consumer"))]
-    UnsupportedStream,
     #[snafu(display("invalid lifecycle event: {message}"))]
     InvalidEvent { message: String },
     #[snafu(display("invalid workflow description: {source}"))]
@@ -261,7 +244,6 @@ pub struct SessionState {
     node_positions: BTreeMap<String, usize>,
     nodes: Vec<NodeObservation>,
     latest_node_event: Option<NodeEventFocus>,
-    max_sequence: Count,
     delivery: DeliveryTracker<SequenceWitness>,
     final_boundary: Option<FinalBoundary>,
     protocol_conflicts: u64,
@@ -282,15 +264,12 @@ struct PassState {
     first_sequence: Option<Count>,
     started_sequence: Option<Count>,
     terminal_sequence: Option<Count>,
-    visited_node_count: Option<Count>,
     outcome: Option<LoopPassOutcome>,
     nodes: BTreeMap<String, NodeObservation>,
 }
 
 #[derive(Clone)]
 struct FinalBoundary {
-    sequence: Count,
-    visited: Count,
     outcome: Outcome,
     failure_node_id: Option<String>,
     failure: Option<Failure>,
@@ -304,15 +283,6 @@ struct SequenceWitness {
 
 impl SessionState {
     pub fn new(description: WorkflowDescription, run_id: RunId) -> Result<Self, StateError> {
-        if description.is_streaming()
-            && !matches!(
-                description.event_schema_version(),
-                mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
-                    | mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
-            )
-        {
-            return UnsupportedStreamSnafu.fail();
-        }
         description.validate().context(DescriptionSnafu)?;
         if description
             .static_node_count()
@@ -324,12 +294,6 @@ impl SessionState {
                 limit: MAX_SESSION_NODES,
             });
         }
-        let max_sequence = if description.version.supports_loops() {
-            maximum_loop_event_count()
-        } else {
-            maximum_event_count(description.node_count().context(DescriptionSnafu)?)
-                .context(DescriptionSnafu)?
-        };
         let described: BTreeMap<_, _> = description
             .nodes
             .iter()
@@ -359,8 +323,7 @@ impl SessionState {
             node_positions,
             nodes,
             latest_node_event: None,
-            max_sequence,
-            delivery: DeliveryTracker::new(max_sequence.get() as usize),
+            delivery: DeliveryTracker::new(MAX_WITNESSES),
             final_boundary: None,
             protocol_conflicts: 0,
             observation_errors: 0,
@@ -444,16 +407,7 @@ impl SessionState {
             self.note("ignored event from another workflow or run");
             return Ok(Admission::UnrelatedRun);
         }
-        if event.sequence > self.max_sequence {
-            return Err(StateError::Event {
-                source: ContractError::Invalid {
-                    message: "sequence exceeds graph event bound".into(),
-                },
-            });
-        }
-        event
-            .validate_for_validated_description(&self.description)
-            .context(EventSnafu)?;
+        event.validate().context(EventSnafu)?;
         let encoded = serde_json::to_vec(&event.event).context(SerializeSnafu)?;
         if encoded.len() > MAX_EVENT_BYTES {
             return Err(StateError::TooLarge {
@@ -498,6 +452,14 @@ impl SessionState {
             DeliveryAdmission::New => {}
         }
         self.invalidate_snapshot();
+        event
+            .validate_for_validated_description(&self.description)
+            .context(EventSnafu)
+            .inspect_err(|_| {
+                self.record_observation_error(
+                    "lifecycle event disagrees with the workflow description",
+                )
+            })?;
         let conflicted = if matches!(
             &event.event,
             Event::LoopPassStarted { .. } | Event::LoopPassFinished { .. }
@@ -706,7 +668,6 @@ impl SessionState {
                     nodes: state.nodes.values().cloned().collect(),
                     started: state.started_sequence.is_some(),
                     outcome: state.outcome,
-                    visited_node_count: state.visited_node_count,
                     interrupted: self.closed && self.final_boundary.is_none(),
                     stream_invocation: None,
                     compact_statuses: Vec::new(),
@@ -782,13 +743,6 @@ impl SessionState {
             | Event::NodeSkipped { node, .. } => &node.path,
             _ => return false,
         };
-        let body_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
-        let body_len = self
-            .description
-            .loop_body(&body_path)
-            .expect("validated event has a body")
-            .nodes
-            .len();
         let mut violation = None;
         let pass = self.ensure_pass(path, sequence);
         match event {
@@ -803,22 +757,15 @@ impl SessionState {
                     pass.started_sequence = Some(sequence);
                 }
             }
-            Event::LoopPassFinished {
-                visited_node_count,
-                outcome,
-                ..
-            } => {
+            Event::LoopPassFinished { outcome, .. } => {
                 if pass.terminal_sequence.is_some()
                     || pass
                         .started_sequence
                         .is_some_and(|started| sequence < started)
-                    || (*outcome == LoopPassOutcome::Completed
-                        && visited_node_count.get() != body_len as i64)
                 {
                     violation = Some("Loop pass has a conflicting finish boundary");
                 } else {
                     pass.terminal_sequence = Some(sequence);
-                    pass.visited_node_count = Some(*visited_node_count);
                     pass.outcome = Some(*outcome);
                 }
             }
@@ -946,10 +893,7 @@ impl SessionState {
                 node, elapsed_ns, ..
             } => {
                 let position = self.node_positions[&node.id];
-                let final_sequence = self
-                    .final_boundary
-                    .as_ref()
-                    .map(|boundary| boundary.sequence);
+                let finalized = self.final_boundary.is_some();
                 let observed = &mut self.nodes[position];
                 if observed.started_sequence.is_some() {
                     self.conflict("node started more than once", event.node());
@@ -963,11 +907,7 @@ impl SessionState {
                     NodeStatus::Unknown if observed.terminal_sequence.is_none() => {
                         observed.last_known = Some(NodeStatus::Running);
                     }
-                    NodeStatus::Failed
-                        if observed.terminal_sequence.is_none()
-                            && final_sequence
-                                .is_some_and(|final_sequence| sequence < final_sequence) =>
-                    {
+                    NodeStatus::Failed if observed.terminal_sequence.is_none() && finalized => {
                         observed.last_known = Some(NodeStatus::Running);
                     }
                     _ if observed
@@ -1058,9 +998,6 @@ impl SessionState {
                 false
             }
             Event::WorkflowFinished {
-                final_sequence,
-                visited_node_count,
-                top_level_visited_count,
                 outcome,
                 failure_node_id,
                 failure,
@@ -1071,8 +1008,6 @@ impl SessionState {
                     return true;
                 }
                 self.final_boundary = Some(FinalBoundary {
-                    sequence: *final_sequence,
-                    visited: top_level_visited_count.unwrap_or(*visited_node_count),
                     outcome: *outcome,
                     failure_node_id: failure_node_id.clone(),
                     failure: failure.clone(),
@@ -1088,7 +1023,7 @@ impl SessionState {
             return;
         };
         let mut contradictions = 0u64;
-        for (position, node) in self.nodes.iter_mut().enumerate() {
+        for node in &mut self.nodes {
             if node.status == NodeStatus::Failed
                 && boundary.failure_node_id.as_deref() != Some(node.id.as_str())
             {
@@ -1117,21 +1052,13 @@ impl SessionState {
                 }
                 continue;
             }
-            if position as i64 >= boundary.visited.get() {
-                if node.status == NodeStatus::Pending {
-                    node.status = NodeStatus::NotRun;
-                } else {
-                    node.conflicted = true;
-                    self.protocol_conflicts = self.protocol_conflicts.saturating_add(1);
-                    contradictions += 1;
-                }
-            } else if matches!(node.status, NodeStatus::Pending | NodeStatus::Running) {
+            if matches!(node.status, NodeStatus::Pending | NodeStatus::Running) {
                 node.last_known = Some(node.status);
                 node.status = NodeStatus::Unknown;
             }
         }
         if contradictions != 0 {
-            self.note("final visited prefix contradicted node evidence");
+            self.note("workflow outcome contradicted node evidence");
         }
     }
 

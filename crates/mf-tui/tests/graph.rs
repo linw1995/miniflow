@@ -956,7 +956,6 @@ fn graph_renders_blocks_edges_and_running_elapsed_time() {
             run_id,
             sequence: count(1),
             event: Event::WorkflowStarted {
-                node_count: count(6),
                 elapsed_ns: count(0),
             },
         })

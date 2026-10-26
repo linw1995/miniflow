@@ -130,7 +130,6 @@ fn finite_runner_isolates_noisy_plugins_and_survives_without_build_inputs() {
                     records.first().unwrap()["event_name"],
                     "mf.workflow.started"
                 );
-                assert_eq!(records.first().unwrap()["body"]["node_count"], 1);
                 assert_eq!(
                     records.last().unwrap()["event_name"],
                     "mf.workflow.finished"

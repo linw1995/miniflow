@@ -1,13 +1,14 @@
 //! Caller-owned OTel instrumentation for one synchronous workflow invocation.
 
 use crate::{
-    ContractError, Count, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE,
+    ContractError, Count, INSTRUMENTATION_SCOPE,
     description::WorkflowDescription,
     event::{
-        Event, EventSequence, Failure, FailurePhase, InputSelection, LifecycleEvent,
-        LoopPassOutcome, LoopPathEntry, LoopSummary, NodeIdentity, Outcome, SkipCause,
+        Event, Failure, FailurePhase, InputSelection, LifecycleEvent, LoopPassOutcome,
+        LoopPathEntry, LoopSummary, NodeIdentity, Outcome, SkipCause,
     },
     identity::{RunId, WorkflowId},
+    transport::EventSequence,
     wire::{TraceContext, WireRecord},
 };
 use opentelemetry::{
@@ -21,7 +22,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -221,25 +222,7 @@ impl Observer {
         nodes: Vec<NodeIdentity>,
         description: Option<WorkflowDescription>,
     ) -> Result<RunObservation, ContractError> {
-        let node_count = Count::try_from(
-            i64::try_from(nodes.len()).map_err(|_| crate::invalid("too many nodes"))?,
-        )?;
-        let loop_schema = description.as_ref().is_some_and(|description| {
-            description.version.supports_loops() && !description.is_streaming()
-        });
-        let static_count = if loop_schema {
-            description
-                .as_ref()
-                .expect("Loop description exists")
-                .static_node_count()?
-        } else {
-            node_count
-        };
-        let sequence = if loop_schema {
-            EventSequence::with_maximum(crate::maximum_loop_event_count())
-        } else {
-            EventSequence::new(node_count)?
-        };
+        let sequence = EventSequence::new();
         let mut index = BTreeMap::new();
         for (position, node) in nodes.into_iter().enumerate() {
             crate::require(
@@ -270,11 +253,9 @@ impl Observer {
             workflow_id,
             run_id,
             nodes: Arc::new(index),
-            sequence: Arc::new(Mutex::new(sequence)),
+            sequence: Some(Arc::new(Mutex::new(sequence))),
             started,
             context,
-            visited: Arc::new(AtomicI64::new(0)),
-            visited_steps: Arc::new(AtomicI64::new(0)),
             description: description.map(Arc::new),
             failure: Arc::new(Mutex::new(None)),
             node_failures: Arc::new(Mutex::new(BTreeMap::new())),
@@ -284,7 +265,6 @@ impl Observer {
         };
         run.record(
             Event::WorkflowStarted {
-                node_count: static_count,
                 elapsed_ns: Count::ZERO,
             },
             None,
@@ -298,11 +278,9 @@ pub struct RunObservation {
     workflow_id: WorkflowId,
     run_id: RunId,
     nodes: Arc<BTreeMap<String, (Count, NodeIdentity)>>,
-    sequence: Arc<Mutex<EventSequence>>,
+    sequence: Option<Arc<Mutex<EventSequence>>>,
     started: Instant,
     context: Context,
-    visited: Arc<AtomicI64>,
-    visited_steps: Arc<AtomicI64>,
     description: Option<Arc<WorkflowDescription>>,
     failure: Arc<Mutex<FailureState>>,
     node_failures: Arc<Mutex<BTreeMap<String, Failure>>>,
@@ -318,11 +296,9 @@ impl Clone for RunObservation {
             workflow_id: self.workflow_id.clone(),
             run_id: self.run_id,
             nodes: Arc::clone(&self.nodes),
-            sequence: Arc::clone(&self.sequence),
+            sequence: self.sequence.clone(),
             started: self.started,
             context: self.context.clone(),
-            visited: Arc::clone(&self.visited),
-            visited_steps: Arc::clone(&self.visited_steps),
             description: self.description.clone(),
             failure: Arc::clone(&self.failure),
             node_failures: Arc::clone(&self.node_failures),
@@ -337,7 +313,6 @@ impl fmt::Debug for RunObservation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RunObservation")
             .field("run_id", &self.run_id)
-            .field("visited", &self.visited.load(Ordering::Acquire))
             .field("closed", &self.closed.load(Ordering::Acquire))
             .finish_non_exhaustive()
     }
@@ -426,17 +401,8 @@ impl RunObservation {
         }
     }
 
-    /// Marks a scheduled step as visited before resolving dependencies.
     pub fn begin_node(&mut self, id: &str) -> Option<NodeObservation> {
-        let step = self.span(id)?;
-        self.visited
-            .fetch_max(step.position.get() + 1, Ordering::AcqRel);
-        self.visited_steps
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .ok()?;
-        Some(step)
+        self.span(id)
     }
 
     pub fn begin_invocation(
@@ -461,11 +427,6 @@ impl RunObservation {
             },
             position,
         );
-        self.visited_steps
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .ok()?;
         Some(step)
     }
 
@@ -627,18 +588,12 @@ impl RunObservation {
         );
     }
 
-    pub fn loop_pass_finished(
-        &mut self,
-        path: Vec<LoopPathEntry>,
-        visited_node_count: Count,
-        outcome: LoopPassOutcome,
-    ) {
+    pub fn loop_pass_finished(&mut self, path: Vec<LoopPathEntry>, outcome: LoopPassOutcome) {
         let current = Context::current();
         self.record(
             Event::LoopPassFinished {
                 path,
                 elapsed_ns: self.elapsed(),
-                visited_node_count,
                 outcome,
             },
             Some(&current),
@@ -677,7 +632,13 @@ impl RunObservation {
                 .span()
                 .set_attribute(KeyValue::new("mf.outcome", "succeeded"));
         }
-        let sequence = self.sequence.lock().unwrap().finish();
+        let sequence = self
+            .sequence
+            .as_ref()
+            .expect("finite run has a delivery sequence")
+            .lock()
+            .unwrap()
+            .finish();
         self.backend
             .finish_diagnostics(&self.workflow_id, self.run_id);
         if let Ok(sequence) = sequence {
@@ -688,19 +649,7 @@ impl RunObservation {
             self.emit(
                 sequence,
                 Event::WorkflowFinished {
-                    final_sequence: sequence,
                     elapsed_ns: self.elapsed(),
-                    visited_node_count: if self.description.is_some() {
-                        Count::try_from(self.visited_steps.load(Ordering::Acquire))
-                            .expect("visited step count is bounded")
-                    } else {
-                        Count::try_from(self.visited.load(Ordering::Acquire))
-                            .expect("visited node position is bounded")
-                    },
-                    top_level_visited_count: self.description.as_ref().map(|_| {
-                        Count::try_from(self.visited.load(Ordering::Acquire))
-                            .expect("visited node position is bounded")
-                    }),
                     outcome,
                     failure_node_id,
                     failure,
@@ -719,7 +668,14 @@ impl RunObservation {
             stream.record(event, context.unwrap_or(&self.context));
             return;
         }
-        if let Ok(sequence) = self.sequence.lock().unwrap().reserve() {
+        if let Ok(sequence) = self
+            .sequence
+            .as_ref()
+            .expect("finite run has a delivery sequence")
+            .lock()
+            .unwrap()
+            .reserve()
+        {
             self.emit(sequence, event, context.unwrap_or(&self.context));
         }
     }
@@ -744,15 +700,7 @@ impl RunObservation {
             sequence,
             event,
         };
-        let schema_version = self
-            .description
-            .as_ref()
-            .map_or(EVENT_SCHEMA_VERSION, |description| {
-                description.event_schema_version()
-            });
-        if let Ok(record) =
-            WireRecord::from_event_with_version(&event, schema_version, timestamp, trace_context)
-        {
+        if let Ok(record) = WireRecord::from_event(&event, timestamp, trace_context) {
             let _ = self.backend.emit_lifecycle(&record);
         }
     }
