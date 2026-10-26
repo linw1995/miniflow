@@ -122,7 +122,11 @@ impl WireRecord {
             .clone();
         require(
             !body.contains_key("node")
-                && (!body.contains_key("outcome") || self.event_name == "mf.loop.pass.finished"),
+                && (!body.contains_key("outcome")
+                    || matches!(
+                        self.event_name.as_str(),
+                        "mf.loop.pass.finished" | "mf.call.finished"
+                    )),
             "routing fields belong in attributes",
         )?;
         if self.event_name.starts_with("mf.node.") {

@@ -720,7 +720,7 @@ impl ExecutionContext {
     pub fn scope_path(&self) -> Vec<LoopPathEntry> {
         self.scopes
             .iter()
-            .map(|scope| LoopPathEntry {
+            .map(|scope| LoopPathEntry::Loop {
                 loop_id: scope.node_id.clone(),
                 index: mf_telemetry::Count::try_from(scope.index as i64)
                     .expect("scope index is bounded"),
@@ -1467,7 +1467,7 @@ mod tests {
                     let path = child.invocation_path();
                     assert_eq!(
                         path.iter()
-                            .map(|entry| (entry.loop_id.as_str(), entry.index.get()))
+                            .map(|entry| (entry.node_id(), entry.index().get()))
                             .collect::<Vec<_>>(),
                         [("outer", 2), ("inner", 3)]
                     );

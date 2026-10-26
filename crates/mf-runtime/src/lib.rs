@@ -71,7 +71,7 @@ pub use loop_node::{
     prepared_scope_source,
 };
 pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
-pub use mf_telemetry::event::{NodeIdentity, SkipCause};
+pub use mf_telemetry::event::{NodeIdentity, ScopePathEntry, SkipCause};
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{

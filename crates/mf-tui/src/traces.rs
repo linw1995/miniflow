@@ -691,11 +691,15 @@ fn data_preview(
         let metadata = &snapshot.metadata[index];
         text.push_str(&format!("{}\n", data_row(entry, metadata)));
         for scope in &entry.scope {
-            text.push_str(&format!(
-                "Scope: {}[{}]\n",
-                label(&scope.loop_id),
-                scope.index.get()
-            ));
+            if scope.is_call() {
+                text.push_str(&format!("Call: {}\n", label(scope.node_id())));
+            } else {
+                text.push_str(&format!(
+                    "Scope: {}[{}]\n",
+                    label(scope.node_id()),
+                    scope.index().get()
+                ));
+            }
         }
         if let Some((trace, span)) = &metadata.correlation {
             text.push_str(&format!("Trace={} span={}\n", hex(trace), hex(span)));
@@ -1429,7 +1433,7 @@ mod tests {
         let recording = crate::snapshots::TestHistory::memory();
         for value in [42, 73, 99] {
             recording.record(
-                vec![mf_telemetry::event::LoopPathEntry {
+                vec![mf_telemetry::event::LoopPathEntry::Loop {
                     loop_id: "repeat".into(),
                     index: 2_i64.try_into().unwrap(),
                 }],
@@ -1515,6 +1519,56 @@ mod tests {
         assert!(list.navigate(KeyCode::Char('f'), &rows, &snapshot));
         assert_eq!(list.position(&rows, &snapshot), 3);
         assert!(data_preview(Some(3), &snapshot, true, false).contains("Native context absent"));
+    }
+
+    #[test]
+    fn call_snapshot_previews_preserve_nested_identity_and_redact_values() {
+        let recording = Arc::new(crate::snapshots::TestHistory::memory());
+        let captured = recording.clone();
+        let recorder = mf_runtime::SnapshotRecorder::new(move |event| {
+            captured.record(event.scope, &event.node, event.snapshot);
+        });
+        recorder.record(mf_runtime::SnapshotEvent {
+            scope: vec![
+                mf_telemetry::event::ScopePathEntry::Call {
+                    call_id: "title".into(),
+                },
+                mf_telemetry::event::ScopePathEntry::Call {
+                    call_id: "nested".into(),
+                },
+            ],
+            node: "leaf".into(),
+            snapshot: mf_runtime::NodeSnapshot {
+                inputs: mf_runtime::ValueRef::object([(
+                    "token".into(),
+                    mf_runtime::ValueRef::from("synthetic-credential").into_secret(),
+                )]),
+                outputs: mf_runtime::ValueRef::object([(
+                    "token".into(),
+                    mf_runtime::ValueRef::from("synthetic-credential").into_secret(),
+                )]),
+                skipped: Arc::from([]),
+                outcome: mf_runtime::SnapshotOutcome::Succeeded,
+                error: None,
+            },
+        });
+        let snapshot = HistorySnapshot {
+            history_len: 1,
+            entries: recording.history(),
+            metadata: vec![SnapshotMetadata {
+                sequence: 1,
+                time_unix_nano: 0,
+                correlation: None,
+            }],
+            ..Default::default()
+        };
+        let text = data_preview(Some(0), &snapshot, false, true);
+        assert!(
+            text.contains("Call: title") && text.contains("Call: nested"),
+            "{text}"
+        );
+        assert!(text.contains("[REDACTED]"), "{text}");
+        assert!(!text.contains("synthetic-credential"));
     }
 
     #[test]

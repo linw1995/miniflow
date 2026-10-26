@@ -123,7 +123,7 @@ fn loop_pass_wire_records_use_the_current_schema_and_reject_retired_formats() {
         run_id: RunId::new(),
         sequence: Count::try_from(2).unwrap(),
         event: Event::LoopPassStarted {
-            path: vec![LoopPathEntry {
+            path: vec![LoopPathEntry::Loop {
                 loop_id: "repeat".into(),
                 index: Count::ZERO,
             }],

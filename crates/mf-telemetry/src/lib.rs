@@ -21,6 +21,8 @@ use snafu::{Snafu, ensure};
 pub const INSTRUMENTATION_SCOPE: &str = "mf.workflow";
 pub const EVENT_SCHEMA_VERSION: i64 = 7;
 pub const STREAM_EVENT_SCHEMA_VERSION: i64 = 8;
+/// Combined static nesting bound for ordinary calls and Loop scopes.
+pub const MAX_SCOPE_DEPTH: usize = 20;
 pub const MAX_LOOP_DEPTH: usize = 4;
 pub const MAX_LOOP_ITERATIONS: u16 = 1000;
 

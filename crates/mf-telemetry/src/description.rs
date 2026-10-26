@@ -184,22 +184,61 @@ impl WorkflowDescription {
         self.loop_bodies.iter().find(|body| body.path == path)
     }
 
-    /// Lifecycle paths contain Loop scopes only; Iteration items use separate detail spans.
+    pub fn validate_scope_path(
+        &self,
+        path: &[crate::event::ScopePathEntry],
+    ) -> Result<(), ContractError> {
+        require(
+            path.is_empty() || self.version.supports_loops(),
+            "scope paths require a description with subgraph support",
+        )?;
+        let mut parent = &self.nodes;
+        let mut static_path = Vec::new();
+        for entry in path {
+            let container = parent
+                .iter()
+                .find(|node| node.id == entry.node_id())
+                .ok_or_else(|| crate::invalid("unknown scope container"))?;
+            require(
+                if entry.is_call() {
+                    container.kind == "workflow.call"
+                } else {
+                    container.kind == "workflow.loop"
+                },
+                "scope path kind disagrees with its container",
+            )?;
+            static_path.push(entry.node_id().to_owned());
+            parent = &self
+                .body(&static_path)
+                .ok_or_else(|| crate::invalid("unknown scope body"))?
+                .nodes;
+        }
+        Ok(())
+    }
+
+    /// Lifecycle paths contain Loop and Call scopes; Iteration items use separate detail spans.
     pub fn loop_body(&self, path: &[String]) -> Option<&LoopBodyDescription> {
-        if path.len() > crate::MAX_LOOP_DEPTH {
+        if path.len() > crate::MAX_SCOPE_DEPTH {
             return None;
         }
-        let (id, parent) = path.split_last()?;
-        let nodes = if parent.is_empty() {
-            &self.nodes
-        } else {
-            &self.loop_body(parent)?.nodes
-        };
-        nodes
-            .iter()
-            .any(|node| node.id == *id && node.kind == "workflow.loop")
-            .then(|| self.body(path))
-            .flatten()
+        let mut nodes = &self.nodes;
+        let mut body = None;
+        let mut has_call = false;
+        for (index, id) in path.iter().enumerate() {
+            let container = nodes.iter().find(|node| node.id == *id)?;
+            match container.kind.as_str() {
+                "workflow.call" => has_call = true,
+                "workflow.loop" => {}
+                _ => return None,
+            }
+            if !has_call && index >= crate::MAX_LOOP_DEPTH {
+                return None;
+            }
+            let next = self.body(&path[..=index])?;
+            nodes = &next.nodes;
+            body = Some(next);
+        }
+        body
     }
 
     pub fn validate(&self) -> Result<(), ContractError> {
@@ -312,17 +351,17 @@ impl WorkflowDescription {
             )?;
             require(orders.insert(edge), "duplicate node-success edge")?;
         }
-        let mut scopes: BTreeMap<Vec<String>, Vec<NodeDescription>> = BTreeMap::new();
-        scopes.insert(Vec::new(), self.nodes.clone());
+        let mut scopes: BTreeMap<Vec<String>, (Vec<NodeDescription>, bool)> = BTreeMap::new();
+        scopes.insert(Vec::new(), (self.nodes.clone(), false));
         let mut bodies: Vec<_> = self.loop_bodies.iter().collect();
         bodies.sort_by_key(|body| body.path.len());
         for body in bodies {
             require(
-                !body.path.is_empty() && body.path.len() <= crate::MAX_LOOP_DEPTH,
+                !body.path.is_empty() && body.path.len() <= crate::MAX_SCOPE_DEPTH,
                 "invalid Loop body path",
             )?;
             let (loop_id, parent_path) = body.path.split_last().expect("path is nonempty");
-            let parent = scopes
+            let (parent, parent_has_call) = scopes
                 .get(parent_path)
                 .ok_or_else(|| crate::invalid("unknown parent Loop scope"))?;
             let container = parent
@@ -331,12 +370,18 @@ impl WorkflowDescription {
                 .ok_or_else(|| crate::invalid("unknown body container"))?;
             let iteration =
                 self.version.supports_iteration_bodies() && container.kind == "builtin.iteration";
+            let call = container.kind == "workflow.call";
+            let has_call = *parent_has_call || call;
             require(
-                container.kind == "workflow.loop" || iteration,
+                has_call || body.path.len() <= crate::MAX_LOOP_DEPTH,
+                "invalid Loop body path",
+            )?;
+            require(
+                container.kind == "workflow.loop" || iteration || call,
                 "body path does not name a supported container",
             )?;
             require(
-                body.nodes.iter().any(|node| {
+                call || body.nodes.iter().any(|node| {
                     if iteration {
                         node.id == "%iteration" && node.kind == "builtin.iteration_input"
                     } else {
@@ -368,7 +413,7 @@ impl WorkflowDescription {
             scope.validate()?;
             require(
                 scopes
-                    .insert(body.path.clone(), body.nodes.clone())
+                    .insert(body.path.clone(), (body.nodes.clone(), has_call))
                     .is_none(),
                 "duplicate Loop body path",
             )?;
