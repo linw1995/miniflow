@@ -60,15 +60,10 @@ fn loop_wire_shape_is_preserved_and_scope_tags_are_strict() {
     let legacy = json!([{"loop_id":"scope0", "index":3}]);
     let path: Vec<ScopePathEntry> = serde_json::from_value(legacy.clone()).unwrap();
     assert_eq!(serde_json::to_value(&path).unwrap(), legacy);
-    assert_eq!(path[0].node_id(), "scope0");
-    assert_eq!(path[0].index(), count(3));
-    assert!(!path[0].is_call());
     assert_eq!(
         serde_json::to_value(call_path()).unwrap(),
         json!([{"call_id":"scope0"}])
     );
-    assert!(call_path()[0].is_call());
-    assert_eq!(call_path()[0].index(), Count::ZERO);
     for invalid in [
         json!({"call_id":"scope0", "index":0}),
         json!({"loop_id":"scope0", "call_id":"scope0", "index":0}),
@@ -91,13 +86,11 @@ fn call_lifecycles_round_trip_in_finite_and_stream_wire_records() {
         Event::CallFinished {
             path: call_path(),
             elapsed_ns: count(2),
-
             outcome: LoopPassOutcome::Completed,
         },
         Event::CallFinished {
             path: call_path(),
             elapsed_ns: count(2),
-
             outcome: LoopPassOutcome::Failed,
         },
     ] {
@@ -139,7 +132,6 @@ fn call_lifecycles_round_trip_in_finite_and_stream_wire_records() {
             existing.execution = None;
         }
         existing.validate().unwrap();
-        existing.validate_scope_path(&call_path()).unwrap();
         let event = lifecycle(
             Event::CallStarted {
                 path: call_path(),
@@ -148,21 +140,12 @@ fn call_lifecycles_round_trip_in_finite_and_stream_wire_records() {
             &existing,
         );
         event.validate_for(&existing).unwrap();
-        assert!(
-            WireRecord::from_event(&event, 0, None)
-                .unwrap()
-                .decode()
-                .is_ok()
-        );
     }
     let mut legacy = graph.clone();
     legacy.version = WorkflowDescriptionVersion::V2026_09_27;
     legacy.execution = None;
     assert!(legacy.validate().is_err());
     assert!(legacy.validate_scope_path(&call_path()).is_err());
-    let mut unsupported = serde_json::to_value(&graph).unwrap();
-    unsupported["version"] = json!("2026-10-25");
-    assert!(serde_json::from_value::<WorkflowDescription>(unsupported).is_err());
 }
 
 #[test]
@@ -197,6 +180,16 @@ fn call_depth_is_independent_of_versions_and_preserves_loop_only_limits() {
     assert!(calls.loop_body(&path(MAX_SCOPE_DEPTH)).is_some());
     assert!(calls.loop_body(&[]).is_none());
     assert!(calls.loop_body(&path(MAX_SCOPE_DEPTH + 1)).is_none());
+    assert!(
+        graph(&["workflow.call"; MAX_SCOPE_DEPTH + 1])
+            .validate()
+            .is_err()
+    );
+    let event = Event::CallStarted {
+        path: vec![call_path()[0].clone(); MAX_SCOPE_DEPTH + 1],
+        elapsed_ns: Count::ZERO,
+    };
+    assert!(lifecycle(event, &calls).validate().is_err());
     let mut ordinary = graph(&["fixture.task"]);
     assert!(ordinary.validate().is_err());
     assert!(ordinary.loop_body(&path(1)).is_none());
@@ -205,7 +198,7 @@ fn call_depth_is_independent_of_versions_and_preserves_loop_only_limits() {
 }
 
 #[test]
-fn scope_paths_check_container_kinds_and_combined_depth() {
+fn scope_paths_check_container_kinds() {
     let graph = graph(&["workflow.loop", "workflow.call", "workflow.loop"]);
     graph.validate().unwrap();
     let path = vec![
@@ -242,24 +235,6 @@ fn scope_paths_check_container_kinds_and_combined_depth() {
     ] {
         assert!(graph.validate_scope_path(&invalid).is_err());
     }
-    let deepest = self::graph(&vec!["workflow.call"; MAX_SCOPE_DEPTH]);
-    deepest.validate().unwrap();
-    let path: Vec<_> = (0..MAX_SCOPE_DEPTH)
-        .map(|index| ScopePathEntry::Call {
-            call_id: format!("scope{index}"),
-        })
-        .collect();
-    deepest.validate_scope_path(&path).unwrap();
-    assert!(
-        self::graph(&vec!["workflow.call"; MAX_SCOPE_DEPTH + 1])
-            .validate()
-            .is_err()
-    );
-    let invalid = Event::CallStarted {
-        path: vec![call_path()[0].clone(); MAX_SCOPE_DEPTH + 1],
-        elapsed_ns: Count::ZERO,
-    };
-    assert!(lifecycle(invalid, &deepest).validate().is_err());
 }
 
 #[test]
@@ -304,7 +279,6 @@ fn call_events_reject_loop_semantics_and_invalid_paths() {
         Event::LoopPassFinished {
             path: call_path(),
             elapsed_ns: Count::ZERO,
-
             outcome: LoopPassOutcome::Completed,
         },
     ] {

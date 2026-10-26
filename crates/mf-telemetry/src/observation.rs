@@ -933,39 +933,12 @@ impl fmt::Debug for BodyObservation {
 }
 
 impl BodyObservation {
-    pub fn for_call(&self, id: &str, nodes: &[NodeIdentity]) -> Self {
-        let mut child = self.clone();
-        let mut path = self
-            .body_nodes
-            .values()
-            .next()
-            .map(|node| node.path.clone())
-            .unwrap_or_default();
-        path.push(LoopPathEntry::Call { call_id: id.into() });
-        child.context = Context::current();
-        child.body_nodes = Arc::new(
-            nodes
-                .iter()
-                .cloned()
-                .map(|mut node| {
-                    node.path = path.clone();
-                    (node.id.clone(), node)
-                })
-                .collect(),
-        );
-        child
-    }
-
     pub fn begin_node(&self, id: &str) -> Option<BodyNodeObservation> {
         let node = self.body_nodes.get(id)?.clone();
         let span = self
             .backend
             .tracer
-            .span_builder(if node.path.iter().any(LoopPathEntry::is_call) {
-                "mf.call.node"
-            } else {
-                "mf.iteration.node"
-            })
+            .span_builder("mf.iteration.node")
             .with_attributes([
                 KeyValue::new("mf.workflow.id", self.workflow_id.to_string()),
                 KeyValue::new("mf.run.id", self.run_id.to_string()),
@@ -1109,32 +1082,12 @@ impl BodyNodeObservation {
     }
 
     fn emit(&self, name: &'static str, attributes: Vec<(String, AnyValue)>) {
-        let name = if self.node.path.iter().any(LoopPathEntry::is_call) {
-            match name {
-                "mf.iteration.node.started" => "mf.call.node.started",
-                "mf.iteration.node.finished" => "mf.call.node.finished",
-                "mf.iteration.node.skipped" => "mf.call.node.skipped",
-                _ => name,
-            }
-        } else {
-            name
-        };
         let mut common = nested_attributes(
             &self.workflow_id,
             self.run_id,
             &self.iteration_id,
             self.index,
         );
-        if !self.node.path.is_empty() {
-            common.push((
-                "mf.scope.path".into(),
-                AnyValue::String(
-                    serde_json::to_string(&self.node.path)
-                        .expect("scope identities serialize")
-                        .into(),
-                ),
-            ));
-        }
         common.push((
             "mf.node.id".into(),
             AnyValue::String(self.node.id.clone().into()),

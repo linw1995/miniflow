@@ -506,7 +506,7 @@ impl LifecycleEvent {
                 )
             } else {
                 let body = graph
-                    .loop_body(&static_path)
+                    .body(&static_path)
                     .ok_or_else(|| crate::invalid("unknown Loop body path"))?;
                 (
                     &body.nodes,
@@ -574,14 +574,6 @@ impl LifecycleEvent {
             | Event::CallFinished { path, .. } => {
                 graph.validate_scope_path(path)?;
                 require(loop_schema, "description does not support scope boundaries")?;
-                let static_path: Vec<_> = path
-                    .iter()
-                    .map(|entry| entry.node_id().to_owned())
-                    .collect();
-                require(
-                    graph.loop_body(&static_path).is_some(),
-                    "unknown scope path",
-                )?;
             }
             Event::WorkflowFinished {
                 failure_node_id: Some(id),

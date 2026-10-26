@@ -586,7 +586,7 @@ fn validate_graph(
                     )
                 } else {
                     let body = description
-                        .loop_body(&path)
+                        .body(&path)
                         .ok_or_else(|| invalid("unknown stream Loop body"))?;
                     (
                         &body.nodes,
@@ -638,13 +638,6 @@ fn validate_graph(
             | Event::CallFinished { path, .. } = event
             {
                 description.validate_scope_path(path).context(EventSnafu)?;
-                let path: Vec<_> = path
-                    .iter()
-                    .map(|entry| entry.node_id().to_owned())
-                    .collect();
-                if description.loop_body(&path).is_none() {
-                    return Err(invalid("unknown stream scope"));
-                }
             }
         }
     }

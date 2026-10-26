@@ -821,6 +821,7 @@ transport envelope; absent child outcomes remain Unknown after completion. Calls
 message and invocation identity.
 
 TUI body navigation opens call graphs and shows their node outcomes. Snapshot scope paths retain
-Call identities and redact secret values. Calls nested inside Iteration item observations use
-`mf.call.node.*` spans and logs carrying `mf.scope.path`, alongside the containing item identity.
+Call identities and redact secret values. Nested calls use ordinary `mf.node` spans under the
+calling node's native span context. Scope paths identify lifecycle and snapshot locations even
+when spans are not sampled; they do not define a separate tracing hierarchy.
 The protocol can describe calls independently of an execution engine that produces them.
