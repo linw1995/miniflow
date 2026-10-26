@@ -74,7 +74,7 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
             assert_eq!(manifest.description().unwrap().order_edges.len(), 1);
             assert_eq!(
                 manifest.description().unwrap().event_schema_version(),
-                mf_telemetry::SUCCESS_EVENT_SCHEMA_VERSION
+                mf_telemetry::EVENT_SCHEMA_VERSION
             );
         }
         if scenario == "nested" {

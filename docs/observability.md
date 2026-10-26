@@ -158,7 +158,7 @@ Use the instrumentation scope `mf.workflow`. Event names, timestamps, and option
 
 | Attribute | Type | Meaning |
 | --- | --- | --- |
-| `mf.schema.version` | Signed integer | Event schema: 1 for flat runs, 2 for finite Loop-capable runs, 4 for source-driven streams; 5 and 6 add Task-success causes to finite and streaming runs |
+| `mf.schema.version` | Signed integer | Event schema: 7 for finite lifecycles and 8 for source-driven streams |
 | `mf.workflow.id` | String | Identity shared with the description |
 | `mf.run.id` | String | Identity of this invocation |
 | `mf.event.sequence` | Signed integer | Positive per-run sequence starting at 1 |
@@ -170,23 +170,20 @@ The body is an OTel structured map, not a JSON message string. All counts and mo
 
 | Event | Body and boundary |
 | --- | --- |
-| `mf.workflow.started` | `node_count`, `elapsed_ns: 0`; sequence 1, before preparation |
+| `mf.workflow.started` | `elapsed_ns: 0`; sequence 1, before preparation |
 | `mf.node.started` | `position`, `elapsed_ns`; dependencies resolved, implementation about to run |
 | `mf.node.finished` | `position`, `elapsed_ns`, available `duration_ns`, `produced_ports`, `skipped_ports`, optional `failure` map; Loop success also carries `loop_summary` with pass count and stop reason |
 | `mf.node.skipped` | `position`, `elapsed_ns`, `causes` with `source_node`/`source_output`, and all skipped output names; no invocation |
-| `mf.loop.pass.started` | Loop path and `elapsed_ns`; before each body traversal in schema 2 |
-| `mf.loop.pass.finished` | Loop path, `elapsed_ns`, local `visited_node_count`, and `completed`, `exit`, or `failed` outcome in schema 2 |
-| `mf.workflow.finished` | `final_sequence`, `elapsed_ns`, `visited_node_count`, optional `failure_node_id` and `failure`; schema 2 also carries `top_level_visited_count` |
+| `mf.loop.pass.started` | Loop path and `elapsed_ns`; before each body traversal |
+| `mf.loop.pass.finished` | Loop path, `elapsed_ns`, and `completed`, `exit`, or `failed` outcome |
+| `mf.workflow.finished` | `elapsed_ns`, optional `failure_node_id` and `failure`; outcome is a native attribute |
 
 `failure` contains a diagnostic `message`; its phase is the `mf.failure.phase` attribute. Phases are `preparation`, `dependency`, `execution`, `publication`, and `output_selection`. Pre-invocation failures have no execution duration. Failed nodes have no published port outcomes. A failed workflow requires failure context; successful outcomes cannot carry it.
 
-In schema 1, `visited_node_count` is the prefix of scheduled steps reached, including a step failing
-dependency resolution. In schema 2, it is the total number of scheduled steps across all scopes,
-while `top_level_visited_count` retains the outer graph prefix. Each pass finish records its local
-visited prefix. Preparation failure visits zero steps; output selection requires the outer graph to
-finish. A proven unvisited suffix of an exited or failed pass is NotRun, while future passes that
-never started have no node invocations. Missing outcomes inside a visited prefix stay unknown, even
-when the workflow succeeded. The final record contains no per-node snapshot.
+Lifecycle bodies contain execution facts and outcomes. Sequence identity belongs to the transport
+envelope; the terminal record's own sequence closes that envelope. Nodes without received outcomes
+remain Unknown after a workflow or pass finishes. Schemas 1 through 6 are retired; existing runners
+must be rebuilt to emit the current protocol.
 
 This logical fixture demonstrates successful node completion:
 
@@ -196,7 +193,7 @@ This logical fixture demonstrates successful node completion:
   "event_name": "mf.node.finished",
   "time_unix_nano": 1700000000000000000,
   "attributes": {
-    "mf.schema.version": 1,
+    "mf.schema.version": 7,
     "mf.workflow.id": "sha256:67389167c589949c07cb3864dbb0bcca61d38bfaef42649c24042cc35875e2a9",
     "mf.run.id": "12345678-1234-4234-9234-123456789abc",
     "mf.event.sequence": 3,
@@ -216,7 +213,7 @@ This logical fixture demonstrates successful node completion:
 }
 ```
 
-`WireRecord::decode` checks required fields and local event invariants. `LifecycleEvent::validate_for` additionally checks graph identity, event bounds, positions, kinds, ports, skip dependencies, and the visited prefix. Run identity matching and cross-record state reduction belong to the later receiver. `WireRecord::write_to` fills a fresh OTel record created by a caller-owned logger; it neither emits that record nor manages the provider.
+`WireRecord::decode` checks required fields and local event invariants. `LifecycleEvent::validate_for` additionally checks graph identity, positions, kinds, ports, and skip dependencies. Run identity matching and cross-record state reduction belong to the later receiver. `WireRecord::write_to` fills a fresh OTel record created by a caller-owned logger; it neither emits that record nor manages the provider.
 
 ## Model request observations
 
@@ -235,17 +232,30 @@ unknown timing rather than fallback receiver-time measurements. Diagnostic log r
 
 ## Sequences and acceptable loss
 
-Reserve sequences before serialization/enqueueing through `EventSequence`. A dropped record consumes
-its sequence. The final reservation closes the sequence permanently, and retransmitting a record
-preserves its identity. Schema 1 permits at most `2 * node_count + 2` lifecycle records. Schemas 2 and 5
-permit at most `4 * 10,000 + 4`: two node records and two pass boundaries per scheduled step, with
-room for one pass that fails before its first step after budget exhaustion. The sequence helper does
-not execute nodes or enforce a scheduler.
+Reserve sequences before serialization/enqueueing through `mf-telemetry::transport::EventSequence`.
+A dropped record consumes its sequence. The final reservation closes the sequence permanently, and
+retransmitting a record preserves its identity. The signed 64-bit sequence space is independent of
+node counts, scheduled-step budgets, and Loop sizes. Exhaustion never wraps or fabricates a terminal
+boundary. Execution budgets remain runtime policy.
+
+`mf-telemetry::transport::DeliveryTracker` owns delivery evidence for both finite and streaming
+lifecycle transports. It uses the reserved sequence, a payload witness, and the terminal marker to
+track gaps, reordered deliveries, duplicates, conflicting retransmissions, and the verified contiguous
+prefix. It has no knowledge of nodes, Loop passes, or execution outcomes. Its witness window and
+reported gap ranges are bounded independently; exhausting the reorder window retains an explicit
+verification failure. A terminal marker cannot truncate an already observed suffix.
+
+The tracker also owns collection closure, local rejection counts, and the resulting `Completeness`
+state. The TUI exposes its `DeliverySnapshot` directly as `LifecycleIntegrity`. Node and Loop protocol
+conflicts, observation errors, and display-retention overflows are reported separately through
+`StateSnapshot.observation`; they do not change transport completeness. Execution counters and node
+states remain business facts for rendering and validation. A producer that never emits a business
+event leaves no transport evidence for that event.
 
 Observation loss is acceptable. Consumers must expose gaps and local drops, and must not claim completeness without evidence:
 
 - While active, collect events and show any pending gaps; late arrival can close a gap.
-- After bounded draining, a valid final record and every applied sequence through it can establish lifecycle completeness.
+- After bounded draining, a valid final record and every received sequence through it can establish lifecycle completeness.
 - Remaining gaps or local lifecycle drops mean incomplete observation.
 - A missing final record means an unverified tail and unknown total loss, including when no telemetry arrived at all.
 - A wholly lost suffix during a long-running node cannot be detected immediately without later evidence. Keep completeness unconfirmed.
@@ -254,16 +264,17 @@ There is no replay, persistent journal, reconnect protocol, node rescheduling, o
 
 ### Loop invocation identity and pass boundaries
 
-Schema 2 node records include a `loop_path` list in the structured body. Each entry has an opaque
+Node records include a `loop_path` list in the structured body. Each entry has an opaque
 Loop node ID and a zero-based pass index. Top-level nodes have an empty path. The event's local node
 ID, kind, and position resolve against the body graph named by that path. Nested paths keep scopes
 distinct even when bodies reuse node IDs. `mf.loop.pass.started` and `mf.loop.pass.finished` carry
-the full path. A pass finish records its visited body prefix and whether the pass completed, exited,
-or failed. A successful Loop node finish carries `loop_summary` with the number of passes and a stop
+the full path. A pass finish records whether the pass completed, exited, or failed. A successful Loop node finish carries `loop_summary` with the number of passes and a stop
 reason of `condition`, `maximum`, or `exit`. No record carries loop variable values or node
 configuration.
 
-Schema 2's workflow final record reports the actual number of scheduled steps and the outer graph's visited prefix. The TUI compares the actual step count with observed pass prefixes, so a missing pass cannot look complete merely because the remaining records have contiguous sequence numbers. A known missing body outcome remains unknown after later passes complete; receiving that delayed record can close the gap. The old description and event versions remain supported for existing binaries.
+Pass and workflow boundaries preserve their declared outcomes. A known missing body outcome stays
+unknown after later passes complete; its delayed record can close a transport gap. Loop summaries
+retain the actual pass count and stop reason for display, independently of delivery verification.
 
 ## Iteration observation
 
@@ -309,12 +320,13 @@ and run ID. It accepts protobuf logs at `/v1/logs` and spans at `/v1/traces`. Re
 each signal request to 1,024 records, and active connections to 16. A request has a two-second read deadline. An HTTP
 success response follows decoding, session checks, and state admission; it does not claim that later network hops or
 the TUI display are complete. Unrelated runs are ignored. Malformed matching lifecycle records and receiver errors
-remain visible as local drops or observation errors. Trace-only drops do not invalidate lifecycle completeness.
+remain visible as local drops or observation errors. Once a valid frame is admitted, graph and business
+validation errors preserve its delivery evidence and enter the separate observation diagnostics.
+Trace-only drops do not invalidate lifecycle completeness.
 
 For finite runs, `mf-tui::state::SessionState` keeps one state record per outer node, sparse per-invocation Loop state, and sequence membership bounded by the graph's lifecycle event count. It retains details for up to 64 recent pass frames and aggregate counts when older pass details leave the view. Identical retransmissions are ignored; conflicting sequence content or
 incompatible terminal outcomes are surfaced without moving a terminal node back to Running. A finish event can arrive
-before its start, and later evidence may close an active sequence gap. Unknown node outcomes inside the final visited
-prefix remain Unknown; a valid final boundary can prove that later nodes were NotRun.
+before its start, and later evidence may close an active sequence gap. Nodes without observed outcomes remain Unknown after the terminal boundary.
 
 Session admission limits the total described nodes across all scopes to 10,000 and individual lifecycle events to 128 KiB. State snapshots retain
 at most 64 missing ranges and 64 diagnostic entries, each at most 1 KiB; omitted ranges and diagnostic bytes are counted.
@@ -322,9 +334,11 @@ Each node retains at most 32 produced and 32 skipped port names of 128 bytes eac
 failure text. Omitted display metadata is counted separately from lifecycle loss. The receiver rejects records that
 exceed admission limits rather than allocating memory proportional to untrusted decoded content indefinitely.
 
-Completeness stays Collecting while the run is active and gaps may still close. A final record with every sequence
-applied, every visited node outcome justified, and no local lifecycle loss, observation error, or conflict is Complete. Remaining gaps or local lifecycle
-drops after bounded collection are Incomplete. If the final record is absent, the tail is UnverifiedTail and its total
+Completeness stays Collecting while transport evidence is unresolved and late records may still arrive.
+A final record with every sequence received and no local lifecycle drops, conflicting transport
+identities, or exhausted transport evidence is Complete. Remaining transport gaps or rejections after
+bounded collection are Incomplete. Business outcomes may remain Unknown even when transport is
+Complete; protocol diagnostics remain visible independently. If the final record is absent, the tail is UnverifiedTail and its total
 missing count is unknown, even when no telemetry arrived. Known missing ranges and local drop counts may overlap and
 must be shown separately. Observed span count, trace drops, and diagnostic truncation are separate indicators; none
 proves lifecycle loss. There is no replay, persistence, reconnect, retry scheduling, or workflow restart.
@@ -724,8 +738,7 @@ item indices or Loop paths repeat in a later message. Native span parentage rema
 
 The final workflow outcome is `succeeded` or `failed`, with aggregate startup-frame,
 emitted-message, completed-frame, and delivered-output counters. Startup traversal counts as one frame;
-producer lifetimes remain active independently until their output domains close. Older schema-3 records
-retain their accepted-input interpretation and are never relabeled as schema 4. Completion follows drain and output
+producer lifetimes remain active independently until their output domains close. Completion follows drain and output
 acknowledgement, including the final stdout record. Failure preserves its phase and available node
 identity. An earlier missing node outcome remains unknown when a later message succeeds. Consumers
 should bound retained detail and distinguish local history eviction from lifecycle transport loss.
@@ -735,7 +748,8 @@ completed invocations, and 64 Loop pass details. Each retained pass has compact 
 to 64 detailed node records. Contiguous verified sequences and completed Loop prefixes compact into
 counters. Losing old display detail does not invalidate lifecycle completeness. An ancient retransmission
 outside the witness window is ignored and counted as unverified; its payload cannot be compared with
-retired evidence. Exhausting an unresolved retention window permanently marks observation incomplete.
+retired evidence. Exhausting the transport reorder window permanently prevents verified completeness.
+Display-retention overflows are reported separately and preserve already received transport evidence.
 Repeated node invocations keep separate identities; node totals describe observed activity, while final
 workflow totals come from the terminal record. Missing outcomes remain visible even after later successes.
 
@@ -761,8 +775,7 @@ flow. Automatic descriptions and lifecycle metadata still exclude configuration 
 
 `NodeTarget::start_observation` starts this scope before preparation. Unrelated factory failures retain
 preparation diagnostics without inventing a target or provider lifecycle. A successful ordinary selected
-Task reports one visited top-level node; a selected Loop adds its actual body invocations and retains pass
-paths. Iteration retains one outer lifecycle and its existing item detail records. Neighboring nodes are
+Task emits the selected node lifecycle; a selected Loop adds its body lifecycles and pass paths. Iteration retains one outer lifecycle and its existing item detail records. Neighboring nodes are
 absent from the selected description and do not receive synthetic skip or completion events.
 
 Opt-in snapshots belong to the finite selected operation, including when its Task is selected from a

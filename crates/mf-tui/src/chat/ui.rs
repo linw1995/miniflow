@@ -1211,7 +1211,7 @@ mod tests {
             assert_eq!(panel == chat, side_by_side, "{text}");
             assert!(text.contains("Flow: Running"), "{text}");
             assert!(text.contains("start"), "{text}");
-            assert!(text.contains("Observation: Collecting"), "{text}");
+            assert!(text.contains("Delivery: Collecting"), "{text}");
             assert!(text.contains("Draft for the next turn"), "{text}");
         }
         let compact = render(&view, 60, 18);

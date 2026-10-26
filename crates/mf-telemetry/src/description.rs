@@ -134,26 +134,11 @@ impl WorkflowDescription {
     }
 
     pub fn event_schema_version(&self) -> i64 {
-        if self.version.uses_node_success_edges() {
-            return if self.is_streaming() {
-                crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
-            } else {
-                crate::SUCCESS_EVENT_SCHEMA_VERSION
-            };
+        if self.is_streaming() {
+            crate::STREAM_EVENT_SCHEMA_VERSION
+        } else {
+            crate::EVENT_SCHEMA_VERSION
         }
-        self.execution.as_ref().map_or_else(
-            || match self.version {
-                WorkflowDescriptionVersion::V2026_09_27 => crate::EVENT_SCHEMA_VERSION,
-                WorkflowDescriptionVersion::V2026_10_02 => {
-                    crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION
-                }
-                _ => crate::LOOP_EVENT_SCHEMA_VERSION,
-            },
-            |execution| match execution.mode {
-                ExecutionMode::Single => crate::LOOP_EVENT_SCHEMA_VERSION,
-                ExecutionMode::Stream => crate::STREAM_EVENT_SCHEMA_VERSION,
-            },
-        )
     }
 
     pub fn from_json(input: &[u8]) -> Result<Self, ContractError> {
@@ -243,11 +228,7 @@ impl WorkflowDescription {
                 "old descriptions cannot declare execution metadata",
             )?;
         }
-        if self.is_streaming() {
-            self.node_count()?;
-        } else {
-            crate::maximum_event_count(self.node_count()?)?;
-        }
+        self.node_count()?;
         if self.version == WorkflowDescriptionVersion::V2026_09_27 {
             require(
                 self.loop_bodies.is_empty(),

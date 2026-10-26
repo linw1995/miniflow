@@ -1415,9 +1415,9 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | d details | ? help | {controls}",
+            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | d details | ? help | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
-            lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
+            snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
         draw_help(frame, view_state);
     }).context(TerminalSnafu)?;
@@ -1880,12 +1880,6 @@ fn details_text(
                 stream.hidden_invocations
             ));
         }
-        if stream.unverified_retransmissions != 0 {
-            details.push_str(&format!(
-                "Retransmissions outside verification coverage: {}\n",
-                stream.unverified_retransmissions
-            ));
-        }
         let unresolved = stream
             .invocations
             .iter()
@@ -1901,6 +1895,12 @@ fn details_text(
             snapshot.hidden_loop_passes
         ));
     }
+    if snapshot.lifecycle.unverified_retransmissions != 0 {
+        details.push_str(&format!(
+            "Retransmissions outside verification coverage: {}\n",
+            snapshot.lifecycle.unverified_retransmissions
+        ));
+    }
     if snapshot.lifecycle.final_sequence.is_none() {
         details.push_str("Final lifecycle boundary missing\n");
     }
@@ -1908,6 +1908,12 @@ fn details_text(
         details.push_str(&format!(
             "Workflow failure ({:?}): {}\n",
             failure.phase, failure.message
+        ));
+    }
+    if snapshot.observation.retention_overflows != 0 {
+        details.push_str(&format!(
+            "Observation retention limit reached: {}\n",
+            snapshot.observation.retention_overflows
         ));
     }
     if snapshot.traces.local_drops != 0 {
@@ -2264,10 +2270,7 @@ impl ObservationView {
             .filter(|node| {
                 matches!(
                     node.status,
-                    NodeStatus::Succeeded
-                        | NodeStatus::Failed
-                        | NodeStatus::Skipped
-                        | NodeStatus::NotRun
+                    NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Skipped
                 )
             })
             .count();
@@ -2304,11 +2307,8 @@ impl ObservationView {
             graph,
         );
         frame.render_widget(
-            Paragraph::new(format!(
-                "Observation: {:?}",
-                snapshot.lifecycle.completeness
-            ))
-            .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!("Delivery: {:?}", snapshot.lifecycle.completeness))
+                .style(Style::default().fg(Color::DarkGray)),
             footer,
         );
     }
@@ -2714,6 +2714,7 @@ mod tests {
             }],
             ..Default::default()
         });
+        snapshot.lifecycle.unverified_retransmissions = 1;
         let capture = CaptureView {
             stdout_open: false,
             stderr_open: false,
@@ -2722,6 +2723,7 @@ mod tests {
             error: None,
         };
         let text = details_text(snapshot.nodes.first(), None, &snapshot, &capture, "");
+        assert!(text.contains("Retransmissions outside verification coverage: 1"));
         assert!(text.contains("Status: Interrupted"));
         assert!(text.contains("Node observation may be incomplete"));
         assert!(text.contains("Unresolved invocation outcomes: 1"));
@@ -2729,6 +2731,10 @@ mod tests {
         let text = details_text(None, None, &snapshot, &capture, "");
         assert!(!text.contains("Node observation may be incomplete"));
         assert!(text.contains("Unresolved invocation outcomes: 1"));
+
+        snapshot.stream = None;
+        let text = details_text(None, None, &snapshot, &capture, "");
+        assert!(text.contains("Retransmissions outside verification coverage: 1"));
     }
 
     #[test]
@@ -3340,7 +3346,6 @@ mod tests {
             (
                 1,
                 LifecycleKind::WorkflowStarted {
-                    node_count: count(3),
                     elapsed_ns: Count::ZERO,
                 },
             ),

@@ -98,15 +98,7 @@ fn record(sequence: i64, final_record: bool, run: &str, version: i64) -> LogReco
         }
         .into(),
         attributes,
-        body: Some(if final_record {
-            body(&[
-                ("final_sequence", sequence),
-                ("elapsed_ns", 0),
-                ("visited_node_count", 0),
-            ])
-        } else {
-            body(&[("node_count", 0), ("elapsed_ns", 0)])
-        }),
+        body: Some(body(&[("elapsed_ns", 0)])),
         ..Default::default()
     }
 }
@@ -190,7 +182,12 @@ fn graph_metrics_use_source_events_before_snapshots_and_keep_call_identity() {
     graph.execution_order.push("model".into());
     let layout = GraphLayout::new(&graph).unwrap();
     let mut receiver = LoopbackReceiver::bind(graph.clone(), run_id()).unwrap();
-    let mut started = record(2, false, &run_id().to_string(), 1);
+    let mut started = record(
+        2,
+        false,
+        &run_id().to_string(),
+        mf_telemetry::EVENT_SCHEMA_VERSION,
+    );
     started.event_name = "mf.node.started".into();
     started.attributes.extend([
         attribute("mf.node.id", string("model")),
@@ -331,7 +328,12 @@ fn receives_protobuf_logs_and_traces_before_acknowledging() {
         return;
     }
     let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
-    let mut started = record(1, false, &run_id().to_string(), 1);
+    let mut started = record(
+        1,
+        false,
+        &run_id().to_string(),
+        mf_telemetry::EVENT_SCHEMA_VERSION,
+    );
     started.attributes.push(attribute(
         "future.bytes",
         AnyValue {
@@ -343,7 +345,15 @@ fn receives_protobuf_logs_and_traces_before_acknowledging() {
             .attributes
             .push(attribute(&format!("future.{index}"), string("ignored")));
     }
-    let records = logs(vec![started, record(2, true, &run_id().to_string(), 1)]);
+    let records = logs(vec![
+        started,
+        record(
+            2,
+            true,
+            &run_id().to_string(),
+            mf_telemetry::EVENT_SCHEMA_VERSION,
+        ),
+    ]);
     assert_eq!(
         send(
             receiver.endpoint(),
@@ -408,8 +418,18 @@ fn iteration_detail_logs_leave_outer_lifecycle_complete() {
                         ..Default::default()
                     }),
                     log_records: vec![
-                        record(1, false, &run_id().to_string(), 1),
-                        record(2, true, &run_id().to_string(), 1),
+                        record(
+                            1,
+                            false,
+                            &run_id().to_string(),
+                            mf_telemetry::EVENT_SCHEMA_VERSION,
+                        ),
+                        record(
+                            2,
+                            true,
+                            &run_id().to_string(),
+                            mf_telemetry::EVENT_SCHEMA_VERSION,
+                        ),
                     ],
                     ..Default::default()
                 },
@@ -430,7 +450,7 @@ fn iteration_detail_logs_leave_outer_lifecycle_complete() {
     let snapshot = receiver.finish();
     assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
     assert_eq!(snapshot.lifecycle.local_drops, 0);
-    assert_eq!(snapshot.lifecycle.observation_errors, 0);
+    assert_eq!(snapshot.observation.errors, 0);
 }
 
 #[test]
@@ -439,7 +459,12 @@ fn unrelated_and_malformed_requests_are_visible_without_fabricating_events() {
         return;
     }
     let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
-    let mut unrelated_record = record(1, false, "87654321-4321-4321-9234-123456789abc", 1);
+    let mut unrelated_record = record(
+        1,
+        false,
+        "87654321-4321-4321-9234-123456789abc",
+        mf_telemetry::EVENT_SCHEMA_VERSION,
+    );
     unrelated_record.attributes.push(attribute(
         "other.bytes",
         AnyValue {
@@ -457,7 +482,7 @@ fn unrelated_and_malformed_requests_are_visible_without_fabricating_events() {
         200
     );
     assert_eq!(receiver.snapshot().lifecycle.known_missing_count, 0);
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 0);
+    assert_eq!(receiver.snapshot().observation.errors, 0);
     assert_eq!(
         send(
             receiver.endpoint(),
@@ -488,7 +513,7 @@ fn unrelated_and_malformed_requests_are_visible_without_fabricating_events() {
         ),
         400
     );
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 1);
+    assert_eq!(receiver.snapshot().observation.errors, 1);
     assert_eq!(
         send(
             receiver.endpoint(),
@@ -499,10 +524,20 @@ fn unrelated_and_malformed_requests_are_visible_without_fabricating_events() {
         400
     );
     assert_eq!(receiver.snapshot().traces.local_drops, 1);
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 1);
+    assert_eq!(receiver.snapshot().observation.errors, 1);
     let valid = logs(vec![
-        record(1, false, &run_id().to_string(), 1),
-        record(2, true, &run_id().to_string(), 1),
+        record(
+            1,
+            false,
+            &run_id().to_string(),
+            mf_telemetry::EVENT_SCHEMA_VERSION,
+        ),
+        record(
+            2,
+            true,
+            &run_id().to_string(),
+            mf_telemetry::EVENT_SCHEMA_VERSION,
+        ),
     ]);
     assert_eq!(
         send(
@@ -547,7 +582,7 @@ fn rejects_oversized_and_non_protobuf_requests() {
             .unwrap()
             .starts_with("HTTP/1.1 413")
     );
-    assert_eq!(receiver.finish().lifecycle.observation_errors, 2);
+    assert_eq!(receiver.finish().observation.errors, 2);
 }
 
 #[test]
@@ -561,7 +596,7 @@ fn rejects_a_batch_above_the_record_budget_without_applying_a_prefix() {
             1,
             false,
             "87654321-4321-4321-9234-123456789abc",
-            1
+            mf_telemetry::EVENT_SCHEMA_VERSION
         );
         mf_tui::receiver::MAX_RECORDS_PER_REQUEST + 1
     ]);
@@ -575,9 +610,14 @@ fn rejects_a_batch_above_the_record_budget_without_applying_a_prefix() {
         400
     );
     assert_eq!(receiver.snapshot().lifecycle.local_drops, 0);
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 0);
+    assert_eq!(receiver.snapshot().observation.errors, 0);
     let oversized = logs(vec![
-        record(1, false, &run_id().to_string(), 1);
+        record(
+            1,
+            false,
+            &run_id().to_string(),
+            mf_telemetry::EVENT_SCHEMA_VERSION
+        );
         mf_tui::receiver::MAX_RECORDS_PER_REQUEST + 1
     ]);
     assert_eq!(
@@ -594,7 +634,7 @@ fn rejects_a_batch_above_the_record_budget_without_applying_a_prefix() {
         snapshot.lifecycle.local_drops,
         (mf_tui::receiver::MAX_RECORDS_PER_REQUEST + 1) as u64
     );
-    assert_eq!(snapshot.lifecycle.observation_errors, 0);
+    assert_eq!(snapshot.observation.errors, 0);
     assert_eq!(
         snapshot.lifecycle.completeness,
         Completeness::UnverifiedTail
@@ -608,7 +648,12 @@ fn a_matching_event_over_the_admission_budget_is_counted_as_local_loss() {
         return;
     }
     let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
-    let mut oversized = record(2, true, &run_id().to_string(), 1);
+    let mut oversized = record(
+        2,
+        true,
+        &run_id().to_string(),
+        mf_telemetry::EVENT_SCHEMA_VERSION,
+    );
     oversized
         .attributes
         .iter_mut()
@@ -621,9 +666,7 @@ fn a_matching_event_over_the_admission_budget_is_counted_as_local_loss() {
     oversized.body = Some(AnyValue {
         value: Some(any_value::Value::KvlistValue(KeyValueList {
             values: vec![
-                attribute("final_sequence", integer(2)),
                 attribute("elapsed_ns", integer(0)),
-                attribute("visited_node_count", integer(0)),
                 attribute(
                     "failure",
                     AnyValue {
@@ -756,7 +799,12 @@ fn retains_session_logs_before_spans_and_ignores_other_runs() {
         return;
     }
     let receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
-    let mut record = record(1, false, &run_id().to_string(), 1);
+    let mut record = record(
+        1,
+        false,
+        &run_id().to_string(),
+        mf_telemetry::EVENT_SCHEMA_VERSION,
+    );
     record.event_name = "custom.log".into();
     record.trace_id = vec![1; 16];
     record.span_id = vec![2; 8];
@@ -811,7 +859,7 @@ fn retains_session_logs_before_spans_and_ignores_other_runs() {
         retained.records[0].scope.as_ref().unwrap().name,
         "custom.scope"
     );
-    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 0);
+    assert_eq!(receiver.snapshot().observation.errors, 0);
 }
 
 #[test]
@@ -823,7 +871,12 @@ fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
     for first in (0..4096).step_by(512) {
         let records = (first..first + 512)
             .map(|index| {
-                let mut record = record(1, false, &run_id().to_string(), 1);
+                let mut record = record(
+                    1,
+                    false,
+                    &run_id().to_string(),
+                    mf_telemetry::EVENT_SCHEMA_VERSION,
+                );
                 record.time_unix_nano = index as u64 + 1;
                 record.event_name = "custom.log".into();
                 record
@@ -851,8 +904,18 @@ fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
             "/v1/logs",
             "application/x-protobuf",
             &logs(vec![
-                record(1, false, &run_id().to_string(), 1),
-                record(2, true, &run_id().to_string(), 1)
+                record(
+                    1,
+                    false,
+                    &run_id().to_string(),
+                    mf_telemetry::EVENT_SCHEMA_VERSION
+                ),
+                record(
+                    2,
+                    true,
+                    &run_id().to_string(),
+                    mf_telemetry::EVENT_SCHEMA_VERSION
+                )
             ])
         ),
         200
@@ -897,7 +960,7 @@ fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
     let state = receiver.finish();
     assert_eq!(state.lifecycle.completeness, Completeness::Complete);
     assert_eq!(state.lifecycle.local_drops, 0);
-    assert_eq!(state.lifecycle.observation_errors, 0);
+    assert_eq!(state.observation.errors, 0);
     assert_eq!(receiver.log_snapshot().records.len(), 4096);
     assert_eq!(receiver.log_snapshot().local_drops, expected_drops);
     let data = receiver.span_data(&[1; 16], &[2; 8]);
@@ -925,7 +988,12 @@ fn call_events_ignore_foreign_records_and_reject_malformed_source_metadata() {
             &request.encode_to_vec(),
         )
     };
-    let mut started = record(0, false, &run_id().to_string(), 1);
+    let mut started = record(
+        0,
+        false,
+        &run_id().to_string(),
+        mf_telemetry::EVENT_SCHEMA_VERSION,
+    );
     started.event_name = "llm.request.started".into();
     started.time_unix_nano = 1_000_000_000;
     started.body = Some(AnyValue {
@@ -989,4 +1057,68 @@ fn call_events_ignore_foreign_records_and_reject_malformed_source_metadata() {
             .is_empty()
     );
     receiver.finish();
+}
+
+#[test]
+fn business_validation_errors_preserve_delivered_sequence_evidence() {
+    if !loopback_available() {
+        return;
+    }
+    let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
+    let start = record(
+        1,
+        false,
+        &run_id().to_string(),
+        mf_telemetry::EVENT_SCHEMA_VERSION,
+    );
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &logs(vec![start])
+        ),
+        200
+    );
+    let mut unknown = record(
+        2,
+        false,
+        &run_id().to_string(),
+        mf_telemetry::EVENT_SCHEMA_VERSION,
+    );
+    unknown.event_name = "mf.node.started".into();
+    unknown.attributes.extend([
+        attribute("mf.node.id", string("unknown.node")),
+        attribute("mf.node.kind", string("fixture.task")),
+    ]);
+    unknown.body = Some(body(&[("position", 0), ("elapsed_ns", 1)]));
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &logs(vec![unknown])
+        ),
+        400
+    );
+    let end = record(
+        3,
+        true,
+        &run_id().to_string(),
+        mf_telemetry::EVENT_SCHEMA_VERSION,
+    );
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &logs(vec![end])
+        ),
+        200
+    );
+    let snapshot = receiver.finish();
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
+    assert_eq!(snapshot.lifecycle.known_missing_count, 0);
+    assert_eq!(snapshot.lifecycle.local_drops, 0);
+    assert_eq!(snapshot.observation.errors, 1);
 }

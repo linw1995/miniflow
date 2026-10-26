@@ -721,18 +721,6 @@ impl PreparedStream {
         options: StreamOptions,
         runtime_options: crate::RuntimeOptions,
     ) -> Result<StreamInstance, StreamError> {
-        if let Some(observation) = &options.observation {
-            ensure!(
-                matches!(
-                    observation.description().event_schema_version(),
-                    mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
-                        | mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
-                ),
-                ConfigurationSnafu {
-                    message: "stream execution requires a supported source-driven observation schema"
-                }
-            );
-        }
         let (prepared, operator_states) = self.into_parts();
         let domain_limit = prepared
             .execution()
@@ -1799,7 +1787,6 @@ fn finish_observation(
                 emitted_messages: summary.emitted_messages,
                 completed_frames: summary.completed_frames,
                 delivered_outputs: summary.delivered_outputs,
-                ..Default::default()
             },
             failure,
         );

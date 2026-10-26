@@ -554,7 +554,7 @@ fn success_observations_round_trip_and_reject_protocol_downgrades() {
     let description = mf_compiler::describe_compiled(&plan).unwrap();
     assert_eq!(
         description.event_schema_version(),
-        mf_telemetry::SUCCESS_EVENT_SCHEMA_VERSION
+        mf_telemetry::EVENT_SCHEMA_VERSION
     );
     let harness = capture::Harness::new(false);
     let observation = plan
@@ -568,7 +568,7 @@ fn success_observations_round_trip_and_reject_protocol_downgrades() {
     for wire in records {
         assert_eq!(
             wire.schema_version().unwrap(),
-            mf_telemetry::SUCCESS_EVENT_SCHEMA_VERSION
+            mf_telemetry::EVENT_SCHEMA_VERSION
         );
         let event = wire.decode().unwrap();
         event.validate_for(&description).unwrap();
@@ -641,8 +641,8 @@ fn stream_success_events_round_trip_with_node_only_skip_causes() {
     for wire in harness.records() {
         let record = StreamRecord::decode(&wire).unwrap();
         assert_eq!(
-            record.schema_version,
-            mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+            record.to_wire(1, None).unwrap().attributes["mf.schema.version"],
+            mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
         );
         let encoded = record
             .to_wire(wire.time_unix_nano, wire.trace_context.clone())
@@ -684,7 +684,7 @@ fn success_edges_change_identity_even_when_execution_order_is_unchanged() {
     assert_ne!(id, manifest.workflow_id().unwrap());
     assert_eq!(
         manifest.description().unwrap().event_schema_version(),
-        mf_telemetry::LOOP_EVENT_SCHEMA_VERSION
+        mf_telemetry::EVENT_SCHEMA_VERSION
     );
 }
 

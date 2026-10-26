@@ -257,8 +257,7 @@ fn write_diagnostic(
     match wire.event_name.as_str() {
         "mf.workflow.started" => write!(
             writer,
-            "workflow started (nodes: {}, run: {})",
-            number(&body["node_count"]),
+            "workflow started (run: {})",
             attribute(wire, "mf.run.id")
         )?,
         "mf.workflow.finished" => {
@@ -270,12 +269,6 @@ fn write_diagnostic(
                     number(&counts["completed_frames"]),
                     number(&counts["emitted_messages"]),
                     number(&counts["delivered_outputs"])
-                )?;
-            } else {
-                write!(
-                    writer,
-                    " (visited: {})",
-                    number(&body["visited_node_count"])
                 )?;
             }
         }
@@ -454,7 +447,7 @@ mod tests {
         let mut wire = fixture(include_str!("../tests/fixtures/node-skipped.json"));
         wire.attributes.insert(
             "mf.schema.version".into(),
-            json!(crate::SUCCESS_EVENT_SCHEMA_VERSION),
+            json!(crate::EVENT_SCHEMA_VERSION),
         );
         wire.body["causes"] = json!([{"node_success":"write_file"}]);
         let mut bytes = Vec::new();
@@ -577,8 +570,8 @@ mod tests {
                 .due(Instant::now() + interval, interval);
             assert_eq!(pending.len(), 1);
             if finish_without_terminal_record {
-                *run.sequence.lock().unwrap() =
-                    crate::event::EventSequence::with_maximum(crate::Count::ZERO);
+                *run.sequence.as_ref().unwrap().lock().unwrap() =
+                    crate::transport::EventSequence::new();
                 run.finish(None);
             } else {
                 drop(run);

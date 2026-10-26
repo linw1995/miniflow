@@ -8,7 +8,6 @@ use serde_json::json;
 
 fn record() -> StreamRecord {
     StreamRecord {
-        schema_version: mf_telemetry::STREAM_EVENT_SCHEMA_VERSION,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
         run_id: RunId::new(),
         sequence: Count::try_from(50_000).unwrap(),
@@ -73,19 +72,17 @@ fn malformed_stream_identities_and_cross_protocol_records_are_rejected() {
 }
 
 #[test]
-fn startup_records_have_no_external_message_and_legacy_records_keep_their_version() {
+fn startup_records_use_the_current_schema_and_reject_retired_formats() {
     let mut startup = record();
     startup.identity.as_mut().unwrap().trigger = StreamTrigger::Startup;
     startup.identity.as_mut().unwrap().message = None;
     let wire = startup.to_wire(1, None).unwrap();
     assert_eq!(StreamRecord::decode(&wire).unwrap(), startup);
-    startup.schema_version = mf_telemetry::LEGACY_STREAM_EVENT_SCHEMA_VERSION;
-    assert!(startup.to_wire(1, None).is_err());
-    let mut legacy = record();
-    legacy.schema_version = mf_telemetry::LEGACY_STREAM_EVENT_SCHEMA_VERSION;
-    let wire = legacy.to_wire(1, None).unwrap();
-    assert_eq!(StreamRecord::decode(&wire).unwrap(), legacy);
-    assert_eq!(wire.attributes["mf.schema.version"], json!(3));
+    for version in 1..=6 {
+        let mut retired = wire.clone();
+        retired.attributes["mf.schema.version"] = json!(version);
+        assert!(StreamRecord::decode(&retired).is_err());
+    }
 }
 
 #[test]
@@ -94,7 +91,6 @@ fn terminal_counters_are_validated_and_serialized_for_their_protocol() {
     let mut terminal = record();
     terminal.identity = None;
     terminal.payload = StreamPayload::Control(StreamEvent::Finished {
-        final_sequence: terminal.sequence,
         elapsed_ns: Count::try_from(100).unwrap(),
         outcome: StreamOutcome::Succeeded,
         counts: StreamCounts {
@@ -102,13 +98,11 @@ fn terminal_counters_are_validated_and_serialized_for_their_protocol() {
             emitted_messages: 2,
             completed_frames: 3,
             delivered_outputs: 2,
-            ..Default::default()
         },
         failure: None,
     });
     let wire = terminal.to_wire(1, None).unwrap();
     assert_eq!(wire.body["counts"]["startup_frames"], json!("1"));
-    assert!(wire.body["counts"].get("accepted_inputs").is_none());
     assert_eq!(StreamRecord::decode(&wire).unwrap(), terminal);
     let mut invalid = wire;
     invalid.body["counts"]["startup_frames"] = json!("2");

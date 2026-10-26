@@ -1469,7 +1469,7 @@ impl<'a> GraphView<'a> {
         {
             return Style::default().fg(Color::Magenta);
         }
-        if matches!(status, NodeStatus::Skipped | NodeStatus::NotRun) {
+        if matches!(status, NodeStatus::Skipped) {
             return Style::default().fg(Color::DarkGray);
         }
         if edge.kind == EdgeKind::Success {
@@ -1808,7 +1808,6 @@ fn merge_status(left: NodeStatus, right: NodeStatus) -> NodeStatus {
         Pending => 3,
         Succeeded => 2,
         Skipped => 1,
-        NotRun => 0,
     };
     if rank(right) > rank(left) {
         right
@@ -1839,7 +1838,7 @@ fn node_style(status: NodeStatus) -> Style {
             .add_modifier(Modifier::BOLD),
         NodeStatus::Succeeded => Style::default().fg(Color::Green),
         NodeStatus::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        NodeStatus::Skipped | NodeStatus::NotRun => Style::default().fg(Color::DarkGray),
+        NodeStatus::Skipped => Style::default().fg(Color::DarkGray),
         NodeStatus::Unknown | NodeStatus::Interrupted => Style::default().fg(Color::Magenta),
     }
 }
@@ -1854,7 +1853,6 @@ fn status_marker(status: NodeStatus, observed: Option<&NodeObservation>, elapsed
         NodeStatus::Succeeded => '✓',
         NodeStatus::Failed => '×',
         NodeStatus::Skipped => '↷',
-        NodeStatus::NotRun => '–',
         NodeStatus::Unknown | NodeStatus::Interrupted => '?',
     }
 }
@@ -1894,7 +1892,6 @@ fn status_name(status: NodeStatus) -> &'static str {
         NodeStatus::Succeeded => "succeeded",
         NodeStatus::Failed => "failed",
         NodeStatus::Skipped => "skipped",
-        NodeStatus::NotRun => "not run",
         NodeStatus::Unknown => "unknown",
         NodeStatus::Interrupted => "interrupted",
     }

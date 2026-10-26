@@ -635,13 +635,6 @@ fn isolated_identity_counts_spans_and_snapshots_follow_the_selected_task() {
                 json!(record.description.workflow_id)
             );
         }
-        for event in events
-            .iter()
-            .filter(|event| event.event_name == "mf.workflow.finished")
-        {
-            assert_eq!(event.body["visited_node_count"], 1);
-            assert_eq!(event.body["top_level_visited_count"], 1);
-        }
         let finished = harness.spans.get_finished_spans().unwrap();
         for span in finished.iter().filter(|span| span.name == "mf.workflow") {
             assert!(
@@ -692,7 +685,6 @@ fn isolated_input_and_preparation_failures_emit_no_target_start() {
         assert!(result.is_err());
         let events = harness.records();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[1].body["visited_node_count"], 0);
         assert_eq!(events[1].attributes["mf.failure.phase"], "preparation");
         for event in events {
             event.decode().unwrap();
@@ -724,9 +716,6 @@ fn selected_loop_observation_counts_real_body_steps_without_neighbors() {
         )
         .unwrap();
     let events = harness.records();
-    let terminal = events.last().unwrap();
-    assert_eq!(terminal.body["top_level_visited_count"], 1);
-    assert!(terminal.body["visited_node_count"].as_i64().unwrap() > 1);
     assert_eq!(
         events
             .iter()
