@@ -343,7 +343,7 @@ and outputs are also redacted. Literal configuration and parameter defaults rema
 
 ### LLM configuration and conversation values
 
-The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing one authoritative terminal result and optional text deltas:
+The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing one authoritative terminal result, optional text deltas, and completed tool-call events:
 
 | Direction | Port | Type | Required |
 | --- | --- | --- | --- |
@@ -562,10 +562,30 @@ Assistant history can also carry optional `reasoning`, a list of records with `i
 records and tool-call metadata when replaying history. The provider adapter determines which issuer's
 reasoning it can replay. Application `metadata` remains separate and is not sent to the provider.
 
-Text deltas remain previews; complete calls appear only in terminal outputs. Tool-only responses do
-not emit a first-text observation. Usage, deadlines, cancellation, and error capture retain the same
-contracts as text calls. Cancellation and publication failure remain execution failures even with
-error capture enabled. This interface supports text and function tools, not media inputs.
+The stream side exposes `delta` for text and `tool_call` for each completed tool call. The text payload
+remains `{text, model_call_id}`. A tool event contains `{model_call_id, call}`, where `call` has the same
+shape as one terminal `tool_calls` entry. Rig assembles arguments before publishing a completed call;
+raw argument fragments are not exposed. A tool event is still a preview of the overall request:
+later failure or truncation can invalidate the batch. Use terminal `outcome` to decide whether to dispatch.
+
+Each emission produces one stream port and explicitly skips the other. Select these ports as optional
+workflow outputs when observing mixed text/tool responses, for example:
+
+```json
+[
+  {"name": "text_delta", "node": "model", "port": "delta", "optional": true},
+  {"name": "tool_call", "node": "model", "port": "tool_call", "optional": true},
+  {"name": "outcome", "node": "model", "port": "outcome"},
+  {"name": "tool_calls", "node": "model", "port": "tool_calls"}
+]
+```
+
+Selecting a stream port enables native streaming execution. Ordinary downstream nodes connected to
+one stream port are skipped on emissions from the other port. Tool-only responses emit neither empty
+text deltas nor a first-text observation. Incomplete or malformed arguments do not produce a completed
+tool event. Usage, deadlines, cancellation, and error capture retain the same contracts as text calls.
+Cancellation and publication failure remain execution failures even with error capture enabled.
+This interface supports text and function tools, not media inputs.
 
 ## Structured Loop
 

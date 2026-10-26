@@ -419,38 +419,92 @@ fn llm_workflows_match_memory_and_standalone_runners() {
 
 #[test]
 fn tool_calls_match_memory_and_standalone_runners() {
-    let reply = Reply::json(json!({
+    fn stabilize(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                for (name, value) in fields {
+                    match name.as_str() {
+                        "call_id" | "model_call_id" => *value = json!("generated"),
+                        "started_at" => *value = json!(0),
+                        _ => stabilize(value),
+                    }
+                }
+            }
+            Value::Array(values) => values.iter_mut().for_each(stabilize),
+            _ => {}
+        }
+    }
+    let call = json!({"id":"call_lookup","type":"function","function":{"name":"lookup","arguments":"{\"id\":42}"}});
+    let unary = Reply::json(json!({
         "id":"tool-response", "object":"chat.completion", "created":0, "model":"example-model",
-        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[
-            {"id":"call_lookup","type":"function","function":{"name":"lookup","arguments":"{\"id\":42}"}}
-        ]},"finish_reason":"tool_calls"}],
+        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[call.clone()]},"finish_reason":"tool_calls"}],
         "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}
     }));
-    let server = Server::start(vec![reply; 2]);
-    let mut definition: Value =
-        serde_json::from_str(include_str!("../../../examples/llm-tools.json")).unwrap();
-    definition["dependencies"] = dependencies();
-    definition["nodes"][0]["config"] =
-        json!({"model":"example-model","base_url":server.base_url,"api_key_env":"MODEL_API_KEY"});
-    let inputs = json!({
-        "model.prompt":"Look up 42",
-        "model.tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}]
-    });
-    let root = tempfile::tempdir().unwrap();
-    let executable = compile(&definition, root.path());
-    assert!(server.requests().is_empty());
-    let mut memory = run_memory(&definition, &inputs);
-    let mut generated = run(&executable, &inputs);
-    for outputs in [&mut memory, &mut generated] {
-        let usage = outputs[0]["usages"][0].as_object_mut().unwrap();
-        usage.remove("call_id");
-        usage.remove("started_at");
+    let mut streamed = Reply::stream_text("");
+    let mut call = call;
+    call["index"] = json!(0);
+    let chunk = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":[call]},"finish_reason":null}]});
+    let finish = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+    streamed.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    for (stream, reply) in [(false, unary), (true, streamed)] {
+        let server = Server::start(vec![reply; 2]);
+        let mut definition: Value =
+            serde_json::from_str(include_str!("../../../examples/llm-tools.json")).unwrap();
+        definition["dependencies"] = dependencies();
+        definition["nodes"][0]["config"] = json!({"model":"example-model","base_url":server.base_url,"api_key_env":"MODEL_API_KEY"});
+        if stream {
+            definition["execution"] = json!({});
+            definition["nodes"].as_array_mut().unwrap().extend([
+                json!({"id":"text_preview","kind":"builtin.identity","inputs":{"input":{"from":{"node":"model","port":"delta"}}}}),
+                json!({"id":"tool_preview","kind":"builtin.identity","inputs":{"input":{"from":{"node":"model","port":"tool_call"}}}}),
+            ]);
+            definition["outputs"].as_array_mut().unwrap().extend([
+                json!({"name":"text_delta","node":"text_preview","port":"value","optional":true}),
+                json!({"name":"tool_delta","node":"tool_preview","port":"value","optional":true}),
+            ]);
+        }
+        let inputs = json!({
+            "model.prompt":"Look up 42",
+            "model.tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}]
+        });
+        let root = tempfile::tempdir().unwrap();
+        let executable = compile(&definition, root.path());
+        assert!(server.requests().is_empty());
+        let mut memory = run_memory(&definition, &inputs);
+        let mut generated = run(&executable, &inputs);
+        for outputs in [&mut memory, &mut generated] {
+            outputs.iter_mut().for_each(stabilize);
+            outputs.sort_by_key(Value::to_string);
+        }
+        assert_eq!(memory, generated);
+        let terminal = generated
+            .iter()
+            .find(|output| output.get("outcome").is_some())
+            .unwrap();
+        assert_eq!(terminal["outcome"], "tool_calls");
+        assert_eq!(terminal["tool_calls"][0]["arguments"], json!({"id":42}));
+        assert_eq!(terminal["usages"][0]["node"]["kind"], "builtin.llm");
+        if stream {
+            let deltas = generated
+                .iter()
+                .filter_map(|output| output.get("tool_delta"))
+                .collect::<Vec<_>>();
+            assert_eq!(deltas.len(), 1);
+            assert!(
+                generated
+                    .iter()
+                    .all(|output| output.get("text_delta").is_none())
+            );
+            assert_eq!(deltas[0]["call"], terminal["tool_calls"][0]);
+        }
+        assert_eq!(server.requests().len(), 2);
+        assert_eq!(
+            server.requests()[0].body["stream"]
+                .as_bool()
+                .unwrap_or(false),
+            stream
+        );
     }
-    assert_eq!(memory, generated);
-    assert_eq!(generated[0]["outcome"], "tool_calls");
-    assert_eq!(generated[0]["tool_calls"][0]["arguments"], json!({"id":42}));
-    assert_eq!(generated[0]["usages"][0]["node"]["kind"], "builtin.llm");
-    assert_eq!(server.requests().len(), 2);
 }
 
 #[test]

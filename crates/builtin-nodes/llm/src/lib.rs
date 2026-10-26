@@ -1,5 +1,5 @@
 pub mod call;
-pub use call::{CallOutcome, Reasoning, ReasoningBlock, ToolCall, ToolDefinition};
+pub use call::{CallOutcome, Reasoning, ReasoningBlock, ToolCall, ToolCallEvent, ToolDefinition};
 mod streaming;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
@@ -116,7 +116,8 @@ pub struct TextDelta {
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct LlmEmission {
-    pub delta: TextDelta,
+    pub delta: Option<TextDelta>,
+    pub tool_call: Option<ToolCallEvent>,
 }
 
 #[derive(mf_runtime::NodeInputs)]
@@ -361,7 +362,7 @@ pub enum LlmExecutionError {
         #[snafu(source(from(ProviderError, Box::new)))]
         source: Box<ProviderError>,
     },
-    #[snafu(display("could not publish LLM text: {source}"))]
+    #[snafu(display("could not publish LLM stream output: {source}"))]
     Publication { source: NodeExecutionError },
     #[snafu(display("LLM response contains unsupported nontext output"))]
     UnsupportedOutput,
@@ -573,6 +574,7 @@ impl LlmNode {
         usage.started_at =
             mf_telemetry::events::record(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
                 .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
+        let allow_tools = !request.tools.is_empty();
         let response = if emitter.is_connected() {
             streaming::complete(
                 model.stream(request),
@@ -580,6 +582,7 @@ impl LlmNode {
                 &usage.call_id,
                 deadline,
                 context,
+                allow_tools,
             )
         } else {
             context
@@ -681,7 +684,7 @@ fn terminal_outputs(
     })
 }
 
-/// Prepares one optional text stream and its authoritative result without acquiring resources.
+/// Prepares text/tool streams and their authoritative result without acquiring resources.
 pub fn prepare_llm(value: Value) -> Result<PreparedNode, NodeBuildError> {
     let config = PreparedConfig::parse(value)?;
     let metadata = NodeMetadata {

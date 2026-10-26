@@ -15,7 +15,7 @@ instance-specific typed inputs, and output types inferred by the CEL checker. A 
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
 The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with fixed typed prompt,
-system, history, terminal outputs, and an optional typed `delta` stream. Select it explicitly to add its HTTP transport dependencies.
+system, history, terminal outputs, and optional typed `delta` and `tool_call` streams. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
 The node also accepts function `tools`, returns tool calls in its existing history, and can continue from
 caller-supplied tool results without a new prompt. Tool protocol types are exported by `mfn_llm`.

@@ -25,6 +25,31 @@ pub struct ToolCall {
     pub additional_params: Option<ValueRef>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
+pub struct ToolCallEvent {
+    pub model_call_id: String,
+    pub call: ToolCall,
+}
+
+impl ToolCall {
+    pub fn from_provider(call: rig::ToolCall) -> Result<Self, LlmExecutionError> {
+        let id = call.id.wire().into_owned();
+        ensure!(
+            !id.trim().is_empty() && valid_name(call.function.name.as_str()),
+            crate::InvalidResponseSnafu {
+                requirement: "nonblank tool call IDs and valid tool names"
+            }
+        );
+        Ok(Self {
+            id,
+            name: call.function.name.into(),
+            arguments: call.function.arguments.into(),
+            signature: call.signature,
+            additional_params: call.additional_params.map(Into::into),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, NodeEnum)]
 #[value(tag = "type")]
 pub enum ReasoningBlock {
@@ -464,22 +489,13 @@ pub fn terminal_result(
                 ContentBlock::Text { text: part.text }
             }
             rig::AssistantContent::ToolCall(call) => {
-                let id = call.id.wire().into_owned();
+                let call = ToolCall::from_provider(call)?;
                 ensure!(
-                    !id.trim().is_empty()
-                        && seen.insert(id.clone())
-                        && valid_name(call.function.name.as_str()),
+                    seen.insert(call.id.clone()),
                     crate::InvalidResponseSnafu {
-                        requirement: "unique nonblank tool call IDs and valid tool names"
+                        requirement: "unique tool call IDs"
                     }
                 );
-                let call = ToolCall {
-                    id,
-                    name: call.function.name.into(),
-                    arguments: call.function.arguments.into(),
-                    signature: call.signature,
-                    additional_params: call.additional_params.map(Into::into),
-                };
                 tool_calls.push(call.clone());
                 ContentBlock::ToolCall { call }
             }

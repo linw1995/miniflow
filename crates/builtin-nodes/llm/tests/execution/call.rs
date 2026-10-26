@@ -134,6 +134,104 @@ fn fragmented_interleaved_streamed_calls_match_the_terminal_response() {
         streamed["results"][0]["events"].as_array().unwrap().len(),
         3
     );
+    let records = streamed["results"][0]["deltas"].as_array().unwrap();
+    let model_call_id = &streamed["results"][0]["outputs"]["usages"][0]["call_id"];
+    let mut calls = Vec::new();
+    for record in records {
+        if let Some(event) = record.get("tool_call") {
+            assert!(record.get("delta").is_none());
+            assert_eq!(&event["model_call_id"], model_call_id);
+            calls.push(event["call"].clone());
+        }
+    }
+    calls.sort_by_key(|call| call["id"].as_str().unwrap().to_owned());
+    assert_eq!(
+        json!(calls),
+        streamed["results"][0]["outputs"]["tool_calls"]
+    );
+}
+
+fn streamed_tool(arguments: &str, finish_reason: &str) -> Reply {
+    let mut reply = Reply::stream_text("");
+    let chunk = json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"one","type":"function","function":{"name":"lookup","arguments":arguments}}]},"finish_reason":null}]});
+    let finish = json!({"id":"response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":finish_reason}],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}});
+    reply.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    reply
+}
+
+#[test]
+fn tool_only_streams_publish_calls_without_text_or_first_text_observations() {
+    let server = Server::start(vec![streamed_tool(r#"{"key":"a"}"#, "tool_calls")]);
+    let output = invoke(
+        &server,
+        json!({"prompt":"Look up a", "tools":[tool()]}),
+        true,
+        json!({}),
+    );
+    let result = &output["results"][0];
+    assert_eq!(result["ok"], true, "{output}");
+    assert_eq!(result["outputs"]["outcome"], "tool_calls");
+    let deltas = result["deltas"].as_array().unwrap();
+    assert!(deltas.iter().all(|delta| delta.get("delta").is_none()));
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(
+        deltas.last().unwrap()["tool_call"]["call"],
+        result["outputs"]["tool_calls"][0]
+    );
+    assert_eq!(result["events"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn unsolicited_tool_streams_retain_the_text_only_failure_contract() {
+    let server = Server::start(vec![streamed_tool("{}", "tool_calls")]);
+    let output = invoke(
+        &server,
+        json!({"prompt":"Hello"}),
+        true,
+        json!({"capture_errors":true}),
+    );
+    let result = &output["results"][0];
+    assert_eq!(result["ok"], true, "{output}");
+    assert_eq!(result["outputs"]["outcome"], "failed");
+    assert_eq!(result["deltas"], json!([]));
+}
+
+#[test]
+fn invalid_or_truncated_tool_streams_do_not_publish_completed_calls() {
+    for (finish, expected) in [("tool_calls", "failed"), ("length", "truncated")] {
+        let server = Server::start(vec![streamed_tool(r#"{"key":"#, finish)]);
+        let output = invoke(
+            &server,
+            json!({"prompt":"Look up a", "tools":[tool()]}),
+            true,
+            json!({"capture_errors":true}),
+        );
+        let result = &output["results"][0];
+        assert_eq!(result["ok"], true, "{output}");
+        assert_eq!(result["outputs"]["outcome"], expected);
+        assert_eq!(result["outputs"]["tool_calls"], json!([]));
+        let deltas = result["deltas"].as_array().unwrap();
+        assert!(deltas.is_empty(), "{output}");
+    }
+}
+
+#[test]
+fn tool_stream_delivery_failure_and_cancellation_remain_fatal() {
+    for option in ["disconnect", "cancel_after_prefix"] {
+        let server = Server::start(vec![streamed_tool("{}", "tool_calls")]);
+        let mut input = json!({"stream":true, "inputs":[{"prompt":"Look up a", "tools":[tool()]}]});
+        input[option] = true.into();
+        let output = probe(&server, input, json!({"capture_errors":true}));
+        let result = &output["results"][0];
+        assert_eq!(result["ok"], false, "{output}");
+        assert_eq!(result["deltas"].as_array().unwrap().len(), 1);
+        assert_eq!(result["deltas"][0]["tool_call"]["call"]["id"], "one");
+        if option == "disconnect" {
+            assert!(result["error"].as_str().unwrap().contains("publish"));
+        } else {
+            assert_eq!(result["typed_runtime"], true, "{output}");
+        }
+    }
 }
 
 #[test]
