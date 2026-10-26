@@ -1,4 +1,6 @@
 use std::sync::Arc;
+#[path = "execution/call.rs"]
+mod call;
 mod support;
 
 use mf_runtime::{ExecutionContext, Inputs, NodeRegistry, StreamCancellation, StreamError};
@@ -145,6 +147,7 @@ fn execution_probe() {
             });
         }
         let mut history: Option<Value> = None;
+        let mut messages = Vec::new();
         let mut context = ExecutionContext::default();
         context.set_cancellation(cancellation.clone());
         for input in parameters["inputs"].as_array().unwrap() {
@@ -157,6 +160,10 @@ fn execution_probe() {
                 && let Some(history) = &history
             {
                 input["history"] = history.clone();
+            }
+            if parameters["append_history"] == true {
+                messages.extend(input["history"].as_array().unwrap().iter().cloned());
+                input["history"] = json!(messages);
             }
             let events = Arc::new(std::sync::Mutex::new(Vec::new()));
             let recorded = events.clone();
@@ -181,6 +188,9 @@ fn execution_probe() {
                 Ok(result) => {
                     let output = serde_json::to_value(result.outputs).unwrap();
                     history = Some(output["history"].clone());
+                    if parameters["append_history"] == true {
+                        messages = output["history"].as_array().unwrap().clone();
+                    }
                     results.push(json!({"ok": true, "outputs": output, "deltas": sink.values, "events": events.lock().unwrap().clone()}));
                 }
                 Err(error) => {
@@ -315,7 +325,7 @@ fn invalid_history_and_prompts_fail_before_network_io() {
         ),
         (
             json!({"prompt": "next", "history": [{"role": "tool", "content": "bad"}]}),
-            "/history/0/role",
+            "/history/0/tool_call_id",
         ),
         (
             json!({"prompt": "next", "history": [{"role": "user", "content": ""}]}),
@@ -364,7 +374,7 @@ fn missing_and_empty_credentials_fail_without_acquiring_network_resources() {
     assert!(server.requests().is_empty());
     let prepared =
         prepare_llm(json!({"model": "example-model", "base_url": server.base_url})).unwrap();
-    assert_eq!(prepared.metadata.ports.inputs.len(), 3);
+    assert_eq!(prepared.metadata.ports.inputs.len(), 4);
 }
 
 #[test]

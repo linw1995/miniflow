@@ -133,7 +133,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
-| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `prompt`; optional `system` and `history` | Required `text` and updated `history`; optional `usage` and `finish_reason` |
+| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Optional `prompt`, `system`, `history`, and `tools`; prompt or nonempty history required | Required `text`, updated `history`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -375,10 +375,13 @@ The request deadline bounds provider setup and reads. Emission waits follow nati
 when the consumer fails or the host cancels.
 Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
-Each history object has exactly two required string fields, `role` and `content`. Conversation roles are `user`
-and `assistant`, with nonempty text. The current `prompt` is also nonempty. System instructions use the separate
-`system` input. Missing or empty history starts a new conversation; a successful turn appends its user prompt and
-assistant text to the supplied history. The workflow owns transcript persistence and trimming.
+Each history object has two required string fields, `role` and `content`. Plain conversation roles are
+`user` and `assistant`, with nonempty text. Tool calls additionally support assistant `tool_calls`,
+optional `reasoning`, and `tool` results with `tool_call_id`; see [LLM tool calls](#llm-tool-calls).
+A supplied `prompt` must be nonempty. It may be omitted when continuing from nonempty history.
+System instructions use the separate `system` input. Missing or empty history plus a prompt starts
+a new conversation. A successful request appends the prompt when present and one assistant message.
+The workflow owns transcript persistence and trimming.
 
 Static configuration has this shape:
 
@@ -439,9 +442,9 @@ disables idle connection pooling so prepared nodes can outlive earlier workflow-
 Each invocation enforces its resolved deadline through the runtime future driver; the shared client retains no
 invocation-specific credentials, endpoint, or deadline.
 
-Request messages are optional system instructions, the supplied history in order, and the current user prompt.
-On success, returned history preserves the supplied records and appends the current user prompt and complete assistant
-text once each. System instructions are excluded and must be supplied again for each turn. The node does not retain
+Request messages are optional system instructions, the supplied history in order, and the current user prompt when present.
+On success, returned history preserves the supplied records and appends the prompt when supplied and the complete assistant
+message once each. System instructions are excluded and must be supplied again for each turn. The node does not retain
 conversation state, automatically trim history, or execute tool calls. Unsupported history roles and response content
 fail rather than being silently rewritten. A nonempty reply truncated at its token limit retains the `length` reason.
 
@@ -470,6 +473,99 @@ mf compile examples/llm-loop.json --output ./conversation
 
 Persist the returned history and pass it as `chat.history` with a new prompt to continue a terminal conversation.
 The Loop example repeats the supplied prompt twice while preserving the earlier reply in the second request.
+
+### LLM tool calls
+
+The existing `builtin.llm` node accepts an optional `tools` input, defaulting to `[]`. Each execution
+still makes exactly one OpenAI-compatible Chat Completions request. The node does not execute tools,
+repeat requests, or expose `tool_choice`. Existing `prompt`, `system`, and text `history` inputs remain
+supported. `prompt` is now optional so callers can continue from tool results; an explicitly supplied
+prompt must remain nonempty, and a request must contain a prompt or nonempty history.
+
+Each tool definition contains `name`, `description`, and `input_schema`. Names must be unique and
+contain 1-64 ASCII letters, digits, underscores, or hyphens. The schema must be an object with
+`type: object`; its remaining JSON Schema semantics are passed to the provider. Generated arguments
+are parsed as JSON but are not validated against that schema by this node. Malformed argument JSON
+fails the response instead of producing an executable tool call.
+
+For example, pass these inputs to the [tool example](../examples/llm-tools.json):
+
+```json
+{
+  "model.prompt": "Look up order 42.",
+  "model.tools": [
+    {
+      "name": "lookup_order",
+      "description": "Look up an order by its ID",
+      "input_schema": {
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
+```
+
+```sh
+mf compile examples/llm-tools.json --output ./tool-call
+MODEL_API_KEY=... ./tool-call --inputs-file inputs.json
+```
+
+The existing outputs remain available. Two additional required outputs describe the response:
+
+| Output | Meaning |
+| --- | --- |
+| `tool_calls` | Ordered calls, each with `id`, `name`, JSON `arguments`, and optional provider `signature` / `additional_params`; `[]` when absent |
+| `outcome` | `completed`, `tool_calls`, `truncated`, `refused`, `incomplete`, or `failed` |
+
+`status: succeeded` means the request produced a valid response, including a tool request. Only
+`outcome: tool_calls` identifies a complete batch for caller-managed dispatch. Tool-only responses
+have empty `text`. `truncated` represents the output length limit, `refused` represents provider
+content filtering, and `incomplete` represents no usable answer or an unrecognized finish reason
+without tool calls. `failed` accompanies `capture_errors` failures. Plain requests without tools
+retain their existing rejection of empty text and unsolicited tool calls.
+
+Returned `history` includes the original records, the prompt if supplied, and one assistant message.
+An assistant tool message retains `content` as a string, which may be empty, and adds `tool_calls`:
+
+```json
+{
+  "role": "assistant",
+  "content": "",
+  "tool_calls": [
+    {"id": "call_123", "name": "lookup_order", "arguments": {"id": "42"}}
+  ]
+}
+```
+
+Execute calls outside the node, append a matching result to that returned history for each call,
+and invoke `builtin.llm` again with `history` and `tools`, omitting `prompt`:
+
+```json
+{
+  "role": "tool",
+  "tool_call_id": "call_123",
+  "content": "Order 42 has shipped."
+}
+```
+
+Call IDs must be nonblank and unique within the supplied history. Every call requires exactly one
+result before subsequent user text, another assistant message, or the next request. Results can
+arrive in any order. The tool name is resolved from the matching assistant call. Tool errors can be
+represented in the result content by the caller; this node imposes no execution or retry policy.
+
+Assistant history can also carry optional `reasoning`, a list of records with `issuer`, optional
+`id`, and ordered `content` blocks. Blocks use `type: text` with `text` and optional `signature`,
+`type: summary` with `text`, or `type: encrypted` / `type: redacted` with `data`. Preserve these
+records and tool-call metadata when replaying history. The provider adapter determines which issuer's
+reasoning it can replay. Application `metadata` remains separate and is not sent to the provider.
+
+Text deltas remain previews; complete calls appear only in terminal outputs. Tool-only responses do
+not emit a first-text observation. Usage, deadlines, cancellation, and error capture retain the same
+contracts as text calls. Cancellation and publication failure remain execution failures even with
+error capture enabled. This interface supports text and function tools, not media inputs.
 
 ## Structured Loop
 

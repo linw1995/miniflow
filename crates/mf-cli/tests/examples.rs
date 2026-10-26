@@ -23,7 +23,7 @@ fn title_usage(node: &str, purpose: &str) -> Value {
     usage
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 16] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 17] {
     [
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
@@ -68,6 +68,13 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 16] {
             "llm-loop.json",
             None,
             json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}, {"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+        ),
+        (
+            "llm-tools.json",
+            None,
+            json!({"outcome":"completed", "text":"reply", "history":[{"role":"user","content":"Hello"},{"role":"assistant","content":"reply"}], "tool_calls":[], "usages":[{
+                "started_at":0, "call_id":"generated", "node":{"id":"model","kind":"builtin.llm","path":[]}, "model":"example-model", "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}
+            }]}),
         ),
         ("stream-batch.json", Some("1\n"), json!({"batch": [1]})),
     ]
@@ -191,6 +198,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 json!({"input.prompt":"Hello", "input.model":"example-model", "input.base_url":server.base_url})
             } else if name.starts_with("chat-") {
                 json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
+            } else if name == "llm-tools.json" {
+                json!({"model.prompt":"Hello"})
             } else if name == "llm-parameters.json" {
                 json!({"params.prompt":"Hello"})
             } else {
@@ -243,7 +252,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 )
             })
         };
-        if name.starts_with("chat-") {
+        if name.starts_with("chat-") || name == "llm-tools.json" {
             let mut identities = std::collections::BTreeSet::new();
             for usage in actual["usages"].as_array_mut().unwrap() {
                 let id = usage["call_id"].as_str().unwrap().to_owned();

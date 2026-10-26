@@ -418,6 +418,42 @@ fn llm_workflows_match_memory_and_standalone_runners() {
 }
 
 #[test]
+fn tool_calls_match_memory_and_standalone_runners() {
+    let reply = Reply::json(json!({
+        "id":"tool-response", "object":"chat.completion", "created":0, "model":"example-model",
+        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[
+            {"id":"call_lookup","type":"function","function":{"name":"lookup","arguments":"{\"id\":42}"}}
+        ]},"finish_reason":"tool_calls"}],
+        "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}
+    }));
+    let server = Server::start(vec![reply; 2]);
+    let mut definition: Value =
+        serde_json::from_str(include_str!("../../../examples/llm-tools.json")).unwrap();
+    definition["dependencies"] = dependencies();
+    definition["nodes"][0]["config"] =
+        json!({"model":"example-model","base_url":server.base_url,"api_key_env":"MODEL_API_KEY"});
+    let inputs = json!({
+        "model.prompt":"Look up 42",
+        "model.tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}]
+    });
+    let root = tempfile::tempdir().unwrap();
+    let executable = compile(&definition, root.path());
+    assert!(server.requests().is_empty());
+    let mut memory = run_memory(&definition, &inputs);
+    let mut generated = run(&executable, &inputs);
+    for outputs in [&mut memory, &mut generated] {
+        let usage = outputs[0]["usages"][0].as_object_mut().unwrap();
+        usage.remove("call_id");
+        usage.remove("started_at");
+    }
+    assert_eq!(memory, generated);
+    assert_eq!(generated[0]["outcome"], "tool_calls");
+    assert_eq!(generated[0]["tool_calls"][0]["arguments"], json!({"id":42}));
+    assert_eq!(generated[0]["usages"][0]["node"]["kind"], "builtin.llm");
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[test]
 fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
     let root = tempfile::tempdir().unwrap();
     let input = root.path().join("prompts.txt");

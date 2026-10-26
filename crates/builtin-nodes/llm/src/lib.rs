@@ -1,3 +1,5 @@
+pub mod call;
+pub use call::{CallOutcome, Reasoning, ReasoningBlock, ToolCall, ToolDefinition};
 mod streaming;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
@@ -10,7 +12,7 @@ use mf_runtime::{
     TypedNodeResult, TypedTaskStreamNode, ValueRef, deserialize_config,
 };
 use rig_core::{
-    completion::{AssistantContent, CompletionRequest, CompletionResponse, FinishReason, Message},
+    completion::{CompletionRequest, CompletionResponse, FinishReason},
     error::ProviderError,
     providers::openai::OpenAIConfig,
 };
@@ -78,18 +80,25 @@ pub struct ChatMessage {
     pub role: String,
     pub content: String,
     pub metadata: Option<MessageMetadata>,
+    pub tool_calls: Option<Vec<ToolCall>>,
+    pub tool_call_id: Option<String>,
+    pub reasoning: Option<Vec<Reasoning>>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct LlmInputs {
-    pub prompt: String,
+    pub prompt: Option<String>,
     pub system: Option<String>,
     pub history: Option<Vec<ChatMessage>>,
+    #[value(default)]
+    pub tools: Vec<ToolDefinition>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct LlmOutputs {
     pub status: String,
+    pub outcome: CallOutcome,
+    pub tool_calls: Vec<ToolCall>,
     pub usages: Vec<CallUsage>,
     pub error: Option<String>,
     pub text: String,
@@ -356,6 +365,8 @@ pub enum LlmExecutionError {
     Publication { source: NodeExecutionError },
     #[snafu(display("LLM response contains unsupported nontext output"))]
     UnsupportedOutput,
+    #[snafu(display("LLM response requires {requirement}"))]
+    InvalidResponse { requirement: &'static str },
     #[snafu(display("LLM response contains no nonempty text"))]
     EmptyText,
     #[snafu(display("LLM usage counter `{counter}` exceeds the signed integer range"))]
@@ -367,6 +378,8 @@ pub enum LlmExecutionError {
     DeadlineRange,
     #[snafu(display("LLM usage metadata is invalid"))]
     UsageMetadata { source: serde_json::Error },
+    #[snafu(display("could not encode LLM request"))]
+    EncodeRequest { source: serde_json::Error },
     #[snafu(display("could not normalize LLM response metadata"))]
     NormalizeResponse { source: serde_json::Error },
     #[snafu(transparent)]
@@ -459,30 +472,62 @@ impl LlmNode {
             .checked_add(Duration::from_millis(config.timeout_ms))
             .context(DeadlineRangeSnafu)?;
         context.check_future_limits(Some(deadline))?;
-        ensure!(
-            !inputs.prompt.is_empty(),
-            InvalidInputSnafu {
-                path: "/prompt",
-                requirement: "nonempty text"
-            }
-        );
+        let request = call::prepare_request(&inputs)?
+            .temperature(config.temperature)
+            .max_tokens(config.max_tokens);
+        let allow_tools = !inputs.tools.is_empty();
         let history = inputs.history.unwrap_or_default();
-        for (index, message) in history.iter().enumerate() {
-            ensure!(
-                matches!(message.role.as_str(), "user" | "assistant"),
-                InvalidInputSnafu {
-                    path: format!("/history/{index}/role"),
-                    requirement: "role `user` or `assistant`"
+        let (response, mut usage) = self.request(request, &config, context, emitter, deadline)?;
+        let failure_history = if config.capture_errors {
+            history.clone()
+        } else {
+            Vec::new()
+        };
+        let result = response.and_then(|response| {
+            if usage.usage.is_none() {
+                usage.usage = reported_usage(&response.usage).ok().flatten();
+            }
+            terminal_outputs(response, inputs.prompt, history, allow_tools).and_then(|result| {
+                context.check_future_limits(Some(deadline))?;
+                Ok(result)
+            })
+        });
+        let mut result = match result {
+            Ok(result) => result,
+            Err(error)
+                if config.capture_errors
+                    && !matches!(error, LlmExecutionError::Publication { .. }) =>
+            {
+                context.check_future_limits(None)?;
+                let error = error.to_string();
+                usage.error = Some(error.clone());
+                LlmOutputs {
+                    status: "failed".into(),
+                    outcome: CallOutcome::Failed,
+                    tool_calls: Vec::new(),
+                    text: String::new(),
+                    history: failure_history,
+                    usage: usage.usage.clone(),
+                    finish_reason: None,
+                    metadata: None,
+                    usages: Vec::new(),
+                    error: Some(error),
                 }
-            );
-            ensure!(
-                !message.content.is_empty(),
-                InvalidInputSnafu {
-                    path: format!("/history/{index}/content"),
-                    requirement: "nonempty text"
-                }
-            );
-        }
+            }
+            Err(error) => return Err(error),
+        };
+        usage.usage = result.usage.clone();
+        result.usages.push(usage);
+        Ok(result)
+    }
+    fn request(
+        &self,
+        request: CompletionRequest,
+        config: &Config,
+        context: &ExecutionContext,
+        emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
+        deadline: Instant,
+    ) -> Result<(Result<CompletionResponse, LlmExecutionError>, CallUsage), LlmExecutionError> {
         let key = if let Some(key) = &config.api_key {
             key.value()
                 .as_str()
@@ -505,20 +550,6 @@ impl LlmNode {
             .with_base_url(&config.base_url)
             .connect(transport.clone())
             .chat(&config.model);
-        let messages = history.iter().map(|message| {
-            if message.role == "user" {
-                Message::user(&message.content)
-            } else {
-                Message::assistant(&message.content)
-            }
-        });
-        let mut request = CompletionRequest::new(&inputs.prompt)
-            .messages(messages)
-            .temperature(config.temperature)
-            .max_tokens(config.max_tokens);
-        if let Some(system) = inputs.system.filter(|system| !system.is_empty()) {
-            request = request.preamble(system);
-        }
         let mut usage = CallUsage {
             attribution: config.attribution.clone(),
             started_at: None,
@@ -574,48 +605,13 @@ impl LlmNode {
         let mut finished = usage.clone();
         finished.error = response.as_ref().err().map(ToString::to_string);
         mf_telemetry::events::record(REQUEST_FINISHED_EVENT, serde_json::json!(finished));
-        let failure_history = if config.capture_errors {
-            history.clone()
-        } else {
-            Vec::new()
-        };
-        let result = response.and_then(|mut response| {
-            if let Some(usage) = transport.usage() {
-                response.usage = usage;
+        let response = response.map(|mut response| {
+            if let Some(reported) = transport.usage() {
+                response.usage = reported;
             }
-            if usage.usage.is_none() {
-                usage.usage = reported_usage(&response.usage).ok().flatten();
-            }
-            terminal_outputs(response, inputs.prompt, history).and_then(|result| {
-                context.check_future_limits(Some(deadline))?;
-                Ok(result)
-            })
+            response
         });
-        let mut result = match result {
-            Ok(result) => result,
-            Err(error)
-                if config.capture_errors
-                    && !matches!(error, LlmExecutionError::Publication { .. }) =>
-            {
-                context.check_future_limits(None)?;
-                let error = error.to_string();
-                usage.error = Some(error.clone());
-                LlmOutputs {
-                    status: "failed".into(),
-                    text: String::new(),
-                    history: failure_history,
-                    usage: usage.usage.clone(),
-                    finish_reason: None,
-                    metadata: None,
-                    usages: Vec::new(),
-                    error: Some(error),
-                }
-            }
-            Err(error) => return Err(error),
-        };
-        usage.usage = result.usage.clone();
-        result.usages.push(usage);
-        Ok(result)
+        Ok((response, usage))
     }
 }
 
@@ -638,49 +634,50 @@ fn reported_usage(
     Ok((!usage.is_empty()).then_some(usage))
 }
 
-fn terminal_outputs(
-    response: CompletionResponse,
-    prompt: String,
-    mut history: Vec<ChatMessage>,
-) -> Result<LlmOutputs, LlmExecutionError> {
-    let finish_reason = response.finish_reason().map(|reason| match reason {
+fn finish_reason(response: &CompletionResponse) -> Option<String> {
+    response.finish_reason().map(|reason| match reason {
         FinishReason::Stop => "stop".into(),
         FinishReason::Length => "length".into(),
         FinishReason::ToolCalls => "tool_calls".into(),
         FinishReason::ContentFilter => "content_filter".into(),
         FinishReason::Other(value) => value,
-    });
-    let mut text = String::new();
-    for part in response.choice {
-        match part {
-            AssistantContent::Text(part) => {
-                text.push_str(&part.text);
-            }
-            AssistantContent::Reasoning(_) => {}
-            _ => return UnsupportedOutputSnafu.fail(),
-        }
-    }
-    ensure!(!text.is_empty(), EmptyTextSnafu);
+    })
+}
+
+fn terminal_outputs(
+    response: CompletionResponse,
+    prompt: Option<String>,
+    mut history: Vec<ChatMessage>,
+    allow_tools: bool,
+) -> Result<LlmOutputs, LlmExecutionError> {
     let usage = reported_usage(&response.usage)?;
-    history.push(ChatMessage {
-        metadata: None,
-        role: "user".into(),
-        content: prompt,
-    });
-    history.push(ChatMessage {
-        metadata: None,
-        role: "assistant".into(),
-        content: text.clone(),
-    });
+    let result = call::terminal_result(response)?;
+    if !allow_tools {
+        ensure!(result.tool_calls.is_empty(), UnsupportedOutputSnafu);
+        ensure!(!result.text.is_empty(), EmptyTextSnafu);
+    }
+    if let Some(prompt) = prompt {
+        history.push(ChatMessage {
+            metadata: None,
+            role: "user".into(),
+            content: prompt,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning: None,
+        });
+    }
+    history.push(call::history_message(&result));
     Ok(LlmOutputs {
         status: "succeeded".into(),
+        outcome: result.outcome,
+        tool_calls: result.tool_calls,
         usages: Vec::new(),
         error: None,
         metadata: None,
-        text,
+        text: result.text,
         history,
         usage,
-        finish_reason,
+        finish_reason: result.finish_reason,
     })
 }
 
@@ -706,6 +703,7 @@ inventory::submit! { NodeRegistration { kind: KIND, factory: NodeFactory::Plain(
 mod tests {
     use super::*;
     use mf_runtime::{NodeValue, ValueType};
+    use rig_core::completion::AssistantContent;
     use serde_json::json;
 
     #[test]
@@ -809,9 +807,9 @@ mod tests {
     #[test]
     fn fixed_ports_reflect_nested_messages_and_optional_metadata() {
         let inputs = LlmInputs::ports();
-        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs.len(), 4);
         assert_eq!(inputs[0].name, "prompt");
-        assert!(inputs[0].required);
+        assert!(!inputs[0].required);
         assert_eq!(
             inputs[2].value_type,
             ValueType::List(Box::new(ValueType::Object))
@@ -834,12 +832,17 @@ mod tests {
         }
         let response = LlmOutputs {
             status: "succeeded".into(),
+            outcome: CallOutcome::Completed,
+            tool_calls: Vec::new(),
             usages: Vec::new(),
             error: None,
             metadata: None,
             text: "reply".into(),
             history: vec![ChatMessage {
                 metadata: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning: None,
                 role: "assistant".into(),
                 content: "reply".into(),
             }],
@@ -911,10 +914,14 @@ mod tests {
         .with_finish_reason(FinishReason::Other("service_stop".into()));
         let previous = vec![ChatMessage {
             metadata: None,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning: None,
             role: "user".into(),
             content: "prior".into(),
         }];
-        let result = terminal_outputs(response, "next".into(), previous.clone()).unwrap();
+        let result =
+            terminal_outputs(response, Some("next".into()), previous.clone(), false).unwrap();
         assert_eq!(result.text, "firstsecond");
         assert_eq!(result.history[0], previous[0]);
         assert_eq!(result.history.len(), 3);
@@ -938,7 +945,7 @@ mod tests {
             "openai",
             json!({}),
         );
-        let error = terminal_outputs(response, "next".into(), vec![]).unwrap_err();
+        let error = terminal_outputs(response, Some("next".into()), vec![], false).unwrap_err();
         assert!(matches!(error, LlmExecutionError::UsageCount { .. }));
         assert!(error.source().unwrap().is::<std::num::TryFromIntError>());
         let response = CompletionResponse::new(
@@ -948,14 +955,14 @@ mod tests {
             json!({}),
         );
         assert_eq!(
-            terminal_outputs(response, "next".into(), vec![])
+            terminal_outputs(response, Some("next".into()), vec![], false)
                 .unwrap()
                 .text,
             "é"
         );
         let response = CompletionResponse::new(vec![], Default::default(), "openai", json!({}));
         assert!(matches!(
-            terminal_outputs(response, "next".into(), vec![]),
+            terminal_outputs(response, Some("next".into()), vec![], false),
             Err(LlmExecutionError::EmptyText)
         ));
     }

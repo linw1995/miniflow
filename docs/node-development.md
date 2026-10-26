@@ -17,7 +17,10 @@ explicitly; `mfn-core` does not register this kind. See the [CEL examples](workf
 The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with fixed typed prompt,
 system, history, terminal outputs, and an optional typed `delta` stream. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
-See [terminal conversations](workflows.md#llm-configuration-and-conversation-values).
+The node also accepts function `tools`, returns tool calls in its existing history, and can continue from
+caller-supplied tool results without a new prompt. Tool protocol types are exported by `mfn_llm`.
+See [terminal conversations](workflows.md#llm-configuration-and-conversation-values) and
+[tool calls](workflows.md#llm-tool-calls).
 
 Providers can opt execution-only fields into `mf_runtime::ConfigTemplate`. Parse each selected field during
 preparation, validate its `literal()` value when present, and add `references(field_name)` to the prepared
