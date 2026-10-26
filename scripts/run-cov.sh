@@ -213,8 +213,10 @@ PYTHON
   cp "${coverage_dir}/result/lcov" "${coverage_dir}/result/lcov.info"
   started=$SECONDS
   python3 -B scripts/coverage_selection.py report
-  rm -rf "${coverage_dir}/report-binaries"
   report_timing publish-reports "$started"
+  started=$SECONDS
+  rm -rf "${coverage_dir}/report-binaries"
+  report_timing clean-binaries "$started"
 }
 
 # CI keeps one instrumented build and accumulates profiles across package steps.

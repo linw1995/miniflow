@@ -2072,7 +2072,6 @@
           "policy": "object",
           "c": "object",
           "artifacts": "any",
-          "repository": "string",
           "profile": "string",
           "precision": "string"
         },
@@ -2082,7 +2081,7 @@
           "path": "'/repos/' + slug + '/actions/workflows/' + policy.workflow + '/runs'",
           "query": "{'branch': policy.branch, 'event': 'push', 'status': 'success', 'per_page': 100}",
           "base": "c.comparison.base",
-          "directory": "artifacts != null ? artifacts + '/coverage-graph' : repository + '/target/test-affected/coverage-graph'",
+          "directory": "artifacts != null ? artifacts + '/coverage-graph' : c.comparison.repository + '/target/test-affected/coverage-graph'",
           "profile": "profile"
         }
       },
@@ -2109,12 +2108,6 @@
           "from": {
             "node": "params",
             "port": "artifacts"
-          }
-        },
-        "repository": {
-          "from": {
-            "node": "params",
-            "port": "repository"
           }
         },
         "profile": {
@@ -2215,10 +2208,10 @@
           "e": "object"
         },
         "code": {
-          "runs": "(e.available && type(e.value.data) == list && size(e.value.data) < 100) ? e.value.data.filter(r, type(r) == map && type(r.id) == int && r.id > 0 && type(r.run_attempt) == int && r.run_attempt > 0 && r.status == 'completed' && r.conclusion == 'success' && type(r.head_sha) == string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : []",
-          "heads": "((e.available && type(e.value.data) == list && size(e.value.data) < 100) ? e.value.data.filter(r, type(r) == map && type(r.id) == int && r.id > 0 && type(r.run_attempt) == int && r.run_attempt > 0 && r.status == 'completed' && r.conclusion == 'success' && type(r.head_sha) == string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : []).map(r, r.head_sha)",
-          "usable": "(e.available && type(e.value.data) == list && size(e.value.data) < 100) && size((e.available && type(e.value.data) == list && size(e.value.data) < 100) ? e.value.data.filter(r, type(r) == map && type(r.id) == int && r.id > 0 && type(r.run_attempt) == int && r.run_attempt > 0 && r.status == 'completed' && r.conclusion == 'success' && type(r.head_sha) == string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : []) > 0",
-          "reason": "e.remaining_ms == 0 ? 'Coverage graph discovery deadline reached' : (!e.available || type(e.value.data) != list ? 'Default-branch coverage run history unavailable' : (size(e.value.data) >= 100 ? 'Coverage graph discovery limit reached' : 'No successful default-branch coverage run found'))"
+          "runs": "(e.available && type(e.value.data) == list && size(e.value.data) <= 100) ? e.value.data.filter(r, type(r) == map && type(r.id) == int && r.id > 0 && type(r.run_attempt) == int && r.run_attempt > 0 && r.status == 'completed' && r.conclusion == 'success' && type(r.head_sha) == string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : []",
+          "heads": "((e.available && type(e.value.data) == list && size(e.value.data) <= 100) ? e.value.data.filter(r, type(r) == map && type(r.id) == int && r.id > 0 && type(r.run_attempt) == int && r.run_attempt > 0 && r.status == 'completed' && r.conclusion == 'success' && type(r.head_sha) == string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : []).map(r, r.head_sha)",
+          "usable": "(e.available && type(e.value.data) == list && size(e.value.data) <= 100) && size((e.available && type(e.value.data) == list && size(e.value.data) <= 100) ? e.value.data.filter(r, type(r) == map && type(r.id) == int && r.id > 0 && type(r.run_attempt) == int && r.run_attempt > 0 && r.status == 'completed' && r.conclusion == 'success' && type(r.head_sha) == string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : []) > 0",
+          "reason": "e.remaining_ms == 0 ? 'Coverage graph discovery deadline reached' : (!e.available || type(e.value.data) != list ? 'Default-branch coverage run history unavailable' : (size(e.value.data) > 100 ? 'Coverage graph discovery limit reached' : 'No successful default-branch coverage run found'))"
         }
       },
       "inputs": {

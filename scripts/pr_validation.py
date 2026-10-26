@@ -282,7 +282,7 @@ def write_json(path, value):
 def summarize(comparison, plan, coverage=None):
     return {"comparison": comparison, "packages": plan["packages"], "tests": plan.get("tests", []), "reasons": plan["reasons"],
             "fallback_reasons": plan["fallback_reasons"], "ignored_files": plan["ignored_files"],
-            "coverage": coverage}
+            "coverage_graph": plan.get("coverage_graph"), "coverage": coverage}
 
 
 def accept_plan(root, output, repository, pr, run_id, attempt, target):
