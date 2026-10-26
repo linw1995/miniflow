@@ -497,6 +497,8 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         "graph_incompatible",
         "graph_foreign",
         "graph_narrows",
+        "graph_full_page",
+        "graph_overfull_page",
         "graph_lagging",
         "ci_execution",
         "invalid_record",
@@ -685,13 +687,28 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 state["graphs"]["29"]["metadata"]["commit_sha"] = json!(base);
                 (Some("incremental"), vec![], newer_merge.as_str())
             }
-            "graph_narrows" => {
+            "graph_overfull_page" => {
+                state["graph_runs"] = json!(vec![state["graph_runs"][0].clone(); 101]);
+                (Some("incremental"), vec![], newer_merge.as_str())
+            }
+            "graph_narrows" | "graph_full_page" => {
                 args["params.cumulative"] = json!(true);
                 // The graph at the comparison base covers the changed core
                 // line, narrowing the package to the covering test; the app
                 // test-only change narrows independently from source.
-                state["graphs"]["23"]["sqlite"] =
-                    json!(build_graph("narrowing", &base, 23, &[(1, 1)]));
+                state["graphs"]["23"]["sqlite"] = json!(build_graph(case, &base, 23, &[(1, 1)]));
+                if case == "graph_full_page" {
+                    // A full API page is a bounded candidate window, not a
+                    // discovery failure. Only its last run is an ancestor.
+                    let mut runs: Vec<Value> = (100..199)
+                        .map(|id| {
+                            json!({"id":id,"run_attempt":1,"head_sha":head,
+                            "status":"completed","conclusion":"success"})
+                        })
+                        .collect();
+                    runs.push(state["graph_runs"][0].clone());
+                    state["graph_runs"] = json!(runs);
+                }
                 (Some("cumulative"), vec![], base.as_str())
             }
             "graph_lagging" => {
@@ -736,7 +753,13 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
             assert!(server.requests().is_empty());
         }
         server.configure(&state);
+        if case == "graph_full_page" {
+            // Resolve the default relative repository before choosing the
+            // artifact destination, just as the in-memory absolute input does.
+            args["params.repository"] = json!(".");
+        }
         let result = Command::new(&executable)
+            .current_dir(root)
             .args(["--inputs", &args.to_string()])
             .output()
             .unwrap();
@@ -775,6 +798,13 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                     "{case}"
                 );
             }
+            "graph_overfull_page" => {
+                assert_eq!(
+                    graph["reason"], "Coverage graph discovery limit reached",
+                    "{case}"
+                );
+                assert!(graph["commit"].is_null(), "{case}");
+            }
             "graph_incompatible" => {
                 assert_eq!(
                     graph["reason"],
@@ -803,7 +833,11 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                         "sample-core",
                         "changed between the coverage graph commit",
                     )],
-                    _ if expected_base == newer_merge || case == "graph_narrows" => vec![],
+                    _ if expected_base == newer_merge
+                        || matches!(case, "graph_narrows" | "graph_full_page") =>
+                    {
+                        vec![]
+                    }
                     _ => vec![("core/src/lib.rs", "sample-core", "no test covers")],
                 };
                 assert_eq!(widened.as_array().unwrap().len(), expected.len(), "{case}");
@@ -816,7 +850,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 }
             }
         }
-        if case == "graph_narrows" {
+        if matches!(case, "graph_narrows" | "graph_full_page") {
             assert_eq!(
                 generated["plan"]["tests"],
                 json!([
