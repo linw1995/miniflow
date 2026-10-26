@@ -59,7 +59,7 @@ impl Invocation {
         (
             self.path
                 .iter()
-                .map(|entry| entry.loop_id.clone())
+                .map(|entry| entry.node_id().to_owned())
                 .collect(),
             self.node.id.clone(),
         )
@@ -318,7 +318,7 @@ impl StreamState {
         let key = (
             node.path
                 .iter()
-                .map(|entry| entry.loop_id.clone())
+                .map(|entry| entry.node_id().to_owned())
                 .collect(),
             node.id.clone(),
         );
@@ -568,10 +568,13 @@ fn validate_graph(
         }
         StreamPayload::Execution(event) => {
             if let Some((node, position)) = event.node() {
+                description
+                    .validate_scope_path(&node.path)
+                    .context(EventSnafu)?;
                 let path: Vec<_> = node
                     .path
                     .iter()
-                    .map(|entry| entry.loop_id.clone())
+                    .map(|entry| entry.node_id().to_owned())
                     .collect();
                 let (nodes, order, data, control, orders) = if path.is_empty() {
                     (
@@ -583,7 +586,7 @@ fn validate_graph(
                     )
                 } else {
                     let body = description
-                        .loop_body(&path)
+                        .body(&path)
                         .ok_or_else(|| invalid("unknown stream Loop body"))?;
                     (
                         &body.nodes,
@@ -629,13 +632,12 @@ fn validate_graph(
                     }
                 }
             }
-            if let Event::LoopPassStarted { path, .. } | Event::LoopPassFinished { path, .. } =
-                event
+            if let Event::LoopPassStarted { path, .. }
+            | Event::LoopPassFinished { path, .. }
+            | Event::CallStarted { path, .. }
+            | Event::CallFinished { path, .. } = event
             {
-                let path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
-                if description.loop_body(&path).is_none() {
-                    return Err(invalid("unknown stream Loop pass"));
-                }
+                description.validate_scope_path(path).context(EventSnafu)?;
             }
         }
     }
@@ -672,25 +674,36 @@ impl StreamState {
             unreachable!()
         };
         let path = match event {
-            Event::LoopPassStarted { path, .. } | Event::LoopPassFinished { path, .. } => path,
+            Event::LoopPassStarted { path, .. }
+            | Event::LoopPassFinished { path, .. }
+            | Event::CallStarted { path, .. }
+            | Event::CallFinished { path, .. } => path,
             _ => return Err(invalid("unexpected stream execution event")),
         };
         let identity = record.identity.as_ref().unwrap();
         let (last, parent) = path.split_last().expect("validated path");
         let node = mf_telemetry::event::NodeIdentity {
-            id: last.loop_id.clone(),
-            kind: "workflow.loop".into(),
+            id: last.node_id().to_owned(),
+            kind: if last.is_call() {
+                "workflow.call"
+            } else {
+                "workflow.loop"
+            }
+            .into(),
             path: parent.to_vec(),
         };
         let admission = self.ensure_invocation(record, &node)?;
         if admission != Admission::Applied {
             return Ok(admission);
         }
-        let body_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+        let body_path: Vec<_> = path
+            .iter()
+            .map(|entry| entry.node_id().to_owned())
+            .collect();
         let body = description.loop_body(&body_path).expect("validated body");
         let key = (identity.invocation, path.clone());
         if !self.passes.contains_key(&key)
-            && self.invocations[&identity.invocation].has_closed_pass(last.index)
+            && self.invocations[&identity.invocation].has_closed_pass(last.index())
         {
             return Ok(self.conflict("completed Loop pass received new lifecycle records"));
         }
@@ -728,7 +741,7 @@ impl StreamState {
         }
         pass.identity = Some(identity.clone());
         let violation = match event {
-            Event::LoopPassStarted { .. } => {
+            Event::LoopPassStarted { .. } | Event::CallStarted { .. } => {
                 if pass.started.is_some() || pass.finished.is_some_and(|end| record.sequence >= end)
                 {
                     true
@@ -737,7 +750,7 @@ impl StreamState {
                     false
                 }
             }
-            Event::LoopPassFinished { outcome, .. } => {
+            Event::LoopPassFinished { outcome, .. } | Event::CallFinished { outcome, .. } => {
                 if pass.finished.is_some()
                     || pass.started.is_some_and(|start| record.sequence <= start)
                     || pass.latest > record.sequence
@@ -777,11 +790,14 @@ impl StreamState {
         let key = (owner, node.path.clone());
         let (last, parent) = node.path.split_last().unwrap();
         let owner_key = (
-            parent.iter().map(|entry| entry.loop_id.clone()).collect(),
-            last.loop_id.clone(),
+            parent
+                .iter()
+                .map(|entry| entry.node_id().to_owned())
+                .collect(),
+            last.node_id().to_owned(),
         );
         if let Some(invocation) = self.invocations.get(&owner) {
-            if invocation.node.id != last.loop_id
+            if invocation.node.id != last.node_id()
                 || invocation.path != parent
                 || invocation.identity.message != identity.message
                 || invocation.identity.trigger != identity.trigger
@@ -789,7 +805,7 @@ impl StreamState {
                 self.conflict("body invocation names a different Loop owner");
                 return;
             }
-            if !self.passes.contains_key(&key) && invocation.has_closed_pass(last.index) {
+            if !self.passes.contains_key(&key) && invocation.has_closed_pass(last.index()) {
                 self.conflict("body invocation followed a completed Loop pass");
                 return;
             }
@@ -808,7 +824,7 @@ impl StreamState {
             let static_path: Vec<_> = node
                 .path
                 .iter()
-                .map(|entry| entry.loop_id.clone())
+                .map(|entry| entry.node_id().to_owned())
                 .collect();
             let body = description.loop_body(&static_path).expect("validated body");
             self.total_passes = self.total_passes.saturating_add(1);
@@ -867,7 +883,7 @@ impl StreamState {
             if pass.is_finished()
                 && let Some(invocation) = self.invocations.get_mut(owner)
             {
-                let index = path.last().unwrap().index;
+                let index = path.last().unwrap().index();
                 if index.get() >= invocation.closed_prefix
                     && invocation.closed_passes.len() < MAX_RECENT_LOOP_PASSES
                 {
@@ -970,7 +986,7 @@ impl StreamState {
                     *owner == invocation.identity.invocation && !pass.is_finished()
                 })
                 .max_by_key(|(_, pass)| pass.latest)
-                .and_then(|((_, path), _)| path.last().map(|entry| entry.index));
+                .and_then(|((_, path), _)| path.last().map(|entry| entry.index()));
             view
         }));
         invocations.sort_by_key(|invocation| invocation.identity.invocation);
@@ -1027,7 +1043,7 @@ impl StreamState {
             BTreeMap::new();
         for ((owner, path), pass) in &self.passes {
             let (last, parent) = path.split_last().unwrap();
-            let key = (parent.to_vec(), last.loop_id.clone());
+            let key = (parent.to_vec(), last.node_id().to_owned());
             if overviews
                 .get(&key)
                 .is_none_or(|(current, _)| owner > current)
@@ -1038,7 +1054,7 @@ impl StreamState {
                         *owner,
                         LoopOverview {
                             parent_path: parent.to_vec(),
-                            loop_id: last.loop_id.clone(),
+                            loop_id: last.node_id().to_owned(),
                             completed_passes: 0,
                             active_index: None,
                             stop_reason: None,
@@ -1051,7 +1067,7 @@ impl StreamState {
                 if pass.is_finished() {
                     overview.completed_passes += 1;
                 } else {
-                    overview.active_index = Some(last.index);
+                    overview.active_index = Some(last.index());
                 }
             }
         }
@@ -1573,7 +1589,7 @@ mod tests {
             sequence += 1;
             for index in 0..pass_count {
                 let child = owner + 1 + index as u64;
-                let path = vec![LoopPathEntry {
+                let path = vec![LoopPathEntry::Loop {
                     loop_id: "repeat".into(),
                     index: count(index),
                 }];
@@ -1703,6 +1719,106 @@ mod tests {
         assert_eq!(
             state.snapshot().lifecycle.completeness,
             Completeness::Incomplete
+        );
+    }
+
+    #[test]
+    fn call_scopes_isolate_messages_and_retain_reordered_duplicate_evidence() {
+        let run = RunId::new();
+        let (mut graph, mut records) = loop_records(run, 1, 2);
+        graph.version = WorkflowDescriptionVersion::V2026_10_23;
+        graph.nodes[1].kind = "workflow.call".into();
+        graph.loop_bodies[0].nodes[0] = NodeDescription {
+            id: "leaf".into(),
+            kind: "fixture.task".into(),
+        };
+        graph.loop_bodies[0].execution_order = vec!["leaf".into()];
+        let path = vec![LoopPathEntry::Call {
+            call_id: "repeat".into(),
+        }];
+        for record in &mut records {
+            let StreamPayload::Execution(event) = &mut record.payload else {
+                continue;
+            };
+            match event {
+                Event::NodeStarted { node, .. } | Event::NodeFinished { node, .. } => {
+                    if node.id == "repeat" {
+                        node.kind = "workflow.call".into();
+                    }
+                    if !node.path.is_empty() {
+                        node.path = path.clone();
+                        node.id = "leaf".into();
+                        node.kind = "fixture.task".into();
+                    }
+                    if let Event::NodeFinished { loop_summary, .. } = event {
+                        *loop_summary = None;
+                    }
+                }
+                Event::LoopPassStarted { elapsed_ns, .. } => {
+                    *event = Event::CallStarted {
+                        path: path.clone(),
+                        elapsed_ns: *elapsed_ns,
+                    };
+                }
+                Event::LoopPassFinished {
+                    elapsed_ns,
+                    outcome,
+                    ..
+                } => {
+                    *event = Event::CallFinished {
+                        path: path.clone(),
+                        elapsed_ns: *elapsed_ns,
+                        outcome: *outcome,
+                    };
+                }
+                _ => {}
+            }
+        }
+        graph.validate().unwrap();
+        for reverse in [false, true] {
+            let mut state = SessionState::new(graph.clone(), run).unwrap();
+            let mut ordered = records.clone();
+            if reverse {
+                ordered.reverse();
+            }
+            for record in ordered {
+                assert_eq!(
+                    state.apply_stream(record.clone()).unwrap(),
+                    Admission::Applied
+                );
+                assert_eq!(state.apply_stream(record).unwrap(), Admission::Duplicate);
+            }
+            let snapshot = state.snapshot();
+            assert_eq!(
+                snapshot.lifecycle.completeness,
+                Completeness::Complete,
+                "{snapshot:?}"
+            );
+            assert_eq!(snapshot.loop_passes.len(), 2);
+            assert_ne!(
+                snapshot.loop_passes[0].stream_invocation,
+                snapshot.loop_passes[1].stream_invocation
+            );
+            for pass in &snapshot.loop_passes {
+                assert_eq!(pass.path, path);
+                assert_eq!(pass.nodes[0].status, NodeStatus::Succeeded);
+            }
+        }
+        let mut forged = records.iter().find(|record| matches!(
+            &record.payload,
+            StreamPayload::Execution(Event::NodeStarted { node, .. }) if !node.path.is_empty()
+        )).unwrap().clone();
+        if let StreamPayload::Execution(Event::NodeStarted { node, .. }) = &mut forged.payload {
+            node.path = vec![LoopPathEntry::Loop {
+                loop_id: "repeat".into(),
+                index: Count::ZERO,
+            }];
+        }
+        assert!(
+            SessionState::new(graph, run)
+                .unwrap()
+                .apply_stream(forged)
+                .is_err()
         );
     }
 

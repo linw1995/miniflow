@@ -103,13 +103,12 @@ Description version `2026-10-19` adds `order_edges` to root and body graphs. Eac
 interface validation, and skip-cause validation. Output gates remain in the inspection model's `control_edges`; these
 inspection fields are distinct from the authoring format.
 
-Graphs containing success dependencies use finite event schema `5` or streaming schema `6`. Other graphs retain their
-existing protocol, including new author definitions that only use input references and output gates. Old readers reject
-unsupported versions before execution. Node-success skip causes use `{"node_success":"source"}` without a fabricated
+All supported descriptions use finite event schema `7` or streaming schema `8`.
+Old readers reject unsupported event versions before execution. Node-success skip causes use `{"node_success":"source"}` without a fabricated
 port; output skip causes keep their existing source-node/source-output fields.
 
 The new description also includes static Iteration bodies when needed to describe success dependencies.
-`WorkflowDescription::body` looks up any described body; `loop_body` only accepts actual Loop lifecycle paths. Iteration
+`WorkflowDescription::body` looks up any described body; `loop_body` accepts Loop and Call lifecycle paths. Iteration
 item execution remains separate span/detail observation and cannot masquerade as a Loop pass.
 
 New runners name the synthetic Loop source `%loop`. Description readers also accept `$loop` from
@@ -324,7 +323,7 @@ remain visible as local drops or observation errors. Once a valid frame is admit
 validation errors preserve its delivery evidence and enter the separate observation diagnostics.
 Trace-only drops do not invalidate lifecycle completeness.
 
-For finite runs, `mf-tui::state::SessionState` keeps one state record per outer node, sparse per-invocation Loop state, and sequence membership bounded by the graph's lifecycle event count. It retains details for up to 64 recent pass frames and aggregate counts when older pass details leave the view. Identical retransmissions are ignored; conflicting sequence content or
+For finite runs, `mf-tui::state::SessionState` keeps one state record per outer node, sparse per-invocation scope state, and independently bounded transport evidence. It retains details for up to 64 recent pass frames and aggregate counts when older pass details leave the view. Identical retransmissions are ignored; conflicting sequence content or
 incompatible terminal outcomes are surfaced without moving a terminal node back to Running. A finish event can arrive
 before its start, and later evidence may close an active sequence gap. Nodes without observed outcomes remain Unknown after the terminal boundary.
 
@@ -698,13 +697,13 @@ See [compiling workflows](compiling.md) for executable commands, endpoint settin
 
 ## Streaming observations
 
-Streaming descriptions use version `2026-10-03` with event schema `4`, or `2026-10-19` with schema `6` when success
-dependencies are present. Decode both with `mf_telemetry::stream::StreamRecord`. The finite-run decoder supports schemas
-`1`, `2`, and `5`. Session admission selects a reducer from the description
-protocol and rejects incompatible lifecycle records. Older schema-3 streams require recompilation for TUI use.
+Streaming descriptions use event schema `8`, decoded with `mf_telemetry::stream::StreamRecord`.
+The finite-run decoder supports schema `7`. Session admission selects a reducer from the description
+execution mode and rejects incompatible lifecycle records. Existing runners using retired schemas
+require recompilation for TUI use.
 
 A streaming instance has one workflow/run identity and a checked, monotonically increasing lifecycle
-sequence. A run can exceed the finite-run event budget. The producer retains counters and shared graph
+sequence independent of runtime execution budgets. The producer retains counters and shared graph
 metadata, while export buffering remains bounded; it does not retain prior message histories. A sequence
 is reserved before encoding or export, so failed delivery leaves a gap. A terminal event records its own
 final sequence. Counter exhaustion stops trustworthy lifecycle emission without wrapping identifiers or
@@ -807,3 +806,22 @@ group members in Details. Exclusive connections use magenta and an `exclusive` l
 Iteration body logs carry the same identities in `mf.input.selections`. Values and secrets are
 not copied into these records. Selection belongs to the consumer's frame or body invocation.
 An unselected candidate is not a skip cause when another candidate successfully binds the input.
+
+## Call scope observation
+
+Call scopes use the existing observation description structure. Descriptions with subgraph support
+recognize `workflow.call` bodies alongside Loop bodies. Iteration bodies retain their existing version rules.
+`ScopePathEntry::Call` serializes as `{"call_id":"title"}`; `ScopePathEntry::Loop`
+retains the existing `loop_id` and `index` fields. The `LoopPathEntry` type alias remains available,
+but Rust struct literals must migrate to `LoopPathEntry::Loop { loop_id, index }`.
+
+`mf.call.started` and `mf.call.finished` bound a child invocation, and child lifecycle events
+retain that call path. A completion reports a completed or failed outcome. Delivery completeness comes from the
+transport envelope; absent child outcomes remain Unknown after completion. Calls do not emit Loop passes or Loop summaries. Stream records retain the containing
+message and invocation identity.
+
+TUI body navigation opens call graphs and shows their node outcomes. Snapshot scope paths retain
+Call identities and redact secret values. Nested calls use ordinary `mf.node` spans under the
+calling node's native span context. Scope paths identify lifecycle and snapshot locations even
+when spans are not sampled; they do not define a separate tracing hierarchy.
+The protocol can describe calls independently of an execution engine that produces them.

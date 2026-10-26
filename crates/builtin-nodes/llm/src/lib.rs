@@ -530,8 +530,8 @@ impl LlmNode {
                     .invocation_path()
                     .into_iter()
                     .map(|scope| UsageScope {
-                        node: scope.loop_id,
-                        index: scope.index.get(),
+                        node: scope.node_id().to_owned(),
+                        index: scope.index().get(),
                     })
                     .collect(),
             }),

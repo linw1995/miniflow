@@ -339,7 +339,10 @@ impl RunObservation {
         if path.is_empty() {
             self.nodes.get(id)?;
         } else {
-            let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+            let static_path: Vec<_> = path
+                .iter()
+                .map(|entry| entry.node_id().to_owned())
+                .collect();
             self.description
                 .as_ref()?
                 .loop_body(&static_path)?
@@ -410,7 +413,10 @@ impl RunObservation {
             return None;
         }
         let description = self.description.as_ref()?;
-        let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+        let static_path: Vec<_> = path
+            .iter()
+            .map(|entry| entry.node_id().to_owned())
+            .collect();
         let body = description.loop_body(&static_path)?;
         let position = body.execution_order.iter().position(|node| node == id)?;
         let kind = body.nodes.iter().find(|node| node.id == id)?.kind.clone();
@@ -571,6 +577,31 @@ impl RunObservation {
             .and_then(|node_id| self.node_failures.lock().unwrap().get(node_id).cloned())
             .unwrap_or(Failure { phase, message });
         *self.failure.lock().unwrap() = Some((node_id, failure));
+    }
+
+    pub fn call_started(&mut self, path: Vec<LoopPathEntry>) {
+        self.record(
+            Event::CallStarted {
+                path,
+                elapsed_ns: self.elapsed(),
+            },
+            Some(&Context::current()),
+        );
+    }
+
+    pub fn call_finished(&mut self, path: Vec<LoopPathEntry>, failed: bool) {
+        self.record(
+            Event::CallFinished {
+                path,
+                elapsed_ns: self.elapsed(),
+                outcome: if failed {
+                    LoopPassOutcome::Failed
+                } else {
+                    LoopPassOutcome::Completed
+                },
+            },
+            Some(&Context::current()),
+        );
     }
 
     pub fn loop_pass_started(&mut self, path: Vec<LoopPathEntry>) {

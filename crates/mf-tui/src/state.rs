@@ -462,7 +462,10 @@ impl SessionState {
             })?;
         let conflicted = if matches!(
             &event.event,
-            Event::LoopPassStarted { .. } | Event::LoopPassFinished { .. }
+            Event::LoopPassStarted { .. }
+                | Event::LoopPassFinished { .. }
+                | Event::CallStarted { .. }
+                | Event::CallFinished { .. }
         ) || event
             .event
             .node()
@@ -682,18 +685,21 @@ impl SessionState {
             let Some((last, parent)) = path.split_last() else {
                 continue;
             };
-            let key = (parent.to_vec(), last.loop_id.clone());
+            let key = (parent.to_vec(), last.node_id().to_owned());
             let overview = overviews.entry(key).or_insert_with(|| LoopOverview {
                 parent_path: parent.to_vec(),
-                loop_id: last.loop_id.clone(),
+                loop_id: last.node_id().to_owned(),
                 completed_passes: 0,
                 active_index: None,
                 stop_reason: None,
             });
             if state.terminal_sequence.is_some() {
                 overview.completed_passes += 1;
-            } else if overview.active_index.is_none_or(|index| last.index > index) {
-                overview.active_index = Some(last.index);
+            } else if overview
+                .active_index
+                .is_none_or(|index| last.index() > index)
+            {
+                overview.active_index = Some(last.index());
             }
         }
         for ((parent, id), summary) in &self.loop_summaries {
@@ -737,7 +743,10 @@ impl SessionState {
 
     fn apply_loop_event(&mut self, sequence: Count, event: &Event) -> bool {
         let path = match event {
-            Event::LoopPassStarted { path, .. } | Event::LoopPassFinished { path, .. } => path,
+            Event::LoopPassStarted { path, .. }
+            | Event::LoopPassFinished { path, .. }
+            | Event::CallStarted { path, .. }
+            | Event::CallFinished { path, .. } => path,
             Event::NodeStarted { node, .. }
             | Event::NodeFinished { node, .. }
             | Event::NodeSkipped { node, .. } => &node.path,
@@ -746,7 +755,7 @@ impl SessionState {
         let mut violation = None;
         let pass = self.ensure_pass(path, sequence);
         match event {
-            Event::LoopPassStarted { .. } => {
+            Event::LoopPassStarted { .. } | Event::CallStarted { .. } => {
                 if pass.started_sequence.is_some()
                     || pass
                         .terminal_sequence
@@ -757,7 +766,7 @@ impl SessionState {
                     pass.started_sequence = Some(sequence);
                 }
             }
-            Event::LoopPassFinished { outcome, .. } => {
+            Event::LoopPassFinished { outcome, .. } | Event::CallFinished { outcome, .. } => {
                 if pass.terminal_sequence.is_some()
                     || pass
                         .started_sequence
@@ -888,7 +897,10 @@ impl SessionState {
     fn apply_event(&mut self, sequence: Count, event: &Event) -> bool {
         match event {
             Event::WorkflowStarted { .. } => false,
-            Event::LoopPassStarted { .. } | Event::LoopPassFinished { .. } => false,
+            Event::LoopPassStarted { .. }
+            | Event::LoopPassFinished { .. }
+            | Event::CallStarted { .. }
+            | Event::CallFinished { .. } => false,
             Event::NodeStarted {
                 node, elapsed_ns, ..
             } => {
