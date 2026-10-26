@@ -933,27 +933,18 @@ impl fmt::Debug for BodyObservation {
 }
 
 impl BodyObservation {
-    pub fn for_call(&self, id: &str, nodes: &[NodeIdentity]) -> Self {
-        let mut child = self.clone();
-        let mut path = self
-            .body_nodes
-            .values()
-            .next()
-            .map(|node| node.path.clone())
-            .unwrap_or_default();
-        path.push(LoopPathEntry::Call { call_id: id.into() });
-        child.context = Context::current();
-        child.body_nodes = Arc::new(
-            nodes
-                .iter()
-                .cloned()
-                .map(|mut node| {
-                    node.path = path.clone();
-                    (node.id.clone(), node)
-                })
-                .collect(),
-        );
-        child
+    pub fn for_call(&self, nodes: &[NodeIdentity]) -> Self {
+        Self {
+            context: Context::current(),
+            body_nodes: Arc::new(
+                nodes
+                    .iter()
+                    .cloned()
+                    .map(|node| (node.id.clone(), node))
+                    .collect(),
+            ),
+            ..self.clone()
+        }
     }
 
     pub fn begin_node(&self, id: &str) -> Option<BodyNodeObservation> {
@@ -1111,16 +1102,6 @@ impl BodyNodeObservation {
             &self.iteration_id,
             self.index,
         );
-        if !self.node.path.is_empty() {
-            common.push((
-                "mf.scope.path".into(),
-                AnyValue::String(
-                    serde_json::to_string(&self.node.path)
-                        .expect("scope identities serialize")
-                        .into(),
-                ),
-            ));
-        }
         common.push((
             "mf.node.id".into(),
             AnyValue::String(self.node.id.clone().into()),

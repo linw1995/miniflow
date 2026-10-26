@@ -179,7 +179,7 @@ impl CompiledWorkflow {
                 clusters: Vec::new(),
             };
             if original.version.supports_clusters() {
-                description.version = original.version;
+                description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23;
                 description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
             } else if description.loop_bodies.iter().any(|body| !body.order_edges.is_empty() || body.nodes.iter().any(|node| node.id == mf_runtime::ITERATION_INPUT_ID)) {
                 description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_19;

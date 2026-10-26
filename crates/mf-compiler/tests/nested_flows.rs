@@ -104,17 +104,6 @@ fn iteration_calls_isolate_item_bindings_and_observe_nested_skips() {
                 .iter()
                 .any(|record| record.event_name == "mf.iteration.node.skipped")
         );
-        let scope = records
-            .iter()
-            .find(|record| {
-                record.event_name == "mf.iteration.node.started"
-                    && record.attributes.contains_key("mf.scope.path")
-            })
-            .unwrap()
-            .attributes["mf.scope.path"]
-            .as_str()
-            .unwrap();
-        assert!(scope.contains("invoke"));
         harness.traces.force_flush().unwrap();
         let spans = harness.spans.get_finished_spans().unwrap();
         for index in 0..2 {
@@ -147,6 +136,22 @@ fn iteration_calls_isolate_item_bindings_and_observe_nested_skips() {
                 assert_eq!(leaf.name, "mf.iteration.node");
                 assert_eq!(leaf.parent_span_id, inner.span_context.span_id());
                 assert_eq!(leaf.span_context.trace_id(), inner.span_context.trace_id());
+                let event_name = if id == "gated" && index == 1 {
+                    "mf.iteration.node.skipped"
+                } else {
+                    "mf.iteration.node.started"
+                };
+                let record = records
+                    .iter()
+                    .find(|record| {
+                        record.event_name == event_name
+                            && record.attributes["mf.node.id"] == id
+                            && record.attributes["mf.iteration.index"] == index
+                    })
+                    .unwrap();
+                let trace = record.trace_context.as_ref().unwrap();
+                assert_eq!(trace.span_id, leaf.span_context.span_id().to_string());
+                assert_eq!(trace.trace_id, leaf.span_context.trace_id().to_string());
             }
         }
     }
