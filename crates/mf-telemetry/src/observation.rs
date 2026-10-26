@@ -961,11 +961,7 @@ impl BodyObservation {
         let span = self
             .backend
             .tracer
-            .span_builder(if node.path.is_empty() {
-                "mf.iteration.node"
-            } else {
-                "mf.call.node"
-            })
+            .span_builder("mf.iteration.node")
             .with_attributes([
                 KeyValue::new("mf.workflow.id", self.workflow_id.to_string()),
                 KeyValue::new("mf.run.id", self.run_id.to_string()),
@@ -1109,16 +1105,6 @@ impl BodyNodeObservation {
     }
 
     fn emit(&self, name: &'static str, attributes: Vec<(String, AnyValue)>) {
-        let name = if self.node.path.is_empty() {
-            name
-        } else {
-            match name {
-                "mf.iteration.node.started" => "mf.call.node.started",
-                "mf.iteration.node.finished" => "mf.call.node.finished",
-                "mf.iteration.node.skipped" => "mf.call.node.skipped",
-                _ => name,
-            }
-        };
         let mut common = nested_attributes(
             &self.workflow_id,
             self.run_id,

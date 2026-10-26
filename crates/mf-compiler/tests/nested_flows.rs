@@ -102,25 +102,53 @@ fn iteration_calls_isolate_item_bindings_and_observe_nested_skips() {
         assert!(
             records
                 .iter()
-                .any(|record| record.event_name == "mf.call.node.skipped")
+                .any(|record| record.event_name == "mf.iteration.node.skipped")
         );
         let scope = records
             .iter()
-            .find(|record| record.event_name == "mf.call.node.started")
+            .find(|record| {
+                record.event_name == "mf.iteration.node.started"
+                    && record.attributes.contains_key("mf.scope.path")
+            })
             .unwrap()
             .attributes["mf.scope.path"]
             .as_str()
             .unwrap();
         assert!(scope.contains("invoke"));
         harness.traces.force_flush().unwrap();
-        assert!(
-            harness
-                .spans
-                .get_finished_spans()
-                .unwrap()
-                .iter()
-                .any(|span| span.name == "mf.call.node")
-        );
+        let spans = harness.spans.get_finished_spans().unwrap();
+        for index in 0..2 {
+            let node_span = |id: &str| {
+                let matching: Vec<_> = spans
+                    .iter()
+                    .filter(|span| {
+                        span.attributes.iter().any(|attribute| {
+                            attribute.key.as_str() == "mf.node.id" && attribute.value.as_str() == id
+                        }) && span.attributes.iter().any(|attribute| {
+                            attribute.key.as_str() == "mf.iteration.index"
+                                && attribute.value.as_str() == index.to_string()
+                        })
+                    })
+                    .collect();
+                assert_eq!(matching.len(), 1, "{mode}: item {index}, node {id}");
+                matching[0]
+            };
+            let invoke = node_span("invoke");
+            let inner = node_span("inner");
+            assert_eq!(invoke.name, "mf.iteration.node");
+            assert_eq!(inner.name, "mf.iteration.node");
+            assert_eq!(inner.parent_span_id, invoke.span_context.span_id());
+            assert_eq!(
+                inner.span_context.trace_id(),
+                invoke.span_context.trace_id()
+            );
+            for id in ["input", "echo", "route", "gated"] {
+                let leaf = node_span(id);
+                assert_eq!(leaf.name, "mf.iteration.node");
+                assert_eq!(leaf.parent_span_id, inner.span_context.span_id());
+                assert_eq!(leaf.span_context.trace_id(), inner.span_context.trace_id());
+            }
+        }
     }
 }
 
@@ -543,7 +571,30 @@ fn nested_calls_have_distinct_lifecycle_and_redacted_capture_paths() {
         mf_telemetry::event::Event::LoopPassStarted { .. }
     )));
     harness.traces.force_flush().unwrap();
-    assert!(!harness.spans.get_finished_spans().unwrap().is_empty());
+    let spans = harness.spans.get_finished_spans().unwrap();
+    let node_span = |id: &str| {
+        let matching: Vec<_> = spans
+            .iter()
+            .filter(|span| {
+                span.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "mf.node.id" && attribute.value.as_str() == id
+                })
+            })
+            .collect();
+        assert_eq!(matching.len(), 1, "node {id}");
+        matching[0]
+    };
+    for (parent_id, child_id) in [("outer", "inner"), ("inner", "input"), ("inner", "echo")] {
+        let parent = node_span(parent_id);
+        let child = node_span(child_id);
+        assert_eq!(parent.name, "mf.node");
+        assert_eq!(child.name, "mf.node");
+        assert_eq!(child.parent_span_id, parent.span_context.span_id());
+        assert_eq!(
+            child.span_context.trace_id(),
+            parent.span_context.trace_id()
+        );
+    }
     let plain = capture::Harness::new(false);
     let observation = plain
         .observer()
@@ -850,6 +901,36 @@ fn call_loop_call_execution_preserves_complete_observation_paths() {
     assert!(events.iter().any(|record| matches!(&record.event,
         Event::CallFinished { path, .. } if path == &leaf_path
     )));
+    harness.traces.force_flush().unwrap();
+    let spans = harness.spans.get_finished_spans().unwrap();
+    let node_span = |id: &str| {
+        let matching: Vec<_> = spans
+            .iter()
+            .filter(|span| {
+                span.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "mf.node.id" && attribute.value.as_str() == id
+                })
+            })
+            .collect();
+        assert_eq!(matching.len(), 1, "node {id}");
+        matching[0]
+    };
+    for (parent_id, child_id) in [
+        ("outer", "repeat"),
+        ("repeat", "inner"),
+        ("inner", "input"),
+        ("inner", "echo"),
+    ] {
+        let parent = node_span(parent_id);
+        let child = node_span(child_id);
+        assert_eq!(parent.name, "mf.node");
+        assert_eq!(child.name, "mf.node");
+        assert_eq!(child.parent_span_id, parent.span_context.span_id());
+        assert_eq!(
+            child.span_context.trace_id(),
+            parent.span_context.trace_id()
+        );
+    }
 }
 
 #[test]
