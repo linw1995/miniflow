@@ -31,13 +31,6 @@ pub struct DeliverySnapshot {
     pub local_drops: u64,
 }
 
-impl DeliverySnapshot {
-    /// Absence of gaps alone cannot verify a wholly missing suffix.
-    pub fn is_complete(&self) -> bool {
-        self.completeness == Completeness::Complete
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryAdmission {
     New,
@@ -98,14 +91,6 @@ impl<W: PartialEq> DeliveryTracker<W> {
         self.witnesses.get(&sequence.get())
     }
 
-    pub fn retained_witnesses(&self) -> usize {
-        self.witnesses.len()
-    }
-
-    pub fn unverified_retransmissions(&self) -> u64 {
-        self.unverified_retransmissions
-    }
-
     pub fn record_local_drop(&mut self, count: u64) {
         self.local_drops = self.local_drops.saturating_add(count);
     }
@@ -114,59 +99,30 @@ impl<W: PartialEq> DeliveryTracker<W> {
         self.closed = true;
     }
 
-    fn check(
-        &self,
-        sequence: Count,
-        witness: &W,
-        terminal: bool,
-    ) -> Result<DeliveryAdmission, DeliveryError> {
-        let sequence = sequence.get();
-        ensure!(!self.closed, ClosedSnafu);
-        ensure!(sequence > 0, InvalidSequenceSnafu);
-        if let Some(previous) = self.witnesses.get(&sequence) {
-            return Ok(
-                if previous == witness
-                    && terminal == self.final_sequence.is_some_and(|end| end.get() == sequence)
-                {
-                    DeliveryAdmission::Duplicate
-                } else {
-                    DeliveryAdmission::Conflict
-                },
-            );
-        }
-        if self.final_sequence.is_some_and(|end| sequence > end.get())
-            || (terminal && (self.final_sequence.is_some() || self.highest > sequence))
-        {
-            return Ok(DeliveryAdmission::Conflict);
-        }
-        if sequence <= self.watermark {
-            return Ok(DeliveryAdmission::UnverifiedDuplicate);
-        }
-        let can_evict = self
-            .witnesses
-            .first_key_value()
-            .is_some_and(|(&first, _)| first <= self.watermark);
-        ensure!(
-            self.witnesses.len() < self.capacity
-                || can_evict
-                || self.watermark.checked_add(1) == Some(sequence),
-            ReorderWindowExhaustedSnafu
-        );
-        Ok(DeliveryAdmission::New)
-    }
-
     pub fn receive(
         &mut self,
         sequence: Count,
         witness: W,
         terminal: bool,
     ) -> Result<DeliveryAdmission, DeliveryError> {
-        let result = self.check(sequence, &witness, terminal);
-        if matches!(result, Err(DeliveryError::ReorderWindowExhausted)) {
-            self.highest = self.highest.max(sequence.get());
-            self.verification_lost = true;
-        }
-        let admission = result?;
+        let value = sequence.get();
+        ensure!(!self.closed, ClosedSnafu);
+        ensure!(value > 0, InvalidSequenceSnafu);
+        let admission = if let Some(previous) = self.witnesses.get(&value) {
+            if previous == &witness && terminal == (self.final_sequence == Some(sequence)) {
+                DeliveryAdmission::Duplicate
+            } else {
+                DeliveryAdmission::Conflict
+            }
+        } else if self.final_sequence.is_some_and(|end| sequence > end)
+            || (terminal && (self.final_sequence.is_some() || self.highest > value))
+        {
+            DeliveryAdmission::Conflict
+        } else if value <= self.watermark {
+            DeliveryAdmission::UnverifiedDuplicate
+        } else {
+            DeliveryAdmission::New
+        };
         match admission {
             DeliveryAdmission::Conflict => {
                 self.protocol_conflicts = self.protocol_conflicts.saturating_add(1);
@@ -179,17 +135,20 @@ impl<W: PartialEq> DeliveryTracker<W> {
             DeliveryAdmission::Duplicate => return Ok(admission),
             DeliveryAdmission::New => {}
         }
-        self.highest = self.highest.max(sequence.get());
+        self.highest = self.highest.max(value);
+        let can_evict = self
+            .witnesses
+            .first_key_value()
+            .is_some_and(|(&first, _)| first <= self.watermark);
+        if self.witnesses.len() == self.capacity
+            && !can_evict
+            && self.watermark.checked_add(1) != Some(value)
+        {
+            self.verification_lost = true;
+            return ReorderWindowExhaustedSnafu.fail();
+        }
         if terminal {
             self.final_sequence = Some(sequence);
-        }
-        if self.witnesses.len() == self.capacity
-            && self
-                .witnesses
-                .first_key_value()
-                .is_some_and(|(&first, _)| first <= self.watermark)
-        {
-            self.witnesses.pop_first();
         }
         self.witnesses.insert(sequence.get(), witness);
         while let Some(next) = self.watermark.checked_add(1) {
@@ -198,7 +157,7 @@ impl<W: PartialEq> DeliveryTracker<W> {
             }
             self.watermark = next;
         }
-        while self.witnesses.len() > self.capacity {
+        if self.witnesses.len() > self.capacity {
             self.witnesses.pop_first();
         }
         Ok(admission)

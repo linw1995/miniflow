@@ -1880,12 +1880,6 @@ fn details_text(
                 stream.hidden_invocations
             ));
         }
-        if stream.unverified_retransmissions != 0 {
-            details.push_str(&format!(
-                "Retransmissions outside verification coverage: {}\n",
-                stream.unverified_retransmissions
-            ));
-        }
         let unresolved = stream
             .invocations
             .iter()
@@ -1899,6 +1893,12 @@ fn details_text(
         details.push_str(&format!(
             "Older pass details hidden: {}\n",
             snapshot.hidden_loop_passes
+        ));
+    }
+    if snapshot.lifecycle.unverified_retransmissions != 0 {
+        details.push_str(&format!(
+            "Retransmissions outside verification coverage: {}\n",
+            snapshot.lifecycle.unverified_retransmissions
         ));
     }
     if snapshot.lifecycle.final_sequence.is_none() {
@@ -2714,6 +2714,7 @@ mod tests {
             }],
             ..Default::default()
         });
+        snapshot.lifecycle.unverified_retransmissions = 1;
         let capture = CaptureView {
             stdout_open: false,
             stderr_open: false,
@@ -2722,6 +2723,7 @@ mod tests {
             error: None,
         };
         let text = details_text(snapshot.nodes.first(), None, &snapshot, &capture, "");
+        assert!(text.contains("Retransmissions outside verification coverage: 1"));
         assert!(text.contains("Status: Interrupted"));
         assert!(text.contains("Node observation may be incomplete"));
         assert!(text.contains("Unresolved invocation outcomes: 1"));
@@ -2729,6 +2731,10 @@ mod tests {
         let text = details_text(None, None, &snapshot, &capture, "");
         assert!(!text.contains("Node observation may be incomplete"));
         assert!(text.contains("Unresolved invocation outcomes: 1"));
+
+        snapshot.stream = None;
+        let text = details_text(None, None, &snapshot, &capture, "");
+        assert!(text.contains("Retransmissions outside verification coverage: 1"));
     }
 
     #[test]

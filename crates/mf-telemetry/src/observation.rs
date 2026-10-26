@@ -366,7 +366,7 @@ impl RunObservation {
         nanos(self.started.elapsed())
     }
 
-    fn span(&self, id: &str) -> Option<NodeObservation> {
+    pub fn begin_node(&self, id: &str) -> Option<NodeObservation> {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
@@ -399,10 +399,6 @@ impl RunObservation {
             invoked: None,
             finished: false,
         }
-    }
-
-    pub fn begin_node(&mut self, id: &str) -> Option<NodeObservation> {
-        self.span(id)
     }
 
     pub fn begin_invocation(
@@ -530,7 +526,7 @@ impl RunObservation {
     }
 
     pub fn preparation_failed(&mut self, node_id: &str, message: String) {
-        if let Some(step) = self.span(node_id) {
+        if let Some(step) = self.begin_node(node_id) {
             self.node_failed(step, FailurePhase::Preparation, message);
         } else {
             *self.failure.lock().unwrap() = Some((

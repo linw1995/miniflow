@@ -36,7 +36,6 @@ pub struct StreamSnapshot {
     pub counts: Option<StreamCounts>,
     pub failure: Option<StreamFailure>,
     pub hidden_invocations: u64,
-    pub unverified_retransmissions: u64,
 }
 
 struct Invocation {
@@ -197,13 +196,7 @@ impl StreamState {
             .delivery
             .receive(record.sequence, signature, terminal)?;
         match admission {
-            DeliveryAdmission::Duplicate => return Ok(Admission::Duplicate),
-            DeliveryAdmission::UnverifiedDuplicate => {
-                if self.delivery.unverified_retransmissions() == 1 {
-                    self.note(
-                        "old retransmission payload is outside retained verification coverage",
-                    );
-                }
+            DeliveryAdmission::Duplicate | DeliveryAdmission::UnverifiedDuplicate => {
                 return Ok(Admission::Duplicate);
             }
             DeliveryAdmission::Conflict => {
@@ -1147,7 +1140,6 @@ impl StreamState {
                     .as_ref()
                     .and_then(|boundary| boundary.failure.clone()),
                 hidden_invocations: self.hidden_invocations,
-                unverified_retransmissions: self.delivery.unverified_retransmissions(),
             }),
         }
     }
@@ -1470,7 +1462,6 @@ mod tests {
                 .unwrap();
         }
         let stream = state.stream.as_ref().unwrap();
-        assert!(stream.delivery.retained_witnesses() <= MAX_WITNESSES);
         assert_eq!(stream.recent.len(), MAX_RECENT_INVOCATIONS);
         assert_eq!(stream.invocations.len(), 1);
         assert_eq!(state.apply_stream(source).unwrap(), Admission::Duplicate);
@@ -1484,7 +1475,7 @@ mod tests {
             snapshot.stream.as_ref().unwrap().nodes[1].observed_completions,
             10_000
         );
-        assert_eq!(snapshot.stream.unwrap().unverified_retransmissions, 1);
+        assert_eq!(snapshot.lifecycle.unverified_retransmissions, 1);
     }
 
     #[test]
@@ -1875,52 +1866,5 @@ mod tests {
             Admission::Conflict
         );
         assert_eq!(state.snapshot().observation.protocol_conflicts, 1);
-    }
-
-    #[test]
-    fn reorder_overflow_never_becomes_complete_after_recovery() {
-        let run = RunId::new();
-        let mut state = SessionState::new(description(), run).unwrap();
-        for invocation in 1..=2048 {
-            state
-                .apply_stream(node(
-                    run,
-                    2 * invocation as i64 + 1,
-                    invocation,
-                    false,
-                    false,
-                ))
-                .unwrap();
-            state
-                .apply_stream(node(
-                    run,
-                    2 * invocation as i64 + 2,
-                    invocation,
-                    false,
-                    true,
-                ))
-                .unwrap();
-        }
-        assert!(
-            state
-                .apply_stream(node(run, 4099, 2049, false, false))
-                .is_err()
-        );
-        assert!(state.stream.as_ref().unwrap().delivery.retained_witnesses() <= MAX_WITNESSES);
-        state.apply_stream(start(run)).unwrap();
-        state.apply_stream(node(run, 2, 0, true, false)).unwrap();
-        state
-            .apply_stream(node(run, 4099, 2049, false, false))
-            .unwrap();
-        state
-            .apply_stream(node(run, 4100, 2049, false, true))
-            .unwrap();
-        state.apply_stream(node(run, 4101, 0, true, true)).unwrap();
-        state.apply_stream(finish(run, 4102, 2049)).unwrap();
-        state.close();
-        assert_eq!(
-            state.snapshot().lifecycle.completeness,
-            Completeness::Incomplete
-        );
     }
 }

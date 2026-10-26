@@ -24,12 +24,12 @@ fn terminal_delivery_bounds_gaps_and_late_arrivals_close_them() {
         ]
     );
     assert_eq!(pending.omitted_missing_ranges, 1);
-    assert!(!pending.is_complete());
+    assert_ne!(pending.completeness, Completeness::Complete);
     for sequence in [5, 3, 1] {
         delivery.receive(count(sequence), "late", false).unwrap();
     }
     assert_eq!(delivery.watermark(), 6);
-    assert!(delivery.snapshot(0).is_complete());
+    assert_eq!(delivery.snapshot(0).completeness, Completeness::Complete);
 }
 
 #[test]
@@ -37,17 +37,19 @@ fn a_contiguous_prefix_does_not_verify_an_absent_tail() {
     let mut delivery = DeliveryTracker::new(2);
     let empty = delivery.snapshot(64);
     assert_eq!(empty.known_missing_count, 0);
-    assert!(!empty.is_complete());
+    assert_ne!(empty.completeness, Completeness::Complete);
     for sequence in 1..100 {
         delivery.receive(count(sequence), sequence, false).unwrap();
-        assert!(delivery.retained_witnesses() <= 2);
+        if sequence > 2 {
+            assert!(delivery.witness(count(sequence - 2)).is_none());
+        }
     }
     let active = delivery.snapshot(64);
     assert_eq!(active.known_missing_count, 0);
     assert_eq!(active.final_sequence, None);
-    assert!(!active.is_complete());
+    assert_ne!(active.completeness, Completeness::Complete);
     delivery.receive(count(100), 100, true).unwrap();
-    assert!(delivery.snapshot(64).is_complete());
+    assert_eq!(delivery.snapshot(64).completeness, Completeness::Complete);
 }
 
 #[test]
@@ -77,7 +79,7 @@ fn retransmissions_preserve_identity_and_report_unverifiable_old_payloads() {
     assert_eq!(snapshot.known_missing_count, 0);
     assert_eq!(snapshot.protocol_conflicts, 1);
     assert_eq!(snapshot.unverified_retransmissions, 1);
-    assert!(!snapshot.is_complete());
+    assert_ne!(snapshot.completeness, Completeness::Complete);
     assert_eq!(
         delivery.receive(count(1), 1, true).unwrap(),
         DeliveryAdmission::Conflict
@@ -121,8 +123,10 @@ fn a_full_reorder_window_accepts_the_next_contiguous_record() {
     delivery.receive(count(3), 3, true).unwrap();
     delivery.receive(count(1), 1, false).unwrap();
     assert_eq!(delivery.watermark(), 3);
-    assert_eq!(delivery.retained_witnesses(), 2);
-    assert!(delivery.snapshot(64).is_complete());
+    assert_eq!(delivery.witness(count(1)), None);
+    assert_eq!(delivery.witness(count(2)), Some(&2));
+    assert_eq!(delivery.witness(count(3)), Some(&3));
+    assert_eq!(delivery.snapshot(64).completeness, Completeness::Complete);
 }
 
 #[test]
@@ -144,7 +148,7 @@ fn exhausted_delivery_evidence_is_owned_by_transport() {
             .unwrap();
     }
     assert_eq!(delivery.snapshot(64).known_missing_count, 0);
-    assert!(!delivery.snapshot(64).is_complete());
+    assert_ne!(delivery.snapshot(64).completeness, Completeness::Complete);
 }
 
 #[test]
@@ -165,7 +169,7 @@ fn sequence_limits_do_not_wrap_gap_counts_or_accept_zero() {
             last: i64::MAX - 1
         }]
     );
-    assert!(!snapshot.is_complete());
+    assert_ne!(snapshot.completeness, Completeness::Complete);
 }
 
 #[test]
@@ -197,7 +201,7 @@ fn local_rejections_remain_separate_from_sequence_gaps() {
     let mut delivery = DeliveryTracker::new(4);
     delivery.receive(count(1), (), false).unwrap();
     delivery.receive(count(2), (), true).unwrap();
-    assert!(delivery.snapshot(64).is_complete());
+    assert_eq!(delivery.snapshot(64).completeness, Completeness::Complete);
     delivery.record_local_drop(2);
     assert_eq!(delivery.snapshot(64).completeness, Completeness::Collecting);
     delivery.close();

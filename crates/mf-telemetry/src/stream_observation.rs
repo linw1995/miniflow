@@ -161,7 +161,7 @@ impl StreamObservation {
         if self.0.counters.lock().unwrap().closed {
             return None;
         }
-        let mut run = self.frame_inner(message, trigger);
+        let run = self.frame_inner(message, trigger);
         let _parent = run.enter();
         let step = run.begin_node(node)?;
         Some(StreamCallback {
