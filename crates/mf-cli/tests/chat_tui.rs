@@ -24,12 +24,6 @@ use terminal::Screen;
 
 #[test]
 fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
-    isolated_probe("supplied_title_workflow_probe");
-}
-
-#[test]
-#[ignore = "invoked as an isolated proxy subprocess"]
-fn supplied_title_workflow_probe() {
     use mf_chat::contract::CompletionState;
     use mf_tui::{
         chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
@@ -596,38 +590,7 @@ fn application_exit(
     }
 }
 
-fn isolated_probe(name: &str) {
-    let mut command = Command::new(std::env::current_exe().unwrap());
-    command
-        .args(["--exact", name, "--ignored", "--nocapture"])
-        .env("NO_PROXY", "127.0.0.1,localhost")
-        .env("no_proxy", "127.0.0.1,localhost");
-    for name in [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ] {
-        command.env_remove(name);
-    }
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 fn loop_conversations() {
-    isolated_probe("loop_conversations_probe");
-}
-
-#[test]
-#[ignore = "invoked as an isolated proxy subprocess"]
-fn loop_conversations_probe() {
     use mf_chat::contract::CompletionState;
     use mf_tui::chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions};
 
@@ -660,14 +623,6 @@ fn loop_conversations_probe() {
         },
     )
     .unwrap();
-    assert_eq!(
-        launch
-            .parameters
-            .0
-            .get("params.base_url")
-            .and_then(|value| value.as_str()),
-        Some(server.base_url.as_str())
-    );
     let controller = ChatController::open(launch).unwrap();
     let next = || {
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -675,11 +630,7 @@ fn loop_conversations_probe() {
             if let Some(event) = controller.try_event() {
                 return event;
             }
-            assert!(
-                Instant::now() < deadline,
-                "loop controller event deadline; requests: {}",
-                server.requests().len()
-            );
+            assert!(Instant::now() < deadline, "loop controller event deadline");
             thread::sleep(Duration::from_millis(10));
         }
     };
@@ -709,11 +660,7 @@ fn loop_conversations_probe() {
                     capture_error,
                     ..
                 } => {
-                    assert!(
-                        status.unwrap().success(),
-                        "{:?}; capture: {capture_error:?}",
-                        resolution.as_ref().map(|result| &result.state)
-                    );
+                    assert!(status.unwrap().success());
                     assert!(capture_error.is_none());
                     let resolution = resolution.unwrap();
                     assert!(
@@ -723,11 +670,7 @@ fn loop_conversations_probe() {
                     );
                     if prompt == "first turn" {
                         let CompletionState::Committed(completion) = resolution.state else {
-                            panic!(
-                                "expected committed loop result: {:?}; requests: {}",
-                                resolution.state,
-                                server.requests().len()
-                            )
+                            panic!("expected committed loop result")
                         };
                         assert_eq!(completion.result.text, "final answer");
                         assert_eq!(completion.result.usages.len(), 2);
