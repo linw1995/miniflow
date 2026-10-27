@@ -57,14 +57,15 @@ submission executes the embedded application `conversation` flow:
 
 ```mermaid
 flowchart LR
-    Begin["mf_chat.turn.begin: load history and context"] --> Invoke["mf_chat.workflow.invoke: user workflow"]
+    Begin["mf_chat.turn.begin: load history and context"] --> Invoke["mf_chat.workflow.invoke: user workflow and optional built-in title"]
     Invoke --> Settle["mf_chat.turn.settle: persist result"]
 ```
 
 The invocation node binds a `ConversationBackend` supplied by the host. Both the embedded Rust backend
 and the executable backend use the same `ConversationInputs` / `ConversationResult` protocol. The
-application flow owns durable turn admission and settlement; the user workflow owns answer generation,
-optional title generation, and explicit usage collection. User workflows need only generic nodes and
+application flow owns durable turn admission and settlement; the user workflow owns answer generation
+and explicit usage collection. When its public inputs support it, the host appends the built-in title
+Flow; user workflows can also own title generation explicitly. User workflows need only generic nodes and
 have no `mf-chat` dependency. The application never identifies or reconfigures their internal model nodes.
 
 ```rust
@@ -103,6 +104,22 @@ Configure the model and endpoint in the supplied workflow. The example prints co
 
 ## Session title summaries
 
+Both `ChatHost` and `mf run --chat` automatically append the built-in title Flow after a successful
+chat result when the workflow declares exactly one string input for each of `model`, `base_url`, and
+`api_key`, and all three resolved values are nonblank. Input node names may differ; defaults and
+environment bindings are resolved before reuse, and secret markers are preserved. Missing, ambiguous,
+or incompatible inputs disable this fallback without rejecting the chat workflow. The host does not
+inspect internal model configuration or choose a separate provider.
+
+A declared `title` output reserves title generation for the user workflow, even when that optional
+output is absent from a result. A returned title or usage attributed to `title` also prevents a second
+attempt. The built-in Flow uses the current prompt and final answer, respects `context.title`, and
+returns title usage for the same atomic settlement as the answer. Captured provider failures preserve
+the answer and record the failed title attempt. `HostConfig::automatic_titles = false` disables this
+fallback and supplies a disabled context policy to the user workflow. Custom `ConversationBackend`
+implementations opt in by returning resolved inputs from `builtin_title_parameters`; the default is
+no built-in title generation. Running a compiled workflow without `--chat` does not add a title Flow.
+
 For a compact reusable composition, use the [nested title Flow](../examples/chat-nested-title-flow.json).
 It calls the `mf-chat`-owned `mf-chat.chat-title` Flow through `workflow.call`; the parent retains primary answer
 streaming and combines both usage lists. See [reusable Flows](workflows.md#reusable-flows) for its
@@ -126,7 +143,7 @@ configuration and omits the optional profile label. It preserves a successful an
 and omits the title output. This policy is expressed by its branches. The application flow only persists
 the final protocol result.
 
-A submission finishes after the composed flow finishes. There is no separate background title job,
+A submission finishes after the user flow and any appended title Flow finish. There is no separate background title job,
 startup scan, title retry API, or title completion queue. Cancellation before delivery can lose the
 whole result and its usage; the host does not infer which internal calls completed. Persisted title
 attempts, including failures, suppress subsequent automatic attempts. Unknown attempts cannot be

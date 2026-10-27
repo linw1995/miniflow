@@ -4,6 +4,10 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
+    #[snafu(display("could not parse the built-in title Flow: {source}"))]
+    TitleDefinition {
+        source: mf_runtime::DefinitionParseError,
+    },
     #[snafu(transparent)]
     FlowResolution {
         source: mf_compiler::FlowResolutionError,

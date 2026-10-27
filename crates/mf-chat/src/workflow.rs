@@ -32,6 +32,11 @@ impl Wake for CancelWorkflow {
 
 /// Invokes one backend and forwards optional text deltas into the conversation Flow.
 pub trait ConversationBackend: Send + Sync {
+    /// Resolved inputs for the optional built-in title Flow, with its `input` namespace.
+    fn builtin_title_parameters(&self) -> Option<WorkflowArguments> {
+        None
+    }
+
     fn invoke(
         &self,
         invocation: &Invocation,
@@ -118,6 +123,10 @@ struct EmbeddedBackend {
 }
 
 impl ConversationBackend for EmbeddedBackend {
+    fn builtin_title_parameters(&self) -> Option<WorkflowArguments> {
+        self.contract.builtin_title_parameters(&self.parameters)
+    }
+
     fn invoke(
         &self,
         _: &Invocation,
@@ -315,6 +324,8 @@ impl TypedStreamNode for InvokeWorkflow {
         if let Some(context) = &mut input.request.context {
             context.title.enabled = self.automatic_titles;
         }
+        let title_prompt = input.request.prompt.clone();
+        let title_context = input.request.context.clone();
         let calls = &self.calls;
         let response = {
             let invocation = input.invocation.clone();
@@ -360,6 +371,28 @@ impl TypedStreamNode for InvokeWorkflow {
             }
         }
         let mut response = response?;
+        response.validate()?;
+        if self.automatic_titles
+            && response.status == "succeeded"
+            && response.title.is_none()
+            && !response.usages.iter().any(|usage| {
+                usage
+                    .attribution
+                    .as_ref()
+                    .and_then(|attribution| attribution.purpose.as_deref())
+                    == Some("title")
+            })
+            && let Some(parameters) = self.backend.builtin_title_parameters()
+        {
+            append_builtin_title(
+                title_prompt,
+                title_context,
+                &mut response,
+                parameters,
+                context,
+                &self.observer,
+            )?;
+        }
         calls.lock().unwrap().apply(&mut response.usages);
         response.validate()?;
         *self
@@ -380,6 +413,70 @@ impl TypedStreamNode for InvokeWorkflow {
             .into(),
         )
     }
+}
+
+fn append_builtin_title(
+    prompt: String,
+    title_context: Option<crate::contract::ConversationContext>,
+    response: &mut ConversationResult,
+    mut parameters: WorkflowArguments,
+    context: &mut ExecutionContext,
+    observer: &Observer,
+) -> Result<(), ChatError> {
+    let Some(title_context) = title_context else {
+        return Ok(());
+    };
+    parameters.0.insert("input.prompt".into(), prompt.into());
+    parameters
+        .0
+        .insert("input.text".into(), response.text.clone().into());
+    parameters
+        .0
+        .insert("input.status".into(), response.status.clone().into());
+    parameters.0.insert(
+        "input.context".into(),
+        mf_runtime::ValueRef::object(
+            title_context
+                .into_values()?
+                .into_iter()
+                .map(|(name, value)| (name.into(), value)),
+        ),
+    );
+    let registry = NodeRegistry::from_inventory()?;
+    let definition = flows::title_definition().context(TitleDefinitionSnafu)?;
+    let plan = mf_compiler::compile_definition(&definition, &registry)?;
+    let observation = Some(plan.start_observation(observer, RunId::new())?);
+    let mut child =
+        context.fork_domain_snapshot(observation, mf_runtime::OutputVisibility::Borrowed(&[]));
+    let _span = child.observation().map(mf_runtime::RunObservation::enter);
+    let result = (|| -> Result<_, ChatError> {
+        child.set_workflow_arguments(parameters);
+        let flow = mf_compiler::instantiate_compiled_with_observation(
+            &plan,
+            &registry,
+            child.observation_mut(),
+        )?;
+        #[derive(NodeValue)]
+        struct TitleResult {
+            title: Option<String>,
+            usages: Vec<crate::CallUsage>,
+        }
+        Ok(TitleResult::from_values(
+            FlowRuntime::default().execute_in_context(&flow, &mut child)?,
+        )?)
+    })();
+    if let Some(run) = child.observation_mut() {
+        run.finish(
+            result
+                .as_ref()
+                .err()
+                .map(|error| error as &dyn std::fmt::Display),
+        );
+    }
+    let title = result?;
+    response.title = title.title;
+    response.usages.extend(title.usages);
+    Ok(())
 }
 
 #[derive(Debug, NodeValue)]
