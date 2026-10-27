@@ -1,4 +1,4 @@
-//! Structured tool and reasoning messages for the LLM node.
+//! OpenAI-compatible function tools and conversation conversion for the LLM node.
 
 use crate::{
     ChatMessage, InvalidInputSnafu, LlmExecutionError, LlmInputs, UnsupportedOutputSnafu,
@@ -6,8 +6,8 @@ use crate::{
 };
 use mf_runtime::{NodeEnum, NodeValue, ValueRef};
 use rig_core::{completion::CompletionRequest, message as rig};
-use snafu::{ResultExt, ensure};
-use std::collections::BTreeMap;
+use snafu::{OptionExt, ResultExt, ensure};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
 pub struct ToolDefinition {
@@ -21,8 +21,6 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: ValueRef,
-    pub signature: Option<String>,
-    pub additional_params: Option<ValueRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
@@ -44,68 +42,8 @@ impl ToolCall {
             id,
             name: call.function.name.into(),
             arguments: call.function.arguments.into(),
-            signature: call.signature,
-            additional_params: call.additional_params.map(Into::into),
         })
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, NodeEnum)]
-#[value(tag = "type")]
-pub enum ReasoningBlock {
-    #[value(rename = "text")]
-    Text {
-        text: String,
-        signature: Option<String>,
-    },
-    #[value(rename = "summary")]
-    Summary { text: String },
-    #[value(rename = "encrypted")]
-    Encrypted { data: String },
-    #[value(rename = "redacted")]
-    Redacted { data: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
-pub struct Reasoning {
-    pub issuer: String,
-    pub id: Option<String>,
-    pub content: Vec<ReasoningBlock>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, NodeEnum)]
-#[value(tag = "type")]
-pub enum ContentBlock {
-    #[value(rename = "text")]
-    Text { text: String },
-    #[value(rename = "tool_call")]
-    ToolCall { call: ToolCall },
-    #[value(rename = "tool_result")]
-    ToolResult {
-        tool_call_id: String,
-        name: String,
-        content: String,
-    },
-    #[value(rename = "reasoning")]
-    Reasoning {
-        issuer: String,
-        id: Option<String>,
-        content: Vec<ReasoningBlock>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
-pub struct Message {
-    pub role: String,
-    pub content: Vec<ContentBlock>,
-}
-
-#[derive(Clone, Debug, NodeValue)]
-pub struct CallInputs {
-    pub messages: Vec<Message>,
-    pub system: Option<String>,
-    #[value(default)]
-    pub tools: Vec<ToolDefinition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeEnum)]
@@ -127,15 +65,39 @@ pub enum CallOutcome {
 #[derive(Clone, Debug, NodeValue)]
 pub struct CallResult {
     pub outcome: CallOutcome,
-    pub message: Message,
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
 }
 
 pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecutionError> {
+    let mut names = BTreeSet::new();
+    let mut tools = Vec::new();
+    for (index, tool) in inputs.tools.iter().enumerate() {
+        let path = format!("/tools/{index}");
+        require(
+            valid_name(&tool.name),
+            &path,
+            "a tool name of 1-64 ASCII letters, digits, underscores or hyphens",
+        )?;
+        require(names.insert(&tool.name), &path, "unique tool names")?;
+        require(
+            tool.input_schema.as_object().is_some()
+                && tool.input_schema["type"].as_str() == Some("object"),
+            &path,
+            "an object JSON Schema with type `object`",
+        )?;
+        tools.push(rig_core::completion::ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: serde_json::to_value(&tool.input_schema)
+                .context(crate::EncodeRequestSnafu)?,
+        });
+    }
+
+    let mut pending = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     let mut messages = Vec::new();
-    let mut names = BTreeMap::new();
     for (index, message) in inputs
         .history
         .as_deref()
@@ -144,73 +106,74 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
         .enumerate()
     {
         let path = format!("/history/{index}");
-        let mut content = Vec::new();
-        match message.role.as_str() {
+        let converted = match message.role.as_str() {
             "user" | "assistant" => {
                 require(
                     message.tool_call_id.is_none(),
                     &path,
                     "tool_call_id only on tool messages",
                 )?;
-                if message.role == "user" {
-                    require(
-                        message.tool_calls.is_none() && message.reasoning.is_none(),
-                        &path,
-                        "plain user text",
-                    )?;
-                }
-                if let Some(reasoning) = &message.reasoning {
-                    for block in reasoning {
-                        content.push(ContentBlock::Reasoning {
-                            issuer: block.issuer.clone(),
-                            id: block.id.clone(),
-                            content: block.content.clone(),
-                        });
-                    }
-                }
-                if !message.content.is_empty() {
-                    content.push(ContentBlock::Text {
-                        text: message.content.clone(),
-                    });
-                }
-                if let Some(calls) = &message.tool_calls {
-                    for call in calls {
-                        names.insert(call.id.clone(), call.name.clone());
-                        content.push(ContentBlock::ToolCall { call: call.clone() });
-                    }
-                }
                 require(
-                    !content.is_empty(),
-                    &format!("{path}/content"),
-                    "nonempty text, reasoning or tool calls",
+                    pending.is_empty(),
+                    &path,
+                    "all pending tool results before another user or assistant message",
                 )?;
-                messages.push(Message {
-                    role: message.role.clone(),
-                    content,
-                });
+                if message.role == "user" {
+                    require(message.tool_calls.is_none(), &path, "plain user text")?;
+                    require(
+                        !message.content.is_empty(),
+                        &format!("{path}/content"),
+                        "nonempty text",
+                    )?;
+                    rig::Message::user(&message.content)
+                } else {
+                    let mut content = Vec::new();
+                    if !message.content.is_empty() {
+                        content.push(rig::AssistantContent::Text(message.content.clone().into()));
+                    }
+                    for call in message.tool_calls.as_deref().unwrap_or_default() {
+                        require(
+                            !call.id.trim().is_empty() && seen.insert(&call.id),
+                            &path,
+                            "nonblank unique tool call IDs",
+                        )?;
+                        require(valid_name(&call.name), &path, "a valid tool name")?;
+                        pending.insert(call.id.as_str(), call.name.as_str());
+                        content.push(rig::AssistantContent::ToolCall(rig::ToolCall::from_wire(
+                            call.id.clone(),
+                            rig::ToolFunction::new(
+                                rig::ToolName::new(call.name.clone()).expect("validated tool name"),
+                                serde_json::to_value(&call.arguments)
+                                    .context(crate::EncodeRequestSnafu)?,
+                            ),
+                        )));
+                    }
+                    require(
+                        !content.is_empty(),
+                        &format!("{path}/content"),
+                        "nonempty text or tool calls",
+                    )?;
+                    rig::Message::Assistant { id: None, content }
+                }
             }
             "tool" => {
                 require(
-                    message.tool_calls.is_none() && message.reasoning.is_none(),
+                    message.tool_calls.is_none(),
                     &path,
                     "tool result content without assistant fields",
                 )?;
                 let id = message.tool_call_id.as_deref().unwrap_or_default();
-                let name = names.get(id).ok_or_else(|| {
-                    InvalidInputSnafu {
-                        path: format!("{path}/tool_call_id"),
-                        requirement: "a tool_call_id from an earlier assistant message",
-                    }
-                    .build()
+                let name = pending.remove(id).context(InvalidInputSnafu {
+                    path: format!("{path}/tool_call_id"),
+                    requirement: "a tool_call_id matching one pending assistant call",
                 })?;
-                messages.push(Message {
-                    role: "user".into(),
-                    content: vec![ContentBlock::ToolResult {
-                        tool_call_id: id.into(),
-                        name: name.clone(),
-                        content: message.content.clone(),
-                    }],
-                });
+                rig::Message::User {
+                    content: vec![rig::UserContent::ToolResult(rig::ToolResult {
+                        call: rig::CallId::from_wire(id),
+                        name: rig::ToolName::new(name).expect("validated pending tool name"),
+                        content: vec![rig::ToolResultContent::Text(message.content.clone().into())],
+                    })],
+                }
             }
             _ => {
                 return InvalidInputSnafu {
@@ -219,175 +182,37 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
                 }
                 .fail();
             }
-        }
+        };
+        messages.push(converted);
     }
+    require(
+        pending.is_empty(),
+        "/history",
+        "a result for every pending tool call",
+    )?;
     if let Some(prompt) = &inputs.prompt {
         require(!prompt.is_empty(), "/prompt", "nonempty text when supplied")?;
-        messages.push(Message {
-            role: "user".into(),
-            content: vec![ContentBlock::Text {
-                text: prompt.clone(),
-            }],
-        });
+        messages.push(rig::Message::user(prompt));
     }
-    CallInputs {
-        messages,
-        system: inputs.system.clone(),
-        tools: inputs.tools.clone(),
+    require(
+        !messages.is_empty(),
+        "/history",
+        "a prompt or nonempty history",
+    )?;
+    let mut request = CompletionRequest::from(messages).tools(tools);
+    if let Some(system) = inputs.system.as_ref().filter(|system| !system.is_empty()) {
+        request = request.preamble(system);
     }
-    .into_request()
+    Ok(request)
 }
 
 pub fn history_message(result: &CallResult) -> ChatMessage {
-    let mut reasoning = Vec::new();
-    {
-        for block in &result.message.content {
-            if let ContentBlock::Reasoning {
-                issuer,
-                id,
-                content,
-            } = block
-            {
-                reasoning.push(Reasoning {
-                    issuer: issuer.clone(),
-                    id: id.clone(),
-                    content: content.clone(),
-                });
-            }
-        }
-    }
     ChatMessage {
         role: "assistant".into(),
         content: result.text.clone(),
         metadata: None,
         tool_calls: (!result.tool_calls.is_empty()).then(|| result.tool_calls.clone()),
         tool_call_id: None,
-        reasoning: (!reasoning.is_empty()).then_some(reasoning),
-    }
-}
-
-impl CallInputs {
-    fn into_request(self) -> Result<CompletionRequest, LlmExecutionError> {
-        require(
-            !self.messages.is_empty(),
-            "/history",
-            "a prompt or nonempty history",
-        )?;
-        let mut names = std::collections::BTreeSet::new();
-        let mut tools = Vec::new();
-        for (index, tool) in self.tools.into_iter().enumerate() {
-            let path = format!("/tools/{index}");
-            require(
-                valid_name(&tool.name),
-                &path,
-                "a tool name of 1-64 ASCII letters, digits, underscores or hyphens",
-            )?;
-            require(names.insert(tool.name.clone()), &path, "unique tool names")?;
-            require(
-                tool.input_schema.as_object().is_some()
-                    && tool.input_schema["type"].as_str() == Some("object"),
-                &path,
-                "an object JSON Schema with type `object`",
-            )?;
-            tools.push(rig_core::completion::ToolDefinition {
-                name: tool.name,
-                description: tool.description,
-                parameters: serde_json::to_value(tool.input_schema)
-                    .context(crate::EncodeRequestSnafu)?,
-            });
-        }
-        let mut pending = BTreeMap::new();
-        let mut seen = std::collections::BTreeSet::new();
-        let mut messages = Vec::new();
-        for (index, message) in self.messages.into_iter().enumerate() {
-            let path = format!("/history/{index}");
-            require(
-                !message.content.is_empty(),
-                &path,
-                "nonempty content blocks",
-            )?;
-            let converted = match message.role.as_str() {
-                "user" => {
-                    let mut content = Vec::new();
-                    for block in message.content {
-                        content.push(match block {
-                            ContentBlock::Text { text } => {
-                                require(
-                                    pending.is_empty(),
-                                    &path,
-                                    "all pending tool results before user text",
-                                )?;
-                                rig::UserContent::text(text)
-                            }
-                            ContentBlock::ToolResult {
-                                tool_call_id,
-                                name,
-                                content,
-                            } => {
-                                require(
-                                    pending.remove(&tool_call_id).as_ref() == Some(&name),
-                                    &path,
-                                    "a result matching one pending tool call ID and name",
-                                )?;
-                                rig::UserContent::ToolResult(rig::ToolResult {
-                                    call: rig::CallId::from_wire(tool_call_id),
-                                    name: rig::ToolName::new(name)
-                                        .expect("validated pending tool name"),
-                                    content: vec![rig::ToolResultContent::Text(content.into())],
-                                })
-                            }
-                            _ => {
-                                return InvalidInputSnafu {
-                                    path,
-                                    requirement: "user text or tool results",
-                                }
-                                .fail();
-                            }
-                        });
-                    }
-                    rig::Message::User { content }
-                }
-                "assistant" => {
-                    require(
-                        pending.is_empty(),
-                        &path,
-                        "all pending tool results before another assistant message",
-                    )?;
-                    let mut content = Vec::new();
-                    for block in message.content {
-                        if let ContentBlock::ToolCall { call } = &block {
-                            require(
-                                !call.id.trim().is_empty() && seen.insert(call.id.clone()),
-                                &path,
-                                "nonblank unique tool call IDs",
-                            )?;
-                            require(valid_name(&call.name), &path, "a valid tool name")?;
-                            pending.insert(call.id.clone(), call.name.clone());
-                        }
-                        content.push(block.into_assistant(&path)?);
-                    }
-                    rig::Message::Assistant { id: None, content }
-                }
-                _ => {
-                    return InvalidInputSnafu {
-                        path,
-                        requirement: "role `user` or `assistant`",
-                    }
-                    .fail();
-                }
-            };
-            messages.push(converted);
-        }
-        require(
-            pending.is_empty(),
-            "/history",
-            "a result for every pending tool call",
-        )?;
-        let mut request = CompletionRequest::from(messages).tools(tools);
-        if let Some(system) = self.system.filter(|system| !system.is_empty()) {
-            request = request.preamble(system);
-        }
-        Ok(request)
     }
 }
 
@@ -407,71 +232,6 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
 }
 
-impl ContentBlock {
-    fn into_assistant(self, path: &str) -> Result<rig::AssistantContent, LlmExecutionError> {
-        Ok(match self {
-            Self::Text { text } => rig::AssistantContent::Text(text.into()),
-            Self::ToolCall { call } => rig::AssistantContent::ToolCall(
-                rig::ToolCall::from_wire(
-                    call.id,
-                    rig::ToolFunction::new(
-                        rig::ToolName::new(call.name).expect("validated tool name"),
-                        serde_json::to_value(call.arguments).context(crate::EncodeRequestSnafu)?,
-                    ),
-                )
-                .with_signature(call.signature)
-                .with_additional_params(
-                    call.additional_params
-                        .map(serde_json::to_value)
-                        .transpose()
-                        .context(crate::EncodeRequestSnafu)?,
-                ),
-            ),
-            Self::Reasoning {
-                issuer,
-                id,
-                content,
-            } => {
-                require(
-                    !issuer.trim().is_empty() && !content.is_empty(),
-                    path,
-                    "reasoning with an issuer and content",
-                )?;
-                rig::AssistantContent::Reasoning(
-                    rig::Reasoning {
-                        id,
-                        content: content
-                            .into_iter()
-                            .map(|block| match block {
-                                ReasoningBlock::Text { text, signature } => {
-                                    rig::ReasoningContent::Text { text, signature }
-                                }
-                                ReasoningBlock::Summary { text } => {
-                                    rig::ReasoningContent::Summary(text)
-                                }
-                                ReasoningBlock::Encrypted { data } => {
-                                    rig::ReasoningContent::Encrypted(data)
-                                }
-                                ReasoningBlock::Redacted { data } => {
-                                    rig::ReasoningContent::Redacted { data }
-                                }
-                            })
-                            .collect(),
-                    }
-                    .sealed(issuer),
-                )
-            }
-            Self::ToolResult { .. } => {
-                return InvalidInputSnafu {
-                    path,
-                    requirement: "assistant text, reasoning or tool calls",
-                }
-                .fail();
-            }
-        })
-    }
-}
-
 pub fn terminal_result(
     response: rig_core::completion::CompletionResponse,
 ) -> Result<CallResult, LlmExecutionError> {
@@ -480,13 +240,11 @@ pub fn terminal_result(
     let finish_reason = finish_reason(&response);
     let mut text = String::new();
     let mut tool_calls = Vec::new();
-    let mut content = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     for block in response.choice {
-        content.push(match block {
+        match block {
             rig::AssistantContent::Text(part) => {
                 text.push_str(&part.text);
-                ContentBlock::Text { text: part.text }
             }
             rig::AssistantContent::ToolCall(call) => {
                 let call = ToolCall::from_provider(call)?;
@@ -496,38 +254,11 @@ pub fn terminal_result(
                         requirement: "unique tool call IDs"
                     }
                 );
-                tool_calls.push(call.clone());
-                ContentBlock::ToolCall { call }
+                tool_calls.push(call);
             }
-            rig::AssistantContent::Reasoning(sealed) => {
-                let issuer = sealed.issuer().as_str().to_owned();
-                let reasoning = sealed.open(sealed.issuer()).expect("matching issuer");
-                ContentBlock::Reasoning {
-                    issuer,
-                    id: reasoning.id.clone(),
-                    content: reasoning
-                        .content
-                        .iter()
-                        .cloned()
-                        .map(|block| match block {
-                            rig::ReasoningContent::Text { text, signature } => {
-                                ReasoningBlock::Text { text, signature }
-                            }
-                            rig::ReasoningContent::Summary(text) => {
-                                ReasoningBlock::Summary { text }
-                            }
-                            rig::ReasoningContent::Encrypted(data) => {
-                                ReasoningBlock::Encrypted { data }
-                            }
-                            rig::ReasoningContent::Redacted { data } => {
-                                ReasoningBlock::Redacted { data }
-                            }
-                        })
-                        .collect(),
-                }
-            }
+            rig::AssistantContent::Reasoning(_) => {}
             _ => return UnsupportedOutputSnafu.fail(),
-        });
+        }
     }
     let outcome = match finish_reason.as_deref() {
         Some("length") => CallOutcome::Truncated,
@@ -538,10 +269,6 @@ pub fn terminal_result(
     };
     Ok(CallResult {
         outcome,
-        message: Message {
-            role: "assistant".into(),
-            content,
-        },
         text,
         tool_calls,
         finish_reason,
@@ -555,61 +282,51 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn reasoning_and_tool_metadata_survive_value_encoding_and_continuation() {
-        let reasoning = rig::Reasoning {
-            id: Some("reasoning-id".into()),
-            content: vec![
-                rig::ReasoningContent::Text {
-                    text: "thinking".into(),
-                    signature: Some("signature".into()),
-                },
-                rig::ReasoningContent::Summary("summary".into()),
-                rig::ReasoningContent::Encrypted("encrypted".into()),
-                rig::ReasoningContent::Redacted {
-                    data: "redacted".into(),
-                },
-            ],
-        }
-        .sealed("openai");
+    fn text_and_tools_round_trip_through_history_without_reasoning_state() {
         let call = rig::ToolCall::from_wire(
             "one",
             rig::ToolFunction::new(rig::ToolName::new("lookup").unwrap(), json!({"id":42})),
-        )
-        .with_signature(Some("call-signature".into()))
-        .with_additional_params(Some(json!({"provider":"state"})));
+        );
         let choice = vec![
-            rig::AssistantContent::Reasoning(reasoning),
             rig::AssistantContent::Text("Checking".into()),
             rig::AssistantContent::ToolCall(call),
         ];
+        let mut response_content = vec![rig::AssistantContent::reasoning("openai", "hidden")];
+        response_content.extend(choice.clone());
         let response =
-            CompletionResponse::new(choice.clone(), Usage::default(), "openai", Value::Null)
+            CompletionResponse::new(response_content, Usage::default(), "openai", Value::Null)
                 .with_finish_reason(FinishReason::ToolCalls);
         let result = terminal_result(response).unwrap();
-        let result = CallResult::from_values(result.into_values().unwrap()).unwrap();
         assert_eq!(result.outcome, CallOutcome::ToolCalls);
-        let request = CallInputs {
-            messages: vec![
-                Message {
+        assert_eq!(result.text, "Checking");
+        let history = history_message(&result).into_values().unwrap();
+        assert!(!history.contains_key("reasoning"));
+        assert_eq!(
+            history["tool_calls"][0],
+            json!({"id":"one", "name":"lookup", "arguments":{"id":42}})
+        );
+        let request = prepare_request(&LlmInputs {
+            prompt: None,
+            history: Some(vec![
+                ChatMessage {
                     role: "user".into(),
-                    content: vec![ContentBlock::Text {
-                        text: "Hello".into(),
-                    }],
+                    content: "Hello".into(),
+                    metadata: None,
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
-                result.message,
-                Message {
-                    role: "user".into(),
-                    content: vec![ContentBlock::ToolResult {
-                        tool_call_id: "one".into(),
-                        name: "lookup".into(),
-                        content: "42".into(),
-                    }],
+                ChatMessage::from_values(history).unwrap(),
+                ChatMessage {
+                    role: "tool".into(),
+                    content: "42".into(),
+                    metadata: None,
+                    tool_calls: None,
+                    tool_call_id: Some("one".into()),
                 },
-            ],
+            ]),
             system: None,
             tools: Vec::new(),
-        }
-        .into_request()
+        })
         .unwrap();
         assert_eq!(
             request.chat_history[1],

@@ -159,7 +159,6 @@ fn history_metadata_round_trips_through_argument_binding() {
                 history: Some(vec![mfn_llm::ChatMessage {
                     tool_calls: None,
                     tool_call_id: None,
-                    reasoning: None,
                     role: "assistant".into(),
                     content: "prior reply".into(),
                     metadata: Some(metadata.clone()),

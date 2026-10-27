@@ -1,5 +1,5 @@
 pub mod call;
-pub use call::{CallOutcome, Reasoning, ReasoningBlock, ToolCall, ToolCallEvent, ToolDefinition};
+pub use call::{CallOutcome, ToolCall, ToolCallEvent, ToolDefinition};
 mod streaming;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
@@ -82,7 +82,6 @@ pub struct ChatMessage {
     pub metadata: Option<MessageMetadata>,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub tool_call_id: Option<String>,
-    pub reasoning: Option<Vec<Reasoning>>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -666,7 +665,6 @@ fn terminal_outputs(
             content: prompt,
             tool_calls: None,
             tool_call_id: None,
-            reasoning: None,
         });
     }
     history.push(call::history_message(&result));
@@ -845,7 +843,6 @@ mod tests {
                 metadata: None,
                 tool_calls: None,
                 tool_call_id: None,
-                reasoning: None,
                 role: "assistant".into(),
                 content: "reply".into(),
             }],
@@ -919,7 +916,6 @@ mod tests {
             metadata: None,
             tool_calls: None,
             tool_call_id: None,
-            reasoning: None,
             role: "user".into(),
             content: "prior".into(),
         }];

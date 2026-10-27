@@ -448,8 +448,8 @@ when the consumer fails or the host cancels.
 Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
 Each history object has two required string fields, `role` and `content`. Plain conversation roles are
-`user` and `assistant`, with nonempty text. Tool calls additionally support assistant `tool_calls`,
-optional `reasoning`, and `tool` results with `tool_call_id`; see [LLM tool calls](#llm-tool-calls).
+`user` and `assistant`, with nonempty text. Tool calls additionally support assistant `tool_calls`
+and `tool` results with `tool_call_id`; see [LLM tool calls](#llm-tool-calls).
 A supplied `prompt` must be nonempty. It may be omitted when continuing from nonempty history.
 System instructions use the separate `system` input. Missing or empty history plus a prompt starts
 a new conversation. A successful request appends the prompt when present and one assistant message.
@@ -589,7 +589,7 @@ The existing outputs remain available. Two additional required outputs describe 
 
 | Output | Meaning |
 | --- | --- |
-| `tool_calls` | Ordered calls, each with `id`, `name`, JSON `arguments`, and optional provider `signature` / `additional_params`; `[]` when absent |
+| `tool_calls` | Ordered calls, each with `id`, `name`, JSON `arguments`; `[]` when absent |
 | `outcome` | `completed`, `tool_calls`, `truncated`, `refused`, `incomplete`, or `failed` |
 
 `status: succeeded` means the request produced a valid response, including a tool request. Only
@@ -628,11 +628,10 @@ result before subsequent user text, another assistant message, or the next reque
 arrive in any order. The tool name is resolved from the matching assistant call. Tool errors can be
 represented in the result content by the caller; this node imposes no execution or retry policy.
 
-Assistant history can also carry optional `reasoning`, a list of records with `issuer`, optional
-`id`, and ordered `content` blocks. Blocks use `type: text` with `text` and optional `signature`,
-`type: summary` with `text`, or `type: encrypted` / `type: redacted` with `data`. Preserve these
-records and tool-call metadata when replaying history. The provider adapter determines which issuer's
-reasoning it can replay. Application `metadata` remains separate and is not sent to the provider.
+The node uses `OpenAIConfig.chat` and retains text, function calls, and tool results in history.
+Provider reasoning blocks are ignored, as in the original text-only node. Reasoning replay and
+cross-provider continuation state are outside this contract. Application `metadata` remains separate
+and is not sent to the provider.
 
 The stream side exposes `delta` for text and `tool_call` for each completed tool call. The text payload
 remains `{text, model_call_id}`. A tool event contains `{model_call_id, call}`, where `call` has the same
