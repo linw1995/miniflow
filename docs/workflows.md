@@ -455,10 +455,11 @@ and `tool`. System and user messages require nonempty text. Assistant messages c
 The node encodes the supplied list in its existing order. It has no `prompt`, `system`, or `history`
 input ports and never inserts messages. Include system instructions and the current user message in
 `messages` explicitly. The output `message` contains only the current assistant response; `text` and
-`tool_calls` are projections of that response. There is no updated-history output. A response with neither text nor completed tool calls
-also omits `message`, so a truncated empty response cannot be appended as an invalid assistant entry.
+`tool_calls` are projections of that response. There is no updated-history output. A response with neither
+text nor completed tool calls also omits `message`, so a truncated empty response cannot be appended as an invalid assistant entry.
 
-Conversation composition belongs to the Flow. The chat examples use `builtin.code` to prepend optional
+Conversation composition belongs to the Flow. New message maps use CEL `dyn(...)` when combined with
+existing messages so inference preserves heterogeneous fields such as nested metadata and tool calls. The chat examples use `builtin.code` to prepend optional
 system instructions and append the current user prompt before invoking the model. The Loop examples
 append the returned `message` to their history variable with a separate code node. On a captured failure,
 the missing `message` skips that append operation and leaves the loop's history unchanged.

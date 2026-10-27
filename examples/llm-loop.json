@@ -96,8 +96,8 @@
                   }
                 },
                 "code": {
-                  "messages": "history + [{'role':'user','content':prompt}]",
-                  "history": "history + [{'role':'user','content':prompt}]"
+                  "messages": "history + [dyn({'role':'user','content':prompt})]",
+                  "history": "history + [dyn({'role':'user','content':prompt})]"
                 }
               },
               "inputs": {

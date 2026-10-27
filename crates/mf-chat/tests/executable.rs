@@ -316,11 +316,17 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         parameters
             .0
             .insert("params.base_url".into(), server.base_url.clone().into());
+        let previous = json!([{"role":"user","content":"prior question"},{"role":"assistant","content":"prior answer","metadata":{"tags":["retained"],"count":1}}]);
         let input = mf_chat::ConversationInputs {
             context: None,
             prompt: "hello".into(),
-            system: None,
-            history: None,
+            system: Some("Keep context".into()),
+            history: Some(
+                <Vec<mfn_llm::ChatMessage> as mf_runtime::InputValue>::decode(
+                    previous.clone().into(),
+                )
+                .unwrap(),
+            ),
         };
         let outputs = mf_compiler::execute_compiled_with_inputs(
             &plan,
@@ -330,13 +336,16 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         )
         .unwrap();
         let result = serde_json::to_value(&outputs).unwrap();
-        assert_eq!(
-            result["history"],
-            if failed {
-                json!([])
-            } else {
-                json!([{"role":"user","content":"hello"},{"role":"assistant","content":"reply"},{"role":"user","content":"hello"},{"role":"assistant","content":"second reply"}])
-            }
+        let mut expected = previous.as_array().unwrap().clone();
+        if !failed {
+            expected.extend(json!([{"role":"user","content":"hello"},{"role":"assistant","content":"reply"},{"role":"user","content":"hello"},{"role":"assistant","content":"second reply"}]).as_array().unwrap().iter().cloned());
+        }
+        assert_eq!(result["history"], json!(expected));
+        assert!(
+            server
+                .requests()
+                .iter()
+                .all(|request| !request.body.to_string().contains("retained"))
         );
         let calls = result["usages"].as_array().unwrap();
         assert_eq!(calls.len(), if failed { 1 } else { 2 });

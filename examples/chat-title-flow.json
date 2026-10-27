@@ -303,7 +303,7 @@
           "system": "string"
         },
         "code": {
-          "messages": "(system == '' ? [] : [{'role':'system','content':system}]) + history + [{'role':'user','content':prompt}]"
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
         }
       },
       "inputs": {

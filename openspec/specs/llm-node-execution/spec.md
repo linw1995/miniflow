@@ -251,13 +251,14 @@ SHALL remain available for existing single-call consumers.
 
 #### Scenario: Preserve annotations without sending them
 
-- **WHEN** input history carries message metadata
-- **THEN** output history retains it while the provider receives only role and content
+- **WHEN** input messages carry application metadata
+- **THEN** caller-owned annotations remain unchanged and are omitted from provider requests
+- **AND** the current assistant message does not inherit annotations from input messages
 
 ### Requirement: Support explicit failure results for workflow aggregation
 
 With capture_errors enabled, request failures, node deadlines, and response validation failures SHALL
-return failed status, an error summary, and a usage entry without appending failed conversation messages.
+return failed status, an error summary, and a usage entry without publishing an assistant message.
 Any valid already reported counters SHALL survive conversion failure. Without capture_errors, errors
 SHALL retain their existing typed sources. Setup failures and workflow cancellation may abort before a
 final result, and MUST NOT be described as known zero remote usage.
@@ -274,7 +275,7 @@ final result, and MUST NOT be described as known zero remote usage.
 
 ### Requirement: Publish typed live text independently of final metadata
 
-Connected live text SHALL carry ordered text increments and the actual model-call identity through a declared stream port. Complete terminal text/history and usages SHALL remain directly available without collecting that stream. Only explicitly exported nodes SHALL become public chat streams; title and other internal model calls MUST NOT be selected by topology inference.
+Connected live text SHALL carry ordered text increments and the actual model-call identity through a declared stream port. The current terminal message, text, and usages SHALL remain directly available without collecting that stream. Only explicitly exported nodes SHALL become public chat streams; title and other internal model calls MUST NOT be selected by topology inference.
 
 #### Scenario: Stream an answer and generate a title
 
