@@ -437,15 +437,10 @@ impl TypedStreamNode for InvokeWorkflow {
 }
 
 #[derive(NodeValue)]
-struct TitleResult {
-    title: Option<String>,
-    usages: Vec<crate::CallUsage>,
-}
-
-#[derive(NodeValue)]
 struct CompleteConversationInputs {
     response: ConversationResult,
-    title_result: TitleResult,
+    title: mf_runtime::Nullable<String>,
+    title_usages: Vec<crate::CallUsage>,
 }
 
 #[derive(NodeValue)]
@@ -456,10 +451,10 @@ struct CompleteConversationOutputs {
 fn complete_conversation(
     mut input: CompleteConversationInputs,
 ) -> Result<CompleteConversationOutputs, ChatError> {
-    if let Some(title) = input.title_result.title {
+    if let mf_runtime::Nullable::Value(title) = input.title {
         input.response.title = Some(title);
     }
-    input.response.usages.extend(input.title_result.usages);
+    input.response.usages.extend(input.title_usages);
     input.response.validate()?;
     Ok(CompleteConversationOutputs {
         response: input.response,

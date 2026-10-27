@@ -120,7 +120,11 @@ The application graph declares `workflow.call` with the registered `mf-chat.chat
 Its plan is resolved and cached after the provider is linked. The route publishes title inputs only
 after the chat producer closes normally, so previews cannot trigger title generation. The title call
 shares the application run and has its own call scope in lifecycle events, traces, and usage paths.
-Completion merges the title result and captures the complete reply before persistence; cancellation
+After the title call succeeds, an `exists` branch checks its optional `title` output. Exclusive
+bindings supply a produced title or explicit null, plus the reported usages or an empty list when
+the call is disabled. Failed or cancelled calls never activate this success-dependent branch.
+The shared title Flow's inputs and outputs remain unchanged for other callers. Completion merges
+these values and captures the complete reply before persistence; cancellation
 during title generation does not promote the intermediate answer into a recoverable completion.
 
 A declared `title` output reserves title generation for the user workflow, even when that optional

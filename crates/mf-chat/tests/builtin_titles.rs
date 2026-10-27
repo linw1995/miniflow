@@ -218,6 +218,25 @@ fn builtin_title_is_a_registered_call_in_the_application_graph() {
     );
     let description = mf_compiler::describe_compiled(&plan).unwrap();
     assert!(description.body(&["title".into()]).is_some());
+    let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+    let manifest = mf_chat::flows::conversation::manifest(&registry).unwrap();
+    assert!(manifest.description().unwrap().is_streaming());
+    assert_eq!(
+        manifest
+            .input_schema
+            .inputs
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["begin"]
+    );
+    let stream = mf_chat::flows::conversation::prepare_stream(&registry).unwrap();
+    assert_eq!(stream.plan().input_schema(), &manifest.input_schema);
+    let error = mf_chat::flows::conversation::prepare_workflow(&registry, None)
+        .err()
+        .unwrap();
+    assert!(matches!(error, mf_chat::ChatError::Compile { source }
+        if matches!(*source, mf_compiler::WorkflowCompileError::InvalidStream { .. })));
 }
 
 fn log_value(value: &opentelemetry::logs::AnyValue) -> serde_json::Value {

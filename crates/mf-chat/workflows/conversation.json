@@ -118,12 +118,54 @@
       }
     },
     {
+      "id": "title_available",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "title.title",
+                "path": ""
+              },
+              "operator": "exists"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "selected_title",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "title",
+            "port": "title"
+          }
+        }
+      }
+    },
+    {
+      "id": "missing_title",
+      "kind": "builtin.constant",
+      "config": {
+        "value": null
+      }
+    },
+    {
       "id": "no_title",
       "kind": "builtin.constant",
       "config": {
-        "value": {
-          "usages": []
-        }
+        "value": null
+      }
+    },
+    {
+      "id": "no_title_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
       }
     },
     {
@@ -136,14 +178,30 @@
             "port": "response"
           }
         },
-        "title_result": {
+        "title": {
           "exclusive": [
             {
-              "node": "title",
-              "port": "result"
+              "node": "selected_title",
+              "port": "value"
+            },
+            {
+              "node": "missing_title",
+              "port": "value"
             },
             {
               "node": "no_title",
+              "port": "value"
+            }
+          ]
+        },
+        "title_usages": {
+          "exclusive": [
+            {
+              "node": "title",
+              "port": "usages"
+            },
+            {
+              "node": "no_title_usages",
               "port": "value"
             }
           ]
@@ -209,6 +267,25 @@
       "from_node": "title_route",
       "from_output": "else",
       "to_node": "no_title"
+    },
+    {
+      "from_node": "title",
+      "to_node": "title_available"
+    },
+    {
+      "from_node": "title_available",
+      "from_output": "else",
+      "to_node": "missing_title"
+    },
+    {
+      "from_node": "title_route",
+      "from_output": "else",
+      "to_node": "no_title_usages"
+    },
+    {
+      "from_node": "title_available",
+      "from_output": "yes",
+      "to_node": "selected_title"
     }
   ]
 }
