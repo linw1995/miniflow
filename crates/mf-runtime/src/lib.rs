@@ -1,3 +1,4 @@
+mod call;
 mod cancellation;
 mod config_template;
 mod context;
@@ -32,6 +33,10 @@ mod worker;
 mod workflow_inputs;
 mod workflow_manifest;
 
+pub use call::{
+    CallArguments, CallBinding, CallBindingId, CallContractError, CallId, CallInputDefaults,
+    CallOutcome, CallPortMapping, CallRequest, CallResponse,
+};
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;

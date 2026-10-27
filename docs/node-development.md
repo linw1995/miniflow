@@ -135,6 +135,60 @@ Rebuild plugins against the matching runtime package and correct declarations th
 
 Declare context reads in `NodeMetadata.context_references`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
 
+## Directed call contracts
+
+`CallBinding` declares a directed call independently of ordinary data publication. It names a target
+`NodeId`, a group of `CallPortMapping` entries, and a `CallInputDefaults` policy. Each mapping names an
+exact caller output and target input; dots are literal port-name characters. Construction rejects
+empty names and duplicate destination inputs, while allowing one source output to feed multiple inputs.
+`ExplicitOnly` is the default. `RemainingInputs` explicitly requests that later graph preparation assign
+otherwise unbound target inputs to the caller after resolving all explicit port connections.
+
+The argument envelope separates `outputs`, keyed by caller output names, from `defaults`, keyed by
+target input names. Both preserve `ValueRef` sharing and sensitivity. An absent optional argument is
+omitted; null remains a supplied value. External constants and configuration values belong to runtime
+input composition, not to this caller-owned envelope.
+
+```rust
+use mf_runtime::{
+    CallArguments, CallBinding, CallBindingId, CallId, CallInputDefaults, CallOutcome,
+    CallPortMapping, CallRequest, NodeId, NodeValues,
+};
+
+let binding = CallBinding::new(
+    "search",
+    NodeId::new(3),
+    vec![CallPortMapping { output: "query".into(), input: "query".into() }],
+    CallInputDefaults::ExplicitOnly,
+)?;
+let request = CallRequest {
+    id: CallId { binding: CallBindingId::new(0), invocation: 42 },
+    arguments: CallArguments {
+        outputs: NodeValues::from([("query".into(), "runtime contracts".into())]),
+        ..Default::default()
+    },
+};
+let expected = request.id;
+let response = request.respond(CallOutcome::Succeeded(NodeValues::new()));
+let outcome = response.into_outcome(expected)?;
+```
+
+The example only constructs contracts; `respond` does not execute the target. These APIs do not yet
+resolve graph bindings, expose context discovery, or provide a dispatcher. A future dispatcher must
+validate target eligibility and composed inputs, allocate invocation numbers uniquely within the
+workflow execution across callers, scopes, and stream frames, and track pending/completed requests.
+Binding indexes are local to a caller's prepared table. Identities are not retry idempotency keys.
+
+`CallRequest` is separate from `NodeResult` and stream emissions: it selects one binding and submits
+its argument group atomically, including an empty group. Calls must eventually be submitted before
+the Parent's final result to support waiting and continuation. Ordinary output publication does not
+dispatch requests. Multiple requests may select the same binding; unselected bindings are not skipped.
+`CallResponse::into_outcome` rejects a mismatched binding or invocation. `CallOutcome` preserves successful
+output values, structured dependency skip causes, or a typed `WorkflowRunError`; optional result omissions
+remain absent. Child loop effects are not returned through this contract.
+`CallContractError` converts transparently into `NodeBuildError` and `NodeExecutionError`, allowing
+factories and node implementations to propagate declaration and correlation failures with `?`.
+
 ## Context-aware execution
 
 ### Optional future execution

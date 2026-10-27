@@ -1,0 +1,42 @@
+## 0. Call and output model
+
+- [x] 0.1 Declare atomic output groups with explicit port mappings and opt-in node-level defaults.
+- [x] 0.2 Separate intermediate call requests from ordinary task results and stream emissions.
+- [x] 0.3 Preserve explicit-output and default-input namespaces, shared values, and sensitivity.
+- [x] 0.4 Correlate success, skip, and typed failure responses by binding and invocation identity.
+- [x] 0.5 Cover local declaration errors, empty calls, repeated calls, mismatches, and payload preservation.
+
+## 1. Binding resolution and derived interfaces
+
+- [ ] 1.1 Specify versioned callable-binding syntax with separate explicit port mappings and node-level defaults.
+- [ ] 1.2 Resolve explicit port ownership before node-level defaults; validate conflicts and missing required inputs.
+- [ ] 1.3 Define public interface projections and scope-local connection indexes without exposing internal values.
+- [ ] 1.4 Project caller parameters from final resolved contracts, preserving optionality and null semantics.
+- [ ] 1.5 Expose read-only context views across dynamic, generated, nested, and TaskStream execution paths.
+- [ ] 1.6 Add deterministic generation and startup contract checks for interfaces and binding layouts.
+
+## 2. Composed runtime invocation
+
+- [ ] 2.1 Separate on-demand targets from ordinary root activation and reject mixed activation modes.
+- [ ] 2.2 Resolve external prerequisites and reject invocation dependency cycles before execution.
+- [ ] 2.3 Compose atomic caller arguments with scoped external inputs and isolate each invocation's results.
+- [ ] 2.4 Preserve shared values, sensitivity, typed errors, skips, cancellation, deadlines, and execution budgets.
+- [ ] 2.5 Serialize calls to each prepared tool instance and preserve progress with one shared worker.
+- [ ] 2.6 Record stable caller, target, binding, and invocation identities for observation and snapshots.
+
+## 3. LLM integration
+
+- [ ] 3.1 Add sufficient value-schema reflection and reject tool contracts that cannot be accurately represented.
+- [ ] 3.2 Build provider tool definitions from caller-visible projections and validate returned tool names.
+- [ ] 3.3 Extend message history with structured tool calls, results, and correlation identities.
+- [ ] 3.4 Add bounded multi-round dispatch and buffer streamed arguments until each call is complete.
+- [ ] 3.5 Define result sensitivity, size limits, and error export without automatic side-effect retries.
+
+## 4. Verification and documentation
+
+- [ ] 4.1 Cover explicit-only, default-only, and mixed bindings, including externally supplied credentials.
+- [ ] 4.2 Cover required omissions, optional omission versus null, duplicate sources, and external-source skips.
+- [ ] 4.3 Verify invocation correlation, repeated calls, nested scope restoration, and unselected tool behavior.
+- [ ] 4.4 Compare dynamic and generated behavior, including a TaskStream caller and worker-limit-one execution.
+- [ ] 4.5 Document eager external producers versus lazy per-call configuration inside a callable Flow.
+- [ ] 4.6 Run affected tests, repository validation, and specification checks for each implementation phase.

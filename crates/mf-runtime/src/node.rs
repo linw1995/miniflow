@@ -645,6 +645,8 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
+    #[snafu(transparent)]
+    CallContract { source: crate::CallContractError },
     #[snafu(display("could not serialize generated metadata: {source}"))]
     GenerationMetadata { source: serde_json::Error },
     #[snafu(display("prepared metadata differs from the compiled typed generation contract"))]
@@ -670,6 +672,8 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
+    #[snafu(transparent)]
+    CallContract { source: crate::CallContractError },
     #[snafu(display("could not decode typed node inputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
     InputDecode {
         #[snafu(source(from(crate::InputDecodeError, Box::new)))]
