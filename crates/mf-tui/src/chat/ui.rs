@@ -19,8 +19,10 @@ use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
     io::{IsTerminal, Write},
+    time::Instant,
 };
 const MAX_EDITOR_BYTES: usize = 256 * 1024;
+const LOADING_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 fn execution_areas(body: Rect) -> (Rect, Rect) {
     if body.width >= 120 && body.height >= 12 {
@@ -278,6 +280,7 @@ struct ChatView {
     transcript: RefCell<super::transcript::Transcript>,
     notice: String,
     outcome: String,
+    animation_started: Instant,
 }
 impl ChatView {
     fn new(
@@ -308,6 +311,7 @@ impl ChatView {
             transcript: RefCell::default(),
             notice: "Start a conversation, or Ctrl+S to resume one".into(),
             outcome: String::new(),
+            animation_started: Instant::now(),
         })
     }
     fn send(&mut self, controller: &ChatController, command: ChatCommand) -> bool {
@@ -388,7 +392,7 @@ impl ChatView {
                 self.observation = None;
                 self.unsaved = None;
                 self.outcome.clear();
-                self.notice = "Working... Ctrl+C to cancel".into();
+                self.notice.clear();
                 self.scroll.set(0);
             }
             ChatEvent::Preview {
@@ -864,15 +868,20 @@ impl ChatView {
                 vec![Line::styled("You", Style::default().fg(Color::Cyan))],
             );
             transcript.literal(format!("{key}:prompt"), prompt, Style::default());
+        }
+        let loading = self.pending.is_some() || self.active.is_some();
+        let has_preview = self
+            .preview
+            .segments
+            .iter()
+            .any(|segment| !segment.text.is_empty());
+        if loading || has_preview {
             transcript.plain(
-                format!("{key}:status"),
-                vec![Line::styled(
-                    "Working...",
-                    Style::default().fg(Color::DarkGray),
-                )],
+                "preview-label".into(),
+                vec![Line::styled("Assistant", Style::default().fg(Color::Cyan))],
             );
         }
-        for (index, segment) in self.preview.segments.iter().enumerate() {
+        for segment in &self.preview.segments {
             if segment.text.is_empty() {
                 continue;
             }
@@ -882,32 +891,21 @@ impl ChatView {
                 .as_ref()
                 .map_or("", |invocation| invocation.call_id.as_str());
             let key = format!("preview:{invocation}:{}", segment.model_call_id);
-            let state = if self.preview.incomplete {
-                "incomplete"
-            } else {
-                "provisional"
-            };
-            transcript.plain(
-                format!("{key}:label"),
-                vec![Line::styled(
-                    format!("Assistant [{state}, segment {}]", index + 1),
-                    Style::default().fg(Color::Yellow),
-                )],
-            );
             transcript.markdown(format!("{key}:body"), &segment.text);
             transcript.plain(format!("{key}:gap"), vec![Line::default()]);
         }
         let mut status = vec![];
-        if self.active.is_some()
-            && self
-                .preview
-                .segments
-                .iter()
-                .any(|segment| !segment.text.is_empty())
-        {
+        if loading {
+            let frame = (self.animation_started.elapsed().as_millis() / 100
+                % LOADING_FRAMES.len() as u128) as usize;
             status.push(Line::styled(
-                "FTT / Gen / E2E: Measuring...",
-                Style::default().fg(Color::DarkGray),
+                LOADING_FRAMES[frame].to_string(),
+                Style::default().fg(Color::Cyan),
+            ));
+        } else if has_preview && self.preview.incomplete {
+            status.push(Line::styled(
+                "Response unfinished",
+                Style::default().fg(Color::Yellow),
             ));
         }
         if self.preview.omitted {
@@ -1206,9 +1204,10 @@ mod tests {
                 .unwrap();
             let chat = rows
                 .iter()
-                .position(|row| row.contains("What would you like"))
+                .position(|row| row.contains("Assistant"))
                 .unwrap();
             assert_eq!(panel == chat, side_by_side, "{text}");
+            assert!(text.contains(LOADING_FRAMES), "{text}");
             assert!(text.contains("Flow: Running"), "{text}");
             assert!(text.contains("start"), "{text}");
             assert!(text.contains("Delivery: Collecting"), "{text}");
@@ -1749,6 +1748,8 @@ mod tests {
             .create_session("default", None, None)
             .unwrap();
         let invocation = Invocation::new(&session.id);
+        view.pending = Some(None);
+        assert!(render(&view, 100, 30).contains(LOADING_FRAMES));
         view.event(
             ChatEvent::Submitted {
                 session: session.clone(),
@@ -1758,6 +1759,7 @@ mod tests {
             &controller,
         );
         let mut preview = LivePreview::default();
+        assert!(render(&view, 100, 30).contains(LOADING_FRAMES));
         preview.begin(invocation.clone());
         preview
             .apply(mf_chat::PreviewEvent {
@@ -1768,6 +1770,15 @@ mod tests {
                 },
             })
             .unwrap();
+        preview
+            .apply(mf_chat::PreviewEvent {
+                invocation: invocation.clone(),
+                delta: mf_chat::TextDelta {
+                    text: "second call output".into(),
+                    model_call_id: "second-call".into(),
+                },
+            })
+            .unwrap();
         view.event(
             ChatEvent::Preview {
                 invocation: invocation.clone(),
@@ -1775,7 +1786,13 @@ mod tests {
             },
             &controller,
         );
-        assert!(render(&view, 100, 30).contains("draft prefix"));
+        let screen = render(&view, 100, 30);
+        assert!(screen.contains("draft prefix"));
+        assert!(screen.contains("second call output"));
+        assert_eq!(screen.matches("Assistant").count(), 1);
+        assert!(screen.contains(LOADING_FRAMES));
+        assert!(!screen.contains("provisional"));
+        assert!(!screen.contains("segment"));
         let finish = |invocation: Invocation, text: &str| ChatEvent::Finished {
             invocation: invocation.clone(),
             resolution: Ok(ReconciledCompletion {
@@ -1801,6 +1818,7 @@ mod tests {
         assert!(!screen.contains("**"));
         assert_eq!(view.final_reply.as_deref(), Some("**canonical reply**"));
         assert!(!screen.contains("draft prefix"));
+        assert!(!screen.contains(LOADING_FRAMES));
         let next = Invocation::new(&session.id);
         view.event(
             ChatEvent::Submitted {
@@ -1865,7 +1883,8 @@ mod tests {
         );
         let screen = render(&view, 100, 30);
         assert!(screen.contains("partial text"));
-        assert!(screen.contains("incomplete"));
+        assert!(screen.contains("Response unfinished"));
+        assert!(!screen.contains(LOADING_FRAMES));
         view.event(
             ChatEvent::Finished {
                 invocation: invocation.clone(),
