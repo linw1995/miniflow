@@ -156,10 +156,8 @@ fn history_metadata_round_trips_through_argument_binding() {
                 context: None,
                 prompt: "continue".into(),
                 system: None,
-                history: Some(vec![mfn_llm::ChatMessage {
+                history: Some(vec![mfn_llm::ChatMessage::Assistant {
                     tool_calls: None,
-                    tool_call_id: None,
-                    role: "assistant".into(),
                     content: "prior reply".into(),
                     metadata: Some(metadata.clone()),
                 }]),
@@ -170,8 +168,12 @@ fn history_metadata_round_trips_through_argument_binding() {
     let values =
         mf_runtime::NodeValues::from([("messages".into(), arguments.0["params.history"].clone())]);
     assert_eq!(
-        mfn_llm::LlmInputs::from_values(values).unwrap().messages[0].metadata,
-        Some(metadata)
+        mfn_llm::LlmInputs::from_values(values).unwrap().messages[0],
+        mfn_llm::ChatMessage::Assistant {
+            content: "prior reply".into(),
+            tool_calls: None,
+            metadata: Some(metadata),
+        }
     );
 }
 

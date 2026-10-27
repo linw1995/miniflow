@@ -85,6 +85,10 @@ Each invocation SHALL accept a required nonempty `messages` list and optional `t
 
 ### Requirement: Validate the explicit message list
 
+The public ChatMessage type SHALL be an enum tagged by role, with System, User, Assistant, and ToolResult variants.
+Only Assistant SHALL expose tool_calls. ToolResult SHALL require tool_call_id and content; all variants MAY carry application metadata.
+JSON field names and the role values system, user, assistant, and tool SHALL remain unchanged. Cross-role fields MUST fail during input decoding.
+
 Messages SHALL contain string role and content fields and optional application metadata. Accepted roles SHALL be system, user, assistant, and tool. System and user content SHALL be nonempty; assistant messages MAY carry tool_calls with empty text. Tool results SHALL identify a pending call through tool_call_id. Application metadata MUST NOT be sent to the provider. Invalid messages MUST fail before network I/O with an indexed diagnostic. Supplied order and content MUST NOT be silently changed.
 
 #### Scenario: Preserve system message placement

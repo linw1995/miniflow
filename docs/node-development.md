@@ -21,7 +21,11 @@ The node also accepts function `tools` and explicit `tool_results`, both optiona
 tool calls in its current assistant message and its `tool_calls` output. Explicit results follow `messages`
 in the provider request and must match pending assistant call IDs. Flows own history and persistence.
 `ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;
-`ToolResult` converts into `ChatMessage` for caller-managed history.
+`ChatMessage` derives `NodeEnum` with the `role` tag and has `System`, `User`, `Assistant`, and
+`ToolResult` variants. Only the assistant variant carries `tool_calls`; the tool-result variant
+requires `tool_call_id`. `ToolResult` converts into `ChatMessage::ToolResult` for caller-managed history.
+Individual messages use `InputValue::decode` and `OutputValue::encode`; enclosing node contracts
+continue to use `NodeValue`.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values) and
 [tool calls](workflows.md#llm-tool-calls).
 

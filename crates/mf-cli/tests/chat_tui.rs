@@ -705,10 +705,10 @@ fn loop_conversations() {
         .unwrap()
         .history;
     assert_eq!(history.len(), 2);
-    assert_eq!(
-        serde_json::to_value(&history[1].metadata).unwrap(),
-        serde_json::json!({"strategy":"iterative"})
-    );
+    assert!(matches!(&history[1],
+        mfn_llm::ChatMessage::Assistant { metadata: Some(metadata), .. }
+            if serde_json::to_value(metadata).unwrap() == serde_json::json!({"strategy":"iterative"})
+    ));
     for invocation in &invocations {
         let call = database.call(&invocation.call_id).unwrap();
         let usages = call.usages.unwrap();

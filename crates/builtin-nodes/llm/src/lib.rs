@@ -7,9 +7,9 @@ pub mod test_support;
 mod transport;
 
 use mf_runtime::{
-    ConfigTemplate, ContextReference, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
-    NodeFactory, NodeMetadata, NodeRegistration, NodeValue, PreparedNode, Shared, TypedEmitter,
-    TypedNodeResult, TypedTaskStreamNode, ValueRef, deserialize_config,
+    ConfigTemplate, ContextReference, ExecutionContext, Inputs, NodeBuildError, NodeEnum,
+    NodeExecutionError, NodeFactory, NodeMetadata, NodeRegistration, NodeValue, PreparedNode,
+    Shared, TypedEmitter, TypedNodeResult, TypedTaskStreamNode, ValueRef, deserialize_config,
 };
 use rig_core::{
     completion::{CompletionRequest, CompletionResponse, FinishReason},
@@ -75,13 +75,31 @@ pub struct CallUsage {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-    pub metadata: Option<MessageMetadata>,
-    pub tool_calls: Option<Vec<ToolCall>>,
-    pub tool_call_id: Option<String>,
+#[derive(Clone, Debug, PartialEq, Eq, NodeEnum)]
+#[value(tag = "role")]
+pub enum ChatMessage {
+    #[value(rename = "system")]
+    System {
+        content: String,
+        metadata: Option<MessageMetadata>,
+    },
+    #[value(rename = "user")]
+    User {
+        content: String,
+        metadata: Option<MessageMetadata>,
+    },
+    #[value(rename = "assistant")]
+    Assistant {
+        content: String,
+        tool_calls: Option<Vec<ToolCall>>,
+        metadata: Option<MessageMetadata>,
+    },
+    #[value(rename = "tool")]
+    ToolResult {
+        tool_call_id: String,
+        content: String,
+        metadata: Option<MessageMetadata>,
+    },
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -688,7 +706,7 @@ inventory::submit! { NodeRegistration { kind: KIND, factory: NodeFactory::Plain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{NodeValue, ValueType};
+    use mf_runtime::{InputValue, NodeValue, OutputValue, ValueType};
     use rig_core::completion::AssistantContent;
     use serde_json::json;
 
@@ -831,11 +849,9 @@ mod tests {
             error: None,
             metadata: None,
             text: "reply".into(),
-            message: Some(ChatMessage {
+            message: Some(ChatMessage::Assistant {
                 metadata: None,
                 tool_calls: None,
-                tool_call_id: None,
-                role: "assistant".into(),
                 content: "reply".into(),
             }),
             usage: None,
@@ -852,9 +868,50 @@ mod tests {
     }
 
     #[test]
+    fn message_variants_preserve_the_role_tagged_json_contract() {
+        for expected in [
+            json!({"role":"system","content":"Be brief"}),
+            json!({"role":"user","content":"Look up both"}),
+            json!({"role":"assistant","content":"","tool_calls":[
+                {"id":"one","name":"lookup","arguments":{"id":1}},
+                {"id":"two","name":"lookup","arguments":{"id":2}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"two","content":"result","metadata":{"source":{"ids":[1,2]}}}),
+        ] {
+            let message = ChatMessage::decode(expected.clone().into()).unwrap();
+            assert_eq!(message.encode().unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn nested_messages_decoding_rejects_unknown_missing_and_mistyped_fields() {
         for (messages, path) in [
             (json!(null), "/messages"),
+            (json!([{"content":"hello"}]), "/messages/0/role"),
+            (
+                json!([{"role":"unknown","content":"hello"}]),
+                "/messages/0/role",
+            ),
+            (
+                json!([{"role":"system","content":"hello","tool_calls":[]}]),
+                "/messages/0/tool_calls",
+            ),
+            (
+                json!([{"role":"user","content":"hello","tool_call_id":"one"}]),
+                "/messages/0/tool_call_id",
+            ),
+            (
+                json!([{"role":"assistant","content":"hello","tool_call_id":"one"}]),
+                "/messages/0/tool_call_id",
+            ),
+            (
+                json!([{"role":"tool","content":"result"}]),
+                "/messages/0/tool_call_id",
+            ),
+            (
+                json!([{"role":"tool","tool_call_id":"one","content":"result","tool_calls":[]}]),
+                "/messages/0/tool_calls",
+            ),
             (json!([{"role": "user"}]), "/messages/0/content"),
             (
                 json!([{"role":"user","content":"hello","metadata":null}]),
@@ -905,8 +962,14 @@ mod tests {
         .with_finish_reason(FinishReason::Other("service_stop".into()));
         let result = terminal_outputs(response, false).unwrap();
         assert_eq!(result.text, "firstsecond");
-        assert_eq!(result.message.as_ref().unwrap().role, "assistant");
-        assert_eq!(result.message.as_ref().unwrap().content, "firstsecond");
+        assert_eq!(
+            result.message,
+            Some(ChatMessage::Assistant {
+                content: "firstsecond".into(),
+                tool_calls: None,
+                metadata: None,
+            })
+        );
         assert_eq!(
             result.usage.unwrap(),
             BTreeMap::from([("output_tokens".into(), 0)])

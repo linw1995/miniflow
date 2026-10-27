@@ -1,7 +1,7 @@
 use diesel::{Connection, connection::SimpleConnection};
 use mf_chat::contract::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit};
 use mf_chat::{ChatDatabase, ConversationResult, ModelIdentity};
-use mf_runtime::NodeValue;
+use mf_runtime::{NodeValue, OutputValue};
 use serde_json::json;
 
 fn begin(database: &ChatDatabase) -> mf_chat::Invocation {
@@ -97,14 +97,13 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
     ));
     failure(&database, false);
     let saved = database.save_recovered(pending.clone()).unwrap();
-    assert_eq!(
-        database
+    assert!(matches!(
+        &database
             .history(&invocation.session_id, 1024)
             .unwrap()
-            .history[1]
-            .metadata,
-        Some(metadata())
-    );
+            .history[1],
+        mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &Some(metadata())
+    ));
     assert_eq!(saved.result, reply());
     assert_eq!(database.save_recovered(pending).unwrap(), saved);
     let performance = database
@@ -130,7 +129,7 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
     let encoded = serde_json::to_vec(
         &history
             .into_iter()
-            .map(|message| message.into_values().unwrap())
+            .map(|message| message.encode().unwrap())
             .collect::<Vec<_>>(),
     )
     .unwrap();
@@ -425,10 +424,9 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
     let second = database
         .begin_turn(&first.session_id, "next", profile.clone(), None, 1024)
         .unwrap();
-    assert_eq!(
-        second.request.history.unwrap()[1].metadata,
-        Some(metadata())
-    );
+    assert!(matches!(&second.request.history.unwrap()[1],
+        mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &Some(metadata())
+    ));
     let mut output: serde_json::Value = serde_json::from_slice(&stdout("next reply")).unwrap();
     output["history"] =
         json!([{"role":"assistant","content":"rewritten","metadata":{"changed":true}}]);
@@ -447,12 +445,17 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
     };
     database.save_recovered(pending).unwrap();
     let history = database.history(&first.session_id, 4096).unwrap().history;
-    assert_eq!(history[1].content, "paid reply");
-    assert_eq!(history[1].metadata, Some(metadata()));
     assert_eq!(
-        history[3].metadata.as_ref().unwrap()["current"],
-        json!(true)
+        history[1],
+        mfn_llm::ChatMessage::Assistant {
+            content: "paid reply".into(),
+            tool_calls: None,
+            metadata: Some(metadata()),
+        }
     );
+    assert!(matches!(&history[3],
+        mfn_llm::ChatMessage::Assistant { metadata: Some(metadata), .. } if metadata["current"] == json!(true)
+    ));
 }
 
 #[test]

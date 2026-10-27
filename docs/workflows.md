@@ -457,6 +457,11 @@ Sparse and absent usage stay sparse or absent; omitted counters are never synthe
 Each message has required string fields `role` and `content`. Roles are `system`, `user`, `assistant`,
 and `tool`. System and user messages require nonempty text. Assistant messages can contain text,
 `tool_calls`, or both; tool results carry `tool_call_id`. See [LLM tool calls](#llm-tool-calls).
+
+The Rust `ChatMessage` enum has `System`, `User`, `Assistant`, and `ToolResult` variants, encoded with
+the same JSON `role` tags. Only `Assistant` carries `tool_calls`; `ToolResult` requires `tool_call_id`
+and `content`. Every variant accepts optional application `metadata`; cross-role fields are rejected.
+
 The node encodes `messages` in its existing order, followed by the explicitly supplied `tool_results`.
 It has no `prompt`, `system`, or `history` input ports and does not synthesize conversation turns.
 Include system instructions and the current user or assistant tool-call message in `messages` explicitly.
@@ -708,7 +713,7 @@ assistant message containing all calls. This follows the
 Here `conversation` and `execute_tools` are caller-defined producers; `execute_tools` produces
 `List(Object)` results and is not a built-in executor.
 For subsequent turns, the caller persists these results as role tool messages along with the assistant
-responses. Rust callers can convert `ToolResult` into `ChatMessage` with `.into()`. The node does not
+responses. Rust callers can convert `ToolResult` into `ChatMessage::ToolResult` with `.into()`. The node does not
 return or retain an updated transcript; sending the same results again in both inputs is an error.
 
 `content` must be a string. Serialize structured results once, for example

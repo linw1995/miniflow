@@ -31,12 +31,10 @@ pub struct ToolResult {
 
 impl From<ToolResult> for ChatMessage {
     fn from(result: ToolResult) -> Self {
-        Self {
-            role: "tool".into(),
+        Self::ToolResult {
+            tool_call_id: result.tool_call_id,
             content: result.content,
             metadata: None,
-            tool_calls: None,
-            tool_call_id: Some(result.tool_call_id),
         }
     }
 }
@@ -118,86 +116,71 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
     let mut messages = Vec::new();
     for (index, message) in inputs.messages.iter().enumerate() {
         let path = format!("/messages/{index}");
-        let converted = match message.role.as_str() {
-            "system" | "user" | "assistant" => {
+        if !matches!(message, ChatMessage::ToolResult { .. }) {
+            require(
+                pending.is_empty(),
+                &path,
+                "all pending tool results before another system, user or assistant message",
+            )?;
+        }
+        let converted = match message {
+            ChatMessage::System { content, .. } | ChatMessage::User { content, .. } => {
                 require(
-                    message.tool_call_id.is_none(),
-                    &path,
-                    "tool_call_id only on tool messages",
+                    !content.is_empty(),
+                    &format!("{path}/content"),
+                    "nonempty text",
                 )?;
-                require(
-                    pending.is_empty(),
-                    &path,
-                    "all pending tool results before another system, user or assistant message",
-                )?;
-                if message.role != "assistant" {
-                    require(
-                        message.tool_calls.is_none(),
-                        &path,
-                        "plain system or user text",
-                    )?;
-                    require(
-                        !message.content.is_empty(),
-                        &format!("{path}/content"),
-                        "nonempty text",
-                    )?;
-                    if message.role == "system" {
-                        rig::Message::System {
-                            content: message.content.clone(),
-                        }
-                    } else {
-                        rig::Message::user(&message.content)
+                if matches!(message, ChatMessage::System { .. }) {
+                    rig::Message::System {
+                        content: content.clone(),
                     }
                 } else {
-                    let mut content = Vec::new();
-                    if !message.content.is_empty() {
-                        content.push(rig::AssistantContent::Text(message.content.clone().into()));
-                    }
-                    for call in message.tool_calls.as_deref().unwrap_or_default() {
-                        require(
-                            !call.id.trim().is_empty() && seen.insert(&call.id),
-                            &path,
-                            "nonblank unique tool call IDs",
-                        )?;
-                        require(valid_name(&call.name), &path, "a valid tool name")?;
-                        pending.insert(call.id.as_str(), call.name.as_str());
-                        content.push(rig::AssistantContent::ToolCall(rig::ToolCall::from_wire(
-                            call.id.clone(),
-                            rig::ToolFunction::new(
-                                rig::ToolName::new(call.name.clone()).expect("validated tool name"),
-                                serde_json::to_value(&call.arguments)
-                                    .context(crate::EncodeRequestSnafu)?,
-                            ),
-                        )));
-                    }
+                    rig::Message::user(content)
+                }
+            }
+            ChatMessage::Assistant {
+                content: text,
+                tool_calls,
+                ..
+            } => {
+                let mut content = Vec::new();
+                if !text.is_empty() {
+                    content.push(rig::AssistantContent::Text(text.clone().into()));
+                }
+                for call in tool_calls.as_deref().unwrap_or_default() {
                     require(
-                        !content.is_empty(),
-                        &format!("{path}/content"),
-                        "nonempty text or tool calls",
+                        !call.id.trim().is_empty() && seen.insert(&call.id),
+                        &path,
+                        "nonblank unique tool call IDs",
                     )?;
-                    rig::Message::Assistant { id: None, content }
+                    require(valid_name(&call.name), &path, "a valid tool name")?;
+                    pending.insert(call.id.as_str(), call.name.as_str());
+                    content.push(rig::AssistantContent::ToolCall(rig::ToolCall::from_wire(
+                        call.id.clone(),
+                        rig::ToolFunction::new(
+                            rig::ToolName::new(call.name.clone()).expect("validated tool name"),
+                            serde_json::to_value(&call.arguments)
+                                .context(crate::EncodeRequestSnafu)?,
+                        ),
+                    )));
                 }
-            }
-            "tool" => {
                 require(
-                    message.tool_calls.is_none(),
-                    &path,
-                    "tool result content without assistant fields",
+                    !content.is_empty(),
+                    &format!("{path}/content"),
+                    "nonempty text or tool calls",
                 )?;
-                rig::Message::tool_results(vec![encode_tool_result(
-                    message.tool_call_id.as_deref().unwrap_or_default(),
-                    &message.content,
-                    &mut pending,
-                    &path,
-                )?])
+                rig::Message::Assistant { id: None, content }
             }
-            _ => {
-                return InvalidInputSnafu {
-                    path: format!("{path}/role"),
-                    requirement: "role `system`, `user`, `assistant` or `tool`",
-                }
-                .fail();
-            }
+            ChatMessage::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => rig::Message::tool_results(vec![encode_tool_result(
+                tool_call_id,
+                content,
+                &mut pending,
+                &path,
+            )?]),
         };
         messages.push(converted);
     }
@@ -248,12 +231,10 @@ fn encode_tool_result(
 }
 
 pub fn assistant_message(result: &CallResult) -> ChatMessage {
-    ChatMessage {
-        role: "assistant".into(),
+    ChatMessage::Assistant {
         content: result.text.clone(),
         metadata: None,
         tool_calls: (!result.tool_calls.is_empty()).then(|| result.tool_calls.clone()),
-        tool_call_id: None,
     }
 }
 
@@ -319,6 +300,7 @@ pub fn terminal_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mf_runtime::{InputValue, OutputValue};
     use rig_core::completion::{CompletionResponse, FinishReason, Usage};
     use serde_json::{Value, json};
 
@@ -340,22 +322,24 @@ mod tests {
         let result = terminal_result(response).unwrap();
         assert_eq!(result.outcome, CallOutcome::ToolCalls);
         assert_eq!(result.text, "Checking");
-        let encoded_message = assistant_message(&result).into_values().unwrap();
-        assert!(!encoded_message.contains_key("reasoning"));
+        let encoded_message = assistant_message(&result).encode().unwrap();
+        assert!(
+            !encoded_message
+                .as_object()
+                .unwrap()
+                .contains_key("reasoning")
+        );
         assert_eq!(
             encoded_message["tool_calls"][0],
             json!({"id":"one", "name":"lookup", "arguments":{"id":42}})
         );
         let request = prepare_request(&LlmInputs {
             messages: vec![
-                ChatMessage {
-                    role: "user".into(),
+                ChatMessage::User {
                     content: "Hello".into(),
                     metadata: None,
-                    tool_calls: None,
-                    tool_call_id: None,
                 },
-                ChatMessage::from_values(encoded_message).unwrap(),
+                ChatMessage::decode(encoded_message).unwrap(),
                 ToolResult {
                     content: "42".into(),
                     tool_call_id: "one".into(),
