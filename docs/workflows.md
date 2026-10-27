@@ -205,7 +205,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
-| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Optional `prompt`, `system`, `history`, and `tools`; prompt or nonempty history required | Required `text`, updated `history`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
+| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -419,18 +419,20 @@ The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing 
 
 | Direction | Port | Type | Required |
 | --- | --- | --- | --- |
-| Input | `prompt` | `string` | Yes |
-| Input | `system` | `string` | No |
-| Input | `history` | `List(Object)` | No |
+| Input | `messages` | `List(Object)` | Yes, nonempty |
+| Input | `tools` | `List(Object)` | No, defaults to `[]` |
+| Output | `message` | `Object` | On a valid response; omitted on captured failure |
 | Output | `text` | `string` | Yes |
-| Output | `history` | `List(Object)` | Yes |
+| Output | `tool_calls` | `List(Object)` | Yes |
+| Output | `outcome` | `string` | Yes |
 | Output | `usage` | `Map(Int64)` | No |
 | Output | `finish_reason` | `string` | No |
-| Stream output | `delta` | `Object` | Yes, per emission |
+| Stream output | `delta` | `Object` | On text emissions |
+| Stream output | `tool_call` | `Object` | On completed tool-call emissions |
 
 The `delta` payload contains `text` and `model_call_id`. A connected graph edge or selected native output
 selects one streaming request; an unconsumed invocation sends one ordinary request and emits nothing.
-There is no per-node streaming flag or fallback request. Terminal text, history, finish reason, and usages
+There is no per-node streaming flag or fallback request. The terminal assistant message, text, finish reason, and usages
 come from the completed provider response. Delivered prefixes remain provisional on failure or cancellation.
 
 The [answer-and-title example](../examples/chat-title-flow.json) declares only the answer as public:
@@ -447,13 +449,18 @@ The request deadline bounds provider setup and reads. Emission waits follow nati
 when the consumer fails or the host cancels.
 Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
-Each history object has two required string fields, `role` and `content`. Plain conversation roles are
-`user` and `assistant`, with nonempty text. Tool calls additionally support assistant `tool_calls`
-and `tool` results with `tool_call_id`; see [LLM tool calls](#llm-tool-calls).
-A supplied `prompt` must be nonempty. It may be omitted when continuing from nonempty history.
-System instructions use the separate `system` input. Missing or empty history plus a prompt starts
-a new conversation. A successful request appends the prompt when present and one assistant message.
-The workflow owns transcript persistence and trimming.
+Each message has required string fields `role` and `content`. Roles are `system`, `user`, `assistant`,
+and `tool`. System and user messages require nonempty text. Assistant messages can contain text,
+`tool_calls`, or both; tool results carry `tool_call_id`. See [LLM tool calls](#llm-tool-calls).
+The node encodes the supplied list in its existing order. It has no `prompt`, `system`, or `history`
+input ports and never inserts messages. Include system instructions and the current user message in
+`messages` explicitly. The output `message` contains only the current assistant response; `text` and
+`tool_calls` are projections of that response. There is no updated-history output.
+
+Conversation composition belongs to the Flow. The chat examples use `builtin.code` to prepend optional
+system instructions and append the current user prompt before invoking the model. The Loop examples
+append the returned `message` to their history variable with a separate code node. On a captured failure,
+the missing `message` skips that append operation and leaves the loop's history unchanged.
 
 Static configuration has this shape:
 
@@ -489,11 +496,11 @@ with `api_key_env`. The latter remains a literal environment-variable name for e
 ```
 
 The [parameter-driven example](../examples/llm-parameters.json) declares these parameters and connects
-`params.prompt` to `chat.prompt`, establishing the dependency for all configuration references to `params`.
+`params.messages` to `chat.messages`, establishing the dependency for all configuration references to `params`.
 
 ```sh
 mf compile examples/llm-parameters.json --output ./configured-chat
-./configured-chat --params.model your-model --params.prompt Hello
+./configured-chat --params.model your-model --params.messages '[{"role":"user","content":"Hello"}]'
 ```
 
 Set `MODEL_API_KEY` in the execution environment. Override the endpoint with `--params.base_url` or other public
@@ -501,7 +508,7 @@ settings through their named arguments. Argument values take precedence over par
 The same prepared node can execute with different credentials, models, endpoints, and limits on subsequent runs.
 
 `mfn_llm::validate_config` checks literal settings and template syntax without looking up credentials, creating clients or runtimes,
-or contacting the endpoint. Value structs use the runtime's nested object codecs, so malformed history has indexed
+or contacting the endpoint. Value structs use the runtime's nested object codecs, so malformed messages have indexed
 diagnostics. Optional output metadata is omitted when absent rather than encoded as JSON null. The package's optional
 `tokio` feature forwards the workflow-managed backend; its native HTTP transport still depends on Tokio with that
 feature disabled.
@@ -514,11 +521,10 @@ disables idle connection pooling so prepared nodes can outlive earlier workflow-
 Each invocation enforces its resolved deadline through the runtime future driver; the shared client retains no
 invocation-specific credentials, endpoint, or deadline.
 
-Request messages are optional system instructions, the supplied history in order, and the current user prompt when present.
-On success, returned history preserves the supplied records and appends the prompt when supplied and the complete assistant
-message once each. System instructions are excluded and must be supplied again for each turn. The node does not retain
-conversation state, automatically trim history, or execute tool calls. Unsupported history roles and response content
-fail rather than being silently rewritten. A nonempty reply truncated at its token limit retains the `length` reason.
+The node retains no conversation state and performs no transcript assembly or trimming. Caller-owned
+messages are never echoed as history. A successful invocation produces one assistant message containing
+its text and tool calls. Unsupported roles and response content fail explicitly. A nonempty reply
+truncated at its token limit retains the `length` reason.
 
 `usage` contains available `input_tokens`, `output_tokens`, and `total_tokens` counters; unreported counts do not become
 zero. Compatible services reporting partial wire usage are adapted without changing Rig's message protocol. Unknown
@@ -527,32 +533,31 @@ omit it. Credential and provider errors retain typed sources while diagnostic di
 arbitrary remote bodies.
 
 The deadline covers setup and waiting for a terminal reply, with deadline and cancellation checks before returning
-converted data. Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot
+converted data. Cancellation fails the invocation. Captured request failures return status and usage without a `message`. Synchronous setup and conversion cannot
 be forcibly preempted. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
 workflow thread. Async hosts use a blocking thread for synchronous workflow entry points.
 
-The [terminal example](../examples/llm-terminal.json) accepts startup prompt, system, and history inputs.
-The [Loop example](../examples/llm-loop.json) passes updated history through a Loop variable for two turns.
+The [terminal example](../examples/llm-terminal.json) accepts a complete startup `messages` list.
+The [Loop example](../examples/llm-loop.json) explicitly builds requests and accumulates replies for two turns.
 Choose an available model in each example's configuration and set `MODEL_API_KEY` in the execution environment.
 An OpenAI-compatible endpoint can be selected with `base_url`. Compilation does not need the key:
 
 ```bash
 mf compile examples/llm-terminal.json --output ./chat
-./chat --chat.prompt Hello --chat.system 'Answer briefly'
+./chat --chat.messages '[{"role":"system","content":"Answer briefly"},{"role":"user","content":"Hello"}]'
 mf compile examples/llm-loop.json --output ./conversation
 ./conversation --repeat.prompt 'Continue the conversation' --repeat.history '[]' --repeat.text ''
 ```
 
-Persist the returned history and pass it as `chat.history` with a new prompt to continue a terminal conversation.
-The Loop example repeats the supplied prompt twice while preserving the earlier reply in the second request.
+To continue, append the returned `message` and the next user message to your own list, then pass that list
+as `chat.messages`. The Loop example expresses these operations explicitly with code and assignment nodes.
 
 ### LLM tool calls
 
 The existing `builtin.llm` node accepts an optional `tools` input, defaulting to `[]`. Each execution
 still makes exactly one OpenAI-compatible Chat Completions request. The node does not execute tools,
-repeat requests, or expose `tool_choice`. Existing `prompt`, `system`, and text `history` inputs remain
-supported. `prompt` is now optional so callers can continue from tool results; an explicitly supplied
-prompt must remain nonempty, and a request must contain a prompt or nonempty history.
+repeat requests, or expose `tool_choice`. Supply the entire request through `messages`, including
+any system instructions, previous exchanges, and current user message or tool results.
 
 Each tool definition contains `name`, `description`, and `input_schema`. Names must be unique and
 contain 1-64 ASCII letters, digits, underscores, or hyphens. The schema must be an object with
@@ -564,7 +569,7 @@ For example, pass these inputs to the [tool example](../examples/llm-tools.json)
 
 ```json
 {
-  "model.prompt": "Look up order 42.",
+  "model.messages": [{"role": "user", "content": "Look up order 42."}],
   "model.tools": [
     {
       "name": "lookup_order",
@@ -585,7 +590,7 @@ mf compile examples/llm-tools.json --output ./tool-call
 MODEL_API_KEY=... ./tool-call --inputs-file inputs.json
 ```
 
-The existing outputs remain available. Two additional required outputs describe the response:
+The `message` output contains the current assistant response. Two required projections support routing:
 
 | Output | Meaning |
 | --- | --- |
@@ -599,8 +604,8 @@ content filtering, and `incomplete` represents no usable answer or an unrecogniz
 without tool calls. `failed` accompanies `capture_errors` failures. Plain requests without tools
 retain their existing rejection of empty text and unsolicited tool calls.
 
-Returned `history` includes the original records, the prompt if supplied, and one assistant message.
-An assistant tool message retains `content` as a string, which may be empty, and adds `tool_calls`:
+The returned `message` contains only the current assistant response. Its `content` is a string,
+which may be empty for a tool-only reply, and `tool_calls` contains the requested calls:
 
 ```json
 {
@@ -612,8 +617,9 @@ An assistant tool message retains `content` as a string, which may be empty, and
 }
 ```
 
-Execute calls outside the node, append a matching result to that returned history for each call,
-and invoke `builtin.llm` again with `history` and `tools`, omitting `prompt`:
+Execute calls outside the node. Append the returned assistant `message` and a matching result for each
+call to the caller-owned conversation, then invoke `builtin.llm` again with that complete `messages` list
+and the desired `tools`:
 
 ```json
 {
@@ -623,12 +629,12 @@ and invoke `builtin.llm` again with `history` and `tools`, omitting `prompt`:
 }
 ```
 
-Call IDs must be nonblank and unique within the supplied history. Every call requires exactly one
+Call IDs must be nonblank and unique within the supplied messages. Every call requires exactly one
 result before subsequent user text, another assistant message, or the next request. Results can
 arrive in any order. The tool name is resolved from the matching assistant call. Tool errors can be
 represented in the result content by the caller; this node imposes no execution or retry policy.
 
-The node uses `OpenAIConfig.chat` and retains text, function calls, and tool results in history.
+The node uses `OpenAIConfig.chat` and encodes text, function calls, and tool results from `messages`.
 Provider reasoning blocks are ignored, as in the original text-only node. Reasoning replay and
 cross-provider continuation state are outside this contract. Application `metadata` remains separate
 and is not sent to the provider.

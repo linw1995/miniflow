@@ -123,7 +123,7 @@ fn parameter_templates_configure_memory_and_standalone_llm_requests() {
             attribution["profile"] = profile.into();
         }
         let inputs = json!({"params.api_key":key, "params.base_url":server.base_url,
-            "params.model":model, "params.prompt":"Hello", "params.temperature":temperature,
+            "params.model":model, "params.messages":[{"role":"user","content":"Hello"}], "params.temperature":temperature,
             "params.max_tokens":max_tokens, "params.call_attribution":attribution});
         let output = stable(run(&executable, &inputs));
         assert_eq!(output[0]["usages"][0]["attribution"], attribution);
@@ -207,7 +207,7 @@ fn invalid_dynamic_configuration_retains_safe_typed_errors() {
         let recording = Snapshots::memory();
         let mut context = ExecutionContext::default();
         context.set_snapshot_recorder(recording.recorder());
-        context.set_workflow_arguments(arguments(&json!({"params.api_key":"synthetic-key", "params.prompt":"Hello", "params.invalid":value})));
+        context.set_workflow_arguments(arguments(&json!({"params.api_key":"synthetic-key", "params.messages":[{"role":"user","content":"Hello"}], "params.invalid":value})));
         let error = flow.execute_in_context(&mut context).unwrap_err();
         let snapshot = recording.current();
         assert_eq!(
@@ -298,7 +298,8 @@ fn configure(value: &mut Value, server: &Server) {
 fn dependencies() -> Value {
     json!({
         "core": {"package": "mfn-core", "path": common::crates_dir().join("builtin-nodes/core")},
-        "llm": {"package": "mfn-llm", "path": common::crates_dir().join("builtin-nodes/llm")}
+        "llm": {"package": "mfn-llm", "path": common::crates_dir().join("builtin-nodes/llm")},
+        "code": {"package":"mfn-code", "path": common::crates_dir().join("builtin-nodes/code")}
     })
 }
 
@@ -355,7 +356,7 @@ fn llm_workflows_match_memory_and_standalone_runners() {
                 &fs::read_to_string(workspace.join("examples/llm-terminal.json")).unwrap(),
             )
             .unwrap(),
-            json!({"chat.prompt":"Hello", "chat.system":"Answer briefly", "chat.history":[{"role": "user", "content": "prior"}, {"role": "assistant", "content": "earlier reply"}]}),
+            json!({"chat.messages":[{"role":"system","content":"Answer briefly"},{"role":"user","content":"prior"},{"role":"assistant","content":"earlier reply"},{"role":"user","content":"Hello"}]}),
             1,
         ),
         (
@@ -367,8 +368,8 @@ fn llm_workflows_match_memory_and_standalone_runners() {
             2,
         ),
         (
-            json!({"version": "2026-10-03", "nodes": [{"id": "iteration", "kind": "builtin.iteration", "config": {"mode": "parallel", "on_error": "terminate", "body": {"nodes": [{"id": "chat", "kind": "builtin.llm"}], "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "chat", "to_input": "prompt"}], "result": {"node": "chat", "port": "text"}}}}], "outputs": [{"name": "results", "node": "iteration", "port": "results"}]}),
-            json!({"iteration.items":["one", "two"]}),
+            json!({"version": "2026-10-03", "nodes": [{"id": "iteration", "kind": "builtin.iteration", "config": {"mode": "parallel", "on_error": "terminate", "body": {"nodes": [{"id": "chat", "kind": "builtin.llm"}], "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "chat", "to_input": "messages"}], "result": {"node": "chat", "port": "text"}}}}], "outputs": [{"name": "results", "node": "iteration", "port": "results"}]}),
+            json!({"iteration.items":[[{"role":"user","content":"one"}],[{"role":"user","content":"two"}]]}),
             2,
         ),
     ];
@@ -464,7 +465,7 @@ fn tool_calls_match_memory_and_standalone_runners() {
             ]);
         }
         let inputs = json!({
-            "model.prompt":"Look up 42",
+            "model.messages":[{"role":"user","content":"Look up 42"}],
             "model.tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}]
         });
         let root = tempfile::tempdir().unwrap();
@@ -516,9 +517,9 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
     let mut value = json!({
         "version": "2026-10-03", "execution": {"limits": {"workers": 1, "max_pending_messages": 2}},
         "dependencies": dependencies(),
-        "nodes": [{"id": "read", "kind": "builtin.readline"}, {"id": "chat", "kind": "builtin.llm"}],
-        "edges": [{"from_node": "read", "from_output": "line", "to_node": "chat", "to_input": "prompt"}],
-        "outputs": [{"name": "text", "node": "chat", "port": "text"}, {"name": "history", "node": "chat", "port": "history"}]
+        "nodes": [{"id":"read","kind":"builtin.readline"}, {"id":"request","kind":"builtin.code","config":{"language":"cel","inputs":{"prompt":"string"},"code":{"messages":"[{'role':'user','content':prompt}]"}}}, {"id":"chat","kind":"builtin.llm"}],
+        "edges": [{"from_node":"read","from_output":"line","to_node":"request","to_input":"prompt"}, {"from_node":"request","from_output":"messages","to_node":"chat","to_input":"messages"}],
+        "outputs": [{"name":"text","node":"chat","port":"text"}, {"name":"message","node":"chat","port":"message","optional":true}]
     });
     configure(&mut value, &server);
     let inputs = json!({"read.path":input});
@@ -534,12 +535,12 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
         "version": "2026-10-03", "dependencies": dependencies(),
         "nodes": [
             {"id": "enabled", "kind": "builtin.constant", "config": {"value": false}},
-            {"id": "prompt", "kind": "builtin.constant", "config": {"value": "Hello"}},
+            {"id":"request","kind":"builtin.constant","config":{"value":[{"role":"user","content":"Hello"}]}},
             {"id": "gate", "kind": "builtin.if_else", "config": {"branches": [{"id": "go", "condition": {"source": {"output": "enabled.value", "path": ""}, "operator": "eq", "value": true}}]}},
             {"id": "chat", "kind": "builtin.llm"}
         ],
         "control_edges": [{"from_node": "enabled", "from_output": "value", "to_node": "gate"}, {"from_node": "gate", "from_output": "go", "to_node": "chat"}],
-        "edges": [{"from_node": "prompt", "from_output": "value", "to_node": "chat", "to_input": "prompt"}],
+        "edges": [{"from_node":"request","from_output":"value","to_node":"chat","to_input":"messages"}],
         "outputs": [{"name": "text", "node": "chat", "port": "text", "optional": true}]
     });
     configure(&mut skipped, &server);

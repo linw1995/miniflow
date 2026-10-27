@@ -39,14 +39,14 @@ fn tools_are_advertised_and_multiple_calls_round_trip_without_an_extra_prompt() 
         ),
         Reply::text("Both values found"),
     ]);
-    let input = json!({"prompt":"Look up a and b", "history":[], "tools": [tool()], "system": "Use the tools"});
-    let results = json!({"history": [
+    let input = json!({"messages":[{"role":"system","content":"Use the tools"},user("Look up a and b")], "tools":[tool()]});
+    let results = json!({"messages": [
         {"role":"tool", "tool_call_id":"second", "content":"B"},
         {"role":"tool", "tool_call_id":"first", "content":"A"}
-    ], "tools": [tool()], "system":"Use the tools"});
+    ], "tools": [tool()]});
     let output = probe(
         &server,
-        json!({"inputs": [input, results], "append_history": true}),
+        json!({"inputs": [input, results], "append_messages": true}),
         json!({}),
     );
     assert_eq!(output["results"][0]["ok"], true, "{output}");
@@ -56,7 +56,7 @@ fn tools_are_advertised_and_multiple_calls_round_trip_without_an_extra_prompt() 
     assert_eq!(first["text"], "");
     assert_eq!(first["tool_calls"].as_array().unwrap().len(), 2);
     assert_eq!(first["tool_calls"][0]["arguments"], json!({"key": "a"}));
-    assert_eq!(first["history"][1]["tool_calls"][0], first["tool_calls"][0]);
+    assert_eq!(first["message"]["tool_calls"][0], first["tool_calls"][0]);
     assert_eq!(first["usages"][0]["usage"]["total_tokens"], 12);
     assert_eq!(output["results"][1]["outputs"]["outcome"], "completed");
     let requests = server.requests();
@@ -113,7 +113,7 @@ fn fragmented_interleaved_streamed_calls_match_the_terminal_response() {
         ),
         streamed,
     ]);
-    let input = json!({"history": [user("Look up a and b")], "tools": [tool()]});
+    let input = json!({"messages": [user("Look up a and b")], "tools": [tool()]});
     let terminal = invoke(&server, input.clone(), false, json!({}));
     let streamed = invoke(&server, input, true, json!({}));
     assert_eq!(terminal["results"][0]["ok"], true, "{terminal}");
@@ -164,7 +164,7 @@ fn tool_only_streams_publish_calls_without_text_or_first_text_observations() {
     let server = Server::start(vec![streamed_tool(r#"{"key":"a"}"#, "tool_calls")]);
     let output = invoke(
         &server,
-        json!({"prompt":"Look up a", "tools":[tool()]}),
+        json!({"messages": [user("Look up a")], "tools":[tool()]}),
         true,
         json!({}),
     );
@@ -186,7 +186,7 @@ fn unsolicited_tool_streams_retain_the_text_only_failure_contract() {
     let server = Server::start(vec![streamed_tool("{}", "tool_calls")]);
     let output = invoke(
         &server,
-        json!({"prompt":"Hello"}),
+        json!({"messages": [user("Hello")]}),
         true,
         json!({"capture_errors":true}),
     );
@@ -202,7 +202,7 @@ fn invalid_or_truncated_tool_streams_do_not_publish_completed_calls() {
         let server = Server::start(vec![streamed_tool(r#"{"key":"#, finish)]);
         let output = invoke(
             &server,
-            json!({"prompt":"Look up a", "tools":[tool()]}),
+            json!({"messages": [user("Look up a")], "tools":[tool()]}),
             true,
             json!({"capture_errors":true}),
         );
@@ -219,7 +219,8 @@ fn invalid_or_truncated_tool_streams_do_not_publish_completed_calls() {
 fn tool_stream_delivery_failure_and_cancellation_remain_fatal() {
     for option in ["disconnect", "cancel_after_prefix"] {
         let server = Server::start(vec![streamed_tool("{}", "tool_calls")]);
-        let mut input = json!({"stream":true, "inputs":[{"prompt":"Look up a", "tools":[tool()]}]});
+        let mut input =
+            json!({"stream":true, "inputs":[{"messages": [user("Look up a")], "tools":[tool()]}]});
         input[option] = true.into();
         let output = probe(&server, input, json!({"capture_errors":true}));
         let result = &output["results"][0];
@@ -245,7 +246,7 @@ fn text_calls_need_no_tools_and_truncation_is_not_completion() {
         let server = Server::start(vec![reply(Some("Answer"), finish, vec![])]);
         let output = invoke(
             &server,
-            json!({"history": [user("Hello")]}),
+            json!({"messages": [user("Hello")]}),
             false,
             json!({}),
         );
@@ -262,18 +263,18 @@ fn invalid_tool_definitions_and_unpaired_histories_fail_before_http() {
     let pending = json!({"role":"assistant", "content":"", "tool_calls":[{"id":"one", "name":"lookup", "arguments":{}}]});
     let result = json!({"role":"tool", "tool_call_id":"one", "content":"value"});
     let cases = [
-        json!({"history":[]}),
-        json!({"history":[user("Hi")], "tool_choice":"auto"}),
-        json!({"history":[user("Hi")], "tools":[tool(),tool()]}),
-        json!({"history":[user("Hi")], "tools":[{"name":"bad name","description":"x","input_schema":{"type":"object"}}]}),
-        json!({"history":[user("Hi")], "tools":[{"name":"valid","description":"x","input_schema":false}]}),
-        json!({"history":[pending.clone()]}),
-        json!({"history":[result.clone()]}),
-        json!({"history":[pending.clone(),user("Hi"),result.clone()]}),
-        json!({"history":[pending.clone(),result.clone(),result.clone()]}),
-        json!({"history":[pending.clone(),result.clone(),pending.clone(),result]}),
-        json!({"history":[{"role":"assistant","tool_call_id":"one","content":"value"}]}),
-        json!({"history":[{"role":"user","content":"Hi","tool_calls":[{"id":"one","name":"lookup","arguments":{}}]}]}),
+        json!({"messages":[]}),
+        json!({"messages":[user("Hi")], "tool_choice":"auto"}),
+        json!({"messages":[user("Hi")], "tools":[tool(),tool()]}),
+        json!({"messages":[user("Hi")], "tools":[{"name":"bad name","description":"x","input_schema":{"type":"object"}}]}),
+        json!({"messages":[user("Hi")], "tools":[{"name":"valid","description":"x","input_schema":false}]}),
+        json!({"messages":[pending.clone()]}),
+        json!({"messages":[result.clone()]}),
+        json!({"messages":[pending.clone(),user("Hi"),result.clone()]}),
+        json!({"messages":[pending.clone(),result.clone(),result.clone()]}),
+        json!({"messages":[pending.clone(),result.clone(),pending.clone(),result]}),
+        json!({"messages":[{"role":"assistant","tool_call_id":"one","content":"value"}]}),
+        json!({"messages":[{"role":"user","content":"Hi","tool_calls":[{"id":"one","name":"lookup","arguments":{}}]}]}),
     ];
     let server = Server::start(vec![]);
     for input in cases {
@@ -289,7 +290,7 @@ fn invalid_tool_definitions_and_unpaired_histories_fail_before_http() {
 }
 
 #[test]
-fn captured_provider_failures_keep_history_and_call_identity() {
+fn captured_provider_failures_publish_no_message_or_transcript() {
     let mut failure = Reply::json(
         json!({"error":{"message":"private provider detail"}, "usage":{"prompt_tokens":9}}),
     );
@@ -297,14 +298,19 @@ fn captured_provider_failures_keep_history_and_call_identity() {
     let server = Server::start(vec![failure]);
     let output = invoke(
         &server,
-        json!({"history":[user("Hi")]}),
+        json!({"messages":[user("Hi")]}),
         false,
         json!({"capture_errors":true}),
     );
     assert_eq!(output["results"][0]["ok"], true, "{output}");
     let result = &output["results"][0]["outputs"];
     assert_eq!(result["outcome"], "failed");
-    assert_eq!(result["history"], json!([user("Hi")]));
+    assert!(result.get("message").is_none());
+    assert!(result.get("history").is_none());
+    assert_eq!(
+        output["original_inputs"][0]["messages"],
+        json!([user("Hi")])
+    );
     assert_eq!(result["tool_calls"], json!([]));
     assert_eq!(result["usages"].as_array().unwrap().len(), 1);
     assert!(!result["usages"][0]["call_id"].as_str().unwrap().is_empty());
@@ -323,7 +329,7 @@ fn malformed_tool_arguments_fail_instead_of_publishing_executable_calls() {
     let server = Server::start(vec![reply(None, "tool_calls", vec![invalid])]);
     let output = invoke(
         &server,
-        json!({"history":[user("Hi")], "tools":[tool()]}),
+        json!({"messages":[user("Hi")], "tools":[tool()]}),
         false,
         json!({"capture_errors":true}),
     );
@@ -337,7 +343,7 @@ fn stream_publication_failure_is_not_captured_as_a_model_failure() {
     let server = Server::start(vec![Reply::stream_text("prefix")]);
     let output = probe(
         &server,
-        json!({"stream":true, "disconnect":true, "inputs":[{"history":[user("Hi")]}]}),
+        json!({"stream":true, "disconnect":true, "inputs":[{"messages":[user("Hi")]}]}),
         json!({"capture_errors":true}),
     );
     assert_eq!(output["results"][0]["ok"], false, "{output}");

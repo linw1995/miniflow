@@ -86,9 +86,7 @@ pub struct ChatMessage {
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct LlmInputs {
-    pub prompt: Option<String>,
-    pub system: Option<String>,
-    pub history: Option<Vec<ChatMessage>>,
+    pub messages: Vec<ChatMessage>,
     #[value(default)]
     pub tools: Vec<ToolDefinition>,
 }
@@ -101,7 +99,7 @@ pub struct LlmOutputs {
     pub usages: Vec<CallUsage>,
     pub error: Option<String>,
     pub text: String,
-    pub history: Vec<ChatMessage>,
+    pub message: Option<ChatMessage>,
     pub usage: Option<BTreeMap<String, i64>>,
     pub finish_reason: Option<String>,
     pub metadata: Option<MessageMetadata>,
@@ -446,6 +444,7 @@ impl TypedTaskStreamNode for LlmNode {
             ("finish_reason", outputs.finish_reason.is_none()),
             ("metadata", outputs.metadata.is_none()),
             ("error", outputs.error.is_none()),
+            ("message", outputs.message.is_none()),
         ]
         .into_iter()
         .filter(|(_, absent)| *absent)
@@ -476,18 +475,12 @@ impl LlmNode {
             .temperature(config.temperature)
             .max_tokens(config.max_tokens);
         let allow_tools = !inputs.tools.is_empty();
-        let history = inputs.history.unwrap_or_default();
         let (response, mut usage) = self.request(request, &config, context, emitter, deadline)?;
-        let failure_history = if config.capture_errors {
-            history.clone()
-        } else {
-            Vec::new()
-        };
         let result = response.and_then(|response| {
             if usage.usage.is_none() {
                 usage.usage = reported_usage(&response.usage).ok().flatten();
             }
-            terminal_outputs(response, inputs.prompt, history, allow_tools).and_then(|result| {
+            terminal_outputs(response, allow_tools).and_then(|result| {
                 context.check_future_limits(Some(deadline))?;
                 Ok(result)
             })
@@ -506,7 +499,7 @@ impl LlmNode {
                     outcome: CallOutcome::Failed,
                     tool_calls: Vec::new(),
                     text: String::new(),
-                    history: failure_history,
+                    message: None,
                     usage: usage.usage.clone(),
                     finish_reason: None,
                     metadata: None,
@@ -648,8 +641,6 @@ fn finish_reason(response: &CompletionResponse) -> Option<String> {
 
 fn terminal_outputs(
     response: CompletionResponse,
-    prompt: Option<String>,
-    mut history: Vec<ChatMessage>,
     allow_tools: bool,
 ) -> Result<LlmOutputs, LlmExecutionError> {
     let usage = reported_usage(&response.usage)?;
@@ -658,16 +649,7 @@ fn terminal_outputs(
         ensure!(result.tool_calls.is_empty(), UnsupportedOutputSnafu);
         ensure!(!result.text.is_empty(), EmptyTextSnafu);
     }
-    if let Some(prompt) = prompt {
-        history.push(ChatMessage {
-            metadata: None,
-            role: "user".into(),
-            content: prompt,
-            tool_calls: None,
-            tool_call_id: None,
-        });
-    }
-    history.push(call::history_message(&result));
+    let message = call::assistant_message(&result);
     Ok(LlmOutputs {
         status: "succeeded".into(),
         outcome: result.outcome,
@@ -676,7 +658,7 @@ fn terminal_outputs(
         error: None,
         metadata: None,
         text: result.text,
-        history,
+        message: Some(message),
         usage,
         finish_reason: result.finish_reason,
     })
@@ -808,23 +790,23 @@ mod tests {
     #[test]
     fn fixed_ports_reflect_nested_messages_and_optional_metadata() {
         let inputs = LlmInputs::ports();
-        assert_eq!(inputs.len(), 4);
-        assert_eq!(inputs[0].name, "prompt");
-        assert!(!inputs[0].required);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].name, "messages");
+        assert!(inputs[0].required);
         assert_eq!(
-            inputs[2].value_type,
+            inputs[0].value_type,
             ValueType::List(Box::new(ValueType::Object))
         );
-        assert!(!inputs[2].required);
+        assert!(!inputs[1].required);
         let outputs = LlmOutputs::ports();
-        for name in ["status", "usages", "text", "history"] {
+        for name in ["status", "usages", "text", "tool_calls", "outcome"] {
             assert!(
                 outputs
                     .iter()
                     .any(|port| port.name == name && port.required)
             );
         }
-        for name in ["usage", "finish_reason", "metadata", "error"] {
+        for name in ["message", "usage", "finish_reason", "metadata", "error"] {
             assert!(
                 outputs
                     .iter()
@@ -839,61 +821,59 @@ mod tests {
             error: None,
             metadata: None,
             text: "reply".into(),
-            history: vec![ChatMessage {
+            message: Some(ChatMessage {
                 metadata: None,
                 tool_calls: None,
                 tool_call_id: None,
                 role: "assistant".into(),
                 content: "reply".into(),
-            }],
+            }),
             usage: None,
             finish_reason: None,
         }
         .into_values()
         .unwrap();
         assert_eq!(
-            response["history"],
-            json!([{"role": "assistant", "content": "reply"}])
+            response["message"],
+            json!({"role": "assistant", "content": "reply"})
         );
         assert!(!response.contains_key("usage"));
         assert!(!response.contains_key("finish_reason"));
     }
 
     #[test]
-    fn nested_history_decoding_rejects_unknown_missing_and_mistyped_fields() {
-        for (history, path) in [
-            (json!(null), "/history"),
-            (json!([{"role": "user"}]), "/history/0/content"),
+    fn nested_messages_decoding_rejects_unknown_missing_and_mistyped_fields() {
+        for (messages, path) in [
+            (json!(null), "/messages"),
+            (json!([{"role": "user"}]), "/messages/0/content"),
             (
                 json!([{"role":"user","content":"hello","metadata":null}]),
-                "/history/0/metadata",
+                "/messages/0/metadata",
             ),
             (
                 json!([{"role":"user","content":"hello","metadata":[]}]),
-                "/history/0/metadata",
+                "/messages/0/metadata",
             ),
             (
                 json!([{"role": "user", "content": 42}]),
-                "/history/0/content",
+                "/messages/0/content",
             ),
             (
                 json!([{"role": "user", "content": "hello", "extra": true}]),
-                "/history/0/extra",
+                "/messages/0/extra",
             ),
         ] {
-            let values = mf_runtime::NodeValues::from([
-                ("prompt".into(), "next".into()),
-                ("history".into(), history.into()),
-            ]);
+            let values = mf_runtime::NodeValues::from([("messages".into(), messages.into())]);
             let error = LlmInputs::from_values(values).unwrap_err();
             assert_eq!(error.pointer(), path);
         }
-        let empty = LlmInputs::from_values(mf_runtime::NodeValues::from([(
-            "prompt".into(),
-            "hello".into(),
+        let input = LlmInputs::from_values(mf_runtime::NodeValues::from([(
+            "messages".into(),
+            json!([{"role":"user","content":"hello"}]).into(),
         )]))
         .unwrap();
-        assert!(empty.history.is_none());
+        assert!(input.tools.is_empty());
+        assert!(LlmInputs::from_values(Default::default()).is_err());
     }
 
     #[test]
@@ -912,20 +892,10 @@ mod tests {
             json!({}),
         )
         .with_finish_reason(FinishReason::Other("service_stop".into()));
-        let previous = vec![ChatMessage {
-            metadata: None,
-            tool_calls: None,
-            tool_call_id: None,
-            role: "user".into(),
-            content: "prior".into(),
-        }];
-        let result =
-            terminal_outputs(response, Some("next".into()), previous.clone(), false).unwrap();
+        let result = terminal_outputs(response, false).unwrap();
         assert_eq!(result.text, "firstsecond");
-        assert_eq!(result.history[0], previous[0]);
-        assert_eq!(result.history.len(), 3);
-        assert_eq!(result.history[1].role, "user");
-        assert_eq!(result.history[2].content, "firstsecond");
+        assert_eq!(result.message.as_ref().unwrap().role, "assistant");
+        assert_eq!(result.message.as_ref().unwrap().content, "firstsecond");
         assert_eq!(
             result.usage.unwrap(),
             BTreeMap::from([("output_tokens".into(), 0)])
@@ -944,7 +914,7 @@ mod tests {
             "openai",
             json!({}),
         );
-        let error = terminal_outputs(response, Some("next".into()), vec![], false).unwrap_err();
+        let error = terminal_outputs(response, false).unwrap_err();
         assert!(matches!(error, LlmExecutionError::UsageCount { .. }));
         assert!(error.source().unwrap().is::<std::num::TryFromIntError>());
         let response = CompletionResponse::new(
@@ -953,15 +923,10 @@ mod tests {
             "openai",
             json!({}),
         );
-        assert_eq!(
-            terminal_outputs(response, Some("next".into()), vec![], false)
-                .unwrap()
-                .text,
-            "é"
-        );
+        assert_eq!(terminal_outputs(response, false).unwrap().text, "é");
         let response = CompletionResponse::new(vec![], Default::default(), "openai", json!({}));
         assert!(matches!(
-            terminal_outputs(response, Some("next".into()), vec![], false),
+            terminal_outputs(response, false),
             Err(LlmExecutionError::EmptyText)
         ));
     }

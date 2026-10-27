@@ -69,12 +69,12 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 18] {
         (
             "llm-terminal.json",
             None,
-            json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+            json!({"text":"reply", "message":{"role":"assistant","content":"reply"}}),
         ),
         (
             "llm-parameters.json",
             None,
-            json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+            json!({"text":"reply", "message":{"role":"assistant","content":"reply"}}),
         ),
         (
             "llm-loop.json",
@@ -84,7 +84,7 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 18] {
         (
             "llm-tools.json",
             None,
-            json!({"outcome":"completed", "text":"reply", "history":[{"role":"user","content":"Hello"},{"role":"assistant","content":"reply"}], "tool_calls":[], "usages":[{
+            json!({"outcome":"completed", "text":"reply", "message":{"role":"assistant","content":"reply"}, "tool_calls":[], "usages":[{
                 "started_at":0, "call_id":"generated", "node":{"id":"model","kind":"builtin.llm","path":[]}, "model":"example-model", "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}
             }]}),
         ),
@@ -213,11 +213,11 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             } else if name.starts_with("chat-") {
                 json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-tools.json" {
-                json!({"model.prompt":"Hello"})
+                json!({"model.messages":[{"role":"user","content":"Hello"}]})
             } else if name == "llm-parameters.json" {
-                json!({"params.prompt":"Hello"})
+                json!({"params.messages":[{"role":"user","content":"Hello"}]})
             } else {
-                json!({"chat.prompt":"Hello"})
+                json!({"chat.messages":[{"role":"user","content":"Hello"}]})
             };
             command
                 .args(["--inputs", &inputs.to_string()])

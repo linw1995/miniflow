@@ -98,16 +98,10 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
     let mut pending = BTreeMap::new();
     let mut seen = BTreeSet::new();
     let mut messages = Vec::new();
-    for (index, message) in inputs
-        .history
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-    {
-        let path = format!("/history/{index}");
+    for (index, message) in inputs.messages.iter().enumerate() {
+        let path = format!("/messages/{index}");
         let converted = match message.role.as_str() {
-            "user" | "assistant" => {
+            "system" | "user" | "assistant" => {
                 require(
                     message.tool_call_id.is_none(),
                     &path,
@@ -116,16 +110,26 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
                 require(
                     pending.is_empty(),
                     &path,
-                    "all pending tool results before another user or assistant message",
+                    "all pending tool results before another system, user or assistant message",
                 )?;
-                if message.role == "user" {
-                    require(message.tool_calls.is_none(), &path, "plain user text")?;
+                if message.role != "assistant" {
+                    require(
+                        message.tool_calls.is_none(),
+                        &path,
+                        "plain system or user text",
+                    )?;
                     require(
                         !message.content.is_empty(),
                         &format!("{path}/content"),
                         "nonempty text",
                     )?;
-                    rig::Message::user(&message.content)
+                    if message.role == "system" {
+                        rig::Message::System {
+                            content: message.content.clone(),
+                        }
+                    } else {
+                        rig::Message::user(&message.content)
+                    }
                 } else {
                     let mut content = Vec::new();
                     if !message.content.is_empty() {
@@ -178,7 +182,7 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
             _ => {
                 return InvalidInputSnafu {
                     path: format!("{path}/role"),
-                    requirement: "role `user`, `assistant` or `tool`",
+                    requirement: "role `system`, `user`, `assistant` or `tool`",
                 }
                 .fail();
             }
@@ -187,26 +191,14 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
     }
     require(
         pending.is_empty(),
-        "/history",
+        "/messages",
         "a result for every pending tool call",
     )?;
-    if let Some(prompt) = &inputs.prompt {
-        require(!prompt.is_empty(), "/prompt", "nonempty text when supplied")?;
-        messages.push(rig::Message::user(prompt));
-    }
-    require(
-        !messages.is_empty(),
-        "/history",
-        "a prompt or nonempty history",
-    )?;
-    let mut request = CompletionRequest::from(messages).tools(tools);
-    if let Some(system) = inputs.system.as_ref().filter(|system| !system.is_empty()) {
-        request = request.preamble(system);
-    }
-    Ok(request)
+    require(!messages.is_empty(), "/messages", "a nonempty message list")?;
+    Ok(CompletionRequest::from(messages).tools(tools))
 }
 
-pub fn history_message(result: &CallResult) -> ChatMessage {
+pub fn assistant_message(result: &CallResult) -> ChatMessage {
     ChatMessage {
         role: "assistant".into(),
         content: result.text.clone(),
@@ -282,7 +274,7 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn text_and_tools_round_trip_through_history_without_reasoning_state() {
+    fn assistant_messages_round_trip_with_tool_results() {
         let call = rig::ToolCall::from_wire(
             "one",
             rig::ToolFunction::new(rig::ToolName::new("lookup").unwrap(), json!({"id":42})),
@@ -299,15 +291,14 @@ mod tests {
         let result = terminal_result(response).unwrap();
         assert_eq!(result.outcome, CallOutcome::ToolCalls);
         assert_eq!(result.text, "Checking");
-        let history = history_message(&result).into_values().unwrap();
-        assert!(!history.contains_key("reasoning"));
+        let encoded_message = assistant_message(&result).into_values().unwrap();
+        assert!(!encoded_message.contains_key("reasoning"));
         assert_eq!(
-            history["tool_calls"][0],
+            encoded_message["tool_calls"][0],
             json!({"id":"one", "name":"lookup", "arguments":{"id":42}})
         );
         let request = prepare_request(&LlmInputs {
-            prompt: None,
-            history: Some(vec![
+            messages: vec![
                 ChatMessage {
                     role: "user".into(),
                     content: "Hello".into(),
@@ -315,7 +306,7 @@ mod tests {
                     tool_calls: None,
                     tool_call_id: None,
                 },
-                ChatMessage::from_values(history).unwrap(),
+                ChatMessage::from_values(encoded_message).unwrap(),
                 ChatMessage {
                     role: "tool".into(),
                     content: "42".into(),
@@ -323,8 +314,7 @@ mod tests {
                     tool_calls: None,
                     tool_call_id: Some("one".into()),
                 },
-            ]),
-            system: None,
+            ],
             tools: Vec::new(),
         })
         .unwrap();

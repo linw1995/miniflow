@@ -154,22 +154,10 @@
                 "capture_errors": true
               },
               "inputs": {
-                "prompt": {
+                "messages": {
                   "from": {
-                    "node": "%loop",
-                    "port": "prompt"
-                  }
-                },
-                "system": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "system"
-                  }
-                },
-                "history": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "history"
+                    "node": "chat_messages",
+                    "port": "messages"
                   }
                 }
               }
@@ -215,8 +203,8 @@
               "inputs": {
                 "value": {
                   "from": {
-                    "node": "chat",
-                    "port": "history"
+                    "node": "chat_history",
+                    "port": "value"
                   }
                 }
               }
@@ -280,6 +268,74 @@
                   }
                 }
               }
+            },
+            {
+              "id": "chat_messages",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "prompt": "string",
+                  "history": {
+                    "list": "object"
+                  },
+                  "system": "string"
+                },
+                "code": {
+                  "messages": "(system == '' ? [] : [{'role':'system','content':system}]) + history + [{'role':'user','content':prompt}]",
+                  "history": "history + [{'role':'user','content':prompt}]"
+                }
+              },
+              "inputs": {
+                "prompt": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "prompt"
+                  }
+                },
+                "history": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "history"
+                  }
+                },
+                "system": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "system"
+                  }
+                }
+              }
+            },
+            {
+              "id": "chat_history",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "history": {
+                    "list": "object"
+                  },
+                  "message": "object"
+                },
+                "code": {
+                  "value": "history + [message]"
+                }
+              },
+              "inputs": {
+                "history": {
+                  "from": {
+                    "node": "chat_messages",
+                    "port": "history"
+                  }
+                },
+                "message": {
+                  "from": {
+                    "node": "chat",
+                    "port": "message"
+                  }
+                }
+              }
             }
           ],
           "clusters": [
@@ -288,7 +344,9 @@
               "annotation": "Generate one reply and append the call usage to the accumulated usage list.",
               "nodes": [
                 "chat",
-                "collect"
+                "collect",
+                "chat_messages",
+                "chat_history"
               ]
             },
             {

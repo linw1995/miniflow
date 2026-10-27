@@ -33,9 +33,10 @@
       "port": "tool_calls"
     },
     {
-      "name": "history",
+      "name": "message",
       "node": "model",
-      "port": "history"
+      "port": "message",
+      "optional": true
     },
     {
       "name": "usages",

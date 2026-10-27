@@ -47,7 +47,7 @@ fn packaged_cli_acceptance() {
         "version": "2026-10-03",
         "dependencies": {"llm": {"package": "mfn-llm", "version": format!("={}", env!("CARGO_PKG_VERSION"))}},
         "nodes": [{"id": "chat", "kind": "builtin.llm", "config": {"model": "example-model", "base_url": llm_server.base_url, "api_key_env": "MINIFLOW_PACKAGED_LLM_KEY"}}],
-        "outputs": [{"name": "text", "node": "chat", "port": "text"}, {"name": "history", "node": "chat", "port": "history"}]
+        "outputs": [{"name": "text", "node": "chat", "port": "text"}, {"name":"message", "node":"chat", "port":"message", "optional":true}]
     });
     let llm_definition = project.join("llm.json");
     let llm_executable = project.join("llm");
@@ -62,7 +62,7 @@ fn packaged_cli_acceptance() {
     assert!(llm_server.requests().is_empty());
     fs::remove_file(&llm_definition).unwrap();
     fs::remove_dir_all(fixture.root().join("llm-build")).unwrap();
-    let llm_inputs = json!({"chat.prompt":"Hello", "chat.history":[{"role": "user", "content": "prior"}, {"role": "assistant", "content": "earlier reply"}]});
+    let llm_inputs = json!({"chat.messages":[{"role":"user","content":"prior"},{"role":"assistant","content":"earlier reply"},{"role":"user","content":"Hello"}]});
     let llm_result = checked(
         Command::new(&llm_executable)
             .current_dir(&project)
@@ -75,7 +75,10 @@ fn packaged_cli_acceptance() {
     );
     let llm_result: Value = serde_json::from_slice(&llm_result.stdout).unwrap();
     assert_eq!(llm_result["text"], "packaged reply");
-    assert_eq!(llm_result["history"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        llm_result["message"],
+        json!({"role":"assistant","content":"packaged reply"})
+    );
     assert_eq!(llm_server.requests().len(), 1);
     let mut flow = json!({
         "version":"2026-09-26",

@@ -14,11 +14,11 @@ The optional [`mfn-code`](../crates/builtin-nodes/code/) package registers `buil
 instance-specific typed inputs, and output types inferred by the CEL checker. A Flow must select the package
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
-The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with fixed typed prompt,
-system, history, terminal outputs, and optional typed `delta` and `tool_call` streams. Select it explicitly to add its HTTP transport dependencies.
+The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with a required typed `messages` input,
+a current assistant `message` output, and optional typed `delta` and `tool_call` streams. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
-The node also accepts function `tools`, returns tool calls in its existing history, and can continue from
-caller-supplied tool results without a new prompt. Tool protocol types are exported by `mfn_llm`.
+The node also accepts function `tools` and returns tool calls in its current assistant message.
+Flows assemble requests and append returned messages; the node never constructs conversation history. Tool protocol types are exported by `mfn_llm`.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values) and
 [tool calls](workflows.md#llm-tool-calls).
 

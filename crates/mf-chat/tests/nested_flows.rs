@@ -82,10 +82,7 @@ fn builtin_title_policy_preserves_captured_failure_usage_without_a_title() {
         let replace =
             |node: &mut mf_runtime::NodeDefinition, status: &str, text: &str, purpose: &str| {
                 node.kind = "builtin.code".into();
-                let mut inputs = json!({"prompt":"string","system":"string"});
-                if purpose == "conversation" {
-                    inputs["history"] = json!({"list":"object"});
-                }
+                let inputs = json!({"messages":{"list":"object"}});
                 node.config = json!({
                     "language":"cel", "inputs":inputs,
                     "code":{

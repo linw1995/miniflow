@@ -85,22 +85,10 @@
         }
       },
       "inputs": {
-        "prompt": {
+        "messages": {
           "from": {
-            "node": "input",
-            "port": "prompt"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "input",
-            "port": "system"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "input",
-            "port": "history"
+            "node": "model_messages",
+            "port": "messages"
           }
         }
       }
@@ -184,6 +172,43 @@
           "from": {
             "node": "title",
             "port": "usages"
+          }
+        }
+      }
+    },
+    {
+      "id": "model_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "history": {
+            "list": "object"
+          },
+          "system": "string"
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [{'role':'system','content':system}]) + history + [{'role':'user','content':prompt}]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "input",
+            "port": "prompt"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "input",
+            "port": "history"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "input",
+            "port": "system"
           }
         }
       }
