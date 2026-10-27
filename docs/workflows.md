@@ -421,7 +421,7 @@ The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing 
 | --- | --- | --- | --- |
 | Input | `messages` | `List(Object)` | Yes, nonempty |
 | Input | `tools` | `List(Object)` | No, defaults to `[]` |
-| Output | `message` | `Object` | On a valid response; omitted on captured failure |
+| Output | `message` | `Object` | When text or tool calls are available; omitted on captured failure |
 | Output | `text` | `string` | Yes |
 | Output | `tool_calls` | `List(Object)` | Yes |
 | Output | `outcome` | `string` | Yes |
@@ -455,7 +455,8 @@ and `tool`. System and user messages require nonempty text. Assistant messages c
 The node encodes the supplied list in its existing order. It has no `prompt`, `system`, or `history`
 input ports and never inserts messages. Include system instructions and the current user message in
 `messages` explicitly. The output `message` contains only the current assistant response; `text` and
-`tool_calls` are projections of that response. There is no updated-history output.
+`tool_calls` are projections of that response. There is no updated-history output. A response with neither text nor completed tool calls
+also omits `message`, so a truncated empty response cannot be appended as an invalid assistant entry.
 
 Conversation composition belongs to the Flow. The chat examples use `builtin.code` to prepend optional
 system instructions and append the current user prompt before invoking the model. The Loop examples

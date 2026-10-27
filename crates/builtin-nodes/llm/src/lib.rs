@@ -649,7 +649,8 @@ fn terminal_outputs(
         ensure!(result.tool_calls.is_empty(), UnsupportedOutputSnafu);
         ensure!(!result.text.is_empty(), EmptyTextSnafu);
     }
-    let message = call::assistant_message(&result);
+    let message = (!result.text.is_empty() || !result.tool_calls.is_empty())
+        .then(|| call::assistant_message(&result));
     Ok(LlmOutputs {
         status: "succeeded".into(),
         outcome: result.outcome,
@@ -658,7 +659,7 @@ fn terminal_outputs(
         error: None,
         metadata: None,
         text: result.text,
-        message: Some(message),
+        message,
         usage,
         finish_reason: result.finish_reason,
     })

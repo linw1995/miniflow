@@ -210,6 +210,7 @@ fn invalid_or_truncated_tool_streams_do_not_publish_completed_calls() {
         assert_eq!(result["ok"], true, "{output}");
         assert_eq!(result["outputs"]["outcome"], expected);
         assert_eq!(result["outputs"]["tool_calls"], json!([]));
+        assert!(result["outputs"].get("message").is_none());
         let deltas = result["deltas"].as_array().unwrap();
         assert!(deltas.is_empty(), "{output}");
     }

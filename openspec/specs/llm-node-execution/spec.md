@@ -104,7 +104,7 @@ Messages SHALL contain string role and content fields and optional application m
 
 ### Requirement: Return only the current assistant message
 
-A valid response SHALL produce one assistant `message` containing the current text and tool calls. The node SHALL NOT return an updated history or echo input messages as part of the response. Captured request failures SHALL omit and explicitly skip message while retaining failure status and available usage. Conversation assembly, append policy, persistence, and trimming SHALL belong to the Flow or caller.
+A response containing text or completed tool calls SHALL produce one assistant `message`. Responses without either SHALL skip message instead of creating an empty assistant entry. The node SHALL NOT return an updated history or echo input messages as part of the response. Captured request failures SHALL omit and explicitly skip message while retaining failure status and available usage. Conversation assembly, append policy, persistence, and trimming SHALL belong to the Flow or caller.
 
 #### Scenario: Return one response
 
@@ -128,7 +128,7 @@ A valid response SHALL produce one assistant `message` containing the current te
 
 ### Requirement: Publish the terminal response atomically
 
-A valid invocation SHALL publish one terminal result containing the assistant message, text and tool-call projections, outcome, succeeded status, one-call usages, and optional usage and finish_reason. Text blocks SHALL retain response order. Conversion and validation MUST precede publication. Unsupported content, unsolicited tool calls, and invalid counts SHALL fail by default. Captured failures SHALL not publish an assistant message. Earlier stream emissions SHALL remain provisional.
+A valid invocation SHALL publish one terminal result containing any available assistant message, text and tool-call projections, outcome, succeeded status, one-call usages, and optional usage and finish_reason. Text blocks SHALL retain response order. Conversion and validation MUST precede publication. Unsupported content, unsolicited tool calls, and invalid counts SHALL fail by default. Captured failures SHALL not publish an assistant message. Earlier stream emissions SHALL remain provisional.
 
 #### Scenario: Receive a complete text answer
 
