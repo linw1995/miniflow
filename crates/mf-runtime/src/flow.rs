@@ -441,8 +441,10 @@ impl Flow {
         state: &mut crate::ExecutionContext,
         options: RuntimeOptions,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
-        if state.scope_path().is_empty() {
+        if state.invocation_path().is_empty() {
             state.configure_worker_limit(options.max_parallel_domains);
+        }
+        if state.scope_path().is_empty() {
             state.bind_workflow_inputs(&self.inner.input_schema)?;
         }
         let domains = &self.inner.plan.execution_domains;

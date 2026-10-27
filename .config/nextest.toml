@@ -43,6 +43,7 @@ run-wrapper = 'per-test-profraw'
 platform = 'cfg(unix)'
 # Keep this selection identical to the shared-cargo override below.
 filter = '''
+(binary_id(=mf-compiler::nested_flows) & test(=generated_calls_match_memory_without_flow_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mfn-test-affected::flow) |
 binary_id(=mfn-test-affected::process) |
@@ -90,6 +91,7 @@ binary_id(=mfn-test-affected::process) |
 )) |
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
+(binary_id(=mf-compiler::nested_flows) & test(=generated_calls_match_memory_without_flow_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mf-compiler::single_node_runner) |
 binary_id(=mf-compiler::runner_signals) |
@@ -142,6 +144,7 @@ setup = "package-dependencies"
 platform = 'cfg(unix)'
 # Serialize generated builds that share the prewarmed Cargo target.
 filter = '''
+(binary_id(=mf-compiler::nested_flows) & test(=generated_calls_match_memory_without_flow_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mfn-test-affected::flow) |
 binary_id(=mfn-test-affected::process) |
@@ -189,6 +192,7 @@ binary_id(=mfn-test-affected::process) |
 )) |
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
+(binary_id(=mf-compiler::nested_flows) & test(=generated_calls_match_memory_without_flow_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mf-compiler::single_node_runner) |
 binary_id(=mf-compiler::runner_signals) |

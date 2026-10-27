@@ -253,8 +253,7 @@ pub fn describe_definition(
         &mut Vec::new(),
         &mut orders,
         &mut loop_bodies,
-        definition.has_order_edges()
-            || definition.version == crate::WorkflowDefinitionVersion::V2026_10_23,
+        definition.has_order_edges() || definition.version.supports_clusters(),
     )?;
     ensure!(
         orders.is_empty(),
@@ -264,7 +263,7 @@ pub fn describe_definition(
     );
     let description = WorkflowDescription {
         order_edges: order_edges(&definition.order_edges),
-        version: if definition.version == crate::WorkflowDefinitionVersion::V2026_10_23 {
+        version: if definition.version.supports_clusters() {
             WorkflowDescriptionVersion::V2026_10_23
         } else if definition.has_order_edges() {
             WorkflowDescriptionVersion::V2026_10_19
@@ -279,7 +278,8 @@ pub fn describe_definition(
                 }
                 crate::WorkflowDefinitionVersion::V2026_10_03
                 | crate::WorkflowDefinitionVersion::V2026_10_19
-                | crate::WorkflowDefinitionVersion::V2026_10_23 => {
+                | crate::WorkflowDefinitionVersion::V2026_10_23
+                | crate::WorkflowDefinitionVersion::V2026_10_25 => {
                     WorkflowDescriptionVersion::V2026_10_03
                 }
             }
@@ -402,6 +402,7 @@ fn describe_loops(
 ) -> Result<(), ContractError> {
     for node in nodes {
         let iteration;
+        let call;
         let (nodes, data, controls, successes, body_clusters, source_id, source_kind) =
             if let Some(definition) = &node.loop_definition {
                 let body = &definition.body;
@@ -413,6 +414,23 @@ fn describe_loops(
                     &body.clusters,
                     crate::LOOP_SOURCE_ID,
                     crate::LOOP_SOURCE_ID,
+                )
+            } else if node.kind == crate::CALL_KIND {
+                call = serde_json::from_value::<crate::CallConfig>(node.config.clone())?;
+                let body = call.definition.as_deref().ok_or_else(|| {
+                    mf_telemetry::InvalidSnafu {
+                        message: "unresolved Flow call",
+                    }
+                    .build()
+                })?;
+                (
+                    &body.nodes,
+                    &body.edges,
+                    &body.control_edges,
+                    &body.order_edges,
+                    &body.clusters,
+                    "",
+                    "",
                 )
             } else if include_iterations && node.kind == crate::ITERATION_KIND {
                 iteration = serde_json::from_value::<crate::IterationConfig>(node.config.clone())?;
@@ -438,11 +456,13 @@ fn describe_loops(
         bodies.push(LoopBodyDescription {
             path: path.clone(),
             nodes: ordered_nodes(
-                std::iter::once((source_id, source_kind)).chain(
-                    nodes
-                        .iter()
-                        .map(|node| (node.id.as_str(), node.kind.as_str())),
-                ),
+                std::iter::once((source_id, source_kind))
+                    .filter(|(id, _)| !id.is_empty())
+                    .chain(
+                        nodes
+                            .iter()
+                            .map(|node| (node.id.as_str(), node.kind.as_str())),
+                    ),
                 order,
             )?,
             data_edges: data_edges(data),

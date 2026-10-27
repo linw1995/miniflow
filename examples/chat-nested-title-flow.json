@@ -1,0 +1,238 @@
+{
+  "version": "2026-10-25",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "flows": {
+    "title": {
+      "builtin": "mf-chat.chat-title"
+    }
+  },
+  "nodes": [
+    {
+      "id": "input",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string",
+            "default": ""
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
+          "context": {
+            "type": "object",
+            "default": {
+              "title": {
+                "source": "provisional",
+                "revision": 0,
+                "attempted": false,
+                "enabled": true
+              }
+            }
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "MODEL_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "model",
+      "kind": "builtin.llm",
+      "config": {
+        "model": {
+          "$ref": "input.model"
+        },
+        "capture_errors": true,
+        "attribution": {
+          "purpose": "conversation"
+        },
+        "base_url": {
+          "$ref": "input.base_url"
+        },
+        "api_key": {
+          "$ref": "input.api_key"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "input",
+            "port": "prompt"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "input",
+            "port": "system"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "input",
+            "port": "history"
+          }
+        }
+      }
+    },
+    {
+      "id": "title",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "title"
+      },
+      "inputs": {
+        "input.prompt": {
+          "from": {
+            "node": "input",
+            "port": "prompt"
+          }
+        },
+        "input.text": {
+          "from": {
+            "node": "model",
+            "port": "text"
+          }
+        },
+        "input.status": {
+          "from": {
+            "node": "model",
+            "port": "status"
+          }
+        },
+        "input.context": {
+          "from": {
+            "node": "input",
+            "port": "context"
+          }
+        },
+        "input.model": {
+          "from": {
+            "node": "input",
+            "port": "model"
+          }
+        },
+        "input.base_url": {
+          "from": {
+            "node": "input",
+            "port": "base_url"
+          }
+        },
+        "input.api_key": {
+          "from": {
+            "node": "input",
+            "port": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "usages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "left": {
+            "list": "object"
+          },
+          "right": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "value": "left + right"
+        }
+      },
+      "inputs": {
+        "left": {
+          "from": {
+            "node": "model",
+            "port": "usages"
+          }
+        },
+        "right": {
+          "from": {
+            "node": "title",
+            "port": "usages"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "status",
+      "node": "model",
+      "port": "status"
+    },
+    {
+      "name": "text",
+      "node": "model",
+      "port": "text"
+    },
+    {
+      "name": "error",
+      "node": "model",
+      "port": "error",
+      "optional": true
+    },
+    {
+      "name": "metadata",
+      "node": "model",
+      "port": "metadata",
+      "optional": true
+    },
+    {
+      "name": "finish_reason",
+      "node": "model",
+      "port": "finish_reason",
+      "optional": true
+    },
+    {
+      "name": "usages",
+      "node": "usages",
+      "port": "value"
+    },
+    {
+      "name": "title",
+      "node": "title",
+      "port": "title",
+      "optional": true
+    },
+    {
+      "name": "answer",
+      "node": "model",
+      "port": "delta"
+    }
+  ]
+}

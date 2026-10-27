@@ -5,6 +5,7 @@ type SubgraphBody =
 
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,
+    pub inputs: crate::WorkflowInputSchema,
     pub outputs: Vec<PortSpec>,
     body: Box<SubgraphBody>,
 }
@@ -20,9 +21,15 @@ impl PreparedSubgraph {
     ) -> Self {
         Self {
             nodes,
+            inputs: Default::default(),
             outputs,
             body: Box::new(body),
         }
+    }
+
+    pub fn with_input_schema(mut self, inputs: crate::WorkflowInputSchema) -> Self {
+        self.inputs = inputs;
+        self
     }
 
     pub fn execute_in_context(

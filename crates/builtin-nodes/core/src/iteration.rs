@@ -269,7 +269,7 @@ impl TypedTaskNode for IterationNode {
         ctx: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         let observation = ctx.observation().and_then(|run| {
-            run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
+            run.iteration_observation(&self.id, &ctx.invocation_path(), self.body.nodes.clone())
         });
         self.execute_items(inputs.items, observation, ctx)
             .map(Into::into)

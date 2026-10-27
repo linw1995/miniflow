@@ -209,3 +209,29 @@ isolated-node execution still accepts resolved inputs without running predecesso
 Execution is inferred when the host registry resolves node contracts. Embedded modules expose both
 `prepare_workflow` and `prepare_stream`; finite preparation rejects graphs that require streaming.
 Standalone Cargo runners resolve this choice during their build and compile one fixed execution path.
+
+## Referenced Flow sources
+
+`embed_workflows` resolves local and built-in `flows` before generating Rust and tracks every referenced
+JSON file with `cargo:rerun-if-changed`. Relative paths belong to the canonical file that declares them.
+All child bodies and their interfaces are frozen into the generated module; execution never loads them
+from disk. The host still links all required node crates through its normal Cargo dependencies. Provider source
+declarations remain provenance in this mode: the helper does not resolve their paths or merge provider
+requirements into Cargo. This also applies to providers used by nested bodies.
+
+For dynamic embedding, load definitions containing local Flow references with
+`mf_compiler::load_embedded_workflow(path)?.definition`, then use `compile_resolved_definition`
+with the host registry. Provider declarations retain the same host-owned dependency policy.
+`load_workflow` instead prepares sources and provider paths for standalone compilation. Calls use the same preparation, input binding,
+shared values, and isolated scope contracts in both execution backends.
+
+Built-in Flow definitions are registered by their owning packages through
+`mf_runtime::register_builtin_flow!`. The macro captures the calling Cargo package, and the registry
+qualifies its local Flow name automatically. Link those packages in the build script as build dependencies
+when `embed_workflows` resolves their names. For example, `mf-chat` provides `mf-chat.chat-title` from its own
+`workflows/title.json`; the compiler does not depend on the chat package. The title source declares
+its provider packages, and the chat build fills their version requirements and feature policy from
+Cargo's resolved manifest declarations, including workspace inheritance. The embedded definition
+retains portable registry requirements rather than checkout paths. Source factories return
+metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
+catalog to prepare or execute its nodes.

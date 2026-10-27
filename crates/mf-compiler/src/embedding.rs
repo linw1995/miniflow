@@ -24,6 +24,12 @@ impl EmbedRequest {
 
 #[derive(Debug, Snafu)]
 pub enum EmbeddingError {
+    #[snafu(display("could not resolve embedded workflow `{name}` at {path:?}: {source}"))]
+    Sources {
+        name: String,
+        path: PathBuf,
+        source: crate::FlowResolutionError,
+    },
     #[snafu(display("workflow embedding requires Cargo environment variable {variable}"))]
     CargoEnvironment { variable: &'static str },
     #[snafu(display("embedded workflow name `{name}` must be a portable Rust module identifier"))]
@@ -126,8 +132,18 @@ fn embed_workflows_at(
         let source = fs::read_to_string(&path).context(ReadSnafu { name, path: &path })?;
         let definition = WorkflowDefinition::from_json(&source)
             .context(DefinitionSnafu { name, path: &path })?;
-        let plan =
-            crate::plan_definition(&definition).context(PlanningSnafu { name, path: &path })?;
+        let canonical = fs::canonicalize(&path).context(ReadSnafu { name, path: &path })?;
+        println!("cargo:rerun-if-changed={}", canonical.display());
+        let resolved = crate::flow_sources::resolve_embedded_flows(
+            &definition,
+            canonical.parent().expect("canonical file has a parent"),
+        )
+        .context(SourcesSnafu { name, path: &path })?;
+        for source in resolved.sources {
+            println!("cargo:rerun-if-changed={}", source.display());
+        }
+        let plan = crate::compiler::plan_resolved_definition(&resolved.definition)
+            .context(PlanningSnafu { name, path: &path })?;
         let module = plan
             .generate_embedded_artifacts()
             .context(GenerationSnafu { name, path: &path })?;
@@ -166,6 +182,36 @@ mod tests {
 
     fn request() -> EmbedRequest {
         EmbedRequest::new("answer", "flow.json")
+    }
+
+    #[test]
+    fn nested_sources_preserve_host_owned_provider_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("flows")).unwrap();
+        let mut child = definition();
+        child["version"] = json!("2026-10-25");
+        child["dependencies"] =
+            json!({"provider":{"package":"host-provider","path":"unused-by-host"}});
+        let parent = json!({
+            "version":"2026-10-25", "dependencies":{"provider":{"package":"host-provider","path":"also-unused"}},
+            "flows":{"child":{"path":"flows/child.json"}},
+            "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"child"}}],
+            "outputs":[{"name":"answer","node":"invoke","port":"answer"}]
+        });
+        // The child fixture uses the legacy edge spelling, so encode its modern authoring form.
+        child["nodes"][1]["inputs"] = json!({"input":{"from":{"node":"source","port":"value"}}});
+        child["nodes"][0]["id"] = json!("source");
+        child["nodes"][1]["id"] = json!("echo");
+        child["edges"] = json!([]);
+        child["outputs"] = json!([{"name":"answer","node":"echo","port":"value"}]);
+        fs::write(root.path().join("flows/child.json"), child.to_string()).unwrap();
+        write_definition(root.path(), &parent);
+        let output = root.path().join("out");
+        embed_workflows_at(&[request()], root.path(), &output).unwrap();
+        let module = fs::read_to_string(output.join("mf-embedded/answer/workflow.rs")).unwrap();
+        assert!(module.contains("workflow.call"));
+        assert!(module.contains("unlinked.echo"));
+        assert!(!module.contains("\"path\":\"flows/child.json\""));
     }
 
     fn write_definition(root: &Path, value: &serde_json::Value) {

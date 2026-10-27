@@ -48,6 +48,7 @@ pub fn body_definition(
     Ok(WorkflowDefinition {
         version: parent.version,
         execution: None,
+        flows: Default::default(),
         dependencies: parent.dependencies.clone(),
         nodes,
         edges: config.body.edges.clone(),
@@ -68,6 +69,21 @@ pub fn normalize_config(
     node: &NodeDefinition,
 ) -> Result<serde_json::Value, WorkflowCompileError> {
     let mut config = parse_config(node)?;
+    for call in config
+        .body
+        .nodes
+        .iter()
+        .filter(|node| node.kind == mf_runtime::CALL_KIND)
+    {
+        let child = crate::calls::body_definition(call)?;
+        snafu::ensure!(
+            !crate::calls::contains_iteration_containers(&child)?,
+            crate::compiler::InvalidCallSnafu {
+                definition_id: call.id.clone(),
+                message: "calls inside Iteration cannot contain Loop or Iteration constructs"
+            }
+        );
+    }
     let body = body_definition(parent, &config).map_err(|message| {
         InvalidIterationSnafu {
             definition_id: node.id.clone(),

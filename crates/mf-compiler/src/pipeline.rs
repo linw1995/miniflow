@@ -82,6 +82,22 @@ pub fn compile_project_with_options(
         &inputs.definition,
         inputs.resolve_dependencies(&definition),
     )?;
+    let mut resolved = at(
+        "Flow source resolution",
+        &inputs.definition,
+        crate::resolve_flows(&definition, inputs.definition.parent()),
+    )?;
+    resolved.sources.insert(inputs.definition.clone());
+    if resolved.sources.contains(&output) || resolved.sources.contains(&inputs.lock) {
+        return Err(failure(
+            "output validation",
+            &inputs.definition,
+            "output or lock would replace a referenced Flow source",
+        ));
+    }
+    let mut protected: Vec<&Path> = resolved.sources.iter().map(PathBuf::as_path).collect();
+    protected.extend([inputs.lock.as_path(), output.as_path()]);
+    let definition = resolved.definition;
     let plan = at(
         "structural validation",
         &inputs.definition,
@@ -103,11 +119,7 @@ pub fn compile_project_with_options(
     let directory = at(
         "build directory",
         &inputs.definition,
-        crate::BuildDirectory::open_protected(
-            &inputs.definition,
-            request.build_dir,
-            &[&inputs.definition, &inputs.lock, &output],
-        ),
+        crate::BuildDirectory::open_protected(&inputs.definition, request.build_dir, &protected),
     )?;
     let project = directory.path.clone();
     eprintln!(
