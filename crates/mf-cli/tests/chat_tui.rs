@@ -670,7 +670,11 @@ fn loop_conversations() {
                     );
                     if prompt == "first turn" {
                         let CompletionState::Committed(completion) = resolution.state else {
-                            panic!("expected committed loop result")
+                            panic!(
+                                "expected committed loop result: {:?}; requests: {}",
+                                resolution.state,
+                                server.requests().len()
+                            )
                         };
                         assert_eq!(completion.result.text, "final answer");
                         assert_eq!(completion.result.usages.len(), 2);
