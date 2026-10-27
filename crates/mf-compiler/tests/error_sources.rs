@@ -84,6 +84,33 @@ fn loop_failures_preserve_scope_context_and_typed_plugin_sources() {
 }
 
 #[test]
+fn call_failures_preserve_typed_plugin_sources_and_call_context() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-25", "dependencies":{},
+        "nodes":[{"id":"invoke","kind":"workflow.call","config":{
+            "flow":"failing", "definition":{
+                "version":"2026-10-25", "dependencies":{},
+                "nodes":[{"id":"fail","kind":"test.error_source"}],
+                "outputs":[{"name":"result","node":"fail","port":"result"}]
+            }
+        }}],
+        "outputs":[{"name":"result","node":"invoke","port":"result"}]
+    }))
+    .unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let error = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap_err();
+    assert!(error.to_string().contains("Flow call `invoke` (failing)"));
+    assert_eq!(
+        find_source::<io::Error>(&error).unwrap().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
 fn iteration_failures_preserve_item_context_and_typed_workflow_sources() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for mode in ["sequential", "parallel"] {

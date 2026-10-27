@@ -933,6 +933,20 @@ impl fmt::Debug for BodyObservation {
 }
 
 impl BodyObservation {
+    pub fn for_call(&self, nodes: &[NodeIdentity]) -> Self {
+        Self {
+            context: Context::current(),
+            body_nodes: Arc::new(
+                nodes
+                    .iter()
+                    .cloned()
+                    .map(|node| (node.id.clone(), node))
+                    .collect(),
+            ),
+            ..self.clone()
+        }
+    }
+
     pub fn begin_node(&self, id: &str) -> Option<BodyNodeObservation> {
         let node = self.body_nodes.get(id)?.clone();
         let span = self

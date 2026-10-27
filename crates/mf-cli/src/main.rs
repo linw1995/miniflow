@@ -1,4 +1,5 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use mf_chat as _;
 use mf_compiler::{
     CompileRequest, PipelineError, RunnerOptions, SupportPackages, compile_project_with_options,
 };

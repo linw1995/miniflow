@@ -152,7 +152,7 @@ impl TaskNode for LoopNode {
             )?;
             let (_, updated, exited) = ctx
                 .run_scope(scope, |state| {
-                    let path = state.scope_path();
+                    let path = state.invocation_path();
                     if let Some(run) = state.observation_mut().filter(|run| run.supports_loops()) {
                         run.loop_pass_started(path.clone());
                     }
