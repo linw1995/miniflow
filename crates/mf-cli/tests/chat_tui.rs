@@ -24,15 +24,6 @@ use terminal::Screen;
 
 #[test]
 fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
-    title_conversation("chat-title-flow.json");
-}
-
-#[test]
-fn plain_chat_workflow_uses_the_builtin_title_flow() {
-    title_conversation("chat-flow.json");
-}
-
-fn title_conversation(example: &str) {
     use mf_chat::contract::CompletionState;
     use mf_tui::{
         chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
@@ -40,22 +31,12 @@ fn title_conversation(example: &str) {
     };
 
     let root = tempfile::tempdir().unwrap();
-    let reply = if example == "chat-flow.json" {
-        Reply::text
-    } else {
-        Reply::stream_text
-    };
-    let namespace = if example == "chat-flow.json" {
-        "params"
-    } else {
-        "input"
-    };
     let server = Server::start(vec![
-        reply("first answer"),
+        Reply::stream_text("first answer"),
         Reply::text("Generated title"),
-        reply("second answer"),
+        Reply::stream_text("second answer"),
     ]);
-    let binary = compiled(root.path(), &server, example);
+    let binary = compiled(root.path(), &server, "chat-title-flow.json");
     let path = root.path().join("chat.sqlite");
     let launch = ChatLaunch::prepare(
         &binary,
@@ -64,8 +45,8 @@ fn title_conversation(example: &str) {
             profile: "assistant-flow".into(),
             run: RunOptions {
                 arguments: vec![
-                    format!("--{namespace}.model=fixture-model").into(),
-                    format!("--{namespace}.api_key=synthetic-key").into(),
+                    "--input.model=fixture-model".into(),
+                    "--input.api_key=synthetic-key".into(),
                 ],
                 ..Default::default()
             },
@@ -115,12 +96,6 @@ fn title_conversation(example: &str) {
                         (calls == 2).then_some("Generated title")
                     );
                     if calls == 2 {
-                        if example == "chat-flow.json" {
-                            assert_eq!(
-                                completion.result.usages[1].node.as_ref().unwrap().path[0].node,
-                                "title"
-                            );
-                        }
                         assert_eq!(
                             completion.result.usages[1]
                                 .attribution
@@ -466,6 +441,18 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
             .iter()
             .all(|session| session.title_source == "generated")
     );
+    let title_usage = transcript
+        .iter()
+        .flat_map(|message| message.usages.iter().flatten())
+        .find(|usage| {
+            usage
+                .attribution
+                .as_ref()
+                .and_then(|labels| labels.purpose.as_deref())
+                == Some("title")
+        })
+        .expect("the parent flow records the built-in title call");
+    assert_eq!(title_usage.node.as_ref().unwrap().path[0].node, "title");
     application_exit(
         &binary,
         &root.path().join("owner.sqlite"),

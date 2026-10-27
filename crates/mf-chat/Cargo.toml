@@ -29,10 +29,6 @@ snafu.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-# Capture application and nested Flow lifecycle records.
-opentelemetry = { workspace = true, features = ["logs", "trace"] }
-opentelemetry_sdk = { workspace = true, features = ["logs", "trace", "testing"] }
-
 # Built-in node fixtures.
 mfn-llm = { workspace = true, features = ["test-support"] }
 
@@ -41,6 +37,8 @@ tempfile.workspace = true
 toml.workspace = true
 
 [build-dependencies]
-# Bind shipped Flow provider dependencies at build time.
+# Workflow embedding at build time.
+mf-runtime.workspace = true
+mf-compiler = { workspace = true, features = ["codegen"] }
 serde_json.workspace = true
 snafu.workspace = true

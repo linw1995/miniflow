@@ -53,8 +53,7 @@ binary_id(=mfn-test-affected::process) |
 )) |
 (binary_id(=mf-cli::chat_tui) & (
     test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart) |
-    test(=supplied_title_workflow_runs_inside_the_application_lifecycle) |
-    test(=plain_chat_workflow_uses_the_builtin_title_flow)
+    test(=supplied_title_workflow_runs_inside_the_application_lifecycle)
 )) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
@@ -154,8 +153,7 @@ binary_id(=mfn-test-affected::process) |
 )) |
 (binary_id(=mf-cli::chat_tui) & (
     test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart) |
-    test(=supplied_title_workflow_runs_inside_the_application_lifecycle) |
-    test(=plain_chat_workflow_uses_the_builtin_title_flow)
+    test(=supplied_title_workflow_runs_inside_the_application_lifecycle)
 )) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
