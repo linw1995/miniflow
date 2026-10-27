@@ -14,10 +14,20 @@ The optional [`mfn-code`](../crates/builtin-nodes/code/) package registers `buil
 instance-specific typed inputs, and output types inferred by the CEL checker. A Flow must select the package
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
-The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with fixed typed prompt,
-system, history, terminal outputs, and an optional typed `delta` stream. Select it explicitly to add its HTTP transport dependencies.
+The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with a required typed `messages` input,
+a current assistant `message` output, and optional typed `delta` and `tool_call` streams. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
-See [terminal conversations](workflows.md#llm-configuration-and-conversation-values).
+The node also accepts function `tools` and explicit `tool_results`, both optional list inputs, and returns
+tool calls in its current assistant message and its `tool_calls` output. Explicit results follow `messages`
+in the provider request and must match pending assistant call IDs. Flows own history and persistence.
+`ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;
+`ChatMessage` derives `NodeEnum` with the `role` tag and has `System`, `User`, `Assistant`, and
+`ToolResult` variants. Only the assistant variant carries `tool_calls`; the tool-result variant
+requires `tool_call_id`. `ToolResult` converts into `ChatMessage::ToolResult` for caller-managed history.
+Individual messages use `InputValue::decode` and `OutputValue::encode`; enclosing node contracts
+continue to use `NodeValue`.
+See [terminal conversations](workflows.md#llm-configuration-and-conversation-values) and
+[tool calls](workflows.md#llm-tool-calls).
 
 Providers can opt execution-only fields into `mf_runtime::ConfigTemplate`. Parse each selected field during
 preparation, validate its `literal()` value when present, and add `references(field_name)` to the prepared

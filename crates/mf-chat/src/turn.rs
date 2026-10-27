@@ -1049,7 +1049,9 @@ mod tests {
             .unwrap();
         let history = database.history(&session.id, 1024).unwrap();
         assert_eq!(history.history.len(), 2);
-        assert_eq!(history.history[0].content, "retry");
+        assert!(
+            matches!(&history.history[0], mfn_llm::ChatMessage::User { content, .. } if content == "retry")
+        );
         assert_eq!(
             database.turn(&second.invocation.turn_id).unwrap().retry_of,
             Some(first.invocation.turn_id)

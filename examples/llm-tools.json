@@ -1,0 +1,47 @@
+{
+  "version": "2026-10-23",
+  "dependencies": {
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "nodes": [
+    {
+      "id": "model",
+      "kind": "builtin.llm",
+      "config": {
+        "model": "your-model",
+        "api_key_env": "MODEL_API_KEY"
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "outcome",
+      "node": "model",
+      "port": "outcome"
+    },
+    {
+      "name": "text",
+      "node": "model",
+      "port": "text"
+    },
+    {
+      "name": "tool_calls",
+      "node": "model",
+      "port": "tool_calls"
+    },
+    {
+      "name": "message",
+      "node": "model",
+      "port": "message",
+      "optional": true
+    },
+    {
+      "name": "usages",
+      "node": "model",
+      "port": "usages"
+    }
+  ]
+}

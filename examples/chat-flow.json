@@ -8,6 +8,10 @@
     "llm": {
       "package": "mfn-llm",
       "path": "../crates/builtin-nodes/llm"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
     }
   },
   "nodes": [
@@ -62,22 +66,47 @@
         "capture_errors": true
       },
       "inputs": {
+        "messages": {
+          "from": {
+            "node": "chat_messages",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "chat_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "history": {
+            "list": "object"
+          },
+          "system": "string"
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+        }
+      },
+      "inputs": {
         "prompt": {
           "from": {
             "node": "params",
             "port": "prompt"
           }
         },
-        "system": {
-          "from": {
-            "node": "params",
-            "port": "system"
-          }
-        },
         "history": {
           "from": {
             "node": "params",
             "port": "history"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
           }
         }
       }
@@ -124,7 +153,8 @@
       "annotation": "Resolve conversation parameters and produce one model response with captured errors and usage.",
       "nodes": [
         "params",
-        "chat"
+        "chat",
+        "chat_messages"
       ]
     }
   ]

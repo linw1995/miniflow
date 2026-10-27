@@ -23,15 +23,16 @@
       "port": "text"
     },
     {
-      "name": "history",
+      "name": "message",
       "node": "chat",
-      "port": "history"
+      "port": "message",
+      "optional": true
     }
   ],
   "clusters": [
     {
       "label": "Model response",
-      "annotation": "Accept prompt and history inputs and return the model response with updated history.",
+      "annotation": "Send an explicit message list and return only the current assistant response.",
       "nodes": [
         "chat"
       ]

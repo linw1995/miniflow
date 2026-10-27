@@ -294,6 +294,7 @@ node counts, control edges, preprocessing, and loops are workflow implementation
 workflow; there is no isolated-model execution mode or assumption that a workflow contains one LLM.
 
 The startup interface supplies an unambiguous `prompt` string and optionally `system`, `history`, and `context`.
+The Flow converts these application inputs into the model node's complete `messages` list.
 Their qualified names can belong to any startup node. Remaining declared inputs form `contract.parameters`;
 resolve them with `mf_runtime::resolve_workflow_inputs` before admission. The contract rejects ambiguous or
 mistyped conversation ports and stdin-dependent execution.
@@ -320,14 +321,16 @@ The [single-call example](../examples/chat-flow.json), the
 nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-loop-flow.json --output target/chat-flow
 ```
 
-The loop explicitly accumulates usage lists with `builtin.code` using `left + right` and stops after a reported model failure.
+The loop explicitly assembles model messages, appends each returned assistant message to its history,
+and accumulates usage lists with `builtin.code`. A missing assistant message skips the history update;
+the loop stops after a reported model failure.
 Its model configuration is passed into the loop through declared variables. The runner receives conversation
 arguments and configuration. The application flow handles database admission and saving around that
 backend invocation; the terminal's backend supplies process supervision and child observation.
 
 ## History metadata
 
-History remains a list of user and assistant messages. Each message accepts an optional object-valued
+Application history remains a list of user and assistant messages. Each message accepts an optional object-valued
 `metadata` field; omitting it means no annotations. System instructions and the current prompt remain separate.
 
 ```json
@@ -341,10 +344,10 @@ History remains a list of user and assistant messages. Each message accepts an o
 }
 ```
 
-Metadata is opaque application data. The LLM adapter forwards only role and content to the provider and
-preserves existing metadata in its returned history. The chat application persists response metadata on the
-new assistant message, including through save retries and database reopen. Returned history never replaces
-stored messages or changes their metadata. New user messages currently have no metadata.
+Metadata is opaque application data and is omitted from provider requests. Flow-level message assembly
+preserves annotations on existing messages; the LLM node returns only its current assistant message.
+The chat application persists response metadata on the new assistant message, including through save retries and database reopen. Workflow history outputs never replace
+stored messages or change their metadata. New user messages currently have no metadata.
 
 Metadata contributes to the canonical encoded history limit and the executable response limit. Existing
 SQLite databases receive a forward migration; old messages retain absent metadata.

@@ -1,8 +1,8 @@
-use crate::{LlmEmission, LlmExecutionError, TextDelta};
+use crate::{LlmEmission, LlmExecutionError, TextDelta, ToolCall, ToolCallEvent};
 use futures::StreamExt;
-use mf_runtime::TypedEmitter;
+use mf_runtime::{TypedEmitter, TypedNodeResult};
 use rig_core::{
-    completion::CompletionResponse,
+    completion::{AssistantContent, CompletionResponse},
     error::ProviderError,
     operation::Completion,
     streaming::{Item, StreamEvent, Streamed},
@@ -16,6 +16,7 @@ pub fn complete(
     call_id: &str,
     deadline: Instant,
     context: &mf_runtime::ExecutionContext,
+    allow_tools: bool,
 ) -> Result<CompletionResponse, LlmExecutionError> {
     let mut response = response.with_context(|source| crate::ProviderSnafu {
         kind: source.kind().code(),
@@ -34,25 +35,47 @@ pub fn complete(
                 .provider_response_status()
                 .map(|status| status.as_u16()),
         })?;
-        if let Item::Event(StreamEvent::Text { text, .. }) = item
-            && !text.is_empty()
-        {
-            if first_text {
-                mf_telemetry::events::record(
-                    crate::FIRST_TEXT_EVENT,
-                    serde_json::json!({"call_id": call_id}),
-                );
-                first_text = false;
-            }
-            emitter
-                .send(LlmEmission {
-                    delta: TextDelta {
+        let emission = match item {
+            Item::Event(StreamEvent::Text { text, .. }) if !text.is_empty() => {
+                if first_text {
+                    mf_telemetry::events::record(
+                        crate::FIRST_TEXT_EVENT,
+                        serde_json::json!({"call_id": call_id}),
+                    );
+                    first_text = false;
+                }
+                LlmEmission {
+                    delta: Some(TextDelta {
                         text,
                         model_call_id: call_id.into(),
-                    },
-                })
-                .context(crate::PublicationSnafu)?;
-        }
+                    }),
+                    tool_call: None,
+                }
+            }
+            Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(call),
+                ..
+            }) if allow_tools => LlmEmission {
+                delta: None,
+                tool_call: Some(ToolCallEvent {
+                    model_call_id: call_id.into(),
+                    call: ToolCall::from_provider(call)?,
+                }),
+            },
+            _ => continue,
+        };
+        let skipped = if emission.delta.is_some() {
+            "tool_call"
+        } else {
+            "delta"
+        };
+        emitter
+            .send(TypedNodeResult {
+                outputs: emission,
+                skipped: std::collections::BTreeSet::from([skipped.into()]),
+                loop_summary: None,
+            })
+            .context(crate::PublicationSnafu)?;
     }
     context
         .execute_future(response.finish(), Some(deadline))?
