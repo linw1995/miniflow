@@ -187,6 +187,64 @@ fn cancelling_the_builtin_title_does_not_commit_an_intermediate_answer() {
 }
 
 #[test]
+fn conversation_finish_retains_the_title_for_save_only_retry() {
+    use diesel::{Connection, connection::SimpleConnection};
+    let server = Server::start(vec![Reply::text("Answer"), Reply::text("Generated title")]);
+    let root = tempfile::tempdir().unwrap();
+    let host = host(root.path(), &server, true);
+    let session = host
+        .database()
+        .create_session("default", None, None)
+        .unwrap();
+    let mut connection =
+        diesel::SqliteConnection::establish(host.database().path().to_str().unwrap()).unwrap();
+    connection.batch_execute("CREATE TRIGGER reject_title BEFORE UPDATE ON sessions WHEN NEW.title_source = 'generated' BEGIN SELECT RAISE(ABORT, 'injected title write failure'); END;").unwrap();
+    let error = host
+        .submit(&session.id, "Prompt")
+        .unwrap()
+        .join()
+        .unwrap_err();
+    let mf_chat::ChatError::Uncommitted { pending, .. } = error else {
+        panic!("expected the complete conversation to remain recoverable")
+    };
+    assert_eq!(
+        pending.completion.result.title.as_deref(),
+        Some("Generated title")
+    );
+    assert_eq!(pending.completion.result.usages.len(), 2);
+    assert_eq!(
+        host.database().session(&session.id).unwrap().title,
+        session.title
+    );
+    assert!(
+        host.database()
+            .history(&session.id, 4096)
+            .unwrap()
+            .history
+            .is_empty()
+    );
+    connection
+        .batch_execute("DROP TRIGGER reject_title;")
+        .unwrap();
+    let saved = host.retry_completion(*pending).unwrap();
+    assert_eq!(saved.result.text, "Answer");
+    assert_eq!(
+        host.database().session(&session.id).unwrap().title,
+        "Generated title"
+    );
+    assert_eq!(
+        host.database()
+            .history(&session.id, 4096)
+            .unwrap()
+            .history
+            .len(),
+        2
+    );
+    assert_eq!(server.requests().len(), 2);
+    host.close().unwrap();
+}
+
+#[test]
 fn embedded_application_declares_and_prepares_the_builtin_title_call() {
     let authored =
         WorkflowDefinition::from_json(include_str!("../workflows/conversation.json")).unwrap();
@@ -197,6 +255,17 @@ fn embedded_application_declares_and_prepares_the_builtin_title_call() {
         }
     );
     let plan = mf_chat::flows::conversation::plan().unwrap();
+    for (id, kind) in [
+        ("prepare_title", "mf_chat.title.prepare"),
+        ("finish", "mf_chat.conversation.finish"),
+    ] {
+        assert!(
+            plan.definition
+                .nodes
+                .iter()
+                .any(|node| node.id.as_str() == id && node.kind == kind)
+        );
+    }
     let call = plan
         .definition
         .nodes

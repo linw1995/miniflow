@@ -258,15 +258,15 @@ register_operation!(
 );
 
 #[derive(Clone, Debug, NodeValue)]
-struct TitleRequest {
+struct TitleGenerationContext {
     prompt: String,
-    context: crate::contract::ConversationContext,
+    context: crate::contract::TitleContext,
     model: mf_runtime::ValueRef,
     base_url: mf_runtime::ValueRef,
     api_key: mf_runtime::ValueRef,
 }
 
-impl TitleRequest {
+impl TitleGenerationContext {
     fn from_inputs(
         request: &ConversationInputs,
         parameters: Option<&WorkflowArguments>,
@@ -286,7 +286,7 @@ impl TitleRequest {
         };
         Ok(Some(Self {
             prompt: request.prompt.clone(),
-            context: context.clone(),
+            context: context.title.clone(),
             model: parameter("model")?,
             base_url: parameter("base_url")?,
             api_key: parameter("api_key")?,
@@ -295,10 +295,17 @@ impl TitleRequest {
 }
 
 #[derive(Clone, Debug, NodeValue)]
+struct ConversationCompleted {
+    database_path: String,
+    invocation: Invocation,
+    result: ConversationResult,
+    title_context: Option<TitleGenerationContext>,
+}
+
+#[derive(Clone, Debug, NodeValue)]
 struct InvocationEvent {
     preview: Option<PreviewEvent>,
-    response: Option<CompleteTurnInputs>,
-    title_request: Option<TitleRequest>,
+    completed: Option<ConversationCompleted>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -363,8 +370,8 @@ impl TypedStreamNode for InvokeWorkflow {
         if let Some(context) = &mut input.request.context {
             context.title.enabled = self.automatic_titles;
         }
-        let title_request =
-            TitleRequest::from_inputs(&input.request, self.title_parameters.as_ref())?;
+        let title_context =
+            TitleGenerationContext::from_inputs(&input.request, self.title_parameters.as_ref())?;
         let calls = &self.calls;
         let response = {
             let invocation = input.invocation.clone();
@@ -376,8 +383,7 @@ impl TypedStreamNode for InvokeWorkflow {
                                 invocation: invocation.clone(),
                                 delta,
                             }),
-                            response: None,
-                            title_request: None,
+                            completed: None,
                         },
                     }
                     .into(),
@@ -423,12 +429,12 @@ impl TypedStreamNode for InvokeWorkflow {
             InvocationEmission {
                 event: InvocationEvent {
                     preview: None,
-                    response: Some(CompleteTurnInputs {
+                    completed: Some(ConversationCompleted {
                         database_path: input.database_path,
                         invocation: input.invocation,
-                        response,
+                        result: response,
+                        title_context,
                     }),
-                    title_request,
                 },
             }
             .into(),
@@ -437,85 +443,145 @@ impl TypedStreamNode for InvokeWorkflow {
 }
 
 #[derive(NodeValue)]
-struct CompleteConversationInputs {
-    response: ConversationResult,
-    title: mf_runtime::Nullable<String>,
-    title_usages: Vec<crate::CallUsage>,
+struct PrepareTitleInputs {
+    completed: ConversationCompleted,
 }
 
-#[derive(NodeValue)]
-struct CompleteConversationOutputs {
-    response: ConversationResult,
+#[derive(Debug, Default, NodeValue)]
+struct PreparedTitle {
+    enabled: bool,
+    prompt: Option<String>,
+    text: Option<String>,
+    status: Option<String>,
+    context: Option<crate::contract::ConversationContext>,
+    model: Option<mf_runtime::ValueRef>,
+    base_url: Option<mf_runtime::ValueRef>,
+    api_key: Option<mf_runtime::ValueRef>,
 }
 
-fn complete_conversation(
-    mut input: CompleteConversationInputs,
-) -> Result<CompleteConversationOutputs, ChatError> {
-    if let mf_runtime::Nullable::Value(title) = input.title {
-        input.response.title = Some(title);
-    }
-    input.response.usages.extend(input.title_usages);
-    input.response.validate()?;
-    Ok(CompleteConversationOutputs {
-        response: input.response,
-    })
-}
+struct PrepareTitle;
 
-register_operation!(
-    "mf_chat.conversation.complete",
-    CompleteConversation,
-    CompleteConversationInputs,
-    CompleteConversationOutputs,
-    complete_conversation
-);
-
-struct CaptureCompletion {
-    calls: Arc<Mutex<crate::CallEventCollector>>,
-    delivered: Arc<Mutex<Option<ConversationResult>>>,
-}
-
-impl mf_runtime::TypedTaskNode for CaptureCompletion {
-    type Input = CompleteConversationInputs;
-    type Output = CompleteConversationOutputs;
+impl mf_runtime::TypedTaskNode for PrepareTitle {
+    type Input = PrepareTitleInputs;
+    type Output = PreparedTitle;
 
     fn execute(
         &self,
         input: Self::Input,
         _: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
-        let mut output = complete_conversation(input)?;
-        self.calls
-            .lock()
-            .expect("call events were not poisoned")
-            .apply(&mut output.response.usages);
-        *self
-            .delivered
-            .lock()
-            .expect("delivery state was not poisoned") = Some(output.response.clone());
-        Ok(output.into())
+        let completed = input.completed;
+        let enabled = completed.title_context.is_some()
+            && completed.result.status == "succeeded"
+            && completed.result.title.is_none()
+            && !completed.result.usages.iter().any(|usage| {
+                usage
+                    .attribution
+                    .as_ref()
+                    .and_then(|attribution| attribution.purpose.as_deref())
+                    == Some("title")
+            });
+        if !enabled {
+            return Ok(TypedNodeResult {
+                outputs: PreparedTitle::default(),
+                skipped: [
+                    "prompt", "text", "status", "context", "model", "base_url", "api_key",
+                ]
+                .map(String::from)
+                .into(),
+                loop_summary: None,
+            });
+        }
+        let title = completed
+            .title_context
+            .expect("enabled title has generation context");
+        Ok(PreparedTitle {
+            enabled: true,
+            prompt: Some(title.prompt),
+            text: Some(completed.result.text),
+            status: Some(completed.result.status),
+            context: Some(crate::contract::ConversationContext {
+                title: title.context,
+            }),
+            model: Some(title.model),
+            base_url: Some(title.base_url),
+            api_key: Some(title.api_key),
+        }
+        .into())
     }
 }
 
-#[derive(Debug, Default, NodeValue)]
+register_task!("mf_chat.title.prepare", PrepareTitle);
+
+#[derive(NodeValue)]
+struct FinishConversationInputs {
+    completed: ConversationCompleted,
+    title: mf_runtime::Nullable<String>,
+    title_usages: Vec<crate::CallUsage>,
+}
+
+impl FinishConversationInputs {
+    fn into_turn_completion(self) -> Result<CompleteTurnInputs, ChatError> {
+        let mut response = self.completed.result;
+        if let mf_runtime::Nullable::Value(title) = self.title {
+            response.title = Some(title);
+        }
+        response.usages.extend(self.title_usages);
+        response.validate()?;
+        Ok(CompleteTurnInputs {
+            database_path: self.completed.database_path,
+            invocation: self.completed.invocation,
+            response,
+        })
+    }
+}
+
+struct CompletionCapture {
+    calls: Arc<Mutex<crate::CallEventCollector>>,
+    delivered: Arc<Mutex<Option<ConversationResult>>>,
+}
+
+#[derive(Default)]
+struct FinishConversation {
+    capture: Option<CompletionCapture>,
+}
+
+impl mf_runtime::TypedTaskNode for FinishConversation {
+    type Input = FinishConversationInputs;
+    type Output = SettlementOutputs;
+
+    fn execute(
+        &self,
+        input: Self::Input,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
+        let mut completion = input.into_turn_completion()?;
+        if let Some(capture) = &self.capture {
+            capture
+                .calls
+                .lock()
+                .expect("call events were not poisoned")
+                .apply(&mut completion.response.usages);
+            *capture
+                .delivered
+                .lock()
+                .expect("delivery state was not poisoned") = Some(completion.response.clone());
+        }
+        Ok(settle(completion)?.into())
+    }
+}
+
+register_task!("mf_chat.conversation.finish", FinishConversation::default());
+
+#[derive(Debug, NodeValue)]
 struct RoutedEvent {
     preview: Option<PreviewEvent>,
-    database_path: Option<String>,
-    invocation: Option<Invocation>,
-    response: Option<ConversationResult>,
-    title_enabled: Option<bool>,
-    title_text: Option<String>,
-    title_status: Option<String>,
-    title_prompt: Option<String>,
-    title_context: Option<crate::contract::ConversationContext>,
-    title_model: Option<mf_runtime::ValueRef>,
-    title_base_url: Option<mf_runtime::ValueRef>,
-    title_api_key: Option<mf_runtime::ValueRef>,
+    completed: Option<ConversationCompleted>,
 }
 
 #[derive(Default)]
 struct RouteInvocation {
-    response: Option<CompleteTurnInputs>,
-    title_request: Option<TitleRequest>,
+    completed: Option<ConversationCompleted>,
 }
 
 impl mf_runtime::TypedEventNode for RouteInvocation {
@@ -530,14 +596,14 @@ impl mf_runtime::TypedEventNode for RouteInvocation {
         let (outputs, skipped) = match event {
             mf_runtime::NodeEvent::Input(input) => {
                 ensure!(
-                    self.response.is_none(),
+                    self.completed.is_none(),
                     InvalidSnafu {
                         field: "conversation event",
                         reason: "cannot follow the final response"
                     }
                 );
                 ensure!(
-                    input.event.preview.is_some() != input.event.response.is_some(),
+                    input.event.preview.is_some() != input.event.completed.is_some(),
                     InvalidSnafu {
                         field: "conversation event",
                         reason: "requires exactly one preview or final response"
@@ -548,72 +614,27 @@ impl mf_runtime::TypedEventNode for RouteInvocation {
                     (
                         RoutedEvent {
                             preview: Some(preview),
-                            ..Default::default()
+                            completed: None,
                         },
-                        vec![
-                            "database_path".into(),
-                            "invocation".into(),
-                            "response".into(),
-                            "title_enabled".into(),
-                            "title_text".into(),
-                            "title_status".into(),
-                            "title_prompt".into(),
-                            "title_context".into(),
-                            "title_model".into(),
-                            "title_base_url".into(),
-                            "title_api_key".into(),
-                        ],
+                        vec!["completed".into()],
                     )
                 } else {
-                    self.response = input.event.response;
-                    self.title_request = input.event.title_request;
+                    self.completed = input.event.completed;
                     return Ok(Default::default());
                 }
             }
             mf_runtime::NodeEvent::UpstreamClosed => {
-                let response = self.response.take().context(InvalidSnafu {
+                let completed = self.completed.take().context(InvalidSnafu {
                     field: "conversation event",
                     reason: "ended without a final response",
                 })?;
-                let title_enabled = self.title_request.is_some()
-                    && response.response.status == "succeeded"
-                    && response.response.title.is_none()
-                    && !response.response.usages.iter().any(|usage| {
-                        usage
-                            .attribution
-                            .as_ref()
-                            .and_then(|attribution| attribution.purpose.as_deref())
-                            == Some("title")
-                    });
-                let mut output = RoutedEvent {
-                    title_text: Some(response.response.text.clone()),
-                    title_status: Some(response.response.status.clone()),
-                    database_path: Some(response.database_path),
-                    invocation: Some(response.invocation),
-                    response: Some(response.response),
-                    title_enabled: Some(title_enabled),
-                    ..Default::default()
-                };
-                let mut skipped = vec!["preview".into()];
-                if let Some(request) = self.title_request.take() {
-                    output.title_prompt = Some(request.prompt);
-                    output.title_context = Some(request.context);
-                    output.title_model = Some(request.model);
-                    output.title_base_url = Some(request.base_url);
-                    output.title_api_key = Some(request.api_key);
-                } else {
-                    skipped.extend(
-                        [
-                            "title_prompt",
-                            "title_context",
-                            "title_model",
-                            "title_base_url",
-                            "title_api_key",
-                        ]
-                        .map(String::from),
-                    );
-                }
-                (output, skipped)
+                (
+                    RoutedEvent {
+                        preview: None,
+                        completed: Some(completed),
+                    },
+                    vec!["preview".into()],
+                )
             }
             mf_runtime::NodeEvent::Timer => return Ok(Default::default()),
         };
@@ -631,7 +652,7 @@ impl mf_runtime::TypedEventNode for RouteInvocation {
     }
 
     fn buffered_items(&self) -> Option<usize> {
-        Some(usize::from(self.response.is_some()))
+        Some(usize::from(self.completed.is_some()))
     }
 }
 
@@ -724,14 +745,16 @@ pub fn run_conversation_with_preview(
     *node = FlowNode::new(node.definition_id.clone(), bound);
     let completion = nodes
         .iter_mut()
-        .find(|node| node.definition_id.as_str() == "complete")
-        .expect("application conversation declares completion");
+        .find(|node| node.definition_id.as_str() == "finish")
+        .expect("application conversation declares finalization");
     *completion = FlowNode::new(
         completion.definition_id.clone(),
         PreparedNode::typed_task(
-            CaptureCompletion {
-                calls,
-                delivered: Arc::clone(&delivered),
+            FinishConversation {
+                capture: Some(CompletionCapture {
+                    calls,
+                    delivered: Arc::clone(&delivered),
+                }),
             },
             NodeMetadata::default(),
         )
@@ -961,12 +984,12 @@ mod tests {
     fn final_event() -> InvocationEmission {
         InvocationEmission {
             event: InvocationEvent {
-                title_request: None,
                 preview: None,
-                response: Some(CompleteTurnInputs {
+                completed: Some(ConversationCompleted {
                     database_path: "chat.sqlite".into(),
                     invocation: Invocation::new("session"),
-                    response: ConversationResult {
+                    title_context: None,
+                    result: ConversationResult {
                         text: "canonical".into(),
                         ..Default::default()
                     },
@@ -995,8 +1018,7 @@ mod tests {
                 NodeEvent::Input(InvocationEmission {
                     event: InvocationEvent {
                         preview: Some(preview.clone()),
-                        response: None,
-                        title_request: None,
+                        completed: None,
                     },
                 }),
                 &context,
@@ -1004,7 +1026,10 @@ mod tests {
             .unwrap();
         assert_eq!(effects.emissions.len(), 1);
         assert_eq!(effects.emissions[0].result.outputs.preview, Some(preview));
-        assert!(effects.emissions[0].result.skipped.contains("response"));
+        assert_eq!(
+            effects.emissions[0].result.skipped,
+            ["completed".into()].into()
+        );
         assert!(
             route
                 .on_event(NodeEvent::Input(final_event()), &context)
@@ -1026,9 +1051,10 @@ mod tests {
             effects.emissions[0]
                 .result
                 .outputs
-                .response
+                .completed
                 .as_ref()
                 .unwrap()
+                .result
                 .text,
             "canonical"
         );
@@ -1068,7 +1094,8 @@ mod tests {
             ]
             .into(),
         );
-        event.event.title_request = TitleRequest::from_inputs(&request, Some(&parameters)).unwrap();
+        event.event.completed.as_mut().unwrap().title_context =
+            TitleGenerationContext::from_inputs(&request, Some(&parameters)).unwrap();
         let decoded = InvocationEmission::from_values(event.into_values().unwrap()).unwrap();
         let mut route = RouteInvocation::default();
         assert!(
@@ -1079,14 +1106,74 @@ mod tests {
                 .is_empty()
         );
         let closed = route.on_event(NodeEvent::UpstreamClosed, &context).unwrap();
-        let output = &closed.emissions[0].result.outputs;
-        assert_eq!(output.title_enabled, Some(true));
-        assert_eq!(output.title_prompt.as_deref(), Some("Prompt"));
-        assert_eq!(output.title_text.as_deref(), Some("canonical"));
-        let api_key = output.title_api_key.as_ref().unwrap();
+        let completed = closed
+            .emissions
+            .into_iter()
+            .next()
+            .unwrap()
+            .result
+            .outputs
+            .completed
+            .unwrap();
+        let output = PrepareTitle
+            .execute(
+                PrepareTitleInputs { completed },
+                &mut ExecutionContext::default(),
+            )
+            .unwrap()
+            .outputs;
+        assert!(output.enabled);
+        assert_eq!(output.prompt.as_deref(), Some("Prompt"));
+        assert_eq!(output.text.as_deref(), Some("canonical"));
+        let api_key = output.api_key.as_ref().unwrap();
         assert_eq!(api_key.as_str(), Some("credential"));
         assert!(api_key.is_secret());
-        assert!(!output.title_model.as_ref().unwrap().is_secret());
+        assert!(!output.model.as_ref().unwrap().is_secret());
+    }
+
+    #[test]
+    fn title_preparation_preserves_workflow_owned_title_results() {
+        for reported_call in [false, true] {
+            let mut completed = final_event().event.completed.unwrap();
+            completed.title_context = Some(TitleGenerationContext {
+                prompt: "Prompt".into(),
+                context: crate::contract::TitleContext {
+                    source: "provisional".into(),
+                    revision: 0,
+                    attempted: false,
+                    enabled: true,
+                },
+                model: "model".into(),
+                base_url: "http://localhost/v1".into(),
+                api_key: mf_runtime::ValueRef::from("credential").into_secret(),
+            });
+            if reported_call {
+                completed.result.usages.push(serde_json::from_value(serde_json::json!({
+                    "call_id":"existing-title", "model":"model", "attribution":{"purpose":"title"}
+                })).unwrap());
+            } else {
+                completed.result.title = Some("Workflow title".into());
+            }
+            let prepared = PrepareTitle
+                .execute(
+                    PrepareTitleInputs { completed },
+                    &mut ExecutionContext::default(),
+                )
+                .unwrap();
+            assert!(!prepared.outputs.enabled);
+            assert!(prepared.skipped.contains("prompt"));
+            assert!(prepared.skipped.contains("api_key"));
+            assert_eq!(
+                prepared
+                    .outputs
+                    .into_values()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["enabled"]
+            );
+        }
     }
 
     #[test]
@@ -1104,8 +1191,7 @@ mod tests {
                     NodeEvent::Input(InvocationEmission {
                         event: InvocationEvent {
                             preview: None,
-                            response: None,
-                            title_request: None,
+                            completed: None,
                         },
                     }),
                     &context

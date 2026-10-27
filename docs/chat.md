@@ -58,8 +58,9 @@ submission executes the embedded application `conversation` flow:
 ```mermaid
 flowchart LR
     Begin["mf_chat.turn.begin: load history and context"] --> Invoke["mf_chat.workflow.invoke: user workflow"]
-    Invoke --> Title["Optional workflow.call: mf-chat.chat-title"]
-    Title --> Settle["mf_chat.turn.settle: persist result"]
+    Invoke --> Prepare["mf_chat.title.prepare"]
+    Prepare --> Title["Optional workflow.call: mf-chat.chat-title"]
+    Title --> Finish["mf_chat.conversation.finish: persist result"]
 ```
 
 The invocation node binds a `ConversationBackend` supplied by the host. Both the embedded Rust backend
@@ -111,9 +112,11 @@ Defaults, environment bindings, and secret markers are preserved. Missing or amb
 this feature; a declared `title` output leaves title generation to the user workflow. A returned title
 or usage attributed to `title` also prevents a duplicate call.
 
-The embedded application graph calls `mf-chat.chat-title` through `workflow.call` after the chat
-stream closes, then passes the combined response and usages to `mf_chat.turn.settle`, which saves
-the generated title through the existing turn-completion transaction. The shared title Flow is
+After the chat stream closes, the route publishes one `ConversationCompleted` event.
+`mf_chat.title.prepare` prepares the optional title call and supplies the inputs to the
+`workflow.call` of `mf-chat.chat-title`. `mf_chat.conversation.finish` combines the completed
+conversation with the title result and saves it through the existing turn-completion transaction.
+The route does not interpret title policy or expose model-specific ports. The shared title Flow is
 unchanged. `HostConfig::automatic_titles = false` disables the call. Custom `ConversationBackend`
 implementations can supply resolved inputs through `builtin_title_parameters`; its default is disabled.
 
@@ -301,7 +304,7 @@ records, validates deltas, and retains the final conversation result until execu
 
 `workflows/conversation.json` owns incremental processing: `begin` admits the turn, `workflow.invoke`
 emits application invocation events, and `route` publishes previews while retaining the final response.
-The route releases settlement inputs only after the backend producer closes successfully. Preview and
+The route releases the completed-conversation event only after the backend producer closes successfully. Preview and
 settlement deliveries share one ordered message domain, so unread previews cannot be overtaken by a save.
 The host consumes these Flow outputs; it does not forward raw model events around the application graph.
 
@@ -463,8 +466,8 @@ through its chosen branches and accumulators. Successful status permits absent o
 ## Persistence and recovery
 
 The embedded application flow uses `mf_chat.turn.begin`, a host-bound `mf_chat.workflow.invoke`, and
-`mf_chat.turn.settle` for both backends. The settlement node handles successful or failed protocol
-results; it does not implement model failure policy. Save-only retry and cleanup after an aborted graph
+`mf_chat.conversation.finish` for both backends. The finishing node combines the chat and title results
+and uses the existing storage handlers; it does not implement model failure policy. Save-only retry and cleanup after an aborted graph
 remain direct storage operations so cancellation cannot prevent finalization.
 
 Direct API callers can allocate an `Invocation`, durably begin its turn, and pass the resulting request to `contract.arguments`.
