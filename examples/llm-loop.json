@@ -8,6 +8,10 @@
     "llm": {
       "package": "mfn-llm",
       "path": "../crates/builtin-nodes/llm"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
     }
   },
   "nodes": [
@@ -42,16 +46,10 @@
                 "api_key_env": "MODEL_API_KEY"
               },
               "inputs": {
-                "prompt": {
+                "messages": {
                   "from": {
-                    "node": "%loop",
-                    "port": "prompt"
-                  }
-                },
-                "history": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "history"
+                    "node": "chat_messages",
+                    "port": "messages"
                   }
                 }
               }
@@ -65,8 +63,8 @@
               "inputs": {
                 "value": {
                   "from": {
-                    "node": "chat",
-                    "port": "history"
+                    "node": "chat_history",
+                    "port": "value"
                   }
                 }
               }
@@ -85,16 +83,79 @@
                   }
                 }
               }
+            },
+            {
+              "id": "chat_messages",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "prompt": "string",
+                  "history": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "messages": "history + [dyn({'role':'user','content':prompt})]",
+                  "history": "history + [dyn({'role':'user','content':prompt})]"
+                }
+              },
+              "inputs": {
+                "prompt": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "prompt"
+                  }
+                },
+                "history": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "history"
+                  }
+                }
+              }
+            },
+            {
+              "id": "chat_history",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "history": {
+                    "list": "object"
+                  },
+                  "message": "object"
+                },
+                "code": {
+                  "value": "history + [message]"
+                }
+              },
+              "inputs": {
+                "history": {
+                  "from": {
+                    "node": "chat_messages",
+                    "port": "history"
+                  }
+                },
+                "message": {
+                  "from": {
+                    "node": "chat",
+                    "port": "message"
+                  }
+                }
+              }
             }
           ],
           "clusters": [
             {
               "label": "Conversation turn",
-              "annotation": "Call the model with the current history, then save its updated history and answer.",
+              "annotation": "Build request messages, call the model, and append the returned message to loop history.",
               "nodes": [
                 "chat",
                 "remember",
-                "answer"
+                "answer",
+                "chat_messages",
+                "chat_history"
               ]
             }
           ]

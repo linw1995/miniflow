@@ -123,7 +123,7 @@ fn parameter_templates_configure_memory_and_standalone_llm_requests() {
             attribution["profile"] = profile.into();
         }
         let inputs = json!({"params.api_key":key, "params.base_url":server.base_url,
-            "params.model":model, "params.prompt":"Hello", "params.temperature":temperature,
+            "params.model":model, "params.messages":[{"role":"user","content":"Hello"}], "params.temperature":temperature,
             "params.max_tokens":max_tokens, "params.call_attribution":attribution});
         let output = stable(run(&executable, &inputs));
         assert_eq!(output[0]["usages"][0]["attribution"], attribution);
@@ -207,7 +207,7 @@ fn invalid_dynamic_configuration_retains_safe_typed_errors() {
         let recording = Snapshots::memory();
         let mut context = ExecutionContext::default();
         context.set_snapshot_recorder(recording.recorder());
-        context.set_workflow_arguments(arguments(&json!({"params.api_key":"synthetic-key", "params.prompt":"Hello", "params.invalid":value})));
+        context.set_workflow_arguments(arguments(&json!({"params.api_key":"synthetic-key", "params.messages":[{"role":"user","content":"Hello"}], "params.invalid":value})));
         let error = flow.execute_in_context(&mut context).unwrap_err();
         let snapshot = recording.current();
         assert_eq!(
@@ -298,7 +298,8 @@ fn configure(value: &mut Value, server: &Server) {
 fn dependencies() -> Value {
     json!({
         "core": {"package": "mfn-core", "path": common::crates_dir().join("builtin-nodes/core")},
-        "llm": {"package": "mfn-llm", "path": common::crates_dir().join("builtin-nodes/llm")}
+        "llm": {"package": "mfn-llm", "path": common::crates_dir().join("builtin-nodes/llm")},
+        "code": {"package":"mfn-code", "path": common::crates_dir().join("builtin-nodes/code")}
     })
 }
 
@@ -355,7 +356,7 @@ fn llm_workflows_match_memory_and_standalone_runners() {
                 &fs::read_to_string(workspace.join("examples/llm-terminal.json")).unwrap(),
             )
             .unwrap(),
-            json!({"chat.prompt":"Hello", "chat.system":"Answer briefly", "chat.history":[{"role": "user", "content": "prior"}, {"role": "assistant", "content": "earlier reply"}]}),
+            json!({"chat.messages":[{"role":"system","content":"Answer briefly"},{"role":"user","content":"prior"},{"role":"assistant","content":"earlier reply"},{"role":"user","content":"Hello"}]}),
             1,
         ),
         (
@@ -367,8 +368,8 @@ fn llm_workflows_match_memory_and_standalone_runners() {
             2,
         ),
         (
-            json!({"version": "2026-10-03", "nodes": [{"id": "iteration", "kind": "builtin.iteration", "config": {"mode": "parallel", "on_error": "terminate", "body": {"nodes": [{"id": "chat", "kind": "builtin.llm"}], "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "chat", "to_input": "prompt"}], "result": {"node": "chat", "port": "text"}}}}], "outputs": [{"name": "results", "node": "iteration", "port": "results"}]}),
-            json!({"iteration.items":["one", "two"]}),
+            json!({"version": "2026-10-03", "nodes": [{"id": "iteration", "kind": "builtin.iteration", "config": {"mode": "parallel", "on_error": "terminate", "body": {"nodes": [{"id": "chat", "kind": "builtin.llm"}], "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "chat", "to_input": "messages"}], "result": {"node": "chat", "port": "text"}}}}], "outputs": [{"name": "results", "node": "iteration", "port": "results"}]}),
+            json!({"iteration.items":[[{"role":"user","content":"one"}],[{"role":"user","content":"two"}]]}),
             2,
         ),
     ];
@@ -418,6 +419,171 @@ fn llm_workflows_match_memory_and_standalone_runners() {
 }
 
 #[test]
+fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
+    fn stabilize(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                for (name, value) in fields {
+                    match name.as_str() {
+                        "call_id" | "model_call_id" => *value = json!("generated"),
+                        "started_at" => *value = json!(0),
+                        _ => stabilize(value),
+                    }
+                }
+            }
+            Value::Array(values) => values.iter_mut().for_each(stabilize),
+            _ => {}
+        }
+    }
+    let calls = json!([
+        {"id":"call_lookup_42","type":"function","function":{"name":"lookup","arguments":"{\"id\":42}"}},
+        {"id":"call_lookup_43","type":"function","function":{"name":"lookup","arguments":"{\"id\":43}"}}
+    ]);
+    let unary = Reply::json(json!({
+        "id":"tool-response", "object":"chat.completion", "created":0, "model":"example-model",
+        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":calls},"finish_reason":"tool_calls"}],
+        "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}
+    }));
+    let mut streamed = Reply::stream_text("");
+    let mut streamed_calls = calls.clone();
+    for (index, call) in streamed_calls
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        call["index"] = json!(index);
+    }
+    let chunk = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":streamed_calls},"finish_reason":null}]});
+    let finish = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+    streamed.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    for (stream, reply) in [(false, unary), (true, streamed)] {
+        let completion = if stream {
+            Reply::stream_text("Both items are available")
+        } else {
+            Reply::text("Both items are available")
+        };
+        let server = Server::start(vec![reply.clone(), reply, completion.clone(), completion]);
+        let mut definition: Value =
+            serde_json::from_str(include_str!("../../../examples/llm-tools.json")).unwrap();
+        definition["dependencies"] = dependencies();
+        definition["nodes"][0]["config"] = json!({"model":"example-model","base_url":server.base_url,"api_key_env":"MODEL_API_KEY"});
+        definition["nodes"][0]["inputs"] = json!({
+            "messages":{"from":{"node":"input","port":"messages"}},
+            "tools":{"from":{"node":"input","port":"tools"}},
+            "tool_results":{"from":{"node":"input","port":"tool_results"}}
+        });
+        definition["nodes"].as_array_mut().unwrap().push(json!({
+            "id":"input","kind":"builtin.parameters","config":{"parameters":{
+                "messages":{"type":{"list":"object"},"secret":false},
+                "tools":{"type":{"list":"object"},"default":[],"secret":false},
+                "tool_results":{"type":{"list":"object"},"default":[],"secret":false}
+            }}
+        }));
+        if stream {
+            definition["execution"] = json!({});
+            definition["nodes"].as_array_mut().unwrap().extend([
+                json!({"id":"text_preview","kind":"builtin.identity","inputs":{"input":{"from":{"node":"model","port":"delta"}}}}),
+                json!({"id":"tool_preview","kind":"builtin.identity","inputs":{"input":{"from":{"node":"model","port":"tool_call"}}}}),
+            ]);
+            definition["outputs"].as_array_mut().unwrap().extend([
+                json!({"name":"text_delta","node":"text_preview","port":"value","optional":true}),
+                json!({"name":"tool_delta","node":"tool_preview","port":"value","optional":true}),
+            ]);
+        }
+        let inputs = json!({
+            "input.messages":[{"role":"user","content":"Look up 42 and 43"}],
+            "input.tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}]
+        });
+        let root = tempfile::tempdir().unwrap();
+        let executable = compile(&definition, root.path());
+        assert!(server.requests().is_empty());
+        let mut memory = run_memory(&definition, &inputs);
+        let mut generated = run(&executable, &inputs);
+        for outputs in [&mut memory, &mut generated] {
+            outputs.iter_mut().for_each(stabilize);
+            outputs.sort_by_key(Value::to_string);
+        }
+        assert_eq!(memory, generated);
+        let terminal = generated
+            .iter()
+            .find(|output| output.get("outcome").is_some())
+            .unwrap();
+        assert_eq!(terminal["outcome"], "tool_calls");
+        assert_eq!(terminal["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(terminal["message"]["tool_calls"], terminal["tool_calls"]);
+        assert_eq!(terminal["tool_calls"][0]["arguments"], json!({"id":42}));
+        assert_eq!(terminal["tool_calls"][1]["arguments"], json!({"id":43}));
+        assert_eq!(terminal["usages"][0]["node"]["kind"], "builtin.llm");
+        if stream {
+            let deltas = generated
+                .iter()
+                .filter_map(|output| output.get("tool_delta"))
+                .collect::<Vec<_>>();
+            assert_eq!(deltas.len(), 2);
+            assert!(
+                generated
+                    .iter()
+                    .all(|output| output.get("text_delta").is_none())
+            );
+            for call in terminal["tool_calls"].as_array().unwrap() {
+                assert!(deltas.iter().any(|delta| delta["call"] == *call));
+            }
+        }
+        assert_eq!(server.requests().len(), 2);
+        assert_eq!(
+            server.requests()[0].body["stream"]
+                .as_bool()
+                .unwrap_or(false),
+            stream
+        );
+
+        let results = json!([
+            {"tool_call_id":terminal["tool_calls"][1]["id"],"content":"{\"id\":43,\"available\":true}"},
+            {"tool_call_id":terminal["tool_calls"][0]["id"],"content":"{\"id\":42,\"available\":true}"}
+        ]);
+        let continuation = json!({"input.messages":[
+            inputs["input.messages"][0], terminal["message"]
+        ],"input.tool_results":results});
+        let mut memory = run_memory(&definition, &continuation);
+        let mut generated = run(&executable, &continuation);
+        for outputs in [&mut memory, &mut generated] {
+            outputs.iter_mut().for_each(stabilize);
+            outputs.sort_by_key(Value::to_string);
+        }
+        assert_eq!(memory, generated);
+        let completed = generated
+            .iter()
+            .find(|output| output.get("outcome").is_some())
+            .unwrap();
+        assert_eq!(completed["outcome"], "completed");
+        assert_eq!(completed["text"], "Both items are available");
+        assert_eq!(completed["tool_calls"], json!([]));
+        assert_eq!(completed["message"]["content"], "Both items are available");
+        assert!(
+            generated
+                .iter()
+                .all(|output| output.get("tool_delta").is_none())
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[2..] {
+            let sent = request.body["messages"].as_array().unwrap();
+            assert_eq!(sent.len(), 4);
+            assert_eq!(sent[0], inputs["input.messages"][0]);
+            assert_eq!(sent[1]["role"], "assistant");
+            assert_eq!(sent[1]["tool_calls"], calls);
+            for (sent, result) in sent[2..].iter().zip(results.as_array().unwrap()) {
+                assert_eq!(
+                    *sent,
+                    json!({"role":"tool","tool_call_id":result["tool_call_id"],"content":result["content"]})
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
     let root = tempfile::tempdir().unwrap();
     let input = root.path().join("prompts.txt");
@@ -426,9 +592,9 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
     let mut value = json!({
         "version": "2026-10-03", "execution": {"limits": {"workers": 1, "max_pending_messages": 2}},
         "dependencies": dependencies(),
-        "nodes": [{"id": "read", "kind": "builtin.readline"}, {"id": "chat", "kind": "builtin.llm"}],
-        "edges": [{"from_node": "read", "from_output": "line", "to_node": "chat", "to_input": "prompt"}],
-        "outputs": [{"name": "text", "node": "chat", "port": "text"}, {"name": "history", "node": "chat", "port": "history"}]
+        "nodes": [{"id":"read","kind":"builtin.readline"}, {"id":"request","kind":"builtin.code","config":{"language":"cel","inputs":{"prompt":"string"},"code":{"messages":"[{'role':'user','content':prompt}]"}}}, {"id":"chat","kind":"builtin.llm"}],
+        "edges": [{"from_node":"read","from_output":"line","to_node":"request","to_input":"prompt"}, {"from_node":"request","from_output":"messages","to_node":"chat","to_input":"messages"}],
+        "outputs": [{"name":"text","node":"chat","port":"text"}, {"name":"message","node":"chat","port":"message","optional":true}]
     });
     configure(&mut value, &server);
     let inputs = json!({"read.path":input});
@@ -444,12 +610,12 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
         "version": "2026-10-03", "dependencies": dependencies(),
         "nodes": [
             {"id": "enabled", "kind": "builtin.constant", "config": {"value": false}},
-            {"id": "prompt", "kind": "builtin.constant", "config": {"value": "Hello"}},
+            {"id":"request","kind":"builtin.constant","config":{"value":[{"role":"user","content":"Hello"}]}},
             {"id": "gate", "kind": "builtin.if_else", "config": {"branches": [{"id": "go", "condition": {"source": {"output": "enabled.value", "path": ""}, "operator": "eq", "value": true}}]}},
             {"id": "chat", "kind": "builtin.llm"}
         ],
         "control_edges": [{"from_node": "enabled", "from_output": "value", "to_node": "gate"}, {"from_node": "gate", "from_output": "go", "to_node": "chat"}],
-        "edges": [{"from_node": "prompt", "from_output": "value", "to_node": "chat", "to_input": "prompt"}],
+        "edges": [{"from_node":"request","from_output":"value","to_node":"chat","to_input":"messages"}],
         "outputs": [{"name": "text", "node": "chat", "port": "text", "optional": true}]
     });
     configure(&mut skipped, &server);

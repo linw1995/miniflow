@@ -157,16 +157,10 @@
         }
       },
       "inputs": {
-        "prompt": {
+        "messages": {
           "from": {
-            "node": "title_prompt",
-            "port": "value"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "title_system",
-            "port": "value"
+            "node": "title_model_messages",
+            "port": "messages"
           }
         }
       }
@@ -224,6 +218,34 @@
               "port": "value"
             }
           ]
+        }
+      }
+    },
+    {
+      "id": "title_model_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "system": "string"
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [{'role':'system','content':system}]) + [] + [{'role':'user','content':prompt}]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "title_prompt",
+            "port": "value"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "title_system",
+            "port": "value"
+          }
         }
       }
     }

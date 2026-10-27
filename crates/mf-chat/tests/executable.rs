@@ -156,8 +156,8 @@ fn history_metadata_round_trips_through_argument_binding() {
                 context: None,
                 prompt: "continue".into(),
                 system: None,
-                history: Some(vec![mfn_llm::ChatMessage {
-                    role: "assistant".into(),
+                history: Some(vec![mfn_llm::ChatMessage::Assistant {
+                    tool_calls: None,
                     content: "prior reply".into(),
                     metadata: Some(metadata.clone()),
                 }]),
@@ -165,17 +165,15 @@ fn history_metadata_round_trips_through_argument_binding() {
             &parameters(&contract),
         )
         .unwrap();
-    let values = mf_runtime::NodeValues::from([
-        ("prompt".into(), arguments.0["params.prompt"].clone()),
-        ("history".into(), arguments.0["params.history"].clone()),
-    ]);
+    let values =
+        mf_runtime::NodeValues::from([("messages".into(), arguments.0["params.history"].clone())]);
     assert_eq!(
-        mfn_llm::LlmInputs::from_values(values)
-            .unwrap()
-            .history
-            .unwrap()[0]
-            .metadata,
-        Some(metadata)
+        mfn_llm::LlmInputs::from_values(values).unwrap().messages[0],
+        mfn_llm::ChatMessage::Assistant {
+            content: "prior reply".into(),
+            tool_calls: None,
+            metadata: Some(metadata),
+        }
     );
 }
 
@@ -205,7 +203,12 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
         extra.config["base_url"] = json!(first.base_url);
         definition.nodes[1].config["base_url"] = json!(second.base_url);
         definition.nodes.push(extra);
-        for mut edge in definition.edges.clone() {
+        for mut edge in definition
+            .edges
+            .clone()
+            .into_iter()
+            .filter(|edge| edge.to_node.as_str() == "chat")
+        {
             edge.to_node = "first".into();
             definition.edges.push(edge);
         }
@@ -300,10 +303,14 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
             response.status = 503;
         }
         let server = Server::start(vec![response, Reply::text("second reply")]);
-        let definition = mf_runtime::WorkflowDefinition::from_json(include_str!(
+        let mut definition = mf_runtime::WorkflowDefinition::from_json(include_str!(
             "../../../examples/chat-loop-flow.json"
         ))
         .unwrap();
+        definition.outputs.push(
+            serde_json::from_value(json!({"name":"history","node":"repeat","port":"history"}))
+                .unwrap(),
+        );
         let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
         let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
         let contract = ChatContract::from_manifest(&plan.manifest(&registry).unwrap()).unwrap();
@@ -311,11 +318,17 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         parameters
             .0
             .insert("params.base_url".into(), server.base_url.clone().into());
+        let previous = json!([{"role":"user","content":"prior question"},{"role":"assistant","content":"prior answer","metadata":{"tags":["retained"],"count":1}}]);
         let input = mf_chat::ConversationInputs {
             context: None,
             prompt: "hello".into(),
-            system: None,
-            history: None,
+            system: Some("Keep context".into()),
+            history: Some(
+                <Vec<mfn_llm::ChatMessage> as mf_runtime::InputValue>::decode(
+                    previous.clone().into(),
+                )
+                .unwrap(),
+            ),
         };
         let outputs = mf_compiler::execute_compiled_with_inputs(
             &plan,
@@ -325,6 +338,17 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         )
         .unwrap();
         let result = serde_json::to_value(&outputs).unwrap();
+        let mut expected = previous.as_array().unwrap().clone();
+        if !failed {
+            expected.extend(json!([{"role":"user","content":"hello"},{"role":"assistant","content":"reply"},{"role":"user","content":"hello"},{"role":"assistant","content":"second reply"}]).as_array().unwrap().iter().cloned());
+        }
+        assert_eq!(result["history"], json!(expected));
+        assert!(
+            server
+                .requests()
+                .iter()
+                .all(|request| !request.body.to_string().contains("retained"))
+        );
         let calls = result["usages"].as_array().unwrap();
         assert_eq!(calls.len(), if failed { 1 } else { 2 });
         assert_eq!(server.requests().len(), calls.len());

@@ -316,10 +316,10 @@ mod tests {
             assert_eq!(call.input_tokens, Some(tokens));
             assert_eq!(call.result_text, original.result_text);
             assert_eq!(call.metadata, metadata);
-            assert_eq!(
-                reopened.history(&session.id, 1024).unwrap().history[1].metadata,
-                metadata
-            );
+            assert!(matches!(
+                &reopened.history(&session.id, 1024).unwrap().history[1],
+                mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &metadata
+            ));
             assert_eq!(
                 model_calls::table
                     .find(&begun.invocation.call_id)

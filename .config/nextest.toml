@@ -70,7 +70,8 @@ binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-compiler::llm_workflows) & (
     test(=llm_workflows_match_memory_and_standalone_runners) |
     test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
-    test(=parameter_templates_configure_memory_and_standalone_llm_requests)
+    test(=parameter_templates_configure_memory_and_standalone_llm_requests) |
+    test(=tool_calls_match_memory_and_standalone_runners)
 )) |
 (binary_id(=mf-compiler::success_dependencies) &
     test(=standalone_success_dependencies_match_memory_and_preserve_manifests)) |
@@ -170,7 +171,8 @@ binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-compiler::llm_workflows) & (
     test(=llm_workflows_match_memory_and_standalone_runners) |
     test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
-    test(=parameter_templates_configure_memory_and_standalone_llm_requests)
+    test(=parameter_templates_configure_memory_and_standalone_llm_requests) |
+    test(=tool_calls_match_memory_and_standalone_runners)
 )) |
 (binary_id(=mf-compiler::success_dependencies) &
     test(=standalone_success_dependencies_match_memory_and_preserve_manifests)) |

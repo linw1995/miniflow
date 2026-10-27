@@ -670,7 +670,11 @@ fn loop_conversations() {
                     );
                     if prompt == "first turn" {
                         let CompletionState::Committed(completion) = resolution.state else {
-                            panic!("expected committed loop result")
+                            panic!(
+                                "expected committed loop result: {:?}; requests: {}",
+                                resolution.state,
+                                server.requests().len()
+                            )
                         };
                         assert_eq!(completion.result.text, "final answer");
                         assert_eq!(completion.result.usages.len(), 2);
@@ -701,10 +705,10 @@ fn loop_conversations() {
         .unwrap()
         .history;
     assert_eq!(history.len(), 2);
-    assert_eq!(
-        serde_json::to_value(&history[1].metadata).unwrap(),
-        serde_json::json!({"strategy":"iterative"})
-    );
+    assert!(matches!(&history[1],
+        mfn_llm::ChatMessage::Assistant { metadata: Some(metadata), .. }
+            if serde_json::to_value(metadata).unwrap() == serde_json::json!({"strategy":"iterative"})
+    ));
     for invocation in &invocations {
         let call = database.call(&invocation.call_id).unwrap();
         let usages = call.usages.unwrap();
