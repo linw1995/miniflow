@@ -1,3 +1,5 @@
+mod call_bindings;
+pub use call_bindings::CallBindingError;
 mod calls;
 mod flow_sources;
 pub use flow_sources::{

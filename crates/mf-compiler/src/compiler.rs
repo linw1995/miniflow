@@ -37,6 +37,11 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("node `{definition_id}` call outputs: {source}"))]
+    CallOutputs {
+        definition_id: DefinitionId,
+        source: mf_runtime::CallContractError,
+    },
     #[snafu(transparent)]
     FlowResolution { source: crate::FlowResolutionError },
     #[snafu(
@@ -361,20 +366,15 @@ impl TypeInferenceState {
                         input_type: Box::new(input.value_type.clone()),
                     }
                 })?;
-            } else if source.value_type.compatibility_with(&input.value_type)
-                == TypeCompatibility::Incompatible
-            {
-                return Err(WorkflowCompileError::IncompatiblePortTypes {
-                    from_node: source_id,
-                    from_output: dependency
-                        .source_output()
-                        .expect("input output source")
-                        .to_owned(),
-                    output_type: Box::new(source.value_type.clone()),
-                    to_node: id.clone(),
-                    to_input: input_name.to_owned(),
-                    input_type: Box::new(input.value_type.clone()),
-                });
+            } else {
+                validate_connection_types(
+                    &source_id,
+                    dependency.source_output().expect("input output source"),
+                    &source.value_type,
+                    id,
+                    input_name,
+                    &input.value_type,
+                )?;
             }
             let value_type = if source.value_type.is_assignable_to(&input.value_type) {
                 source.value_type.clone()
@@ -493,6 +493,28 @@ impl TypeInferenceState {
     }
 }
 
+pub fn validate_connection_types(
+    from_node: &DefinitionId,
+    from_output: &str,
+    output_type: &ValueType,
+    to_node: &DefinitionId,
+    to_input: &str,
+    input_type: &ValueType,
+) -> Result<(), WorkflowCompileError> {
+    ensure!(
+        output_type.compatibility_with(input_type) != TypeCompatibility::Incompatible,
+        IncompatiblePortTypesSnafu {
+            from_node: from_node.clone(),
+            from_output,
+            output_type: Box::new(output_type.clone()),
+            to_node: to_node.clone(),
+            to_input,
+            input_type: Box::new(input_type.clone()),
+        }
+    );
+    Ok(())
+}
+
 pub fn validate_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
@@ -520,6 +542,7 @@ pub fn prepare_definition_with_layouts(
             registry,
             body_layouts,
             path: Vec::new(),
+            call_targets: BTreeSet::new(),
         },
         None,
         false,
@@ -530,6 +553,27 @@ struct GraphPreparation<'a> {
     registry: &'a NodeRegistry,
     body_layouts: Option<&'a mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
     path: Vec<DefinitionId>,
+    call_targets: BTreeSet<DefinitionId>,
+}
+
+pub fn prepare_call_scope(
+    definition: &WorkflowDefinition,
+    registry: &NodeRegistry,
+    call_targets: BTreeSet<DefinitionId>,
+) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
+    crate::loops::validate_structure(definition)?;
+    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
+    prepare_graph(
+        definition,
+        &mut GraphPreparation {
+            registry,
+            body_layouts: None,
+            path: Vec::new(),
+            call_targets,
+        },
+        None,
+        false,
+    )
 }
 
 fn prepare_graph(
@@ -575,12 +619,22 @@ fn prepare_graph(
     let startup = definition.version.supports_startup_inputs()
         && enclosing.is_none()
         && !allow_iteration_input;
-    validate_base_metadata(definition, &nodes, &incoming, startup)?;
+    let empty_targets = BTreeSet::new();
+    let call_targets = if preparation.path.is_empty() {
+        &preparation.call_targets
+    } else {
+        &empty_targets
+    };
+    validate_base_metadata(definition, &nodes, &incoming, startup, call_targets)?;
     if startup {
         crate::workflow_input_schema(
-            nodes
-                .iter()
-                .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
+            nodes.iter().map(|node| {
+                (
+                    node,
+                    !incoming.contains_key(node.definition_id.as_str())
+                        && !call_targets.contains(&node.definition_id),
+                )
+            }),
             |node, input| {
                 definition
                     .edges
@@ -665,6 +719,7 @@ fn validate_base_metadata(
     nodes: &[FlowNode],
     incoming: &BTreeMap<&str, Vec<ExecutionDependency<'_>>>,
     startup: bool,
+    call_targets: &BTreeSet<DefinitionId>,
 ) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
@@ -679,6 +734,11 @@ fn validate_base_metadata(
     };
     let mut output_index = BTreeMap::new();
     for node in nodes {
+        node.metadata
+            .validate_call_outputs()
+            .context(CallOutputsSnafu {
+                definition_id: node.definition_id.clone(),
+            })?;
         let ports = registrations[&node.definition_id];
         for (name, binding) in &ports.input_bindings {
             let port = ports
@@ -853,7 +913,9 @@ fn validate_base_metadata(
 
     for node in &definition.nodes {
         let registration = registrations[&node.id];
-        if startup && !incoming.contains_key(node.id.as_str()) {
+        // Call-owned inputs are validated after explicit external bindings have been resolved.
+        if call_targets.contains(&node.id) || (startup && !incoming.contains_key(node.id.as_str()))
+        {
             continue;
         }
         for port in registration
@@ -1419,6 +1481,7 @@ pub fn instantiate_compiled_with_observation(
             && let WorkflowCompileError::NodeConstruction { definition_id, .. }
             | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
             | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
+            | WorkflowCompileError::CallOutputs { definition_id, .. }
             | WorkflowCompileError::TypedGeneration { definition_id, .. }
             | WorkflowCompileError::OutputDerivation { definition_id, .. }
             | WorkflowCompileError::PortTypeDepth { definition_id, .. }
@@ -1636,6 +1699,7 @@ pub fn resolve_nodes(
             registry,
             body_layouts: None,
             path: Vec::new(),
+            call_targets: BTreeSet::new(),
         },
         None,
         false,

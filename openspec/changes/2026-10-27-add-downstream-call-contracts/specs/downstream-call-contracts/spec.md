@@ -1,5 +1,72 @@
 ## ADDED Requirements
 
+### Requirement: Declare call outputs independently
+
+Providers SHALL declare explicit call output slots separately from ordinary and stream outputs.
+Preparation SHALL reject overlapping namespaces, invalid names, and excessive type nesting. Ordinary
+result publication and output references MUST NOT treat call slots as terminal or stream outputs.
+
+#### Scenario: Preserve ordinary output validation
+
+- **WHEN** a task declares required call slots but produces only its ordinary terminal result
+- **THEN** ordinary execution does not require values for the unused call slots
+- **AND** ordinary data edges cannot reference those call slots
+
+#### Scenario: Detect call output drift
+
+- **WHEN** a provider changes a nonempty call-output contract after generated metadata was frozen
+- **THEN** the shared metadata comparison rejects the change
+- **AND** providers without call slots retain their previous serialized metadata shape
+
+### Requirement: Resolve calls through prepared node contracts
+
+Compiler call resolution SHALL reuse normal node preparation, type compatibility, and exclusive-branch
+proofs. Only declared call targets in the current root scope MAY defer input completeness validation
+until caller mappings and external bindings have been resolved.
+
+#### Scenario: Resolve a partially bound target
+
+- **WHEN** a target receives a token through ordinary data connections and query through a caller mapping
+- **THEN** call preparation resolves the query binding after preparing the token producer's inferred type
+- **AND** ordinary workflow preparation still rejects the same missing query without call declarations
+
+#### Scenario: Keep nested scope validation strict
+
+- **WHEN** preparing a call scope containing a nested Flow or Loop
+- **THEN** root call-target declarations do not waive input requirements inside that nested body
+
+### Requirement: Validate caller arguments against resolved ownership
+
+A resolved binding SHALL validate supplied names against its explicit-output and default-input
+namespaces, then check requiredness and both source and destination value contracts. A successful
+binding SHALL return caller-owned values under target input names, preserving sharing and sensitivity.
+External and omitted inputs MUST NOT be inserted, read, or overridden by this operation. A failed
+binding MUST NOT expose a partial result or execute a node.
+
+#### Scenario: Preserve source and target constraints
+
+- **WHEN** a broad source feeds a narrow target, or a narrow source feeds a broad target
+- **THEN** argument binding validates the value against both declarations using runtime type rules
+- **AND** failures retain typed causes and nested value paths
+
+#### Scenario: Scope required outputs to the selected binding
+
+- **WHEN** a Parent declares outputs for multiple callable bindings
+- **THEN** a selected binding requires only its own mapped outputs and defaults
+- **AND** a shared mapped output must satisfy every destination in that binding
+
+#### Scenario: Preserve control dependencies without claiming parameters
+
+- **WHEN** a target has output-control or node-success prerequisites
+- **THEN** resolution retains those dependencies and their producer indexes
+- **AND** they do not remove target inputs from the caller's default ownership set
+
+#### Scenario: Reject unimplemented invocation resources
+
+- **WHEN** a target requires an external context reference, stdin, or startup environment/default binding
+- **THEN** the initial resolver rejects it before execution instead of dropping the requirement
+- **AND** input sensitivity declarations remain supported
+
 ### Requirement: Model call outputs separately from ordinary publication
 
 The runtime SHALL provide an explicit call-binding declaration with a target, an atomic group of

@@ -53,6 +53,45 @@ publication until their combined lifecycle is explicitly defined.
 
 ## Port connections determine ownership
 
+The second implementation adds programmatic resolution through `CompiledWorkflow::resolve_call_bindings`
+and `FlowBuilder::resolve_call_bindings`. The former uses normal graph preparation and type inference,
+deferring required-input checks only for declared targets in the root call scope. Nested scopes and
+ordinary workflow preparation retain their existing validation. The latter accepts already prepared
+metadata and retains the builder's ordinary scheduling behavior. Neither API creates an executable
+call graph or changes existing JSON activation semantics.
+
+Providers declare explicit caller slots in `NodeMetadata.call_outputs`, separately from ordinary and
+stream outputs. Preparation rejects empty, duplicate, overlapping, or excessively nested declarations.
+Call slots do not become ordinary output references or obligations of the final `NodeResult`.
+Generated metadata checks include nonempty call slots without changing serialization for existing nodes.
+
+Resolution produces runtime-owned `ResolvedCallBinding` records. Each `ResolvedCallInput` retains its
+target contract and sensitivity, with an `Output`, `Default`, `External`, or `Omitted` source. Explicit
+outputs retain their source contract as well. Runtime `FlowDependency` records preserve external data
+and output-control dependencies; success dependencies and direct prerequisite node indexes are stored
+separately. The compiler reuses ordinary type compatibility and exclusive-branch proofs, and rejects
+waits on the caller or another target in the same callable set. These prerequisites are recorded, not
+yet inserted into a running scheduler.
+
+`bind_arguments` validates the two caller namespaces and maps them to target input names. External
+inputs cannot be overridden, and failed validation returns no partial map. Optional omissions, nullable
+values, lossless numeric checks, shared values, and sensitivity retain existing runtime semantics.
+Source requiredness applies within the selected group; a value mapped to multiple inputs must satisfy
+all destination contracts. The method returns only caller-owned inputs, leaving external resolution
+and invocation activation to the subsequent runtime phase.
+
+The initial resolver accepts ordinary terminal Task targets. It rejects external context references,
+stdin, and startup environment/default bindings until invocation-scope support can preserve them.
+TaskStream callers and terminal producer values are supported, while stream emissions are rejected
+as external values. These restrictions fail during planning rather than silently dropping resources
+or reading an unscoped latest value. Input sensitivity metadata is supported independently of startup
+environment/default bindings.
+
+The returned records are compiler/runtime planning data, not the future Parent-facing interface view.
+Versioned JSON call syntax, executable plan integration, recursive call-graph validation across callers,
+and generated call-binding tables remain deferred. Accepting runnable call syntax before on-demand
+activation exists would incorrectly execute targets as ordinary roots.
+
 Resolve explicit port bindings before considering node-level invocation connections:
 
 | Connection | Input ownership |

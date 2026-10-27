@@ -173,9 +173,56 @@ let response = request.respond(CallOutcome::Succeeded(NodeValues::new()));
 let outcome = response.into_outcome(expected)?;
 ```
 
-The example only constructs contracts; `respond` does not execute the target. These APIs do not yet
-resolve graph bindings, expose context discovery, or provide a dispatcher. A future dispatcher must
-validate target eligibility and composed inputs, allocate invocation numbers uniquely within the
+The example only constructs contracts; `respond` does not execute the target. Declare explicit caller
+output slots in `NodeMetadata.call_outputs`. They are separate from ordinary and stream outputs, and
+cannot share names with either. Factories still return complete nodes; ordinary result validation and
+output references exclude these slots. Empty call-output metadata retains the existing serialized form,
+while the existing `verify_generated_metadata` comparison includes nonempty declarations.
+Exhaustive `NodeMetadata` literals must add `call_outputs: Vec::new()`; constructors and literals using
+`..Default::default()` require no migration.
+
+`CompiledWorkflow::resolve_call_bindings(registry, caller, bindings)` prepares a call scope using the
+normal compiler, including type inference and exclusive-branch proofs. Node indexes refer to the
+compiled definition's node list. Only declared call targets may defer required input checks to binding
+resolution; ordinary workflow preparation remains strict. `FlowBuilder::resolve_call_bindings` also
+resolves against already prepared nodes and dependencies without changing the builder's schedule.
+It uses the supplied metadata as its type evidence, so prepare/refine that metadata first when building
+the scope manually.
+
+Explicit output mappings claim their target inputs first. Existing data connections claim external
+inputs and conflict with explicit caller mappings. Node-level defaults fill only the remaining inputs.
+An unbound optional input stays omitted, while an unbound required input is rejected. Control and success
+dependencies remain prerequisites and never claim parameters. External exclusive groups use ordinary
+branch proofs; caller/external mixtures are rejected. Unknown ports, duplicate aliases, incompatible
+types, self-calls, and waits on the caller or another callable target fail during resolution.
+
+The returned `ResolvedCallBinding` records each input's source and sensitivity, ordinary output
+dependencies, success dependencies, and direct prerequisite nodes. These are execution-planning records,
+not a model-facing schema: external input names and internal dependency keys must not be advertised as
+caller arguments. `bind_arguments(&CallArguments)` checks allowed names, requiredness, source contracts,
+and destination contracts before returning caller-owned inputs keyed by target port names. A shared
+source is checked against every destination. Source requiredness applies only within a selected binding.
+Sensitivity and shared payloads are preserved. External and omitted inputs are not inserted or read.
+
+```rust
+fn bind_call_arguments(
+    plan: &mf_compiler::CompiledWorkflow,
+    registry: &mf_runtime::NodeRegistry,
+    caller: mf_runtime::NodeId,
+    declaration: &mf_runtime::CallBinding,
+    arguments: &mf_runtime::CallArguments,
+) -> Result<mf_runtime::Inputs, Box<dyn std::error::Error>> {
+    let bindings = plan.resolve_call_bindings(registry, caller, std::slice::from_ref(declaration))?;
+    Ok(bindings[0].bind_arguments(arguments)?)
+}
+```
+
+Current targets must be ordinary terminal Tasks without external context references, stdin, or startup
+environment/default bindings. TaskStream callers and terminal TaskStream producer values are supported;
+stream emissions cannot serve as external input values. Input sensitivity declarations remain supported.
+These APIs do not activate targets, compose external values, expose context discovery, or provide a
+dispatcher. Workflow JSON syntax for callable activation remains deferred until scheduling is available.
+A future dispatcher must validate composed inputs, allocate invocation numbers uniquely within the
 workflow execution across callers, scopes, and stream frames, and track pending/completed requests.
 Binding indexes are local to a caller's prepared table. Identities are not retry idempotency keys.
 

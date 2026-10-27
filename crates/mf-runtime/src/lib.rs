@@ -35,7 +35,8 @@ mod workflow_manifest;
 
 pub use call::{
     CallArguments, CallBinding, CallBindingId, CallContractError, CallId, CallInputDefaults,
-    CallOutcome, CallPortMapping, CallRequest, CallResponse,
+    CallInputSource, CallOutcome, CallPortMapping, CallRequest, CallResponse, ResolvedCallBinding,
+    ResolvedCallInput,
 };
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;

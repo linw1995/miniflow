@@ -103,6 +103,48 @@ pub enum PlanError {
 }
 
 impl CompiledWorkflow {
+    /// Prepares and resolves directed-call declarations without starting the ordinary workflow.
+    /// Node indexes refer to `definition.nodes`; normal plans store them in canonical order.
+    pub fn resolve_call_bindings(
+        &self,
+        registry: &mf_runtime::NodeRegistry,
+        caller: mf_runtime::NodeId,
+        bindings: &[mf_runtime::CallBinding],
+    ) -> Result<Vec<mf_runtime::ResolvedCallBinding>, crate::CallBindingError> {
+        // The builder owns index validation. Validate before provider construction as well.
+        let unknown = |role, index| crate::call_bindings::UnknownNodeSnafu { role, index }.build();
+        self.definition
+            .nodes
+            .get(caller.index())
+            .ok_or_else(|| unknown("caller", caller.index()))?;
+        let mut targets = std::collections::BTreeSet::new();
+        for binding in bindings {
+            let index = binding.target().index();
+            targets.insert(
+                self.definition
+                    .nodes
+                    .get(index)
+                    .ok_or_else(|| unknown("target", index))?
+                    .id
+                    .clone(),
+            );
+        }
+        let (nodes, order) =
+            crate::compiler::prepare_call_scope(&self.definition, registry, targets)?;
+        if order != self.execution_order {
+            return Err(crate::compiler::NonCanonicalPlanOrderSnafu.build().into());
+        }
+        let flow = crate::FlowBuilder::prepare(
+            nodes,
+            self.definition.edges.clone(),
+            order,
+            self.definition.outputs.clone(),
+        )?
+        .with_control_edges(self.definition.control_edges.clone())?
+        .with_order_edges(self.definition.order_edges.clone())?;
+        flow.resolve_call_bindings(caller, bindings)
+    }
+
     pub fn manifest(
         &self,
         registry: &mf_runtime::NodeRegistry,

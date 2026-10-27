@@ -246,3 +246,110 @@ fn contract_errors_propagate_through_node_boundaries() {
         })
     ));
 }
+
+#[derive(mf_runtime::NodeValue)]
+struct Empty {}
+
+#[derive(mf_runtime::NodeValue)]
+struct Delta {
+    delta: String,
+}
+
+struct Combined;
+impl mf_runtime::TypedTaskStreamNode for Combined {
+    type Input = Empty;
+    type Output = Empty;
+    type Emission = Delta;
+
+    fn execute(
+        &self,
+        _: Empty,
+        _: &mut mf_runtime::ExecutionContext,
+        _: &mut mf_runtime::TypedEmitter<'_, '_, Delta>,
+    ) -> Result<mf_runtime::TypedNodeResult<Empty>, NodeExecutionError> {
+        panic!("preparation must not execute the node")
+    }
+}
+
+fn call_metadata(name: &str) -> mf_runtime::NodeMetadata {
+    mf_runtime::NodeMetadata {
+        call_outputs: vec![mf_runtime::PortSpec::owned(
+            name,
+            mf_runtime::ValueType::String,
+            true,
+        )],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn call_output_declarations_have_a_separate_validated_namespace() {
+    for scenario in ["empty", "duplicate", "ordinary", "stream", "depth"] {
+        let mut metadata = call_metadata("query");
+        match scenario {
+            "empty" => metadata.call_outputs[0].name = "".into(),
+            "duplicate" => metadata.call_outputs.push(metadata.call_outputs[0].clone()),
+            "ordinary" => metadata
+                .ports
+                .outputs
+                .push(metadata.call_outputs[0].clone()),
+            "stream" => metadata
+                .stream_outputs
+                .push(metadata.call_outputs[0].clone()),
+            "depth" => {
+                for _ in 0..mf_runtime::ValueType::MAX_DEPTH {
+                    metadata.call_outputs[0].value_type = mf_runtime::ValueType::List(Box::new(
+                        metadata.call_outputs[0].value_type.clone(),
+                    ));
+                }
+            }
+            _ => unreachable!(),
+        }
+        let error = metadata.validate_call_outputs().unwrap_err();
+        assert!(error.to_string().contains("call output"));
+        if scenario == "depth" {
+            assert!(matches!(error, CallContractError::OutputDepth { .. }));
+            assert!(
+                error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<mf_runtime::TypeDepthError>()
+                    .is_some()
+            );
+        } else {
+            assert!(matches!(error, CallContractError::InvalidOutput { .. }));
+        }
+    }
+    let metadata = call_metadata("query");
+    metadata.validate_call_outputs().unwrap();
+    assert!(metadata.output_ports().next().is_none());
+    assert!(mf_runtime::PreparedNode::typed_task_stream(Combined, metadata).is_ok());
+    assert!(matches!(
+        mf_runtime::PreparedNode::typed_task_stream(Combined, call_metadata("delta")),
+        Err(NodeBuildError::CallContract {
+            source: CallContractError::InvalidOutput { .. }
+        })
+    ));
+    assert!(matches!(
+        mf_runtime::PreparedNode::typed_task_stream(Combined, call_metadata("")),
+        Err(NodeBuildError::CallContract { .. })
+    ));
+}
+
+#[test]
+fn generated_metadata_checks_include_call_outputs_without_changing_empty_metadata() {
+    assert!(
+        serde_json::to_value(mf_runtime::NodeMetadata::default())
+            .unwrap()
+            .get("call_outputs")
+            .is_none()
+    );
+    let mut metadata = call_metadata("query");
+    let expected = serde_json::to_value(&metadata).unwrap();
+    mf_runtime::verify_generated_metadata(&metadata, &expected).unwrap();
+    metadata.call_outputs[0].value_type = mf_runtime::ValueType::Int64;
+    assert!(matches!(
+        mf_runtime::verify_generated_metadata(&metadata, &expected),
+        Err(NodeBuildError::GenerationMetadataMismatch)
+    ));
+}

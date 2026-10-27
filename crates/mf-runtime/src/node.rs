@@ -820,6 +820,9 @@ impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
+    /// Caller-owned output slots, published only through directed call requests.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub call_outputs: Vec<PortSpec>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stream_outputs: Vec<PortSpec>,
     /// At most one listed output may produce a value per task invocation.
@@ -1087,6 +1090,7 @@ fn reflected_node_metadata(
         ConflictingStreamDeclarationsSnafu
     );
     metadata.ports = ports;
+    metadata.validate_call_outputs()?;
     Ok(metadata)
 }
 
@@ -1144,11 +1148,11 @@ impl PreparedNode {
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
-        Ok(Self::combined(
+        Self::combined(
             Box::new(crate::task_stream::TypedTaskStreamAdapter(task)),
             <N::Emission as crate::NodeOutputs>::ports(),
             metadata,
-        ))
+        )
     }
 
     pub fn task_stream<N: crate::TaskStreamNode + NodePortContract + 'static>(
@@ -1157,19 +1161,20 @@ impl PreparedNode {
     ) -> Result<Self, NodeBuildError> {
         let metadata = reflected_node_metadata(task.ports(), metadata.into())?;
         let outputs = task.stream_outputs();
-        Ok(Self::combined(Box::new(task), outputs, metadata))
+        Self::combined(Box::new(task), outputs, metadata)
     }
 
     fn combined(
         task: Box<dyn crate::TaskStreamNode>,
         outputs: Vec<PortSpec>,
         mut metadata: NodeMetadata,
-    ) -> Self {
+    ) -> Result<Self, NodeBuildError> {
         metadata.stream_outputs = outputs.clone();
-        Self::from_parts(
+        metadata.validate_call_outputs()?;
+        Ok(Self::from_parts(
             NodeExecution::TaskStream(Box::new(crate::TaskStreamExecutor::new(task, outputs))),
             metadata,
-        )
+        ))
     }
 
     /// Reflects both value contracts and adapts typed event execution without dispatching an event.
