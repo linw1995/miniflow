@@ -98,6 +98,10 @@ returns no title and an empty usage list; a failed provider attempt retains its 
 The [nested chat example](../examples/chat-nested-title-flow.json) combines the returned usage with the
 conversation call and streams only the primary answer. The older flat title example remains available
 for inspecting the equivalent composition.
+The required `result` output contains `usages` and an optional `title` on every successful Flow
+execution, including ineligible requests and captured provider failures. Parent workflows can use
+this result when joining title generation with other work, without depending on the optional `title`
+port being produced. The existing `title` and `usages` outputs remain available.
 
 Rust callers loading local references use `mf_compiler::load_workflow(path)?.definition` or
 `resolve_flows(&definition, Some(directory))?.definition` before preparing the graph. Definitions with

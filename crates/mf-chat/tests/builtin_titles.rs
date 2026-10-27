@@ -5,6 +5,10 @@ use serde_json::json;
 use std::time::Duration;
 
 fn host(directory: &std::path::Path, server: &Server, enabled: bool) -> ChatHost {
+    ChatHost::open(directory.join("chat.sqlite"), config(server, enabled)).unwrap()
+}
+
+fn config(server: &Server, enabled: bool) -> HostConfig {
     let definition =
         WorkflowDefinition::from_json(include_str!("../../../examples/chat-flow.json")).unwrap();
     let profile = WorkflowProfile::new(
@@ -20,7 +24,7 @@ fn host(directory: &std::path::Path, server: &Server, enabled: bool) -> ChatHost
     .unwrap();
     let mut config = HostConfig::new(profile);
     config.automatic_titles = enabled;
-    ChatHost::open(directory.join("chat.sqlite"), config).unwrap()
+    config
 }
 
 #[test]
@@ -146,7 +150,7 @@ fn builtin_title_respects_disabled_policy_manual_titles_and_failed_answers() {
 fn builtin_title_preserves_concurrent_renames_and_cancellation_semantics() {
     for cancel in [false, true] {
         let mut title = Reply::text("Generated title");
-        title.header_delay = Duration::from_millis(300);
+        title.header_delay = Duration::from_millis(1200);
         let server = Server::start(vec![Reply::text("Answer"), title]);
         let root = tempfile::tempdir().unwrap();
         let host = host(root.path(), &server, true);
@@ -183,5 +187,176 @@ fn builtin_title_preserves_concurrent_renames_and_cancellation_semantics() {
             );
         }
         host.close().unwrap();
+    }
+}
+
+#[test]
+fn builtin_title_is_a_registered_call_in_the_application_graph() {
+    let authored =
+        WorkflowDefinition::from_json(include_str!("../workflows/conversation.json")).unwrap();
+    assert_eq!(
+        authored.flows["title"],
+        mf_runtime::FlowSource::Builtin {
+            builtin: "mf-chat.chat-title".into()
+        }
+    );
+    let plan = mf_chat::flows::conversation::plan().unwrap();
+    let call = plan
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "title")
+        .unwrap();
+    assert_eq!(call.kind, mf_runtime::CALL_KIND);
+    let configuration: mf_runtime::CallConfig =
+        serde_json::from_value(call.config.clone()).unwrap();
+    let body = configuration.definition.unwrap();
+    assert!(
+        body.nodes
+            .iter()
+            .any(|node| node.id.as_str() == "title_model" && node.kind == "builtin.llm")
+    );
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert!(description.body(&["title".into()]).is_some());
+}
+
+fn log_value(value: &opentelemetry::logs::AnyValue) -> serde_json::Value {
+    use opentelemetry::logs::AnyValue;
+    match value {
+        AnyValue::String(value) => json!(value.as_str()),
+        AnyValue::Int(value) => json!(value),
+        AnyValue::Boolean(value) => json!(value),
+        AnyValue::ListAny(values) => values.iter().map(log_value).collect(),
+        AnyValue::Map(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.as_str().into(), log_value(value)))
+                .collect(),
+        ),
+        _ => panic!("unexpected lifecycle value"),
+    }
+}
+
+fn attribute(record: &opentelemetry_sdk::logs::SdkLogRecord, name: &str) -> serde_json::Value {
+    record
+        .attributes_iter()
+        .find(|(key, _)| key.as_str() == name)
+        .map(|(_, value)| log_value(value))
+        .unwrap_or_default()
+}
+
+#[test]
+fn builtin_title_lifecycle_shares_the_application_run_and_call_scope() {
+    use opentelemetry_sdk::{
+        logs::{InMemoryLogExporter, SdkLoggerProvider},
+        trace::{InMemorySpanExporter, SdkTracerProvider},
+    };
+    let exporter = InMemoryLogExporter::default();
+    let logs = SdkLoggerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let span_exporter = InMemorySpanExporter::default();
+    let traces = SdkTracerProvider::builder()
+        .with_simple_exporter(span_exporter.clone())
+        .build();
+    for enabled in [true, false] {
+        exporter.reset();
+        span_exporter.reset();
+        let server = Server::start(if enabled {
+            vec![Reply::text("Answer"), Reply::text("Title")]
+        } else {
+            vec![Reply::text("Answer")]
+        });
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(&server, enabled);
+        config.observer = Some(mf_telemetry::observation::Observer::new(&traces, &logs));
+        let host = ChatHost::open(root.path().join("chat.sqlite"), config).unwrap();
+        let session = host
+            .database()
+            .create_session("default", None, None)
+            .unwrap();
+        let result = host.submit(&session.id, "Prompt").unwrap().join().unwrap();
+        host.close().unwrap();
+        let records = exporter.get_emitted_logs().unwrap();
+        let application = records
+            .iter()
+            .find(|log| {
+                log.record.event_name() == Some("mf.node.started")
+                    && attribute(&log.record, "mf.node.id") == "workflow"
+            })
+            .unwrap();
+        let calls: Vec<_> = records
+            .iter()
+            .filter(|log| log.record.event_name() == Some("mf.call.started"))
+            .collect();
+        assert_eq!(calls.len(), usize::from(enabled));
+        if !enabled {
+            continue;
+        }
+        let call = &calls[0].record;
+        let run_id = attribute(&application.record, "mf.run.id");
+        assert_eq!(attribute(call, "mf.run.id"), run_id);
+        assert_eq!(
+            log_value(call.body().unwrap())["path"],
+            json!([{"call_id":"title"}])
+        );
+        let started = records
+            .iter()
+            .position(|log| log.record.event_name() == Some("mf.call.started"))
+            .unwrap();
+        let finished = records
+            .iter()
+            .position(|log| log.record.event_name() == Some("mf.call.finished"))
+            .unwrap();
+        let closed = records
+            .iter()
+            .position(|log| {
+                log.record.event_name() == Some("mf.node.finished")
+                    && attribute(&log.record, "mf.node.id") == "workflow"
+            })
+            .unwrap();
+        let settled = records
+            .iter()
+            .position(|log| {
+                log.record.event_name() == Some("mf.node.started")
+                    && attribute(&log.record, "mf.node.id") == "settle"
+            })
+            .unwrap();
+        assert!(closed < started && started < finished && finished < settled);
+        let title = records
+            .iter()
+            .find(|log| {
+                log.record.event_name() == Some("mf.node.started")
+                    && attribute(&log.record, "mf.node.id") == "title_model"
+            })
+            .unwrap();
+        assert_eq!(attribute(&title.record, "mf.run.id"), run_id);
+        assert_eq!(
+            log_value(title.record.body().unwrap())["loop_path"],
+            json!([{"call_id":"title"}])
+        );
+        let usage = result.result.usages.last().unwrap();
+        assert_eq!(usage.node.as_ref().unwrap().path[0].node, "title");
+        traces.force_flush().unwrap();
+        let spans = span_exporter.get_finished_spans().unwrap();
+        let node_span = |id, kind| {
+            spans
+                .iter()
+                .find(|span| {
+                    span.attributes.iter().any(|attribute| {
+                        attribute.key.as_str() == "mf.node.id" && attribute.value.as_str() == id
+                    }) && span.attributes.iter().any(|attribute| {
+                        attribute.key.as_str() == "mf.node.kind" && attribute.value.as_str() == kind
+                    })
+                })
+                .unwrap()
+        };
+        let parent = node_span("title", "workflow.call");
+        let child = node_span("title_model", "builtin.llm");
+        assert_eq!(child.parent_span_id, parent.span_context.span_id());
+        assert_eq!(
+            child.span_context.trace_id(),
+            parent.span_context.trace_id()
+        );
     }
 }

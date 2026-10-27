@@ -115,6 +115,12 @@ fn title_conversation(example: &str) {
                         (calls == 2).then_some("Generated title")
                     );
                     if calls == 2 {
+                        if example == "chat-flow.json" {
+                            assert_eq!(
+                                completion.result.usages[1].node.as_ref().unwrap().path[0].node,
+                                "title"
+                            );
+                        }
                         assert_eq!(
                             completion.result.usages[1]
                                 .attribution

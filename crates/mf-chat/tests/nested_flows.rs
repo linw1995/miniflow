@@ -8,7 +8,7 @@ fn ineligible_builtin_title_returns_no_title_and_empty_usage() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25","dependencies":{},"flows":{"title":{"builtin":"mf-chat.chat-title"}},
         "nodes":[{"id":"title","kind":"workflow.call","config":{"flow":"title"}}],
-        "outputs":[{"name":"title","node":"title","port":"title","optional":true},{"name":"usages","node":"title","port":"usages"}]
+        "outputs":[{"name":"title","node":"title","port":"title","optional":true},{"name":"usages","node":"title","port":"usages"},{"name":"result","node":"title","port":"result"}]
     })).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let flow = instantiate_compiled(
@@ -22,6 +22,10 @@ fn ineligible_builtin_title_returns_no_title_and_empty_usage() {
     })).unwrap()).unwrap();
     assert!(!outputs.contains_key("title"));
     assert_eq!(serde_json::to_value(&outputs["usages"]).unwrap(), json!([]));
+    assert_eq!(
+        serde_json::to_value(&outputs["result"]).unwrap(),
+        json!({"usages":[]})
+    );
 }
 
 #[test]

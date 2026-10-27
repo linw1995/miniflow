@@ -57,8 +57,13 @@ submission executes the embedded application `conversation` flow:
 
 ```mermaid
 flowchart LR
-    Begin["mf_chat.turn.begin: load history and context"] --> Invoke["mf_chat.workflow.invoke: user workflow and optional built-in title"]
-    Invoke --> Settle["mf_chat.turn.settle: persist result"]
+    Begin["Load history and context"] --> Invoke["Invoke user workflow"]
+    Invoke --> Route["Wait for normal stream close"]
+    Route --> Enabled{"Built-in title enabled?"}
+    Enabled -->|yes| Title["workflow.call: mf-chat.chat-title"]
+    Enabled -->|no| Complete["Merge and capture final result"]
+    Title --> Complete
+    Complete --> Settle["Persist result"]
 ```
 
 The invocation node binds a `ConversationBackend` supplied by the host. Both the embedded Rust backend
@@ -110,6 +115,13 @@ chat result when the workflow declares exactly one string input for each of `mod
 environment bindings are resolved before reuse, and secret markers are preserved. Missing, ambiguous,
 or incompatible inputs disable this fallback without rejecting the chat workflow. The host does not
 inspect internal model configuration or choose a separate provider.
+
+The application graph declares `workflow.call` with the registered `mf-chat.chat-title` Flow.
+Its plan is resolved and cached after the provider is linked. The route publishes title inputs only
+after the chat producer closes normally, so previews cannot trigger title generation. The title call
+shares the application run and has its own call scope in lifecycle events, traces, and usage paths.
+Completion merges the title result and captures the complete reply before persistence; cancellation
+during title generation does not promote the intermediate answer into a recoverable completion.
 
 A declared `title` output reserves title generation for the user workflow, even when that optional
 output is absent from a result. A returned title or usage attributed to `title` also prevents a second

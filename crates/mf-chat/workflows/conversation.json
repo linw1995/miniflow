@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-19",
+  "version": "2026-10-25",
   "dependencies": {
     "chat": {
       "package": "mf-chat",
@@ -48,6 +48,109 @@
       }
     },
     {
+      "id": "title_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "route.title_enabled",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "title",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "title"
+      },
+      "inputs": {
+        "input.prompt": {
+          "from": {
+            "node": "route",
+            "port": "title_prompt"
+          }
+        },
+        "input.text": {
+          "from": {
+            "node": "route",
+            "port": "title_text"
+          }
+        },
+        "input.status": {
+          "from": {
+            "node": "route",
+            "port": "title_status"
+          }
+        },
+        "input.context": {
+          "from": {
+            "node": "route",
+            "port": "title_context"
+          }
+        },
+        "input.model": {
+          "from": {
+            "node": "route",
+            "port": "title_model"
+          }
+        },
+        "input.base_url": {
+          "from": {
+            "node": "route",
+            "port": "title_base_url"
+          }
+        },
+        "input.api_key": {
+          "from": {
+            "node": "route",
+            "port": "title_api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "no_title",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "usages": []
+        }
+      }
+    },
+    {
+      "id": "complete",
+      "kind": "mf_chat.conversation.complete",
+      "inputs": {
+        "response": {
+          "from": {
+            "node": "route",
+            "port": "response"
+          }
+        },
+        "title_result": {
+          "exclusive": [
+            {
+              "node": "title",
+              "port": "result"
+            },
+            {
+              "node": "no_title",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "settle",
       "kind": "mf_chat.turn.settle",
       "inputs": {
@@ -65,7 +168,7 @@
         },
         "response": {
           "from": {
-            "node": "route",
+            "node": "complete",
             "port": "response"
           }
         }
@@ -84,6 +187,28 @@
       "node": "settle",
       "port": "settlement",
       "optional": true
+    }
+  ],
+  "flows": {
+    "title": {
+      "builtin": "mf-chat.chat-title"
+    }
+  },
+  "edges": [
+    {
+      "from_node": "route",
+      "from_output": "title_enabled",
+      "to_node": "title_route"
+    },
+    {
+      "from_node": "title_route",
+      "from_output": "yes",
+      "to_node": "title"
+    },
+    {
+      "from_node": "title_route",
+      "from_output": "else",
+      "to_node": "no_title"
     }
   ]
 }

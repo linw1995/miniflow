@@ -1753,6 +1753,8 @@ dependencies = [
  "mfn-code",
  "mfn-core",
  "mfn-llm",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "serde",
  "serde_json",
  "snafu",

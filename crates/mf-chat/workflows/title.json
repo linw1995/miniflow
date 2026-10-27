@@ -203,27 +203,107 @@
       }
     },
     {
-      "id": "no_usages",
-      "kind": "builtin.constant",
+      "id": "success_result",
+      "kind": "builtin.code",
       "config": {
-        "value": []
+        "language": "cel",
+        "inputs": {
+          "text": "string",
+          "usages": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "value": "{'title': text, 'usages': usages}"
+        }
+      },
+      "inputs": {
+        "text": {
+          "from": {
+            "node": "title_model",
+            "port": "text"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "title_model",
+            "port": "usages"
+          }
+        }
       }
     },
     {
-      "id": "usages",
+      "id": "failure_result",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "usages": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "value": "{'usages': usages}"
+        }
+      },
+      "inputs": {
+        "usages": {
+          "from": {
+            "node": "title_model",
+            "port": "usages"
+          }
+        }
+      }
+    },
+    {
+      "id": "no_result",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "usages": []
+        }
+      }
+    },
+    {
+      "id": "result",
       "kind": "builtin.identity",
       "inputs": {
         "input": {
           "exclusive": [
             {
-              "node": "title_model",
-              "port": "usages"
+              "node": "success_result",
+              "port": "value"
             },
             {
-              "node": "no_usages",
+              "node": "failure_result",
+              "port": "value"
+            },
+            {
+              "node": "no_result",
               "port": "value"
             }
           ]
+        }
+      }
+    },
+    {
+      "id": "usages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "result": "object"
+        },
+        "code": {
+          "value": "result.usages"
+        }
+      },
+      "inputs": {
+        "result": {
+          "from": {
+            "node": "result",
+            "port": "value"
+          }
         }
       }
     }
@@ -250,7 +330,17 @@
     {
       "from_node": "title_route",
       "from_output": "else",
-      "to_node": "no_usages"
+      "to_node": "no_result"
+    },
+    {
+      "from_node": "title_success",
+      "from_output": "yes",
+      "to_node": "success_result"
+    },
+    {
+      "from_node": "title_success",
+      "from_output": "else",
+      "to_node": "failure_result"
     }
   ],
   "outputs": [
@@ -263,6 +353,11 @@
     {
       "name": "usages",
       "node": "usages",
+      "port": "value"
+    },
+    {
+      "name": "result",
+      "node": "result",
       "port": "value"
     }
   ]

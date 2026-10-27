@@ -48,9 +48,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Path::new(&env::var("OUT_DIR")?).join("title.json"),
         serde_json::to_vec(&definition)?,
     )?;
-    mf_compiler::embed_workflows(&[mf_compiler::EmbedRequest::new(
-        "conversation",
-        "workflows/conversation.json",
-    )])?;
     Ok(())
 }

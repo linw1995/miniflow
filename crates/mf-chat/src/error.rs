@@ -4,8 +4,8 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
-    #[snafu(display("could not parse the built-in title Flow: {source}"))]
-    TitleDefinition {
+    #[snafu(display("could not parse the application conversation Flow: {source}"))]
+    ConversationDefinition {
         source: mf_runtime::DefinitionParseError,
     },
     #[snafu(transparent)]
