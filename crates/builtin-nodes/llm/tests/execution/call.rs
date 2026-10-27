@@ -40,9 +40,9 @@ fn tools_are_advertised_and_multiple_calls_round_trip_without_an_extra_prompt() 
         Reply::text("Both values found"),
     ]);
     let input = json!({"messages":[{"role":"system","content":"Use the tools"},user("Look up a and b")], "tools":[tool()]});
-    let results = json!({"messages": [
-        {"role":"tool", "tool_call_id":"second", "content":"B"},
-        {"role":"tool", "tool_call_id":"first", "content":"A"}
+    let results = json!({"messages": [], "tool_results": [
+        {"tool_call_id":"second", "content":"B"},
+        {"tool_call_id":"first", "content":"A"}
     ], "tools": [tool()]});
     let output = probe(
         &server,
@@ -101,51 +101,145 @@ fn tool_results_preserve_content_without_readvertising_historical_tools() {
         json!({"role":"tool","tool_call_id":format!("call_{index}"),"content":content,
             "metadata":{"local":true,"tags":["tool-result"]}})
     }));
-    for stream in [false, true] {
-        let reply = if stream {
-            Reply::stream_text("Results received")
-        } else {
-            Reply::text("Results received")
-        };
-        let server = Server::start(vec![reply]);
-        let input = json!({"messages":messages});
-        let output = invoke(&server, input.clone(), stream, json!({}));
-        assert_eq!(output["results"][0]["ok"], true, "{output}");
-        assert_eq!(output["results"][0]["outputs"]["outcome"], "completed");
-        assert_eq!(output["results"][0]["outputs"]["text"], "Results received");
-        assert_eq!(output["original_inputs"][0], input);
-        let requests = server.requests();
-        assert_eq!(requests.len(), 1);
-        let body = &requests[0].body;
-        assert!(
-            body.get("tools")
-                .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)),
-            "{body}"
-        );
-        let sent = body["messages"].as_array().unwrap();
-        assert_eq!(sent.len(), messages.len());
-        assert_eq!(sent[0], messages[0]);
-        assert_eq!(
-            sent[1]["content"],
-            json!([{"type":"text","text":"Checking"}])
-        );
-        for (index, call) in sent[1]["tool_calls"].as_array().unwrap().iter().enumerate() {
-            assert_eq!(call["id"], format!("call_{index}"));
-            assert_eq!(call["type"], "function");
-            assert_eq!(call["function"]["name"], "lookup");
-            assert_eq!(
-                serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap())
-                    .unwrap(),
-                json!({"key":index.to_string()})
+    for result_start in [2, 4, 6] {
+        for stream in [false, true] {
+            let reply = if stream {
+                Reply::stream_text("Results received")
+            } else {
+                Reply::text("Results received")
+            };
+            let server = Server::start(vec![reply]);
+            let results: Vec<_> = messages[result_start..].iter().map(|message| {
+            json!({"tool_call_id":message["tool_call_id"],"content":message["content"]})
+        }).collect();
+            let input = json!({"messages":messages[..result_start],"tool_results":results});
+            let output = invoke(&server, input.clone(), stream, json!({}));
+            assert_eq!(output["results"][0]["ok"], true, "{output}");
+            assert_eq!(output["results"][0]["outputs"]["outcome"], "completed");
+            assert_eq!(output["results"][0]["outputs"]["text"], "Results received");
+            assert_eq!(output["original_inputs"][0], input);
+            let requests = server.requests();
+            assert_eq!(requests.len(), 1);
+            let body = &requests[0].body;
+            assert!(
+                body.get("tools")
+                    .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)),
+                "{body}"
             );
-        }
-        for (sent, supplied) in sent[2..].iter().zip(&messages[2..]) {
-            assert_eq!(sent["role"], "tool");
-            assert_eq!(sent["tool_call_id"], supplied["tool_call_id"]);
-            assert_eq!(sent["content"], supplied["content"]);
-            assert!(sent.get("metadata").is_none());
+            let sent = body["messages"].as_array().unwrap();
+            assert_eq!(sent.len(), messages.len());
+            assert_eq!(sent[0], messages[0]);
+            assert_eq!(
+                sent[1]["content"],
+                json!([{"type":"text","text":"Checking"}])
+            );
+            for (index, call) in sent[1]["tool_calls"].as_array().unwrap().iter().enumerate() {
+                assert_eq!(call["id"], format!("call_{index}"));
+                assert_eq!(call["type"], "function");
+                assert_eq!(call["function"]["name"], "lookup");
+                assert_eq!(
+                    serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap())
+                        .unwrap(),
+                    json!({"key":index.to_string()})
+                );
+            }
+            for (sent, supplied) in sent[2..].iter().zip(&messages[2..]) {
+                assert_eq!(sent["role"], "tool");
+                assert_eq!(sent["tool_call_id"], supplied["tool_call_id"]);
+                assert_eq!(sent["content"], supplied["content"]);
+                assert!(sent.get("metadata").is_none());
+            }
         }
     }
+}
+
+#[test]
+fn invalid_explicit_tool_results_fail_with_indexed_errors_before_http() {
+    let pending = json!({"role":"assistant","content":"","tool_calls":[
+        {"id":"one","name":"lookup","arguments":{}}
+    ]});
+    let result = json!({"tool_call_id":"one","content":"value"});
+    let server = Server::start(vec![]);
+    for (messages, results, path) in [
+        (json!([pending.clone()]), json!(null), "/tool_results"),
+        (json!([pending.clone()]), json!({}), "/tool_results"),
+        (
+            json!([pending.clone()]),
+            json!([{"content":"value"}]),
+            "/tool_results/0/tool_call_id",
+        ),
+        (
+            json!([pending.clone()]),
+            json!([{"tool_call_id":"","content":"value"}]),
+            "/tool_results/0/tool_call_id",
+        ),
+        (
+            json!([pending.clone()]),
+            json!([{"tool_call_id":"unknown","content":"value"}]),
+            "/tool_results/0/tool_call_id",
+        ),
+        (
+            json!([pending.clone()]),
+            json!([{"tool_call_id":"one"}]),
+            "/tool_results/0/content",
+        ),
+        (
+            json!([pending.clone()]),
+            json!([{"tool_call_id":"one","content":{"value":5}}]),
+            "/tool_results/0/content",
+        ),
+        (
+            json!([pending.clone()]),
+            json!([{"tool_call_id":"one","content":"value","role":"tool"}]),
+            "/tool_results/0/role",
+        ),
+        (
+            json!([pending.clone()]),
+            json!([result.clone(), result.clone()]),
+            "/tool_results/1/tool_call_id",
+        ),
+        (
+            json!([pending.clone(),{"role":"tool","tool_call_id":"one","content":"value"}]),
+            json!([result.clone()]),
+            "/tool_results/0/tool_call_id",
+        ),
+        (
+            json!([user("Hi")]),
+            json!([result.clone()]),
+            "/tool_results/0/tool_call_id",
+        ),
+        (
+            json!([pending.clone(), user("Hi")]),
+            json!([result.clone()]),
+            "/messages/1",
+        ),
+        (
+            json!([{"role":"assistant","content":"","tool_calls":[
+                {"id":"one","name":"lookup","arguments":{}},
+                {"id":"two","name":"lookup","arguments":{}}
+            ]}]),
+            json!([result]),
+            "/tool_results",
+        ),
+    ] {
+        for stream in [false, true] {
+            let input = json!({"messages":messages,"tool_results":results});
+            let output = invoke(
+                &server,
+                input.clone(),
+                stream,
+                json!({"capture_errors":true}),
+            );
+            let failure = &output["results"][0];
+            assert_eq!(failure["ok"], false, "{input}: {output}");
+            assert!(
+                failure["error"].as_str().unwrap().contains(path),
+                "{input}: {output}"
+            );
+            assert_eq!(output["original_inputs"][0], input);
+        }
+    }
+    assert!(server.requests().is_empty());
 }
 
 #[test]

@@ -435,29 +435,51 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
             _ => {}
         }
     }
-    let call = json!({"id":"call_lookup","type":"function","function":{"name":"lookup","arguments":"{\"id\":42}"}});
+    let calls = json!([
+        {"id":"call_lookup_42","type":"function","function":{"name":"lookup","arguments":"{\"id\":42}"}},
+        {"id":"call_lookup_43","type":"function","function":{"name":"lookup","arguments":"{\"id\":43}"}}
+    ]);
     let unary = Reply::json(json!({
         "id":"tool-response", "object":"chat.completion", "created":0, "model":"example-model",
-        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[call.clone()]},"finish_reason":"tool_calls"}],
+        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":calls},"finish_reason":"tool_calls"}],
         "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}
     }));
     let mut streamed = Reply::stream_text("");
-    let mut call = call;
-    call["index"] = json!(0);
-    let chunk = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":[call]},"finish_reason":null}]});
+    let mut streamed_calls = calls.clone();
+    for (index, call) in streamed_calls
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        call["index"] = json!(index);
+    }
+    let chunk = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":streamed_calls},"finish_reason":null}]});
     let finish = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
     streamed.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
     for (stream, reply) in [(false, unary), (true, streamed)] {
         let completion = if stream {
-            Reply::stream_text("Item 42 is available")
+            Reply::stream_text("Both items are available")
         } else {
-            Reply::text("Item 42 is available")
+            Reply::text("Both items are available")
         };
         let server = Server::start(vec![reply.clone(), reply, completion.clone(), completion]);
         let mut definition: Value =
             serde_json::from_str(include_str!("../../../examples/llm-tools.json")).unwrap();
         definition["dependencies"] = dependencies();
         definition["nodes"][0]["config"] = json!({"model":"example-model","base_url":server.base_url,"api_key_env":"MODEL_API_KEY"});
+        definition["nodes"][0]["inputs"] = json!({
+            "messages":{"from":{"node":"input","port":"messages"}},
+            "tools":{"from":{"node":"input","port":"tools"}},
+            "tool_results":{"from":{"node":"input","port":"tool_results"}}
+        });
+        definition["nodes"].as_array_mut().unwrap().push(json!({
+            "id":"input","kind":"builtin.parameters","config":{"parameters":{
+                "messages":{"type":{"list":"object"},"secret":false},
+                "tools":{"type":{"list":"object"},"default":[],"secret":false},
+                "tool_results":{"type":{"list":"object"},"default":[],"secret":false}
+            }}
+        }));
         if stream {
             definition["execution"] = json!({});
             definition["nodes"].as_array_mut().unwrap().extend([
@@ -470,8 +492,8 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
             ]);
         }
         let inputs = json!({
-            "model.messages":[{"role":"user","content":"Look up 42"}],
-            "model.tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}]
+            "input.messages":[{"role":"user","content":"Look up 42 and 43"}],
+            "input.tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}]
         });
         let root = tempfile::tempdir().unwrap();
         let executable = compile(&definition, root.path());
@@ -488,20 +510,25 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
             .find(|output| output.get("outcome").is_some())
             .unwrap();
         assert_eq!(terminal["outcome"], "tool_calls");
+        assert_eq!(terminal["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(terminal["message"]["tool_calls"], terminal["tool_calls"]);
         assert_eq!(terminal["tool_calls"][0]["arguments"], json!({"id":42}));
+        assert_eq!(terminal["tool_calls"][1]["arguments"], json!({"id":43}));
         assert_eq!(terminal["usages"][0]["node"]["kind"], "builtin.llm");
         if stream {
             let deltas = generated
                 .iter()
                 .filter_map(|output| output.get("tool_delta"))
                 .collect::<Vec<_>>();
-            assert_eq!(deltas.len(), 1);
+            assert_eq!(deltas.len(), 2);
             assert!(
                 generated
                     .iter()
                     .all(|output| output.get("text_delta").is_none())
             );
-            assert_eq!(deltas[0]["call"], terminal["tool_calls"][0]);
+            for call in terminal["tool_calls"].as_array().unwrap() {
+                assert!(deltas.iter().any(|delta| delta["call"] == *call));
+            }
         }
         assert_eq!(server.requests().len(), 2);
         assert_eq!(
@@ -511,11 +538,13 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
             stream
         );
 
-        let result = json!({"role":"tool","tool_call_id":terminal["tool_calls"][0]["id"],
-            "content":"{\"id\":42,\"available\":true}"});
-        let continuation = json!({"model.messages":[
-            inputs["model.messages"][0], terminal["message"], result
-        ]});
+        let results = json!([
+            {"tool_call_id":terminal["tool_calls"][1]["id"],"content":"{\"id\":43,\"available\":true}"},
+            {"tool_call_id":terminal["tool_calls"][0]["id"],"content":"{\"id\":42,\"available\":true}"}
+        ]);
+        let continuation = json!({"input.messages":[
+            inputs["input.messages"][0], terminal["message"]
+        ],"input.tool_results":results});
         let mut memory = run_memory(&definition, &continuation);
         let mut generated = run(&executable, &continuation);
         for outputs in [&mut memory, &mut generated] {
@@ -528,9 +557,9 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
             .find(|output| output.get("outcome").is_some())
             .unwrap();
         assert_eq!(completed["outcome"], "completed");
-        assert_eq!(completed["text"], "Item 42 is available");
+        assert_eq!(completed["text"], "Both items are available");
         assert_eq!(completed["tool_calls"], json!([]));
-        assert_eq!(completed["message"]["content"], "Item 42 is available");
+        assert_eq!(completed["message"]["content"], "Both items are available");
         assert!(
             generated
                 .iter()
@@ -540,11 +569,16 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
         assert_eq!(requests.len(), 4);
         for request in &requests[2..] {
             let sent = request.body["messages"].as_array().unwrap();
-            assert_eq!(sent.len(), 3);
-            assert_eq!(sent[0], inputs["model.messages"][0]);
+            assert_eq!(sent.len(), 4);
+            assert_eq!(sent[0], inputs["input.messages"][0]);
             assert_eq!(sent[1]["role"], "assistant");
-            assert_eq!(sent[1]["tool_calls"][0]["id"], result["tool_call_id"]);
-            assert_eq!(sent[2], result);
+            assert_eq!(sent[1]["tool_calls"], calls);
+            for (sent, result) in sent[2..].iter().zip(results.as_array().unwrap()) {
+                assert_eq!(
+                    *sent,
+                    json!({"role":"tool","tool_call_id":result["tool_call_id"],"content":result["content"]})
+                );
+            }
         }
     }
 }

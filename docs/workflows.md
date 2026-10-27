@@ -205,7 +205,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
-| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
+| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -421,12 +421,17 @@ The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing 
 | --- | --- | --- | --- |
 | Input | `messages` | `List(Object)` | Yes, nonempty |
 | Input | `tools` | `List(Object)` | No, defaults to `[]` |
+| Input | `tool_results` | `List(Object)` | No, defaults to `[]`; appended after `messages` in this request |
 | Output | `message` | `Object` | When text or tool calls are available; omitted on captured failure |
 | Output | `text` | `string` | Yes |
 | Output | `tool_calls` | `List(Object)` | Yes |
 | Output | `outcome` | `string` | Yes |
+| Output | `status` | `string` | Yes; `succeeded` or `failed` |
+| Output | `usages` | `List(Object)` | Yes; accounting for this model call, including captured failures |
+| Output | `error` | `string` | On captured failure |
 | Output | `usage` | `Map(Int64)` | No |
 | Output | `finish_reason` | `string` | No |
+| Output | `metadata` | `Map(Any)` | No; currently omitted |
 | Stream output | `delta` | `Object` | On text emissions |
 | Stream output | `tool_call` | `Object` | On completed tool-call emissions |
 
@@ -452,9 +457,10 @@ Sparse and absent usage stay sparse or absent; omitted counters are never synthe
 Each message has required string fields `role` and `content`. Roles are `system`, `user`, `assistant`,
 and `tool`. System and user messages require nonempty text. Assistant messages can contain text,
 `tool_calls`, or both; tool results carry `tool_call_id`. See [LLM tool calls](#llm-tool-calls).
-The node encodes the supplied list in its existing order. It has no `prompt`, `system`, or `history`
-input ports and never inserts messages. Include system instructions and the current user message in
-`messages` explicitly. The output `message` contains only the current assistant response; `text` and
+The node encodes `messages` in its existing order, followed by the explicitly supplied `tool_results`.
+It has no `prompt`, `system`, or `history` input ports and does not synthesize conversation turns.
+Include system instructions and the current user or assistant tool-call message in `messages` explicitly.
+The output `message` contains only the current assistant response; `text` and
 `tool_calls` are projections of that response. There is no updated-history output. A response with neither
 text nor completed tool calls also omits `message`, so a truncated empty response cannot be appended as an invalid assistant entry.
 
@@ -556,10 +562,20 @@ as `chat.messages`. The Loop example expresses these operations explicitly with 
 
 ### LLM tool calls
 
-The existing `builtin.llm` node accepts an optional `tools` input, defaulting to `[]`. Each execution
+The existing `builtin.llm` node accepts optional `tools` and `tool_results` inputs, each defaulting to `[]`. Each execution
 still makes exactly one OpenAI-compatible Chat Completions request. The node does not execute tools,
-repeat requests, or expose `tool_choice`. Supply the entire request through `messages`, including
-any system instructions, previous exchanges, and current user message or tool results.
+repeat requests, or expose `tool_choice`. Supply system instructions, previous exchanges, and the
+current user or assistant tool-call message through `messages`. Supply current execution results
+through `tool_results`, or include them as role tool messages in the conversation.
+
+The public Rust contracts are exported by `mfn_llm`:
+
+| Type | Fields | Direction |
+| --- | --- | --- |
+| `ToolDefinition` | `name: String`, `description: String`, `input_schema: ValueRef` | `tools` input |
+| `ToolCall` | `id: String`, `name: String`, `arguments: ValueRef` | `tool_calls` output and assistant messages |
+| `ToolResult` | `tool_call_id: String`, `content: String` | `tool_results` input |
+| `ToolCallEvent` | `model_call_id: String`, `call: ToolCall` | `tool_call` stream output |
 
 Each tool definition contains `name`, `description`, and `input_schema`. Names must be unique and
 contain 1-64 ASCII letters, digits, underscores, or hyphens. The schema must be an object with
@@ -571,7 +587,7 @@ For example, pass these inputs to the [tool example](../examples/llm-tools.json)
 
 ```json
 {
-  "model.messages": [{"role": "user", "content": "Look up order 42."}],
+  "model.messages": [{"role": "user", "content": "Look up orders 42 and 43."}],
   "model.tools": [
     {
       "name": "lookup_order",
@@ -614,39 +630,44 @@ which may be empty for a tool-only reply, and `tool_calls` contains the requeste
   "role": "assistant",
   "content": "",
   "tool_calls": [
-    {"id": "call_123", "name": "lookup_order", "arguments": {"id": "42"}}
+    {"id": "call_123", "name": "lookup_order", "arguments": {"id": "42"}},
+    {"id": "call_124", "name": "lookup_order", "arguments": {"id": "43"}}
   ]
 }
 ```
 
-Execute calls outside the node. Append the returned assistant `message` and a matching result for each
-call to the caller-owned conversation, then invoke `builtin.llm` again with that complete `messages` list
-and the desired `tools`. A tool result is a `ChatMessage` with `role: tool`; there is no separate
-`tool_results` input. Its `tool_call_id` is the call's `id`, and its `content` is the result text:
+Execute calls outside the node. Append the returned assistant `message` to the caller-owned
+conversation and pass a matching result for each call through `tool_results`. Each result needs only
+the call's `id` as `tool_call_id` and the result text as `content`:
 
 ```json
 {
-  "role": "tool",
   "tool_call_id": "call_123",
   "content": "Order 42 has shipped."
 }
 ```
 
-For the returned `call_123` above, the complete second invocation of `llm-tools.json` is:
+For the returned batch above, the complete second invocation of `llm-tools.json` can return results in reverse order:
 
 ```json
 {
   "model.messages": [
-    {"role": "user", "content": "Look up order 42."},
+    {"role": "user", "content": "Look up orders 42 and 43."},
     {
       "role": "assistant",
       "content": "",
       "tool_calls": [
-        {"id": "call_123", "name": "lookup_order", "arguments": {"id": "42"}}
+        {"id": "call_123", "name": "lookup_order", "arguments": {"id": "42"}},
+        {"id": "call_124", "name": "lookup_order", "arguments": {"id": "43"}}
       ]
+    }
+  ],
+  "model.tool_results": [
+    {
+      "tool_call_id": "call_124",
+      "content": "Order 43 is being processed."
     },
     {
-      "role": "tool",
       "tool_call_id": "call_123",
       "content": "Order 42 has shipped."
     }
@@ -659,6 +680,36 @@ Use the actual assistant `message` and call IDs from the first invocation. `tool
 available for the current request; it does not carry results. This example disables further tool calls
 while asking for the final answer. Historical calls remain valid when their definitions are absent
 from the current `tools` list. To allow more calls, supply the desired definitions again.
+
+The request order is exactly `messages` followed by `tool_results` encoded as role tool messages.
+The adapter does not insert an assistant call or user prompt, reorder results, or modify the input lists.
+Both inputs share one pending-call validator: an ID answered in `messages` cannot be answered again
+in `tool_results`. Results may be split across the inputs, but every pending call must be answered
+before sending the request. Results cannot repair an earlier incomplete exchange inside `messages`.
+
+One assistant message can contain multiple calls, including repeated calls to the same tool with
+different arguments. Keep that message intact and return one result per call ID. Results may arrive
+in a different order; matching uses IDs rather than tool names or list positions. The current
+`OpenAIConfig.chat` adapter uses Rig's `Message::tool_results(Vec<ToolResult>)` for an explicit batch;
+its Chat Completions encoder emits a separate role tool message for each result, after the single
+assistant message containing all calls. This follows the
+[OpenAI function-calling protocol](https://developers.openai.com/api/docs/guides/function-calling).
+`tool_results` is a node input, not an extra field in the provider's HTTP request.
+
+`tool_results` is a normal list input and can receive an upstream node's output through a data binding:
+
+```json
+"inputs": {
+  "messages": {"from": {"node": "conversation", "port": "messages"}},
+  "tool_results": {"from": {"node": "execute_tools", "port": "results"}}
+}
+```
+
+Here `conversation` and `execute_tools` are caller-defined producers; `execute_tools` produces
+`List(Object)` results and is not a built-in executor.
+For subsequent turns, the caller persists these results as role tool messages along with the assistant
+responses. Rust callers can convert `ToolResult` into `ChatMessage` with `.into()`. The node does not
+return or retain an updated transcript; sending the same results again in both inputs is an error.
 
 `content` must be a string. Serialize structured results once, for example
 `"content": "{\"id\":\"42\",\"status\":\"shipped\"}"`; empty strings are also accepted. Execution errors can
@@ -673,7 +724,7 @@ result before subsequent user text, another assistant message, or the next reque
 arrive in any order. Unknown, duplicate, or missing results fail before network I/O. The tool name is
 resolved from the matching assistant call. This node imposes no execution or retry policy.
 
-The node uses `OpenAIConfig.chat` and encodes text, function calls, and tool results from `messages`.
+The node uses `OpenAIConfig.chat` and encodes text, function calls, and tool results from these inputs.
 Provider reasoning blocks are ignored, as in the original text-only node. Reasoning replay and
 cross-provider continuation state are outside this contract. Application `metadata` remains separate
 and is not sent to the provider.

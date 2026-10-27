@@ -17,8 +17,11 @@ explicitly; `mfn-core` does not register this kind. See the [CEL examples](workf
 The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with a required typed `messages` input,
 a current assistant `message` output, and optional typed `delta` and `tool_call` streams. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
-The node also accepts function `tools` and returns tool calls in its current assistant message.
-Flows assemble requests and append returned messages; the node never constructs conversation history. Tool protocol types are exported by `mfn_llm`.
+The node also accepts function `tools` and explicit `tool_results`, both optional list inputs, and returns
+tool calls in its current assistant message and its `tool_calls` output. Explicit results follow `messages`
+in the provider request and must match pending assistant call IDs. Flows own history and persistence.
+`ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;
+`ToolResult` converts into `ChatMessage` for caller-managed history.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values) and
 [tool calls](workflows.md#llm-tool-calls).
 

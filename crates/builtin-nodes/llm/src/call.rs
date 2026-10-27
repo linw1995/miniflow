@@ -24,6 +24,24 @@ pub struct ToolCall {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
+pub struct ToolResult {
+    pub tool_call_id: String,
+    pub content: String,
+}
+
+impl From<ToolResult> for ChatMessage {
+    fn from(result: ToolResult) -> Self {
+        Self {
+            role: "tool".into(),
+            content: result.content,
+            metadata: None,
+            tool_calls: None,
+            tool_call_id: Some(result.tool_call_id),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
 pub struct ToolCallEvent {
     pub model_call_id: String,
     pub call: ToolCall,
@@ -166,18 +184,12 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
                     &path,
                     "tool result content without assistant fields",
                 )?;
-                let id = message.tool_call_id.as_deref().unwrap_or_default();
-                let name = pending.remove(id).context(InvalidInputSnafu {
-                    path: format!("{path}/tool_call_id"),
-                    requirement: "a tool_call_id matching one pending assistant call",
-                })?;
-                rig::Message::User {
-                    content: vec![rig::UserContent::ToolResult(rig::ToolResult {
-                        call: rig::CallId::from_wire(id),
-                        name: rig::ToolName::new(name).expect("validated pending tool name"),
-                        content: vec![rig::ToolResultContent::Text(message.content.clone().into())],
-                    })],
-                }
+                rig::Message::tool_results(vec![encode_tool_result(
+                    message.tool_call_id.as_deref().unwrap_or_default(),
+                    &message.content,
+                    &mut pending,
+                    &path,
+                )?])
             }
             _ => {
                 return InvalidInputSnafu {
@@ -189,13 +201,50 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
         };
         messages.push(converted);
     }
+    if !inputs.tool_results.is_empty() {
+        let results = inputs
+            .tool_results
+            .iter()
+            .enumerate()
+            .map(|(index, result)| {
+                encode_tool_result(
+                    &result.tool_call_id,
+                    &result.content,
+                    &mut pending,
+                    &format!("/tool_results/{index}"),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        messages.push(rig::Message::tool_results(results));
+    }
     require(
         pending.is_empty(),
-        "/messages",
+        if inputs.tool_results.is_empty() {
+            "/messages"
+        } else {
+            "/tool_results"
+        },
         "a result for every pending tool call",
     )?;
     require(!messages.is_empty(), "/messages", "a nonempty message list")?;
     Ok(CompletionRequest::from(messages).tools(tools))
+}
+
+fn encode_tool_result(
+    id: &str,
+    content: &str,
+    pending: &mut BTreeMap<&str, &str>,
+    path: &str,
+) -> Result<rig::ToolResult, LlmExecutionError> {
+    let name = pending.remove(id).context(InvalidInputSnafu {
+        path: format!("{path}/tool_call_id"),
+        requirement: "a tool_call_id matching one pending assistant call",
+    })?;
+    Ok(rig::ToolResult {
+        call: rig::CallId::from_wire(id),
+        name: rig::ToolName::new(name).expect("validated pending tool name"),
+        content: vec![rig::ToolResultContent::Text(content.into())],
+    })
 }
 
 pub fn assistant_message(result: &CallResult) -> ChatMessage {
@@ -307,15 +356,14 @@ mod tests {
                     tool_call_id: None,
                 },
                 ChatMessage::from_values(encoded_message).unwrap(),
-                ChatMessage {
-                    role: "tool".into(),
+                ToolResult {
                     content: "42".into(),
-                    metadata: None,
-                    tool_calls: None,
-                    tool_call_id: Some("one".into()),
-                },
+                    tool_call_id: "one".into(),
+                }
+                .into(),
             ],
             tools: Vec::new(),
+            tool_results: Vec::new(),
         })
         .unwrap();
         assert_eq!(
@@ -351,5 +399,58 @@ mod tests {
             terminal_result(truncated).unwrap().outcome,
             CallOutcome::Truncated
         );
+    }
+
+    #[test]
+    fn explicit_results_match_call_ids_in_one_rig_batch() {
+        let input = LlmInputs::from_values(
+            [
+                (
+                    "messages".into(),
+                    json!([{"role":"assistant","content":"","tool_calls":[
+                        {"id":"first","name":"lookup","arguments":{"key":"a"}},
+                        {"id":"second","name":"lookup","arguments":{"key":"b"}},
+                        {"id":"third","name":"store","arguments":{"key":"c"}}
+                    ]}])
+                    .into(),
+                ),
+                (
+                    "tool_results".into(),
+                    json!([
+                        {"tool_call_id":"second","content":"B"},
+                        {"tool_call_id":"third","content":"C"},
+                        {"tool_call_id":"first","content":"A"}
+                    ])
+                    .into(),
+                ),
+            ]
+            .into(),
+        )
+        .unwrap();
+        let request = prepare_request(&input).unwrap();
+        assert_eq!(request.chat_history.len(), 2);
+        let rig::Message::Assistant { content, .. } = &request.chat_history[0] else {
+            panic!("expected one assistant call batch");
+        };
+        assert_eq!(content.len(), 3);
+        let rig::Message::User { content } = &request.chat_history[1] else {
+            panic!("expected one tool result batch");
+        };
+        assert_eq!(content.len(), 3);
+        for (item, (id, name, text)) in content.iter().zip([
+            ("second", "lookup", "B"),
+            ("third", "store", "C"),
+            ("first", "lookup", "A"),
+        ]) {
+            let rig::UserContent::ToolResult(result) = item else {
+                panic!("expected a tool result without synthetic user text");
+            };
+            assert_eq!(result.call.wire(), id);
+            assert_eq!(result.name.as_str(), name);
+            assert_eq!(
+                result.content,
+                vec![rig::ToolResultContent::Text(text.into())]
+            );
+        }
     }
 }

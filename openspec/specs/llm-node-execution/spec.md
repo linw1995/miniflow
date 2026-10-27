@@ -151,6 +151,33 @@ A valid invocation SHALL publish one terminal result containing any available as
 
 Tools SHALL declare unique valid names, descriptions, and object input schemas. Calls SHALL carry id, name, and parsed JSON arguments. Call IDs SHALL be nonblank and unique within the supplied transcript. Every pending call SHALL receive exactly one result before another system, user, or assistant message or the next request. The node SHALL NOT expose tool_choice, perform tool execution, or retain provider-specific reasoning state.
 
+The node SHALL accept an optional tool_results list, defaulting to empty, whose ToolResult entries contain required string tool_call_id and content fields.
+The request SHALL encode these entries as role tool messages after the supplied messages, preserving both lists and their order. The same pending-call validation SHALL apply across both inputs.
+The node SHALL NOT synthesize the preceding assistant call, insert results into earlier exchanges, or retain or return an updated transcript. ToolResult SHALL be publicly exported and convertible into ChatMessage for caller-owned persistence.
+
+#### Scenario: Bind explicit results from an upstream node
+
+- **WHEN** messages ends with an assistant call batch and an upstream output binds to tool_results
+- **THEN** the provider receives the supplied messages followed by the matching results
+- **AND** Task and TaskStream execution use the same input contract in memory and compiled runners
+
+#### Scenario: Reject a result duplicated across inputs
+
+- **WHEN** a call is answered in messages and tool_results repeats its ID
+- **THEN** validation fails before network I/O with the offending tool_results index
+
+#### Scenario: Return multiple results for one assistant message
+
+- **WHEN** one assistant message calls the same or different tools multiple times and results arrive in a different order
+- **THEN** matching uses call IDs rather than names or positions, preserving the result order
+- **AND** the OpenAI Chat Completions request contains one assistant message with all calls followed by one role tool message per result
+- **AND** a missing result prevents a partial batch from being sent to the provider
+
+#### Scenario: Preserve the distinction between a result and a message
+
+- **WHEN** a tool_results entry contains role, assistant fields, an unknown field, or a missing or mistyped required field
+- **THEN** input decoding fails with the offending tool_results path
+
 #### Scenario: Continue from tool results
 
 - **WHEN** messages contains an assistant tool-call message followed by matching tool results

@@ -1,5 +1,5 @@
 pub mod call;
-pub use call::{CallOutcome, ToolCall, ToolCallEvent, ToolDefinition};
+pub use call::{CallOutcome, ToolCall, ToolCallEvent, ToolDefinition, ToolResult};
 mod streaming;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
@@ -89,6 +89,8 @@ pub struct LlmInputs {
     pub messages: Vec<ChatMessage>,
     #[value(default)]
     pub tools: Vec<ToolDefinition>,
+    #[value(default)]
+    pub tool_results: Vec<ToolResult>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -791,14 +793,21 @@ mod tests {
     #[test]
     fn fixed_ports_reflect_nested_messages_and_optional_metadata() {
         let inputs = LlmInputs::ports();
-        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs.len(), 3);
         assert_eq!(inputs[0].name, "messages");
         assert!(inputs[0].required);
         assert_eq!(
             inputs[0].value_type,
             ValueType::List(Box::new(ValueType::Object))
         );
-        assert!(!inputs[1].required);
+        for (port, name) in inputs[1..].iter().zip(["tools", "tool_results"]) {
+            assert_eq!(port.name, name);
+            assert!(!port.required);
+            assert_eq!(
+                port.value_type,
+                ValueType::List(Box::new(ValueType::Object))
+            );
+        }
         let outputs = LlmOutputs::ports();
         for name in ["status", "usages", "text", "tool_calls", "outcome"] {
             assert!(
@@ -874,6 +883,7 @@ mod tests {
         )]))
         .unwrap();
         assert!(input.tools.is_empty());
+        assert!(input.tool_results.is_empty());
         assert!(LlmInputs::from_values(Default::default()).is_err());
     }
 
