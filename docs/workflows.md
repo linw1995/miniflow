@@ -621,7 +621,8 @@ which may be empty for a tool-only reply, and `tool_calls` contains the requeste
 
 Execute calls outside the node. Append the returned assistant `message` and a matching result for each
 call to the caller-owned conversation, then invoke `builtin.llm` again with that complete `messages` list
-and the desired `tools`:
+and the desired `tools`. A tool result is a `ChatMessage` with `role: tool`; there is no separate
+`tool_results` input. Its `tool_call_id` is the call's `id`, and its `content` is the result text:
 
 ```json
 {
@@ -631,10 +632,46 @@ and the desired `tools`:
 }
 ```
 
+For the returned `call_123` above, the complete second invocation of `llm-tools.json` is:
+
+```json
+{
+  "model.messages": [
+    {"role": "user", "content": "Look up order 42."},
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {"id": "call_123", "name": "lookup_order", "arguments": {"id": "42"}}
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_123",
+      "content": "Order 42 has shipped."
+    }
+  ],
+  "model.tools": []
+}
+```
+
+Use the actual assistant `message` and call IDs from the first invocation. `tools` declares the tools
+available for the current request; it does not carry results. This example disables further tool calls
+while asking for the final answer. Historical calls remain valid when their definitions are absent
+from the current `tools` list. To allow more calls, supply the desired definitions again.
+
+`content` must be a string. Serialize structured results once, for example
+`"content": "{\"id\":\"42\",\"status\":\"shipped\"}"`; empty strings are also accepted. Execution errors can
+use caller-defined text or JSON encoded as a string, such as
+`"content": "{\"error\":{\"code\":\"not_found\",\"message\":\"Order 42 does not exist\"}}"`.
+There is no separate `is_error` protocol field. These messages retain the original call ID and let
+the model interpret the result. Application metadata is preserved by the caller and omitted from
+provider requests.
+
 Call IDs must be nonblank and unique within the supplied messages. Every call requires exactly one
 result before subsequent user text, another assistant message, or the next request. Results can
-arrive in any order. The tool name is resolved from the matching assistant call. Tool errors can be
-represented in the result content by the caller; this node imposes no execution or retry policy.
+arrive in any order. Unknown, duplicate, or missing results fail before network I/O. The tool name is
+resolved from the matching assistant call. This node imposes no execution or retry policy.
 
 The node uses `OpenAIConfig.chat` and encodes text, function calls, and tool results from `messages`.
 Provider reasoning blocks are ignored, as in the original text-only node. Reasoning replay and

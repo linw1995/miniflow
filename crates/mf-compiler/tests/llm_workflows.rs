@@ -419,7 +419,7 @@ fn llm_workflows_match_memory_and_standalone_runners() {
 }
 
 #[test]
-fn tool_calls_match_memory_and_standalone_runners() {
+fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
     fn stabilize(value: &mut Value) {
         match value {
             Value::Object(fields) => {
@@ -448,7 +448,12 @@ fn tool_calls_match_memory_and_standalone_runners() {
     let finish = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
     streamed.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
     for (stream, reply) in [(false, unary), (true, streamed)] {
-        let server = Server::start(vec![reply; 2]);
+        let completion = if stream {
+            Reply::stream_text("Item 42 is available")
+        } else {
+            Reply::text("Item 42 is available")
+        };
+        let server = Server::start(vec![reply.clone(), reply, completion.clone(), completion]);
         let mut definition: Value =
             serde_json::from_str(include_str!("../../../examples/llm-tools.json")).unwrap();
         definition["dependencies"] = dependencies();
@@ -505,6 +510,42 @@ fn tool_calls_match_memory_and_standalone_runners() {
                 .unwrap_or(false),
             stream
         );
+
+        let result = json!({"role":"tool","tool_call_id":terminal["tool_calls"][0]["id"],
+            "content":"{\"id\":42,\"available\":true}"});
+        let continuation = json!({"model.messages":[
+            inputs["model.messages"][0], terminal["message"], result
+        ]});
+        let mut memory = run_memory(&definition, &continuation);
+        let mut generated = run(&executable, &continuation);
+        for outputs in [&mut memory, &mut generated] {
+            outputs.iter_mut().for_each(stabilize);
+            outputs.sort_by_key(Value::to_string);
+        }
+        assert_eq!(memory, generated);
+        let completed = generated
+            .iter()
+            .find(|output| output.get("outcome").is_some())
+            .unwrap();
+        assert_eq!(completed["outcome"], "completed");
+        assert_eq!(completed["text"], "Item 42 is available");
+        assert_eq!(completed["tool_calls"], json!([]));
+        assert_eq!(completed["message"]["content"], "Item 42 is available");
+        assert!(
+            generated
+                .iter()
+                .all(|output| output.get("tool_delta").is_none())
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[2..] {
+            let sent = request.body["messages"].as_array().unwrap();
+            assert_eq!(sent.len(), 3);
+            assert_eq!(sent[0], inputs["model.messages"][0]);
+            assert_eq!(sent[1]["role"], "assistant");
+            assert_eq!(sent[1]["tool_calls"][0]["id"], result["tool_call_id"]);
+            assert_eq!(sent[2], result);
+        }
     }
 }
 

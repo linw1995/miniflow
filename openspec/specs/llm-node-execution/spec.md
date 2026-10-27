@@ -155,6 +155,25 @@ Tools SHALL declare unique valid names, descriptions, and object input schemas. 
 
 - **WHEN** messages contains an assistant tool-call message followed by matching tool results
 - **THEN** the adapter encodes their IDs and arguments without adding a user prompt
+- **AND** each result is a role tool message with the original tool_call_id and unchanged string content
+- **AND** Task and TaskStream execution support the same continuation contract
+
+#### Scenario: Change the available tools after execution
+
+- **WHEN** the caller submits completed historical calls and results with a different or empty tools list
+- **THEN** the historical calls remain valid and the current tools list controls only the tools advertised for this request
+
+#### Scenario: Report structured, failed, or empty tool results
+
+- **WHEN** a tool result contains JSON encoded as a string, caller-defined error text, or an empty string
+- **THEN** the adapter preserves that content without parsing, wrapping, or discarding it
+- **AND** application metadata is omitted from the provider request
+
+#### Scenario: Reject an incomplete or ambiguous result batch
+
+- **WHEN** a result has an unknown or missing call ID, repeats an answered call, or leaves another call unanswered
+- **THEN** the request fails before network I/O
+- **AND** a result cannot contain assistant tool_calls or non-string content
 
 #### Scenario: Receive a tool-only response
 

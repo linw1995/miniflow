@@ -74,7 +74,78 @@ fn tools_are_advertised_and_multiple_calls_round_trip_without_an_extra_prompt() 
     assert_eq!(sent[2]["tool_calls"][0]["id"], "first");
     assert_eq!(sent[3]["role"], "tool");
     assert_eq!(sent[3]["tool_call_id"], "second");
+    assert_eq!(sent[3]["content"], "B");
+    assert_eq!(sent[4]["role"], "tool");
     assert_eq!(sent[4]["tool_call_id"], "first");
+    assert_eq!(sent[4]["content"], "A");
+}
+
+#[test]
+fn tool_results_preserve_content_without_readvertising_historical_tools() {
+    let contents = [
+        "Found the item",
+        r#"{"value":5,"items":[1,true,null]}"#,
+        r#"{"error":{"code":"not_found","message":"No matching item"}}"#,
+        "",
+    ];
+    let calls: Vec<_> = contents
+        .iter()
+        .enumerate()
+        .map(|(index, _)| json!({"id":format!("call_{index}"),"name":"lookup","arguments":{"key":index.to_string()}}))
+        .collect();
+    let mut messages = vec![
+        user("Look up the items"),
+        json!({"role":"assistant","content":"Checking","tool_calls":calls}),
+    ];
+    messages.extend(contents.iter().enumerate().rev().map(|(index, content)| {
+        json!({"role":"tool","tool_call_id":format!("call_{index}"),"content":content,
+            "metadata":{"local":true,"tags":["tool-result"]}})
+    }));
+    for stream in [false, true] {
+        let reply = if stream {
+            Reply::stream_text("Results received")
+        } else {
+            Reply::text("Results received")
+        };
+        let server = Server::start(vec![reply]);
+        let input = json!({"messages":messages});
+        let output = invoke(&server, input.clone(), stream, json!({}));
+        assert_eq!(output["results"][0]["ok"], true, "{output}");
+        assert_eq!(output["results"][0]["outputs"]["outcome"], "completed");
+        assert_eq!(output["results"][0]["outputs"]["text"], "Results received");
+        assert_eq!(output["original_inputs"][0], input);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        let body = &requests[0].body;
+        assert!(
+            body.get("tools")
+                .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)),
+            "{body}"
+        );
+        let sent = body["messages"].as_array().unwrap();
+        assert_eq!(sent.len(), messages.len());
+        assert_eq!(sent[0], messages[0]);
+        assert_eq!(
+            sent[1]["content"],
+            json!([{"type":"text","text":"Checking"}])
+        );
+        for (index, call) in sent[1]["tool_calls"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(call["id"], format!("call_{index}"));
+            assert_eq!(call["type"], "function");
+            assert_eq!(call["function"]["name"], "lookup");
+            assert_eq!(
+                serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap())
+                    .unwrap(),
+                json!({"key":index.to_string()})
+            );
+        }
+        for (sent, supplied) in sent[2..].iter().zip(&messages[2..]) {
+            assert_eq!(sent["role"], "tool");
+            assert_eq!(sent["tool_call_id"], supplied["tool_call_id"]);
+            assert_eq!(sent["content"], supplied["content"]);
+            assert!(sent.get("metadata").is_none());
+        }
+    }
 }
 
 #[test]
@@ -273,7 +344,17 @@ fn invalid_tool_definitions_and_unpaired_histories_fail_before_http() {
         json!({"messages":[result.clone()]}),
         json!({"messages":[pending.clone(),user("Hi"),result.clone()]}),
         json!({"messages":[pending.clone(),result.clone(),result.clone()]}),
-        json!({"messages":[pending.clone(),result.clone(),pending.clone(),result]}),
+        json!({"messages":[pending.clone(),result.clone(),pending.clone(),result.clone()]}),
+        json!({"messages":[pending.clone(),{"role":"tool","tool_call_id":"unknown","content":"value"}]}),
+        json!({"messages":[pending.clone(),{"role":"tool","content":"value"}]}),
+        json!({"messages":[pending.clone(),{"role":"tool","tool_call_id":"","content":"value"}]}),
+        json!({"messages":[pending.clone(),{"role":"tool","tool_call_id":"one","content":{"value":5}}]}),
+        json!({"messages":[pending.clone(),{"role":"tool","tool_call_id":"one","content":"value","tool_calls":[]}]}),
+        json!({"messages":[pending.clone(),{"role":"system","content":"Continue"},result.clone()]}),
+        json!({"messages":[{"role":"assistant","content":"","tool_calls":[
+            {"id":"one","name":"lookup","arguments":{}},
+            {"id":"two","name":"lookup","arguments":{}}
+        ]},result]}),
         json!({"messages":[{"role":"assistant","tool_call_id":"one","content":"value"}]}),
         json!({"messages":[{"role":"user","content":"Hi","tool_calls":[{"id":"one","name":"lookup","arguments":{}}]}]}),
     ];
