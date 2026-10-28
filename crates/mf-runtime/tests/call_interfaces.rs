@@ -418,3 +418,47 @@ fn schema_projection_keeps_decoded_refinements_and_descriptions_without_external
         })
         .unwrap();
 }
+
+#[test]
+fn decoded_fanout_intersects_schemas_deterministically_and_allows_optional_omission() {
+    use mf_runtime::ValueSchema;
+    let mut binding = binding("lookup", 0);
+    for (name, variants) in [("left", vec!["a", "b"]), ("right", vec!["b", "c"])] {
+        let mut parameter = input(
+            name,
+            ValueType::String,
+            false,
+            CallInputSource::Output(PortSpec::new("query", ValueType::String, false)),
+            false,
+        );
+        parameter.schema = Some(ValueSchema::Enum(
+            variants.into_iter().map(String::from).collect(),
+        ));
+        binding.inputs.push(parameter);
+    }
+    let interface = binding.interface();
+    assert_eq!(interface.outputs()[0].schema_constraints().len(), 2);
+    interface
+        .validate_decoded_arguments(&CallArguments::default())
+        .unwrap();
+    for (value, accepted) in [("a", false), ("b", true), ("c", false)] {
+        let arguments = CallArguments {
+            outputs: NodeValues::from([("query".into(), value.into())]),
+            ..Default::default()
+        };
+        assert!(interface.validate_arguments(&arguments).is_ok());
+        assert_eq!(
+            interface.validate_decoded_arguments(&arguments).is_ok(),
+            accepted
+        );
+    }
+    binding.inputs.reverse();
+    assert_eq!(binding.interface(), interface);
+    let map = ValueSchema::Map(Box::new(ValueSchema::Enum(vec!["a".into()])));
+    assert_eq!(
+        map.value_type(),
+        ValueType::Map(Box::new(ValueType::String))
+    );
+    map.validate_shared(&json!({"field":"a"}).into()).unwrap();
+    assert!(map.validate_shared(&json!({"field":"b"}).into()).is_err());
+}
