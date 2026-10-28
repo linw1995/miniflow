@@ -317,6 +317,18 @@ Preserve sensitivity metadata when composing values. Result export to the model 
 policy for sensitive values and size limits. Invocation identifiers support correlation but do not
 guarantee idempotency; side-effecting tools must not be retried automatically after ambiguous failures.
 
+### Delivered LLM boundary
+
+`builtin.llm` declares static `config.call_outputs`; resolved public schemas become provider tool definitions.
+Flat arguments remain flat unless output/default names collide, in which case both namespaces are explicit.
+Opaque schemas and binary32 contracts fail before network activity. The adapter validates complete JSON batches,
+executes calls sequentially through the context dispatcher, and replays SDK assistant messages with correlated results.
+Public history carries optional structured `tool_calls` and `tool_call_id` fields. Marked result secrets are redacted;
+arguments/results are bounded to 64 KiB each and batches/declarations to 256 KiB. Generic feedback hides domain failures.
+An invocation has one deadline, at most 32 tool rounds and 128 requested calls (defaults 8 and 32).
+Each provider request has independent usage facts; aggregate counters require every round to report them.
+Failure capture retains the original history and never intercepts runtime dispatch control failures.
+
 ## Alternatives and risks
 
 - Exposing full target inputs ignores composition and lets callers overwrite external configuration.

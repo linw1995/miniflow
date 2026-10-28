@@ -33,11 +33,11 @@
 ## 3. LLM integration
 
 - [x] 3.1 Reflect decoded structs, enums, collections, presence, and descriptions; mark unknown or recursive codecs opaque.
-- [ ] 3.1a Reject unsupported schema projections at the LLM boundary before provider requests.
-- [ ] 3.2 Build provider tool definitions from caller-visible projections and validate returned tool names.
-- [ ] 3.3 Extend message history with structured tool calls, results, and correlation identities.
-- [ ] 3.4 Add bounded multi-round dispatch and buffer streamed arguments until each call is complete.
-- [ ] 3.5 Define result sensitivity, size limits, and error export without automatic side-effect retries.
+- [x] 3.1a Reject unsupported schema projections at the LLM boundary before provider requests.
+- [x] 3.2 Build provider tool definitions from caller-visible projections and validate returned tool names.
+- [x] 3.3 Extend message history with structured tool calls, results, and correlation identities.
+- [x] 3.4 Add bounded multi-round dispatch and buffer streamed arguments until each call is complete.
+- [x] 3.5 Define result sensitivity, size limits, and error export without automatic side-effect retries.
 
 ## 4. Verification and documentation
 

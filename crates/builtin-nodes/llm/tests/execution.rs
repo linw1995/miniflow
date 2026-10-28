@@ -315,7 +315,7 @@ fn invalid_history_and_prompts_fail_before_network_io() {
         ),
         (
             json!({"prompt": "next", "history": [{"role": "tool", "content": "bad"}]}),
-            "/history/0/role",
+            "/history/0/tool_call_id",
         ),
         (
             json!({"prompt": "next", "history": [{"role": "user", "content": ""}]}),

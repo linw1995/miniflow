@@ -29,7 +29,7 @@ fn nested_title_usage() -> Value {
     usage
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 17] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 18] {
     [
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
@@ -66,6 +66,11 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 17] {
         ("if-else.json", None, json!({"accepted": {"amount": 150}})),
         ("iteration.json", None, json!({"results": [2, 5, 8]})),
         ("loop.json", None, json!({"count": 3})),
+        (
+            "llm-tools.json",
+            None,
+            json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+        ),
         (
             "llm-terminal.json",
             None,
@@ -147,7 +152,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     .unwrap();
             let config = if name == "llm-loop.json" {
                 &mut value["nodes"][0]["loop"]["body"]["nodes"][0]["config"]
-            } else if name == "llm-parameters.json" {
+            } else if matches!(name, "llm-parameters.json" | "llm-tools.json") {
                 &mut value["nodes"][1]["config"]
             } else {
                 &mut value["nodes"][0]["config"]

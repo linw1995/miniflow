@@ -324,7 +324,7 @@ History remains a list of user and assistant messages. Each message accepts an o
 }
 ```
 
-Metadata is opaque application data. The LLM adapter forwards only role and content to the provider and
+Metadata is opaque application data. The LLM adapter forwards conversation and tool protocol fields to the provider and
 preserves existing metadata in its returned history. The chat application persists response metadata on the
 new assistant message, including through save retries and database reopen. Returned history never replaces
 stored messages or changes their metadata. New user messages currently have no metadata.

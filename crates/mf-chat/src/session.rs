@@ -181,6 +181,8 @@ pub fn history(
         }
         for message in page {
             let history_message = mfn_llm::ChatMessage {
+                tool_calls: None,
+                tool_call_id: None,
                 role: message.role,
                 content: message.content,
                 metadata: message.metadata,

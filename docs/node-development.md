@@ -14,7 +14,7 @@ The optional [`mfn-code`](../crates/builtin-nodes/code/) package registers `buil
 instance-specific typed inputs, and output types inferred by the CEL checker. A Flow must select the package
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
-The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with fixed typed prompt,
+The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with typed prompt,
 system, history, terminal outputs, and an optional typed `delta` stream. Select it explicitly to add its HTTP transport dependencies.
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values).

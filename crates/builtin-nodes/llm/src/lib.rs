@@ -1,4 +1,7 @@
+mod history;
 mod streaming;
+mod tools;
+pub use tools::ToolSchemaError;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
 pub mod test_support;
@@ -75,9 +78,18 @@ pub struct CallUsage {
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
 pub struct ChatMessage {
+    pub tool_calls: Option<Vec<ChatToolCall>>,
+    pub tool_call_id: Option<String>,
     pub role: String,
     pub content: String,
     pub metadata: Option<MessageMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
+pub struct ChatToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: ValueRef,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -120,6 +132,8 @@ struct Config {
     max_tokens: Option<u64>,
     timeout_ms: u64,
     capture_errors: bool,
+    max_tool_rounds: u64,
+    max_tool_calls: u64,
     attribution: Option<UsageAttribution>,
 }
 
@@ -157,12 +171,30 @@ impl From<LlmConfigError> for NodeBuildError {
 }
 
 struct PreparedConfig {
+    call_outputs: Vec<mf_runtime::PortSpec>,
     fields: BTreeMap<String, ConfigTemplate>,
 }
 
 impl PreparedConfig {
     fn parse(value: Value) -> Result<Self, NodeBuildError> {
         let mut fields: BTreeMap<String, Value> = deserialize_config(value)?;
+        let call_outputs: BTreeMap<String, mf_runtime::ValueType> = fields
+            .remove("call_outputs")
+            .map(deserialize_config)
+            .transpose()?
+            .unwrap_or_default();
+        let call_outputs: Vec<_> = call_outputs
+            .into_iter()
+            .map(|(name, value_type)| mf_runtime::PortSpec::owned(name, value_type, false))
+            .collect();
+        mf_runtime::NodeMetadata {
+            ports: mf_runtime::NodePorts::from_types::<LlmInputs, LlmOutputs>(),
+            stream_outputs: <LlmEmission as mf_runtime::NodeOutputs>::ports(),
+            call_outputs: call_outputs.clone(),
+            ..Default::default()
+        }
+        .validate_call_outputs()?;
+
         ensure!(
             fields.contains_key("model"),
             InvalidConfigSnafu {
@@ -182,6 +214,8 @@ impl PreparedConfig {
             ("api_key_env", Value::from("OPENAI_API_KEY")),
             ("timeout_ms", Value::from(60_000_u64)),
             ("capture_errors", Value::from(false)),
+            ("max_tool_rounds", Value::from(8_u64)),
+            ("max_tool_calls", Value::from(32_u64)),
         ] {
             fields.entry(name.into()).or_insert(value);
         }
@@ -223,7 +257,10 @@ impl PreparedConfig {
             }
             templates.insert(field, template);
         }
-        Ok(Self { fields: templates })
+        Ok(Self {
+            fields: templates,
+            call_outputs,
+        })
     }
 
     fn references(&self) -> Vec<ContextReference> {
@@ -288,6 +325,20 @@ fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
             Some("a finite number from 0 to 2")
         }
         "max_tokens" | "timeout_ms" if value.as_f64() == Some(0.0) => Some("a positive integer"),
+        "max_tool_rounds"
+            if !value
+                .as_f64()
+                .is_some_and(|value| (1.0..=32.0).contains(&value)) =>
+        {
+            Some("an integer from 1 to 32")
+        }
+        "max_tool_calls"
+            if !value
+                .as_f64()
+                .is_some_and(|value| (1.0..=128.0).contains(&value)) =>
+        {
+            Some("an integer from 1 to 128")
+        }
         "base_url" => {
             let base = url::Url::parse(value.as_str().unwrap()).context(BaseUrlSnafu)?;
             ensure!(
@@ -329,6 +380,20 @@ fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
 
 #[derive(Snafu)]
 pub enum LlmExecutionError {
+    #[snafu(transparent)]
+    ToolSchema { source: ToolSchemaError },
+    #[snafu(display("LLM tool {resource} limit exceeded"))]
+    ToolLimit { resource: &'static str },
+    #[snafu(display("LLM response contains an incomplete or ambiguous tool call"))]
+    InvalidToolCall,
+    #[snafu(display("LLM tool arguments are not complete unambiguous JSON"))]
+    ToolArgumentsJson { source: serde_json::Error },
+    #[snafu(display("LLM tool dispatch stopped"))]
+    ToolDispatch {
+        source: mf_runtime::CallDispatchError,
+    },
+    #[snafu(display("LLM accumulated usage exceeds the signed integer range"))]
+    UsageTotal,
     #[snafu(transparent)]
     Configuration { source: LlmConfigError },
     #[snafu(display("LLM input `{path}` requires {requirement}"))]
@@ -450,12 +515,12 @@ impl LlmNode {
     fn complete(
         &self,
         inputs: LlmInputs,
-        context: &ExecutionContext,
+        context: &mut ExecutionContext,
         emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
     ) -> Result<LlmOutputs, LlmExecutionError> {
-        let deadline_origin = Instant::now();
+        let origin = Instant::now();
         let config = self.config.resolve(context)?;
-        let deadline = deadline_origin
+        let deadline = origin
             .checked_add(Duration::from_millis(config.timeout_ms))
             .context(DeadlineRangeSnafu)?;
         context.check_future_limits(Some(deadline))?;
@@ -466,23 +531,13 @@ impl LlmNode {
                 requirement: "nonempty text"
             }
         );
-        let history = inputs.history.unwrap_or_default();
-        for (index, message) in history.iter().enumerate() {
-            ensure!(
-                matches!(message.role.as_str(), "user" | "assistant"),
-                InvalidInputSnafu {
-                    path: format!("/history/{index}/role"),
-                    requirement: "role `user` or `assistant`"
-                }
-            );
-            ensure!(
-                !message.content.is_empty(),
-                InvalidInputSnafu {
-                    path: format!("/history/{index}/content"),
-                    requirement: "nonempty text"
-                }
-            );
+        let original_history = inputs.history.unwrap_or_default();
+        let mut conversation = history::messages(&original_history)?;
+        conversation.push(Message::user(&inputs.prompt));
+        if let Some(system) = inputs.system.filter(|system| !system.is_empty()) {
+            conversation.insert(0, Message::system(system));
         }
+        let catalog = tools::ToolCatalog::new(context)?;
         let key = if let Some(key) = &config.api_key {
             key.value()
                 .as_str()
@@ -500,123 +555,291 @@ impl LlmNode {
             );
             key
         };
-        let transport = transport::TerminalTransport::new(self.client()?);
-        let model = OpenAIConfig::new(key)
-            .with_base_url(&config.base_url)
-            .connect(transport.clone())
-            .chat(&config.model);
-        let messages = history.iter().map(|message| {
-            if message.role == "user" {
-                Message::user(&message.content)
-            } else {
-                Message::assistant(&message.content)
+        let client = self.client()?;
+        let mut output_history = original_history.clone();
+        output_history.push(history::plain("user", inputs.prompt));
+        let mut usages = Vec::new();
+        let mut text = String::new();
+        let mut rounds = 0_u64;
+        let mut calls = 0_u64;
+        let result = (|| -> Result<LlmOutputs, LlmExecutionError> {
+            loop {
+                let mut request = CompletionRequest::new("")
+                    .temperature(config.temperature)
+                    .max_tokens(config.max_tokens)
+                    .tools(catalog.definitions());
+                request.chat_history = conversation.clone();
+                let (response, usage) =
+                    request_round(&config, &key, &client, request, context, emitter, deadline);
+                usages.push(usage);
+                let response = response?;
+                let requested: Vec<_> = response.tool_calls().cloned().collect();
+                if requested.is_empty() {
+                    ensure!(
+                        !matches!(response.finish_reason(), Some(FinishReason::ToolCalls)),
+                        InvalidToolCallSnafu
+                    );
+                    let mut output = terminal_response(response, output_history)?;
+                    text.push_str(&output.text);
+                    output.text = text;
+                    output.usage = total_usage(&usages)?;
+                    context.check_future_limits(Some(deadline))?;
+                    return Ok(output);
+                }
+                ensure!(!catalog.is_empty(), UnsupportedOutputSnafu);
+                ensure!(
+                    !matches!(
+                        response.finish_reason(),
+                        Some(FinishReason::Length | FinishReason::ContentFilter)
+                    ),
+                    InvalidToolCallSnafu
+                );
+                validate_tool_batch(&requested)?;
+                ensure!(
+                    rounds < config.max_tool_rounds,
+                    ToolLimitSnafu { resource: "round" }
+                );
+                ensure!(
+                    requested.len() as u64 <= config.max_tool_calls.saturating_sub(calls),
+                    ToolLimitSnafu { resource: "call" }
+                );
+                reported_usage(&response.usage)?;
+                let mut prefix = String::new();
+                for part in &response.choice {
+                    match part {
+                        AssistantContent::Text(part) => prefix.push_str(&part.text),
+                        AssistantContent::ToolCall(_) | AssistantContent::Reasoning(_) => {}
+                        _ => return UnsupportedOutputSnafu.fail(),
+                    }
+                }
+                text.push_str(&prefix);
+                output_history.push(history::assistant(
+                    prefix,
+                    requested
+                        .iter()
+                        .map(|call| ChatToolCall {
+                            id: call.id.to_string(),
+                            name: call.function.name.to_string(),
+                            arguments: catalog.history_arguments(
+                                call.function.name.as_str(),
+                                &call.function.arguments,
+                            ),
+                        })
+                        .collect(),
+                ));
+                conversation.push(
+                    response
+                        .message()
+                        .expect("tool calls provide an assistant message"),
+                );
+                rounds += 1;
+                calls += requested.len() as u64;
+                for call in requested {
+                    context.check_future_limits(Some(deadline))?;
+                    let content = match catalog
+                        .arguments(call.function.name.as_str(), &call.function.arguments)
+                    {
+                        Err(tools::ToolArgumentsError::UnknownTool) => {
+                            tool_error("unknown tool name")
+                        }
+                        Err(_) => tool_error("arguments do not match the tool contract"),
+                        Ok((binding, arguments)) => {
+                            let response = context
+                                .invoke_call_with_deadline(binding, arguments, Some(deadline))
+                                .context(ToolDispatchSnafu)?;
+                            match response.outcome {
+                                mf_runtime::CallOutcome::Succeeded(outputs) => {
+                                    match tools::tool_result(outputs) {
+                                        Ok(content) => content,
+                                        Err(tools::ToolEncodingError::Size) => {
+                                            tool_error("tool result exceeds the size limit")
+                                        }
+                                        Err(_) => tool_error("tool result could not be encoded"),
+                                    }
+                                }
+                                mf_runtime::CallOutcome::Skipped { .. } => tool_error(
+                                    "tool was skipped because a prerequisite was unavailable",
+                                ),
+                                mf_runtime::CallOutcome::Failed { .. } => {
+                                    tool_error("tool execution failed")
+                                }
+                            }
+                        }
+                    };
+                    output_history.push(history::tool(call.id.to_string(), content.clone()));
+                    conversation.push(Message::tool_results(vec![
+                        call.result(vec![rig_core::message::ToolResultContent::text(content)]),
+                    ]));
+                }
             }
-        });
-        let mut request = CompletionRequest::new(&inputs.prompt)
-            .messages(messages)
-            .temperature(config.temperature)
-            .max_tokens(config.max_tokens);
-        if let Some(system) = inputs.system.filter(|system| !system.is_empty()) {
-            request = request.preamble(system);
-        }
-        let mut usage = CallUsage {
-            attribution: config.attribution.clone(),
-            started_at: None,
-            call_id: uuid::Uuid::new_v4().to_string(),
-            node: context.current_node().map(|id| UsageNode {
-                id: id.into(),
-                kind: KIND.into(),
-                path: context
-                    .invocation_path()
-                    .into_iter()
-                    .map(|scope| UsageScope {
-                        node: scope.node_id().to_owned(),
-                        index: scope.index().get(),
-                    })
-                    .collect(),
-            }),
-            model: config.model.clone(),
-            usage: None,
-            error: None,
-        };
-        usage.started_at =
-            mf_telemetry::events::record(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
-                .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
-        let response = if emitter.is_connected() {
-            streaming::complete(
-                model.stream(request),
-                emitter,
-                &usage.call_id,
-                deadline,
-                context,
-            )
-        } else {
-            context
-                .execute_future(model.call(request), Some(deadline))
-                .map_err(LlmExecutionError::from)
-                .and_then(|response| {
-                    response.with_context(|source| ProviderSnafu {
-                        kind: source.kind().code(),
-                        status: source
-                            .provider_response_status()
-                            .map(|status| status.as_u16()),
-                    })
-                })
-        };
-        if let Some(reported) = transport.usage() {
-            usage.usage = reported_usage(&reported).ok().flatten();
-        }
-        if usage.usage.is_none()
-            && let Ok(response) = &response
-        {
-            usage.usage = reported_usage(&response.usage).ok().flatten();
-        }
-        let mut finished = usage.clone();
-        finished.error = response.as_ref().err().map(ToString::to_string);
-        mf_telemetry::events::record(REQUEST_FINISHED_EVENT, serde_json::json!(finished));
-        let failure_history = if config.capture_errors {
-            history.clone()
-        } else {
-            Vec::new()
-        };
-        let result = response.and_then(|mut response| {
-            if let Some(usage) = transport.usage() {
-                response.usage = usage;
-            }
-            if usage.usage.is_none() {
-                usage.usage = reported_usage(&response.usage).ok().flatten();
-            }
-            terminal_outputs(response, inputs.prompt, history).and_then(|result| {
-                context.check_future_limits(Some(deadline))?;
-                Ok(result)
-            })
-        });
-        let mut result = match result {
-            Ok(result) => result,
+        })();
+        let mut output = match result {
+            Ok(output) => output,
             Err(error)
                 if config.capture_errors
-                    && !matches!(error, LlmExecutionError::Publication { .. }) =>
+                    && !matches!(
+                        error,
+                        LlmExecutionError::Publication { .. }
+                            | LlmExecutionError::ToolDispatch { .. }
+                    ) =>
             {
                 context.check_future_limits(None)?;
                 let error = error.to_string();
-                usage.error = Some(error.clone());
+                if let Some(usage) = usages.last_mut() {
+                    usage.error = Some(error.clone());
+                }
                 LlmOutputs {
                     status: "failed".into(),
-                    text: String::new(),
-                    history: failure_history,
-                    usage: usage.usage.clone(),
-                    finish_reason: None,
-                    metadata: None,
                     usages: Vec::new(),
                     error: Some(error),
+                    text: String::new(),
+                    history: original_history,
+                    usage: total_usage(&usages).ok().flatten(),
+                    finish_reason: None,
+                    metadata: None,
                 }
             }
             Err(error) => return Err(error),
         };
-        usage.usage = result.usage.clone();
-        result.usages.push(usage);
-        Ok(result)
+        output.usages = usages;
+        Ok(output)
     }
+}
+
+fn tool_error(message: &str) -> String {
+    serde_json::json!({"error":message}).to_string()
+}
+
+fn validate_tool_batch(calls: &[rig_core::message::ToolCall]) -> Result<(), LlmExecutionError> {
+    let mut identities = std::collections::BTreeSet::new();
+    let mut bytes = 0usize;
+    ensure!(
+        calls.len() <= tools::MAX_TOOL_CALLS,
+        ToolLimitSnafu {
+            resource: "batch count"
+        }
+    );
+    for call in calls {
+        let id = call.id.to_string();
+        ensure!(
+            !id.trim().is_empty()
+                && id.len() <= 256
+                && identities.insert(id)
+                && !call.function.name.trim().is_empty()
+                && call.function.name.len() <= 256,
+            InvalidToolCallSnafu
+        );
+        let encoded = tools::bounded_json(&call.function.arguments, tools::MAX_TOOL_ARGUMENT_BYTES)
+            .ok()
+            .context(ToolLimitSnafu {
+                resource: "argument bytes",
+            })?;
+        bytes = bytes.saturating_add(encoded.len());
+        ensure!(
+            bytes <= tools::MAX_TOOL_BATCH_ARGUMENT_BYTES,
+            ToolLimitSnafu {
+                resource: "batch argument bytes"
+            }
+        );
+    }
+    Ok(())
+}
+
+fn request_round(
+    config: &Config,
+    key: &str,
+    client: &ReqwestClient,
+    request: CompletionRequest,
+    context: &ExecutionContext,
+    emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
+    deadline: Instant,
+) -> (Result<CompletionResponse, LlmExecutionError>, CallUsage) {
+    let transport = transport::TerminalTransport::new(client.clone());
+    let model = OpenAIConfig::new(key.to_owned())
+        .with_base_url(&config.base_url)
+        .connect(transport.clone())
+        .chat(&config.model);
+    let mut usage = CallUsage {
+        attribution: config.attribution.clone(),
+        started_at: None,
+        call_id: uuid::Uuid::new_v4().to_string(),
+        node: context.current_node().map(|id| UsageNode {
+            id: id.into(),
+            kind: KIND.into(),
+            path: context
+                .invocation_path()
+                .into_iter()
+                .map(|scope| UsageScope {
+                    node: scope.node_id().into(),
+                    index: scope.index().get(),
+                })
+                .collect(),
+        }),
+        model: config.model.clone(),
+        usage: None,
+        error: None,
+    };
+    usage.started_at =
+        mf_telemetry::events::record(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
+            .and_then(|time| i64::try_from(time / 1_000_000).ok());
+    let mut response = if emitter.is_connected() {
+        streaming::complete(
+            model.stream(request),
+            emitter,
+            &usage.call_id,
+            deadline,
+            context,
+        )
+    } else {
+        context
+            .execute_future(model.call(request), Some(deadline))
+            .map_err(LlmExecutionError::from)
+            .and_then(|result| {
+                result.with_context(|source| ProviderSnafu {
+                    kind: source.kind().code(),
+                    status: source
+                        .provider_response_status()
+                        .map(|status| status.as_u16()),
+                })
+            })
+    };
+    if let Some(reported) = transport.usage() {
+        usage.usage = reported_usage(&reported).ok().flatten();
+        if let Ok(response) = &mut response {
+            response.usage = reported;
+        }
+    }
+    if usage.usage.is_none()
+        && let Ok(response) = &response
+    {
+        usage.usage = reported_usage(&response.usage).ok().flatten();
+    }
+    let mut finished = usage.clone();
+    finished.error = response.as_ref().err().map(ToString::to_string);
+    mf_telemetry::events::record(REQUEST_FINISHED_EVENT, serde_json::json!(finished));
+    (response, usage)
+}
+
+fn total_usage(usages: &[CallUsage]) -> Result<Option<BTreeMap<String, i64>>, LlmExecutionError> {
+    let Some(mut total) = usages.first().and_then(|usage| usage.usage.clone()) else {
+        return Ok(None);
+    };
+    for usage in &usages[1..] {
+        let Some(usage) = &usage.usage else {
+            return Ok(None);
+        };
+        for key in total.keys().cloned().collect::<Vec<_>>() {
+            if let Some(value) = usage.get(&key) {
+                total.insert(
+                    key.clone(),
+                    total[&key].checked_add(*value).context(UsageTotalSnafu)?,
+                );
+            } else {
+                total.remove(&key);
+            }
+        }
+    }
+    Ok((!total.is_empty()).then_some(total))
 }
 
 fn reported_usage(
@@ -638,9 +861,18 @@ fn reported_usage(
     Ok((!usage.is_empty()).then_some(usage))
 }
 
+#[cfg(test)]
 fn terminal_outputs(
     response: CompletionResponse,
     prompt: String,
+    mut history: Vec<ChatMessage>,
+) -> Result<LlmOutputs, LlmExecutionError> {
+    history.push(history::plain("user", prompt));
+    terminal_response(response, history)
+}
+
+fn terminal_response(
+    response: CompletionResponse,
     mut history: Vec<ChatMessage>,
 ) -> Result<LlmOutputs, LlmExecutionError> {
     let finish_reason = response.finish_reason().map(|reason| match reason {
@@ -663,11 +895,8 @@ fn terminal_outputs(
     ensure!(!text.is_empty(), EmptyTextSnafu);
     let usage = reported_usage(&response.usage)?;
     history.push(ChatMessage {
-        metadata: None,
-        role: "user".into(),
-        content: prompt,
-    });
-    history.push(ChatMessage {
+        tool_calls: None,
+        tool_call_id: None,
         metadata: None,
         role: "assistant".into(),
         content: text.clone(),
@@ -688,6 +917,7 @@ fn terminal_outputs(
 pub fn prepare_llm(value: Value) -> Result<PreparedNode, NodeBuildError> {
     let config = PreparedConfig::parse(value)?;
     let metadata = NodeMetadata {
+        call_outputs: config.call_outputs.clone(),
         context_references: config.references(),
         ..Default::default()
     };
@@ -795,6 +1025,13 @@ mod tests {
         for patch in [
             json!({"api_key":{"$template":"literal-key"}}),
             json!({"api_key_env":{"$ref":"params.name"}}),
+            json!({"call_outputs":{"$ref":"params.ports"}}),
+            json!({"call_outputs":{"text":"string"}}),
+            json!({"call_outputs":{"delta":"string"}}),
+            json!({"max_tool_rounds":0}),
+            json!({"max_tool_rounds":33}),
+            json!({"max_tool_calls":0}),
+            json!({"max_tool_calls":129}),
             json!({"model":{"$ref":"params.model", "unexpected":true}}),
         ] {
             let mut config = json!({"model":"example"});
@@ -839,6 +1076,8 @@ mod tests {
             metadata: None,
             text: "reply".into(),
             history: vec![ChatMessage {
+                tool_calls: None,
+                tool_call_id: None,
                 metadata: None,
                 role: "assistant".into(),
                 content: "reply".into(),
@@ -910,6 +1149,8 @@ mod tests {
         )
         .with_finish_reason(FinishReason::Other("service_stop".into()));
         let previous = vec![ChatMessage {
+            tool_calls: None,
+            tool_call_id: None,
             metadata: None,
             role: "user".into(),
             content: "prior".into(),

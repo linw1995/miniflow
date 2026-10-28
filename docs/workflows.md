@@ -429,7 +429,7 @@ The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing 
 | Stream output | `delta` | `Object` | Yes, per emission |
 
 The `delta` payload contains `text` and `model_call_id`. A connected graph edge or selected native output
-selects one streaming request; an unconsumed invocation sends one ordinary request and emits nothing.
+selects streaming requests for every model round; an unconsumed invocation sends ordinary requests and emits nothing.
 There is no per-node streaming flag or fallback request. Terminal text, history, finish reason, and usages
 come from the completed provider response. Delivered prefixes remain provisional on failure or cancellation.
 
@@ -448,7 +448,8 @@ when the consumer fails or the host cancels.
 Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
 Each history object has exactly two required string fields, `role` and `content`. Conversation roles are `user`
-and `assistant`, with nonempty text. The current `prompt` is also nonempty. System instructions use the separate
+and `assistant`, with nonempty text for ordinary messages. Tool exchanges additionally use `tool` records,
+as described below. The current `prompt` is also nonempty. System instructions use the separate
 `system` input. Missing or empty history starts a new conversation; a successful turn appends its user prompt and
 assistant text to the supplied history. The workflow owns transcript persistence and trimming.
 
@@ -513,8 +514,8 @@ invocation-specific credentials, endpoint, or deadline.
 
 Request messages are optional system instructions, the supplied history in order, and the current user prompt.
 On success, returned history preserves the supplied records and appends the current user prompt and complete assistant
-text once each. System instructions are excluded and must be supplied again for each turn. The node does not retain
-conversation state, automatically trim history, or execute tool calls. Unsupported history roles and response content
+text, including intervening tool calls and results. System instructions are excluded and must be supplied again
+for each turn. The node does not retain conversation state or automatically trim history. Unsupported history roles and response content
 fail rather than being silently rewritten. A nonempty reply truncated at its token limit retains the `length` reason.
 
 `usage` contains available `input_tokens`, `output_tokens`, and `total_tokens` counters; unreported counts do not become
@@ -527,6 +528,69 @@ The deadline covers setup and waiting for a terminal reply, with deadline and ca
 converted data. Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot
 be forcibly preempted. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
 workflow thread. Async hosts use a blocking thread for synchronous workflow entry points.
+
+#### Nodes as LLM tools
+
+The [tool example](../examples/llm-tools.json) exposes a callable CEL node. Its `amount` argument comes from
+`chat`, while an ordinary connection supplies `factor` from a constant. The model sees only `amount`.
+The same binding and execution rules apply to terminal tasks, TaskStream nodes, and callable Flow wrappers.
+
+Declare `config.call_outputs` as a static name-to-type map on the LLM node, then connect those slots with
+`calls.<caller>.<alias>.ports`. These are intermediate call arguments, separate from terminal outputs and `delta`.
+Explicit port mappings take precedence. `defaults: "remaining_inputs"` opts into the remaining unbound target
+inputs; externally wired inputs are never included. The alias becomes the provider tool name and must contain
+1 to 64 ASCII letters, digits, underscores, or hyphens. An optional binding `description` describes the tool.
+
+Provider argument objects use flat names unless explicit output names collide with default-input names.
+A collision produces separate `outputs` and `defaults` objects. Requiredness, nullability, closed structs,
+enums, tagged variants, collections, and descriptions come from the resolved public contract. All constraints
+on a mapped argument apply together. Opaque/custom or recursive codecs and lossless binary32 contracts are
+rejected before the first provider request; give such tools a supported input wrapper. Unknown external
+credential schemas do not affect the public tool schema. Runtime decoded validation remains authoritative,
+including exact numeric representation checks that a provider may not enforce.
+
+A complete assistant tool batch is validated before dispatch. Calls run in response order, with isolated
+invocation state and ordinary external prerequisites. Streamed arguments are buffered and checked for
+complete, duplicate-free JSON before any tool in that response executes. Tool IDs correlate each assistant
+call with exactly one result. History preserves these records:
+
+```json
+[
+  {"role":"assistant","content":"","tool_calls":[
+    {"id":"call-1","name":"multiply","arguments":{"amount":21}}
+  ]},
+  {"role":"tool","content":"{\"result\":42}","tool_call_id":"call-1"}
+]
+```
+
+Supply all results before another user or assistant message. Plain history records retain their existing
+shape; metadata stays local. Full SDK assistant content is replayed between rounds of one invocation,
+while the public persisted history contains visible text and structured tool exchanges. Provider-specific
+reasoning state is not persisted across workflow invocations.
+
+`max_tool_rounds` defaults to 8 (range 1–32) and `max_tool_calls` to 32 (range 1–128). A tool round is one
+assistant batch, followed by another model request, so the maximum provider request count is rounds plus one.
+Both limits accept configuration templates. One `timeout_ms` deadline covers all rounds and tool calls;
+runtime cancellation, invocation depth, and shared execution budgets remain in force. Limit checks precede
+batch execution. Already executed tools are not rolled back when a later round fails.
+
+Tool arguments and results are each limited to 64 KiB of JSON, argument batches to 256 KiB, and tool
+declarations to 256 KiB. Oversized results are replaced with a generic error rather than truncated JSON.
+Marked secret result values are redacted before entering provider messages. Unknown names, invalid arguments,
+skips, and domain failures return generic tool feedback; typed runtime control failures stop execution.
+The adapter does not retry requests or tools automatically. A model may explicitly request a tool again;
+side-effecting tools must enforce their own idempotency policy.
+
+`text` concatenates visible assistant text across rounds, matching emitted deltas. `history` preserves each
+round separately. `usages` contains one entry per actual model request with a distinct call ID; aggregate
+`usage` includes only counters reported by every round. With `capture_errors`, a recoverable failure returns
+`status: "failed"`, the original input history, and collected request facts. Delivery failures and runtime
+control failures still propagate.
+
+```sh
+mf compile examples/llm-tools.json --output ./tool-chat
+./tool-chat --chat.prompt 'Use multiply to double 21'
+```
 
 The [terminal example](../examples/llm-terminal.json) accepts startup prompt, system, and history inputs.
 The [Loop example](../examples/llm-loop.json) passes updated history through a Loop variable for two turns.

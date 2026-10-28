@@ -392,6 +392,16 @@ impl ExecutionContext {
         }
     }
 
+    /// Whether the active node has a live executable call scope.
+    pub fn can_invoke_calls(&self) -> bool {
+        self.current_node.is_some()
+            && self
+                .call_dispatcher
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some()
+    }
+
     /// The current caller's immutable interfaces. Outside a node invocation this is empty.
     pub fn call_targets(&self) -> &[crate::CallInterface] {
         self.current_node

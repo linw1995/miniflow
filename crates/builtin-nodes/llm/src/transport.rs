@@ -51,6 +51,18 @@ fn normalize(
     let Ok(mut reply) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(bytes);
     };
+    if reply
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|choice| choice.pointer("/message/tool_calls").is_some())
+        })
+    {
+        let _: Value = mf_runtime::decode_unique_json(&bytes).context(NormalizeResponseSnafu)?;
+        crate::tools::validate_wire_arguments(&reply)?;
+    }
     let Some(object) = reply.as_object_mut() else {
         return Ok(bytes);
     };

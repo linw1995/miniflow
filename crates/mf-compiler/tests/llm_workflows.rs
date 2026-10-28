@@ -489,3 +489,73 @@ fn composed_conversation_compiles_without_application_nodes() {
     );
     instantiate_stream(&plan, &registry).unwrap();
 }
+
+#[test]
+fn directed_llm_tools_match_memory_and_generated_finite_and_native_execution() {
+    fn stable(mut values: Vec<Value>) -> Vec<Value> {
+        for value in &mut values {
+            if let Some(delta) = value.get_mut("delta") {
+                delta.as_object_mut().unwrap().remove("model_call_id");
+            }
+        }
+        values
+    }
+    for (native, streaming) in [(false, false), (true, false), (true, true)] {
+        let tool = if streaming {
+            let mut reply = Reply::stream_text("");
+            let start = json!({"id":"first","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":null}]});
+            let finish = json!({"id":"first","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]});
+            reply.body = format!("data: {start}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+            reply
+        } else {
+            Reply::json(
+                json!({"id":"first","object":"chat.completion","created":0,"model":"example-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":"tool_calls"}]}),
+            )
+        };
+        let final_reply = if streaming {
+            Reply::stream_text("42")
+        } else {
+            Reply::text("42")
+        };
+        let server = Server::start(vec![tool.clone(), final_reply.clone(), tool, final_reply]);
+        let mut definition: Value =
+            serde_json::from_str(include_str!("../../../examples/llm-tools.json")).unwrap();
+        definition["dependencies"] = dependencies();
+        definition["dependencies"]["code"] =
+            json!({"package":"mfn-code","path":common::crates_dir().join("builtin-nodes/code")});
+        definition["nodes"][1]["config"]["base_url"] = server.base_url.clone().into();
+        if native {
+            definition["execution"] = json!({"limits":{"workers":1,"max_pending_messages":2}});
+        }
+        if streaming {
+            definition["outputs"] = json!([{"name":"delta","node":"chat","port":"delta"}]);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let executable = compile(&definition, root.path());
+        assert!(server.requests().is_empty());
+        let inputs = json!({"chat.prompt":"Use multiply to double 21"});
+        let memory = stable(run_memory(&definition, &inputs));
+        let generated = stable(run(&executable, &inputs));
+        assert_eq!(generated, memory);
+        if streaming {
+            assert_eq!(memory, vec![json!({"delta":{"text":"42"}})]);
+        } else {
+            assert_eq!(memory[0]["text"], "42");
+            assert_eq!(memory[0]["history"].as_array().unwrap().len(), 4);
+        }
+        let requests = server.requests();
+        assert_eq!(requests.len(), 4);
+        for request in [&requests[0], &requests[2]] {
+            let properties = &request.body["tools"][0]["function"]["parameters"]["properties"];
+            assert!(properties.get("amount").is_some());
+            assert!(properties.get("factor").is_none());
+        }
+        for request in [&requests[1], &requests[3]] {
+            assert_eq!(request.body["messages"][2]["tool_call_id"], "a");
+            let result: Value =
+                serde_json::from_str(request.body["messages"][2]["content"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(result, json!({"result":42}));
+        }
+    }
+}
