@@ -405,3 +405,70 @@ fn schema_metadata_rejects_conflicting_tags_and_excessive_fields() {
         Err(SchemaContractError::Limit { .. })
     ));
 }
+
+struct ManualMessage(String);
+impl NodeValue for ManualMessage {
+    fn ports() -> Vec<PortSpec> {
+        vec![PortSpec::new("text", ValueType::String, true)]
+    }
+    fn from_values(mut values: NodeValues) -> Result<Self, InputDecodeError> {
+        let text = decode_input(&mut values, "text")?;
+        Ok(Self(text))
+    }
+    fn into_values(self) -> Result<NodeValues, OutputEncodeError> {
+        Ok(NodeValues::from([("text".into(), self.0.into())]))
+    }
+}
+
+#[test]
+fn manual_node_values_keep_opaque_reflection_and_independent_working_codecs() {
+    let schemas = ManualMessage::input_schemas_with_context(&mut ValueSchemaContext::default());
+    assert_eq!(schemas.len(), 1);
+    assert_eq!(schemas["text"].value_type(), ValueType::String);
+    assert!(!schemas["text"].is_complete());
+    let values = NodeValues::from([("text".into(), "message".into())]);
+    schemas["text"].validate_shared(&values["text"]).unwrap();
+    let decoded = ManualMessage::from_values(values.clone()).unwrap();
+    assert_eq!(decoded.into_values().unwrap(), values);
+    assert!(schemas["text"].validate_shared(&false.into()).is_err());
+    assert!(ManualMessage::from_values(NodeValues::new()).is_err());
+}
+
+#[test]
+fn reflected_tagged_values_roundtrip_defaults_and_reject_unknown_discriminators() {
+    let value = json!({
+        "query":"q", "mode":"Thorough", "limit":4,
+        "filters":[{"kind":"Match","field.path":"name","expected":"value","optional":true}],
+        "extra":{"nullable":null,"present":"text"}
+    });
+    let decoded = <Request as InputValue>::decode(value.clone().into()).unwrap();
+    assert!(matches!(decoded.mode, Mode::Thorough));
+    assert_eq!(decoded.query, "q");
+    assert_eq!(decoded.limit, 4);
+    assert!(format!("{decoded:?}").contains("Match"));
+    let encoded = <Request as OutputValue>::encode(decoded).unwrap();
+    assert_eq!(serde_json::to_value(encoded).unwrap(), value);
+    let mut context = ValueSchemaContext::default();
+    let schema = context.describe::<Filter>();
+    let invalid = json!({"kind":"missing"});
+    let error = schema.validate_shared(&invalid.clone().into()).unwrap_err();
+    assert!(error.to_string().contains("kind"));
+    assert!(error.source().is_some());
+    assert!(<Filter as InputValue>::decode(invalid.into()).is_err());
+    let nested = context.describe::<Vec<Filter>>();
+    assert_eq!(
+        nested.value_type(),
+        ValueType::List(Box::new(ValueType::Object))
+    );
+    assert!(nested.is_complete());
+    let all = <Filter as InputValue>::decode(json!({"kind":"All"}).into()).unwrap();
+    assert_eq!(
+        serde_json::to_value(<Filter as OutputValue>::encode(all).unwrap()).unwrap(),
+        json!({"kind":"All"})
+    );
+    let mode = <Mode as InputValue>::decode("fast".into()).unwrap();
+    assert_eq!(
+        <Mode as OutputValue>::encode(mode).unwrap(),
+        ValueRef::from("fast")
+    );
+}
