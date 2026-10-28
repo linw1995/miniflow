@@ -544,3 +544,25 @@ fn runtime_control_failures_propagate_even_when_provider_errors_are_captured() {
     assert_eq!(result["calls"].as_array().unwrap().len(), 1);
     assert_eq!(server.requests().len(), 1);
 }
+
+#[test]
+fn rejected_tool_arguments_retain_reported_usage_without_executing_the_tool() {
+    for usage in [
+        json!({"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}),
+        json!({"completion_tokens":1}),
+    ] {
+        let mut tool_call = call("a", "search", json!({}));
+        tool_call["function"]["arguments"] = "{\"query\":\"first\",\"query\":\"second\"}".into();
+        let response = reply(vec![tool_call]);
+        let mut body: Value = serde_json::from_str(&response.body).unwrap();
+        body["usage"] = usage;
+        let server = Server::start(vec![Reply::json(body)]);
+        let result = probe(&server, json!({"config":{"capture_errors":true}}));
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["outputs"]["status"], "failed");
+        assert_eq!(result["outputs"]["usages"][0]["usage"]["output_tokens"], 1);
+        assert_eq!(result["outputs"]["usage"]["output_tokens"], 1);
+        assert!(result["calls"].as_array().unwrap().is_empty());
+        assert_eq!(server.requests().len(), 1);
+    }
+}

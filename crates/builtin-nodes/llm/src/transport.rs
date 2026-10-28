@@ -51,47 +51,46 @@ fn normalize(
     let Ok(mut reply) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(bytes);
     };
-    if reply
+    let has_tools = reply
         .get("choices")
         .and_then(Value::as_array)
         .is_some_and(|choices| {
             choices
                 .iter()
                 .any(|choice| choice.pointer("/message/tool_calls").is_some())
-        })
-    {
+        });
+    if has_tools {
         let _: Value = mf_runtime::decode_unique_json(&bytes).context(NormalizeResponseSnafu)?;
+    }
+    let mut rewrite = false;
+    if let Some(counters) = reply.get("usage").filter(|value| !value.is_null()).cloned() {
+        let counters: WireUsage = serde_json::from_value(counters).context(UsageMetadataSnafu)?;
+        *usage.lock().unwrap() = Some(Usage {
+            input_tokens: counters.prompt_tokens,
+            output_tokens: counters.completion_tokens,
+            total_tokens: counters.total_tokens,
+            ..Default::default()
+        });
+        if counters.prompt_tokens.is_none()
+            || counters.completion_tokens.is_none()
+            || counters.total_tokens.is_none()
+        {
+            // Rig requires complete counters; retain sparse facts outside its DTO without inventing zeros.
+            reply.as_object_mut().unwrap().remove("usage");
+            rewrite = true;
+        }
+    }
+    // A rejected tool payload can still represent a billed provider request.
+    if has_tools {
         crate::tools::validate_wire_arguments(&reply)?;
     }
-    let Some(object) = reply.as_object_mut() else {
-        return Ok(bytes);
-    };
-    let Some(counters) = object
-        .get("usage")
-        .filter(|value| !value.is_null())
-        .cloned()
-    else {
-        return Ok(bytes);
-    };
-    let counters: WireUsage = serde_json::from_value(counters).context(UsageMetadataSnafu)?;
-    let normalized = Usage {
-        input_tokens: counters.prompt_tokens,
-        output_tokens: counters.completion_tokens,
-        total_tokens: counters.total_tokens,
-        ..Default::default()
-    };
-    *usage.lock().unwrap() = Some(normalized);
-    if counters.prompt_tokens.is_some()
-        && counters.completion_tokens.is_some()
-        && counters.total_tokens.is_some()
-    {
-        return Ok(bytes);
+    if rewrite {
+        serde_json::to_vec(&reply)
+            .context(NormalizeResponseSnafu)
+            .map(Bytes::from)
+    } else {
+        Ok(bytes)
     }
-    // Rig's Chat DTO requires all wire counts; carry optional counts separately instead of inventing zeroes.
-    object.remove("usage");
-    serde_json::to_vec(&reply)
-        .context(NormalizeResponseSnafu)
-        .map(Bytes::from)
 }
 
 impl HttpClientExt for TerminalTransport {
