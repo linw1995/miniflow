@@ -441,7 +441,8 @@ impl fmt::Display for ValueType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PortSpec {
     pub name: Cow<'static, str>,
     pub value_type: ValueType,
@@ -742,6 +743,16 @@ pub trait TaskNode: Send + Sync {
         inputs: Inputs,
         ctx: &mut crate::ExecutionContext,
     ) -> Result<crate::NodeResult, NodeExecutionError>;
+
+    /// Executes with an explicitly connected sink when a containing scope exports emissions.
+    fn execute_with_sink(
+        &self,
+        inputs: Inputs,
+        context: &mut crate::ExecutionContext,
+        _sink: &mut dyn crate::EmissionSink,
+    ) -> Result<crate::NodeResult, NodeExecutionError> {
+        self.execute(inputs, context)
+    }
 }
 
 /// Reflects an instance's dynamic input and output contracts before execution.

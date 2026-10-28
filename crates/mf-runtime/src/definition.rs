@@ -122,27 +122,44 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_23,
     #[serde(rename = "2026-10-25")]
     V2026_10_25,
+    #[serde(rename = "2026-10-28")]
+    V2026_10_28,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_25;
+    pub const CURRENT: Self = Self::V2026_10_28;
+
+    pub fn supports_child_streams(self) -> bool {
+        matches!(self, Self::V2026_10_28)
+    }
+
+    pub fn supports_nested_flows(self) -> bool {
+        matches!(self, Self::V2026_10_25 | Self::V2026_10_28)
+    }
 
     pub fn supports_startup_inputs(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_03 | Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
+            Self::V2026_10_03
+                | Self::V2026_10_19
+                | Self::V2026_10_23
+                | Self::V2026_10_25
+                | Self::V2026_10_28
         )
     }
 
     pub fn supports_node_success_edges(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
         )
     }
 
     pub fn supports_clusters(self) -> bool {
-        matches!(self, Self::V2026_10_23 | Self::V2026_10_25)
+        matches!(
+            self,
+            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+        )
     }
 }
 
@@ -204,6 +221,8 @@ pub const MAX_SCHEDULED_STEPS: usize = 10_000;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopDefinition {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stream_outputs: BTreeMap<String, OutputReferenceDefinition>,
     pub max_iterations: u16,
     pub variables: Vec<LoopVariableDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

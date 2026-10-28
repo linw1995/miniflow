@@ -218,8 +218,7 @@ impl Resolver {
             }
         );
         ensure!(
-            definition.flows.is_empty()
-                || definition.version == mf_runtime::WorkflowDefinitionVersion::V2026_10_25,
+            definition.flows.is_empty() || definition.version.supports_nested_flows(),
             InvalidSnafu {
                 reference,
                 message: "Flow sources require version 2026-10-25"
@@ -313,7 +312,7 @@ impl Resolver {
                         node: node.id.as_str(),
                     })?;
                 ensure!(
-                    version == mf_runtime::WorkflowDefinitionVersion::V2026_10_25,
+                    version.supports_nested_flows(),
                     InvalidSnafu {
                         reference: node.id.as_str(),
                         message: "Flow calls require version 2026-10-25"

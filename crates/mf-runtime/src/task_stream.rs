@@ -158,6 +158,18 @@ impl<'a> Emitter<'a> {
     }
 }
 
+impl EmissionSink for Emitter<'_> {
+    fn is_connected(&self) -> bool {
+        Emitter::is_connected(self)
+    }
+
+    fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
+        Emitter::send(self, result).context(crate::stream_instance::ProducerSnafu {
+            definition_id: self.contract.definition_id.clone(),
+        })
+    }
+}
+
 pub struct TypedEmitter<'a, 'sink, O> {
     emitter: &'a mut Emitter<'sink>,
     output: PhantomData<fn(O)>,
@@ -229,6 +241,15 @@ impl TaskNode for TaskStreamExecutor {
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         self.execute_with_sink(inputs, context, &mut DiscardSink)
+    }
+
+    fn execute_with_sink(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn EmissionSink,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        TaskStreamExecutor::execute_with_sink(self, inputs, context, sink)
     }
 }
 

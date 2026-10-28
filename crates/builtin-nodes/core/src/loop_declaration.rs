@@ -35,16 +35,27 @@ fn factory(
     );
     let types = loop_variable_types(&config.variables)
         .map_err(|message| mf_runtime::NodeInvalidSubgraphSnafu { message }.build())?;
-    mf_runtime::PreparedNode::new(
-        LoopNode {
-            id: id.into(),
-            max_iterations: config.max_iterations,
-            until: config.until,
-            types,
-            body,
-        },
-        mf_runtime::NodeMetadata::default(),
-    )
+    ensure!(
+        body.stream_outputs
+            .iter()
+            .all(|port| !types.contains_key(port.name.as_ref())),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "Loop stream outputs must not overlap loop variables"
+        }
+    );
+    let streaming = !body.stream_outputs.is_empty();
+    let node = LoopNode {
+        id: id.into(),
+        max_iterations: config.max_iterations,
+        until: config.until,
+        types,
+        body,
+    };
+    if streaming {
+        mf_runtime::PreparedNode::task_stream(node, mf_runtime::NodeMetadata::default())
+    } else {
+        mf_runtime::PreparedNode::new(node, mf_runtime::NodeMetadata::default())
+    }
 }
 
 inventory::submit! {
@@ -114,6 +125,9 @@ impl NodePortContract for LoopNode {
             outputs: ports,
         }
     }
+    fn stream_outputs(&self) -> Vec<PortSpec> {
+        self.body.stream_outputs.clone()
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -134,10 +148,37 @@ impl TaskNode for LoopNode {
     fn supports_success_dependencies(&self) -> bool {
         false
     }
+
     fn execute(
         &self,
         inputs: Inputs,
         ctx: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.run(inputs, ctx, &mut mf_runtime::DiscardSink)
+    }
+}
+
+impl mf_runtime::TaskStreamNode for LoopNode {
+    fn supports_success_dependencies(&self) -> bool {
+        false
+    }
+
+    fn execute(
+        &self,
+        inputs: Inputs,
+        ctx: &mut ExecutionContext,
+        emitter: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.run(inputs, ctx, emitter)
+    }
+}
+
+impl LoopNode {
+    fn run(
+        &self,
+        inputs: Inputs,
+        ctx: &mut ExecutionContext,
+        sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
         let mut variables = inputs;
         let mut pass_count = 0;
@@ -156,8 +197,10 @@ impl TaskNode for LoopNode {
                     if let Some(run) = state.observation_mut().filter(|run| run.supports_loops()) {
                         run.loop_pass_started(path.clone());
                     }
-                    let result = self.body.execute_in_context(state);
-                    let outcome = if result.is_err() {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.body.execute_with_sink(state, sink)
+                    }));
+                    let outcome = if !matches!(&result, Ok(Ok(_))) {
                         LoopPassOutcome::Failed
                     } else if state.scope_exit_requested() {
                         LoopPassOutcome::Exit
@@ -167,7 +210,10 @@ impl TaskNode for LoopNode {
                     if let Some(run) = state.observation_mut().filter(|run| run.supports_loops()) {
                         run.loop_pass_finished(path, outcome);
                     }
-                    result
+                    match result {
+                        Ok(result) => result,
+                        Err(payload) => std::panic::resume_unwind(payload),
+                    }
                 })
                 .context(LoopPassFailureSnafu {
                     node: self.id.clone(),

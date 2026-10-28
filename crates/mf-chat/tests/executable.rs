@@ -412,6 +412,7 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
             "../../../examples/chat-loop-flow.json"
         ))
         .unwrap();
+        definition.outputs.retain(|output| output.name != "answer");
         definition.outputs.push(
             serde_json::from_value(json!({"name":"history","node":"repeat","port":"history"}))
                 .unwrap(),

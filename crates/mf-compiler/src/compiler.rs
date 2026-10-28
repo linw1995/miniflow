@@ -510,7 +510,7 @@ pub fn prepare_definition(
 pub fn prepare_definition_with_layouts(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
-    body_layouts: Option<&mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
+    body_layouts: Option<&mut ScopeLayouts>,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
@@ -526,9 +526,17 @@ pub fn prepare_definition_with_layouts(
     )
 }
 
+pub type ScopeLayouts = BTreeMap<
+    Vec<DefinitionId>,
+    (
+        mf_runtime::ExecutionDomains,
+        Vec<mf_runtime::SubgraphStreamOutput>,
+    ),
+>;
+
 struct GraphPreparation<'a> {
     registry: &'a NodeRegistry,
-    body_layouts: Option<&'a mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
+    body_layouts: Option<&'a mut ScopeLayouts>,
     path: Vec<DefinitionId>,
 }
 
@@ -1701,6 +1709,11 @@ fn bind_subgraph_node(
             }
         );
     }
+    let stream_outputs = if let Some(definition) = &node.loop_definition {
+        crate::loops::prepare_stream_outputs(definition, &nodes, &node.id)?
+    } else {
+        Vec::new()
+    };
     let outputs = body
         .outputs
         .iter()
@@ -1744,17 +1757,39 @@ fn bind_subgraph_node(
         builder
     };
     let flow = builder.into_tasks().context(FlowConstructionSnafu)?;
+    let flow = flow
+        .with_stream_outputs(stream_outputs)
+        .context(NodeConstructionSnafu {
+            definition_id: node.id.clone(),
+            kind: node.kind.clone(),
+        })?;
     let input_schema = flow.input_schema().clone();
+    let stream_ports = flow.stream_output_ports();
     if let Some(layouts) = preparation.body_layouts.as_mut() {
+        let streams = flow
+            .stream_bindings()
+            .iter()
+            .cloned()
+            .map(|mut output| {
+                output.node = mf_runtime::NodeId::new(
+                    flow.execution_order()
+                        .iter()
+                        .position(|id| *id == output.node)
+                        .expect("prepared child exists"),
+                );
+                output
+            })
+            .collect();
         layouts.insert(
             path.expect("layout collection has a body path"),
-            flow.execution_domains().clone(),
+            (flow.execution_domains().clone(), streams),
         );
     }
-    let body = PreparedSubgraph::new(identities, outputs, move |state| {
-        flow.execute_in_context(state)
-    })
-    .with_input_schema(input_schema);
+    let body =
+        PreparedSubgraph::streaming(identities, outputs, stream_ports, move |state, sink| {
+            flow.execute_with_sink(state, sink)
+        })
+        .with_input_schema(input_schema);
     let instance = registration
         .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
         .context(NodeConstructionSnafu {

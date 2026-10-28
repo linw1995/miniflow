@@ -321,6 +321,8 @@ The [single-call example](../examples/chat-flow.json), the
 nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-loop-flow.json --output target/chat-flow
 ```
 
+The loop exports `chat.delta` through `loop.stream_outputs.answer`, reusing the normal answer subscription
+and drain-before-settlement contract. Its final reply remains authoritative.
 The loop explicitly assembles model messages, appends each returned assistant message to its history,
 and accumulates usage lists with `builtin.code`. A missing assistant message skips the history update;
 the loop stops after a reported model failure.

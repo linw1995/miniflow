@@ -612,10 +612,10 @@ fn loop_conversations() {
         Reply::json(serde_json::json!({"error":{"message":"second iteration failed"}}));
     failure.status = 400;
     let server = Server::start(vec![
-        Reply::text("intermediate answer"),
-        Reply::text("final answer"),
+        Reply::stream_text("intermediate answer"),
+        Reply::stream_text("final answer"),
         Reply::text("Loop title"),
-        Reply::text("partial answer"),
+        Reply::stream_text("partial answer"),
         failure,
     ]);
     let root = tempfile::tempdir().unwrap();
@@ -658,6 +658,7 @@ fn loop_conversations() {
                 prompt: prompt.into(),
             })
             .unwrap();
+        let mut saw_preview = false;
         loop {
             match next() {
                 ChatEvent::Submitted {
@@ -669,12 +670,17 @@ fn loop_conversations() {
                     invocations.push(invocation);
                 }
                 ChatEvent::Observing(_) => {}
+                ChatEvent::Preview { preview, .. } => {
+                    saw_preview = true;
+                    assert!(!preview.segments.is_empty());
+                }
                 ChatEvent::Finished {
                     resolution,
                     status,
                     capture_error,
                     ..
                 } => {
+                    assert!(saw_preview);
                     assert!(status.unwrap().success());
                     assert!(capture_error.is_none());
                     let resolution = resolution.unwrap();

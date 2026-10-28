@@ -235,3 +235,19 @@ Cargo's resolved manifest declarations, including workspace inheritance. The emb
 retains portable registry requirements rather than checkout paths. Source factories return
 metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
 catalog to prepare or execute its nodes.
+
+## Forwarding finite child emissions
+
+`Flow::with_stream_outputs` installs compiler-resolved `SubgraphStreamOutput` bindings. Each binding
+retains its child node index, exact source `PortSpec`, and parent-facing alias. `stream_output_ports`
+projects the containing node's emission contract. Shared values and sensitivity markers survive projection.
+
+`Flow::execute_with_sink` executes a connected scope in order through its normal input resolution,
+observation, publication, and domain-output merging. It borrows the sink synchronously and does not spawn
+a forwarding worker or add a queue. Disconnected sinks use the ordinary execution path. The compiler uses
+`with_input_guards` to bind success prerequisites once; dynamic execution, generated execution, and stream
+forwarding all consume those guards. Typed generated-domain optimizations retain their normal fallback.
+
+Custom semantic bodies installed with `with_prepared_domains` cannot be bypassed safely by a generic
+stream adapter. Connected forwarding rejects such a scope before business work; ordinary or disconnected
+execution continues to use its custom executor. Use the normal prepared task path for stream-exporting bodies.

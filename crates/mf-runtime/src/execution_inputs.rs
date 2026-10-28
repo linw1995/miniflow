@@ -12,6 +12,10 @@ use std::{
     sync::Arc,
 };
 
+/// Prepared activation evidence shared by ordinary and adapted task execution.
+pub type ExecutionGuard =
+    dyn Fn(&crate::ExecutionContext) -> Result<BTreeSet<SkipCause>, WorkflowRunError> + Send + Sync;
+
 #[derive(Clone, Debug, Default)]
 pub struct InputResolution {
     pub causes: BTreeSet<SkipCause>,
