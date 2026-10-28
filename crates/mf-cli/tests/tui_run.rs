@@ -299,6 +299,268 @@ TRACES
 }
 
 #[test]
+fn tui_displays_parallel_running_nodes_in_pips_until_they_finish() {
+    if !loopback_available() {
+        return;
+    }
+    use opentelemetry_proto::tonic::{
+        collector::logs::v1::ExportLogsServiceRequest,
+        common::v1::{
+            AnyValue, ArrayValue, InstrumentationScope, KeyValue, KeyValueList, any_value,
+        },
+        logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+    };
+    use prost::Message;
+    fn string(value: impl Into<String>) -> AnyValue {
+        AnyValue {
+            value: Some(any_value::Value::StringValue(value.into())),
+        }
+    }
+    fn integer(value: i64) -> AnyValue {
+        AnyValue {
+            value: Some(any_value::Value::IntValue(value)),
+        }
+    }
+    fn array(values: Vec<AnyValue>) -> AnyValue {
+        AnyValue {
+            value: Some(any_value::Value::ArrayValue(ArrayValue { values })),
+        }
+    }
+    fn attribute(key: &str, value: AnyValue) -> KeyValue {
+        KeyValue {
+            key: key.into(),
+            value: Some(value),
+            ..Default::default()
+        }
+    }
+    fn body(fields: Vec<(&str, AnyValue)>) -> Option<AnyValue> {
+        Some(AnyValue {
+            value: Some(any_value::Value::KvlistValue(KeyValueList {
+                values: fields
+                    .into_iter()
+                    .map(|(key, value)| attribute(key, value))
+                    .collect(),
+            })),
+        })
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let runner = directory.path().join("parallel-runner");
+    let manifest = mf_runtime::WorkflowManifest {
+        version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
+        definition: serde_json::from_value(serde_json::json!({
+            "version": "2026-09-26", "dependencies": {},
+            "nodes": [
+                {"id": "parallel-0", "kind": "test.parallel"},
+                {"id": "parallel-1", "kind": "test.parallel"}
+            ]
+        }))
+        .unwrap(),
+        execution_order: vec!["parallel-0".into(), "parallel-1".into()],
+        loop_orders: vec![],
+        input_schema: mf_runtime::WorkflowInputSchema::default(),
+    };
+    let description = manifest.description().unwrap();
+    let placeholder = "00000000-0000-4000-8000-000000000000";
+    let record = |sequence: i64,
+                  event_name: &str,
+                  node: Option<&str>,
+                  outcome: Option<&str>,
+                  fields: Vec<(&str, AnyValue)>| {
+        let mut attributes = vec![
+            attribute(
+                "mf.schema.version",
+                integer(mf_telemetry::EVENT_SCHEMA_VERSION),
+            ),
+            attribute(
+                "mf.workflow.id",
+                string(description.workflow_id.to_string()),
+            ),
+            attribute("mf.run.id", string(placeholder)),
+            attribute("mf.event.sequence", integer(sequence)),
+        ];
+        if let Some(node) = node {
+            attributes.push(attribute("mf.node.id", string(node)));
+            attributes.push(attribute("mf.node.kind", string("test.parallel")));
+        }
+        if let Some(outcome) = outcome {
+            attributes.push(attribute("mf.outcome", string(outcome)));
+        }
+        LogRecord {
+            event_name: event_name.into(),
+            attributes,
+            body: body(fields),
+            ..Default::default()
+        }
+    };
+    let node_start = |sequence, position: i64, id: &str| {
+        record(
+            sequence,
+            "mf.node.started",
+            Some(id),
+            None,
+            vec![("position", integer(position)), ("elapsed_ns", integer(0))],
+        )
+    };
+    let node_finish = |sequence, position: i64, id: &str| {
+        record(
+            sequence,
+            "mf.node.finished",
+            Some(id),
+            Some("succeeded"),
+            vec![
+                ("position", integer(position)),
+                ("elapsed_ns", integer(1)),
+                ("duration_ns", integer(1)),
+                ("produced_ports", array(Vec::new())),
+                ("skipped_ports", array(Vec::new())),
+            ],
+        )
+    };
+    let started = vec![
+        record(
+            1,
+            "mf.workflow.started",
+            None,
+            None,
+            vec![("elapsed_ns", integer(0))],
+        ),
+        node_start(2, 0, "parallel-0"),
+        node_start(3, 1, "parallel-1"),
+    ];
+    let finished = vec![
+        node_finish(4, 0, "parallel-0"),
+        node_finish(5, 1, "parallel-1"),
+        record(
+            6,
+            "mf.workflow.finished",
+            None,
+            Some("succeeded"),
+            vec![("elapsed_ns", integer(2))],
+        ),
+    ];
+    let encode = |log_records| {
+        ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: "mf.workflow".into(),
+                        ..Default::default()
+                    }),
+                    log_records,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+    };
+    let started = encode(started);
+    let finished = encode(finished);
+    write_runner_with_manifest(
+        &runner,
+        format!(
+            r#"python3 -I -S - <<'TELEMETRY'
+import os
+import time
+import urllib.request
+endpoint = os.environ['OTEL_EXPORTER_OTLP_ENDPOINT'] + '/v1/logs'
+def send(encoded):
+    payload = bytes.fromhex(encoded).replace(b'{placeholder}', os.environ['MF_RUN_ID'].encode())
+    request = urllib.request.Request(endpoint, data=payload, headers={{'Content-Type': 'application/x-protobuf'}})
+    urllib.request.build_opener(urllib.request.ProxyHandler({{}})).open(request, timeout=2).read()
+send('{started}')
+time.sleep(3)
+send('{finished}')
+TELEMETRY
+"#
+        ),
+        manifest,
+    );
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: 30,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .unwrap();
+    let original = tcgetattr(&pty.slave).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .arg("run")
+        .arg(&runner)
+        .arg("--tui")
+        .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut master = fs::File::from(pty.master);
+    let reader = thread::spawn(move || {
+        let mut output = String::new();
+        let mut screen = Screen::new(100, 30);
+        let mut bytes = [0; 4096];
+        let mut stage = 0;
+        let mut finished_without_pips = false;
+        loop {
+            match master.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(len) => {
+                    screen.feed(&bytes[..len]);
+                    let text = screen.text();
+                    output.push_str(&text);
+                    output.push('\n');
+                    if stage == 0
+                        && text.matches(" Running: ").count() == 2
+                        && text.contains(" Running: parallel-0 ")
+                        && text.contains(" Running: parallel-1 ")
+                    {
+                        stage = 1;
+                    } else if stage == 1 && text.contains("Exited:") && !text.contains(" Running: ")
+                    {
+                        finished_without_pips = true;
+                        master.write_all(b"q").unwrap();
+                        stage = 2;
+                    }
+                }
+            }
+        }
+        (output, finished_without_pips)
+    });
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            drop(pty.slave);
+            let (screen, _) = reader.join().unwrap();
+            panic!("parallel PiP scenario timed out: {screen}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let restored = tcgetattr(&pty.slave).unwrap();
+    assert_eq!(
+        restored.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO),
+        original.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO)
+    );
+    drop(pty.slave);
+    let (screen, finished_without_pips) = reader.join().unwrap();
+    assert!(screen.contains(" Running: parallel-0 "), "{screen}");
+    assert!(screen.contains(" Running: parallel-1 "), "{screen}");
+    assert!(finished_without_pips, "{screen}");
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
 fn tui_rejects_missing_terminal_before_launching_runner() {
     let output = Command::new(env!("CARGO_BIN_EXE_mf"))
         .arg("run")
@@ -750,9 +1012,17 @@ fn loopback_available() -> bool {
 }
 
 fn write_runner(path: &std::path::Path, script: String) {
+    write_runner_with_manifest(path, script, manifest());
+}
+
+fn write_runner_with_manifest(
+    path: &std::path::Path,
+    script: String,
+    manifest: mf_runtime::WorkflowManifest,
+) {
     let source = path.with_extension("rs");
     let manifest_path = path.with_extension("manifest");
-    fs::write(&manifest_path, manifest().to_bytes().unwrap()).unwrap();
+    fs::write(&manifest_path, manifest.to_bytes().unwrap()).unwrap();
     fs::write(&source, format!(
         r#"use std::os::unix::process::CommandExt;
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".mf_manifest"))]

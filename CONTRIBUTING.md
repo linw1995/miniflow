@@ -129,6 +129,7 @@ The arguments select the node count and repetition count. Shared snapshots are r
 | `crates/mf-chat/` | Persistent chat nodes and embedded application workflows |
 | `crates/builtin-nodes/core/` | `mfn-core` basic node implementations |
 | `crates/builtin-nodes/code/` | `mfn-code` CEL node implementation |
+| `crates/builtin-nodes/deepseek/` | `mfn-deepseek` web search and fetch node implementations |
 | `tools/test-affected/nodes/` | Unpublished developer-only LSP and affected-test providers |
 
 See [node development](docs/node-development.md) for adding nodes. Developer tools share workspace validation but are not product release dependencies.

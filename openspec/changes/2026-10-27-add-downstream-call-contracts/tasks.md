@@ -36,7 +36,7 @@
 - [x] 3.1a Reject unsupported schema projections at the LLM boundary before provider requests.
 - [x] 3.2 Build provider tool definitions from caller-visible projections and validate returned tool names.
 - [x] 3.3 Extend message history with structured tool calls, results, and correlation identities.
-- [x] 3.4 Execute one model request per invocation, buffer complete tool batches, and expose continuation for workflow-owned loops.
+- [x] 3.4 Execute one model request per invocation, buffer complete tool batches, and reuse explicit messages/results for workflow-owned loops.
 - [x] 3.5 Define result sensitivity, size limits, and error export without automatic side-effect retries.
 
 ## 4. Verification and documentation

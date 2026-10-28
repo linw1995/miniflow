@@ -180,15 +180,18 @@ pub fn history(
             break;
         }
         for message in page {
-            let history_message = mfn_llm::ChatMessage {
-                tool_calls: None,
-                tool_call_id: None,
-                role: message.role,
-                content: message.content,
-                metadata: message.metadata,
-            };
-            let encoded =
-                serde_json::to_vec(&history_message.clone().into_values()?).context(JsonSnafu)?;
+            let mut values = mf_runtime::NodeValues::from([
+                ("role".into(), message.role.into()),
+                ("content".into(), message.content.into()),
+            ]);
+            mf_runtime::encode_output(&mut values, "metadata", message.metadata)?;
+            let encoded = serde_json::to_vec(&values).context(JsonSnafu)?;
+            let history_message = mf_runtime::decode_required_input(
+                "history",
+                Some(mf_runtime::ValueRef::object(
+                    values.into_iter().map(|(key, value)| (key.into(), value)),
+                )),
+            )?;
             bytes = bytes
                 .checked_add(encoded.len() + usize::from(!result.is_empty()))
                 .context(ArithmeticSnafu {
@@ -728,8 +731,12 @@ mod tests {
             .unwrap();
         let context = database.history(&session.id, 1024).unwrap();
         assert_eq!(context.history.len(), 2);
-        assert_eq!(context.history[0].content, "question");
-        assert_eq!(context.history[1].content, "answer");
+        assert!(
+            matches!(&context.history[0], mfn_llm::ChatMessage::User { content, .. } if content == "question")
+        );
+        assert!(
+            matches!(&context.history[1], mfn_llm::ChatMessage::Assistant { content, .. } if content == "answer")
+        );
         assert_eq!(context.system.as_deref(), Some("instructions"));
         assert!(database.history(&session.id, 2).is_err());
         assert!(

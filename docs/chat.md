@@ -58,13 +58,16 @@ submission executes the embedded application `conversation` flow:
 ```mermaid
 flowchart LR
     Begin["mf_chat.turn.begin: load history and context"] --> Invoke["mf_chat.workflow.invoke: user workflow"]
-    Invoke --> Settle["mf_chat.turn.settle: persist result"]
+    Invoke --> Prepare["mf_chat.title.prepare"]
+    Prepare --> Title["Optional workflow.call: mf-chat.chat-title"]
+    Title --> Finish["mf_chat.conversation.finish: persist result"]
 ```
 
 The invocation node binds a `ConversationBackend` supplied by the host. Both the embedded Rust backend
 and the executable backend use the same `ConversationInputs` / `ConversationResult` protocol. The
-application flow owns durable turn admission and settlement; the user workflow owns answer generation,
-optional title generation, and explicit usage collection. User workflows need only generic nodes and
+application flow owns durable turn admission and settlement; the user workflow owns answer generation
+and explicit usage collection. When its public inputs support it, the host appends the built-in title
+Flow; user workflows can also own title generation explicitly. User workflows need only generic nodes and
 have no `mf-chat` dependency. The application never identifies or reconfigures their internal model nodes.
 
 ```rust
@@ -96,12 +99,26 @@ If cleanup also fails, `ChatError::Execution` retains both typed errors and invo
 Run the two-turn example with an available model and credentials in the environment:
 
 ```sh
-MODEL_API_KEY=your-key nix develop --command cargo run -p mf-chat --example conversation -- state/chat.sqlite examples/chat-title-flow.json
+OPENAI_API_KEY=your-key nix develop --command cargo run -p mf-chat --example conversation -- state/chat.sqlite examples/chat-title-flow.json
 ```
 
 Configure the model and endpoint in the supplied workflow. The example prints complete results with their session, turn, and call identities.
 
 ## Session title summaries
+
+`ChatHost` and `mf run --chat` enable the built-in title Flow when the chat workflow exposes exactly
+one string input for each of `model`, `base_url`, and `api_key`, with nonblank resolved values.
+Defaults, environment bindings, and secret markers are preserved. Missing or ambiguous inputs skip
+this feature; a declared `title` output leaves title generation to the user workflow. A returned title
+or usage attributed to `title` also prevents a duplicate call.
+
+After the chat stream closes, the route publishes one `ConversationCompleted` event.
+`mf_chat.title.prepare` prepares the optional title call and supplies the inputs to the
+`workflow.call` of `mf-chat.chat-title`. `mf_chat.conversation.finish` combines the completed
+conversation with the title result and saves it through the existing turn-completion transaction.
+The route does not interpret title policy or expose model-specific ports. The shared title Flow is
+unchanged. `HostConfig::automatic_titles = false` disables the call. Custom `ConversationBackend`
+implementations can supply resolved inputs through `builtin_title_parameters`; its default is disabled.
 
 For a compact reusable composition, use the [nested title Flow](../examples/chat-nested-title-flow.json).
 It calls the `mf-chat`-owned `mf-chat.chat-title` Flow through `workflow.call`; the parent retains primary answer
@@ -116,7 +133,7 @@ compiled and used directly with `--chat`:
 
 ```sh
 mf compile examples/chat-title-flow.json --output chat-title-flow
-mf run ./chat-title-flow --chat --chat-db state/chat.sqlite --input.model your-model
+mf run ./chat-title-flow --chat --chat-db state/chat.sqlite --params.model your-model
 ```
 
 Both model configurations belong to this user flow; change `title_model.config` to use a different model
@@ -126,7 +143,7 @@ configuration and omits the optional profile label. It preserves a successful an
 and omits the title output. This policy is expressed by its branches. The application flow only persists
 the final protocol result.
 
-A submission finishes after the composed flow finishes. There is no separate background title job,
+A submission finishes after the user flow and any appended title Flow finish. There is no separate background title job,
 startup scan, title retry API, or title completion queue. Cancellation before delivery can lose the
 whole result and its usage; the host does not infer which internal calls completed. Persisted title
 attempts, including failures, suppress subsequent automatic attempts. Unknown attempts cannot be
@@ -277,6 +294,7 @@ node counts, control edges, preprocessing, and loops are workflow implementation
 workflow; there is no isolated-model execution mode or assumption that a workflow contains one LLM.
 
 The startup interface supplies an unambiguous `prompt` string and optionally `system`, `history`, and `context`.
+The Flow converts these application inputs into the model node's complete `messages` list.
 Their qualified names can belong to any startup node. Remaining declared inputs form `contract.parameters`;
 resolve them with `mf_runtime::resolve_workflow_inputs` before admission. The contract rejects ambiguous or
 mistyped conversation ports and stdin-dependent execution.
@@ -287,7 +305,7 @@ records, validates deltas, and retains the final conversation result until execu
 
 `workflows/conversation.json` owns incremental processing: `begin` admits the turn, `workflow.invoke`
 emits application invocation events, and `route` publishes previews while retaining the final response.
-The route releases settlement inputs only after the backend producer closes successfully. Preview and
+The route releases the completed-conversation event only after the backend producer closes successfully. Preview and
 settlement deliveries share one ordered message domain, so unread previews cannot be overtaken by a save.
 The host consumes these Flow outputs; it does not forward raw model events around the application graph.
 
@@ -296,7 +314,7 @@ actual model-call identity; they do not need runtime open/close envelopes. A com
 a later failure remains available for explicit save-only recovery, while partial text never becomes history.
 
 The [single-call example](../examples/chat-flow.json), the
-[tool-calling conversation](../examples/chat-tools-flow.json), the
+[node-backed tool conversation](../examples/chat-tools-flow.json), the
 [conversation and title example](../examples/chat-title-flow.json), and the
 [loop example](../examples/chat-loop-flow.json) can be compiled directly:
 
@@ -304,30 +322,16 @@ The [single-call example](../examples/chat-flow.json), the
 nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-loop-flow.json --output target/chat-flow
 ```
 
-The tool-calling example supplies the model, endpoint, credentials, and external multiplier through
-`builtin.parameters`. The LLM sees only its own `amount` argument and invokes the CEL tool through the
-runtime call dispatcher. Each LLM execution makes one model request. The existing `workflow.loop` owns
-continuation, stopping, and usage accumulation; it returns the final answer and every request in `usages`
-through the normal chat contract. This example currently uses terminal delivery; loop child streaming
-is a separate runtime capability. The chat application reuses its existing persistence and accounting:
-
-```sh
-mf compile examples/chat-tools-flow.json --output ./chat-tools-flow
-mf run ./chat-tools-flow --chat --chat-db state/chat.sqlite --params.model your-model
-```
-
-Set `MODEL_API_KEY`, then ask the assistant to multiply an integer. `--params.factor` changes the configured
-multiplier without adding that parameter to the model's tool arguments. Tool exchanges stay inside each
-workflow invocation; subsequent chat turns receive the application's saved user and assistant messages.
-
-The loop explicitly accumulates usage lists with `builtin.code` using `left + right` and stops after a reported model failure.
+The loop explicitly assembles model messages, appends each returned assistant message to its history,
+and accumulates usage lists with `builtin.code`. A missing assistant message skips the history update;
+the loop stops after a reported model failure.
 Its model configuration is passed into the loop through declared variables. The runner receives conversation
 arguments and configuration. The application flow handles database admission and saving around that
 backend invocation; the terminal's backend supplies process supervision and child observation.
 
 ## History metadata
 
-History remains a list of user and assistant messages. Each message accepts an optional object-valued
+Application history remains a list of user and assistant messages. Each message accepts an optional object-valued
 `metadata` field; omitting it means no annotations. System instructions and the current prompt remain separate.
 
 ```json
@@ -341,10 +345,10 @@ History remains a list of user and assistant messages. Each message accepts an o
 }
 ```
 
-Metadata is opaque application data. The LLM adapter forwards conversation and tool protocol fields to the provider and
-preserves existing metadata in its returned history. The chat application persists response metadata on the
-new assistant message, including through save retries and database reopen. Returned history never replaces
-stored messages or changes their metadata. New user messages currently have no metadata.
+Metadata is opaque application data and is omitted from provider requests. Flow-level message assembly
+preserves annotations on existing messages; the LLM node returns only its current assistant message.
+The chat application persists response metadata on the new assistant message, including through save retries and database reopen. Workflow history outputs never replace
+stored messages or change their metadata. New user messages currently have no metadata.
 
 Metadata contributes to the canonical encoded history limit and the executable response limit. Existing
 SQLite databases receive a forward migration; old messages retain absent metadata.
@@ -466,8 +470,8 @@ through its chosen branches and accumulators. Successful status permits absent o
 ## Persistence and recovery
 
 The embedded application flow uses `mf_chat.turn.begin`, a host-bound `mf_chat.workflow.invoke`, and
-`mf_chat.turn.settle` for both backends. The settlement node handles successful or failed protocol
-results; it does not implement model failure policy. Save-only retry and cleanup after an aborted graph
+`mf_chat.conversation.finish` for both backends. The finishing node combines the chat and title results
+and uses the existing storage handlers; it does not implement model failure policy. Save-only retry and cleanup after an aborted graph
 remain direct storage operations so cancellation cannot prevent finalization.
 
 Direct API callers can allocate an `Invocation`, durably begin its turn, and pass the resulting request to `contract.arguments`.
@@ -581,3 +585,9 @@ process supervision run on one background worker, keeping terminal rendering and
 Quitting cancels and reaps the child, reconciles retained results, and releases database ownership. It never prints
 turn JSON to stdout. Handled turn failures allow a normal exit; display or cleanup failures return status 1. Unsaved
 replies remain memory-only: restarting recovers abandoned turns as interrupted without resending them.
+
+The node-backed tool example composes ordinary message-building, Loop, and assignment nodes around
+single-step LLM execution. It uses the same `ChatMessage`, `ToolCall`, and `ToolResult` contracts as manual
+tool workflows. The model provides `amount`, while the Flow supplies the configured multiplier. The Loop
+appends the returned assistant message and tool results and explicitly accumulates each request's usage.
+The existing application pipeline saves the final reply and handles automatic titles and accounting.

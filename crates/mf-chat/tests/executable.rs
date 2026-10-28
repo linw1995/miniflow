@@ -26,6 +26,111 @@ fn parameters(contract: &ChatContract) -> WorkflowArguments {
     .unwrap()
 }
 
+fn add_provider_input(manifest: &mut WorkflowManifest, name: &str) {
+    let mut node = manifest.definition.nodes[0].clone();
+    node.id = "provider".into();
+    manifest.definition.nodes.push(node);
+    manifest.execution_order.insert(0, "provider".into());
+    let port = manifest.input_schema.inputs["params"][name].clone();
+    manifest
+        .input_schema
+        .inputs
+        .insert("provider".into(), [(name.into(), port)].into());
+}
+
+#[test]
+fn builtin_titles_reuse_unique_resolved_provider_inputs_and_preserve_secrets() {
+    let mut manifest = manifest();
+    add_provider_input(&mut manifest, "api_key");
+    manifest
+        .input_schema
+        .inputs
+        .get_mut("params")
+        .unwrap()
+        .remove("api_key");
+    let contract = ChatContract::from_manifest(&manifest).unwrap();
+    let parameters = mf_runtime::resolve_workflow_inputs(
+        &contract.parameters,
+        &WorkflowArguments::try_from(json!({"params.model":"chosen-model"})).unwrap(),
+        |name| (name == "OPENAI_API_KEY").then(|| "synthetic-key".into()),
+    )
+    .unwrap();
+    let title = contract.builtin_title_parameters(&parameters).unwrap();
+    assert_eq!(title.0["params.model"].as_str(), Some("chosen-model"));
+    assert_eq!(
+        title.0["params.base_url"].as_str(),
+        Some("https://api.openai.com/v1")
+    );
+    assert_eq!(title.0["params.api_key"].as_str(), Some("synthetic-key"));
+    assert!(title.0["params.api_key"].is_secret());
+    assert_eq!(title.0.len(), 3);
+}
+
+#[test]
+fn builtin_titles_skip_missing_ambiguous_wrongly_typed_or_empty_provider_inputs() {
+    let original = manifest();
+    for name in ["model", "base_url", "api_key"] {
+        for variant in ["missing", "ambiguous", "type", "unresolved", "empty"] {
+            let mut manifest = original.clone();
+            let original_contract = ChatContract::from_manifest(&manifest).unwrap();
+            let mut parameters = parameters(&original_contract);
+            match variant {
+                "missing" => {
+                    manifest
+                        .input_schema
+                        .inputs
+                        .get_mut("params")
+                        .unwrap()
+                        .remove(name);
+                }
+                "ambiguous" => {
+                    add_provider_input(&mut manifest, name);
+                }
+                "type" => {
+                    let port = manifest
+                        .input_schema
+                        .inputs
+                        .get_mut("params")
+                        .unwrap()
+                        .get_mut(name)
+                        .unwrap();
+                    port.value_type = mf_runtime::ValueType::Boolean;
+                    port.binding = Default::default();
+                }
+                "unresolved" => {
+                    parameters.0.remove(&format!("params.{name}"));
+                }
+                "empty" => {
+                    parameters.0.insert(format!("params.{name}"), "  ".into());
+                }
+                _ => unreachable!(),
+            }
+            let contract = ChatContract::from_manifest(&manifest).unwrap();
+            assert!(
+                contract.builtin_title_parameters(&parameters).is_none(),
+                "{name}: {variant}"
+            );
+        }
+    }
+}
+
+#[test]
+fn declared_title_output_reserves_title_generation_for_the_user_flow() {
+    let mut manifest = manifest();
+    manifest.definition.outputs.push(
+        serde_json::from_value(json!({
+            "name":"title", "node":"chat", "port":"text", "optional":true
+        }))
+        .unwrap(),
+    );
+    let contract = ChatContract::from_manifest(&manifest).unwrap();
+    assert!(
+        contract
+            .builtin_title_parameters(&parameters(&contract))
+            .is_none()
+    );
+}
+
 #[test]
 fn conversation_inputs_are_bound_separately_from_parameters() {
     let manifest = manifest();
@@ -156,10 +261,8 @@ fn history_metadata_round_trips_through_argument_binding() {
                 context: None,
                 prompt: "continue".into(),
                 system: None,
-                history: Some(vec![mfn_llm::ChatMessage {
+                history: Some(vec![mfn_llm::ChatMessage::Assistant {
                     tool_calls: None,
-                    tool_call_id: None,
-                    role: "assistant".into(),
                     content: "prior reply".into(),
                     metadata: Some(metadata.clone()),
                 }]),
@@ -167,17 +270,15 @@ fn history_metadata_round_trips_through_argument_binding() {
             &parameters(&contract),
         )
         .unwrap();
-    let values = mf_runtime::NodeValues::from([
-        ("prompt".into(), arguments.0["params.prompt"].clone()),
-        ("history".into(), arguments.0["params.history"].clone()),
-    ]);
+    let values =
+        mf_runtime::NodeValues::from([("messages".into(), arguments.0["params.history"].clone())]);
     assert_eq!(
-        mfn_llm::LlmInputs::from_values(values)
-            .unwrap()
-            .history
-            .unwrap()[0]
-            .metadata,
-        Some(metadata)
+        mfn_llm::LlmInputs::from_values(values).unwrap().messages[0],
+        mfn_llm::ChatMessage::Assistant {
+            content: "prior reply".into(),
+            tool_calls: None,
+            metadata: Some(metadata),
+        }
     );
 }
 
@@ -207,7 +308,12 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
         extra.config["base_url"] = json!(first.base_url);
         definition.nodes[1].config["base_url"] = json!(second.base_url);
         definition.nodes.push(extra);
-        for mut edge in definition.edges.clone() {
+        for mut edge in definition
+            .edges
+            .clone()
+            .into_iter()
+            .filter(|edge| edge.to_node.as_str() == "chat")
+        {
             edge.to_node = "first".into();
             definition.edges.push(edge);
         }
@@ -302,10 +408,14 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
             response.status = 503;
         }
         let server = Server::start(vec![response, Reply::text("second reply")]);
-        let definition = mf_runtime::WorkflowDefinition::from_json(include_str!(
+        let mut definition = mf_runtime::WorkflowDefinition::from_json(include_str!(
             "../../../examples/chat-loop-flow.json"
         ))
         .unwrap();
+        definition.outputs.push(
+            serde_json::from_value(json!({"name":"history","node":"repeat","port":"history"}))
+                .unwrap(),
+        );
         let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
         let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
         let contract = ChatContract::from_manifest(&plan.manifest(&registry).unwrap()).unwrap();
@@ -313,11 +423,17 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         parameters
             .0
             .insert("params.base_url".into(), server.base_url.clone().into());
+        let previous = json!([{"role":"user","content":"prior question"},{"role":"assistant","content":"prior answer","metadata":{"tags":["retained"],"count":1}}]);
         let input = mf_chat::ConversationInputs {
             context: None,
             prompt: "hello".into(),
-            system: None,
-            history: None,
+            system: Some("Keep context".into()),
+            history: Some(
+                <Vec<mfn_llm::ChatMessage> as mf_runtime::InputValue>::decode(
+                    previous.clone().into(),
+                )
+                .unwrap(),
+            ),
         };
         let outputs = mf_compiler::execute_compiled_with_inputs(
             &plan,
@@ -327,6 +443,17 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         )
         .unwrap();
         let result = serde_json::to_value(&outputs).unwrap();
+        let mut expected = previous.as_array().unwrap().clone();
+        if !failed {
+            expected.extend(json!([{"role":"user","content":"hello"},{"role":"assistant","content":"reply"},{"role":"user","content":"hello"},{"role":"assistant","content":"second reply"}]).as_array().unwrap().iter().cloned());
+        }
+        assert_eq!(result["history"], json!(expected));
+        assert!(
+            server
+                .requests()
+                .iter()
+                .all(|request| !request.body.to_string().contains("retained"))
+        );
         let calls = result["usages"].as_array().unwrap();
         assert_eq!(calls.len(), if failed { 1 } else { 2 });
         assert_eq!(server.requests().len(), calls.len());

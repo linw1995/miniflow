@@ -1,5 +1,6 @@
 #![cfg(feature = "development-support")]
 
+use mfn_deepseek::test_support as deepseek_support;
 use mfn_llm::test_support as llm_support;
 use serde_json::{Value, json};
 use std::{fs, path::Path};
@@ -29,8 +30,31 @@ fn nested_title_usage() -> Value {
     usage
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 18] {
+fn search_result() -> Value {
+    json!({
+        "rerank_score":2.4,"title":"DeepSeek release","url":"https://example.com/release",
+        "snippet":"Snippet","summary":"Summary","content":"Content","site_name":null,
+        "site_icon":null,"date":null,"authority":3
+    })
+}
+
+fn examples() -> [(&'static str, Option<&'static str>, Value); 21] {
     [
+        (
+            "deepseek-fetch.json",
+            None,
+            json!({"title":"Example","content":"# Markdown"}),
+        ),
+        (
+            "deepseek-search.json",
+            None,
+            json!({"results":[search_result()]}),
+        ),
+        (
+            "chat-tools-flow.json",
+            None,
+            json!({"status":"succeeded","text":"reply","usages":[chat_usage(json!([{"node":"repeat","index":0}]))],"error":""}),
+        ),
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
         ("clustered-workflow.json", None, json!({"doubled": 42})),
@@ -67,24 +91,26 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 18] {
         ("iteration.json", None, json!({"results": [2, 5, 8]})),
         ("loop.json", None, json!({"count": 3})),
         (
-            "chat-tools-flow.json",
-            None,
-            json!({"status":"succeeded", "text":"reply", "usages":[chat_usage(json!([{"node":"repeat","index":0}]))], "error":""}),
-        ),
-        (
             "llm-terminal.json",
             None,
-            json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+            json!({"text":"reply", "message":{"role":"assistant","content":"reply"}}),
         ),
         (
             "llm-parameters.json",
             None,
-            json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+            json!({"text":"reply", "message":{"role":"assistant","content":"reply"}}),
         ),
         (
             "llm-loop.json",
             None,
             json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}, {"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+        ),
+        (
+            "llm-tools.json",
+            None,
+            json!({"outcome":"completed", "text":"reply", "message":{"role":"assistant","content":"reply"}, "tool_calls":[], "usages":[{
+                "started_at":0, "call_id":"generated", "node":{"id":"model","kind":"builtin.llm","path":[]}, "model":"example-model", "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}
+            }]}),
         ),
         ("stream-batch.json", Some("1\n"), json!({"batch": [1]})),
     ]
@@ -144,6 +170,14 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 },
             )
         });
+        let deepseek_server = name.starts_with("deepseek-").then(|| {
+            let reply = if name == "deepseek-search.json" {
+                deepseek_support::Reply::search(json!([search_result()]))
+            } else {
+                deepseek_support::Reply::fetch("Example", "# Markdown")
+            };
+            deepseek_support::Server::start(vec![reply])
+        });
         if let Some(server) = &server
             && !name.starts_with("chat-")
         {
@@ -171,7 +205,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             .env("MF_DEV_SUPPORT_ROOT", workspace().join("crates"))
             .env("CARGO_NET_OFFLINE", "true")
             .env("CARGO_TERM_COLOR", "never")
-            .env_remove("MODEL_API_KEY")
+            .env_remove("OPENAI_API_KEY")
             .arg("compile")
             .arg(&definition)
             .arg("--output")
@@ -206,18 +240,30 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         if let Some(server) = &server {
             let inputs = if name == "llm-loop.json" {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
-            } else if matches!(name, "chat-title-flow.json" | "chat-nested-title-flow.json") {
-                json!({"input.prompt":"Hello", "input.model":"example-model", "input.base_url":server.base_url})
             } else if name.starts_with("chat-") {
                 json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
+            } else if name == "llm-tools.json" {
+                json!({"model.messages":[{"role":"user","content":"Hello"}]})
             } else if name == "llm-parameters.json" {
-                json!({"params.prompt":"Hello"})
+                json!({"params.messages":[{"role":"user","content":"Hello"}]})
             } else {
-                json!({"chat.prompt":"Hello"})
+                json!({"chat.messages":[{"role":"user","content":"Hello"}]})
             };
             command
                 .args(["--inputs", &inputs.to_string()])
-                .env("MODEL_API_KEY", "synthetic-key")
+                .env("OPENAI_API_KEY", "synthetic-key")
+                .env("NO_PROXY", "127.0.0.1,localhost")
+                .env("no_proxy", "127.0.0.1,localhost");
+        }
+        if let Some(server) = &deepseek_server {
+            let inputs = if name == "deepseek-search.json" {
+                json!({"params.base_url":server.base_url,"params.query":"DeepSeek"})
+            } else {
+                json!({"params.base_url":server.base_url,"params.url":"https://example.com/article"})
+            };
+            command
+                .args(["--inputs", &inputs.to_string()])
+                .env("DEEPSEEK_API_KEY", "synthetic-key")
                 .env("NO_PROXY", "127.0.0.1,localhost")
                 .env("no_proxy", "127.0.0.1,localhost");
         }
@@ -263,7 +309,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     )
                 })
             };
-        if name.starts_with("chat-") {
+        if name.starts_with("chat-") || name == "llm-tools.json" {
             let mut identities = std::collections::BTreeSet::new();
             for usage in actual["usages"].as_array_mut().unwrap() {
                 let id = usage["call_id"].as_str().unwrap().to_owned();

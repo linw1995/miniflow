@@ -1,0 +1,79 @@
+{
+  "version": "2026-10-23",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "deepseek": {
+      "package": "mfn-deepseek",
+      "path": "../crates/builtin-nodes/deepseek"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "api_key": {
+            "type": "string",
+            "env": "DEEPSEEK_API_KEY"
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.deepseek.com",
+            "secret": false
+          },
+          "url": {
+            "type": "string",
+            "default": "https://api-docs.deepseek.com/zh-cn/guides/search",
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "fetch",
+      "kind": "builtin.deepseek.fetch",
+      "config": {
+        "api_key": {
+          "$ref": "params.api_key"
+        },
+        "base_url": {
+          "$ref": "params.base_url"
+        }
+      },
+      "inputs": {
+        "url": {
+          "from": {
+            "node": "params",
+            "port": "url"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "title",
+      "node": "fetch",
+      "port": "title"
+    },
+    {
+      "name": "content",
+      "node": "fetch",
+      "port": "content"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Web fetch",
+      "annotation": "Resolve the DeepSeek credential and page URL before fetching its title and Markdown content.",
+      "nodes": [
+        "params",
+        "fetch"
+      ]
+    }
+  ]
+}

@@ -16,7 +16,7 @@
   },
   "nodes": [
     {
-      "id": "input",
+      "id": "params",
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
@@ -56,7 +56,7 @@
           },
           "api_key": {
             "type": "string",
-            "env": "MODEL_API_KEY"
+            "env": "OPENAI_API_KEY"
           }
         }
       }
@@ -66,36 +66,24 @@
       "kind": "builtin.llm",
       "config": {
         "model": {
-          "$ref": "input.model"
+          "$ref": "params.model"
         },
         "capture_errors": true,
         "attribution": {
           "purpose": "conversation"
         },
         "base_url": {
-          "$ref": "input.base_url"
+          "$ref": "params.base_url"
         },
         "api_key": {
-          "$ref": "input.api_key"
+          "$ref": "params.api_key"
         }
       },
       "inputs": {
-        "prompt": {
+        "messages": {
           "from": {
-            "node": "input",
-            "port": "prompt"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "input",
-            "port": "system"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "input",
-            "port": "history"
+            "node": "model_messages",
+            "port": "messages"
           }
         }
       }
@@ -116,7 +104,7 @@
       "inputs": {
         "context": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "context"
           }
         },
@@ -163,7 +151,7 @@
       "inputs": {
         "prompt": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "prompt"
           }
         },
@@ -187,30 +175,24 @@
       "kind": "builtin.llm",
       "config": {
         "model": {
-          "$ref": "input.model"
+          "$ref": "params.model"
         },
         "capture_errors": true,
         "attribution": {
           "purpose": "title"
         },
         "base_url": {
-          "$ref": "input.base_url"
+          "$ref": "params.base_url"
         },
         "api_key": {
-          "$ref": "input.api_key"
+          "$ref": "params.api_key"
         }
       },
       "inputs": {
-        "prompt": {
+        "messages": {
           "from": {
-            "node": "title_prompt",
-            "port": "value"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "title_system",
-            "port": "value"
+            "node": "title_model_messages",
+            "port": "messages"
           }
         }
       }
@@ -307,6 +289,71 @@
           }
         }
       }
+    },
+    {
+      "id": "model_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "history": {
+            "list": "object"
+          },
+          "system": "string"
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        }
+      }
+    },
+    {
+      "id": "title_model_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "system": "string"
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [{'role':'system','content':system}]) + [] + [{'role':'user','content':prompt}]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "title_prompt",
+            "port": "value"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "title_system",
+            "port": "value"
+          }
+        }
+      }
     }
   ],
   "edges": [
@@ -385,8 +432,9 @@
       "label": "Conversation",
       "annotation": "Resolve inputs and generate the primary response before deciding whether a title is needed.",
       "nodes": [
-        "input",
-        "model"
+        "params",
+        "model",
+        "model_messages"
       ]
     },
     {
@@ -405,7 +453,8 @@
         "title_system",
         "title_model",
         "title_success",
-        "title"
+        "title",
+        "title_model_messages"
       ]
     },
     {

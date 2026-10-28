@@ -173,6 +173,7 @@ pub struct ChatContract {
     pub answer_stream: bool,
     pub streaming: bool,
     inputs: BTreeMap<String, String>,
+    owns_title: bool,
 }
 
 impl ChatContract {
@@ -253,7 +254,42 @@ impl ChatContract {
             answer_stream,
             streaming,
             inputs,
+            owns_title: manifest
+                .definition
+                .outputs
+                .iter()
+                .any(|output| output.name == "title"),
         })
+    }
+
+    /// Reuses resolved provider inputs only when the workflow leaves titles to the host.
+    pub fn builtin_title_parameters(
+        &self,
+        parameters: &WorkflowArguments,
+    ) -> Option<WorkflowArguments> {
+        if self.owns_title {
+            return None;
+        }
+        let mut arguments = WorkflowArguments::default();
+        for name in ["model", "base_url", "api_key"] {
+            let mut candidates = self
+                .parameters
+                .inputs
+                .iter()
+                .filter_map(|(node, ports)| ports.get(name).map(|port| (node, port)));
+            let (node, port) = candidates.next()?;
+            if candidates.next().is_some() || port.value_type != mf_runtime::ValueType::String {
+                return None;
+            }
+            let value = parameters.0.get(&mf_runtime::output_id(node, name))?;
+            if value.as_str()?.trim().is_empty() {
+                return None;
+            }
+            arguments
+                .0
+                .insert(mf_runtime::output_id("params", name), value.clone());
+        }
+        Some(arguments)
     }
 
     pub fn arguments(
@@ -452,6 +488,7 @@ mod output_tests {
 
     fn decoder(answer: bool) -> ConversationOutputDecoder {
         ConversationOutputDecoder::new(&ChatContract {
+            owns_title: false,
             parameters: Default::default(),
             answer_stream: answer,
             streaming: true,

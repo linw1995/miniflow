@@ -1,14 +1,14 @@
-use crate::{LlmEmission, LlmExecutionError, TextDelta};
+use crate::{LlmEmission, LlmExecutionError, TextDelta, ToolCall, ToolCallEvent};
 use futures::StreamExt;
-use mf_runtime::TypedEmitter;
+use mf_runtime::{TypedEmitter, TypedNodeResult};
 use rig_core::{
-    completion::CompletionResponse,
+    completion::{AssistantContent, CompletionResponse},
     error::ProviderError,
     operation::Completion,
     streaming::{Item, StreamEvent, Streamed},
 };
 use snafu::{OptionExt, ResultExt, ensure};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 pub fn complete(
@@ -17,6 +17,8 @@ pub fn complete(
     call_id: &str,
     deadline: Instant,
     context: &mf_runtime::ExecutionContext,
+    allow_tools: bool,
+    external_tools: Option<&BTreeSet<String>>,
 ) -> Result<CompletionResponse, LlmExecutionError> {
     let mut response = response.with_context(|source| crate::ProviderSnafu {
         kind: source.kind().code(),
@@ -54,9 +56,12 @@ pub fn complete(
                     arguments.insert(part.index(), Vec::new());
                 }
                 StreamEvent::Arguments { part, json } => {
-                    let bytes = arguments
-                        .get_mut(&part.index())
-                        .context(crate::InvalidToolCallSnafu)?;
+                    let bytes =
+                        arguments
+                            .get_mut(&part.index())
+                            .context(crate::InvalidResponseSnafu {
+                                requirement: "complete unambiguous tool call fragments",
+                            })?;
                     ensure!(
                         json.len()
                             <= crate::tools::MAX_TOOL_ARGUMENT_BYTES.saturating_sub(bytes.len()),
@@ -77,40 +82,77 @@ pub fn complete(
                     part,
                     content: rig_core::completion::AssistantContent::ToolCall(call),
                 } => {
-                    let bytes = arguments
-                        .remove(&part.index())
-                        .context(crate::InvalidToolCallSnafu)?;
+                    let bytes =
+                        arguments
+                            .remove(&part.index())
+                            .context(crate::InvalidResponseSnafu {
+                                requirement: "complete unambiguous tool call fragments",
+                            })?;
                     let parsed: serde_json::Value = mf_runtime::decode_unique_json(&bytes)
                         .context(crate::ToolArgumentsJsonSnafu)?;
                     ensure!(
                         parsed == call.function.arguments,
-                        crate::InvalidToolCallSnafu
+                        crate::InvalidResponseSnafu {
+                            requirement: "complete unambiguous tool call fragments"
+                        }
                     );
                 }
                 _ => {}
             }
         }
-        if let Item::Event(StreamEvent::Text { text, .. }) = item
-            && !text.is_empty()
-        {
-            if first_text {
-                mf_telemetry::events::record(
-                    crate::FIRST_TEXT_EVENT,
-                    serde_json::json!({"call_id": call_id}),
-                );
-                first_text = false;
-            }
-            emitter
-                .send(LlmEmission {
-                    delta: TextDelta {
+        let emission = match item {
+            Item::Event(StreamEvent::Text { text, .. }) if !text.is_empty() => {
+                if first_text {
+                    mf_telemetry::events::record(
+                        crate::FIRST_TEXT_EVENT,
+                        serde_json::json!({"call_id": call_id}),
+                    );
+                    first_text = false;
+                }
+                LlmEmission {
+                    delta: Some(TextDelta {
                         text,
                         model_call_id: call_id.into(),
-                    },
-                })
-                .context(crate::PublicationSnafu)?;
-        }
+                    }),
+                    tool_call: None,
+                }
+            }
+            Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(call),
+                ..
+            }) if allow_tools
+                && external_tools
+                    .is_none_or(|names| names.contains(call.function.name.as_str())) =>
+            {
+                LlmEmission {
+                    delta: None,
+                    tool_call: Some(ToolCallEvent {
+                        model_call_id: call_id.into(),
+                        call: ToolCall::from_provider(call)?,
+                    }),
+                }
+            }
+            _ => continue,
+        };
+        let skipped = if emission.delta.is_some() {
+            "tool_call"
+        } else {
+            "delta"
+        };
+        emitter
+            .send(TypedNodeResult {
+                outputs: emission,
+                skipped: std::collections::BTreeSet::from([skipped.into()]),
+                loop_summary: None,
+            })
+            .context(crate::PublicationSnafu)?;
     }
-    ensure!(arguments.is_empty(), crate::InvalidToolCallSnafu);
+    ensure!(
+        arguments.is_empty(),
+        crate::InvalidResponseSnafu {
+            requirement: "complete tool call fragments"
+        }
+    );
     context
         .execute_future(response.finish(), Some(deadline))?
         .with_context(|source| crate::ProviderSnafu {

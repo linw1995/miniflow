@@ -1,0 +1,74 @@
+{
+  "version": "2026-10-23",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "deepseek": {
+      "package": "mfn-deepseek",
+      "path": "../crates/builtin-nodes/deepseek"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "api_key": {
+            "type": "string",
+            "env": "DEEPSEEK_API_KEY"
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.deepseek.com",
+            "secret": false
+          },
+          "query": {
+            "type": "string",
+            "default": "DeepSeek Search API documentation",
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "search",
+      "kind": "builtin.deepseek.search",
+      "config": {
+        "api_key": {
+          "$ref": "params.api_key"
+        },
+        "base_url": {
+          "$ref": "params.base_url"
+        }
+      },
+      "inputs": {
+        "query": {
+          "from": {
+            "node": "params",
+            "port": "query"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "results",
+      "node": "search",
+      "port": "results"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Web search",
+      "annotation": "Resolve the DeepSeek credential and search query before requesting structured web results.",
+      "nodes": [
+        "params",
+        "search"
+      ]
+    }
+  ]
+}

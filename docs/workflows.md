@@ -91,8 +91,8 @@ catalog without owning application definitions. `mf-chat` owns `workflows/title.
 `mf-chat.chat-title`; the CLI already links that provider. Custom hosts must link the provider before source
 resolution. Standalone runners contain the expanded graph and need only its node packages.
 
-The built-in `mf-chat.chat-title` Flow takes `input.prompt`, `input.text`, `input.status`, `input.context`,
-`input.model`, `input.base_url`, and `input.api_key`. It checks the title policy in `context.title`,
+The built-in `mf-chat.chat-title` Flow takes `params.prompt`, `params.text`, `params.status`, `params.context`,
+`params.model`, `params.base_url`, and `params.api_key`. It checks the title policy in `context.title`,
 captures provider failures, and returns optional `title` and required `usages`. An ineligible call
 returns no title and an empty usage list; a failed provider attempt retains its usage without a title.
 The [nested chat example](../examples/chat-nested-title-flow.json) combines the returned usage with the
@@ -205,7 +205,9 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
-| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `prompt`; optional `system` and `history` | Required `text` and updated `history`; optional `usage` and `finish_reason` |
+| `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
+| `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
+| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -390,8 +392,8 @@ Nodes that support [configuration templates](#configuration-templates) can consu
 
 ### Configuration templates
 
-Providers explicitly enable templates for execution-time configuration fields. LLM configuration supports them;
-structural settings such as parameter declarations, node ports, and Loop bodies remain static.
+Providers explicitly enable templates for execution-time configuration fields. LLM and DeepSeek configuration
+support them; structural settings such as parameter declarations, node ports, and Loop bodies remain static.
 
 | Configuration value | Meaning |
 | --- | --- |
@@ -415,29 +417,30 @@ and outputs are also redacted. Literal configuration and parameter defaults rema
 
 ### LLM configuration and conversation values
 
-The opt-in `mfn-llm` package registers `builtin.llm`. Each execution makes exactly one model request,
-optionally dispatches its completed tool batch, and returns one result with optional text deltas:
+The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing one authoritative terminal result, optional text deltas, and completed tool-call events:
 
 | Direction | Port | Type | Required |
 | --- | --- | --- | --- |
-| Input | `prompt` | `string` | Yes |
-| Input | `system` | `string` | No |
-| Input | `history` | `List(Object)` | No |
-| Input | `continuation` | `any` (opaque state or null) | No |
-| Output | `status` | `string` | Yes |
-| Output | `usages` | `List(Object)` | Yes |
-| Output | `continuation` | `any` (opaque state or null) | Yes |
+| Input | `messages` | `List(Object)` | Yes, nonempty |
+| Input | `tools` | `List(Object)` | No, defaults to `[]` |
+| Input | `tool_results` | `List(Object)` | No, defaults to `[]`; appended after `messages` in this request |
+| Output | `message` | `Object` | When text or tool calls are available; omitted on captured failure |
 | Output | `text` | `string` | Yes |
-| Output | `history` | `List(Object)` | Yes |
+| Output | `tool_calls` | `List(Object)` | Yes |
+| Output | `tool_results` | `List(Object)` | Yes; results of node-backed calls, otherwise `[]` |
+| Output | `outcome` | `string` | Yes |
+| Output | `status` | `string` | Yes; `succeeded` or `failed` |
+| Output | `usages` | `List(Object)` | Yes; accounting for this model call, including captured failures |
+| Output | `error` | `string` | On captured failure |
 | Output | `usage` | `Map(Int64)` | No |
 | Output | `finish_reason` | `string` | No |
-| Output | `error` | `string` | No |
-| Output | `metadata` | `object` | No |
-| Stream output | `delta` | `Object` | Yes, per emission |
+| Output | `metadata` | `Map(Any)` | No; currently omitted |
+| Stream output | `delta` | `Object` | On text emissions |
+| Stream output | `tool_call` | `Object` | On completed tool-call emissions |
 
 The `delta` payload contains `text` and `model_call_id`. A connected graph edge or selected native output
-selects streaming for that request; an unconsumed invocation sends one ordinary request and emits nothing.
-There is no per-node streaming flag or fallback request. Terminal text, history, finish reason, and usages
+selects one streaming request; an unconsumed invocation sends one ordinary request and emits nothing.
+There is no per-node streaming flag or fallback request. The terminal assistant message, text, finish reason, and usages
 come from the completed provider response. Delivered prefixes remain provisional on failure or cancellation.
 
 The [answer-and-title example](../examples/chat-title-flow.json) declares only the answer as public:
@@ -454,11 +457,26 @@ The request deadline bounds provider setup and reads. Emission waits follow nati
 when the consumer fails or the host cancels.
 Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
-Each history object has exactly two required string fields, `role` and `content`. Conversation roles are `user`
-and `assistant`, with nonempty text for ordinary messages. Tool exchanges additionally use `tool` records,
-as described below. The current `prompt` is also nonempty. System instructions use the separate
-`system` input. Missing or empty history starts a new conversation; a successful turn appends its user prompt and
-assistant text to the supplied history. The workflow owns transcript persistence and trimming.
+Each message has required string fields `role` and `content`. Roles are `system`, `user`, `assistant`,
+and `tool`. System and user messages require nonempty text. Assistant messages can contain text,
+`tool_calls`, or both; tool results carry `tool_call_id`. See [LLM tool calls](#llm-tool-calls).
+
+The Rust `ChatMessage` enum has `System`, `User`, `Assistant`, and `ToolResult` variants, encoded with
+the same JSON `role` tags. Only `Assistant` carries `tool_calls`; `ToolResult` requires `tool_call_id`
+and `content`. Every variant accepts optional application `metadata`; cross-role fields are rejected.
+
+The node encodes `messages` in its existing order, followed by the explicitly supplied `tool_results`.
+It has no `prompt`, `system`, or `history` input ports and does not synthesize conversation turns.
+Include system instructions and the current user or assistant tool-call message in `messages` explicitly.
+The output `message` contains only the current assistant response; `text` and
+`tool_calls` are projections of that response. There is no updated-history output. A response with neither
+text nor completed tool calls also omits `message`, so a truncated empty response cannot be appended as an invalid assistant entry.
+
+Conversation composition belongs to the Flow. New message maps use CEL `dyn(...)` when combined with
+existing messages so inference preserves heterogeneous fields such as nested metadata and tool calls. The chat examples use `builtin.code` to prepend optional
+system instructions and append the current user prompt before invoking the model. The Loop examples
+append the returned `message` to their history variable with a separate code node. On a captured failure,
+the missing `message` skips that append operation and leaves the loop's history unchanged.
 
 Static configuration has this shape:
 
@@ -466,7 +484,7 @@ Static configuration has this shape:
 {
   "model": "example-model",
   "base_url": "https://api.openai.com/v1",
-  "api_key_env": "MODEL_API_KEY",
+  "api_key_env": "OPENAI_API_KEY",
   "temperature": 0.2,
   "max_tokens": 256,
   "timeout_ms": 60000
@@ -494,19 +512,19 @@ with `api_key_env`. The latter remains a literal environment-variable name for e
 ```
 
 The [parameter-driven example](../examples/llm-parameters.json) declares these parameters and connects
-`params.prompt` to `chat.prompt`, establishing the dependency for all configuration references to `params`.
+`params.messages` to `chat.messages`, establishing the dependency for all configuration references to `params`.
 
 ```sh
 mf compile examples/llm-parameters.json --output ./configured-chat
-./configured-chat --params.model your-model --params.prompt Hello
+./configured-chat --params.model your-model --params.messages '[{"role":"user","content":"Hello"}]'
 ```
 
-Set `MODEL_API_KEY` in the execution environment. Override the endpoint with `--params.base_url` or other public
+Set `OPENAI_API_KEY` in the execution environment. Override the endpoint with `--params.base_url` or other public
 settings through their named arguments. Argument values take precedence over parameter environment fallbacks.
 The same prepared node can execute with different credentials, models, endpoints, and limits on subsequent runs.
 
 `mfn_llm::validate_config` checks literal settings and template syntax without looking up credentials, creating clients or runtimes,
-or contacting the endpoint. Value structs use the runtime's nested object codecs, so malformed history has indexed
+or contacting the endpoint. Value structs use the runtime's nested object codecs, so malformed messages have indexed
 diagnostics. Optional output metadata is omitted when absent rather than encoded as JSON null. The package's optional
 `tokio` feature forwards the workflow-managed backend; its native HTTP transport still depends on Tokio with that
 feature disabled.
@@ -519,11 +537,10 @@ disables idle connection pooling so prepared nodes can outlive earlier workflow-
 Each invocation enforces its resolved deadline through the runtime future driver; the shared client retains no
 invocation-specific credentials, endpoint, or deadline.
 
-Request messages are optional system instructions, the supplied history in order, and the current user prompt.
-Returned history preserves the supplied records and appends one assistant response and its tool results. A fresh
-request also appends the current user prompt; a continuation request does not append that prompt again. System instructions are excluded and must be supplied again
-for each turn. The node does not retain conversation state or automatically trim history. Unsupported history roles and response content
-fail rather than being silently rewritten. A nonempty reply truncated at its token limit retains the `length` reason.
+The node retains no conversation state and performs no transcript assembly or trimming. Caller-owned
+messages are never echoed as history. A successful invocation produces one assistant message containing
+its text and tool calls. Unsupported roles and response content fail explicitly. A nonempty reply
+truncated at its token limit retains the `length` reason.
 
 `usage` contains available `input_tokens`, `output_tokens`, and `total_tokens` counters; unreported counts do not become
 zero. Compatible services reporting partial wire usage are adapted without changing Rig's message protocol. Unknown
@@ -532,103 +549,328 @@ omit it. Credential and provider errors retain typed sources while diagnostic di
 arbitrary remote bodies.
 
 The deadline covers setup and waiting for a terminal reply, with deadline and cancellation checks before returning
-converted data. Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot
+converted data. Cancellation fails the invocation. Captured request failures return status and usage without a `message`. Synchronous setup and conversion cannot
 be forcibly preempted. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
 workflow thread. Async hosts use a blocking thread for synchronous workflow entry points.
 
-#### Nodes as LLM tools
-
-The [chat workflow with tools](../examples/chat-tools-flow.json) exposes a callable CEL node. Its `amount`
-argument comes from `chat`, while an ordinary connection supplies `factor` from a configuration parameter.
-The model sees only `amount`. The workflow uses the existing chat contract: `prompt`, `system`, and `history`
-inputs and terminal `status`, `text`, and per-request `usages` outputs. The example uses `workflow.loop`
-to schedule each model request; it currently uses terminal chat output because child-stream forwarding is separate.
-The same binding and execution rules apply to terminal tasks, TaskStream nodes, and callable Flow wrappers.
-
-Declare `config.call_outputs` as a static name-to-type map on the LLM node, then connect those slots with
-`calls.<caller>.<alias>.ports`. These are intermediate call arguments, separate from terminal outputs and `delta`.
-Explicit port mappings take precedence. `defaults: "remaining_inputs"` opts into the remaining unbound target
-inputs; externally wired inputs are never included. The alias becomes the provider tool name and must contain
-1 to 64 ASCII letters, digits, underscores, or hyphens. An optional binding `description` describes the tool.
-
-Provider argument objects use flat names unless explicit output names collide with default-input names.
-A collision produces separate `outputs` and `defaults` objects. Requiredness, nullability, closed structs,
-enums, tagged variants, collections, and descriptions come from the resolved public contract. All constraints
-on a mapped argument apply together. Opaque/custom or recursive codecs and lossless binary32 contracts are
-rejected before the first provider request; give such tools a supported input wrapper. Unknown external
-credential schemas do not affect the public tool schema. Runtime decoded validation remains authoritative,
-including exact numeric representation checks that a provider may not enforce.
-
-A complete assistant tool batch is validated before dispatch. Calls run in response order, with isolated
-invocation state and ordinary external prerequisites. Streamed arguments are buffered and checked for
-complete, duplicate-free JSON before any tool in that response executes. Tool IDs correlate each assistant
-call with exactly one result. History preserves these records:
-
-```json
-[
-  {"role":"assistant","content":"","tool_calls":[
-    {"id":"call-1","name":"multiply","arguments":{"amount":21}}
-  ]},
-  {"role":"tool","content":"{\"result\":42}","tool_call_id":"call-1"}
-]
-```
-
-Supply all results before another user or assistant message. Plain history records retain their existing
-shape; metadata stays local.
-
-A response requesting tools returns `status: "tool_calls"`, completed call/result history, and a non-null
-`continuation`. The node then finishes. Pass both `history` and `continuation` into another execution to
-request the next model response; `prompt` and `system` initialize only fresh requests. Continuation is
-versioned opaque state bound to the model and endpoint. It preserves complete SDK messages, including
-sealed reasoning, and is marked secret. Do not edit it or send it to another model. A final response returns
-`status: "succeeded"` and null continuation; captured errors return `status: "failed"` and null continuation.
-
-`max_tool_calls` defaults to 32 (range 1–128) and limits the current response's tool batch. It accepts
-configuration templates. `max_tool_rounds` is not supported: loop policy belongs to the workflow.
-One `timeout_ms` deadline covers this model request and its tool batch; runtime cancellation, invocation
-depth, and shared execution budgets remain in force. Already executed tools are not rolled back on failure.
-
-The example uses the existing `workflow.loop` with `max_iterations: 4`, stopping when `status` differs from
-`tool_calls`. It explicitly accumulates usage lists and carries history and continuation with loop variables.
-If the limit is reached with tools still pending, a normal CEL node returns a failed chat result while
-retaining the collected usage. The LLM node never schedules the next model request itself.
-
-Tool arguments and results are each limited to 64 KiB of JSON, argument batches to 256 KiB, and tool
-declarations to 256 KiB, with at most 128 tools and 256 public parameters per tool. Oversized results are replaced with a generic error rather than truncated JSON.
-Marked secret result values are redacted before entering provider messages. Unknown names, invalid arguments,
-skips, and domain failures return generic tool feedback; typed runtime control failures stop execution.
-The adapter does not retry requests or tools automatically. A model may explicitly request a tool again;
-side-effecting tools must enforce their own idempotency policy.
-
-`text` contains this response's visible text and matches this request's deltas; it may be empty for a tool
-response. `usage` contains this request's sparse counters, and `usages` contains exactly one entry per
-execution that attempted a model request. The workflow owns cross-request accumulation. With `capture_errors`,
-a recoverable failure returns `status: "failed"`, the input history, and that request's facts. Delivery
-failures and runtime control failures still propagate.
-
-```sh
-mf compile examples/chat-tools-flow.json --output ./chat-tools-flow
-mf run ./chat-tools-flow --chat --chat-db state/chat.sqlite --params.model your-model
-```
-
-Set `MODEL_API_KEY` and ask the chat to use `multiply`. Override the external factor with `--params.factor`.
-The chat application saves the final assistant reply and all model-request usage; tool protocol messages
-remain internal to the workflow turn.
-
-The [terminal example](../examples/llm-terminal.json) accepts startup prompt, system, and history inputs.
-The [Loop example](../examples/llm-loop.json) passes updated history through a Loop variable for two turns.
-Choose an available model in each example's configuration and set `MODEL_API_KEY` in the execution environment.
+The [terminal example](../examples/llm-terminal.json) accepts a complete startup `messages` list.
+The [Loop example](../examples/llm-loop.json) explicitly builds requests and accumulates replies for two turns.
+Choose an available model in each example's configuration and set `OPENAI_API_KEY` in the execution environment.
 An OpenAI-compatible endpoint can be selected with `base_url`. Compilation does not need the key:
 
 ```bash
 mf compile examples/llm-terminal.json --output ./chat
-./chat --chat.prompt Hello --chat.system 'Answer briefly'
+./chat --chat.messages '[{"role":"system","content":"Answer briefly"},{"role":"user","content":"Hello"}]'
 mf compile examples/llm-loop.json --output ./conversation
 ./conversation --repeat.prompt 'Continue the conversation' --repeat.history '[]' --repeat.text ''
 ```
 
-Persist the returned history and pass it as `chat.history` with a new prompt to continue a terminal conversation.
-The Loop example repeats the supplied prompt twice while preserving the earlier reply in the second request.
+To continue, append the returned `message` and the next user message to your own list, then pass that list
+as `chat.messages`. The Loop example expresses these operations explicitly with code and assignment nodes.
+
+### DeepSeek web search and fetch
+
+The opt-in `mfn-deepseek` package registers `builtin.deepseek.search` and `builtin.deepseek.fetch`.
+They call the [DeepSeek Search and Fetch APIs](https://api-docs.deepseek.com/zh-cn/guides/search),
+with one JSON POST per node invocation and no implicit model call. Declare the package in the Flow's
+`dependencies` and use either kind independently. The [Search example](../examples/deepseek-search.json)
+and [Fetch example](../examples/deepseek-fetch.json) are complete parameter-driven Flows.
+
+Both nodes accept this configuration:
+
+```json
+{
+  "base_url": "https://api.deepseek.com",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "timeout_ms": 60000
+}
+```
+
+The shown values are the defaults. `base_url` is an HTTP or HTTPS prefix without embedded credentials,
+query, or fragment; the node appends `/v1/tools/search` or `/v1/tools/fetch`. `timeout_ms` must be a
+positive integer and bounds provider setup and response reads. Unknown configuration fields are rejected.
+
+`base_url` and `timeout_ms` accept configuration templates. Use `api_key` with a runtime reference instead
+of `api_key_env` to supply a parameter credential; literal credentials are rejected, and the two credential
+sources cannot be combined:
+
+```json
+{
+  "base_url": {"$ref": "params.base_url"},
+  "api_key": {"$ref": "params.api_key"},
+  "timeout_ms": {"$ref": "params.timeout_ms"}
+}
+```
+
+The Search node has these input ports:
+
+| Port | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `query` | `string` | Yes | 1–128 Unicode characters and not all whitespace |
+| `count` | `uint` | No | 1–50, defaults to 10 |
+| `ori_question` | `string` | No | Original user question, 1–128 characters |
+| `localization` | `string` | No | IP address used to prefer localized results |
+| `need_content` | `bool` | No | Whether results include page content, defaults to `false` |
+
+Its required `results` output is `List(Object)`. A search without matches succeeds with `[]`. Every result
+contains `rerank_score`, `title`, `url`, `snippet`, `summary`, `content`, `site_name`, `site_icon`, `date`,
+and `authority`. The site name, icon, and date are nullable strings and remain explicit JSON `null` when
+DeepSeek does not supply them. Other fields retain their API values, including an empty `content` string.
+
+The Fetch node accepts a required string `url` and returns required string outputs `title` and `content`.
+The URL can have at most 8192 characters, must be an absolute HTTP or HTTPS URL with a host, and cannot
+contain a username or password. `content` preserves the returned Markdown; an unavailable title remains
+an empty string as reported by the API.
+
+Input validation happens before credential resolution and network I/O. Compilation and preparation do not
+read credentials or contact DeepSeek. Redirects are not followed, requests are not automatically retried,
+and HTTP errors, malformed responses, deadlines, or cancellation fail the invocation without publishing
+node outputs. Retry policy belongs to the enclosing Flow or host, which can account for the API's per-request
+billing and status-specific retry guidance.
+
+### LLM tool calls
+
+The existing `builtin.llm` node accepts optional `tools` and `tool_results` inputs, each defaulting to `[]`. Each execution
+still makes exactly one OpenAI-compatible Chat Completions request. Manually supplied tools remain
+caller-owned. [Node-backed tools](#node-backed-tools) execute through explicit runtime bindings. The
+node does not repeat model requests or expose `tool_choice`. Supply system instructions, previous exchanges, and the
+current user or assistant tool-call message through `messages`. Supply current execution results
+through `tool_results`, or include them as role tool messages in the conversation.
+
+The public Rust contracts are exported by `mfn_llm`:
+
+| Type | Fields | Direction |
+| --- | --- | --- |
+| `ToolDefinition` | `name: String`, `description: String`, `input_schema: ValueRef` | `tools` input |
+| `ToolCall` | `id: String`, `name: String`, `arguments: ValueRef` | `tool_calls` output and assistant messages |
+| `ToolResult` | `tool_call_id: String`, `content: String` | `tool_results` input and node-backed results output |
+| `ToolCallEvent` | `model_call_id: String`, `call: ToolCall` | `tool_call` stream output |
+
+Each tool definition contains `name`, `description`, and `input_schema`. Names must be unique and
+contain 1-64 ASCII letters, digits, underscores, or hyphens. The schema must be an object with
+`type: object`; its remaining JSON Schema semantics are passed to the provider. Generated arguments
+for manually supplied tools are parsed as JSON but are not validated against that schema by this node. Malformed argument JSON
+fails the response instead of producing an executable tool call.
+
+For example, pass these inputs to the [tool example](../examples/llm-tools.json):
+
+```json
+{
+  "model.messages": [{"role": "user", "content": "Look up orders 42 and 43."}],
+  "model.tools": [
+    {
+      "name": "lookup_order",
+      "description": "Look up an order by its ID",
+      "input_schema": {
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
+```
+
+```sh
+mf compile examples/llm-tools.json --output ./tool-call
+OPENAI_API_KEY=... ./tool-call --inputs-file inputs.json
+```
+
+The `message` output contains the current assistant response. Two required projections support routing:
+
+| Output | Meaning |
+| --- | --- |
+| `tool_calls` | Ordered calls, each with `id`, `name`, JSON `arguments`; `[]` when absent |
+| `outcome` | `completed`, `tool_calls`, `truncated`, `refused`, `incomplete`, or `failed` |
+
+`status: succeeded` means the request produced a valid response, including a tool request. Only
+`outcome: tool_calls` identifies a complete batch for caller-managed dispatch. Tool-only responses
+have empty `text`. `truncated` represents the output length limit, `refused` represents provider
+content filtering, and `incomplete` represents no usable answer or an unrecognized finish reason
+without tool calls. `failed` accompanies `capture_errors` failures. Plain requests without tools
+retain their existing rejection of empty text and unsolicited tool calls.
+
+The returned `message` contains only the current assistant response. Its `content` is a string,
+which may be empty for a tool-only reply, and `tool_calls` contains the requested calls:
+
+```json
+{
+  "role": "assistant",
+  "content": "",
+  "tool_calls": [
+    {"id": "call_123", "name": "lookup_order", "arguments": {"id": "42"}},
+    {"id": "call_124", "name": "lookup_order", "arguments": {"id": "43"}}
+  ]
+}
+```
+
+Execute calls outside the node. Append the returned assistant `message` to the caller-owned
+conversation and pass a matching result for each call through `tool_results`. Each result needs only
+the call's `id` as `tool_call_id` and the result text as `content`:
+
+```json
+{
+  "tool_call_id": "call_123",
+  "content": "Order 42 has shipped."
+}
+```
+
+For the returned batch above, the complete second invocation of `llm-tools.json` can return results in reverse order:
+
+```json
+{
+  "model.messages": [
+    {"role": "user", "content": "Look up orders 42 and 43."},
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {"id": "call_123", "name": "lookup_order", "arguments": {"id": "42"}},
+        {"id": "call_124", "name": "lookup_order", "arguments": {"id": "43"}}
+      ]
+    }
+  ],
+  "model.tool_results": [
+    {
+      "tool_call_id": "call_124",
+      "content": "Order 43 is being processed."
+    },
+    {
+      "tool_call_id": "call_123",
+      "content": "Order 42 has shipped."
+    }
+  ],
+  "model.tools": []
+}
+```
+
+Use the actual assistant `message` and call IDs from the first invocation. `tools` declares the tools
+available for the current request; it does not carry results. This example disables further tool calls
+while asking for the final answer. Historical calls remain valid when their definitions are absent
+from the current `tools` list. To allow more calls, supply the desired definitions again.
+
+The request order is exactly `messages` followed by `tool_results` encoded as role tool messages.
+The adapter does not insert an assistant call or user prompt, reorder results, or modify the input lists.
+Both inputs share one pending-call validator: an ID answered in `messages` cannot be answered again
+in `tool_results`. Results may be split across the inputs, but every pending call must be answered
+before sending the request. Results cannot repair an earlier incomplete exchange inside `messages`.
+
+One assistant message can contain multiple calls, including repeated calls to the same tool with
+different arguments. Keep that message intact and return one result per call ID. Results may arrive
+in a different order; matching uses IDs rather than tool names or list positions. The current
+`OpenAIConfig.chat` adapter uses Rig's `Message::tool_results(Vec<ToolResult>)` for an explicit batch;
+its Chat Completions encoder emits a separate role tool message for each result, after the single
+assistant message containing all calls. This follows the
+[OpenAI function-calling protocol](https://developers.openai.com/api/docs/guides/function-calling).
+`tool_results` is a node input, not an extra field in the provider's HTTP request.
+
+`tool_results` is a normal list input and can receive an upstream node's output through a data binding:
+
+```json
+"inputs": {
+  "messages": {"from": {"node": "conversation", "port": "messages"}},
+  "tool_results": {"from": {"node": "execute_tools", "port": "results"}}
+}
+```
+
+Here `conversation` and `execute_tools` are caller-defined producers; `execute_tools` produces
+`List(Object)` results and is not a built-in executor.
+For subsequent turns, the caller persists these results as role tool messages along with the assistant
+responses. Rust callers can convert `ToolResult` into `ChatMessage::ToolResult` with `.into()`. The node does not
+return or retain an updated transcript; sending the same results again in both inputs is an error.
+
+`content` must be a string. Serialize structured results once, for example
+`"content": "{\"id\":\"42\",\"status\":\"shipped\"}"`; empty strings are also accepted. Execution errors can
+use caller-defined text or JSON encoded as a string, such as
+`"content": "{\"error\":{\"code\":\"not_found\",\"message\":\"Order 42 does not exist\"}}"`.
+There is no separate `is_error` protocol field. These messages retain the original call ID and let
+the model interpret the result. Application metadata is preserved by the caller and omitted from
+provider requests.
+
+Call IDs must be nonblank and unique within the supplied messages. Every call requires exactly one
+result before subsequent user text, another assistant message, or the next request. Results can
+arrive in any order. Unknown, duplicate, or missing results fail before network I/O. The tool name is
+resolved from the matching assistant call. This node imposes no execution or retry policy.
+
+The node uses `OpenAIConfig.chat` and encodes text, function calls, and tool results from these inputs.
+Provider reasoning blocks are ignored, as in the original text-only node. Reasoning replay and
+cross-provider continuation state are outside this contract. Application `metadata` remains separate
+and is not sent to the provider.
+
+The stream side exposes `delta` for text and `tool_call` for each completed tool call. The text payload
+remains `{text, model_call_id}`. A tool event contains `{model_call_id, call}`, where `call` has the same
+shape as one terminal `tool_calls` entry. Rig assembles arguments before publishing a completed call;
+raw argument fragments are not exposed. A tool event is still a preview of the overall request:
+later failure or truncation can invalidate the batch. Use terminal `outcome` to decide whether to dispatch.
+
+Each emission produces one stream port and explicitly skips the other. Select these ports as optional
+workflow outputs when observing mixed text/tool responses, for example:
+
+```json
+[
+  {"name": "text_delta", "node": "model", "port": "delta", "optional": true},
+  {"name": "tool_call", "node": "model", "port": "tool_call", "optional": true},
+  {"name": "outcome", "node": "model", "port": "outcome"},
+  {"name": "tool_calls", "node": "model", "port": "tool_calls"}
+]
+```
+
+Selecting a stream port enables native streaming execution. Ordinary downstream nodes connected to
+one stream port are skipped on emissions from the other port. Tool-only responses emit neither empty
+text deltas nor a first-text observation. Incomplete or malformed arguments do not produce a completed
+tool event. Usage, deadlines, cancellation, and error capture retain the same contracts as text calls.
+Cancellation and publication failure remain execution failures even with error capture enabled.
+This interface supports text and function tools, not media inputs.
+
+#### Node-backed tools
+
+The [chat workflow with tools](../examples/chat-tools-flow.json) uses the existing chat contract and
+explicit `messages` protocol. A normal CEL node assembles the initial system/history/user messages once.
+`workflow.loop` owns repeated requests, stopping, and usage accumulation. There is no internal model loop,
+node-owned history, or opaque continuation channel.
+
+Declare static `config.call_outputs` slots on the LLM node and bind them through the scope's
+`calls.<caller>.<alias>.ports`. The example maps `amount` to `multiply.amount`; an ordinary connection
+supplies `multiply.factor` from `%loop.factor`. The model sees only `amount`. Explicit port ownership
+wins; `defaults: "remaining_inputs"` opts into unbound target inputs without exposing external fields.
+
+Resolved `CallInterface` and `ValueSchema` projections become the existing `ToolDefinition` values and
+pass through the same request conversion and name validation as manual `tools`. Requiredness, closed
+records, enum variants, collections, nullability, descriptions, and conjunctive constraints are retained.
+Opaque/custom, recursive, and lossless binary32 contracts fail before requesting the model; use a supported
+wrapper for these contracts. External opaque fields do not participate in the public schema.
+
+One accepted `outcome: "tool_calls"` response dispatches its bound calls through `ExecutionContext` in
+response order. Decoded arguments are checked before invocation. `message`, `tool_calls`, and `outcome`
+retain their existing meanings; the additional `tool_results` output uses the existing `ToolResult` type.
+The workflow appends `message` and those results as role-tool messages before the next explicit invocation.
+A truncated or refused response never dispatches node-backed calls.
+
+Manual and bound tools may coexist with distinct names. Manual tools remain external and are emitted on
+`tool_call`; bound calls are represented by runtime invocation observations and `tool_results`, avoiding
+a second execution through a manual stream handler. Unknown names receive generic feedback when automatic
+bindings are active. Provider errors, domain failures, and runtime control failures retain separate handling.
+
+`max_tool_calls` defaults to 32 (range 1–128) and bounds the current automatic batch. `max_tool_rounds` is
+unsupported. `timeout_ms` covers one model request and its dispatched batch. The example's existing Loop
+runs at most four requests and stops when `outcome` differs from `tool_calls`. It maps exhausted or noncompleted
+outcomes to a failed chat result while retaining the accumulated usage.
+
+Tool arguments/results are limited to 64 KiB each, argument batches and automatic declarations to 256 KiB.
+Automatic catalogs admit at most 128 tools and 256 public parameters per tool. Marked result secrets are
+redacted before being sent back to the provider; oversized results use generic feedback instead of truncated
+JSON. There are no automatic request or tool retries, and already executed tools are not rolled back.
+
+```sh
+mf compile examples/chat-tools-flow.json --output ./chat-tools-flow
+mf run ./chat-tools-flow --chat --chat-db state/chat.sqlite --model your-model --factor 2
+```
+
+Set `OPENAI_API_KEY`. The chat application owns persistence, title
+composition, and accounting. This example uses terminal delivery; Loop child-stream forwarding is an
+independent runtime change. The main branch's manual [LLM tool example](../examples/llm-tools.json) remains
+available for caller-managed tool execution.
 
 ## Structured Loop
 
@@ -1028,8 +1270,8 @@ Per-domain ordering and native delivery acknowledgment remain enforced. Successf
 waits for connected work to drain, and terminal values are never reconstructed from increments.
 
 Use application event nodes when several delivery kinds must share one ordered protocol. The conversation
-Flow routes preview events and releases final settlement inputs on upstream close, so the graph owns their
-ordering.
+Flow routes preview events and publishes a completed-conversation event on upstream close, so the graph
+owns their ordering.
 
 ## Streaming through the in-memory API
 

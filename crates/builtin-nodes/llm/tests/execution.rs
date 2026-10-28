@@ -1,4 +1,6 @@
 use std::sync::Arc;
+#[path = "execution/call.rs"]
+mod call;
 mod support;
 
 use mf_runtime::{ExecutionContext, Inputs, NodeRegistry, StreamCancellation, StreamError};
@@ -6,6 +8,10 @@ use mfn_llm::{KIND, LlmExecutionError, prepare_llm};
 use serde_json::{Value, json};
 use std::{error::Error, process::Command, thread, time::Duration};
 use support::{Reply, Server, messages};
+
+fn user(text: &str) -> Value {
+    json!({"role":"user", "content":text})
+}
 
 fn probe(server: &Server, inputs: Value, patch: Value) -> Value {
     let mut config = json!({"model": "example-model", "base_url": server.base_url, "api_key_env": "MINIFLOW_LLM_TEST_KEY"});
@@ -144,7 +150,7 @@ fn execution_probe() {
                 });
             });
         }
-        let mut history: Option<Value> = None;
+        let mut messages = Vec::new();
         let mut context = ExecutionContext::default();
         context.set_cancellation(cancellation.clone());
         for input in parameters["inputs"].as_array().unwrap() {
@@ -153,10 +159,9 @@ fn execution_probe() {
                 context.set_cancellation(cancellation.clone());
             }
             let mut input = input.clone();
-            if parameters["carry_history"] == true
-                && let Some(history) = &history
-            {
-                input["history"] = history.clone();
+            if parameters["append_messages"] == true {
+                messages.extend(input["messages"].as_array().unwrap().iter().cloned());
+                input["messages"] = json!(messages);
             }
             let events = Arc::new(std::sync::Mutex::new(Vec::new()));
             let recorded = events.clone();
@@ -180,7 +185,11 @@ fn execution_probe() {
             match executed {
                 Ok(result) => {
                     let output = serde_json::to_value(result.outputs).unwrap();
-                    history = Some(output["history"].clone());
+                    if parameters["append_messages"] == true
+                        && let Some(message) = output.get("message")
+                    {
+                        messages.push(message.clone());
+                    }
                     results.push(json!({"ok": true, "outputs": output, "deltas": sink.values, "events": events.lock().unwrap().clone()}));
                 }
                 Err(error) => {
@@ -199,26 +208,33 @@ fn execution_probe() {
 }
 
 #[test]
-fn two_turns_reuse_the_node_and_preserve_explicit_history() {
+fn callers_compose_messages_without_node_owned_history() {
     let server = Server::start(vec![
         Reply::text("first reply"),
         Reply::text("second reply"),
     ]);
-    let initial = json!([{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "prior reply", "metadata": {"note":"local-annotation"}}]);
+    let initial = json!([{"role":"system","content":"be brief"}, user("earlier"), {"role":"assistant","content":"prior reply","metadata":{"note":"local-annotation"}}, user("first")]);
     let result = probe(
         &server,
-        json!({"inputs": [{"prompt": "first", "system": "be brief", "history": initial}, {"prompt": "second", "system": "be brief"}], "carry_history": true, "fresh_contexts": true}),
+        json!({"inputs":[{"messages":initial}, {"messages":[user("second")]}], "append_messages":true, "fresh_contexts":true}),
         json!({"temperature": 0.2, "max_tokens": 7}),
     );
     let turns = result["results"].as_array().unwrap();
     assert!(turns.iter().all(|turn| turn["ok"] == true), "{result}");
-    assert_eq!(turns[0]["outputs"]["history"].as_array().unwrap().len(), 4);
-    assert_eq!(turns[1]["outputs"]["history"].as_array().unwrap().len(), 6);
-    assert_eq!(result["original_inputs"][0]["history"], initial);
     assert_eq!(
-        turns[1]["outputs"]["history"][1]["metadata"],
-        initial[1]["metadata"]
+        turns[0]["outputs"]["message"],
+        json!({"role":"assistant","content":"first reply"})
     );
+    assert_eq!(
+        turns[1]["outputs"]["message"],
+        json!({"role":"assistant","content":"second reply"})
+    );
+    assert!(
+        turns
+            .iter()
+            .all(|turn| turn["outputs"].get("history").is_none())
+    );
+    assert_eq!(result["original_inputs"][0]["messages"], initial);
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
     assert!(
@@ -253,6 +269,31 @@ fn two_turns_reuse_the_node_and_preserve_explicit_history() {
 }
 
 #[test]
+fn messages_are_sent_in_supplied_order_without_synthetic_prompts() {
+    let server = Server::start(vec![Reply::text("current reply")]);
+    let supplied = json!([
+        {"role":"system", "content":"Initial instructions"},
+        user("earlier question"),
+        {"role":"assistant", "content":"earlier answer"},
+        {"role":"system", "content":"Updated instructions"},
+        user("current question")
+    ]);
+    let result = probe(
+        &server,
+        json!({"inputs":[{"messages":supplied}]}),
+        json!({}),
+    );
+    assert_eq!(result["results"][0]["ok"], true, "{result}");
+    assert_eq!(json!(messages(&server.requests()[0])), supplied);
+    assert_eq!(result["original_inputs"][0]["messages"], supplied);
+    assert_eq!(
+        result["results"][0]["outputs"]["message"],
+        json!({"role":"assistant", "content":"current reply"})
+    );
+    assert!(result["results"][0]["outputs"].get("history").is_none());
+}
+
+#[test]
 fn separate_invocations_have_no_implicit_conversation_memory() {
     let server = Server::start(vec![
         Reply::text("one"),
@@ -261,7 +302,7 @@ fn separate_invocations_have_no_implicit_conversation_memory() {
     ]);
     let result = probe(
         &server,
-        json!({"inputs": [{"prompt": "a", "history": [{"role": "assistant", "content": "previous"}]}, {"prompt": "b", "system": ""}, {"prompt": "c", "history": []}]}),
+        json!({"inputs":[{"messages":[{"role":"assistant","content":"previous"},user("a")]},{"messages":[user("b")]},{"messages":[user("c")]}]}),
         json!({}),
     );
     assert!(
@@ -288,54 +329,72 @@ fn parallel_calls_use_independent_transcripts() {
     let server = Server::start(vec![Reply::text("reply"); 3]);
     let result = probe(
         &server,
-        json!({"parallel": true, "inputs": [{"prompt": "a"}, {"prompt": "b"}, {"prompt": "c"}]}),
+        json!({"parallel": true, "inputs": [{"messages": [user("a")]}, {"messages": [user("b")]}, {"messages": [user("c")]}]}),
         json!({}),
     );
-    for (turn, prompt) in result["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(["a", "b", "c"])
-    {
+    for turn in result["results"].as_array().unwrap() {
         assert_eq!(turn["ok"], true, "{result}");
-        assert_eq!(turn["outputs"]["history"][0]["content"], prompt);
-        assert_eq!(turn["outputs"]["history"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            turn["outputs"]["message"],
+            json!({"role":"assistant","content":"reply"})
+        );
+        assert!(turn["outputs"].get("history").is_none());
     }
-    assert_eq!(server.requests().len(), 3);
+    let mut sent = server
+        .requests()
+        .iter()
+        .map(|request| {
+            let messages = messages(request);
+            assert_eq!(messages.len(), 1);
+            messages[0]["content"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    sent.sort();
+    assert_eq!(sent, ["a", "b", "c"]);
 }
 
 #[test]
-fn invalid_history_and_prompts_fail_before_network_io() {
+fn invalid_messages_fail_before_network_io() {
     let server = Server::start(vec![]);
     for (input, path) in [
-        (json!({"prompt": ""}), "/prompt"),
+        (json!({}), "/messages"),
+        (json!({"messages":[]}), "/messages"),
+        (json!({"messages":null}), "/messages"),
+        (json!({"messages":[user("")]}), "/messages/0/content"),
         (
-            json!({"prompt": "next", "history": [{"role": "system", "content": "bad"}]}),
-            "/history/0/role",
+            json!({"messages":[{"role":"invalid","content":"bad"}]}),
+            "/messages/0/role",
         ),
         (
-            json!({"prompt": "next", "history": [{"role": "tool", "content": "bad"}]}),
-            "/history/0/tool_call_id",
+            json!({"messages":[{"role":"tool","content":"bad"}]}),
+            "/messages/0/tool_call_id",
         ),
         (
-            json!({"prompt": "next", "history": [{"role": "user", "content": ""}]}),
-            "/history/0/content",
+            json!({"messages":[{"role":"user","content":42}]}),
+            "/messages/0/content",
         ),
-        (
-            json!({"prompt": "next", "history": [{"role": "user", "content": 42}]}),
-            "/history/0/content",
-        ),
-        (json!({"prompt": "next", "history": null}), "/history"),
     ] {
-        let result = probe(&server, json!({"inputs": [input]}), json!({}));
+        let result = probe(&server, json!({"inputs":[input]}), json!({}));
         let failure = &result["results"][0];
         assert_eq!(failure["ok"], false);
         assert!(
             failure["error"].as_str().unwrap().contains(path),
             "{failure}"
         );
-        assert!(server.requests().is_empty());
     }
+    for field in ["prompt", "history", "system"] {
+        let mut input = json!({"messages":[user("Hello")]});
+        input[field] = json!("legacy");
+        let result = probe(&server, json!({"inputs":[input]}), json!({}));
+        assert_eq!(result["results"][0]["ok"], false, "{result}");
+        assert!(
+            result["results"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains(field)
+        );
+    }
+    assert!(server.requests().is_empty());
 }
 
 #[test]
@@ -343,7 +402,7 @@ fn missing_and_empty_credentials_fail_without_acquiring_network_resources() {
     let server = Server::start(vec![]);
     let result = probe(
         &server,
-        json!({"inputs": [{"prompt": "hello"}]}),
+        json!({"inputs": [{"messages": [user("hello")]}]}),
         json!({"api_key_env": "MINIFLOW_LLM_UNAVAILABLE_CREDENTIAL"}),
     );
     assert_eq!(result["results"][0]["ok"], false);
@@ -351,7 +410,7 @@ fn missing_and_empty_credentials_fail_without_acquiring_network_resources() {
     assert!(server.requests().is_empty());
     let empty = probe(
         &server,
-        json!({"credential": "", "inputs": [{"prompt": "hello"}]}),
+        json!({"credential": "", "inputs": [{"messages": [user("hello")]}]}),
         json!({}),
     );
     assert_eq!(empty["results"][0]["ok"], false);
@@ -364,7 +423,7 @@ fn missing_and_empty_credentials_fail_without_acquiring_network_resources() {
     assert!(server.requests().is_empty());
     let prepared =
         prepare_llm(json!({"model": "example-model", "base_url": server.base_url})).unwrap();
-    assert_eq!(prepared.metadata.ports.inputs.len(), 4);
+    assert_eq!(prepared.metadata.ports.inputs.len(), 3);
 }
 
 #[test]
@@ -375,7 +434,11 @@ fn provider_errors_are_not_retried_and_diagnostics_hide_the_body() {
         );
         reply.status = status;
         let server = Server::start(vec![reply]);
-        let result = probe(&server, json!({"inputs": [{"prompt": "hello"}]}), json!({}));
+        let result = probe(
+            &server,
+            json!({"inputs": [{"messages": [user("hello")]}]}),
+            json!({}),
+        );
         let failure = &result["results"][0];
         assert_eq!(failure["ok"], false);
         assert_eq!(failure["typed_provider"], true);
@@ -404,7 +467,11 @@ fn redirects_do_not_contact_the_target() {
         format!("{}/chat/completions", target.base_url),
     ));
     let server = Server::start(vec![reply]);
-    let result = probe(&server, json!({"inputs": [{"prompt": "hello"}]}), json!({}));
+    let result = probe(
+        &server,
+        json!({"inputs": [{"messages": [user("hello")]}]}),
+        json!({}),
+    );
     assert_eq!(result["results"][0]["ok"], false);
     assert_eq!(server.requests().len(), 1);
     assert!(target.requests().is_empty());
@@ -422,7 +489,7 @@ fn waiting_for_headers_or_body_is_bounded_and_cancelled_calls_publish_nothing() 
         let server = Server::start(vec![reply]);
         let result = probe(
             &server,
-            json!({"inputs": [{"prompt": "hello"}]}),
+            json!({"inputs": [{"messages": [user("hello")]}]}),
             json!({"timeout_ms": 150}),
         );
         assert_eq!(result["results"][0]["ok"], false);
@@ -433,7 +500,7 @@ fn waiting_for_headers_or_body_is_bounded_and_cancelled_calls_publish_nothing() 
     let server = Server::start(vec![reply]);
     let result = probe(
         &server,
-        json!({"cancel": true, "inputs": [{"prompt": "hello"}]}),
+        json!({"cancel": true, "inputs": [{"messages": [user("hello")]}]}),
         json!({}),
     );
     assert_eq!(result["results"][0]["ok"], false);
@@ -458,13 +525,13 @@ fn empty_tool_and_malformed_responses_fail_without_history() {
         let server = Server::start(vec![reply]);
         let result = probe(
             &server,
-            json!({"inputs": [{"prompt": "hello", "history": [{"role": "user", "content": "prior"}]}]}),
+            json!({"inputs": [{"messages":[user("prior"),user("hello")]}]}),
             config,
         );
         assert_eq!(result["results"][0]["ok"], false);
         assert!(result["results"][0].get("outputs").is_none());
         assert_eq!(
-            result["original_inputs"][0]["history"][0]["content"],
+            result["original_inputs"][0]["messages"][0]["content"],
             "prior"
         );
     }
@@ -485,7 +552,11 @@ fn sparse_usage_unknown_finish_and_token_truncation_are_preserved() {
         }
         reply["choices"][0]["finish_reason"] = reason.into();
         let server = Server::start(vec![Reply::json(reply)]);
-        let result = probe(&server, json!({"inputs": [{"prompt": "hello"}]}), json!({}));
+        let result = probe(
+            &server,
+            json!({"inputs": [{"messages": [user("hello")]}]}),
+            json!({}),
+        );
         let outputs = &result["results"][0]["outputs"];
         assert_eq!(outputs["text"], "partial", "{result}");
         assert_eq!(outputs["finish_reason"], reason);
@@ -514,15 +585,22 @@ fn missing_metadata_is_omitted_and_invalid_counts_do_not_publish() {
     let server = Server::start(vec![Reply::json(payload)]);
     let result = probe(
         &server,
-        json!({"inputs": [{"prompt": "next", "history": [{"role": "user", "content": "one"}, {"role": "user", "content": "two"}]}]}),
+        json!({"inputs": [{"messages":[user("one"),user("two"),user("next")]}]}),
         json!({}),
     );
     assert_eq!(result["results"][0]["ok"], true, "{result}");
     let outputs = &result["results"][0]["outputs"];
     assert!(outputs.get("usage").is_none());
     assert!(outputs.get("finish_reason").is_none());
-    assert_eq!(outputs["history"][0]["content"], "one");
-    assert_eq!(outputs["history"][1]["content"], "two");
+    assert_eq!(
+        server.requests()[0].body["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(outputs["message"]["content"], "reply");
+    assert!(outputs.get("history").is_none());
 
     for usage in [
         json!({"completion_tokens": i64::MAX as u64 + 1}),
@@ -531,7 +609,11 @@ fn missing_metadata_is_omitted_and_invalid_counts_do_not_publish() {
         let mut payload = serde_json::from_str::<Value>(&Reply::text("reply").body).unwrap();
         payload["usage"] = usage;
         let server = Server::start(vec![Reply::json(payload)]);
-        let result = probe(&server, json!({"inputs": [{"prompt": "next"}]}), json!({}));
+        let result = probe(
+            &server,
+            json!({"inputs": [{"messages": [user("next")]}]}),
+            json!({}),
+        );
         let failure = &result["results"][0];
         assert_eq!(failure["ok"], false);
         assert!(failure.get("outputs").is_none());
@@ -572,7 +654,7 @@ fn captured_provider_failures_and_timeouts_return_explicit_call_facts() {
         let server = Server::start(vec![response]);
         let result = probe(
             &server,
-            json!({"inputs":[{"prompt":"hello"}]}),
+            json!({"inputs":[{"messages": [user("hello")]}]}),
             json!({"capture_errors":true,"timeout_ms":timeout}),
         );
         let outputs = &result["results"][0]["outputs"];
@@ -603,7 +685,7 @@ fn captured_response_validation_failure_keeps_reported_tokens() {
     let server = Server::start(vec![Reply::text("")]);
     let result = probe(
         &server,
-        json!({"inputs":[{"prompt":"hello"}]}),
+        json!({"inputs":[{"messages": [user("hello")]}]}),
         json!({"capture_errors":true}),
     );
     let outputs = &result["results"][0]["outputs"];
@@ -623,7 +705,7 @@ fn attribution_is_reported_for_success_and_captured_failure_without_entering_pro
     let attribution = json!({"purpose":"title", "profile":"summary-profile"});
     let result = probe(
         &server,
-        json!({"inputs":[{"prompt":"first"},{"prompt":"second"}]}),
+        json!({"inputs":[{"messages": [user("first")]},{"messages": [user("second")]}]}),
         json!({"capture_errors":true,"attribution":attribution}),
     );
     for (index, status) in ["succeeded", "failed"].into_iter().enumerate() {
@@ -684,7 +766,7 @@ fn request_events_observe_first_nonempty_stream_text_and_unary_unknowns() {
         let server = Server::start(vec![reply]);
         let result = probe(
             &server,
-            json!({"stream":stream,"inputs":[{"prompt":"hello"}]}),
+            json!({"stream":stream,"inputs":[{"messages": [user("hello")]}]}),
             json!({}),
         );
         assert_eq!(result["results"][0]["ok"], true, "{result}");
@@ -726,7 +808,7 @@ fn captured_stream_failures_retain_events_without_node_local_timing() {
         let server = Server::start(vec![reply]);
         let result = probe(
             &server,
-            json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
+            json!({"stream":true,"inputs":[{"messages": [user("hello")]}]}),
             config,
         );
         let output = &result["results"][0]["outputs"];
@@ -766,7 +848,7 @@ fn subscribed_streams_use_one_request_and_preserve_sparse_terminal_facts() {
         )]);
         let result = probe(
             &server,
-            json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
+            json!({"stream":true,"inputs":[{"messages": [user("hello")]}]}),
             json!({}),
         );
         let result = &result["results"][0];
@@ -775,7 +857,7 @@ fn subscribed_streams_use_one_request_and_preserve_sparse_terminal_facts() {
         assert_eq!(result["outputs"]["finish_reason"], "length");
         assert_eq!(result["outputs"]["usage"], expected);
         assert_eq!(
-            result["outputs"]["history"][1]["content"],
+            result["outputs"]["message"]["content"],
             result["outputs"]["text"]
         );
         let deltas = result["deltas"].as_array().unwrap();
@@ -810,7 +892,7 @@ fn streaming_failures_and_capture_policy_never_retry_as_unary() {
         let server = Server::start(vec![reply]);
         let result = probe(
             &server,
-            json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
+            json!({"stream":true,"inputs":[{"messages": [user("hello")]}]}),
             config,
         );
         let result = &result["results"][0];
@@ -836,7 +918,7 @@ fn delivery_failures_and_cancellation_cannot_become_captured_success() {
             Some("stop"),
             true,
         )]);
-        let mut input = json!({"stream":true,"inputs":[{"prompt":"hello"}]});
+        let mut input = json!({"stream":true,"inputs":[{"messages": [user("hello")]}]});
         input
             .as_object_mut()
             .unwrap()
@@ -858,14 +940,14 @@ fn large_utf8_stream_is_preserved_without_a_client_output_byte_limit() {
     )]);
     let result = probe(
         &server,
-        json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
+        json!({"stream":true,"inputs":[{"messages": [user("hello")]}]}),
         json!({}),
     );
     let result = &result["results"][0];
     assert_eq!(result["ok"], true, "{result}");
     assert_eq!(result["outputs"]["text"].as_str().unwrap(), text);
     assert_eq!(
-        result["outputs"]["history"][1]["content"].as_str().unwrap(),
+        result["outputs"]["message"]["content"].as_str().unwrap(),
         text
     );
     assert_eq!(result["deltas"][0]["delta"]["text"].as_str().unwrap(), text);
@@ -887,7 +969,7 @@ fn streaming_byte_boundaries_and_many_small_frames_preserve_one_final_text() {
     let server = Server::start(vec![reply]);
     let result = probe(
         &server,
-        json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
+        json!({"stream":true,"inputs":[{"messages": [user("hello")]}]}),
         json!({}),
     );
     assert_eq!(result["results"][0]["ok"], true, "{result}");
@@ -908,7 +990,7 @@ fn stalled_streams_are_bounded_and_cancellation_after_a_prefix_keeps_call_facts(
         let server = Server::start(vec![reply]);
         let result = probe(
             &server,
-            json!({"stream":true,"cancel_after_prefix":cancel,"inputs":[{"prompt":"hello"}]}),
+            json!({"stream":true,"cancel_after_prefix":cancel,"inputs":[{"messages": [user("hello")]}]}),
             json!({"capture_errors":true,"timeout_ms":1000}),
         );
         let result = &result["results"][0];
@@ -931,12 +1013,16 @@ fn stalled_streams_are_bounded_and_cancellation_after_a_prefix_keeps_call_facts(
 fn large_utf8_reply_is_preserved_without_a_client_output_byte_limit() {
     let text = "é".repeat(600_000);
     let server = Server::start(vec![Reply::text(&text)]);
-    let result = probe(&server, json!({"inputs":[{"prompt":"hello"}]}), json!({}));
+    let result = probe(
+        &server,
+        json!({"inputs":[{"messages": [user("hello")]}]}),
+        json!({}),
+    );
     let result = &result["results"][0];
     assert_eq!(result["ok"], true, "{result}");
     assert_eq!(result["outputs"]["text"].as_str().unwrap(), text);
     assert_eq!(
-        result["outputs"]["history"][1]["content"].as_str().unwrap(),
+        result["outputs"]["message"]["content"].as_str().unwrap(),
         text
     );
     assert_eq!(server.requests().len(), 1);

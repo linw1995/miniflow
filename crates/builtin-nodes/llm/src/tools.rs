@@ -260,7 +260,7 @@ impl ToolCatalog {
         Ok((tool.interface.id(), arguments))
     }
 
-    pub fn history_arguments(&self, name: &str, value: &Value) -> ValueRef {
+    pub fn mark_arguments(&self, name: &str, value: &Value) -> ValueRef {
         let Some(tool) = self.tools.get(name) else {
             return value.clone().into();
         };
@@ -742,8 +742,7 @@ mod tests {
                 assert!(arguments.defaults["key"].is_secret());
             }
             let history =
-                serde_json::to_value(catalog.history_arguments("search", &value).redacted())
-                    .unwrap();
+                serde_json::to_value(catalog.mark_arguments("search", &value).redacted()).unwrap();
             assert!(!history.to_string().contains("first-secret"));
             assert!(!history.to_string().contains("second-secret"));
             let bad = if namespaced {
@@ -753,13 +752,13 @@ mod tests {
             };
             assert!(catalog.arguments("search", &bad).is_err());
             assert!(
-                !serde_json::to_string(&catalog.history_arguments("search", &bad).redacted())
+                !serde_json::to_string(&catalog.mark_arguments("search", &bad).redacted())
                     .unwrap()
                     .contains("invalid-secret")
             );
             assert!(catalog.arguments("search", &json!(null)).is_err());
             assert_eq!(
-                catalog.history_arguments("search", &json!(null)),
+                catalog.mark_arguments("search", &json!(null)),
                 ValueRef::null()
             );
         }

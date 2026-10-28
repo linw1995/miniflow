@@ -308,7 +308,7 @@ authoritative. Provider schema conversion must not silently change omission, nul
 
 LLM integration consumes the generic callable view and maps public aliases back to prepared bindings.
 It owns provider tool descriptions, structured call/result history, and one model request per execution.
-Workflow composition owns repeated requests, continuation state, accumulation, and termination.
+Workflow composition owns repeated requests, explicit messages/results, accumulation, and termination.
 It dispatches only complete, validated tool calls, including when arguments arrive incrementally.
 The runtime owns execution and returns typed outcomes; the LLM layer decides how supported failures
 are represented in tool-result messages. Cancellation and exhausted budgets remain terminal control
@@ -320,18 +320,22 @@ guarantee idempotency; side-effecting tools must not be retried automatically af
 
 ### Delivered LLM boundary
 
-`builtin.llm` declares static `config.call_outputs`; resolved public schemas become provider tool definitions.
-Flat arguments remain flat unless output/default names collide, in which case both namespaces are explicit.
-Opaque schemas and binary32 contracts fail before network activity. The adapter validates complete JSON batches,
-executes calls sequentially through the context dispatcher, and replays SDK assistant messages with correlated results.
-Public history carries optional structured `tool_calls` and `tool_call_id` fields. Marked result secrets are redacted;
-arguments/results are bounded to 64 KiB each and batches/declarations to 256 KiB. Generic feedback hides domain failures.
-An invocation has one model request and its tool batch under one deadline; the batch is limited to 128 calls
-(default 32). A tool response returns `tool_calls` status, history, and secret opaque continuation preserving
-SDK message state. The caller explicitly schedules the next invocation. There is no `max_tool_rounds` setting.
-The chat example uses the existing `workflow.loop` and CEL nodes to bound requests and collect usage.
-The LLM node reports only current-request usage. Loop child streaming is delivered in a separate PR.
-Failure capture retains the original history and never intercepts runtime dispatch control failures.
+`builtin.llm` declares static `config.call_outputs`; resolved public schemas become existing `ToolDefinition`
+values. Request assembly, message validation, response classification, `ChatMessage`, `ToolCall`, `ToolResult`,
+and streamed manual calls reuse the main branch's `call` module. There is no separate history or continuation DTO.
+Flat arguments remain flat unless explicit/default names collide. Opaque schemas and binary32 contracts fail
+before network activity. Complete accepted call batches use the runtime dispatcher. Manual tools remain
+external; duplicate manual/bound aliases are rejected by the shared request validator.
+
+Each invocation makes one model request. Bound results are returned in `tool_results`; the graph appends them
+and the returned assistant `message` to its own message list. Bound calls do not also emit manual `tool_call`
+events. `outcome` retains the existing completed/tool_calls/truncated/refused/incomplete/failed classification.
+Only accepted tool-call outcomes dispatch. The model node has no `max_tool_rounds` setting and owns no loop.
+
+Arguments/results are bounded to 64 KiB each and batches/declarations to 256 KiB. Sensitive results are redacted;
+domain failures use generic feedback. The batch is limited to 128 calls (default 32). Runtime control and delivery
+failures propagate. The chat example uses existing Loop/CEL primitives to stop, assemble messages, and collect usage;
+Loop child streaming remains an independent PR based on origin/main.
 
 ## Alternatives and risks
 

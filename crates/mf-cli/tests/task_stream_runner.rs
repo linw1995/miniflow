@@ -202,12 +202,12 @@ fn answer_and_title_share_one_result_while_only_answer_is_streamed() {
         let executable = compile(root.path(), definition);
         let output = Command::new(&executable)
             .args([
-                "--input.prompt",
+                "--params.prompt",
                 "Hello",
-                "--input.base_url",
+                "--params.base_url",
                 &server.base_url,
             ])
-            .env("MODEL_API_KEY", "synthetic-key")
+            .env("OPENAI_API_KEY", "synthetic-key")
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost")
             .output()

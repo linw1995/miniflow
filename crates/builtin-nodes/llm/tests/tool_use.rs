@@ -86,7 +86,13 @@ fn tool_probe() {
     let deltas = Arc::new(Mutex::new(Vec::new()));
     let emitted = deltas.clone();
     let streaming = options["stream"] == true;
-    let history = options.get("history").cloned();
+    let initial_messages = options
+        .get("messages")
+        .cloned()
+        .unwrap_or_else(|| json!([{ "role":"user","content":"question" }]));
+    let manual_tools = options.get("tools").cloned();
+    let messages = Arc::new(Mutex::new(initial_messages));
+    let transcript = messages.clone();
     let rounds = options["rounds"].as_u64().unwrap_or(1);
     let steps = Arc::new(Mutex::new(Vec::new()));
     let completed = steps.clone();
@@ -95,12 +101,13 @@ fn tool_probe() {
         metadata,
         output_keys: Default::default(),
         node: Box::new(Task(Box::new(move |_, context| {
-            let mut inputs = Inputs::from([("prompt".into(), "question".into())]);
-            if let Some(history) = &history {
-                inputs.insert("history".into(), history.clone().into());
+            let mut inputs =
+                Inputs::from([("messages".into(), transcript.lock().unwrap().clone().into())]);
+            if let Some(tools) = &manual_tools {
+                inputs.insert("tools".into(), tools.clone().into());
             }
             let mut result = NodeResult::default();
-            // The harness owns continuation scheduling, just as a Flow loop does in production.
+            // The caller appends explicit messages and results between node invocations.
             for _ in 0..rounds {
                 result = if streaming {
                     executor.execute_with_sink(inputs.clone(), context, &mut Sink(emitted.clone()))
@@ -111,15 +118,20 @@ fn tool_probe() {
                     .lock()
                     .unwrap()
                     .push(serde_json::to_value(&result.outputs).unwrap());
-                if result.outputs["status"] != ValueRef::from("tool_calls") {
+                let mut current = transcript.lock().unwrap();
+                if let Some(message) = result.outputs.get("message") {
+                    current
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::to_value(message).unwrap());
+                }
+                for result in result.outputs["tool_results"].as_array().unwrap() {
+                    current.as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":result["tool_call_id"],"content":result["content"]}));
+                }
+                inputs.insert("messages".into(), current.clone().into());
+                if result.outputs["outcome"] != ValueRef::from("tool_calls") {
                     break;
                 }
-                assert!(result.outputs["continuation"].is_secret());
-                inputs.insert(
-                    "continuation".into(),
-                    result.outputs["continuation"].clone(),
-                );
-                inputs.insert("history".into(), result.outputs["history"].clone());
             }
             *recorded.lock().unwrap() = Some(serde_json::to_value(&result.outputs).unwrap());
             Ok(result)
@@ -295,7 +307,7 @@ fn tool_probe() {
     let outcome = flow.execute_in_context(&mut ExecutionContext::default());
     println!(
         "TOOL_RESULT:{}",
-        json!({"ok":outcome.is_ok(),"error":outcome.err().map(|error| error.to_string()),"outputs":*results.lock().unwrap(),"calls":*seen.lock().unwrap(),"deltas":*deltas.lock().unwrap(),"steps":*steps.lock().unwrap()})
+        json!({"ok":outcome.is_ok(),"error":outcome.err().map(|error| error.to_string()),"outputs":*results.lock().unwrap(),"calls":*seen.lock().unwrap(),"deltas":*deltas.lock().unwrap(),"steps":*steps.lock().unwrap(),"messages":*messages.lock().unwrap()})
     );
 }
 
@@ -352,10 +364,7 @@ fn repeated_calls_compose_external_inputs_and_preserve_protocol_and_usage() {
     assert_eq!(replay[2]["tool_call_id"], "a");
     assert_eq!(replay[3]["tool_call_id"], "b");
     let history_server = Server::start(vec![Reply::text("again")]);
-    let replayed = probe(
-        &history_server,
-        json!({"history":result["outputs"]["history"]}),
-    );
+    let replayed = probe(&history_server, json!({"messages":result["messages"]}));
     assert_eq!(replayed["ok"], true, "{replayed}");
     assert!(replayed["calls"].as_array().unwrap().is_empty());
 }
@@ -474,8 +483,9 @@ fn budgets_and_ambiguous_batches_stop_before_any_new_side_effect() {
         reply(vec![call("b", "search", json!({"query":"second"}))]),
     ]);
     let result = probe(&server, json!({}));
-    assert_eq!(result["outputs"]["status"], "tool_calls", "{result}");
-    assert!(!result["outputs"]["continuation"].is_null());
+    assert_eq!(result["outputs"]["status"], "succeeded", "{result}");
+    assert_eq!(result["outputs"]["outcome"], "tool_calls");
+    assert_eq!(result["outputs"]["tool_results"][0]["tool_call_id"], "a");
     assert_eq!(result["outputs"]["usages"].as_array().unwrap().len(), 1);
     assert_eq!(result["calls"].as_array().unwrap().len(), 1);
     assert_eq!(server.requests().len(), 1);
@@ -614,4 +624,66 @@ fn an_unreported_later_usage_never_reuses_the_previous_round_counters() {
     assert_eq!(usages.len(), 2);
     assert_eq!(usages[0]["usage"]["output_tokens"], 1);
     assert!(usages[1].get("usage").is_none());
+}
+
+#[test]
+fn manual_tools_keep_external_dispatch_while_bound_calls_use_runtime_execution() {
+    let start = json!({"id":"mixed","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":[
+        {"index":0,"id":"bound","type":"function","function":{"name":"search","arguments":"{\"query\":\"value\"}"}},
+        {"index":1,"id":"manual","type":"function","function":{"name":"external","arguments":"{}"}}
+    ]},"finish_reason":null}]});
+    let finish = json!({"id":"mixed","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]});
+    let mut response = Reply::stream_text("");
+    response.body = format!("data: {start}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    let server = Server::start(vec![response]);
+    let result = probe(
+        &server,
+        json!({"stream":true,"tools":[{"name":"external","description":"Caller-owned handler","input_schema":{"type":"object"}}]}),
+    );
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["calls"].as_array().unwrap().len(), 1);
+    assert_eq!(result["outputs"]["tool_calls"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        result["outputs"]["tool_results"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        result["outputs"]["tool_results"][0]["tool_call_id"],
+        "bound"
+    );
+    let events = result["deltas"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["tool_call"]["call"]["id"], "manual");
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(
+        server.requests()[0].body["tools"].as_array().unwrap().len(),
+        2
+    );
+}
+
+#[test]
+fn shared_protocol_validation_rejects_name_collisions_and_truncation_never_dispatches() {
+    let server = Server::start(vec![]);
+    let result = probe(
+        &server,
+        json!({"tools":[{"name":"search","description":"duplicate","input_schema":{"type":"object"}}]}),
+    );
+    assert_eq!(result["ok"], false);
+    assert!(server.requests().is_empty());
+    let mut response: Value =
+        serde_json::from_str(&reply(vec![call("a", "search", json!({"query":"value"}))]).body)
+            .unwrap();
+    response["choices"][0]["finish_reason"] = "length".into();
+    let server = Server::start(vec![Reply::json(response)]);
+    let result = probe(&server, json!({}));
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["outputs"]["outcome"], "truncated");
+    assert!(
+        result["outputs"]["tool_results"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(result["calls"].as_array().unwrap().is_empty());
+    assert_eq!(server.requests().len(), 1);
 }

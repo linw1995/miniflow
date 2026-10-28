@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide explicitly selected builtin text generation with caller-supplied conversation history that publishes one complete terminal response and an updated transcript while preserving ordinary task preparation, dependency validation, and failure semantics.
+Provide explicitly selected model calls with a caller-owned message list and function tools, publishing only the current assistant response while preserving ordinary task preparation, dependency validation, streaming, and failure semantics.
 
 ## Requirements
 
@@ -12,7 +12,7 @@ Workflows SHALL select the package registering `builtin.llm` through ordinary no
 
 #### Scenario: Compile a terminal generation workflow
 
-- **WHEN** a oneshot workflow declares the LLM package and connects a string to its prompt input
+- **WHEN** a oneshot workflow declares the LLM package and connects a complete message list to its messages input
 - **THEN** the compiler prepares the node through ordinary registry and typed-port validation
 
 #### Scenario: Reference an undeclared LLM node
@@ -48,26 +48,30 @@ Node preparation and workflow build validation MUST NOT read credentials, initia
 - **WHEN** the node executes with a missing or empty configured credential variable
 - **THEN** execution fails with node attribution and publishes no result
 
-### Requirement: Send one text generation request
+### Requirement: Send one model request from explicit messages
 
-Each invocation SHALL accept nonempty string `prompt`, optional string `system`, and optional message-list `history`, then send one Chat Completions request ordered as system, history, prompt. Connected output SHALL stream; unconnected output SHALL permit unary execution with zero emissions. The node MUST NOT execute tools, retain conversation state, follow redirects, or retry requests.
+Each invocation SHALL accept a required nonempty `messages` list and optional `tools`, then send one Chat Completions request. The node SHALL NOT expose prompt, system, or history input ports, insert synthetic messages, or reorder caller messages. Connected stream outputs SHALL select streaming; unconnected outputs SHALL permit unary execution with zero emissions. The node MUST NOT execute tools, retain conversation state, follow redirects, or retry requests.
 
 #### Scenario: Use an explicit compatible endpoint
 
-- **WHEN** an invocation supplies prompt and system inputs with a custom base URL
-- **THEN** one request reaches that prefix's `/chat/completions` route with the configured model, credentials, and text messages
+- **WHEN** an invocation supplies messages with a custom base URL
+- **THEN** one request reaches that prefix's `/chat/completions` route with the configured model, credentials, and supplied messages
 - **AND** no Responses API request is made
 
 #### Scenario: Continue a conversation
 
-- **WHEN** an invocation supplies completed user and assistant messages as history and a new prompt
-- **THEN** the request preserves those messages in order before appending the current prompt once
-- **AND** supplied system instructions appear first without being duplicated in history
+- **WHEN** a caller appends a prior assistant response and its next user message or tool results to its conversation
+- **THEN** the next invocation encodes the supplied list without adding another prompt or system message
 
-#### Scenario: Reject an empty current prompt
+#### Scenario: Reject an empty request
 
-- **WHEN** an invocation supplies an empty prompt
-- **THEN** validation fails before network I/O instead of returning history that the next invocation cannot consume
+- **WHEN** messages is absent, null, or empty
+- **THEN** validation fails before network I/O
+
+#### Scenario: Reject removed conversation assembly inputs
+
+- **WHEN** an invocation supplies prompt, system, or history as node input ports
+- **THEN** input decoding rejects those unknown ports even when messages is also supplied
 
 #### Scenario: Receive a retryable or redirect response
 
@@ -79,72 +83,140 @@ Each invocation SHALL accept nonempty string `prompt`, optional string `system`,
 - **WHEN** an active streaming request fails before valid completion
 - **THEN** the node does not retry as a nonstreaming request or report its delivered prefix as a successful answer
 
-### Requirement: Validate explicit text conversation history
+### Requirement: Validate the explicit message list
 
-History SHALL be an ordered list of objects containing required string `role`, nonempty string `content`, and optional object-valued `metadata`.
-Metadata SHALL be preserved but MUST NOT be sent to the provider automatically. Accepted roles SHALL be `user` and `assistant`; system instructions SHALL use the separate input. Omitted or empty history SHALL start a fresh conversation. Invalid history MUST fail before network I/O with an indexed diagnostic. Supplied order and content MUST NOT be silently changed.
+The public ChatMessage type SHALL be an enum tagged by role, with System, User, Assistant, and ToolResult variants.
+Only Assistant SHALL expose tool_calls. ToolResult SHALL require tool_call_id and content; all variants MAY carry application metadata.
+JSON field names and the role values system, user, assistant, and tool SHALL remain unchanged. Cross-role fields MUST fail during input decoding.
 
-#### Scenario: Start without history
+Messages SHALL contain string role and content fields and optional application metadata. Accepted roles SHALL be system, user, assistant, and tool. System and user content SHALL be nonempty; assistant messages MAY carry tool_calls with empty text. Tool results SHALL identify a pending call through tool_call_id. Application metadata MUST NOT be sent to the provider. Invalid messages MUST fail before network I/O with an indexed diagnostic. Supplied order and content MUST NOT be silently changed.
 
-- **WHEN** an invocation omits history or supplies an empty list
-- **THEN** it sends only optional system instructions and the current user prompt as conversation messages
+#### Scenario: Preserve system message placement
 
-#### Scenario: Reject malformed history
+- **WHEN** a valid request contains multiple system messages among completed conversation exchanges
+- **THEN** their supplied positions and content are preserved without extracting a separate preamble
 
-- **WHEN** history is null or contains a missing field, unknown field, nonobject metadata, nonstring content, empty content, or an unsupported role
-- **THEN** input validation fails with the offending history path and no provider request
+#### Scenario: Reject malformed messages
 
-#### Scenario: Preserve caller supplied history
+- **WHEN** a message contains a missing field, unknown field, nonobject metadata, nonstring content, or an unsupported role
+- **THEN** input validation fails with the offending messages path and no provider request
 
-- **WHEN** valid history contains consecutive messages with the same supported role
+#### Scenario: Preserve consecutive roles
+
+- **WHEN** valid messages contain consecutive entries with the same supported role
 - **THEN** the request preserves their order and content without enforcing alternation, trimming, summarization, or deduplication
 
-### Requirement: Return history for the next turn
+### Requirement: Return only the current assistant message
 
-Each successful invocation SHALL return required message-list `history` containing the supplied history followed by the current user prompt and assistant text once each. System instructions SHALL be excluded. The node MUST NOT mutate input history or reuse an earlier invocation's transcript implicitly. Workflows SHALL be able to pass the returned history to a subsequent invocation.
+A response containing text or completed tool calls SHALL produce one assistant `message`. Responses without either SHALL skip message instead of creating an empty assistant entry. The node SHALL NOT return an updated history or echo input messages as part of the response. Captured request failures SHALL omit and explicitly skip message while retaining failure status and available usage. Conversation assembly, append policy, persistence, and trimming SHALL belong to the Flow or caller.
 
-#### Scenario: Return the first completed turn
+#### Scenario: Return one response
 
-- **WHEN** generation succeeds without supplied history
-- **THEN** output history contains one user message with the prompt followed by one assistant message with the returned text
+- **WHEN** generation succeeds after receiving an existing conversation
+- **THEN** message contains only the current assistant response, and the caller's message list is unchanged
 
-#### Scenario: Feed completed history into another turn
+#### Scenario: Compose a loop explicitly
 
-- **WHEN** a second invocation receives the first invocation's output history and a new prompt
-- **THEN** the next output preserves that history and appends exactly the second user message and reply
+- **WHEN** a Loop invokes the model repeatedly
+- **THEN** its Flow constructs each request and appends each returned assistant message through ordinary nodes and loop assignments
+
+#### Scenario: Preserve loop state on failure
+
+- **WHEN** a captured model failure skips the message output
+- **THEN** a required message binding skips the Flow's append node and history assignment, leaving the prior loop state unchanged
 
 #### Scenario: Keep conversations independent
 
-- **WHEN** the same prepared node handles separate transcripts or a later invocation omits history
-- **THEN** each result depends only on its supplied conversation and system inputs
-- **AND** no transcript from another invocation is added
+- **WHEN** the same prepared node handles separate message lists
+- **THEN** each request depends only on its supplied messages and tools
 
-### Requirement: Publish a terminal text result atomically
+### Requirement: Publish the terminal response atomically
 
-Success SHALL publish one terminal result with complete string `text`, updated message-list `history`, succeeded status, one-call `usages`, and optional `usage` and `finish_reason`. Text blocks SHALL retain response order. Conversion and validation MUST precede publication. Empty text, unsupported content, and invalid counts SHALL fail without terminal outputs or transcript mutation by default. Earlier increments SHALL remain provisional.
+A valid invocation SHALL publish one terminal result containing any available assistant message, text and tool-call projections, outcome, succeeded status, one-call usages, and optional usage and finish_reason. Text blocks SHALL retain response order. Conversion and validation MUST precede publication. Unsupported content, unsolicited tool calls, and invalid counts SHALL fail by default. Captured failures SHALL not publish an assistant message. Earlier stream emissions SHALL remain provisional.
 
 #### Scenario: Receive a complete text answer
 
 - **WHEN** a provider returns multiple text blocks and a terminal finish reason
-- **THEN** the node publishes their ordered concatenation, updated history, and finish reason in one Task result
-- **AND** any earlier live increments do not create additional terminal results or history messages
-
-#### Scenario: Reject unsupported output
-
-- **WHEN** the reply has no nonempty text or contains a tool call or unsupported content
-- **THEN** with capture_errors disabled the invocation fails without publishing terminal text, updated history, or metadata
-- **AND** supplied history remains unchanged
+- **THEN** the node publishes their ordered concatenation in one assistant message and its text projection
+- **AND** earlier live increments do not create additional terminal messages
 
 #### Scenario: Preserve a large reply
 
 - **WHEN** valid generated text exceeds the former client-side output byte limit
-- **THEN** the node preserves the complete text, any live increments, and updated history without a byte-limit failure
+- **THEN** the node preserves the complete response without a byte-limit failure
 - **AND** provider token limits, timeout, cancellation, and output validation remain in effect
 
 #### Scenario: Complete at the token limit
 
-- **WHEN** a reply contains nonempty text with a `length` finish reason
-- **THEN** the result includes that text and reason without claiming an untruncated answer
+- **WHEN** a reply reaches a length finish reason
+- **THEN** its outcome is truncated rather than completed or actionable tool_calls
+
+### Requirement: Support caller-managed function tools
+
+Tools SHALL declare unique valid names, descriptions, and object input schemas. Calls SHALL carry id, name, and parsed JSON arguments. Call IDs SHALL be nonblank and unique within the supplied transcript. Every pending call SHALL receive exactly one result before another system, user, or assistant message or the next request. The node SHALL NOT expose tool_choice, perform tool execution, or retain provider-specific reasoning state.
+
+The node SHALL accept an optional tool_results list, defaulting to empty, whose ToolResult entries contain required string tool_call_id and content fields.
+The request SHALL encode these entries as role tool messages after the supplied messages, preserving both lists and their order. The same pending-call validation SHALL apply across both inputs.
+The node SHALL NOT synthesize the preceding assistant call, insert results into earlier exchanges, or retain or return an updated transcript. ToolResult SHALL be publicly exported and convertible into ChatMessage for caller-owned persistence.
+
+#### Scenario: Bind explicit results from an upstream node
+
+- **WHEN** messages ends with an assistant call batch and an upstream output binds to tool_results
+- **THEN** the provider receives the supplied messages followed by the matching results
+- **AND** Task and TaskStream execution use the same input contract in memory and compiled runners
+
+#### Scenario: Reject a result duplicated across inputs
+
+- **WHEN** a call is answered in messages and tool_results repeats its ID
+- **THEN** validation fails before network I/O with the offending tool_results index
+
+#### Scenario: Return multiple results for one assistant message
+
+- **WHEN** one assistant message calls the same or different tools multiple times and results arrive in a different order
+- **THEN** matching uses call IDs rather than names or positions, preserving the result order
+- **AND** the OpenAI Chat Completions request contains one assistant message with all calls followed by one role tool message per result
+- **AND** a missing result prevents a partial batch from being sent to the provider
+
+#### Scenario: Preserve the distinction between a result and a message
+
+- **WHEN** a tool_results entry contains role, assistant fields, an unknown field, or a missing or mistyped required field
+- **THEN** input decoding fails with the offending tool_results path
+
+#### Scenario: Continue from tool results
+
+- **WHEN** messages contains an assistant tool-call message followed by matching tool results
+- **THEN** the adapter encodes their IDs and arguments without adding a user prompt
+- **AND** each result is a role tool message with the original tool_call_id and unchanged string content
+- **AND** Task and TaskStream execution support the same continuation contract
+
+#### Scenario: Change the available tools after execution
+
+- **WHEN** the caller submits completed historical calls and results with a different or empty tools list
+- **THEN** the historical calls remain valid and the current tools list controls only the tools advertised for this request
+
+#### Scenario: Report structured, failed, or empty tool results
+
+- **WHEN** a tool result contains JSON encoded as a string, caller-defined error text, or an empty string
+- **THEN** the adapter preserves that content without parsing, wrapping, or discarding it
+- **AND** application metadata is omitted from the provider request
+
+#### Scenario: Reject an incomplete or ambiguous result batch
+
+- **WHEN** a result has an unknown or missing call ID, repeats an answered call, or leaves another call unanswered
+- **THEN** the request fails before network I/O
+- **AND** a result cannot contain assistant tool_calls or non-string content
+
+#### Scenario: Receive a tool-only response
+
+- **WHEN** advertised tools produce a valid response containing calls without text
+- **THEN** message contains the assistant calls, text is empty, and outcome is tool_calls
+
+#### Scenario: Observe completed tool calls
+
+- **WHEN** the tool_call stream port is consumed
+- **THEN** each completed call emits its model_call_id and call without a synthetic text delta
+- **AND** the other stream port is explicitly skipped for that emission
+- **AND** terminal outcome remains authoritative for the whole request
 
 ### Requirement: Preserve optional generation metadata
 
@@ -173,13 +245,13 @@ The node SHALL apply a positive invocation deadline and honor workflow cancellat
 
 - **WHEN** an endpoint accepts a request but does not complete before the deadline
 - **THEN** the invocation terminates with a deadline failure and, by default, no outputs
-- **AND** supplied history remains unchanged
+- **AND** supplied messages remain unchanged
 
 #### Scenario: Cancel an active request
 
 - **WHEN** workflow cancellation occurs while the node awaits the provider
 - **THEN** local waiting ends without publishing a later reply
-- **AND** no updated history is published
+- **AND** no assistant message is published
 
 ### Requirement: Keep credentials out of artifacts and error display
 
@@ -229,13 +301,14 @@ SHALL remain available for existing single-call consumers.
 
 #### Scenario: Preserve annotations without sending them
 
-- **WHEN** input history carries message metadata
-- **THEN** output history retains it while the provider receives only role and content
+- **WHEN** input messages carry application metadata
+- **THEN** caller-owned annotations remain unchanged and are omitted from provider requests
+- **AND** the current assistant message does not inherit annotations from input messages
 
 ### Requirement: Support explicit failure results for workflow aggregation
 
 With capture_errors enabled, request failures, node deadlines, and response validation failures SHALL
-return failed status, an error summary, and a usage entry without appending failed conversation messages.
+return failed status, an error summary, and a usage entry without publishing an assistant message.
 Any valid already reported counters SHALL survive conversion failure. Without capture_errors, errors
 SHALL retain their existing typed sources. Setup failures and workflow cancellation may abort before a
 final result, and MUST NOT be described as known zero remote usage.
@@ -252,7 +325,7 @@ final result, and MUST NOT be described as known zero remote usage.
 
 ### Requirement: Publish typed live text independently of final metadata
 
-Connected live text SHALL carry ordered text increments and the actual model-call identity through a declared stream port. Complete terminal text/history and usages SHALL remain directly available without collecting that stream. Only explicitly exported nodes SHALL become public chat streams; title and other internal model calls MUST NOT be selected by topology inference.
+Connected live text SHALL carry ordered text increments and the actual model-call identity through a declared stream port. The current terminal message, text, and usages SHALL remain directly available without collecting that stream. Only explicitly exported nodes SHALL become public chat streams; title and other internal model calls MUST NOT be selected by topology inference.
 
 #### Scenario: Stream an answer and generate a title
 

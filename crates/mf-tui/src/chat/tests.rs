@@ -1,4 +1,5 @@
 use super::*;
+use mf_runtime::OutputValue;
 use serde_json::json;
 use std::{fs, os::unix::fs::PermissionsExt, time::Instant};
 
@@ -238,18 +239,9 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
             if abandon { 1 } else { 2 }
         );
         if !abandon {
-            assert_eq!(
-                serde_json::to_value(
-                    database
-                        .history(&invocation.session_id, 4096)
-                        .unwrap()
-                        .history[1]
-                        .metadata
-                        .clone()
-                )
-                .unwrap(),
-                json!({"source":"fixture"})
-            );
+            let history = database.history(&invocation.session_id, 4096).unwrap();
+            let message = history.history[1].clone().encode().unwrap();
+            assert_eq!(message["metadata"], json!({"source":"fixture"}));
         }
     }
 }

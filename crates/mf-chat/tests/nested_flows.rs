@@ -17,8 +17,8 @@ fn ineligible_builtin_title_returns_no_title_and_empty_usage() {
     )
     .unwrap();
     let outputs = flow.execute_with_inputs(WorkflowArguments::try_from(json!({
-        "title.input.prompt":"Hello", "title.input.text":"Answer", "title.input.status":"succeeded", "title.input.api_key":"synthetic-key",
-        "title.input.context":{"title":{"enabled":false,"source":"provisional","attempted":false}}
+        "title.params.prompt":"Hello", "title.params.text":"Answer", "title.params.status":"succeeded", "title.params.api_key":"synthetic-key",
+        "title.params.context":{"title":{"enabled":false,"source":"provisional","attempted":false}}
     })).unwrap()).unwrap();
     assert!(!outputs.contains_key("title"));
     assert_eq!(serde_json::to_value(&outputs["usages"]).unwrap(), json!([]));
@@ -45,7 +45,7 @@ fn nested_title_composition_preserves_answers_and_usage_after_provider_failure()
         let registry = NodeRegistry::from_inventory().unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
         let outputs = instantiate_compiled(&plan, &registry).unwrap().execute_with_inputs(WorkflowArguments::try_from(json!({
-            "input.prompt":"Hello", "input.model":"example-model", "input.base_url":server.base_url, "input.api_key":"synthetic-key"
+            "params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url, "params.api_key":"synthetic-key"
         })).unwrap()).unwrap();
         assert_eq!(outputs["text"].as_str(), Some("Primary answer"));
         assert_eq!(outputs.contains_key("title"), !failed);
@@ -82,10 +82,7 @@ fn builtin_title_policy_preserves_captured_failure_usage_without_a_title() {
         let replace =
             |node: &mut mf_runtime::NodeDefinition, status: &str, text: &str, purpose: &str| {
                 node.kind = "builtin.code".into();
-                let mut inputs = json!({"prompt":"string","system":"string"});
-                if purpose == "conversation" {
-                    inputs["history"] = json!({"list":"object"});
-                }
+                let inputs = json!({"messages":{"list":"object"}});
                 node.config = json!({
                     "language":"cel", "inputs":inputs,
                     "code":{
@@ -120,7 +117,7 @@ fn builtin_title_policy_preserves_captured_failure_usage_without_a_title() {
             .unwrap()
             .execute_with_inputs(
                 WorkflowArguments::try_from(
-                    json!({"input.prompt":"Hello","input.api_key":"synthetic-key"}),
+                    json!({"params.prompt":"Hello","params.api_key":"synthetic-key"}),
                 )
                 .unwrap(),
             )
@@ -174,7 +171,7 @@ fn profiles_load_local_child_flows_with_host_owned_provider_paths() {
     let profile = mf_chat::WorkflowProfile::from_path(
         "host",
         path,
-        WorkflowArguments::try_from(json!({"input.api_key":"synthetic-key"})).unwrap(),
+        WorkflowArguments::try_from(json!({"params.api_key":"synthetic-key"})).unwrap(),
     )
     .unwrap();
     assert_eq!(profile.name, "host");

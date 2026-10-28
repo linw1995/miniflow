@@ -32,7 +32,7 @@
           },
           "api_key": {
             "type": "string",
-            "env": "MODEL_API_KEY"
+            "env": "OPENAI_API_KEY"
           },
           "prompt": {
             "type": "string"
@@ -56,10 +56,40 @@
       }
     },
     {
-      "id": "empty_continuation",
-      "kind": "builtin.constant",
+      "id": "chat_messages",
+      "kind": "builtin.code",
       "config": {
-        "value": null
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "history": {
+            "list": "object"
+          },
+          "system": "string"
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        }
       }
     },
     {
@@ -71,6 +101,13 @@
     },
     {
       "id": "initial_status",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "succeeded"
+      }
+    },
+    {
+      "id": "initial_outcome",
       "kind": "builtin.constant",
       "config": {
         "value": "tool_calls"
@@ -90,38 +127,10 @@
         "max_iterations": 4,
         "variables": [
           {
-            "name": "model",
-            "type": "string"
-          },
-          {
-            "name": "base_url",
-            "type": "string"
-          },
-          {
-            "name": "api_key",
-            "type": "string"
-          },
-          {
-            "name": "prompt",
-            "type": "string"
-          },
-          {
-            "name": "system",
-            "type": "string"
-          },
-          {
-            "name": "history",
+            "name": "messages",
             "type": {
               "list": "object"
             }
-          },
-          {
-            "name": "factor",
-            "type": "int"
-          },
-          {
-            "name": "continuation",
-            "type": "any"
           },
           {
             "name": "usages",
@@ -134,16 +143,36 @@
             "type": "string"
           },
           {
+            "name": "outcome",
+            "type": "string"
+          },
+          {
             "name": "text",
             "type": "string"
           },
           {
             "name": "error",
             "type": "string"
+          },
+          {
+            "name": "model",
+            "type": "string"
+          },
+          {
+            "name": "base_url",
+            "type": "string"
+          },
+          {
+            "name": "api_key",
+            "type": "string"
+          },
+          {
+            "name": "factor",
+            "type": "int"
           }
         ],
         "until": {
-          "variable": "status",
+          "variable": "outcome",
           "operator": "ne",
           "value": "tool_calls"
         },
@@ -169,28 +198,10 @@
                 "max_tool_calls": 8
               },
               "inputs": {
-                "prompt": {
+                "messages": {
                   "from": {
                     "node": "%loop",
-                    "port": "prompt"
-                  }
-                },
-                "system": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "system"
-                  }
-                },
-                "history": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "history"
-                  }
-                },
-                "continuation": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "continuation"
+                    "port": "messages"
                   }
                 }
               }
@@ -218,7 +229,7 @@
               }
             },
             {
-              "id": "collect",
+              "id": "collect_usages",
               "kind": "builtin.code",
               "config": {
                 "language": "cel",
@@ -250,31 +261,55 @@
               }
             },
             {
-              "id": "save_history",
-              "kind": "workflow.loop_assign",
+              "id": "collect_messages",
+              "kind": "builtin.code",
               "config": {
-                "variable": "history"
+                "language": "cel",
+                "inputs": {
+                  "left": {
+                    "list": "object"
+                  },
+                  "message": "object",
+                  "results": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "value": "left + [message] + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
+                }
               },
               "inputs": {
-                "value": {
+                "left": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                },
+                "message": {
                   "from": {
                     "node": "chat",
-                    "port": "history"
+                    "port": "message"
+                  }
+                },
+                "results": {
+                  "from": {
+                    "node": "chat",
+                    "port": "tool_results"
                   }
                 }
               }
             },
             {
-              "id": "save_continuation",
+              "id": "save_messages",
               "kind": "workflow.loop_assign",
               "config": {
-                "variable": "continuation"
+                "variable": "messages"
               },
               "inputs": {
                 "value": {
                   "from": {
-                    "node": "chat",
-                    "port": "continuation"
+                    "node": "collect_messages",
+                    "port": "value"
                   }
                 }
               }
@@ -288,7 +323,7 @@
               "inputs": {
                 "value": {
                   "from": {
-                    "node": "collect",
+                    "node": "collect_usages",
                     "port": "value"
                   }
                 }
@@ -305,6 +340,21 @@
                   "from": {
                     "node": "chat",
                     "port": "status"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_outcome",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "outcome"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "outcome"
                   }
                 }
               }
@@ -357,6 +407,12 @@
         }
       },
       "inputs": {
+        "messages": {
+          "from": {
+            "node": "chat_messages",
+            "port": "messages"
+          }
+        },
         "model": {
           "from": {
             "node": "params",
@@ -375,34 +431,10 @@
             "port": "api_key"
           }
         },
-        "prompt": {
-          "from": {
-            "node": "params",
-            "port": "prompt"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "params",
-            "port": "system"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "params",
-            "port": "history"
-          }
-        },
         "factor": {
           "from": {
             "node": "params",
             "port": "factor"
-          }
-        },
-        "continuation": {
-          "from": {
-            "node": "empty_continuation",
-            "port": "value"
           }
         },
         "usages": {
@@ -414,6 +446,12 @@
         "status": {
           "from": {
             "node": "initial_status",
+            "port": "value"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "initial_outcome",
             "port": "value"
           }
         },
@@ -438,11 +476,14 @@
         "language": "cel",
         "inputs": {
           "status": "string",
+          "outcome": "string",
+          "text": "string",
           "error": "string"
         },
         "code": {
-          "status": "status == \"tool_calls\" ? \"failed\" : status",
-          "error": "status == \"tool_calls\" ? \"Tool round limit reached\" : error"
+          "status": "status == 'succeeded' && outcome == 'completed' ? 'succeeded' : 'failed'",
+          "text": "outcome == 'completed' ? text : ''",
+          "error": "status == 'failed' ? error : outcome == 'tool_calls' ? 'Tool round limit reached' : outcome == 'completed' ? '' : 'Model response did not complete'"
         }
       },
       "inputs": {
@@ -450,6 +491,18 @@
           "from": {
             "node": "repeat",
             "port": "status"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "repeat",
+            "port": "outcome"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "repeat",
+            "port": "text"
           }
         },
         "error": {
@@ -469,7 +522,7 @@
     },
     {
       "name": "text",
-      "node": "repeat",
+      "node": "settle",
       "port": "text"
     },
     {
@@ -486,18 +539,19 @@
   "clusters": [
     {
       "label": "Conversation setup",
-      "annotation": "Resolve configuration and initialize caller-owned loop state.",
+      "annotation": "Assemble explicit messages once and initialize workflow-owned iteration state.",
       "nodes": [
         "params",
-        "empty_continuation",
+        "chat_messages",
         "empty_usages",
         "initial_status",
+        "initial_outcome",
         "empty_text"
       ]
     },
     {
       "label": "Tool conversation",
-      "annotation": "The workflow controls model requests, continuation, usage accumulation, and the terminal result.",
+      "annotation": "Use ordinary loop assignments and message composition to continue after each model request.",
       "nodes": [
         "repeat",
         "settle"

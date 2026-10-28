@@ -13,7 +13,7 @@
   },
   "nodes": [
     {
-      "id": "input",
+      "id": "params",
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
@@ -43,7 +43,7 @@
           },
           "api_key": {
             "type": "string",
-            "env": "MODEL_API_KEY"
+            "env": "OPENAI_API_KEY"
           },
           "text": {
             "type": "string",
@@ -72,13 +72,13 @@
       "inputs": {
         "context": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "context"
           }
         },
         "status": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "status"
           }
         }
@@ -119,13 +119,13 @@
       "inputs": {
         "prompt": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "prompt"
           }
         },
         "text": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "text"
           }
         }
@@ -143,30 +143,24 @@
       "kind": "builtin.llm",
       "config": {
         "model": {
-          "$ref": "input.model"
+          "$ref": "params.model"
         },
         "capture_errors": true,
         "attribution": {
           "purpose": "title"
         },
         "base_url": {
-          "$ref": "input.base_url"
+          "$ref": "params.base_url"
         },
         "api_key": {
-          "$ref": "input.api_key"
+          "$ref": "params.api_key"
         }
       },
       "inputs": {
-        "prompt": {
+        "messages": {
           "from": {
-            "node": "title_prompt",
-            "port": "value"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "title_system",
-            "port": "value"
+            "node": "title_model_messages",
+            "port": "messages"
           }
         }
       }
@@ -224,6 +218,34 @@
               "port": "value"
             }
           ]
+        }
+      }
+    },
+    {
+      "id": "title_model_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "system": "string"
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [{'role':'system','content':system}]) + [] + [{'role':'user','content':prompt}]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "title_prompt",
+            "port": "value"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "title_system",
+            "port": "value"
+          }
         }
       }
     }

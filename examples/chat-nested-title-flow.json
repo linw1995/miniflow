@@ -21,7 +21,7 @@
   },
   "nodes": [
     {
-      "id": "input",
+      "id": "params",
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
@@ -61,7 +61,7 @@
           },
           "api_key": {
             "type": "string",
-            "env": "MODEL_API_KEY"
+            "env": "OPENAI_API_KEY"
           }
         }
       }
@@ -71,36 +71,24 @@
       "kind": "builtin.llm",
       "config": {
         "model": {
-          "$ref": "input.model"
+          "$ref": "params.model"
         },
         "capture_errors": true,
         "attribution": {
           "purpose": "conversation"
         },
         "base_url": {
-          "$ref": "input.base_url"
+          "$ref": "params.base_url"
         },
         "api_key": {
-          "$ref": "input.api_key"
+          "$ref": "params.api_key"
         }
       },
       "inputs": {
-        "prompt": {
+        "messages": {
           "from": {
-            "node": "input",
-            "port": "prompt"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "input",
-            "port": "system"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "input",
-            "port": "history"
+            "node": "model_messages",
+            "port": "messages"
           }
         }
       }
@@ -112,45 +100,45 @@
         "flow": "title"
       },
       "inputs": {
-        "input.prompt": {
+        "params.prompt": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "prompt"
           }
         },
-        "input.text": {
+        "params.text": {
           "from": {
             "node": "model",
             "port": "text"
           }
         },
-        "input.status": {
+        "params.status": {
           "from": {
             "node": "model",
             "port": "status"
           }
         },
-        "input.context": {
+        "params.context": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "context"
           }
         },
-        "input.model": {
+        "params.model": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "model"
           }
         },
-        "input.base_url": {
+        "params.base_url": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "base_url"
           }
         },
-        "input.api_key": {
+        "params.api_key": {
           "from": {
-            "node": "input",
+            "node": "params",
             "port": "api_key"
           }
         }
@@ -184,6 +172,43 @@
           "from": {
             "node": "title",
             "port": "usages"
+          }
+        }
+      }
+    },
+    {
+      "id": "model_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "history": {
+            "list": "object"
+          },
+          "system": "string"
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
           }
         }
       }

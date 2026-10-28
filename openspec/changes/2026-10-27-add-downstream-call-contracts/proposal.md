@@ -22,8 +22,8 @@ parameter ownership and permit callers to override externally supplied values.
 The implementation affects workflow definitions, compiler preparation and generated plans, runtime
 invocation contexts, decoded schema reflection, observation, and LLM protocol adaptation. It reuses
 ordinary node preparation, input resolution, node execution, exclusive-branch proofs, success guards,
-and the shared worker pool. LLM nodes execute one model request and return explicit continuation;
-existing workflow loops own repeated requests, termination, and usage accumulation. The chat tool
+and the shared worker pool. LLM nodes execute one model request and reuse the existing explicit messages, calls, and results contracts;
+workflow loops own repeated requests, termination, and usage accumulation. The chat tool
 example uses the application's existing conversation contract. Loop child-stream forwarding is a
 separate change.
 

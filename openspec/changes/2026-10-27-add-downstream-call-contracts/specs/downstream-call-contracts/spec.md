@@ -474,20 +474,20 @@ caller-owned decoded refinements, and all refinements for a shared caller parame
 ### Requirement: Keep model iteration in workflow composition
 
 Each LLM node execution SHALL issue at most one model request. A completed tool batch SHALL return
-correlated history and opaque continuation without issuing another request. The workflow SHALL own
-iteration limits, termination, and usage accumulation. Continuation MUST retain the provider's complete
-message state and MUST NOT inject another user prompt when resumed.
+the existing assistant message and correlated tool results without issuing another request. The workflow SHALL own
+iteration limits, termination, message assembly, and usage accumulation. The node MUST reuse the existing
+explicit-message conversion and response classification, without injecting another user prompt.
 
 #### Scenario: Stop after one tool response
 
 - **WHEN** a model response requests a valid tool batch
-- **THEN** the node executes only that batch and returns `tool_calls` status
-- **AND** it returns the current request's usage and a continuation without another provider request
+- **THEN** the node executes only that batch and returns `tool_calls` outcome
+- **AND** it returns the current request's usage and explicit results without another provider request
 
 #### Scenario: Continue through an existing workflow loop
 
-- **WHEN** a workflow carries history and continuation to its next iteration
-- **THEN** the node replays complete provider state without duplicating the user prompt
+- **WHEN** a workflow appends the assistant message and tool results for its next iteration
+- **THEN** the node submits the caller-owned message list without duplicating the user prompt
 - **AND** the workflow decides whether to continue and how to combine usage and text
 
 #### Scenario: Exhaust the graph-owned request limit

@@ -38,6 +38,7 @@ toml.workspace = true
 
 [build-dependencies]
 # Workflow embedding at build time.
+mf-runtime.workspace = true
 mf-compiler = { workspace = true, features = ["codegen"] }
 serde_json.workspace = true
 snafu.workspace = true
