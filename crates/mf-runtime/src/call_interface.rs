@@ -158,8 +158,6 @@ pub enum CallInterfaceError {
     DuplicateId { caller: DefinitionId, id: usize },
     #[snafu(display("caller `{caller}` has duplicate call alias `{name}`"))]
     DuplicateAlias { caller: DefinitionId, name: String },
-    #[snafu(display("scope has no task caller `{caller}` for its call interfaces"))]
-    UnknownCaller { caller: DefinitionId },
 }
 
 /// Immutable discovery data for one prepared scope. Empty catalogs do not allocate.
@@ -238,21 +236,5 @@ impl CallInterfaces {
             .as_ref()
             .and_then(|callers| callers.get(caller))
             .map_or(&[], Vec::as_slice)
-    }
-
-    pub fn validate_callers<'a>(
-        &self,
-        available: impl IntoIterator<Item = &'a DefinitionId>,
-    ) -> Result<(), CallInterfaceError> {
-        let available: BTreeSet<_> = available.into_iter().collect();
-        for caller in self.callers() {
-            ensure!(
-                available.contains(caller),
-                UnknownCallerSnafu {
-                    caller: caller.clone()
-                }
-            );
-        }
-        Ok(())
     }
 }

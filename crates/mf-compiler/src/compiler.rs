@@ -549,11 +549,6 @@ pub fn prepare_definition_with_layouts(
             registry,
             body_layouts,
             path: Vec::new(),
-            call_targets: definition
-                .calls
-                .values()
-                .flat_map(|aliases| aliases.values().map(|call| call.target.clone()))
-                .collect(),
         },
         None,
         false,
@@ -565,27 +560,6 @@ struct GraphPreparation<'a> {
     body_layouts:
         Option<&'a mut BTreeMap<Vec<DefinitionId>, crate::construction::PreparedScopeLayout>>,
     path: Vec<DefinitionId>,
-    call_targets: BTreeSet<DefinitionId>,
-}
-
-pub fn prepare_call_scope(
-    definition: &WorkflowDefinition,
-    registry: &NodeRegistry,
-    call_targets: BTreeSet<DefinitionId>,
-) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
-    crate::loops::validate_structure(definition)?;
-    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
-    prepare_graph(
-        definition,
-        &mut GraphPreparation {
-            registry,
-            body_layouts: None,
-            path: Vec::new(),
-            call_targets,
-        },
-        None,
-        false,
-    )
 }
 
 fn prepare_graph(
@@ -631,8 +605,12 @@ fn prepare_graph(
     let startup = definition.version.supports_startup_inputs()
         && enclosing.is_none()
         && !allow_iteration_input;
-    let call_targets = &preparation.call_targets;
-    validate_base_metadata(definition, &nodes, &incoming, startup, call_targets)?;
+    let call_targets = definition
+        .calls
+        .values()
+        .flat_map(|aliases| aliases.values().map(|call| call.target.clone()))
+        .collect::<BTreeSet<_>>();
+    validate_base_metadata(definition, &nodes, &incoming, startup, &call_targets)?;
     if startup {
         crate::workflow_input_schema(
             nodes.iter().map(|node| {
@@ -1720,11 +1698,6 @@ pub fn resolve_nodes(
             registry,
             body_layouts: None,
             path: Vec::new(),
-            call_targets: definition
-                .calls
-                .values()
-                .flat_map(|aliases| aliases.values().map(|call| call.target.clone()))
-                .collect(),
         },
         None,
         false,
@@ -1762,14 +1735,7 @@ fn bind_subgraph_node(
     );
     let registration = registration_for(node, preparation.registry)?;
     preparation.path.push(node.id.clone());
-    let targets = body
-        .calls
-        .values()
-        .flat_map(|aliases| aliases.values().map(|call| call.target.clone()))
-        .collect();
-    let previous_targets = std::mem::replace(&mut preparation.call_targets, targets);
     let prepared = prepare_graph(body, preparation, enclosing, allow_iteration_input);
-    preparation.call_targets = previous_targets;
     let path = preparation
         .body_layouts
         .as_ref()

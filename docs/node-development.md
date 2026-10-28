@@ -160,16 +160,12 @@ also feed ordinary connections or selected workflow outputs. Unknown endpoints, 
 caller declarations, duplicate destination mappings, and recursive call graphs fail during planning.
 Caller and target IDs are exact names in the same scope, not paths through nested graphs.
 
-`CompiledWorkflow::declared_call_layout` resolves declarations through the existing preparation path
-and returns a versioned `CompiledCallLayout` with canonical node identities, caller-local binding IDs,
-and a workflow identity. `to_json`/`from_json` preserve private planning records; `verify` compares a
-saved layout with a freshly prepared one. Parsing alone does not validate or authorize execution.
-Use `interfaces()` for public discovery instead of exposing the private layout to a model.
+Executable preparation resolves declarations into `PreparedCall` records shared by runtime dispatch
+and caller-visible interface projection. Generated runners freeze these records in the existing
+`PreparedScopeLayout`, alongside execution domains, visibility, and success guards. Startup checks
+the scope identity and complete provider metadata before installing the table. No separate serialized
+call-layout artifact or independently versioned layout contract is required.
 
-This intermediate release supports planning only: executable preparation, manifest generation, and
-runner generation reject definitions containing directed calls before business execution. Nested call
-declarations round-trip but cannot yet prepare executable child bodies. The subsequent scheduling
-change must remove these guards only after on-demand activation and input composition are available.
 Exhaustive `WorkflowDefinition`, `LoopBodyDefinition`, and `IterationBodyDefinition` literals must add
 `calls: Default::default()` to preserve ordinary behavior.
 
@@ -217,13 +213,10 @@ while the existing `verify_generated_metadata` comparison includes nonempty decl
 Exhaustive `NodeMetadata` literals must add `call_outputs: Vec::new()`; constructors and literals using
 `..Default::default()` require no migration.
 
-`CompiledWorkflow::resolve_call_bindings(registry, caller, bindings)` prepares a call scope using the
-normal compiler, including type inference and exclusive-branch proofs. Node indexes refer to the
-compiled definition's node list. Only declared call targets may defer required input checks to binding
-resolution; ordinary workflow preparation remains strict. `FlowBuilder::resolve_call_bindings` also
-resolves against already prepared nodes and dependencies without changing the builder's schedule.
-It uses the supplied metadata as its type evidence, so prepare/refine that metadata first when building
-the scope manually.
+Normal workflow preparation resolves the scope's declared calls with existing type inference and
+exclusive-branch proofs. Only declared targets defer required-input checks to binding resolution;
+nested scopes retain their own declarations. `FlowBuilder::resolve_call_bindings` remains the shared
+resolver for already prepared nodes. The compiler has no separate call-only preparation mode.
 
 Explicit output mappings claim their target inputs first. Existing data connections claim external
 inputs and conflict with explicit caller mappings. Node-level defaults fill only the remaining inputs.
@@ -242,25 +235,16 @@ Sensitivity and shared payloads are preserved. External and omitted inputs are n
 
 ```rust
 fn bind_call_arguments(
-    plan: &mf_compiler::CompiledWorkflow,
-    registry: &mf_runtime::NodeRegistry,
-    caller: mf_runtime::NodeId,
-    declaration: &mf_runtime::CallBinding,
+    call: &mf_runtime::PreparedCall,
     arguments: &mf_runtime::CallArguments,
-) -> Result<mf_runtime::Inputs, Box<dyn std::error::Error>> {
-    let bindings = plan.resolve_call_bindings(registry, caller, std::slice::from_ref(declaration))?;
-    Ok(bindings[0].bind_arguments(arguments)?)
+) -> Result<mf_runtime::Inputs, mf_runtime::CallContractError> {
+    call.binding.bind_arguments(arguments)
 }
 ```
 
-Current targets must be ordinary terminal Tasks without external context references, stdin, or startup
+Current targets must be terminal tasks without external context references, stdin, or startup
 environment/default bindings. TaskStream callers and terminal TaskStream producer values are supported;
 stream emissions cannot serve as external input values. Input sensitivity declarations remain supported.
-These APIs do not activate targets, compose external values, or provide a dispatcher. Versioned call
-syntax is accepted for planning, while executable activation remains guarded until scheduling exists.
-A future dispatcher must validate composed inputs, allocate invocation numbers uniquely within the
-workflow execution across callers, scopes, and stream frames, and track pending/completed requests.
-Binding indexes are local to a caller's prepared table. Identities are not retry idempotency keys.
 
 `CallRequest` is separate from `NodeResult` and stream emissions: it selects one binding and submits
 its argument group atomically, including an empty group. Calls must eventually be submitted before
@@ -289,28 +273,14 @@ checks this public contract without modifying values or performing target execut
 preserve value sensitivity and use the parameter's sensitivity flag when handling caller-side data.
 The runtime binding still marks target inputs as sensitive during mapping.
 
-`FlowBuilder::call_interfaces` and `CompiledWorkflow::call_interfaces` take a `BTreeMap<NodeId,
-Vec<CallBinding>>` and produce a `CallInterfaces` catalog indexed by caller definition ID. The compiled
-entry point prepares the union of all declared targets once, retaining ordinary validation elsewhere.
-Aliases and binding IDs must be unique per caller; the same IDs and aliases can occur in another caller.
-Catalogs retain binding IDs rather than renumbering them, so an ID is not necessarily its position in
-a filtered interface list. Catalog diagnostics expose only the caller count.
-
-Attach the catalog explicitly with `Flow::with_call_interfaces` or
-`PreparedStream::with_call_interfaces`. Attachment checks that catalog owners are task nodes in that
-scope, including TaskStream nodes. Inside execution, `ExecutionContext::call_targets()` returns only
-the current node's immutable view, or an empty slice outside a node invocation. Raw node invocations
-can install a catalog with `ExecutionContext::with_call_interfaces`; graph-owned entry points always
-use their own catalog, including an empty one, instead of inheriting a different Flow's data.
+The prepared scope derives its immutable `CallInterfaces` catalog from the executable call table.
+Aliases and binding IDs are unique within each caller. `ExecutionContext::call_targets()` returns
+only the current node's view and is empty outside node execution. There is no separate catalog
+attachment step on `Flow` or `PreparedStream`, so advertised routes and executable routes cannot
+be configured independently. Isolated task inspection uses a scoped read-only overlay without
+granting dispatch authority; nested graph entry points always install their own table.
 
 ```rust
-fn attach_discovery(
-    flow: mf_runtime::Flow,
-    interfaces: mf_runtime::CallInterfaces,
-) -> Result<mf_runtime::Flow, mf_runtime::CallInterfaceError> {
-    flow.with_call_interfaces(interfaces)
-}
-
 fn advertised_tools(ctx: &mf_runtime::ExecutionContext) -> Vec<&str> {
     ctx.call_targets().iter().map(|interface| interface.name()).collect()
 }

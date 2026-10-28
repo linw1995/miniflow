@@ -130,23 +130,6 @@ impl std::fmt::Debug for PreparedStream {
 }
 
 impl PreparedStream {
-    /// Installs discovery metadata only for task callers, including combined task/stream nodes.
-    pub fn with_call_interfaces(
-        mut self,
-        interfaces: crate::CallInterfaces,
-    ) -> Result<Self, crate::CallInterfaceError> {
-        interfaces.validate_callers(
-            self.plan
-                .nodes
-                .iter()
-                .enumerate()
-                .filter_map(|(index, node)| self.task_node(index).map(|_| &node.definition_id)),
-        )?;
-        self.plan.call_interfaces = interfaces;
-        self.plan.calls = None;
-        Ok(self)
-    }
-
     pub fn with_prepared_calls(
         mut self,
         calls: Vec<crate::PreparedCall>,

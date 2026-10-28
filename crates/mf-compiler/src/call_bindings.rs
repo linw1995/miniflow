@@ -8,8 +8,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Snafu)]
 pub enum CallBindingError {
-    #[snafu(transparent)]
-    Identity { source: mf_telemetry::ContractError },
     #[snafu(
         display("invalid directed-call declaration: {message}"),
         visibility(pub)
@@ -18,14 +16,6 @@ pub enum CallBindingError {
     #[snafu(transparent)]
     Contract {
         source: mf_runtime::CallContractError,
-    },
-    #[snafu(display("directed-call layout JSON: {source}"))]
-    LayoutJson { source: serde_json::Error },
-    #[snafu(display("prepared directed-call layout differs from the compiled contract"))]
-    LayoutDrift,
-    #[snafu(transparent)]
-    Interfaces {
-        source: mf_runtime::CallInterfaceError,
     },
     #[snafu(transparent)]
     Preparation {
@@ -84,52 +74,6 @@ pub enum CallBindingError {
     },
     #[snafu(transparent)]
     Flow { source: crate::FlowBuildError },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum CallLayoutVersion {
-    #[serde(rename = "2026-10-28")]
-    V2026_10_28,
-}
-
-/// Frozen private planning data. Only `interfaces()` is suitable for caller-facing discovery.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompiledCallLayout {
-    pub version: CallLayoutVersion,
-    pub workflow_id: mf_telemetry::identity::WorkflowId,
-    pub nodes: Vec<DefinitionId>,
-    pub callers: BTreeMap<DefinitionId, Vec<ResolvedCallBinding>>,
-}
-
-impl CompiledCallLayout {
-    pub fn interfaces(&self) -> Result<mf_runtime::CallInterfaces, CallBindingError> {
-        Ok(mf_runtime::CallInterfaces::new(self.callers.iter().map(
-            |(caller, bindings)| {
-                (
-                    caller.clone(),
-                    bindings
-                        .iter()
-                        .map(ResolvedCallBinding::interface)
-                        .collect(),
-                )
-            },
-        ))?)
-    }
-
-    pub fn to_json(&self) -> Result<String, CallBindingError> {
-        serde_json::to_string(self).context(LayoutJsonSnafu)
-    }
-
-    /// Parses planning evidence, not an executable capability. Reprepare and verify before use.
-    pub fn from_json(input: &[u8]) -> Result<Self, CallBindingError> {
-        mf_runtime::decode_unique_json(input).context(LayoutJsonSnafu)
-    }
-
-    pub fn verify(&self, actual: &Self) -> Result<(), CallBindingError> {
-        ensure!(self == actual, LayoutDriftSnafu);
-        Ok(())
-    }
 }
 
 pub fn declarations(
