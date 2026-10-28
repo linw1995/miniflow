@@ -209,4 +209,34 @@ mod tests {
         duplicate.tool_calls.as_mut().unwrap().push(call);
         assert!(messages(&[duplicate]).is_err());
     }
+    #[test]
+    fn history_rejects_cross_role_fields_empty_assistants_and_unbounded_calls() {
+        let call = request().tool_calls.unwrap().remove(0);
+        let mut user = plain("user", "question".into());
+        user.tool_calls = Some(vec![call.clone()]);
+        let mut assistant_result = plain("assistant", "answer".into());
+        assistant_result.tool_call_id = Some("a".into());
+        let mut unnamed = call.clone();
+        unnamed.name = " ".into();
+        let mut result_with_calls = tool("a".into(), "result".into());
+        result_with_calls.tool_calls = Some(vec![call.clone()]);
+        for history in [
+            vec![user],
+            vec![assistant_result],
+            vec![plain("assistant", String::new())],
+            vec![assistant(
+                String::new(),
+                vec![call; crate::tools::MAX_TOOL_CALLS + 1],
+            )],
+            vec![assistant(String::new(), vec![unnamed])],
+            vec![request(), result_with_calls],
+        ] {
+            let error = messages(&history).unwrap_err();
+            assert!(matches!(error, LlmExecutionError::InvalidInput { .. }));
+            assert!(
+                error.to_string().contains("/history/0")
+                    || error.to_string().contains("/history/1")
+            );
+        }
+    }
 }

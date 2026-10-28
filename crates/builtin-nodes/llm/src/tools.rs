@@ -764,4 +764,28 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn wire_arguments_enforce_individual_batch_and_count_limits_before_sdk_decoding() {
+        let wire = |arguments: Vec<String>| json!({"choices":[{"message":{"tool_calls":arguments.into_iter().map(|arguments| json!({"function":{"arguments":arguments}})).collect::<Vec<_>>()}}]});
+        assert!(validate_wire_arguments(&wire(vec!["{}".into(); MAX_TOOL_CALLS])).is_ok());
+        let excessive_count =
+            validate_wire_arguments(&wire(vec!["{}".into(); MAX_TOOL_CALLS + 1])).unwrap_err();
+        assert!(excessive_count.to_string().contains("batch count"));
+        let oversized = serde_json::to_string(&"x".repeat(MAX_TOOL_ARGUMENT_BYTES)).unwrap();
+        assert!(
+            validate_wire_arguments(&wire(vec![oversized]))
+                .unwrap_err()
+                .to_string()
+                .contains("argument bytes")
+        );
+        let bounded = serde_json::to_string(&"x".repeat(MAX_TOOL_ARGUMENT_BYTES - 2)).unwrap();
+        assert!(validate_wire_arguments(&wire(vec![bounded.clone(); 4])).is_ok());
+        assert!(
+            validate_wire_arguments(&wire(vec![bounded; 5]))
+                .unwrap_err()
+                .to_string()
+                .contains("batch argument bytes")
+        );
+        assert!(validate_wire_arguments(&wire(vec!["{\"key\":1,\"key\":2}".into()])).is_err());
+    }
 }

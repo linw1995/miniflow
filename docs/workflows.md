@@ -575,7 +575,7 @@ runtime cancellation, invocation depth, and shared execution budgets remain in f
 batch execution. Already executed tools are not rolled back when a later round fails.
 
 Tool arguments and results are each limited to 64 KiB of JSON, argument batches to 256 KiB, and tool
-declarations to 256 KiB. Oversized results are replaced with a generic error rather than truncated JSON.
+declarations to 256 KiB, with at most 128 tools and 256 public parameters per tool. Oversized results are replaced with a generic error rather than truncated JSON.
 Marked secret result values are redacted before entering provider messages. Unknown names, invalid arguments,
 skips, and domain failures return generic tool feedback; typed runtime control failures stop execution.
 The adapter does not retry requests or tools automatically. A model may explicitly request a tool again;

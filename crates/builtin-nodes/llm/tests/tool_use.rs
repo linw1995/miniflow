@@ -566,3 +566,20 @@ fn rejected_tool_arguments_retain_reported_usage_without_executing_the_tool() {
         assert_eq!(server.requests().len(), 1);
     }
 }
+
+#[test]
+fn an_unreported_later_usage_never_reuses_the_previous_round_counters() {
+    let mut final_reply: Value = serde_json::from_str(&Reply::text("done").body).unwrap();
+    final_reply.as_object_mut().unwrap().remove("usage");
+    let server = Server::start(vec![
+        reply(vec![call("a", "search", json!({"query":"first"}))]),
+        Reply::json(final_reply),
+    ]);
+    let result = probe(&server, json!({}));
+    assert_eq!(result["ok"], true, "{result}");
+    assert!(result["outputs"].get("usage").is_none());
+    let usages = result["outputs"]["usages"].as_array().unwrap();
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0]["usage"]["output_tokens"], 1);
+    assert!(usages[1].get("usage").is_none());
+}

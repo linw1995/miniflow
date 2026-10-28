@@ -46,7 +46,7 @@
 - [x] 4.3 Verify invocation correlation, repeated calls, nested scope restoration, and unselected tool behavior.
 - [x] 4.4 Compare dynamic and generated behavior, including a TaskStream caller and worker-limit-one execution.
 - [x] 4.5 Document eager external producers versus lazy per-call configuration inside a callable Flow.
-- [ ] 4.6 Run affected tests, repository validation, and specification checks for each implementation phase.
+- [x] 4.6 Run affected tests, repository validation, and specification checks for each implementation phase.
 
 ## Runtime prerequisite delivery
 
