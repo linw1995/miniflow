@@ -1131,9 +1131,12 @@ fn reflected_typed_metadata<I: crate::NodeInputs>(
     let mut metadata = reflected_node_metadata(ports, metadata)?;
     metadata.input_schemas = I::input_schemas();
     metadata.input_schemas.retain(|name, schema| {
-        !metadata.ports.inputs.iter().any(|port| {
-            port.name == *name && *schema == crate::ValueSchema::Type(port.value_type.clone())
-        })
+        match metadata.ports.inputs.iter().find(|port| port.name == *name) {
+            // Preserve the established diagnostic boundary for invalid coarse descriptors.
+            Some(port) if port.value_type.check_depth().is_err() => false,
+            Some(port) => *schema != crate::ValueSchema::Type(port.value_type.clone()),
+            None => true,
+        }
     });
     metadata.validate_input_schemas()?;
     Ok(metadata)
