@@ -21,6 +21,8 @@ pub enum WorkflowDescriptionVersion {
     V2026_10_19,
     #[serde(rename = "2026-10-23")]
     V2026_10_23,
+    #[serde(rename = "2026-10-28")]
+    V2026_10_28,
 }
 
 impl WorkflowDescriptionVersion {
@@ -32,15 +34,25 @@ impl WorkflowDescriptionVersion {
     }
 
     pub fn supports_iteration_bodies(self) -> bool {
-        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+        matches!(
+            self,
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_28
+        )
     }
 
     pub fn supports_clusters(self) -> bool {
-        self == Self::V2026_10_23
+        matches!(self, Self::V2026_10_23 | Self::V2026_10_28)
     }
 
     pub fn uses_node_success_edges(self) -> bool {
-        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+        matches!(
+            self,
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_28
+        )
+    }
+
+    pub fn supports_invocations(self) -> bool {
+        self == Self::V2026_10_28
     }
 }
 
@@ -76,6 +88,9 @@ pub struct WorkflowDescription {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopBodyDescription {
+    /// Nonempty only for a directed-call template in its containing physical graph scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_targets: Vec<CallTargetDescription>,
     pub path: Vec<String>,
     pub nodes: Vec<NodeDescription>,
     pub data_edges: Vec<DataEdge>,
@@ -85,6 +100,14 @@ pub struct LoopBodyDescription {
     pub execution_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<ClusterDescription>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallTargetDescription {
+    pub binding: Count,
+    pub name: String,
+    pub target: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +194,7 @@ impl WorkflowDescription {
         let count = self
             .loop_bodies
             .iter()
+            .filter(|body| body.call_targets.is_empty())
             .try_fold(self.nodes.len(), |count, body| {
                 count
                     .checked_add(body.nodes.len())
@@ -181,7 +205,40 @@ impl WorkflowDescription {
     }
 
     pub fn body(&self, path: &[String]) -> Option<&LoopBodyDescription> {
-        self.loop_bodies.iter().find(|body| body.path == path)
+        if path.len() > crate::MAX_SCOPE_DEPTH {
+            return None;
+        }
+        let mut physical = Vec::new();
+        let mut result = None;
+        for id in path {
+            physical.push(id.clone());
+            let body = self.loop_bodies.iter().find(|body| body.path == physical)?;
+            if !body.call_targets.is_empty() {
+                physical.pop();
+            }
+            result = Some(body);
+        }
+        result
+    }
+
+    pub fn node_in_scope(
+        &self,
+        path: &[crate::event::ScopePathEntry],
+        id: &str,
+    ) -> Option<&NodeDescription> {
+        let nodes = if path.is_empty() {
+            &self.nodes
+        } else {
+            &self
+                .body(
+                    &path
+                        .iter()
+                        .map(|entry| entry.node_id().to_owned())
+                        .collect::<Vec<_>>(),
+                )?
+                .nodes
+        };
+        nodes.iter().find(|node| node.id == id)
     }
 
     pub fn validate_scope_path(
@@ -194,24 +251,53 @@ impl WorkflowDescription {
         )?;
         let mut parent = &self.nodes;
         let mut static_path = Vec::new();
+        let mut active_target: Option<&str> = None;
         for entry in path {
+            if let Some(target) = active_target {
+                require(
+                    entry.node_id() == target,
+                    "nested invocation scope disagrees with its active target",
+                )?;
+            }
             let container = parent
                 .iter()
                 .find(|node| node.id == entry.node_id())
                 .ok_or_else(|| crate::invalid("unknown scope container"))?;
-            require(
-                if entry.is_call() {
-                    container.kind == "workflow.call"
-                } else {
-                    container.kind == "workflow.loop"
-                },
-                "scope path kind disagrees with its container",
-            )?;
             static_path.push(entry.node_id().to_owned());
-            parent = &self
+            let body = self
                 .body(&static_path)
-                .ok_or_else(|| crate::invalid("unknown scope body"))?
-                .nodes;
+                .ok_or_else(|| crate::invalid("unknown scope body"))?;
+            if let crate::event::ScopePathEntry::Invocation {
+                binding, target_id, ..
+            } = entry
+            {
+                require(
+                    self.version.supports_invocations(),
+                    "directed invocations require version 2026-10-28",
+                )?;
+                require(
+                    body.call_targets
+                        .iter()
+                        .any(|target| target.binding == *binding && target.target == *target_id),
+                    "unknown invocation binding or target",
+                )?;
+                active_target = Some(target_id);
+            } else {
+                require(
+                    body.call_targets.is_empty(),
+                    "static scope cannot use an invocation template",
+                )?;
+                require(
+                    if entry.is_call() {
+                        container.kind == "workflow.call"
+                    } else {
+                        container.kind == "workflow.loop"
+                    },
+                    "scope path kind disagrees with its container",
+                )?;
+                active_target = None;
+            }
+            parent = &body.nodes;
         }
         Ok(())
     }
@@ -226,15 +312,19 @@ impl WorkflowDescription {
         let mut has_call = false;
         for (index, id) in path.iter().enumerate() {
             let container = nodes.iter().find(|node| node.id == *id)?;
-            match container.kind.as_str() {
-                "workflow.call" => has_call = true,
-                "workflow.loop" => {}
-                _ => return None,
+            let next = self.body(&path[..=index])?;
+            if !next.call_targets.is_empty() {
+                has_call = true;
+            } else {
+                match container.kind.as_str() {
+                    "workflow.call" => has_call = true,
+                    "workflow.loop" => {}
+                    _ => return None,
+                }
             }
             if !has_call && index >= crate::MAX_LOOP_DEPTH {
                 return None;
             }
-            let next = self.body(&path[..=index])?;
             nodes = &next.nodes;
             body = Some(next);
         }
@@ -256,6 +346,7 @@ impl WorkflowDescription {
             WorkflowDescriptionVersion::V2026_10_03
                 | WorkflowDescriptionVersion::V2026_10_19
                 | WorkflowDescriptionVersion::V2026_10_23
+                | WorkflowDescriptionVersion::V2026_10_28
         ) {
             require(
                 self.execution.is_some(),
@@ -355,7 +446,9 @@ impl WorkflowDescription {
         scopes.insert(Vec::new(), (self.nodes.clone(), false));
         let mut bodies: Vec<_> = self.loop_bodies.iter().collect();
         bodies.sort_by_key(|body| body.path.len());
+        let mut body_paths = BTreeSet::new();
         for body in bodies {
+            require(body_paths.insert(&body.path), "duplicate Loop body path")?;
             require(
                 !body.path.is_empty() && body.path.len() <= crate::MAX_SCOPE_DEPTH,
                 "invalid Loop body path",
@@ -371,23 +464,81 @@ impl WorkflowDescription {
             let iteration =
                 self.version.supports_iteration_bodies() && container.kind == "builtin.iteration";
             let call = container.kind == "workflow.call";
-            let has_call = *parent_has_call || call;
+            let directed = !body.call_targets.is_empty();
+            if directed {
+                require(
+                    self.version.supports_invocations(),
+                    "directed call templates require version 2026-10-28",
+                )?;
+                require(
+                    !matches!(
+                        container.kind.as_str(),
+                        "workflow.call" | "workflow.loop" | "builtin.iteration"
+                    ),
+                    "directed calls must be declared inside container bodies",
+                )?;
+                let (data, controls, orders, order) = if parent_path.is_empty() {
+                    (
+                        &self.data_edges,
+                        &self.control_edges,
+                        &self.order_edges,
+                        &self.execution_order,
+                    )
+                } else {
+                    let parent_body = self
+                        .loop_bodies
+                        .iter()
+                        .find(|body| body.path == parent_path)
+                        .expect("validated physical parent");
+                    (
+                        &parent_body.data_edges,
+                        &parent_body.control_edges,
+                        &parent_body.order_edges,
+                        &parent_body.execution_order,
+                    )
+                };
+                require(
+                    body.nodes == *parent
+                        && body.data_edges == *data
+                        && body.control_edges == *controls
+                        && body.order_edges == *orders
+                        && body.execution_order == *order,
+                    "invocation template must retain its physical scope contracts",
+                )?;
+                let mut bindings = BTreeSet::new();
+                let mut aliases = BTreeSet::new();
+                for target in &body.call_targets {
+                    require(
+                        !target.name.trim().is_empty()
+                            && bindings.insert(target.binding)
+                            && aliases.insert(&target.name),
+                        "ambiguous invocation binding",
+                    )?;
+                    require(
+                        parent.iter().any(|node| node.id == target.target)
+                            && body.nodes.iter().any(|node| node.id == target.target),
+                        "unknown invocation target",
+                    )?;
+                }
+            }
+            let has_call = *parent_has_call || call || directed;
             require(
                 has_call || body.path.len() <= crate::MAX_LOOP_DEPTH,
                 "invalid Loop body path",
             )?;
             require(
-                container.kind == "workflow.loop" || iteration || call,
+                container.kind == "workflow.loop" || iteration || call || directed,
                 "body path does not name a supported container",
             )?;
             require(
-                call || body.nodes.iter().any(|node| {
-                    if iteration {
-                        node.id == "%iteration" && node.kind == "builtin.iteration_input"
-                    } else {
-                        matches!(node.id.as_str(), "%loop" | "$loop") && node.kind == node.id
-                    }
-                }),
+                call || directed
+                    || body.nodes.iter().any(|node| {
+                        if iteration {
+                            node.id == "%iteration" && node.kind == "builtin.iteration_input"
+                        } else {
+                            matches!(node.id.as_str(), "%loop" | "$loop") && node.kind == node.id
+                        }
+                    }),
                 "body omits its synthetic source",
             )?;
             let scope = Self {
@@ -411,6 +562,9 @@ impl WorkflowDescription {
                 clusters: body.clusters.clone(),
             };
             scope.validate()?;
+            if directed {
+                continue;
+            }
             require(
                 scopes
                     .insert(body.path.clone(), (body.nodes.clone(), has_call))

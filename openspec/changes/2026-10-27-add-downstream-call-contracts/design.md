@@ -217,6 +217,24 @@ equivalent contracts.
 
 ## Composed invocation execution
 
+Observation descriptions add version `2026-10-28` and an `Invocation` path variant carrying caller ID,
+binding ID, selected target ID, and invocation count. It uses existing Call start/finish lifecycle
+events while retaining the target's ordinary node events. The count is independent of Loop pass limits.
+Receivers validate target identity, route identity, and nested caller continuity instead of treating
+repeated tool calls as repeated root-node completions.
+
+Virtual body templates use `LoopBodyDescription.call_targets`. Each template references its physical
+graph's node and dependency contracts, plus caller-local binding/alias/target mappings. Lookup resets
+to that physical scope after a dynamic invocation; ordinary Loop/Call entries still descend into child
+graphs. This permits reusable nested call paths without exponential description expansion. Template
+copies do not increase the static executor count. Built-in container nodes cannot own directed calls;
+their body nodes own those declarations, avoiding ambiguity with the container's static body.
+
+Finite and stream receivers retain invocation-specific outcomes, support reordered/duplicate evidence,
+and reject a node event claiming a different selected target. TUI navigation reuses templates and
+shows invocation, target, and binding identity. Runtime emission is connected in the subsequent dispatch
+implementation; defining the observation protocol does not activate any tool.
+
 The initial callable targets are terminal Tasks, including suitable terminal Flow wrappers. Tool
 instances are activated on demand and excluded from ordinary root activation. Reject an instance that
 mixes ordinary DAG activation and callable activation in the initial implementation.

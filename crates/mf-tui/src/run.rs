@@ -1138,12 +1138,7 @@ impl ViewState {
                     .saturating_sub(self.details_height.max(1))
             }
             KeyCode::Char('l') => {
-                if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
-                    && matches!(
-                        node.kind.as_str(),
-                        "workflow.loop" | "builtin.iteration" | "workflow.call"
-                    )
-                {
+                if let Some(node) = self.layout(root, bodies).nodes().get(self.selected) {
                     let mut child = self.path.clone();
                     child.push(node.id.clone());
                     if bodies.contains_key(&child) {
@@ -1341,7 +1336,11 @@ fn draw(
         };
         let pass_label = if static_body { "  |  Static body; item execution in spans".into() } else { pass.map_or(String::new(), |pass| {
             let index = pass.path.last().map_or(0, |entry| entry.index().get());
-            let scope_label = if pass.path.last().is_some_and(mf_telemetry::event::LoopPathEntry::is_call) { "Call".to_owned() } else { format!("Pass: {index}") };
+            let scope_label = match pass.path.last() {
+                Some(mf_telemetry::event::ScopePathEntry::Invocation { target_id, binding, .. }) => format!("Call: {index} -> {target_id} (binding {})", binding.get()),
+                Some(entry) if entry.is_call() => "Call".to_owned(),
+                _ => format!("Pass: {index}"),
+            };
             match pass.stream_invocation {
                 Some(owner) => format!("  |  Invocation: {owner}  |  {scope_label}"),
                 None => format!("  |  {scope_label}"),
@@ -3387,6 +3386,121 @@ mod tests {
     }
 
     #[test]
+    fn directed_call_views_navigate_reused_templates_and_select_invocations() {
+        use mf_telemetry::description::CallTargetDescription;
+        let mut description: WorkflowDescription=serde_json::from_value(serde_json::json!({
+            "version":"2026-10-28","workflow_id":format!("sha256:{}","c".repeat(64)),"execution":{"mode":"single"},
+            "nodes":[{"id":"agent","kind":"builtin.llm"},{"id":"tool","kind":"fixture.tool"},{"id":"leaf","kind":"fixture.leaf"}],
+            "execution_order":["agent","tool","leaf"],"data_edges":[],"control_edges":[]
+        })).unwrap();
+        for (caller, target) in [("agent", "tool"), ("tool", "leaf")] {
+            description.loop_bodies.push(LoopBodyDescription {
+                path: vec![caller.into()],
+                nodes: description.nodes.clone(),
+                execution_order: description.execution_order.clone(),
+                data_edges: vec![],
+                control_edges: vec![],
+                order_edges: vec![],
+                clusters: vec![],
+                call_targets: vec![CallTargetDescription {
+                    binding: Count::ZERO,
+                    name: target.into(),
+                    target: target.into(),
+                }],
+            });
+        }
+        let path = vec![
+            LoopPathEntry::Invocation {
+                call_id: "agent".into(),
+                binding: Count::ZERO,
+                target_id: "tool".into(),
+                invocation: Count::try_from(4).unwrap(),
+            },
+            LoopPathEntry::Invocation {
+                call_id: "tool".into(),
+                binding: Count::ZERO,
+                target_id: "leaf".into(),
+                invocation: Count::try_from(8).unwrap(),
+            },
+        ];
+        let run = RunId::new();
+        let mut state = crate::state::SessionState::new(description.clone(), run).unwrap();
+        for (sequence, event) in [
+            (
+                1,
+                LifecycleKind::WorkflowStarted {
+                    elapsed_ns: Count::ZERO,
+                },
+            ),
+            (
+                2,
+                LifecycleKind::CallStarted {
+                    path: path.clone(),
+                    elapsed_ns: Count::ZERO,
+                },
+            ),
+            (
+                3,
+                LifecycleKind::NodeStarted {
+                    selected_inputs: vec![],
+                    node: mf_telemetry::event::NodeIdentity {
+                        id: "leaf".into(),
+                        kind: "fixture.leaf".into(),
+                        path: path.clone(),
+                    },
+                    position: Count::try_from(2).unwrap(),
+                    elapsed_ns: Count::ZERO,
+                },
+            ),
+        ] {
+            state
+                .apply(LifecycleEvent {
+                    workflow_id: description.workflow_id.clone(),
+                    run_id: run,
+                    sequence: Count::try_from(sequence).unwrap(),
+                    event,
+                })
+                .unwrap();
+        }
+        let snapshot = state.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        view.state.selected = view.root.display_index_for_node_id("agent").unwrap();
+        view.handle_navigation(
+            KeyCode::Char('l'),
+            &snapshot,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(view.state.path, vec!["agent"]);
+        view.state.selected = view
+            .state
+            .layout(&view.root, &view.bodies)
+            .display_index_for_node_id("tool")
+            .unwrap();
+        view.handle_navigation(
+            KeyCode::Char('l'),
+            &snapshot,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(view.state.path, vec!["agent", "tool"]);
+        assert_eq!(view.state.pass(&snapshot).unwrap().path, path);
+        view.switch_connections().unwrap();
+        assert_eq!(view.bodies.len(), 1);
+        assert!(
+            view.bodies
+                .contains_key(&vec!["agent".into(), "tool".into()])
+        );
+        view.handle_navigation(
+            KeyCode::Char('h'),
+            &snapshot,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(view.state.path, vec!["agent"]);
+    }
+
+    #[test]
     fn loop_views_preserve_navigation_and_compacted_stream_totals() {
         let description = WorkflowDescription {
             order_edges: Vec::new(),
@@ -3401,6 +3515,7 @@ mod tests {
             execution_order: vec!["repeat".into()],
             execution: None,
             loop_bodies: vec![LoopBodyDescription {
+                call_targets: Vec::new(),
                 order_edges: Vec::new(),
                 path: vec!["repeat".into()],
                 nodes: vec![

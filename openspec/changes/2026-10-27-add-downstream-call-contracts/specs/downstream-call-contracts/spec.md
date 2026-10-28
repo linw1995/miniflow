@@ -1,5 +1,36 @@
 ## ADDED Requirements
 
+### Requirement: Distinguish dynamic invocation observations
+
+Description version 2026-10-28 SHALL support invocation path entries identifying caller, binding,
+selected target, and invocation count. Repeated calls SHALL have distinct paths. Receivers SHALL
+validate route identity and nested caller continuity, and SHALL reject target events for another node.
+Invocation counts MUST NOT use Loop pass limits. Existing static scope wire shapes SHALL remain valid.
+
+#### Scenario: Observe repeated calls independently
+
+- **WHEN** one caller invokes the same target more than once
+- **THEN** lifecycle and snapshot paths retain distinct invocation identities
+- **AND** finite and stream receivers do not overwrite the target's root-node state
+
+#### Scenario: Reuse physical scope templates
+
+- **WHEN** a target invokes another target or enters an ordinary nested Flow
+- **THEN** description lookup follows physical scopes and reusable invocation templates
+- **AND** templates preserve physical node/dependency contracts without inflating executor counts
+
+#### Scenario: Reject forged call provenance
+
+- **WHEN** an event names an undeclared binding/target pair or a nested caller different from the active target
+- **THEN** receiver validation rejects the event
+- **AND** reordered or duplicate valid events retain their ordinary delivery semantics
+
+#### Scenario: Inspect a dynamic caller in the TUI
+
+- **WHEN** a caller with an invocation template is selected
+- **THEN** body navigation can inspect the invocation and show its selected target and binding
+- **AND** the caller retains its real node kind rather than being relabeled as a static Flow call
+
 ### Requirement: Parse versioned directed-call declarations
 
 Workflow version 2026-10-28 SHALL accept scope-local `calls` maps indexed by caller ID and alias. Each

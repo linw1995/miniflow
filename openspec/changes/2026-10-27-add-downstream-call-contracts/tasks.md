@@ -27,6 +27,7 @@
 - [ ] 2.4 Preserve shared values, sensitivity, typed errors, skips, cancellation, deadlines, and execution budgets.
 - [ ] 2.5 Serialize calls to each prepared tool instance and preserve progress with one shared worker.
 - [ ] 2.6 Record stable caller, target, binding, and invocation identities for observation and snapshots.
+- [x] 2.7 Define and validate dynamic invocation scope identities and receiver/TUI support independently of dispatch.
 
 ## 3. LLM integration
 

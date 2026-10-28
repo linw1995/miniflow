@@ -155,6 +155,15 @@ pub fn declarations(
         let caller_id = indices.get(caller).with_context(|| DefinitionSnafu {
             message: format!("unknown caller `{caller}`"),
         })?;
+        ensure!(
+            !matches!(
+                definition.nodes[caller_id.index()].kind.as_str(),
+                mf_runtime::CALL_KIND | mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND
+            ),
+            DefinitionSnafu {
+                message: format!("caller `{caller}` is a container; declare calls inside its body"),
+            }
+        );
         let mut bindings = Vec::new();
         for (name, declaration) in aliases {
             let target = indices
@@ -469,4 +478,29 @@ pub fn resolve(
         });
     }
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn container_callers_must_declare_calls_inside_their_bodies() {
+        for kind in [
+            mf_runtime::CALL_KIND,
+            mf_runtime::LOOP_KIND,
+            mf_runtime::ITERATION_KIND,
+        ] {
+            let definition = serde_json::from_value(serde_json::json!({
+                "version":"2026-10-28","dependencies":{},
+                "nodes":[{"id":"parent","kind":kind},{"id":"target","kind":"builtin.identity"}],
+                "calls":{"parent":{"run":{"target":"target","defaults":"remaining_inputs"}}}
+            }))
+            .unwrap();
+            assert!(
+                super::declarations(&definition)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("inside its body")
+            );
+        }
+    }
 }

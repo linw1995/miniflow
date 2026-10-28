@@ -455,6 +455,7 @@ fn describe_loops(
                 message: format!("missing compiled body execution order at {path:?}"),
             })?;
         bodies.push(LoopBodyDescription {
+            call_targets: Vec::new(),
             path: path.clone(),
             nodes: ordered_nodes(
                 std::iter::once((source_id, source_kind))
