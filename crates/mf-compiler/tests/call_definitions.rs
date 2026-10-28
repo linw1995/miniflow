@@ -216,3 +216,95 @@ fn nested_calls_roundtrip_without_losing_scope_or_enabling_execution() {
     value["version"] = "2026-10-25".into();
     assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
 }
+
+#[test]
+fn programmatic_versions_and_mapping_order_preserve_the_wire_contract() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut old = parse(document());
+    old.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_25;
+    assert!(
+        serde_json::to_string(&old)
+            .unwrap_err()
+            .to_string()
+            .contains("2026-10-28")
+    );
+    assert!(
+        mf_compiler::structural_order(&old)
+            .unwrap_err()
+            .to_string()
+            .contains("2026-10-28")
+    );
+    let mut value = document();
+    value["nodes"][2]["config"]["inputs"]["alternate"] = "string".into();
+    value["calls"]["parent"]["search"]["ports"] = json!([
+        {"output":"query","input":"query"}, {"output":"query","input":"alternate"}
+    ]);
+    let first = mf_compiler::compile_definition(&parse(value.clone()), &registry).unwrap();
+    value["calls"]["parent"]["search"]["ports"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    let second = mf_compiler::compile_definition(&parse(value), &registry).unwrap();
+    assert_eq!(first, second);
+    let layout = first.declared_call_layout(&registry).unwrap();
+    layout
+        .verify(&second.declared_call_layout(&registry).unwrap())
+        .unwrap();
+    let mut drift = layout.clone();
+    drift.callers.get_mut(&"parent".into()).unwrap()[0].name = "changed".into();
+    assert!(
+        layout
+            .verify(&drift)
+            .unwrap_err()
+            .to_string()
+            .contains("differs")
+    );
+    let mut ambiguous = layout.clone();
+    let duplicate = ambiguous.callers[&"parent".into()][0].clone();
+    ambiguous
+        .callers
+        .get_mut(&"parent".into())
+        .unwrap()
+        .push(duplicate);
+    assert!(
+        ambiguous
+            .interfaces()
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate")
+    );
+    let mut invalid_type = document();
+    invalid_type["nodes"][1]["config"]["value"] = false.into();
+    let unresolved = mf_compiler::plan_definition(&parse(invalid_type)).unwrap();
+    assert!(
+        unresolved
+            .declared_call_layout(&registry)
+            .unwrap_err()
+            .to_string()
+            .contains("token")
+    );
+}
+
+#[test]
+fn nested_iteration_and_flow_calls_are_detected_without_entering_their_bodies() {
+    let child = document();
+    let parent = parse(json!({"version":"2026-10-28","dependencies":{},"nodes":[
+        {"id":"nested","kind":"workflow.call","config":{"flow":"child","definition":child}}
+    ]}));
+    assert!(parent.has_directed_calls());
+    let iteration = parse(json!({"version":"2026-10-28","dependencies":{},"nodes":[
+        {"id":"items","kind":"builtin.iteration","config":{"body":{
+            "nodes":[{"id":"parent","kind":"test.call_definition_parent"},{"id":"tool","kind":"builtin.identity"}],
+            "calls":{"parent":{"identity":{"target":"tool","defaults":"remaining_inputs"}}},
+            "result":{"node":"parent","port":"unused"}
+        }}}
+    ]}));
+    assert!(iteration.has_directed_calls());
+    let roundtrip: WorkflowDefinition =
+        serde_json::from_str(&serde_json::to_string(&iteration).unwrap()).unwrap();
+    assert!(roundtrip.has_directed_calls());
+    let wrapped_iteration = parse(json!({"version":"2026-10-28","dependencies":{},"nodes":[
+        {"id":"nested","kind":"workflow.call","config":{"flow":"child","definition":iteration}}
+    ]}));
+    assert!(wrapped_iteration.has_directed_calls());
+}
