@@ -1,7 +1,7 @@
 use mf_runtime::{
-    CallArguments, CallBindingId, CallContractError, CallInputSource, CallInterfaceError,
-    CallInterfaces, DefinitionId, ExecutionContext, FlowDependency, NodeId, NodeValues, PortSpec,
-    ResolvedCallBinding, ResolvedCallInput, ValueType,
+    CallArguments, CallBindingId, CallContractError, CallInputSource, CallInterfaces, DefinitionId,
+    ExecutionContext, FlowDependency, NodeId, NodeValues, PortSpec, ResolvedCallBinding,
+    ResolvedCallInput, ValueType,
 };
 use serde_json::json;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -266,12 +266,6 @@ fn catalogs_preserve_local_ids_and_reject_ambiguous_entries() {
     assert!(std::ptr::eq(parent, clone.for_caller(&"parent".into())));
     assert!(interfaces.for_caller(&"unknown".into()).is_empty());
     assert!(!format!("{interfaces:?}").contains("same_alias"));
-    let available = [DefinitionId::from("parent"), DefinitionId::from("right")];
-    interfaces.validate_callers(&available).unwrap();
-    assert!(matches!(
-        interfaces.validate_callers(&available[..1]),
-        Err(CallInterfaceError::UnknownCaller { .. })
-    ));
     for entries in [
         vec![(" ".into(), vec![])],
         vec![("parent".into(), vec![]), ("parent".into(), vec![])],

@@ -262,8 +262,8 @@ can still run concurrently. Unselected targets never execute. Target failures re
 in `CallOutcome::Failed`; cancellation, deadlines, depth limits, and exhausted step budgets return
 terminal errors. Tool execution is never automatically retried.
 
-Discovery data alone does not grant execution: installing `with_call_interfaces` clears the local
-executable capability and scoped context overlays restore it on return or unwind. Contexts hold only
+Prepared scopes derive discovery metadata from their executable call tables. Isolated target
+inspection exposes a read-only context overlay, restoring the enclosing capability on return or unwind. Contexts hold only
 weak references to their owning executor graph. Native frames share invocation identities across
 messages while retaining independent frame budgets and immutable input snapshots.
 

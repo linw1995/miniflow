@@ -53,12 +53,10 @@ publication until their combined lifecycle is explicitly defined.
 
 ## Port connections determine ownership
 
-The second implementation adds programmatic resolution through `CompiledWorkflow::resolve_call_bindings`
-and `FlowBuilder::resolve_call_bindings`. The former uses normal graph preparation and type inference,
-deferring required-input checks only for declared targets in the root call scope. Nested scopes and
-ordinary workflow preparation retain their existing validation. The latter accepts already prepared
-metadata and retains the builder's ordinary scheduling behavior. Neither API creates an executable
-call graph or changes existing JSON activation semantics.
+Normal graph preparation and type inference resolve the scope's `calls` declarations. Required-input
+checks are deferred only for targets declared in that scope; nested scopes derive their own target
+sets directly from their definitions. `FlowBuilder::resolve_call_bindings` is the shared binding
+resolver. There is no second compiler preparation mode or inherited mutable target set.
 
 Providers declare explicit caller slots in `NodeMetadata.call_outputs`, separately from ordinary and
 stream outputs. Preparation rejects empty, duplicate, overlapping, or excessively nested declarations.
@@ -343,11 +341,9 @@ external values. Call declarations are preserved in Loop/Iteration bodies and re
 definitions; older scope versions reject the field. Canonical plans sort mappings by destination and
 source, and bind aliases in sorted map order.
 
-`CompiledCallLayout` freezes node identities, resolved private bindings, and the workflow identity.
-The versioned JSON form uses duplicate-key rejection and typed port descriptors. Verification compares
-against a freshly prepared layout, including definition identity, types, requiredness, sensitivity,
-external sources, and local routes. This is planning evidence, not an executor capability. Public
-interfaces are obtained through projection and omit external configuration values.
+Resolved bindings belong to the executable scope's `PreparedCall` records. Public interfaces are
+projected from those records and omit external configuration values. Generated runners reuse
+`PreparedScopeLayout` rather than maintaining a second serialized call-layout format.
 
 Finite preparation now installs the executable call table and excludes targets from ordinary domains.
 Readiness edges include every transitive callee's external producers and participate in global cycle
