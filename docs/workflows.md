@@ -91,8 +91,8 @@ catalog without owning application definitions. `mf-chat` owns `workflows/title.
 `mf-chat.chat-title`; the CLI already links that provider. Custom hosts must link the provider before source
 resolution. Standalone runners contain the expanded graph and need only its node packages.
 
-The built-in `mf-chat.chat-title` Flow takes `input.prompt`, `input.text`, `input.status`, `input.context`,
-`input.model`, `input.base_url`, and `input.api_key`. It checks the title policy in `context.title`,
+The built-in `mf-chat.chat-title` Flow takes `params.prompt`, `params.text`, `params.status`, `params.context`,
+`params.model`, `params.base_url`, and `params.api_key`. It checks the title policy in `context.title`,
 captures provider failures, and returns optional `title` and required `usages`. An ineligible call
 returns no title and an empty usage list; a failed provider attempt retains its usage without a title.
 The [nested chat example](../examples/chat-nested-title-flow.json) combines the returned usage with the
@@ -481,7 +481,7 @@ Static configuration has this shape:
 {
   "model": "example-model",
   "base_url": "https://api.openai.com/v1",
-  "api_key_env": "MODEL_API_KEY",
+  "api_key_env": "OPENAI_API_KEY",
   "temperature": 0.2,
   "max_tokens": 256,
   "timeout_ms": 60000
@@ -516,7 +516,7 @@ mf compile examples/llm-parameters.json --output ./configured-chat
 ./configured-chat --params.model your-model --params.messages '[{"role":"user","content":"Hello"}]'
 ```
 
-Set `MODEL_API_KEY` in the execution environment. Override the endpoint with `--params.base_url` or other public
+Set `OPENAI_API_KEY` in the execution environment. Override the endpoint with `--params.base_url` or other public
 settings through their named arguments. Argument values take precedence over parameter environment fallbacks.
 The same prepared node can execute with different credentials, models, endpoints, and limits on subsequent runs.
 
@@ -552,7 +552,7 @@ workflow thread. Async hosts use a blocking thread for synchronous workflow entr
 
 The [terminal example](../examples/llm-terminal.json) accepts a complete startup `messages` list.
 The [Loop example](../examples/llm-loop.json) explicitly builds requests and accumulates replies for two turns.
-Choose an available model in each example's configuration and set `MODEL_API_KEY` in the execution environment.
+Choose an available model in each example's configuration and set `OPENAI_API_KEY` in the execution environment.
 An OpenAI-compatible endpoint can be selected with `base_url`. Compilation does not need the key:
 
 ```bash
@@ -610,7 +610,7 @@ For example, pass these inputs to the [tool example](../examples/llm-tools.json)
 
 ```sh
 mf compile examples/llm-tools.json --output ./tool-call
-MODEL_API_KEY=... ./tool-call --inputs-file inputs.json
+OPENAI_API_KEY=... ./tool-call --inputs-file inputs.json
 ```
 
 The `message` output contains the current assistant response. Two required projections support routing:

@@ -45,8 +45,8 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
             profile: "assistant-flow".into(),
             run: RunOptions {
                 arguments: vec![
-                    "--input.model=fixture-model".into(),
-                    "--input.api_key=synthetic-key".into(),
+                    "--params.model=fixture-model".into(),
+                    "--params.api_key=synthetic-key".into(),
                 ],
                 ..Default::default()
             },

@@ -52,17 +52,17 @@ fn builtin_titles_reuse_unique_resolved_provider_inputs_and_preserve_secrets() {
     let parameters = mf_runtime::resolve_workflow_inputs(
         &contract.parameters,
         &WorkflowArguments::try_from(json!({"params.model":"chosen-model"})).unwrap(),
-        |name| (name == "MODEL_API_KEY").then(|| "synthetic-key".into()),
+        |name| (name == "OPENAI_API_KEY").then(|| "synthetic-key".into()),
     )
     .unwrap();
     let title = contract.builtin_title_parameters(&parameters).unwrap();
-    assert_eq!(title.0["input.model"].as_str(), Some("chosen-model"));
+    assert_eq!(title.0["params.model"].as_str(), Some("chosen-model"));
     assert_eq!(
-        title.0["input.base_url"].as_str(),
+        title.0["params.base_url"].as_str(),
         Some("https://api.openai.com/v1")
     );
-    assert_eq!(title.0["input.api_key"].as_str(), Some("synthetic-key"));
-    assert!(title.0["input.api_key"].is_secret());
+    assert_eq!(title.0["params.api_key"].as_str(), Some("synthetic-key"));
+    assert!(title.0["params.api_key"].is_secret());
     assert_eq!(title.0.len(), 3);
 }
 

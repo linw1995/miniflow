@@ -277,7 +277,7 @@ impl TitleGenerationContext {
         let parameter = |name| {
             parameters
                 .0
-                .get(&mf_runtime::output_id("input", name))
+                .get(&mf_runtime::output_id("params", name))
                 .cloned()
                 .context(InvalidSnafu {
                     field: "title parameters",
@@ -1085,10 +1085,10 @@ mod tests {
         };
         let parameters = WorkflowArguments(
             [
-                ("input.model".into(), "model".into()),
-                ("input.base_url".into(), "http://localhost/v1".into()),
+                ("params.model".into(), "model".into()),
+                ("params.base_url".into(), "http://localhost/v1".into()),
                 (
-                    "input.api_key".into(),
+                    "params.api_key".into(),
                     mf_runtime::ValueRef::from("credential").into_secret(),
                 ),
             ]
