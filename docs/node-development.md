@@ -29,6 +29,12 @@ continue to use `NodeValue`.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values) and
 [tool calls](workflows.md#llm-tool-calls).
 
+The optional [`mfn-deepseek`](../crates/builtin-nodes/deepseek/) package registers
+`builtin.deepseek.search` and `builtin.deepseek.fetch`. Both are typed tasks using DeepSeek's
+single-request JSON APIs, execution-time configuration templates, and the shared future-driving
+contract. Preparation performs no credential reads or network I/O. See
+[DeepSeek web search and fetch](workflows.md#deepseek-web-search-and-fetch).
+
 Providers can opt execution-only fields into `mf_runtime::ConfigTemplate`. Parse each selected field during
 preparation, validate its `literal()` value when present, and add `references(field_name)` to the prepared
 `NodeMetadata.context_references`. Resolve it against the invocation's `ExecutionContext` and validate the result

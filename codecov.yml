@@ -38,6 +38,9 @@ flags:
   mfn-core:
     paths: [crates/builtin-nodes/core/]
     carryforward: false
+  mfn-deepseek:
+    paths: [crates/builtin-nodes/deepseek/]
+    carryforward: false
   mfn-llm:
     paths: [crates/builtin-nodes/llm/]
     carryforward: false

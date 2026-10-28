@@ -205,6 +205,8 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
+| `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
+| `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
 | `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
@@ -390,8 +392,8 @@ Nodes that support [configuration templates](#configuration-templates) can consu
 
 ### Configuration templates
 
-Providers explicitly enable templates for execution-time configuration fields. LLM configuration supports them;
-structural settings such as parameter declarations, node ports, and Loop bodies remain static.
+Providers explicitly enable templates for execution-time configuration fields. LLM and DeepSeek configuration
+support them; structural settings such as parameter declarations, node ports, and Loop bodies remain static.
 
 | Configuration value | Meaning |
 | --- | --- |
@@ -564,6 +566,66 @@ mf compile examples/llm-loop.json --output ./conversation
 
 To continue, append the returned `message` and the next user message to your own list, then pass that list
 as `chat.messages`. The Loop example expresses these operations explicitly with code and assignment nodes.
+
+### DeepSeek web search and fetch
+
+The opt-in `mfn-deepseek` package registers `builtin.deepseek.search` and `builtin.deepseek.fetch`.
+They call the [DeepSeek Search and Fetch APIs](https://api-docs.deepseek.com/zh-cn/guides/search),
+with one JSON POST per node invocation and no implicit model call. Declare the package in the Flow's
+`dependencies` and use either kind independently. The [Search example](../examples/deepseek-search.json)
+and [Fetch example](../examples/deepseek-fetch.json) are complete parameter-driven Flows.
+
+Both nodes accept this configuration:
+
+```json
+{
+  "base_url": "https://api.deepseek.com",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "timeout_ms": 60000
+}
+```
+
+The shown values are the defaults. `base_url` is an HTTP or HTTPS prefix without embedded credentials,
+query, or fragment; the node appends `/v1/tools/search` or `/v1/tools/fetch`. `timeout_ms` must be a
+positive integer and bounds provider setup and response reads. Unknown configuration fields are rejected.
+
+`base_url` and `timeout_ms` accept configuration templates. Use `api_key` with a runtime reference instead
+of `api_key_env` to supply a parameter credential; literal credentials are rejected, and the two credential
+sources cannot be combined:
+
+```json
+{
+  "base_url": {"$ref": "params.base_url"},
+  "api_key": {"$ref": "params.api_key"},
+  "timeout_ms": {"$ref": "params.timeout_ms"}
+}
+```
+
+The Search node has these input ports:
+
+| Port | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `query` | `string` | Yes | 1–128 Unicode characters and not all whitespace |
+| `count` | `uint` | No | 1–50, defaults to 10 |
+| `ori_question` | `string` | No | Original user question, 1–128 characters |
+| `localization` | `string` | No | IP address used to prefer localized results |
+| `need_content` | `bool` | No | Whether results include page content, defaults to `false` |
+
+Its required `results` output is `List(Object)`. A search without matches succeeds with `[]`. Every result
+contains `rerank_score`, `title`, `url`, `snippet`, `summary`, `content`, `site_name`, `site_icon`, `date`,
+and `authority`. The site name, icon, and date are nullable strings and remain explicit JSON `null` when
+DeepSeek does not supply them. Other fields retain their API values, including an empty `content` string.
+
+The Fetch node accepts a required string `url` and returns required string outputs `title` and `content`.
+The URL can have at most 8192 characters, must be an absolute HTTP or HTTPS URL with a host, and cannot
+contain a username or password. `content` preserves the returned Markdown; an unavailable title remains
+an empty string as reported by the API.
+
+Input validation happens before credential resolution and network I/O. Compilation and preparation do not
+read credentials or contact DeepSeek. Redirects are not followed, requests are not automatically retried,
+and HTTP errors, malformed responses, deadlines, or cancellation fail the invocation without publishing
+node outputs. Retry policy belongs to the enclosing Flow or host, which can account for the API's per-request
+billing and status-specific retry guidance.
 
 ### LLM tool calls
 

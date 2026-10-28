@@ -176,6 +176,9 @@ jobs:
       - name: Coverage tests (mfn-core)
         if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.prepared.outputs.packages || '[]'), 'mfn-core')
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-core
+      - name: Coverage tests (mfn-deepseek)
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.prepared.outputs.packages || '[]'), 'mfn-deepseek')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mfn-deepseek
       - name: Coverage tests (mfn-llm)
         if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.prepared.outputs.packages || '[]'), 'mfn-llm')
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-llm
@@ -297,6 +300,15 @@ jobs:
           files: target/coverage/result/crates/mfn-core.lcov
           disable_search: true
           flags: mfn-core
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mfn-deepseek)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-deepseek')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mfn-deepseek.lcov
+          disable_search: true
+          flags: mfn-deepseek
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mfn-llm)

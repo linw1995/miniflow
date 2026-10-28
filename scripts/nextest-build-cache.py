@@ -138,6 +138,7 @@ def prepare_cache(workspace, cargo, metadata, directory, persistent, prewarm=Tru
         ("mf-telemetry", "crates/mf-telemetry"),
         ("mfn-core", "crates/builtin-nodes/core"),
         ("mfn-code", "crates/builtin-nodes/code"),
+        ("mfn-deepseek", "crates/builtin-nodes/deepseek"),
         ("mfn-llm", "crates/builtin-nodes/llm"),
     ]:
         features = ', features = ["otlp", "snapshot"]' if name == "mf-telemetry" else ""
@@ -151,6 +152,7 @@ def prepare_cache(workspace, cargo, metadata, directory, persistent, prewarm=Tru
         ("mf-compiler", "crates/mf-compiler"),
         ("mfn-core", "crates/builtin-nodes/core"),
         ("mfn-code", "crates/builtin-nodes/code"),
+        ("mfn-deepseek", "crates/builtin-nodes/deepseek"),
         ("mfn-llm", "crates/builtin-nodes/llm"),
     ]:
         features = ', features = ["codegen"]' if name == "mf-compiler" else ""

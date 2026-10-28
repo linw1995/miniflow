@@ -1,5 +1,6 @@
 #![cfg(feature = "development-support")]
 
+use mfn_deepseek::test_support as deepseek_support;
 use mfn_llm::test_support as llm_support;
 use serde_json::{Value, json};
 use std::{fs, path::Path};
@@ -29,8 +30,26 @@ fn nested_title_usage() -> Value {
     usage
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 18] {
+fn search_result() -> Value {
+    json!({
+        "rerank_score":2.4,"title":"DeepSeek release","url":"https://example.com/release",
+        "snippet":"Snippet","summary":"Summary","content":"Content","site_name":null,
+        "site_icon":null,"date":null,"authority":3
+    })
+}
+
+fn examples() -> [(&'static str, Option<&'static str>, Value); 20] {
     [
+        (
+            "deepseek-fetch.json",
+            None,
+            json!({"title":"Example","content":"# Markdown"}),
+        ),
+        (
+            "deepseek-search.json",
+            None,
+            json!({"results":[search_result()]}),
+        ),
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
         ("clustered-workflow.json", None, json!({"doubled": 42})),
@@ -146,6 +165,14 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 },
             )
         });
+        let deepseek_server = name.starts_with("deepseek-").then(|| {
+            let reply = if name == "deepseek-search.json" {
+                deepseek_support::Reply::search(json!([search_result()]))
+            } else {
+                deepseek_support::Reply::fetch("Example", "# Markdown")
+            };
+            deepseek_support::Server::start(vec![reply])
+        });
         if let Some(server) = &server
             && !name.starts_with("chat-")
         {
@@ -220,6 +247,18 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             command
                 .args(["--inputs", &inputs.to_string()])
                 .env("OPENAI_API_KEY", "synthetic-key")
+                .env("NO_PROXY", "127.0.0.1,localhost")
+                .env("no_proxy", "127.0.0.1,localhost");
+        }
+        if let Some(server) = &deepseek_server {
+            let inputs = if name == "deepseek-search.json" {
+                json!({"params.base_url":server.base_url,"params.query":"DeepSeek"})
+            } else {
+                json!({"params.base_url":server.base_url,"params.url":"https://example.com/article"})
+            };
+            command
+                .args(["--inputs", &inputs.to_string()])
+                .env("DEEPSEEK_API_KEY", "synthetic-key")
                 .env("NO_PROXY", "127.0.0.1,localhost")
                 .env("no_proxy", "127.0.0.1,localhost");
         }
