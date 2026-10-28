@@ -296,12 +296,27 @@ actual model-call identity; they do not need runtime open/close envelopes. A com
 a later failure remains available for explicit save-only recovery, while partial text never becomes history.
 
 The [single-call example](../examples/chat-flow.json), the
+[tool-calling conversation](../examples/chat-tools-flow.json), the
 [conversation and title example](../examples/chat-title-flow.json), and the
 [loop example](../examples/chat-loop-flow.json) can be compiled directly:
 
 ```sh
 nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-loop-flow.json --output target/chat-flow
 ```
+
+The tool-calling example supplies the model, endpoint, credentials, and external multiplier through
+`builtin.parameters`. The LLM sees only its own `amount` argument and invokes the CEL tool through the
+runtime call dispatcher. It streams the final answer and returns every model round in `usages`, so the
+existing chat application handles previews, persistence, and usage without a tool-specific backend:
+
+```sh
+mf compile examples/chat-tools-flow.json --output ./chat-tools-flow
+mf run ./chat-tools-flow --chat --chat-db state/chat.sqlite --params.model your-model
+```
+
+Set `MODEL_API_KEY`, then ask the assistant to multiply an integer. `--params.factor` changes the configured
+multiplier without adding that parameter to the model's tool arguments. Tool exchanges stay inside each
+workflow invocation; subsequent chat turns receive the application's saved user and assistant messages.
 
 The loop explicitly accumulates usage lists with `builtin.code` using `left + right` and stops after a reported model failure.
 Its model configuration is passed into the loop through declared variables. The runner receives conversation

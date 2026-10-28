@@ -494,7 +494,14 @@ fn composed_conversation_compiles_without_application_nodes() {
 fn directed_llm_tools_match_memory_and_generated_finite_and_native_execution() {
     fn stable(mut values: Vec<Value>) -> Vec<Value> {
         for value in &mut values {
-            if let Some(delta) = value.get_mut("delta") {
+            if let Some(usages) = value.get_mut("usages").and_then(Value::as_array_mut) {
+                for usage in usages {
+                    let usage = usage.as_object_mut().unwrap();
+                    usage.remove("call_id");
+                    usage.remove("started_at");
+                }
+            }
+            if let Some(delta) = value.get_mut("answer") {
                 delta.as_object_mut().unwrap().remove("model_call_id");
             }
         }
@@ -519,29 +526,45 @@ fn directed_llm_tools_match_memory_and_generated_finite_and_native_execution() {
         };
         let server = Server::start(vec![tool.clone(), final_reply.clone(), tool, final_reply]);
         let mut definition: Value =
-            serde_json::from_str(include_str!("../../../examples/llm-tools.json")).unwrap();
+            serde_json::from_str(include_str!("../../../examples/chat-tools-flow.json")).unwrap();
         definition["dependencies"] = dependencies();
         definition["dependencies"]["code"] =
             json!({"package":"mfn-code","path":common::crates_dir().join("builtin-nodes/code")});
-        definition["nodes"][1]["config"]["base_url"] = server.base_url.clone().into();
+        definition["outputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"history","node":"chat","port":"history"}));
         if native {
             definition["execution"] = json!({"limits":{"workers":1,"max_pending_messages":2}});
         }
-        if streaming {
-            definition["outputs"] = json!([{"name":"delta","node":"chat","port":"delta"}]);
+        if !streaming {
+            definition["outputs"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|output| output["name"] != "answer");
         }
         let root = tempfile::tempdir().unwrap();
         let executable = compile(&definition, root.path());
         assert!(server.requests().is_empty());
-        let inputs = json!({"chat.prompt":"Use multiply to double 21"});
+        let inputs = json!({"params.prompt":"Use multiply to double 21","params.base_url":server.base_url,"params.model":"example-model"});
         let memory = stable(run_memory(&definition, &inputs));
         let generated = stable(run(&executable, &inputs));
         assert_eq!(generated, memory);
+        let terminal = memory
+            .iter()
+            .find(|value| value.get("status").is_some())
+            .unwrap();
+        assert_eq!(terminal["status"], "succeeded");
+        assert_eq!(terminal["text"], "42");
+        assert_eq!(terminal["usages"].as_array().unwrap().len(), 2);
+        assert_eq!(terminal["history"].as_array().unwrap().len(), 4);
         if streaming {
-            assert_eq!(memory, vec![json!({"delta":{"text":"42"}})]);
-        } else {
-            assert_eq!(memory[0]["text"], "42");
-            assert_eq!(memory[0]["history"].as_array().unwrap().len(), 4);
+            let previews: Vec<_> = memory
+                .iter()
+                .filter_map(|value| value.get("answer"))
+                .cloned()
+                .collect();
+            assert_eq!(previews, vec![json!({"text":"42"})]);
         }
         let requests = server.requests();
         assert_eq!(requests.len(), 4);

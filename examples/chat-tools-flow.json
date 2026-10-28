@@ -1,0 +1,187 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "MODEL_API_KEY"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string",
+            "default": ""
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
+          "factor": {
+            "type": "int",
+            "default": 2,
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "chat",
+      "kind": "builtin.llm",
+      "config": {
+        "model": {
+          "$ref": "params.model"
+        },
+        "base_url": {
+          "$ref": "params.base_url"
+        },
+        "api_key": {
+          "$ref": "params.api_key"
+        },
+        "capture_errors": true,
+        "call_outputs": {
+          "amount": "int"
+        },
+        "max_tool_rounds": 4,
+        "max_tool_calls": 8
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        }
+      }
+    },
+    {
+      "id": "multiply",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "amount": "int",
+          "factor": "int"
+        },
+        "code": {
+          "result": "amount * factor"
+        }
+      },
+      "inputs": {
+        "factor": {
+          "from": {
+            "node": "params",
+            "port": "factor"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "chat",
+      "port": "delta"
+    },
+    {
+      "name": "status",
+      "node": "chat",
+      "port": "status"
+    },
+    {
+      "name": "text",
+      "node": "chat",
+      "port": "text"
+    },
+    {
+      "name": "usages",
+      "node": "chat",
+      "port": "usages"
+    },
+    {
+      "name": "error",
+      "node": "chat",
+      "port": "error",
+      "optional": true
+    },
+    {
+      "name": "metadata",
+      "node": "chat",
+      "port": "metadata",
+      "optional": true
+    },
+    {
+      "name": "finish_reason",
+      "node": "chat",
+      "port": "finish_reason",
+      "optional": true
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Conversation with tools",
+      "annotation": "Stream the answer, invoke the selected tool with the configured factor, and return all model usage to the chat application.",
+      "nodes": [
+        "params",
+        "chat",
+        "multiply"
+      ]
+    }
+  ],
+  "calls": {
+    "chat": {
+      "multiply": {
+        "target": "multiply",
+        "description": "Multiply an integer by the configured factor.",
+        "ports": [
+          {
+            "output": "amount",
+            "input": "amount"
+          }
+        ]
+      }
+    }
+  }
+}

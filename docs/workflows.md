@@ -531,8 +531,10 @@ workflow thread. Async hosts use a blocking thread for synchronous workflow entr
 
 #### Nodes as LLM tools
 
-The [tool example](../examples/llm-tools.json) exposes a callable CEL node. Its `amount` argument comes from
-`chat`, while an ordinary connection supplies `factor` from a constant. The model sees only `amount`.
+The [chat workflow with tools](../examples/chat-tools-flow.json) exposes a callable CEL node. Its `amount`
+argument comes from `chat`, while an ordinary connection supplies `factor` from a configuration parameter.
+The model sees only `amount`. The workflow uses the existing chat contract: `prompt`, `system`, and `history`
+inputs, streamed `answer` output, and terminal `status`, `text`, and per-request `usages` outputs.
 The same binding and execution rules apply to terminal tasks, TaskStream nodes, and callable Flow wrappers.
 
 Declare `config.call_outputs` as a static name-to-type map on the LLM node, then connect those slots with
@@ -588,9 +590,13 @@ round separately. `usages` contains one entry per actual model request with a di
 control failures still propagate.
 
 ```sh
-mf compile examples/llm-tools.json --output ./tool-chat
-./tool-chat --chat.prompt 'Use multiply to double 21'
+mf compile examples/chat-tools-flow.json --output ./chat-tools-flow
+mf run ./chat-tools-flow --chat --chat-db state/chat.sqlite --params.model your-model
 ```
+
+Set `MODEL_API_KEY` and ask the chat to use `multiply`. Override the external factor with `--params.factor`.
+The chat application saves the final assistant reply and all model-request usage; tool protocol messages
+remain internal to the workflow turn.
 
 The [terminal example](../examples/llm-terminal.json) accepts startup prompt, system, and history inputs.
 The [Loop example](../examples/llm-loop.json) passes updated history through a Loop variable for two turns.

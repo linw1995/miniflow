@@ -861,16 +861,6 @@ fn reported_usage(
     Ok((!usage.is_empty()).then_some(usage))
 }
 
-#[cfg(test)]
-fn terminal_outputs(
-    response: CompletionResponse,
-    prompt: String,
-    mut history: Vec<ChatMessage>,
-) -> Result<LlmOutputs, LlmExecutionError> {
-    history.push(history::plain("user", prompt));
-    terminal_response(response, history)
-}
-
 fn terminal_response(
     response: CompletionResponse,
     mut history: Vec<ChatMessage>,
@@ -1155,7 +1145,9 @@ mod tests {
             role: "user".into(),
             content: "prior".into(),
         }];
-        let result = terminal_outputs(response, "next".into(), previous.clone()).unwrap();
+        let mut conversation = previous.clone();
+        conversation.push(history::plain("user", "next".into()));
+        let result = terminal_response(response, conversation).unwrap();
         assert_eq!(result.text, "firstsecond");
         assert_eq!(result.history[0], previous[0]);
         assert_eq!(result.history.len(), 3);
@@ -1179,7 +1171,7 @@ mod tests {
             "openai",
             json!({}),
         );
-        let error = terminal_outputs(response, "next".into(), vec![]).unwrap_err();
+        let error = terminal_response(response, vec![]).unwrap_err();
         assert!(matches!(error, LlmExecutionError::UsageCount { .. }));
         assert!(error.source().unwrap().is::<std::num::TryFromIntError>());
         let response = CompletionResponse::new(
@@ -1188,15 +1180,10 @@ mod tests {
             "openai",
             json!({}),
         );
-        assert_eq!(
-            terminal_outputs(response, "next".into(), vec![])
-                .unwrap()
-                .text,
-            "é"
-        );
+        assert_eq!(terminal_response(response, vec![]).unwrap().text, "é");
         let response = CompletionResponse::new(vec![], Default::default(), "openai", json!({}));
         assert!(matches!(
-            terminal_outputs(response, "next".into(), vec![]),
+            terminal_response(response, vec![]),
             Err(LlmExecutionError::EmptyText)
         ));
     }

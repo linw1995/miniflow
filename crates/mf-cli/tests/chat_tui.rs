@@ -23,118 +23,170 @@ mod terminal;
 use terminal::Screen;
 
 #[test]
-fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
+fn supplied_conversation_workflows_run_inside_the_application_lifecycle() {
     use mf_chat::contract::CompletionState;
     use mf_tui::{
         chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
         run::RunOptions,
     };
 
-    let root = tempfile::tempdir().unwrap();
-    let server = Server::start(vec![
-        Reply::stream_text("first answer"),
-        Reply::text("Generated title"),
-        Reply::stream_text("second answer"),
-    ]);
-    let binary = compiled(root.path(), &server, "chat-title-flow.json");
-    let path = root.path().join("chat.sqlite");
-    let launch = ChatLaunch::prepare(
-        &binary,
-        ChatOptions {
-            database_path: path.clone(),
-            profile: "assistant-flow".into(),
-            run: RunOptions {
-                arguments: vec![
-                    "--input.model=fixture-model".into(),
-                    "--input.api_key=synthetic-key".into(),
-                ],
-                ..Default::default()
+    for example in ["chat-title-flow.json", "chat-tools-flow.json"] {
+        let tools = example == "chat-tools-flow.json";
+        let root = tempfile::tempdir().unwrap();
+        let replies = if tools {
+            let mut call = Reply::stream_text("");
+            let start = serde_json::json!({"id":"tool-round","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"multiply-1","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":null}]});
+            let end = serde_json::json!({"id":"tool-round","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+            call.body = format!("data: {start}\n\ndata: {end}\n\ndata: [DONE]\n\n");
+            vec![
+                call,
+                Reply::stream_text("first answer"),
+                Reply::stream_text("second answer"),
+            ]
+        } else {
+            vec![
+                Reply::stream_text("first answer"),
+                Reply::text("Generated title"),
+                Reply::stream_text("second answer"),
+            ]
+        };
+        let server = Server::start(replies);
+        let binary = compiled(root.path(), &server, example);
+        let prefix = if tools { "params" } else { "input" };
+        let path = root.path().join("chat.sqlite");
+        let launch = ChatLaunch::prepare(
+            &binary,
+            ChatOptions {
+                database_path: path.clone(),
+                profile: "assistant-flow".into(),
+                run: RunOptions {
+                    arguments: vec![
+                        format!("--{prefix}.model=fixture-model").into(),
+                        format!("--{prefix}.api_key=synthetic-key").into(),
+                    ],
+                    ..Default::default()
+                },
             },
-        },
-    )
-    .unwrap();
-    let controller = ChatController::open(launch).unwrap();
-    let mut session_id = None;
-    for (prompt, expected, calls) in [("first", "first answer", 2), ("second", "second answer", 1)]
-    {
-        controller
-            .send(ChatCommand::Submit {
-                session_id: session_id.clone(),
-                prompt: prompt.into(),
-            })
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            assert!(Instant::now() < deadline, "conversation did not finish");
-            match controller.try_event() {
-                Some(ChatEvent::Submitted { session, .. }) => session_id = Some(session.id),
-                Some(ChatEvent::Preview { preview, .. }) => {
-                    assert!(preview.segments.len() <= 32);
-                }
-                Some(ChatEvent::Observing(_)) | None => thread::sleep(Duration::from_millis(10)),
-                Some(ChatEvent::Finished { resolution, .. }) => {
-                    let resolution = resolution.unwrap();
-                    assert!(
-                        resolution.diagnostics.is_empty(),
-                        "{:?}",
-                        resolution.diagnostics
-                    );
-                    let CompletionState::Committed(completion) = resolution.state else {
-                        panic!("expected committed conversation")
-                    };
-                    assert_eq!(completion.result.text, expected);
-                    assert_eq!(completion.result.usages.len(), calls);
-                    for usage in &completion.result.usages {
-                        let timing = usage
-                            .timing
-                            .as_ref()
-                            .expect("runner request events populate timing");
-                        assert!(timing.is_valid() && timing.elapsed_us > 0);
+        )
+        .unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        let mut session_id = None;
+        for (prompt, expected, calls) in
+            [("first", "first answer", 2), ("second", "second answer", 1)]
+        {
+            controller
+                .send(ChatCommand::Submit {
+                    session_id: session_id.clone(),
+                    prompt: prompt.into(),
+                })
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut saw_preview = false;
+            loop {
+                assert!(Instant::now() < deadline, "conversation did not finish");
+                match controller.try_event() {
+                    Some(ChatEvent::Submitted { session, .. }) => session_id = Some(session.id),
+                    Some(ChatEvent::Preview { preview, .. }) => {
+                        saw_preview = true;
+                        assert!(preview.segments.len() <= 32);
                     }
-                    assert_eq!(
-                        completion.result.title.as_deref(),
-                        (calls == 2).then_some("Generated title")
-                    );
-                    if calls == 2 {
-                        assert_eq!(
-                            completion.result.usages[1]
-                                .attribution
-                                .as_ref()
-                                .unwrap()
-                                .purpose
-                                .as_deref(),
-                            Some("title")
+                    Some(ChatEvent::Observing(_)) | None => {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    Some(ChatEvent::Finished { resolution, .. }) => {
+                        let resolution = resolution.unwrap();
+                        assert!(
+                            resolution.diagnostics.is_empty(),
+                            "{:?}",
+                            resolution.diagnostics
                         );
+                        let CompletionState::Committed(completion) = resolution.state else {
+                            panic!("expected committed conversation")
+                        };
+                        assert!(saw_preview, "chat answer was not streamed");
+                        assert_eq!(completion.result.text, expected);
+                        assert_eq!(completion.result.usages.len(), calls);
+                        for usage in &completion.result.usages {
+                            let timing = usage
+                                .timing
+                                .as_ref()
+                                .expect("runner request events populate timing");
+                            assert!(timing.is_valid() && timing.elapsed_us > 0);
+                        }
+                        assert_eq!(
+                            completion.result.title.as_deref(),
+                            (!tools && calls == 2).then_some("Generated title")
+                        );
+                        if !tools && calls == 2 {
+                            assert_eq!(
+                                completion.result.usages[1]
+                                    .attribution
+                                    .as_ref()
+                                    .unwrap()
+                                    .purpose
+                                    .as_deref(),
+                                Some("title")
+                            );
+                        }
+                        break;
                     }
-                    break;
+                    Some(ChatEvent::Error { source, .. }) => {
+                        panic!("conversation failed: {source}")
+                    }
+                    _ => panic!("unexpected controller event"),
                 }
-                Some(ChatEvent::Error { source, .. }) => panic!("conversation failed: {source}"),
-                _ => panic!("unexpected controller event"),
             }
         }
+        controller.close().unwrap();
+        let database = ChatDatabase::open(path).unwrap();
+        let id = session_id.unwrap();
+        assert_eq!(
+            database.session(&id).unwrap().title,
+            if tools { "first" } else { "Generated title" }
+        );
+        assert_eq!(database.history(&id, 4096).unwrap().history.len(), 4);
+        assert_eq!(
+            database
+                .usage(mf_chat::UsageQuery {
+                    profile: Some("assistant-flow".into()),
+                    ..Default::default()
+                })
+                .unwrap()
+                .overall
+                .attempted_calls,
+            3,
+        );
+        assert_eq!(server.requests().len(), 3);
+        assert!(
+            messages(&server.requests()[2])
+                .iter()
+                .any(|message| message["content"] == "first answer")
+        );
+        if tools {
+            let requests = server.requests();
+            let schema = &requests[0].body["tools"][0]["function"]["parameters"]["properties"];
+            assert!(schema.get("amount").is_some());
+            assert!(schema.get("factor").is_none());
+            let result = requests[1].body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["role"] == "tool")
+                .unwrap();
+            assert_eq!(result["tool_call_id"], "multiply-1");
+            let output: serde_json::Value =
+                serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+            assert_eq!(output, serde_json::json!({"result":42}));
+            let transcript = database.history(&id, 4096).unwrap().history;
+            assert_eq!(transcript[1].content, "first answer");
+            assert_eq!(transcript[3].content, "second answer");
+            assert!(
+                transcript
+                    .iter()
+                    .all(|message| message.tool_calls.is_none() && message.tool_call_id.is_none())
+            );
+        }
     }
-    controller.close().unwrap();
-    let database = ChatDatabase::open(path).unwrap();
-    let id = session_id.unwrap();
-    assert_eq!(database.session(&id).unwrap().title, "Generated title");
-    assert_eq!(database.history(&id, 4096).unwrap().history.len(), 4);
-    assert_eq!(
-        database
-            .usage(mf_chat::UsageQuery {
-                profile: Some("assistant-flow".into()),
-                ..Default::default()
-            })
-            .unwrap()
-            .overall
-            .attempted_calls,
-        3,
-    );
-    assert_eq!(server.requests().len(), 3);
-    assert!(
-        messages(&server.requests()[2])
-            .iter()
-            .any(|message| message["content"] == "first answer")
-    );
 }
 
 fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
