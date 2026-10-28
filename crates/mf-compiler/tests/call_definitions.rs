@@ -1,6 +1,6 @@
 extern crate mfn_code as _;
 extern crate mfn_core as _;
-use mf_compiler::{CompiledCallLayout, NodeRegistry, WorkflowDefinition};
+use mf_compiler::{NodeRegistry, WorkflowDefinition};
 use mf_runtime::{
     CallInputDefaults, CallInputSource, NodeExecution, NodeMetadata, NodePorts, PortSpec,
     PreparedNode, ValueType,
@@ -42,14 +42,25 @@ fn parse(value: Value) -> WorkflowDefinition {
     serde_json::from_value(value).unwrap()
 }
 
+fn bindings(
+    plan: &mf_compiler::CompiledWorkflow,
+    registry: &NodeRegistry,
+) -> Vec<mf_runtime::ResolvedCallBinding> {
+    mf_compiler::instantiate_compiled(plan, registry)
+        .unwrap()
+        .prepared_calls()
+        .map(|call| call.binding.clone())
+        .collect()
+}
+
 #[test]
-fn versioned_definitions_lower_to_stable_private_layouts_and_public_interfaces() {
+fn versioned_definitions_prepare_stable_bindings_and_public_interfaces() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let definition = parse(document());
     assert!(definition.has_directed_calls());
     let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
-    let layout = plan.declared_call_layout(&registry).unwrap();
-    let binding = &layout.callers[&"parent".into()][0];
+    let resolved = bindings(&plan, &registry);
+    let binding = &resolved[0];
     assert_eq!(binding.name, "search");
     assert!(matches!(binding.inputs[0].source, CallInputSource::Default));
     assert!(matches!(
@@ -60,32 +71,21 @@ fn versioned_definitions_lower_to_stable_private_layouts_and_public_interfaces()
         binding.inputs[2].source,
         CallInputSource::External
     ));
-    let encoded = layout.to_json().unwrap();
+    let encoded = serde_json::to_string(binding).unwrap();
     assert!(!encoded.contains("top-secret"));
-    let decoded = CompiledCallLayout::from_json(encoded.as_bytes()).unwrap();
-    decoded.verify(&layout).unwrap();
-    assert_eq!(decoded, layout);
-    let view =
-        serde_json::to_string(layout.interfaces().unwrap().for_caller(&"parent".into())).unwrap();
+    let view = serde_json::to_string(&binding.interface()).unwrap();
     assert!(!view.contains("token") && !view.contains("config"));
-    let mut changed = document();
-    changed["nodes"][1]["config"]["value"] = "other-secret".into();
-    let changed = mf_compiler::compile_definition(&parse(changed), &registry)
-        .unwrap()
-        .declared_call_layout(&registry)
-        .unwrap();
-    assert!(layout.verify(&changed).is_err());
     let roundtrip = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
     assert_eq!(roundtrip, plan);
-    assert_eq!(roundtrip.declared_call_layout(&registry).unwrap(), layout);
+    assert_eq!(bindings(&roundtrip, &registry), resolved);
     let mut reordered = document();
     reordered["nodes"].as_array_mut().unwrap().reverse();
     let reordered = mf_compiler::compile_definition(&parse(reordered), &registry).unwrap();
-    assert_eq!(reordered.declared_call_layout(&registry).unwrap(), layout);
+    assert_eq!(bindings(&reordered, &registry), resolved);
 }
 
 #[test]
-fn call_definitions_and_layouts_reject_ambiguous_or_unknown_wire_data() {
+fn call_definitions_reject_unknown_wire_data() {
     for version in ["2026-09-26", "2026-10-19", "2026-10-25"] {
         let mut old = document();
         old["version"] = version.into();
@@ -96,20 +96,6 @@ fn call_definitions_and_layouts_reject_ambiguous_or_unknown_wire_data() {
         invalid["calls"]["parent"]["search"][field] = "invalid".into();
         assert!(serde_json::from_value::<WorkflowDefinition>(invalid).is_err());
     }
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = mf_compiler::compile_definition(&parse(document()), &registry).unwrap();
-    let layout = plan
-        .declared_call_layout(&registry)
-        .unwrap()
-        .to_json()
-        .unwrap();
-    let mut wrong_version: Value = serde_json::from_str(&layout).unwrap();
-    wrong_version["version"] = "future".into();
-    assert!(CompiledCallLayout::from_json(wrong_version.to_string().as_bytes()).is_err());
-    assert!(
-        CompiledCallLayout::from_json(br#"{"version":"2026-10-28","version":"2026-10-28"}"#)
-            .is_err()
-    );
     let mut defaults = document();
     defaults["calls"]["parent"]["search"]
         .as_object_mut()
@@ -239,40 +225,14 @@ fn programmatic_versions_and_mapping_order_preserve_the_wire_contract() {
         .reverse();
     let second = mf_compiler::compile_definition(&parse(value), &registry).unwrap();
     assert_eq!(first, second);
-    let layout = first.declared_call_layout(&registry).unwrap();
-    layout
-        .verify(&second.declared_call_layout(&registry).unwrap())
-        .unwrap();
-    let mut drift = layout.clone();
-    drift.callers.get_mut(&"parent".into()).unwrap()[0].name = "changed".into();
-    assert!(
-        layout
-            .verify(&drift)
-            .unwrap_err()
-            .to_string()
-            .contains("differs")
-    );
-    let mut ambiguous = layout.clone();
-    let duplicate = ambiguous.callers[&"parent".into()][0].clone();
-    ambiguous
-        .callers
-        .get_mut(&"parent".into())
-        .unwrap()
-        .push(duplicate);
-    assert!(
-        ambiguous
-            .interfaces()
-            .unwrap_err()
-            .to_string()
-            .contains("duplicate")
-    );
+    assert_eq!(bindings(&first, &registry), bindings(&second, &registry));
     let mut invalid_type = document();
     invalid_type["nodes"][1]["config"]["value"] = false.into();
     let unresolved = mf_compiler::plan_definition(&parse(invalid_type)).unwrap();
     assert!(
-        unresolved
-            .declared_call_layout(&registry)
-            .unwrap_err()
+        mf_compiler::instantiate_compiled(&unresolved, &registry)
+            .err()
+            .unwrap()
             .to_string()
             .contains("token")
     );

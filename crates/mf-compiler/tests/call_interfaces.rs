@@ -1,20 +1,17 @@
 extern crate mfn_core as _;
 use mf_compiler::{FlowBuilder, NodeRegistry};
 use mf_runtime::{
-    CallBinding, CallBindingId, CallInputDefaults, CallInterfaces, CallPortMapping,
-    ExecutionContext, Flow, FlowNode, GeneratedDomainExecutor, GeneratedNodeResult, Inputs,
-    NodeExecution, NodeExecutionError, NodeId, NodeMetadata, NodePortContract, NodePorts,
-    NodeResult, NodeTarget, Outputs, PortSpec, PreparedNode, ResolvedCallBinding, SnapshotRecorder,
-    StreamExecution, StreamOptions, TaskNode, ValueType, WorkflowArguments,
+    CallBindingId, CallInterfaces, ExecutionContext, Flow, FlowNode, GeneratedDomainExecutor,
+    GeneratedNodeResult, Inputs, NodeExecution, NodeExecutionError, NodeId, NodeMetadata,
+    NodePortContract, NodePorts, NodeResult, NodeTarget, Outputs, PortSpec, PreparedNode,
+    ResolvedCallBinding, SnapshotRecorder, StreamExecution, StreamOptions, TaskNode, ValueType,
+    WorkflowArguments,
 };
 use serde_json::{Value, json};
 use snafu::ResultExt;
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 
 fn catalog(entries: &[(&str, &str)]) -> CallInterfaces {
@@ -88,8 +85,39 @@ fn inspector(id: &str, child: Option<Flow>, inputs: Vec<PortSpec>) -> FlowNode {
     )
 }
 
+fn prepare(
+    mut nodes: Vec<FlowNode>,
+    edges: Vec<mf_runtime::EdgeDefinition>,
+    mut order: Vec<mf_runtime::DefinitionId>,
+    outputs: Vec<mf_runtime::WorkflowOutputDefinition>,
+    interfaces: CallInterfaces,
+) -> Result<FlowBuilder, mf_compiler::CallBindingError> {
+    let mut calls = serde_json::Map::new();
+    for caller in interfaces.callers() {
+        let aliases = interfaces
+            .for_caller(caller)
+            .iter()
+            .map(|interface| (interface.name().into(), json!({"target":"unused_tool"})))
+            .collect::<serde_json::Map<_, _>>();
+        calls.insert(caller.to_string(), aliases.into());
+    }
+    if !calls.is_empty() {
+        nodes.push(FlowNode::new(
+            "unused_tool",
+            empty_target(Value::Null).unwrap(),
+        ));
+        order.push("unused_tool".into());
+    }
+    let definition = serde_json::from_value(json!({
+        "version":"2026-10-28", "dependencies":{},
+        "nodes":nodes.iter().map(|node| json!({"id":node.definition_id,"kind":"test.interface_empty"})).collect::<Vec<_>>(),
+        "calls":calls,
+    })).unwrap();
+    FlowBuilder::prepare(nodes, edges, order, outputs)?.with_declared_calls(&definition)
+}
+
 fn single(child: Option<Flow>, interfaces: CallInterfaces) -> Flow {
-    FlowBuilder::prepare(
+    prepare(
         vec![inspector("parent", child, vec![])],
         vec![],
         vec!["parent".into()],
@@ -98,11 +126,10 @@ fn single(child: Option<Flow>, interfaces: CallInterfaces) -> Flow {
             {"name":"child","node":"parent","port":"child"}
         ]))
         .unwrap(),
+        interfaces,
     )
     .unwrap()
     .into_tasks()
-    .unwrap()
-    .with_call_interfaces(interfaces)
     .unwrap()
 }
 
@@ -123,6 +150,13 @@ impl TaskNode for NeverRun {
         panic!("interface preparation must not invoke a target")
     }
 }
+fn empty_target(_: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
+    Ok(PreparedNode::from_parts(
+        NodeExecution::Task(Box::new(NeverRun)),
+        NodeMetadata::default(),
+    ))
+}
+inventory::submit! { mf_runtime::NodeRegistration { kind:"test.interface_empty", factory:mf_runtime::NodeFactory::Plain(empty_target) } }
 fn target_factory(_: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
     Ok(PreparedNode::from_parts(
         NodeExecution::Task(Box::new(NeverRun)),
@@ -141,52 +175,24 @@ inventory::submit! { mf_runtime::NodeRegistration { kind:"test.interface_target"
 #[test]
 fn compiled_catalogs_prepare_all_callers_together_without_advertising_external_inputs() {
     let definition = serde_json::from_value(json!({
-        "version":"2026-10-25", "dependencies":{}, "nodes":[
+        "version":"2026-10-28", "dependencies":{}, "nodes":[
             {"id":"left","kind":"test.interface_inspector"},
             {"id":"right","kind":"test.interface_inspector"},
             {"id":"config","kind":"builtin.constant","config":{"value":"never publish this value"}},
             {"id":"left_tool","kind":"test.interface_target","inputs":{"credential":{"from":{"node":"config","port":"value"}}}},
             {"id":"right_tool","kind":"test.interface_target","inputs":{"credential":{"from":{"node":"config","port":"value"}}}}
+        ], "calls": {
+            "left":{"left_tool":{"target":"left_tool","ports":[{"output":"shared","input":"provided"}]}},
+            "right":{"right_tool":{"target":"right_tool","ports":[{"output":"shared","input":"provided"}]}}
+        }, "outputs":[
+            {"name":"left","node":"left","port":"tools"}, {"name":"right","node":"right","port":"tools"}
         ]
     })).unwrap();
-    let plan = mf_compiler::plan_definition(&definition).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
-    let id = |name| {
-        NodeId::new(
-            plan.definition
-                .nodes
-                .iter()
-                .position(|node| node.id.as_str() == name)
-                .unwrap(),
-        )
-    };
-    let declarations: BTreeMap<_, _> = [("left", "left_tool"), ("right", "right_tool")]
-        .into_iter()
-        .map(|(caller, target)| {
-            (
-                id(caller),
-                vec![
-                    CallBinding::new(
-                        target,
-                        id(target),
-                        vec![CallPortMapping {
-                            output: "shared".into(),
-                            input: "provided".into(),
-                        }],
-                        CallInputDefaults::ExplicitOnly,
-                    )
-                    .unwrap(),
-                ],
-            )
-        })
-        .collect();
-    assert!(
-        plan.resolve_call_bindings(&registry, id("left"), &declarations[&id("left")])
-            .is_err()
-    );
-    let interfaces = plan.call_interfaces(&registry, &declarations).unwrap();
+    let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
+    let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
     for name in ["left", "right"] {
-        let view = &interfaces.for_caller(&name.into())[0];
+        let view = &flow.call_interfaces().for_caller(&name.into())[0];
         assert_eq!(view.outputs()[0].name(), "shared");
         assert!(view.outputs()[0].required());
         let json = serde_json::to_string(view).unwrap();
@@ -194,10 +200,6 @@ fn compiled_catalogs_prepare_all_callers_together_without_advertising_external_i
             assert!(!json.contains(private));
         }
     }
-    let flow = FlowBuilder::prepare(vec![inspector("left", None, vec![]), inspector("right", None, vec![])], vec![], vec!["left".into(),"right".into()],
-        serde_json::from_value(json!([
-            {"name":"left","node":"left","port":"tools"}, {"name":"right","node":"right","port":"tools"}
-        ])).unwrap()).unwrap().into_tasks().unwrap().with_call_interfaces(interfaces).unwrap();
     for limit in [1, 4] {
         let outputs = flow
             .execute_with_options(mf_runtime::RuntimeOptions {
@@ -272,16 +274,13 @@ fn nested_flows_override_inherited_catalogs_and_restore_the_host_scope() {
         .unwrap();
     }
     assert!(
-        FlowBuilder::prepare(
+        prepare(
             vec![inspector("parent", None, vec![])],
             vec![],
             vec!["parent".into()],
-            vec![]
+            vec![],
+            catalog(&[("unknown", "tool")]),
         )
-        .unwrap()
-        .into_tasks()
-        .unwrap()
-        .with_call_interfaces(catalog(&[("unknown", "tool")]))
         .is_err()
     );
 }
@@ -355,7 +354,7 @@ fn stream_messages_and_combined_producers_receive_the_owning_scope() {
             vec![PortSpec::new("trigger", ValueType::String, true)],
         ),
     ];
-    let prepared = FlowBuilder::prepare(
+    let prepared = prepare(
         nodes,
         serde_json::from_value(json!([
             {"from_node":"source","from_output":"item","to_node":"middle","to_input":"trigger"},
@@ -367,15 +366,14 @@ fn stream_messages_and_combined_producers_receive_the_owning_scope() {
             {"name":"tools","node":"leaf","port":"tools"}
         ]))
         .unwrap(),
+        catalog(&[
+            ("source", "source_tool"),
+            ("middle", "middle_tool"),
+            ("leaf", "leaf_tool"),
+        ]),
     )
     .unwrap()
     .into_stream(StreamExecution::default())
-    .unwrap()
-    .with_call_interfaces(catalog(&[
-        ("source", "source_tool"),
-        ("middle", "middle_tool"),
-        ("leaf", "leaf_tool"),
-    ]))
     .unwrap();
     let leaf = prepared
         .plan()
@@ -438,27 +436,31 @@ fn stream_catalogs_reject_non_task_callers_before_starting_sources() {
             }),
         ),
     );
-    let stream = FlowBuilder::prepare(vec![source], vec![], vec!["source".into()], vec![])
-        .unwrap()
-        .into_stream(StreamExecution::default())
-        .unwrap();
-    assert!(matches!(
-        stream.with_call_interfaces(catalog(&[("source", "tool")])),
-        Err(mf_runtime::CallInterfaceError::UnknownCaller { .. })
-    ));
+    assert!(
+        prepare(
+            vec![source],
+            vec![],
+            vec!["source".into()],
+            vec![],
+            catalog(&[("source", "tool")]),
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn isolated_targets_use_their_prepared_scope_without_retaining_it_in_the_host() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    let definition = serde_json::from_value(json!({"version":"2026-10-25","dependencies":{},"nodes":[{"id":"parent","kind":"test.interface_inspector"}]})).unwrap();
+    let definition =
+        serde_json::from_value(json!({"version":"2026-10-28","dependencies":{},"nodes":[
+        {"id":"parent","kind":"test.interface_inspector"},
+        {"id":"unused_tool","kind":"test.interface_empty"}
+    ],"calls":{"parent":{"isolated":{"target":"unused_tool"}}}}))
+        .unwrap();
     let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
     let nodes = mf_compiler::resolve_nodes(&plan.definition, &registry).unwrap();
     let targets = plan.node_targets(&nodes).unwrap();
-    let flow = mf_compiler::instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .with_call_interfaces(catalog(&[("parent", "isolated")]))
-        .unwrap();
+    let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
     let selected = NodeTarget::find(&targets, "parent")
         .unwrap()
         .bind_flow(&flow)
@@ -474,16 +476,15 @@ fn isolated_targets_use_their_prepared_scope_without_retaining_it_in_the_host() 
         .unwrap();
     assert_eq!(output["tools"][0]["name"], json!("isolated"));
     assert!(ctx.call_targets().is_empty());
-    let stream = FlowBuilder::prepare(
+    let stream = prepare(
         vec![inspector("parent", None, vec![])],
         vec![],
         vec!["parent".into()],
         vec![],
+        catalog(&[("parent", "stream_isolated")]),
     )
     .unwrap()
     .into_stream(StreamExecution::default())
-    .unwrap()
-    .with_call_interfaces(catalog(&[("parent", "stream_isolated")]))
     .unwrap();
     let mut record = targets[0].clone();
     record.worker_limit = std::num::NonZeroUsize::new(stream.plan().execution().limits.workers);

@@ -271,17 +271,6 @@ impl Flow {
             }),
         }
     }
-    /// Installs read-only discovery metadata without changing node activation or scheduling.
-    pub fn with_call_interfaces(
-        mut self,
-        interfaces: crate::CallInterfaces,
-    ) -> Result<Self, crate::CallInterfaceError> {
-        interfaces.validate_callers(self.inner.nodes.iter().map(|node| &node.definition_id))?;
-        self.data_mut().call_interfaces = interfaces;
-        self.data_mut().calls = None;
-        Ok(self)
-    }
-
     /// Host-side compiler contracts; node discovery remains limited to `call_targets`.
     pub fn prepared_calls(&self) -> impl Iterator<Item = &crate::PreparedCall> {
         self.inner

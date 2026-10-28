@@ -19,14 +19,11 @@ fn definition() -> WorkflowDefinition {
 }
 
 #[test]
-fn resolved_schemas_are_projected_after_ownership_and_survive_layout_roundtrips() {
+fn resolved_schemas_are_projected_from_the_executable_scope_after_ownership() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition(), &registry).unwrap();
-    let layout = plan.declared_call_layout(&registry).unwrap();
-    let decoded =
-        mf_compiler::CompiledCallLayout::from_json(layout.to_json().unwrap().as_bytes()).unwrap();
-    decoded.verify(&layout).unwrap();
-    let interfaces = layout.interfaces().unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let interfaces = flow.call_interfaces();
     let interface = &interfaces.for_caller(&"parent".into())[0];
     assert_eq!(interface.description(), Some("Find a record"));
     assert_eq!(interface.outputs().len(), 1);
@@ -57,15 +54,7 @@ fn resolved_schemas_are_projected_after_ownership_and_survive_layout_roundtrips(
                 .is_err()
         );
     }
-    let flow = instantiate_compiled(&plan, &registry).unwrap();
-    assert_eq!(
-        flow.call_interfaces().for_caller(&"parent".into()),
-        interfaces.for_caller(&"parent".into())
-    );
     assert_eq!(flow.execute().unwrap()["result"], ValueRef::from("find"));
-    let mut changed = decoded;
-    changed.callers.get_mut(&"parent".into()).unwrap()[0].inputs[0].schema = None;
-    assert!(layout.verify(&changed).is_err());
 }
 
 #[cfg(feature = "codegen")]
