@@ -261,9 +261,11 @@ pub fn describe_definition(
             message: "compiled execution order names an unknown Loop body"
         }
     );
-    let description = WorkflowDescription {
+    let mut description = WorkflowDescription {
         order_edges: order_edges(&definition.order_edges),
-        version: if definition.version.supports_clusters() {
+        version: if definition.has_directed_calls() {
+            WorkflowDescriptionVersion::V2026_10_28
+        } else if definition.version.supports_clusters() {
             WorkflowDescriptionVersion::V2026_10_23
         } else if definition.has_order_edges() {
             WorkflowDescriptionVersion::V2026_10_19
@@ -309,6 +311,17 @@ pub fn describe_definition(
         loop_bodies,
         clusters: clusters(&definition.clusters),
     };
+    let root = LoopBodyDescription {
+        path: vec![],
+        nodes: description.nodes.clone(),
+        execution_order: description.execution_order.clone(),
+        data_edges: description.data_edges.clone(),
+        control_edges: description.control_edges.clone(),
+        order_edges: description.order_edges.clone(),
+        clusters: description.clusters.clone(),
+        call_targets: vec![],
+    };
+    describe_calls(&definition.calls, &root, &mut description.loop_bodies)?;
     description.validate()?;
     Ok(description)
 }
@@ -404,7 +417,7 @@ fn describe_loops(
     for node in nodes {
         let iteration;
         let call;
-        let (nodes, data, controls, successes, body_clusters, source_id, source_kind) =
+        let (nodes, data, controls, successes, body_clusters, body_calls, source_id, source_kind) =
             if let Some(definition) = &node.loop_definition {
                 let body = &definition.body;
                 (
@@ -413,6 +426,7 @@ fn describe_loops(
                     &body.control_edges,
                     &body.order_edges,
                     &body.clusters,
+                    &body.calls,
                     crate::LOOP_SOURCE_ID,
                     crate::LOOP_SOURCE_ID,
                 )
@@ -430,6 +444,7 @@ fn describe_loops(
                     &body.control_edges,
                     &body.order_edges,
                     &body.clusters,
+                    &body.calls,
                     "",
                     "",
                 )
@@ -442,6 +457,7 @@ fn describe_loops(
                     &body.control_edges,
                     &body.order_edges,
                     &body.clusters,
+                    &body.calls,
                     crate::ITERATION_INPUT_ID,
                     crate::ITERATION_INPUT_KIND,
                 )
@@ -454,7 +470,7 @@ fn describe_loops(
             .with_context(|| mf_telemetry::InvalidSnafu {
                 message: format!("missing compiled body execution order at {path:?}"),
             })?;
-        bodies.push(LoopBodyDescription {
+        let physical = LoopBodyDescription {
             call_targets: Vec::new(),
             path: path.clone(),
             nodes: ordered_nodes(
@@ -472,9 +488,42 @@ fn describe_loops(
             order_edges: order_edges(successes),
             execution_order: order.to_vec(),
             clusters: clusters(body_clusters),
-        });
+        };
+        describe_calls(body_calls, &physical, bodies)?;
+        bodies.push(physical);
         describe_loops(nodes, path, orders, bodies, include_iterations)?;
         path.pop();
+    }
+    Ok(())
+}
+
+fn describe_calls(
+    calls: &crate::CallDefinitions,
+    physical: &LoopBodyDescription,
+    bodies: &mut Vec<LoopBodyDescription>,
+) -> Result<(), ContractError> {
+    for (caller, aliases) in calls {
+        let mut template = physical.clone();
+        template.path.push(caller.to_string());
+        template.call_targets = aliases
+            .iter()
+            .enumerate()
+            .map(|(index, (name, call))| {
+                ensure!(
+                    index <= i64::MAX as usize,
+                    mf_telemetry::InvalidSnafu {
+                        message: "too many call bindings"
+                    }
+                );
+                let index = index as i64;
+                Ok(mf_telemetry::description::CallTargetDescription {
+                    binding: mf_telemetry::Count::try_from(index)?,
+                    name: name.clone(),
+                    target: call.target.to_string(),
+                })
+            })
+            .collect::<Result<_, ContractError>>()?;
+        bodies.push(template);
     }
     Ok(())
 }

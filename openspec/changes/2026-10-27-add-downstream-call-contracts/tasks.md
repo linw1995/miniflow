@@ -51,4 +51,5 @@
 
 - [x] Bind prepared calls to isolated execution with shared limits, typed outcomes, and instance serialization.
 - [x] Cover repeated and nested calls, external skips and secrets, capability restoration, lock deadlines, and worker limits.
-- [ ] Install prepared call tables from compiler scheduling, generated runners, and native stream frames.
+- [x] Install prepared call tables and readiness scheduling for finite definitions and nested bodies.
+- [ ] Install prepared call tables from generated runners and native stream frames.

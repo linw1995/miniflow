@@ -280,10 +280,14 @@ impl CompiledWorkflow {
                 nodes: vec![original.nodes[index].clone()],
                 data_edges: Vec::new(), control_edges: Vec::new(),
                 execution_order: vec![id.clone()],
-                loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
+                loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default().into_iter()
+                    .filter(|body| body.path.len() != 1 || body.call_targets.is_empty()).collect(),
                 clusters: Vec::new(),
             };
-            if original.version.supports_clusters() {
+            if description.loop_bodies.iter().any(|body| !body.call_targets.is_empty()) {
+                description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_28;
+                description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
+            } else if original.version.supports_clusters() {
                 description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23;
                 description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
             } else if description.loop_bodies.iter().any(|body| !body.order_edges.is_empty() || body.nodes.iter().any(|node| node.id == mf_runtime::ITERATION_INPUT_ID)) {

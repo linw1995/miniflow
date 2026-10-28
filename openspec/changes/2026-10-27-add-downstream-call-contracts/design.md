@@ -232,7 +232,7 @@ their body nodes own those declarations, avoiding ambiguity with the container's
 
 Finite and stream receivers retain invocation-specific outcomes, support reordered/duplicate evidence,
 and reject a node event claiming a different selected target. TUI navigation reuses templates and
-shows invocation, target, and binding identity. Runtime emission is connected in the subsequent dispatch
+shows invocation, target, and binding identity. Runtime emission is connected through isolated call
 implementation; defining the observation protocol does not activate any tool.
 
 The initial callable targets are terminal Tasks, including suitable terminal Flow wrappers. Tool
@@ -339,12 +339,15 @@ against a freshly prepared layout, including definition identity, types, require
 external sources, and local routes. This is planning evidence, not an executor capability. Public
 interfaces are obtained through projection and omit external configuration values.
 
-This intermediate PR deliberately rejects executable preparation and code generation for any directed
-call definition. It also rejects preparing a nested callable body that would otherwise become an
-ordinary executable subgraph. Thus accepting syntax cannot accidentally run tool nodes as roots.
-The runtime PR must replace these guards with on-demand scheduling and global readiness validation.
-Compiler declarations already reject recursion, unknown endpoints, duplicate caller mappings, and
-targets used as ordinary producers or workflow outputs.
+Finite preparation now installs the executable call table and excludes targets from ordinary domains.
+Readiness edges include every transitive callee's external producers and participate in global cycle
+validation before canonical ordering. They never become caller skip predicates. Domain positions map
+back to the complete canonical order, while target snapshots include transitive input and success-guard
+evidence. Callable targets are omitted from workflow startup input schemas, including targets without
+ordinary input edges. Static Flow and Iteration bodies own separate call tables and templates.
+Generated runners and native stream dispatch remain rejected until their plans carry these contracts.
+Compiler declarations reject recursion, unknown endpoints, duplicate caller mappings, and targets used
+as ordinary producers or workflow outputs.
 
 Deliver the call/output model first, then connection and ownership resolution. Derive caller-visible
 interfaces from those resolved bindings and implement composed runtime invocation against the same

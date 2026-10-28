@@ -350,7 +350,6 @@ impl ExecutionContext {
             .as_ref()
             .map(|body| body.for_call(std::slice::from_ref(target)));
         let mut child = self.fork_body(body);
-        child.remaining_steps = self.remaining_steps.clone();
         child.observation = self.observation.clone();
         child.call_dispatcher = self.call_dispatcher.clone();
         child.call_interfaces = self.call_interfaces.clone();
@@ -851,6 +850,7 @@ impl ExecutionContext {
 
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
+        child.remaining_steps = self.remaining_steps.clone();
         child.cancellation = self.cancellation.clone();
         child.call_sequence = self.call_sequence.clone();
         child.call_deadline = self.call_deadline;
@@ -886,7 +886,6 @@ impl ExecutionContext {
             .as_ref()
             .map(|observation| observation.for_call(nodes));
         let mut child = self.fork_body(body_observation);
-        child.remaining_steps = self.remaining_steps.clone();
         child.observation = self.observation.clone();
         child
             .scope_prefix
@@ -1624,6 +1623,20 @@ mod tests {
             source: error.into(),
         };
         assert!(wrapped.is_terminal_control());
+    }
+
+    #[test]
+    fn nested_bodies_charge_the_parent_step_budget() {
+        let mut context = ExecutionContext {
+            remaining_steps: StepBudget::new(1),
+            ..Default::default()
+        };
+        let child = context.fork_body(None);
+        child.fork_body(None).reserve_step("nested").unwrap();
+        assert!(matches!(
+            context.reserve_step("parent"),
+            Err(WorkflowRunError::StepBudget { .. })
+        ));
     }
 
     struct EmitNode(Outputs);

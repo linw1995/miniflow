@@ -242,8 +242,9 @@ catalog to prepare or execute its nodes.
 `FlowPlan` must already exclude callable targets from ordinary execution domains and arrange the
 callers' external prerequisites. Each `PreparedCall` carries a resolved binding, target identity,
 snapshot visibility, and a prepared success guard. This low-level API does not build or validate a
-workflow dependency graph. Versioned definition execution remains gated until compiler scheduling
-and generated-runner integration install these contracts.
+workflow dependency graph. `compile_definition` and `instantiate_compiled` install these contracts
+for finite definitions, including nested Flow and Iteration bodies. Generated runners and native
+stream dispatch remain gated until their prepared plans carry the same contracts.
 
 During a node invocation, `ExecutionContext::invoke_call` selects a `CallBindingId` and accepts one
 atomic `CallArguments` group. The runtime combines caller-owned values with visible external values,

@@ -10,7 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum CallBindingError {
     #[snafu(transparent)]
     Identity { source: mf_telemetry::ContractError },
-    #[snafu(display("invalid directed-call declaration: {message}"))]
+    #[snafu(
+        display("invalid directed-call declaration: {message}"),
+        visibility(pub)
+    )]
     Definition { message: String },
     #[snafu(transparent)]
     Contract {
@@ -478,6 +481,49 @@ pub fn resolve(
         });
     }
     Ok(resolved)
+}
+
+/// Readiness edges order external producers without changing caller skip semantics.
+pub fn readiness_pairs(
+    definition: &crate::WorkflowDefinition,
+) -> BTreeSet<(DefinitionId, DefinitionId)> {
+    let ordinary: Vec<_> = definition
+        .edges
+        .iter()
+        .map(|edge| (&edge.from_node, &edge.to_node))
+        .chain(
+            definition
+                .control_edges
+                .iter()
+                .map(|edge| (&edge.from_node, &edge.to_node)),
+        )
+        .chain(
+            definition
+                .order_edges
+                .iter()
+                .map(|edge| (&edge.from_node, &edge.to_node)),
+        )
+        .collect();
+    let mut pairs = BTreeSet::new();
+    for (caller, aliases) in &definition.calls {
+        let mut pending: Vec<_> = aliases.values().map(|call| &call.target).collect();
+        let mut visited = BTreeSet::new();
+        while let Some(target) = pending.pop() {
+            if !visited.insert(target) {
+                continue;
+            }
+            pairs.extend(
+                ordinary
+                    .iter()
+                    .filter(|(_, to)| *to == target)
+                    .map(|(from, _)| ((*from).clone(), caller.clone())),
+            );
+            if let Some(nested) = definition.calls.get(target) {
+                pending.extend(nested.values().map(|call| &call.target));
+            }
+        }
+    }
+    pairs
 }
 
 #[cfg(test)]

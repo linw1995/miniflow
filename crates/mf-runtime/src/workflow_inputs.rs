@@ -83,6 +83,17 @@ impl WorkflowInterface {
                     .iter()
                     .map(|edge| edge.to_node.as_str()),
             )
+            .chain(
+                description
+                    .loop_bodies
+                    .iter()
+                    .filter(|body| body.path.len() == 1)
+                    .flat_map(|body| {
+                        body.call_targets
+                            .iter()
+                            .map(|target| target.target.as_str())
+                    }),
+            )
             .collect();
         let roots: BTreeSet<_> = description
             .nodes

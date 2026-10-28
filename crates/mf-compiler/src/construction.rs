@@ -15,6 +15,10 @@ use std::{
 };
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
+    #[snafu(transparent)]
+    CallDispatch {
+        source: mf_runtime::CallDispatchError,
+    },
     #[snafu(display("node `{definition_id}` call outputs: {source}"))]
     CallOutputs {
         definition_id: DefinitionId,
@@ -261,9 +265,142 @@ pub struct FlowBuilder {
     controls: Vec<crate::ControlEdgeDefinition>,
     orders: Vec<crate::OrderEdgeDefinition>,
     input_schema: crate::WorkflowInputSchema,
+    calls: Vec<mf_runtime::PreparedCall>,
+    call_readiness: Vec<(NodeId, NodeId)>,
 }
 
 impl FlowBuilder {
+    /// Binds calls in this definition after ordinary data and success dependencies are prepared.
+    pub fn with_declared_calls(
+        mut self,
+        definition: &crate::WorkflowDefinition,
+    ) -> Result<Self, crate::CallBindingError> {
+        let declarations = crate::call_bindings::declarations(definition)?;
+        if declarations.is_empty() {
+            return Ok(self);
+        }
+        let indices: BTreeMap<_, _> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.definition_id.clone(), NodeId::new(index)))
+            .collect();
+        ensure!(
+            definition.nodes.len() == self.nodes.len()
+                && definition
+                    .nodes
+                    .iter()
+                    .all(|node| indices.contains_key(&node.id)),
+            crate::call_bindings::DefinitionSnafu {
+                message: "call definition does not match the prepared scope"
+            }
+        );
+        let mut resolved = BTreeMap::new();
+        for (caller, bindings) in declarations {
+            let caller = indices[&definition.nodes[caller.index()].id];
+            let bindings = bindings
+                .iter()
+                .map(|binding| {
+                    mf_runtime::CallBinding::new(
+                        binding.name(),
+                        indices[&definition.nodes[binding.target().index()].id],
+                        binding.ports().to_vec(),
+                        binding.defaults(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            resolved.insert(caller, self.resolve_call_bindings(caller, &bindings)?);
+        }
+        let conditions = crate::dependencies::success_conditions(
+            self.execution_order
+                .iter()
+                .zip(&self.dependencies)
+                .map(|(id, dependencies)| {
+                    (
+                        self.nodes[id.index()].definition_id.as_str(),
+                        dependencies
+                            .iter()
+                            .map(crate::FlowDependency::borrowed)
+                            .collect(),
+                    )
+                }),
+        );
+        let node_positions: BTreeMap<_, _> = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (*id, position))
+            .collect();
+        let mut calls = Vec::new();
+        let mut readiness = BTreeSet::new();
+        for bindings in resolved.values() {
+            for binding in bindings {
+                let mut pending = vec![binding.target];
+                let mut targets = BTreeSet::new();
+                let mut sources: BTreeSet<_> = binding.prerequisites.iter().copied().collect();
+                while let Some(target) = pending.pop() {
+                    if !targets.insert(target) {
+                        continue;
+                    }
+                    if let Some(nested) = resolved.get(&target) {
+                        for binding in nested {
+                            sources.extend(binding.prerequisites.iter().copied());
+                            pending.push(binding.target);
+                        }
+                    }
+                }
+                for source in &sources {
+                    ensure!(
+                        node_positions[source] < node_positions[&binding.caller],
+                        crate::call_bindings::DefinitionSnafu {
+                            message: "prepared order must place call prerequisites before the caller"
+                        }
+                    );
+                    readiness.insert((*source, binding.caller));
+                }
+                let mut pending: Vec<_> = sources.iter().copied().collect();
+                while let Some(source) = pending.pop() {
+                    for dependency in &self.dependencies[node_positions[&source]] {
+                        let ancestor =
+                            indices[&DefinitionId::from(dependency.borrowed().source_node())];
+                        if sources.insert(ancestor) {
+                            pending.push(ancestor);
+                        }
+                    }
+                }
+                let visibility = sources
+                    .into_iter()
+                    .flat_map(|id| self.nodes[id.index()].output_keys().iter().cloned())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let target = &self.nodes[binding.target.index()].definition_id;
+                let kind = &definition
+                    .nodes
+                    .iter()
+                    .find(|node| &node.id == target)
+                    .expect("prepared definition node")
+                    .kind;
+                calls.push(mf_runtime::PreparedCall {
+                    target: mf_runtime::NodeIdentity {
+                        id: target.to_string(),
+                        kind: kind.clone(),
+                        path: vec![],
+                    },
+                    binding: binding.clone(),
+                    visibility: mf_runtime::OutputVisibility::from_sorted(visibility),
+                    guard: std::sync::Arc::from(crate::dependencies::bind_guards(
+                        target.to_string(),
+                        conditions[node_positions[&binding.target]].clone(),
+                    )),
+                });
+            }
+        }
+        self.calls = calls;
+        self.call_readiness = readiness.into_iter().collect();
+        Ok(self)
+    }
+
     /// Projects caller-owned parameters from resolved bindings into one scope's discovery catalog.
     pub fn call_interfaces(
         &self,
@@ -406,12 +543,19 @@ impl FlowBuilder {
             },
             data.input_schema,
         );
+        let flow = flow.with_prepared_calls(data.calls)?;
         Ok(crate::dependencies::bind_task_guards(flow, guards))
     }
     pub fn into_stream(
         self,
         execution: crate::StreamExecution,
     ) -> Result<crate::PreparedStream, StreamBuildError> {
+        ensure!(
+            self.calls.is_empty(),
+            InvalidPlanSnafu {
+                message: "native streaming directed calls are not yet supported"
+            }
+        );
         let data = self;
         let outputs = data
             .outputs
@@ -454,11 +598,14 @@ pub fn into_task(node: FlowNode) -> Result<mf_runtime::TaskFlowNode, FlowBuildEr
 }
 impl FlowBuilder {
     pub fn with_workflow_inputs(mut self) -> Result<Self, crate::WorkflowInputError> {
+        let targets: BTreeSet<_> = self.calls.iter().map(|call| call.binding.target).collect();
         let initial: BTreeSet<_> = self
             .execution_order
             .iter()
             .enumerate()
-            .filter(|(position, _)| self.dependencies[*position].is_empty())
+            .filter(|(position, id)| {
+                self.dependencies[*position].is_empty() && !targets.contains(id)
+            })
             .map(|(_, id)| id.index())
             .collect();
         let input_schema = workflow_input_schema(
@@ -678,6 +825,8 @@ impl FlowBuilder {
             controls: Vec::new(),
             orders: Vec::new(),
             input_schema: crate::WorkflowInputSchema::default(),
+            calls: Vec::new(),
+            call_readiness: Vec::new(),
         };
         flow.prepare_execution();
         Ok(flow)
@@ -820,28 +969,60 @@ impl FlowBuilder {
     }
 
     fn build_execution_domains(&self) -> ExecutionDomains {
-        let positions: BTreeMap<_, _> = self
+        let targets: BTreeSet<_> = self.calls.iter().map(|call| call.binding.target).collect();
+        let scheduled: Vec<_> = self
             .execution_order
             .iter()
             .enumerate()
-            .map(|(position, node_id)| {
-                (self.nodes[node_id.index()].definition_id.as_str(), position)
-            })
+            .filter(|(_, id)| !targets.contains(id))
+            .map(|(position, id)| (position, *id))
+            .collect();
+        let positions: BTreeMap<_, _> = scheduled
+            .iter()
+            .enumerate()
+            .map(|(local, (_, id))| (self.nodes[id.index()].definition_id.as_str(), local))
             .collect();
         let mut edges = Vec::new();
-        for (target, dependencies) in self.dependencies.iter().enumerate() {
-            for dependency in dependencies.iter() {
+        for (local, (position, _)) in scheduled.iter().enumerate() {
+            for dependency in &self.dependencies[*position] {
                 if let Some(&source) = positions.get(dependency.borrowed().source_node()) {
-                    edges.push((source, target));
+                    edges.push((source, local));
                 }
             }
         }
-        let domains = partition_execution_domains(
-            &self.execution_order,
-            &edges,
-            &vec![false; self.execution_order.len()],
-        );
-        bind_domain_snapshots(domains, &self.nodes, |_| None)
+        for (source, target) in &self.call_readiness {
+            if let (Some(&source), Some(&target)) = (
+                positions.get(self.nodes[source.index()].definition_id.as_str()),
+                positions.get(self.nodes[target.index()].definition_id.as_str()),
+            ) {
+                edges.push((source, target));
+            }
+        }
+        let order: Vec<_> = scheduled.iter().map(|(_, id)| *id).collect();
+        let domains = partition_execution_domains(&order, &edges, &vec![false; order.len()]);
+        let ancestors = (0..domains.len())
+            .map(|id| domains.ancestor_domains(id).to_vec().into())
+            .collect::<Vec<_>>();
+        let remapped = domains
+            .domains()
+            .iter()
+            .cloned()
+            .map(|mut domain| {
+                domain.positions = domain
+                    .positions
+                    .iter()
+                    .map(|position| scheduled[*position].0)
+                    .collect::<Vec<_>>()
+                    .into();
+                domain.first_position = scheduled[domain.first_position].0;
+                domain
+            })
+            .collect::<Vec<_>>();
+        bind_domain_snapshots(
+            ExecutionDomains::from_parts(remapped.into(), ancestors.into()),
+            &self.nodes,
+            |_| None,
+        )
     }
 }
 #[derive(Debug, Snafu)]

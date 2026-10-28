@@ -161,22 +161,18 @@ fn planning_rejects_unknown_endpoints_mixed_activation_and_recursive_calls() {
 }
 
 #[test]
-fn executable_entry_points_fail_closed_before_directed_dispatch_exists() {
+fn finite_execution_prepares_calls_while_unintegrated_backends_fail_closed() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = mf_compiler::compile_definition(&parse(document()), &registry).unwrap();
-    assert!(matches!(
-        mf_compiler::instantiate_compiled(&plan, &registry),
-        Err(WorkflowCompileError::DirectedCallExecution)
-    ));
+    let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
+    assert!(!flow.call_interfaces().is_empty());
+    assert!(!flow.input_schema().inputs.contains_key("tool"));
     assert!(matches!(
         mf_compiler::instantiate_stream(&plan, &registry),
         Err(WorkflowCompileError::DirectedCallExecution)
     ));
-    assert!(matches!(
-        mf_compiler::resolve_nodes(&plan.definition, &registry),
-        Err(WorkflowCompileError::DirectedCallExecution)
-    ));
-    assert!(plan.manifest(&registry).is_err());
+    assert!(mf_compiler::resolve_nodes(&plan.definition, &registry).is_ok());
+    assert!(plan.manifest(&registry).is_ok());
     #[cfg(feature = "codegen")]
     {
         assert!(plan.generate_artifacts().is_err());
@@ -188,7 +184,7 @@ fn executable_entry_points_fail_closed_before_directed_dispatch_exists() {
 }
 
 #[test]
-fn nested_calls_roundtrip_without_losing_scope_or_enabling_execution() {
+fn nested_calls_roundtrip_and_prepare_in_their_own_scope() {
     let mut value = json!({"version":"2026-10-28","dependencies":{},"nodes":[
         {"id":"repeat","kind":"workflow.loop","loop":{"max_iterations":1,"variables":[{"name":"count","type":"int"}],
             "body":{"nodes":[{"id":"parent","kind":"test.call_definition_parent"},{"id":"tool","kind":"builtin.identity"}],
@@ -211,8 +207,8 @@ fn nested_calls_roundtrip_without_losing_scope_or_enabling_execution() {
         serde_json::from_str(&serde_json::to_string(&plan.definition).unwrap()).unwrap();
     assert!(roundtrip.has_directed_calls());
     let registry = NodeRegistry::from_inventory().unwrap();
-    assert!(mf_compiler::instantiate_compiled(&plan, &registry).is_err());
-    assert!(mf_compiler::compile_definition(&definition, &registry).is_err());
+    assert!(mf_compiler::instantiate_compiled(&plan, &registry).is_ok());
+    assert!(mf_compiler::compile_definition(&definition, &registry).is_ok());
     value["version"] = "2026-10-25".into();
     assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
 }
