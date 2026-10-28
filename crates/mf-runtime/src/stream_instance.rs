@@ -325,6 +325,8 @@ struct Completion {
 }
 
 struct State {
+    startup_snapshot: crate::ExecutionOutputs,
+    startup_completed: BTreeSet<usize>,
     output: Option<StreamOutput>,
     delivered: Option<usize>,
     delivery_pending: bool,
@@ -485,8 +487,7 @@ fn run_producer(
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
 ) {
-    job.context
-        .set_call_interfaces(plan.call_interfaces().clone());
+    plan.install_call_scope(&mut job.context);
     let index = plan.execution_domain(job.execution_domain).nodes[0].index();
     let _span = job.callback.as_ref().map(StreamCallback::enter);
     let mut sink = ProducerEmitter {
@@ -788,8 +789,11 @@ impl PreparedStream {
             })
             .collect();
         let plan = Arc::new(prepared);
+        plan.initialize_calls();
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
+                startup_snapshot: Default::default(),
+                startup_completed: BTreeSet::new(),
                 output: None,
                 delivered: None,
                 delivery_pending: false,
@@ -823,6 +827,7 @@ impl PreparedStream {
         let workers = start_workers(&plan, runtime_options)?;
         if let Some(frame) = shared.state.lock().unwrap().domains[0].frame.as_mut() {
             frame.context.set_worker_handle(workers.handle());
+            plan.install_call_scope(&mut frame.context);
         }
         let coordinator = thread::Builder::new()
             .name("workflow-stream".into())
@@ -1061,7 +1066,7 @@ fn coordinate(
                 }
                 guard.failure.get_or_insert(error);
             }
-            if guard.failure.is_none()
+            let startup_snapshot = if guard.failure.is_none()
                 && !completion.detached
                 && let Some(frame) = guard.domains[message_domain].frame.as_mut()
             {
@@ -1076,6 +1081,17 @@ fn coordinate(
                     plan.message_schedule(message_domain),
                     completion.execution_domain,
                 );
+                (message_domain == 0 && plan.has_startup_dependencies()).then(|| {
+                    frame
+                        .context
+                        .capture_visible_outputs(&plan.program().startup_visibility)
+                })
+            } else {
+                None
+            };
+            if let Some(snapshot) = startup_snapshot {
+                guard.startup_snapshot = snapshot;
+                guard.startup_completed.insert(completion.execution_domain);
             }
         }
         if let Err(failure) = check_failure(&mut guard, shared) {
@@ -1179,7 +1195,12 @@ fn tick<'a>(
         }
     }
     for domain in 1..guard.domains.len() {
-        if guard.domains[domain].occupied {
+        if guard.domains[domain].occupied
+            || plan.program().messages[domain]
+                .startup_dependencies
+                .iter()
+                .any(|dependency| !guard.startup_completed.contains(dependency))
+        {
             continue;
         }
         let source = plan.program().messages[domain]
@@ -1209,6 +1230,11 @@ fn tick<'a>(
         context.set_cancellation(shared.cancellation.clone());
         context.configure_worker_limit(shared.worker_limit);
         context.set_worker_handle(workers.handle());
+        plan.install_call_scope(&mut context);
+        context.import_visible_outputs(
+            &guard.startup_snapshot,
+            &plan.program().messages[domain].startup_visibility,
+        );
         if let Some(observation) = &shared.observation {
             context.set_frame_observation(observation.frame(stream_message(queued.message)));
         }
@@ -1897,6 +1923,8 @@ mod tests {
                     local: local.into_boxed_slice(),
                 };
                 crate::StreamMessageProgram {
+                    startup_dependencies: vec![].into_boxed_slice(),
+                    startup_visibility: crate::OutputVisibility::Borrowed(&[]),
                     source,
                     schedule,
                     select_outputs: selected.contains(&message).then(|| {
@@ -1950,6 +1978,7 @@ mod tests {
             })
             .collect();
         crate::StreamProgram {
+            startup_visibility: crate::OutputVisibility::Borrowed(&[]),
             execution_domains,
             messages,
             emissions,

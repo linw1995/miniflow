@@ -404,9 +404,6 @@ impl CompiledWorkflow {
     /// Generate a self-contained module that prepares nodes from the host registry.
     #[cfg(feature = "codegen")]
     pub fn generate_embedded_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-        if self.definition.execution.is_some() {
-            crate::compiler::require_no_directed_calls(&self.definition)?;
-        }
         ensure!(
             crate::structural_order(&self.definition)? == self.execution_order,
             InvalidExecutionOrderSnafu
@@ -466,9 +463,6 @@ impl CompiledWorkflow {
         &self,
         include_helpers: bool,
     ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-        if self.definition.execution.is_some() {
-            crate::compiler::require_no_directed_calls(&self.definition)?;
-        }
         if self.definition.execution.is_some() {
             return generate_stream_artifacts(self);
         }
@@ -681,6 +675,12 @@ fn generate_stream_artifacts(
         &serde_json::to_string(definition.execution.as_ref().unwrap()).context(SerializeSnafu)?,
         Span::call_site(),
     );
+    let calls = if definition.calls.is_empty() {
+        quote! { prepared }
+    } else {
+        let identity = call_scope_identity(definition, order)?;
+        quote! { bind_calls_stream(prepared, #identity)? }
+    };
     let generated = quote! {
         include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
 
@@ -699,7 +699,7 @@ fn generate_stream_artifacts(
             let prepared = mf_runtime::PreparedStream::from_plan(
                 execution, nodes, stream_program(), input_schema,
             );
-            Ok(bind_stream_guards(prepared))
+            Ok(bind_stream_guards(#calls))
         }
     };
     let syntax: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
@@ -1117,9 +1117,6 @@ impl CompiledWorkflow {
         registry: &mf_runtime::NodeRegistry,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
-        if self.definition.execution.is_some() {
-            crate::compiler::require_no_directed_calls(&self.definition)?;
-        }
         let mut body_layouts = BTreeMap::new();
         let (nodes, order) = crate::compiler::prepare_definition_with_layouts(
             &self.definition,
@@ -1166,7 +1163,6 @@ impl CompiledWorkflow {
         let mut layouts = Vec::new();
         let mut typed_plan = crate::TypedPlan::default();
         if let Some(execution) = &self.definition.execution {
-            crate::compiler::require_no_directed_calls(&self.definition)?;
             typed_plan.connections = self
                 .definition
                 .edges
@@ -1186,6 +1182,14 @@ impl CompiledWorkflow {
             let prepared = flow
                 .into_stream(execution.clone())
                 .map_err(crate::WorkflowBuildError::from)?;
+            let calls = crate::construction::PreparedScopeLayout::capture_stream(prepared.plan());
+            layouts.push(call_scope_tokens(
+                &self.definition,
+                &order,
+                "stream",
+                &calls,
+                true,
+            )?);
             let metadata_checks = prepared.plan().nodes().iter().enumerate().map(|(index, node)| {
                 let id = LitStr::new(node.definition_id.as_str(), Span::call_site());
                 let expected = LitStr::new(
@@ -1228,7 +1232,13 @@ impl CompiledWorkflow {
         } else {
             let flow = flow.into_tasks().map_err(crate::WorkflowBuildError::from)?;
             let calls = crate::construction::PreparedScopeLayout::capture(&flow);
-            layouts.push(call_scope_tokens(&self.definition, &order, "root", &calls)?);
+            layouts.push(call_scope_tokens(
+                &self.definition,
+                &order,
+                "root",
+                &calls,
+                false,
+            )?);
             typed_plan = crate::plan_typed_segments(&flow, standard, true);
             if standard {
                 layouts.push(typed_preparation_tokens(self, &flow, &typed_plan)?);
@@ -1631,10 +1641,21 @@ fn call_scope_tokens(
     order: &[DefinitionId],
     scope: &str,
     layout: &crate::construction::PreparedScopeLayout,
+    stream: bool,
 ) -> Result<TokenStream, PlanError> {
     if layout.calls.is_empty() {
         return Ok(quote! {});
     }
+    let executor = if stream {
+        quote! { mf_runtime::PreparedStream }
+    } else {
+        quote! { mf_runtime::Flow }
+    };
+    let nodes = if stream {
+        quote! { flow.plan().nodes() }
+    } else {
+        quote! { flow.nodes() }
+    };
     let name = format_ident!("bind_calls_{scope}");
     let identity = call_scope_identity(definition, order)?;
     let checks = layout.metadata.iter().enumerate().map(|(index, metadata)| {
@@ -1644,7 +1665,7 @@ fn call_scope_tokens(
             let expected = serde_json::from_str(#expected).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
                 definition_id: mf_runtime::DefinitionId::from(#id),
             })?;
-            mf_runtime::verify_generated_metadata(&flow.nodes()[#index].metadata, &expected)
+            mf_runtime::verify_generated_metadata(&#nodes[#index].metadata, &expected)
                 .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: mf_runtime::DefinitionId::from(#id) })?;
         })
     }).collect::<Result<Vec<_>, PlanError>>()?;
@@ -1668,7 +1689,7 @@ fn call_scope_tokens(
         } })
     }).collect::<Result<Vec<_>, PlanError>>()?;
     Ok(quote! {
-        pub fn #name(flow: mf_runtime::Flow, identity: &str) -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
+        pub fn #name(flow: #executor, identity: &str) -> Result<#executor, mf_compiler::WorkflowBuildError> {
             use snafu::ResultExt as _;
             snafu::ensure!(identity == #identity, mf_compiler::WorkflowInvalidDefinitionSnafu { definition_id: #scope, message: "generated call scope identity differs from the frozen layout" });
             #(#checks)*
@@ -1773,7 +1794,13 @@ fn collect_body_layouts(
             &body_scope,
             &layout.domains,
         ));
-        layouts.push(call_scope_tokens(&body, &body_order, &body_scope, layout)?);
+        layouts.push(call_scope_tokens(
+            &body,
+            &body_order,
+            &body_scope,
+            layout,
+            false,
+        )?);
         collect_body_layouts(&body, &body_order, &body_scope, path, body_layouts, layouts)?;
         path.pop();
     }
@@ -2012,17 +2039,20 @@ fn stream_program_tokens(
             });
             quote! { Some(std::sync::Arc::new(#name) as std::sync::Arc<mf_runtime::StreamOutputSelector>) }
         } else { quote! { None } };
-        quote! { mf_runtime::StreamMessageProgram {
+        let startup_dependencies = program.startup_dependencies.iter();
+        let startup_visibility = program.startup_visibility.keys();
+        quote! { mf_runtime::StreamMessageProgram { startup_dependencies: vec![#(#startup_dependencies),*].into_boxed_slice(), startup_visibility: mf_runtime::OutputVisibility::Borrowed(&[#(#startup_visibility),*]),
             source: #source,
             schedule: mf_runtime::MessageSchedule { domains: vec![#(#domains),*].into_boxed_slice(), local: vec![#(#local),*].into_boxed_slice(), initial_deps: vec![#(#initial),*].into_boxed_slice(), successors: vec![#(#successors),*].into_boxed_slice() },
             select_outputs: #select,
         } }
     }).collect();
+    let startup_capture = plan.program().startup_visibility.keys();
     quote! {
         #(#functions)*
         static STREAM_EXECUTION_DOMAINS: mf_runtime::ExecutionDomains = #executions;
         fn stream_program() -> mf_runtime::StreamProgram {
-            mf_runtime::StreamProgram { execution_domains: STREAM_EXECUTION_DOMAINS.clone(), messages: vec![#(#messages),*], emissions: vec![#(#emissions),*], inputs: vec![#(#inputs),*] }
+            mf_runtime::StreamProgram { startup_visibility: mf_runtime::OutputVisibility::Borrowed(&[#(#startup_capture),*]), execution_domains: STREAM_EXECUTION_DOMAINS.clone(), messages: vec![#(#messages),*], emissions: vec![#(#emissions),*], inputs: vec![#(#inputs),*] }
         }
     }
 }

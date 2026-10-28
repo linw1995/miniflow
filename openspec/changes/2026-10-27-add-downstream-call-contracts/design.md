@@ -70,27 +70,26 @@ target contract and sensitivity, with an `Output`, `Default`, `External`, or `Om
 outputs retain their source contract as well. Runtime `FlowDependency` records preserve external data
 and output-control dependencies; success dependencies and direct prerequisite node indexes are stored
 separately. The compiler reuses ordinary type compatibility and exclusive-branch proofs, and rejects
-waits on the caller or another target in the same callable set. These prerequisites are recorded, not
-yet inserted into a running scheduler.
+waits on the caller or another target in the same callable set. Resolution records prerequisites;
+executable preparation lowers them into readiness without adding caller skip predicates.
 
 `bind_arguments` validates the two caller namespaces and maps them to target input names. External
 inputs cannot be overridden, and failed validation returns no partial map. Optional omissions, nullable
 values, lossless numeric checks, shared values, and sensitivity retain existing runtime semantics.
 Source requiredness applies within the selected group; a value mapped to multiple inputs must satisfy
 all destination contracts. The method returns only caller-owned inputs, leaving external resolution
-and invocation activation to the subsequent runtime phase.
+and invocation activation to the runtime.
 
-The initial resolver accepts ordinary terminal Task targets. It rejects external context references,
-stdin, and startup environment/default bindings until invocation-scope support can preserve them.
-TaskStream callers and terminal producer values are supported, while stream emissions are rejected
-as external values. These restrictions fail during planning rather than silently dropping resources
+The resolver accepts terminal Task and TaskStream targets. It rejects unbound context references,
+stdin, and direct startup environment/default bindings. A callable Flow can own scoped environment
+or default bindings. TaskStream callers and terminal producer values are supported, while stream
+emissions are rejected as external values. Called TaskStream emissions are validated but disconnected. These restrictions fail during planning rather than silently dropping resources
 or reading an unscoped latest value. Input sensitivity metadata is supported independently of startup
 environment/default bindings.
 
-The returned records are compiler/runtime planning data, not the future Parent-facing interface view.
-Versioned JSON call syntax, executable plan integration, recursive call-graph validation across callers,
-and generated call-binding tables remain deferred. Accepting runnable call syntax before on-demand
-activation exists would incorrectly execute targets as ordinary roots.
+Resolved bindings remain private compiler/runtime planning data. Parent-facing interfaces are derived
+from those records. Versioned declarations, recursive call-graph checks, executable scheduling, and
+generated binding tables reuse the same ownership resolution.
 
 Resolve explicit port bindings before considering node-level invocation connections:
 
@@ -235,7 +234,7 @@ and reject a node event claiming a different selected target. TUI navigation reu
 shows invocation, target, and binding identity. Runtime emission is connected through isolated call
 implementation; defining the observation protocol does not activate any tool.
 
-The initial callable targets are terminal Tasks, including suitable terminal Flow wrappers. Tool
+Callable targets provide a terminal task contract, including TaskStream nodes and suitable Flow wrappers. Tool
 instances are activated on demand and excluded from ordinary root activation. Reject an instance that
 mixes ordinary DAG activation and callable activation in the initial implementation.
 
@@ -350,7 +349,13 @@ Bindings use generated node positions, including nested scopes whose definition 
 compares complete provider metadata and the generated scope fingerprint before enabling dispatch; it
 neither rebuilds adjacency nor sorts the graph. Typed transfer paths are disabled in call-bearing scopes
 with a `directed_call` fallback, preserving their external snapshots and semantic guard bodies.
-Native stream dispatch remains rejected until its frame-owned plans carry these contracts.
+Native plans retain ordinary message ownership. Calls may read same-frame producers and pure initial
+configuration chains; they reject joins with other message owners. Per-message startup prerequisites
+wait only for required initial execution domains, then import a fixed visibility set. This preserves
+backpressure progress without waiting for an entire startup frame that may contain an active producer.
+Configuration ancestry involving connected streaming producers is rejected to prevent terminal-result
+wait cycles. Native frames share call identities and retain separate frame budgets; nested work shares
+its frame budget. The same call-table executor handles finite and streaming requests.
 Compiler declarations reject recursion, unknown endpoints, duplicate caller mappings, and targets used
 as ordinary producers or workflow outputs.
 

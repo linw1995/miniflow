@@ -334,8 +334,9 @@ configuration, literal derivation values, or executor handles.
 
 Ordinary data connections SHALL retain existing fan-out and dependency behavior. Callable invocation
 SHALL require an explicit callable declaration. Its port mappings SHALL be grouped atomically without
-implicitly enabling node-level default binding. Initial callable targets SHALL use on-demand terminal
-Task execution and MUST NOT also participate in ordinary DAG activation as the same instance.
+implicitly enabling node-level default binding. Callable targets SHALL use an on-demand terminal
+task contract and MUST NOT also participate in ordinary DAG activation as the same instance.
+TaskStream targets SHALL keep incremental emissions disconnected from ordinary channels.
 
 #### Scenario: Leave ordinary fan-out unchanged
 
@@ -413,3 +414,35 @@ prepared target instance and reject recursive callable dependencies.
 
 - **WHEN** the caller is cancelled while a tool invocation is active
 - **THEN** the child observes the inherited cancellation and cannot escape the caller's execution budget
+
+### Requirement: Preserve native message ownership during calls
+
+Native calls SHALL compose their caller frame's values with a fixed snapshot of eligible initial
+configuration. Ordinary edges MUST retain their message ownership rules. Preparation MUST reject
+call prerequisites from another noninitial message and initial prerequisites waiting on a connected
+streaming producer. Each message SHALL wait only for its required initial execution domains; initial
+skip evidence MUST remain a selected-call outcome rather than suppressing the caller.
+
+#### Scenario: Make progress while a source is backpressured
+
+- **WHEN** a startup TaskStream source is awaiting consumers and an independent configuration Task completes
+- **THEN** messages requiring that configuration can execute before the source's terminal result exists
+- **AND** their imported snapshot contains only the selected initial prerequisite evidence
+
+#### Scenario: Preserve frame-local arguments
+
+- **WHEN** successive messages provide different query values and reuse one initial configuration
+- **THEN** each call observes its own message's query and the captured configuration
+- **AND** no unscoped latest-value cache joins separate messages
+
+#### Scenario: Correlate concurrent native calls
+
+- **WHEN** callers from different message owners invoke the same prepared target
+- **THEN** invocations have distinct identities and retain their message attribution
+- **AND** calls share the target's serialized instance while nested work shares its frame budget
+
+#### Scenario: Generate the same startup prerequisites
+
+- **WHEN** a native workflow is lowered into a standalone runner
+- **THEN** startup prerequisites, visibility, call bindings, and success guards are frozen at build time
+- **AND** startup checks scope identity and provider metadata before enabling dispatch

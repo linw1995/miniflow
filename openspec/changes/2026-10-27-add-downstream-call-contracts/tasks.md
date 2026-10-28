@@ -21,12 +21,12 @@
 
 ## 2. Composed runtime invocation
 
-- [ ] 2.1 Separate on-demand targets from ordinary root activation and reject mixed activation modes.
-- [ ] 2.2 Resolve external prerequisites and reject invocation dependency cycles before execution.
-- [ ] 2.3 Compose atomic caller arguments with scoped external inputs and isolate each invocation's results.
-- [ ] 2.4 Preserve shared values, sensitivity, typed errors, skips, cancellation, deadlines, and execution budgets.
-- [ ] 2.5 Serialize calls to each prepared tool instance and preserve progress with one shared worker.
-- [ ] 2.6 Record stable caller, target, binding, and invocation identities for observation and snapshots.
+- [x] 2.1 Separate on-demand targets from ordinary root activation and reject mixed activation modes.
+- [x] 2.2 Resolve external prerequisites and reject invocation dependency cycles before execution.
+- [x] 2.3 Compose atomic caller arguments with scoped external inputs and isolate each invocation's results.
+- [x] 2.4 Preserve shared values, sensitivity, typed errors, skips, cancellation, deadlines, and execution budgets.
+- [x] 2.5 Serialize calls to each prepared tool instance and preserve progress with one shared worker.
+- [x] 2.6 Record stable caller, target, binding, and invocation identities for observation and snapshots.
 - [x] 2.7 Define and validate dynamic invocation scope identities and receiver/TUI support independently of dispatch.
 - [x] 2.8 Add thread-bound reservations and inline nested worker execution for serialized calls.
 
@@ -41,10 +41,10 @@
 ## 4. Verification and documentation
 
 - [x] 4.1 Cover explicit-only, default-only, and mixed bindings, including externally supplied credentials.
-- [ ] 4.2 Cover required omissions, optional omission versus null, duplicate sources, and external-source skips.
-- [ ] 4.3 Verify invocation correlation, repeated calls, nested scope restoration, and unselected tool behavior.
-- [ ] 4.4 Compare dynamic and generated behavior, including a TaskStream caller and worker-limit-one execution.
-- [ ] 4.5 Document eager external producers versus lazy per-call configuration inside a callable Flow.
+- [x] 4.2 Cover required omissions, optional omission versus null, duplicate sources, and external-source skips.
+- [x] 4.3 Verify invocation correlation, repeated calls, nested scope restoration, and unselected tool behavior.
+- [x] 4.4 Compare dynamic and generated behavior, including a TaskStream caller and worker-limit-one execution.
+- [x] 4.5 Document eager external producers versus lazy per-call configuration inside a callable Flow.
 - [ ] 4.6 Run affected tests, repository validation, and specification checks for each implementation phase.
 
 ## Runtime prerequisite delivery
@@ -53,4 +53,4 @@
 - [x] Cover repeated and nested calls, external skips and secrets, capability restoration, lock deadlines, and worker limits.
 - [x] Install prepared call tables and readiness scheduling for finite definitions and nested bodies.
 - [x] Install frozen call tables in generated finite runners with scope identity and full metadata drift checks.
-- [ ] Install prepared call tables in native stream frames.
+- [x] Install prepared call tables in native stream frames and generated native runners.

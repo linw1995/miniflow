@@ -1,9 +1,13 @@
 use crate::{
-    CallArguments, CallBindingId, CallId, CallResponse, DefinitionId, ExecutionContext,
+    CallArguments, CallBindingId, CallId, CallResponse, DefinitionId, ExecutionContext, NodeId,
     OutputVisibility, ResolvedCallBinding, SkipCause, WorkflowRunError,
 };
 use snafu::Snafu;
-use std::{collections::BTreeSet, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Instant,
+};
 
 /// A compiler-bound success prerequisite, evaluated against the invocation's input snapshot.
 pub type CallGuard =
@@ -70,4 +74,198 @@ pub trait CallDispatcher: Send + Sync {
         context: &mut ExecutionContext,
         deadline: Option<Instant>,
     ) -> Result<CallResponse, CallDispatchError>;
+}
+
+struct CallInstance {
+    lock: std::sync::Mutex<()>,
+    resource: crate::WorkerResource,
+}
+
+/// Shared finite and streaming bindings; executors remain owned by their enclosing plan.
+pub struct CallTable {
+    callers: BTreeMap<crate::DefinitionId, Vec<crate::PreparedCall>>,
+    instances: BTreeMap<NodeId, CallInstance>,
+    interfaces: crate::CallInterfaces,
+}
+
+impl CallTable {
+    pub fn interfaces(&self) -> &crate::CallInterfaces {
+        &self.interfaces
+    }
+
+    pub fn prepared_calls(&self) -> impl Iterator<Item = &crate::PreparedCall> {
+        self.callers.values().flatten()
+    }
+
+    pub fn new<N>(
+        nodes: &[crate::FlowNode<N>],
+        domains: &crate::ExecutionDomains,
+        calls: Vec<crate::PreparedCall>,
+    ) -> Result<Option<Self>, crate::CallDispatchError> {
+        use crate::invocation::InvalidPlanSnafu;
+        use snafu::{OptionExt, ensure};
+        if calls.is_empty() {
+            return Ok(None);
+        }
+        let mut callers: BTreeMap<crate::DefinitionId, Vec<crate::PreparedCall>> = BTreeMap::new();
+        let mut instances = BTreeMap::new();
+        let scheduled: BTreeSet<_> = domains
+            .domains()
+            .iter()
+            .flat_map(|domain| domain.nodes.iter().copied())
+            .collect();
+        for call in calls {
+            let caller = nodes
+                .get(call.binding.caller.index())
+                .context(InvalidPlanSnafu {
+                    message: "unknown caller",
+                })?;
+            let target = nodes
+                .get(call.binding.target.index())
+                .context(InvalidPlanSnafu {
+                    message: "unknown target",
+                })?;
+            ensure!(
+                target.definition_id.as_str() == call.target.id,
+                InvalidPlanSnafu {
+                    message: "target identity mismatch"
+                }
+            );
+            ensure!(
+                !scheduled.contains(&call.binding.target),
+                InvalidPlanSnafu {
+                    message: "call target remains in ordinary execution domains"
+                }
+            );
+            ensure!(
+                !call.binding.inputs.iter().any(|input| {
+                    matches!(
+                        input.source,
+                        crate::CallInputSource::Output(_) | crate::CallInputSource::Default
+                    ) && call.binding.dependencies.iter().any(|dependency| {
+                        dependency.input.as_deref() == Some(input.port.name.as_ref())
+                    })
+                }),
+                InvalidPlanSnafu {
+                    message: "caller and external inputs overlap"
+                }
+            );
+            instances
+                .entry(call.binding.target)
+                .or_insert_with(|| CallInstance {
+                    lock: std::sync::Mutex::new(()),
+                    resource: crate::WorkerResource::default(),
+                });
+            let bindings = callers.entry(caller.definition_id.clone()).or_default();
+            ensure!(
+                call.binding.id.index() == bindings.len(),
+                InvalidPlanSnafu {
+                    message: "binding indexes must be contiguous and ordered"
+                }
+            );
+            bindings.push(call);
+        }
+        let interfaces = crate::CallInterfaces::new(callers.iter().map(|(caller, calls)| {
+            (
+                caller.clone(),
+                calls.iter().map(|call| call.binding.interface()).collect(),
+            )
+        }))?;
+        Ok((!callers.is_empty()).then_some(Self {
+            callers,
+            instances,
+            interfaces,
+        }))
+    }
+
+    pub fn dispatch<N>(
+        &self,
+        caller: &crate::DefinitionId,
+        request: crate::CallRequest,
+        context: &mut crate::ExecutionContext,
+        deadline: Option<std::time::Instant>,
+        nodes: &[crate::FlowNode<N>],
+        invoke: impl FnOnce(
+            &crate::FlowNode<N>,
+            crate::Inputs,
+            &mut crate::ExecutionContext,
+        ) -> Result<crate::NodeResult, crate::NodeExecutionError>,
+    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
+        use crate::invocation::{
+            ExecutionSnafu, PoisonedSnafu, ReentrantSnafu, UnknownBindingSnafu,
+        };
+        use snafu::{OptionExt, ResultExt};
+        let calls = self;
+        let crate::CallRequest { id, arguments } = request;
+        let call = calls
+            .callers
+            .get(caller)
+            .and_then(|bindings| bindings.get(id.binding.index()))
+            .context(UnknownBindingSnafu {
+                caller: caller.clone(),
+                binding: id.binding,
+            })?;
+        let initial = call.binding.bind_arguments(&arguments)?;
+        let node = &nodes[call.binding.target.index()];
+        let instance = &calls.instances[&call.binding.target];
+        context.run_directed_call(
+            id,
+            &call.target,
+            call.visibility.clone(),
+            deadline,
+            |child| {
+                let _reservation = instance.resource.reserve().context(ReentrantSnafu)?;
+                let _lock = loop {
+                    child.check_call_limits(deadline)?;
+                    match instance.lock.try_lock() {
+                        Ok(lock) => break lock,
+                        Err(std::sync::TryLockError::Poisoned(_)) => return PoisonedSnafu.fail(),
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            std::thread::park_timeout(std::time::Duration::from_millis(1));
+                        }
+                    }
+                };
+                let mut skipped = Vec::new();
+                let result = crate::execute_resolved_node_in_context(
+                    node,
+                    child,
+                    |ctx, inputs| {
+                        *inputs = initial;
+                        let resolution = crate::ExecutionInputs::resolve_composed_inputs(
+                            node,
+                            call.binding
+                                .dependencies
+                                .iter()
+                                .map(crate::FlowDependency::borrowed),
+                            |dependency| ctx.output(&dependency.source_key).map(Some),
+                            inputs,
+                            (call.guard)(ctx)?,
+                        )?;
+                        skipped = resolution.causes.iter().cloned().collect();
+                        Ok(resolution)
+                    },
+                    |inputs, ctx| {
+                        invoke(node, inputs, ctx).map(crate::GeneratedNodeResult::Dynamic)
+                    },
+                );
+                child.check_call_limits(deadline)?;
+                if let Err(source) = result {
+                    if source.is_terminal_control() {
+                        return Err(source).context(ExecutionSnafu);
+                    }
+                    return Ok(crate::CallOutcome::Failed { source });
+                }
+                if !skipped.is_empty() {
+                    return Ok(crate::CallOutcome::Skipped { causes: skipped });
+                }
+                let mut outputs = crate::Outputs::new();
+                for (port, key) in node.metadata.ports.outputs.iter().zip(node.output_keys()) {
+                    if let Ok(crate::ContextValue::Value(value)) = child.output(key) {
+                        outputs.insert(port.name.to_string(), value.clone());
+                    }
+                }
+                Ok(crate::CallOutcome::Succeeded(outputs))
+            },
+        )
+    }
 }

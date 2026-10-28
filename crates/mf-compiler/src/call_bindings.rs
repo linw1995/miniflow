@@ -328,11 +328,15 @@ pub fn resolve(
             index: target_id.index(),
         })?;
         ensure!(
-            matches!(target.node.as_ref(), Some(NodeExecution::Task(task)) if task.supports_success_dependencies()),
+            target
+                .node
+                .as_ref()
+                .and_then(NodeExecution::as_task_node)
+                .is_some_and(|task| task.supports_success_dependencies()),
             UnsupportedNodeSnafu {
                 node: target.definition_id.clone(),
                 role: "target",
-                reason: "an ordinary terminal Task is required"
+                reason: "a terminal task executor is required"
             }
         );
         ensure!(

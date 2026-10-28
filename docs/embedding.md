@@ -245,7 +245,8 @@ snapshot visibility, and a prepared success guard. This low-level API does not b
 workflow dependency graph. `compile_definition` and `instantiate_compiled` install these contracts
 for finite definitions, including nested Flow and Iteration bodies. Generated finite runners freeze
 the same call tables, snapshot visibility, and success guards at build time. Startup checks complete
-node metadata and scope identity before binding executors. Native stream dispatch remains gated.
+node metadata and scope identity before binding executors. Native stream runners freeze the same
+contracts together with message ownership and startup prerequisites.
 
 During a node invocation, `ExecutionContext::invoke_call` selects a `CallBindingId` and accepts one
 atomic `CallArguments` group. The runtime combines caller-owned values with visible external values,
@@ -263,5 +264,15 @@ terminal errors. Tool execution is never automatically retried.
 
 Discovery data alone does not grant execution: installing `with_call_interfaces` clears the local
 executable capability and scoped context overlays restore it on return or unwind. Contexts hold only
-weak references to their owning executor graph. Native stream programs still expose discovery only;
-frame-owned executable dispatch is integrated separately.
+weak references to their owning executor graph. Native frames share invocation identities across
+messages while retaining independent frame budgets and immutable input snapshots.
+
+Native calls may combine values from their own message with initial configuration produced by finite
+Task chains. Message admission waits only for the required initial execution domains, then imports
+selected shared values and skip evidence. Ordinary cross-message edges remain invalid. Initial
+prerequisites depending on a connected streaming producer are rejected because its terminal result
+may wait for the very messages needing that prerequisite. Initial configuration is eager even when
+no tool is selected; place a configuration service inside a callable Flow for fresh per-call execution.
+
+TaskStream targets use their terminal task contract. Their incremental emissions are validated and
+remain disconnected from ordinary channels. Callers may still emit their own incremental results.

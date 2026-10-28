@@ -148,6 +148,15 @@ impl ExecutionOutputs {
         }
     }
 
+    /// Copies only compiler-selected evidence, retaining sharing and explicit skips or absence.
+    pub fn merge_visible(&mut self, source: &Self, visibility: &OutputVisibility) {
+        for key in visibility.keys() {
+            if let Some(entry) = source.entry(key) {
+                self.writes.insert_mut(key.to_owned(), entry.clone());
+            }
+        }
+    }
+
     pub fn merge_nodes<'a, N: 'a>(
         &mut self,
         source: &Self,

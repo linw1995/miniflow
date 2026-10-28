@@ -1,6 +1,6 @@
 extern crate mfn_code as _;
 extern crate mfn_core as _;
-use mf_compiler::{CompiledCallLayout, NodeRegistry, WorkflowCompileError, WorkflowDefinition};
+use mf_compiler::{CompiledCallLayout, NodeRegistry, WorkflowDefinition};
 use mf_runtime::{
     CallInputDefaults, CallInputSource, NodeExecution, NodeMetadata, NodePorts, PortSpec,
     PreparedNode, ValueType,
@@ -161,16 +161,13 @@ fn planning_rejects_unknown_endpoints_mixed_activation_and_recursive_calls() {
 }
 
 #[test]
-fn finite_execution_and_generation_prepare_calls_while_native_streams_fail_closed() {
+fn execution_and_generation_prepare_declared_calls() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = mf_compiler::compile_definition(&parse(document()), &registry).unwrap();
     let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
     assert!(!flow.call_interfaces().is_empty());
     assert!(!flow.input_schema().inputs.contains_key("tool"));
-    assert!(matches!(
-        mf_compiler::instantiate_stream(&plan, &registry),
-        Err(WorkflowCompileError::DirectedCallExecution)
-    ));
+    assert!(mf_compiler::instantiate_stream(&plan, &registry).is_ok());
     assert!(mf_compiler::resolve_nodes(&plan.definition, &registry).is_ok());
     assert!(plan.manifest(&registry).is_ok());
     #[cfg(feature = "codegen")]

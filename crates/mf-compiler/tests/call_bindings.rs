@@ -1060,7 +1060,7 @@ fn task_stream_callers_and_terminal_producers_keep_emissions_out_of_arguments() 
                 })
             ));
         }
-        assert!(matches!(
+        assert!(
             flow.resolve_call_bindings(
                 NodeId::new(0),
                 &[declaration(
@@ -1069,9 +1069,9 @@ fn task_stream_callers_and_terminal_producers_keep_emissions_out_of_arguments() 
                     &[],
                     CallInputDefaults::ExplicitOnly
                 )]
-            ),
-            Err(CallBindingError::UnsupportedNode { role: "target", .. })
-        ));
+            )
+            .is_ok()
+        );
     }
 }
 
