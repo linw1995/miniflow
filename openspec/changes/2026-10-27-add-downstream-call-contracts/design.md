@@ -333,11 +333,9 @@ external values. Call declarations are preserved in Loop/Iteration bodies and re
 definitions; older scope versions reject the field. Canonical plans sort mappings by destination and
 source, and bind aliases in sorted map order.
 
-`CompiledCallLayout` freezes node identities, resolved private bindings, and the workflow identity.
-The versioned JSON form uses duplicate-key rejection and typed port descriptors. Verification compares
-against a freshly prepared layout, including definition identity, types, requiredness, sensitivity,
-external sources, and local routes. This is planning evidence, not an executor capability. Public
-interfaces are obtained through projection and omit external configuration values.
+Resolved bindings belong to the executable scope's `PreparedCall` records. Public interfaces are
+projected from those records and omit external configuration values. Generated runners reuse
+`PreparedScopeLayout` rather than maintaining a second serialized call-layout format.
 
 Finite preparation now installs the executable call table and excludes targets from ordinary domains.
 Readiness edges include every transitive callee's external producers and participate in global cycle

@@ -160,16 +160,12 @@ also feed ordinary connections or selected workflow outputs. Unknown endpoints, 
 caller declarations, duplicate destination mappings, and recursive call graphs fail during planning.
 Caller and target IDs are exact names in the same scope, not paths through nested graphs.
 
-`CompiledWorkflow::declared_call_layout` resolves declarations through the existing preparation path
-and returns a versioned `CompiledCallLayout` with canonical node identities, caller-local binding IDs,
-and a workflow identity. `to_json`/`from_json` preserve private planning records; `verify` compares a
-saved layout with a freshly prepared one. Parsing alone does not validate or authorize execution.
-Use `interfaces()` for public discovery instead of exposing the private layout to a model.
+Executable preparation resolves declarations into `PreparedCall` records shared by runtime dispatch
+and caller-visible interface projection. Generated runners freeze these records in the existing
+`PreparedScopeLayout`, alongside execution domains, visibility, and success guards. Startup checks
+the scope identity and complete provider metadata before installing the table. No separate serialized
+call-layout artifact or independently versioned layout contract is required.
 
-This intermediate release supports planning only: executable preparation, manifest generation, and
-runner generation reject definitions containing directed calls before business execution. Nested call
-declarations round-trip but cannot yet prepare executable child bodies. The subsequent scheduling
-change must remove these guards only after on-demand activation and input composition are available.
 Exhaustive `WorkflowDefinition`, `LoopBodyDefinition`, and `IterationBodyDefinition` literals must add
 `calls: Default::default()` to preserve ordinary behavior.
 
