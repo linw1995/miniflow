@@ -6,4 +6,4 @@
 - [x] Cover nested and sparse exports, cancellation, delivery failures, and guarded execution.
 - [x] Verify source-free generated runners and startup drift rejection.
 - [x] Exercise chat previews through the existing application lifecycle.
-- [ ] Run repository validation and affected tests, then create an independent PR against main.
+- [x] Run repository validation and affected tests, then create an independent PR against main.
