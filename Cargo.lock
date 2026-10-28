@@ -1793,6 +1793,7 @@ dependencies = [
  "mf-telemetry",
  "mfn-code",
  "mfn-core",
+ "mfn-deepseek",
  "mfn-llm",
  "nix",
  "opentelemetry",
@@ -1913,6 +1914,20 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+]
+
+[[package]]
+name = "mfn-deepseek"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "mf-runtime",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tokio",
+ "url",
 ]
 
 [[package]]

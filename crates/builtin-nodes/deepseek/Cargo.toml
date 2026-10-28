@@ -1,0 +1,22 @@
+[package]
+name = "mfn-deepseek"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DeepSeek web search and fetch nodes for miniflow"
+
+[features]
+default = []
+tokio = ["mf-runtime/tokio"]
+test-support = []
+
+[dependencies]
+inventory.workspace = true
+mf-runtime = { workspace = true, features = ["async"] }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snafu.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+url.workspace = true

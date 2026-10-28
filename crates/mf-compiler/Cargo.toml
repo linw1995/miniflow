@@ -35,6 +35,7 @@ snafu.workspace = true
 inventory.workspace = true
 mfn-code.workspace = true
 mfn-core.workspace = true
+mfn-deepseek = { workspace = true, features = ["test-support"] }
 mfn-llm = { workspace = true, features = ["test-support"] }
 
 # Observation assertions and tracing examples.
