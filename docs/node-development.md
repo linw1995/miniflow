@@ -137,6 +137,42 @@ Declare context reads in `NodeMetadata.context_references`. Each `ContextReferen
 
 ## Directed call contracts
 
+Workflow version `2026-10-28` adds a scope-local `calls` map indexed by caller definition ID and public
+alias. Each entry names an exact `target`, explicit `ports` mappings, and a `defaults` policy:
+
+```json
+{
+  "calls": {
+    "parent": {
+      "search": {
+        "target": "search-node",
+        "ports": [{"output": "query", "input": "query"}],
+        "defaults": "remaining_inputs"
+      }
+    }
+  }
+}
+```
+
+The default policy is `explicit_only`; an empty port group does not enable node-level fallback.
+Normal target input connections retain external parameter ownership. A declared call target cannot
+also feed ordinary connections or selected workflow outputs. Unknown endpoints, blank aliases, empty
+caller declarations, duplicate destination mappings, and recursive call graphs fail during planning.
+Caller and target IDs are exact names in the same scope, not paths through nested graphs.
+
+`CompiledWorkflow::declared_call_layout` resolves declarations through the existing preparation path
+and returns a versioned `CompiledCallLayout` with canonical node identities, caller-local binding IDs,
+and a workflow identity. `to_json`/`from_json` preserve private planning records; `verify` compares a
+saved layout with a freshly prepared one. Parsing alone does not validate or authorize execution.
+Use `interfaces()` for public discovery instead of exposing the private layout to a model.
+
+This intermediate release supports planning only: executable preparation, manifest generation, and
+runner generation reject definitions containing directed calls before business execution. Nested call
+declarations round-trip but cannot yet prepare executable child bodies. The subsequent scheduling
+change must remove these guards only after on-demand activation and input composition are available.
+Exhaustive `WorkflowDefinition`, `LoopBodyDefinition`, and `IterationBodyDefinition` literals must add
+`calls: Default::default()` to preserve ordinary behavior.
+
 `CallBinding` declares a directed call independently of ordinary data publication. It names a target
 `NodeId`, a group of `CallPortMapping` entries, and a `CallInputDefaults` policy. Each mapping names an
 exact caller output and target input; dots are literal port-name characters. Construction rejects
@@ -220,8 +256,8 @@ fn bind_call_arguments(
 Current targets must be ordinary terminal Tasks without external context references, stdin, or startup
 environment/default bindings. TaskStream callers and terminal TaskStream producer values are supported;
 stream emissions cannot serve as external input values. Input sensitivity declarations remain supported.
-These APIs do not activate targets, compose external values, or provide a dispatcher. Workflow JSON
-syntax for callable activation remains deferred until scheduling is available.
+These APIs do not activate targets, compose external values, or provide a dispatcher. Versioned call
+syntax is accepted for planning, while executable activation remains guarded until scheduling exists.
 A future dispatcher must validate composed inputs, allocate invocation numbers uniquely within the
 workflow execution across callers, scopes, and stream frames, and track pending/completed requests.
 Binding indexes are local to a caller's prepared table. Identities are not retry idempotency keys.
@@ -289,8 +325,8 @@ Scopes without discovery metadata do not allocate catalog storage.
 
 Discovery does not change ordinary scheduling or make tools invocable. Do not execute a prototype Flow
 containing tool nodes expecting discovery attachment to make them lazy. Provider descriptions, full
-JSON Schema conversion, versioned call syntax, generated catalog persistence/drift checks, and the
-actual invocation scheduler remain separate work. In particular, a serialized `CallInterface` is not
+JSON Schema conversion, generated executable catalog checks, and the actual invocation scheduler
+remain separate work. In particular, a serialized `CallInterface` is not
 a provider tool definition: its constraint list is conjunctive, and its two namespaces remain distinct.
 
 ## Context-aware execution

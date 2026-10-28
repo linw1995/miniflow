@@ -8,7 +8,7 @@
 
 ## 1. Binding resolution and derived interfaces
 
-- [ ] 1.1 Specify versioned callable-binding syntax with separate explicit port mappings and node-level defaults.
+- [x] 1.1 Specify versioned callable-binding syntax with separate explicit port mappings and node-level defaults.
 - [x] 1.2 Resolve explicit port ownership before node-level defaults; validate conflicts and missing required inputs.
 - [x] 1.3 Define public interface projections and scope-local connection indexes without exposing internal values.
 - [x] 1.4 Project caller parameters from final resolved contracts, preserving optionality and null semantics.
@@ -17,6 +17,7 @@
 - [x] 1.7 Declare and validate separate call-output slots using normal node preparation and metadata drift checks.
 - [x] 1.8 Reuse prepared graph types and exclusive-branch proofs; retain external prerequisites and reject wait cycles.
 - [x] 1.9 Validate and remap caller-owned arguments without resolving external values or activating targets.
+- [x] 1.10 Freeze deterministic private call layouts with workflow identity and explicit drift verification.
 
 ## 2. Composed runtime invocation
 

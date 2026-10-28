@@ -38,6 +38,8 @@ pub struct IterationConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IterationBodyDefinition {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub calls: crate::CallDefinitions,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,

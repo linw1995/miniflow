@@ -57,7 +57,7 @@ fn decode_scope(
         return Ok(());
     };
     ensure!(
-        version == WorkflowDefinitionVersion::V2026_10_25
+        version.supports_flows()
             || (!scope.contains_key("flows")
                 && scope
                     .get("nodes")
@@ -73,6 +73,13 @@ fn decode_scope(
         InvalidSnafu {
             path,
             message: "order_edges is an internal graph field"
+        }
+    );
+    ensure!(
+        !scope.contains_key("calls") || version.supports_directed_calls(),
+        InvalidSnafu {
+            path,
+            message: "directed calls require version 2026-10-28"
         }
     );
     ensure!(
@@ -206,7 +213,7 @@ fn encode_scope(
         return Ok(());
     };
     ensure!(
-        version == WorkflowDefinitionVersion::V2026_10_25
+        version.supports_flows()
             || (!scope.contains_key("flows")
                 && scope
                     .get("nodes")
@@ -215,6 +222,13 @@ fn encode_scope(
         InvalidSnafu {
             path,
             message: "nested flows require version 2026-10-25"
+        }
+    );
+    ensure!(
+        !scope.contains_key("calls") || version.supports_directed_calls(),
+        InvalidSnafu {
+            path,
+            message: "directed calls require version 2026-10-28"
         }
     );
     ensure!(

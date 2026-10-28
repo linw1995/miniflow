@@ -9,6 +9,18 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Snafu)]
 pub enum CallBindingError {
     #[snafu(transparent)]
+    Identity { source: mf_telemetry::ContractError },
+    #[snafu(display("invalid directed-call declaration: {message}"))]
+    Definition { message: String },
+    #[snafu(transparent)]
+    Contract {
+        source: mf_runtime::CallContractError,
+    },
+    #[snafu(display("directed-call layout JSON: {source}"))]
+    LayoutJson { source: serde_json::Error },
+    #[snafu(display("prepared directed-call layout differs from the compiled contract"))]
+    LayoutDrift,
+    #[snafu(transparent)]
     Interfaces {
         source: mf_runtime::CallInterfaceError,
     },
@@ -69,6 +81,147 @@ pub enum CallBindingError {
     },
     #[snafu(transparent)]
     Flow { source: crate::FlowBuildError },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CallLayoutVersion {
+    #[serde(rename = "2026-10-28")]
+    V2026_10_28,
+}
+
+/// Frozen private planning data. Only `interfaces()` is suitable for caller-facing discovery.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledCallLayout {
+    pub version: CallLayoutVersion,
+    pub workflow_id: mf_telemetry::identity::WorkflowId,
+    pub nodes: Vec<DefinitionId>,
+    pub callers: BTreeMap<DefinitionId, Vec<ResolvedCallBinding>>,
+}
+
+impl CompiledCallLayout {
+    pub fn interfaces(&self) -> Result<mf_runtime::CallInterfaces, CallBindingError> {
+        Ok(mf_runtime::CallInterfaces::new(self.callers.iter().map(
+            |(caller, bindings)| {
+                (
+                    caller.clone(),
+                    bindings
+                        .iter()
+                        .map(ResolvedCallBinding::interface)
+                        .collect(),
+                )
+            },
+        ))?)
+    }
+
+    pub fn to_json(&self) -> Result<String, CallBindingError> {
+        serde_json::to_string(self).context(LayoutJsonSnafu)
+    }
+
+    /// Parses planning evidence, not an executable capability. Reprepare and verify before use.
+    pub fn from_json(input: &[u8]) -> Result<Self, CallBindingError> {
+        mf_runtime::decode_unique_json(input).context(LayoutJsonSnafu)
+    }
+
+    pub fn verify(&self, actual: &Self) -> Result<(), CallBindingError> {
+        ensure!(self == actual, LayoutDriftSnafu);
+        Ok(())
+    }
+}
+
+pub fn declarations(
+    definition: &crate::WorkflowDefinition,
+) -> Result<BTreeMap<NodeId, Vec<CallBinding>>, CallBindingError> {
+    ensure!(
+        definition.calls.is_empty() || definition.version.supports_directed_calls(),
+        DefinitionSnafu {
+            message: "directed calls require version 2026-10-28",
+        }
+    );
+    let indices: BTreeMap<_, _> = definition
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), NodeId::new(index)))
+        .collect();
+    let mut result = BTreeMap::new();
+    for (caller, aliases) in &definition.calls {
+        ensure!(
+            !aliases.is_empty(),
+            DefinitionSnafu {
+                message: format!("caller `{caller}` must declare at least one call")
+            }
+        );
+        let caller_id = indices.get(caller).with_context(|| DefinitionSnafu {
+            message: format!("unknown caller `{caller}`"),
+        })?;
+        let mut bindings = Vec::new();
+        for (name, declaration) in aliases {
+            let target = indices
+                .get(&declaration.target)
+                .with_context(|| DefinitionSnafu {
+                    message: format!(
+                        "call `{caller}`.`{name}` references unknown target `{}`",
+                        declaration.target
+                    ),
+                })?;
+            bindings.push(CallBinding::new(
+                name,
+                *target,
+                declaration.ports.clone(),
+                declaration.defaults,
+            )?);
+        }
+        result.insert(*caller_id, bindings);
+    }
+    let targets: BTreeSet<_> = definition
+        .calls
+        .values()
+        .flat_map(|aliases| aliases.values().map(|call| &call.target))
+        .collect();
+    ensure!(
+        !definition
+            .edges
+            .iter()
+            .any(|edge| targets.contains(&edge.from_node))
+            && !definition
+                .control_edges
+                .iter()
+                .any(|edge| targets.contains(&edge.from_node))
+            && !definition
+                .order_edges
+                .iter()
+                .any(|edge| targets.contains(&edge.from_node))
+            && !definition
+                .outputs
+                .iter()
+                .any(|output| targets.contains(&output.node)),
+        DefinitionSnafu {
+            message: "on-demand targets cannot publish through ordinary connections or workflow outputs",
+        }
+    );
+    // A call graph is separate from the data DAG, but must also be acyclic initially.
+    for start in definition.calls.keys() {
+        let mut visited = BTreeSet::new();
+        let mut pending: Vec<_> = definition.calls[start]
+            .values()
+            .map(|call| &call.target)
+            .collect();
+        while let Some(target) = pending.pop() {
+            ensure!(
+                target != start,
+                DefinitionSnafu {
+                    message: format!("recursive directed-call graph reaches `{start}`")
+                }
+            );
+            if visited.insert(target)
+                && let Some(aliases) = definition.calls.get(target)
+            {
+                pending.extend(aliases.values().map(|call| &call.target));
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn ports<'a>(

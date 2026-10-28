@@ -1,5 +1,5 @@
 mod call_bindings;
-pub use call_bindings::CallBindingError;
+pub use call_bindings::{CallBindingError, CallLayoutVersion, CompiledCallLayout};
 mod calls;
 mod flow_sources;
 pub use flow_sources::{

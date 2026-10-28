@@ -441,7 +441,8 @@ impl fmt::Display for ValueType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PortSpec {
     pub name: Cow<'static, str>,
     pub value_type: ValueType,

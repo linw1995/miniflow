@@ -103,6 +103,45 @@ pub enum PlanError {
 }
 
 impl CompiledWorkflow {
+    /// Validates serialized call declarations and freezes their resolved contracts.
+    pub fn declared_call_layout(
+        &self,
+        registry: &mf_runtime::NodeRegistry,
+    ) -> Result<crate::CompiledCallLayout, crate::CallBindingError> {
+        let declarations = crate::call_bindings::declarations(&self.definition)?;
+        let flow = self.prepare_call_scope(
+            registry,
+            declarations
+                .iter()
+                .map(|(caller, bindings)| (*caller, bindings.as_slice())),
+        )?;
+        let mut callers = BTreeMap::new();
+        for (caller, bindings) in declarations {
+            callers.insert(
+                self.definition.nodes[caller.index()].id.clone(),
+                flow.resolve_call_bindings(caller, &bindings)?,
+            );
+        }
+        Ok(crate::CompiledCallLayout {
+            version: crate::CallLayoutVersion::V2026_10_28,
+            workflow_id: mf_telemetry::identity::WorkflowId::from_definition(
+                &self.definition,
+                &self
+                    .execution_order
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            )?,
+            nodes: self
+                .definition
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect(),
+            callers,
+        })
+    }
+
     /// Prepares and resolves directed-call declarations without starting the ordinary workflow.
     /// Node indexes refer to `definition.nodes`; normal plans store them in canonical order.
     pub fn resolve_call_bindings(
@@ -361,6 +400,7 @@ impl CompiledWorkflow {
     /// Generate a self-contained module that prepares nodes from the host registry.
     #[cfg(feature = "codegen")]
     pub fn generate_embedded_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        crate::compiler::require_no_directed_calls(&self.definition)?;
         ensure!(
             crate::structural_order(&self.definition)? == self.execution_order,
             InvalidExecutionOrderSnafu
@@ -420,6 +460,7 @@ impl CompiledWorkflow {
         &self,
         include_helpers: bool,
     ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        crate::compiler::require_no_directed_calls(&self.definition)?;
         if self.definition.execution.is_some() {
             return generate_stream_artifacts(self);
         }
@@ -1063,6 +1104,7 @@ impl CompiledWorkflow {
         registry: &mf_runtime::NodeRegistry,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
+        crate::compiler::require_no_directed_calls(&self.definition)?;
         let mut body_layouts = BTreeMap::new();
         let (nodes, order) = crate::compiler::prepare_definition_with_layouts(
             &self.definition,

@@ -295,6 +295,26 @@ guarantee idempotency; side-effecting tools must not be retried automatically af
 
 ## Delivery and remaining implementation decisions
 
+Version `2026-10-28` introduces a scope-local `calls` map, keyed by caller ID and alias. Each value has
+`target`, optional explicit `ports`, and `defaults` (`explicit_only` by default or `remaining_inputs`).
+Node-level fallback remains opt-in even for zero-port groups. Normal node input bindings provide
+external values. Call declarations are preserved in Loop/Iteration bodies and resolved nested Flow
+definitions; older scope versions reject the field. Canonical plans sort mappings by destination and
+source, and bind aliases in sorted map order.
+
+`CompiledCallLayout` freezes node identities, resolved private bindings, and the workflow identity.
+The versioned JSON form uses duplicate-key rejection and typed port descriptors. Verification compares
+against a freshly prepared layout, including definition identity, types, requiredness, sensitivity,
+external sources, and local routes. This is planning evidence, not an executor capability. Public
+interfaces are obtained through projection and omit external configuration values.
+
+This intermediate PR deliberately rejects executable preparation and code generation for any directed
+call definition. It also rejects preparing a nested callable body that would otherwise become an
+ordinary executable subgraph. Thus accepting syntax cannot accidentally run tool nodes as roots.
+The runtime PR must replace these guards with on-demand scheduling and global readiness validation.
+Compiler declarations already reject recursion, unknown endpoints, duplicate caller mappings, and
+targets used as ordinary producers or workflow outputs.
+
 Deliver the call/output model first, then connection and ownership resolution. Derive caller-visible
 interfaces from those resolved bindings and implement composed runtime invocation against the same
 contracts. Interface exposure and runtime execution can proceed independently once resolution is

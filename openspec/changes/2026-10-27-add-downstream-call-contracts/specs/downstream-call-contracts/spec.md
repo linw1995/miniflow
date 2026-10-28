@@ -1,5 +1,42 @@
 ## ADDED Requirements
 
+### Requirement: Parse versioned directed-call declarations
+
+Workflow version 2026-10-28 SHALL accept scope-local `calls` maps indexed by caller ID and alias. Each
+declaration SHALL name an exact target, explicit port mappings, and an opt-in remaining-input policy.
+Older versions MUST reject the field. Empty caller groups, unknown endpoints, duplicate destination
+mappings, recursive call graphs, and ordinary outgoing uses of call targets MUST fail planning.
+
+#### Scenario: Preserve declaration semantics through normalization
+
+- **WHEN** a call declaration combines explicit ports with remaining-input fallback
+- **THEN** canonical serialization preserves both policies and their scope-local identities
+- **AND** omitting the fallback policy retains explicit-only binding
+
+#### Scenario: Preserve nested declarations without activating them
+
+- **WHEN** a Loop or Iteration body contains a version-supported call declaration
+- **THEN** definition normalization retains the declaration in that body
+- **AND** executable preparation rejects it until invocation scheduling supports the scope
+
+### Requirement: Freeze and verify private call layouts
+
+The compiler SHALL emit deterministic versioned call layouts containing workflow identity, canonical
+node identities, and resolved bindings. Saved layouts SHALL be checked against freshly prepared
+contracts before executable use. Public discovery MUST project interfaces rather than serialize the
+private plan. Parsing planning evidence alone MUST NOT grant an execution capability.
+
+#### Scenario: Detect layout or definition drift
+
+- **WHEN** a saved layout differs from a freshly prepared definition or binding contract
+- **THEN** verification fails rather than dispatching using stale indexes or parameter ownership
+
+#### Scenario: Fail closed before invocation scheduling is available
+
+- **WHEN** executable preparation or runner generation encounters directed-call declarations
+- **THEN** the intermediate implementation reports an unsupported execution error before business work
+- **AND** ordinary definitions without call declarations retain their execution behavior
+
 ### Requirement: Preserve the exact caller parameter constraints
 
 A caller-visible interface SHALL retain local binding identity and alias with separate output and

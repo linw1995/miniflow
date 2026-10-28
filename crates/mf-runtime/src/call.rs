@@ -11,7 +11,9 @@ use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::BTreeSet;
 
 /// An index into one caller's prepared binding table in its owning scope.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct CallBindingId(usize);
 
@@ -37,20 +39,38 @@ pub struct CallId {
 }
 
 /// One caller output mapped to an exact target input name, without field-path interpretation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CallPortMapping {
     pub output: String,
     pub input: String,
 }
 
 /// How a callable group handles target inputs not claimed by explicit port connections.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CallInputDefaults {
     /// Only explicitly mapped caller outputs supply arguments.
     #[default]
     ExplicitOnly,
     /// A node-level invocation connection assigns remaining inputs to the caller.
     RemainingInputs,
+}
+
+/// Definition-facing directed-call groups, indexed by caller ID and public alias.
+pub type CallDefinitions = std::collections::BTreeMap<
+    crate::DefinitionId,
+    std::collections::BTreeMap<String, CallDefinition>,
+>;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallDefinition {
+    pub target: crate::DefinitionId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<CallPortMapping>,
+    #[serde(default)]
+    pub defaults: CallInputDefaults,
 }
 
 /// A declaration of one directed call and its atomic group of caller outputs.
@@ -246,7 +266,7 @@ impl NodeMetadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CallInputSource {
     /// An explicit caller output, including its independent source contract.
     Output(PortSpec),
@@ -258,7 +278,8 @@ pub enum CallInputSource {
     Omitted,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedCallInput {
     pub port: PortSpec,
     pub source: CallInputSource,
@@ -270,7 +291,8 @@ pub struct ResolvedCallInput {
 /// Output dependencies retain ordinary data and control selection semantics; success dependencies
 /// remain separate. Prerequisites name the direct producers whose completion a dispatcher must
 /// arrange before invoking the target. Construct this through compiler binding resolution.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedCallBinding {
     pub id: CallBindingId,
     pub name: String,

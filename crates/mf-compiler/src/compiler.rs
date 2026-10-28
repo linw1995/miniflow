@@ -37,6 +37,16 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(
+        display("directed calls are planning-only until invocation scheduling is available"),
+        visibility(pub)
+    )]
+    DirectedCallExecution,
+    #[snafu(transparent)]
+    DirectedCalls {
+        #[snafu(source(from(crate::CallBindingError, Box::new)))]
+        source: Box<crate::CallBindingError>,
+    },
     #[snafu(display("node `{definition_id}` call outputs: {source}"))]
     CallOutputs {
         definition_id: DefinitionId,
@@ -534,6 +544,7 @@ pub fn prepare_definition_with_layouts(
     registry: &NodeRegistry,
     body_layouts: Option<&mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
+    require_no_directed_calls(definition)?;
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
     prepare_graph(
@@ -960,6 +971,7 @@ pub fn topological_order(
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
+    crate::call_bindings::declarations(definition)?;
     if definition.has_order_edges() && !definition.version.supports_node_success_edges() {
         return InvalidSuccessDependencySnafu {
             message: "node-success edges require version 2026-10-19",
@@ -1253,11 +1265,23 @@ pub fn compile_definition(
     compile_resolved_definition(&resolved.definition, registry)
 }
 
+pub fn require_no_directed_calls(
+    definition: &WorkflowDefinition,
+) -> Result<(), WorkflowCompileError> {
+    ensure!(!definition.has_directed_calls(), DirectedCallExecutionSnafu);
+    Ok(())
+}
+
 /// Prepares a frozen definition whose sources and dependency ownership are already resolved.
 pub fn compile_resolved_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
+    if !definition.calls.is_empty() {
+        let plan = plan_resolved_definition(definition)?;
+        plan.declared_call_layout(registry)?;
+        return Ok(plan);
+    }
     let (nodes, execution_order) = prepare_definition(definition, registry)?;
     let definition = resolve_execution(definition, &nodes)?;
     let flow = crate::FlowBuilder::prepare(
@@ -1385,12 +1409,21 @@ pub fn normalize_plan(
     outputs.sort_by(|left, right| {
         (&left.name, &left.node, &left.port).cmp(&(&right.name, &right.node, &right.port))
     });
+    let mut calls = definition.calls.clone();
+    for aliases in calls.values_mut() {
+        for call in aliases.values_mut() {
+            call.ports.sort_by(|left, right| {
+                (&left.input, &left.output).cmp(&(&right.input, &right.output))
+            });
+        }
+    }
 
     Ok(CompiledWorkflow {
         definition: WorkflowDefinition {
             version: definition.version,
             execution: definition.execution.clone(),
             flows: definition.flows.clone(),
+            calls,
             dependencies: definition.dependencies.clone(),
             nodes,
             edges,
@@ -1421,6 +1454,7 @@ fn normalize_loop_node(
         .nodes
         .retain(|node| node.id.as_str() != crate::LOOP_SOURCE_ID);
     loop_definition.body.nodes = normalized.nodes;
+    loop_definition.body.calls = normalized.calls;
     loop_definition.body.edges = normalized.edges;
     loop_definition.body.control_edges = normalized.control_edges;
     loop_definition.body.order_edges = normalized.order_edges;
@@ -1445,6 +1479,10 @@ pub fn prepare_compiled_plan(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<(CompiledWorkflow, crate::FlowBuilder), WorkflowCompileError> {
+    ensure!(
+        !plan.definition.has_directed_calls(),
+        DirectedCallExecutionSnafu
+    );
     let (nodes, canonical_order) = prepare_definition(&plan.definition, registry)?;
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
@@ -1691,6 +1729,7 @@ pub fn resolve_nodes(
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     let resolved = crate::resolve_flows(definition, None)?;
     let definition = &resolved.definition;
+    require_no_directed_calls(definition)?;
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
     resolve_nodes_in_scope(
@@ -1728,6 +1767,7 @@ fn bind_subgraph_node(
     allow_iteration_input: bool,
     options: Value,
 ) -> Result<FlowNode, WorkflowCompileError> {
+    require_no_directed_calls(body)?;
     ensure!(
         preparation.path.len() < mf_telemetry::MAX_SCOPE_DEPTH,
         InvalidCallSnafu {
