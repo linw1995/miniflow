@@ -167,6 +167,62 @@ pub fn tool(id: String, content: String) -> ChatMessage {
     }
 }
 
+#[derive(mf_runtime::NodeValue)]
+struct Continuation {
+    version: u64,
+    model: String,
+    base_url: String,
+    messages: mf_runtime::ValueRef,
+}
+
+pub fn continuation(
+    messages: &[Message],
+    model: &str,
+    base_url: &str,
+) -> Result<mf_runtime::ValueRef, LlmExecutionError> {
+    use mf_runtime::OutputValue;
+    use snafu::ResultExt;
+    Continuation {
+        version: 1,
+        model: model.into(),
+        base_url: base_url.into(),
+        messages: serde_json::to_value(messages)
+            .context(crate::ContinuationJsonSnafu)?
+            .into(),
+    }
+    .encode()
+    .map(mf_runtime::ValueRef::into_secret)
+    .context(crate::ContinuationValueSnafu)
+}
+
+pub fn resume(
+    value: mf_runtime::ValueRef,
+    model: &str,
+    base_url: &str,
+) -> Result<Vec<Message>, LlmExecutionError> {
+    use mf_runtime::InputValue;
+    use snafu::ResultExt;
+    let state = Continuation::decode(value).context(crate::ContinuationValueSnafu)?;
+    ensure!(
+        state.version == 1 && state.model == model && state.base_url == base_url,
+        InvalidInputSnafu {
+            path: "/continuation",
+            requirement: "a continuation from the same model and endpoint"
+        }
+    );
+    let value = serde_json::to_value(&state.messages).context(crate::ContinuationJsonSnafu)?;
+    let messages: Vec<Message> =
+        serde_json::from_value(value).context(crate::ContinuationJsonSnafu)?;
+    ensure!(
+        !messages.is_empty(),
+        InvalidInputSnafu {
+            path: "/continuation",
+            requirement: "nonempty provider messages"
+        }
+    );
+    Ok(messages)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +294,55 @@ mod tests {
                     || error.to_string().contains("/history/1")
             );
         }
+    }
+    #[test]
+    fn continuation_preserves_provider_reasoning_and_rejects_invalid_or_mismatched_state() {
+        use rig_core::message::{Reasoning, ReasoningContent};
+        let messages = vec![
+            Message::system("instructions"),
+            Message::Assistant {
+                id: Some("provider-message".into()),
+                content: vec![AssistantContent::Reasoning(
+                    Reasoning {
+                        id: Some("reasoning-id".into()),
+                        content: vec![ReasoningContent::Encrypted("private-sealed-content".into())],
+                    }
+                    .sealed("openai"),
+                )],
+            },
+        ];
+        let state = continuation(&messages, "model", "https://example.test/v1").unwrap();
+        assert!(state.is_secret());
+        assert_eq!(state.redacted(), mf_runtime::ValueRef::from("[REDACTED]"));
+        assert_eq!(
+            resume(state.clone(), "model", "https://example.test/v1").unwrap(),
+            messages
+        );
+        for (model, endpoint) in [
+            ("other", "https://example.test/v1"),
+            ("model", "https://other.test/v1"),
+        ] {
+            assert!(resume(state.clone(), model, endpoint).is_err());
+        }
+        let state = serde_json::to_value(&state).unwrap();
+        for (field, value) in [
+            ("version", serde_json::json!(2)),
+            ("messages", serde_json::json!([])),
+            ("messages", serde_json::json!("invalid")),
+        ] {
+            let mut invalid = state.clone();
+            invalid[field] = value;
+            let error = resume(invalid.into(), "model", "https://example.test/v1").unwrap_err();
+            assert!(!error.to_string().contains("private-sealed-content"));
+            assert!(!format!("{error:?}").contains("private-sealed-content"));
+        }
+        assert!(
+            resume(
+                serde_json::json!({}).into(),
+                "model",
+                "https://example.test/v1"
+            )
+            .is_err()
+        );
     }
 }

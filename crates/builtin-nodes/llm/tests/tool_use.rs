@@ -87,6 +87,9 @@ fn tool_probe() {
     let emitted = deltas.clone();
     let streaming = options["stream"] == true;
     let history = options.get("history").cloned();
+    let rounds = options["rounds"].as_u64().unwrap_or(1);
+    let steps = Arc::new(Mutex::new(Vec::new()));
+    let completed = steps.clone();
     let parent: TaskFlowNode = FlowNode {
         definition_id: "parent".into(),
         metadata,
@@ -96,11 +99,28 @@ fn tool_probe() {
             if let Some(history) = &history {
                 inputs.insert("history".into(), history.clone().into());
             }
-            let result = if streaming {
-                executor.execute_with_sink(inputs, context, &mut Sink(emitted.clone()))
-            } else {
-                executor.execute(inputs, context)
-            }?;
+            let mut result = NodeResult::default();
+            // The harness owns continuation scheduling, just as a Flow loop does in production.
+            for _ in 0..rounds {
+                result = if streaming {
+                    executor.execute_with_sink(inputs.clone(), context, &mut Sink(emitted.clone()))
+                } else {
+                    executor.execute(inputs.clone(), context)
+                }?;
+                completed
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::to_value(&result.outputs).unwrap());
+                if result.outputs["status"] != ValueRef::from("tool_calls") {
+                    break;
+                }
+                assert!(result.outputs["continuation"].is_secret());
+                inputs.insert(
+                    "continuation".into(),
+                    result.outputs["continuation"].clone(),
+                );
+                inputs.insert("history".into(), result.outputs["history"].clone());
+            }
             *recorded.lock().unwrap() = Some(serde_json::to_value(&result.outputs).unwrap());
             Ok(result)
         }))),
@@ -275,7 +295,7 @@ fn tool_probe() {
     let outcome = flow.execute_in_context(&mut ExecutionContext::default());
     println!(
         "TOOL_RESULT:{}",
-        json!({"ok":outcome.is_ok(),"error":outcome.err().map(|error| error.to_string()),"outputs":*results.lock().unwrap(),"calls":*seen.lock().unwrap(),"deltas":*deltas.lock().unwrap()})
+        json!({"ok":outcome.is_ok(),"error":outcome.err().map(|error| error.to_string()),"outputs":*results.lock().unwrap(),"calls":*seen.lock().unwrap(),"deltas":*deltas.lock().unwrap(),"steps":*steps.lock().unwrap()})
     );
 }
 
@@ -298,15 +318,20 @@ fn repeated_calls_compose_external_inputs_and_preserve_protocol_and_usage() {
         reply(vec![call("c", "search", json!({"query":"third"}))]),
         Reply::text("done"),
     ]);
-    let result = probe(&server, json!({}));
+    let result = probe(&server, json!({"rounds":3}));
     assert_eq!(result["ok"], true, "{result}");
     assert_eq!(result["calls"].as_array().unwrap().len(), 3);
-    assert_eq!(result["outputs"]["text"], "checkingcheckingdone");
+    assert_eq!(result["outputs"]["text"], "done");
     assert_eq!(
         result["outputs"]["usage"],
-        json!({"input_tokens":6,"output_tokens":3,"total_tokens":9})
+        json!({"input_tokens":2,"output_tokens":1,"total_tokens":3})
     );
-    let usages = result["outputs"]["usages"].as_array().unwrap();
+    let usages: Vec<_> = result["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| &step["usages"][0])
+        .collect();
     assert_eq!(usages.len(), 3);
     assert_ne!(usages[0]["call_id"], usages[1]["call_id"]);
     let requests = server.requests();
@@ -380,7 +405,7 @@ fn invalid_calls_receive_feedback_without_dispatch_and_domain_failures_are_sanit
         ]),
         Reply::text("done"),
     ]);
-    let result = probe(&server, json!({}));
+    let result = probe(&server, json!({"rounds":2}));
     assert_eq!(result["ok"], true, "{result}");
     assert_eq!(result["calls"].as_array().unwrap().len(), 3);
     let request = server.requests()[1].body.to_string();
@@ -448,14 +473,12 @@ fn budgets_and_ambiguous_batches_stop_before_any_new_side_effect() {
         reply(vec![call("a", "search", json!({"query":"first"}))]),
         reply(vec![call("b", "search", json!({"query":"second"}))]),
     ]);
-    let result = probe(
-        &server,
-        json!({"config":{"max_tool_rounds":1,"capture_errors":true}}),
-    );
-    assert_eq!(result["outputs"]["status"], "failed", "{result}");
-    assert_eq!(result["outputs"]["history"], json!([]));
+    let result = probe(&server, json!({}));
+    assert_eq!(result["outputs"]["status"], "tool_calls", "{result}");
+    assert!(!result["outputs"]["continuation"].is_null());
+    assert_eq!(result["outputs"]["usages"].as_array().unwrap().len(), 1);
     assert_eq!(result["calls"].as_array().unwrap().len(), 1);
-    assert_eq!(server.requests().len(), 2);
+    assert_eq!(server.requests().len(), 1);
 }
 
 fn stream_call(raw: &str, finish: bool) -> Reply {
@@ -481,11 +504,15 @@ fn streamed_arguments_are_buffered_until_complete_and_rounds_keep_distinct_usage
         stream_call("{\"query\":\"first\"}", true),
         Reply::stream_text("done"),
     ]);
-    let result = probe(&server, json!({"stream":true}));
+    let result = probe(&server, json!({"stream":true,"rounds":2}));
     assert_eq!(result["ok"], true, "{result}");
     assert_eq!(result["calls"].as_array().unwrap().len(), 1);
-    assert_eq!(result["outputs"]["text"], "checkingdone");
-    assert_eq!(result["outputs"]["usage"], json!({"output_tokens":2}));
+    assert_eq!(result["outputs"]["text"], "done");
+    assert_eq!(result["steps"][0]["usage"], json!({"output_tokens":1}));
+    assert_eq!(
+        result["outputs"]["usage"],
+        json!({"input_tokens":2,"output_tokens":1,"total_tokens":3})
+    );
     let deltas = result["deltas"].as_array().unwrap();
     assert_eq!(
         deltas
@@ -575,10 +602,15 @@ fn an_unreported_later_usage_never_reuses_the_previous_round_counters() {
         reply(vec![call("a", "search", json!({"query":"first"}))]),
         Reply::json(final_reply),
     ]);
-    let result = probe(&server, json!({}));
+    let result = probe(&server, json!({"rounds":2}));
     assert_eq!(result["ok"], true, "{result}");
     assert!(result["outputs"].get("usage").is_none());
-    let usages = result["outputs"]["usages"].as_array().unwrap();
+    let usages: Vec<_> = result["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| &step["usages"][0])
+        .collect();
     assert_eq!(usages.len(), 2);
     assert_eq!(usages[0]["usage"]["output_tokens"], 1);
     assert!(usages[1].get("usage").is_none());

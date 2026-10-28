@@ -19,13 +19,13 @@ parameter ownership and permit callers to override externally supplied values.
 
 ## Impact
 
-The eventual implementation affects workflow definitions, compiler preparation and generated plans,
-runtime invocation contexts, interface reflection, and observation. LLM protocol changes are a later
-integration phase. The implementation provides the runtime's call/output model, compiler-backed
-ownership resolution, validation/remapping of caller-owned arguments, and scope-bound read-only
-discovery through the execution context. It reuses ordinary node preparation, type compatibility, and
-exclusive-branch proofs. Scheduling, provider descriptions/schema conversion, and workflow-format
-changes remain subsequent phases.
+The implementation affects workflow definitions, compiler preparation and generated plans, runtime
+invocation contexts, decoded schema reflection, observation, and LLM protocol adaptation. It reuses
+ordinary node preparation, input resolution, node execution, exclusive-branch proofs, success guards,
+and the shared worker pool. LLM nodes execute one model request and return explicit continuation;
+existing workflow loops own repeated requests, termination, and usage accumulation. The chat tool
+example uses the application's existing conversation contract. Loop child-stream forwarding is a
+separate change.
 
 Runtime topology mutation, dynamically loaded providers, arbitrary cross-scope discovery, and stream
 or event nodes as callable tools are outside the initial scope.

@@ -364,7 +364,7 @@ fn missing_and_empty_credentials_fail_without_acquiring_network_resources() {
     assert!(server.requests().is_empty());
     let prepared =
         prepare_llm(json!({"model": "example-model", "base_url": server.base_url})).unwrap();
-    assert_eq!(prepared.metadata.ports.inputs.len(), 3);
+    assert_eq!(prepared.metadata.ports.inputs.len(), 4);
 }
 
 #[test]

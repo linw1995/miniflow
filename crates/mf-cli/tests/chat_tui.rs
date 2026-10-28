@@ -34,14 +34,13 @@ fn supplied_conversation_workflows_run_inside_the_application_lifecycle() {
         let tools = example == "chat-tools-flow.json";
         let root = tempfile::tempdir().unwrap();
         let replies = if tools {
-            let mut call = Reply::stream_text("");
-            let start = serde_json::json!({"id":"tool-round","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"multiply-1","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":null}]});
-            let end = serde_json::json!({"id":"tool-round","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
-            call.body = format!("data: {start}\n\ndata: {end}\n\ndata: [DONE]\n\n");
+            let call = Reply::json(
+                serde_json::json!({"id":"tool-round","object":"chat.completion","created":0,"model":"fixture-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"multiply-1","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}),
+            );
             vec![
                 call,
-                Reply::stream_text("first answer"),
-                Reply::stream_text("second answer"),
+                Reply::text("first answer"),
+                Reply::text("second answer"),
             ]
         } else {
             vec![
@@ -103,7 +102,7 @@ fn supplied_conversation_workflows_run_inside_the_application_lifecycle() {
                         let CompletionState::Committed(completion) = resolution.state else {
                             panic!("expected committed conversation")
                         };
-                        assert!(saw_preview, "chat answer was not streamed");
+                        assert_eq!(saw_preview, !tools);
                         assert_eq!(completion.result.text, expected);
                         assert_eq!(completion.result.usages.len(), calls);
                         for usage in &completion.result.usages {

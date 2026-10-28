@@ -306,8 +306,10 @@ nix develop --command cargo run -p mf-cli --features development-support -- comp
 
 The tool-calling example supplies the model, endpoint, credentials, and external multiplier through
 `builtin.parameters`. The LLM sees only its own `amount` argument and invokes the CEL tool through the
-runtime call dispatcher. It streams the final answer and returns every model round in `usages`, so the
-existing chat application handles previews, persistence, and usage without a tool-specific backend:
+runtime call dispatcher. Each LLM execution makes one model request. The existing `workflow.loop` owns
+continuation, stopping, and usage accumulation; it returns the final answer and every request in `usages`
+through the normal chat contract. This example currently uses terminal delivery; loop child streaming
+is a separate runtime capability. The chat application reuses its existing persistence and accounting:
 
 ```sh
 mf compile examples/chat-tools-flow.json --output ./chat-tools-flow

@@ -56,26 +56,325 @@
       }
     },
     {
-      "id": "chat",
-      "kind": "builtin.llm",
+      "id": "empty_continuation",
+      "kind": "builtin.constant",
       "config": {
-        "model": {
-          "$ref": "params.model"
+        "value": null
+      }
+    },
+    {
+      "id": "empty_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "initial_status",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "tool_calls"
+      }
+    },
+    {
+      "id": "empty_text",
+      "kind": "builtin.constant",
+      "config": {
+        "value": ""
+      }
+    },
+    {
+      "id": "repeat",
+      "kind": "workflow.loop",
+      "loop": {
+        "max_iterations": 4,
+        "variables": [
+          {
+            "name": "model",
+            "type": "string"
+          },
+          {
+            "name": "base_url",
+            "type": "string"
+          },
+          {
+            "name": "api_key",
+            "type": "string"
+          },
+          {
+            "name": "prompt",
+            "type": "string"
+          },
+          {
+            "name": "system",
+            "type": "string"
+          },
+          {
+            "name": "history",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "factor",
+            "type": "int"
+          },
+          {
+            "name": "continuation",
+            "type": "any"
+          },
+          {
+            "name": "usages",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "status",
+            "type": "string"
+          },
+          {
+            "name": "text",
+            "type": "string"
+          },
+          {
+            "name": "error",
+            "type": "string"
+          }
+        ],
+        "until": {
+          "variable": "status",
+          "operator": "ne",
+          "value": "tool_calls"
         },
-        "base_url": {
-          "$ref": "params.base_url"
-        },
-        "api_key": {
-          "$ref": "params.api_key"
-        },
-        "capture_errors": true,
-        "call_outputs": {
-          "amount": "int"
-        },
-        "max_tool_rounds": 4,
-        "max_tool_calls": 8
+        "body": {
+          "nodes": [
+            {
+              "id": "chat",
+              "kind": "builtin.llm",
+              "config": {
+                "model": {
+                  "$ref": "%loop.model"
+                },
+                "base_url": {
+                  "$ref": "%loop.base_url"
+                },
+                "api_key": {
+                  "$ref": "%loop.api_key"
+                },
+                "capture_errors": true,
+                "call_outputs": {
+                  "amount": "int"
+                },
+                "max_tool_calls": 8
+              },
+              "inputs": {
+                "prompt": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "prompt"
+                  }
+                },
+                "system": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "system"
+                  }
+                },
+                "history": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "history"
+                  }
+                },
+                "continuation": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "continuation"
+                  }
+                }
+              }
+            },
+            {
+              "id": "multiply",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "amount": "int",
+                  "factor": "int"
+                },
+                "code": {
+                  "result": "amount * factor"
+                }
+              },
+              "inputs": {
+                "factor": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "factor"
+                  }
+                }
+              }
+            },
+            {
+              "id": "collect",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "left": {
+                    "list": "object"
+                  },
+                  "right": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "value": "left + right"
+                }
+              },
+              "inputs": {
+                "left": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "usages"
+                  }
+                },
+                "right": {
+                  "from": {
+                    "node": "chat",
+                    "port": "usages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_history",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "history"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "history"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_continuation",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "continuation"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "continuation"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_usages",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "usages"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "collect",
+                    "port": "value"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_status",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "status"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "status"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_text",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "text"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "text"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_error",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "error"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "error"
+                  }
+                }
+              }
+            }
+          ],
+          "calls": {
+            "chat": {
+              "multiply": {
+                "target": "multiply",
+                "description": "Multiply an integer by the configured factor.",
+                "ports": [
+                  {
+                    "output": "amount",
+                    "input": "amount"
+                  }
+                ]
+              }
+            }
+          }
+        }
       },
       "inputs": {
+        "model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        },
         "prompt": {
           "from": {
             "node": "params",
@@ -93,27 +392,70 @@
             "node": "params",
             "port": "history"
           }
-        }
-      }
-    },
-    {
-      "id": "multiply",
-      "kind": "builtin.code",
-      "config": {
-        "language": "cel",
-        "inputs": {
-          "amount": "int",
-          "factor": "int"
         },
-        "code": {
-          "result": "amount * factor"
-        }
-      },
-      "inputs": {
         "factor": {
           "from": {
             "node": "params",
             "port": "factor"
+          }
+        },
+        "continuation": {
+          "from": {
+            "node": "empty_continuation",
+            "port": "value"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "empty_usages",
+            "port": "value"
+          }
+        },
+        "status": {
+          "from": {
+            "node": "initial_status",
+            "port": "value"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "empty_text",
+            "port": "value"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "empty_text",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "settle",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "status": "string",
+          "error": "string"
+        },
+        "code": {
+          "status": "status == \"tool_calls\" ? \"failed\" : status",
+          "error": "status == \"tool_calls\" ? \"Tool round limit reached\" : error"
+        }
+      },
+      "inputs": {
+        "status": {
+          "from": {
+            "node": "repeat",
+            "port": "status"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "repeat",
+            "port": "error"
           }
         }
       }
@@ -121,67 +463,45 @@
   ],
   "outputs": [
     {
-      "name": "answer",
-      "node": "chat",
-      "port": "delta"
-    },
-    {
       "name": "status",
-      "node": "chat",
+      "node": "settle",
       "port": "status"
     },
     {
       "name": "text",
-      "node": "chat",
+      "node": "repeat",
       "port": "text"
     },
     {
       "name": "usages",
-      "node": "chat",
+      "node": "repeat",
       "port": "usages"
     },
     {
       "name": "error",
-      "node": "chat",
-      "port": "error",
-      "optional": true
-    },
-    {
-      "name": "metadata",
-      "node": "chat",
-      "port": "metadata",
-      "optional": true
-    },
-    {
-      "name": "finish_reason",
-      "node": "chat",
-      "port": "finish_reason",
-      "optional": true
+      "node": "settle",
+      "port": "error"
     }
   ],
   "clusters": [
     {
-      "label": "Conversation with tools",
-      "annotation": "Stream the answer, invoke the selected tool with the configured factor, and return all model usage to the chat application.",
+      "label": "Conversation setup",
+      "annotation": "Resolve configuration and initialize caller-owned loop state.",
       "nodes": [
         "params",
-        "chat",
-        "multiply"
+        "empty_continuation",
+        "empty_usages",
+        "initial_status",
+        "empty_text"
+      ]
+    },
+    {
+      "label": "Tool conversation",
+      "annotation": "The workflow controls model requests, continuation, usage accumulation, and the terminal result.",
+      "nodes": [
+        "repeat",
+        "settle"
       ]
     }
-  ],
-  "calls": {
-    "chat": {
-      "multiply": {
-        "target": "multiply",
-        "description": "Multiply an integer by the configured factor.",
-        "ports": [
-          {
-            "output": "amount",
-            "input": "amount"
-          }
-        ]
-      }
-    }
-  }
+  ]
 }

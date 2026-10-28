@@ -470,3 +470,27 @@ caller-owned decoded refinements, and all refinements for a shared caller parame
 
 - **WHEN** a provider changes nested required fields while its coarse input port remains `object`
 - **THEN** generated startup rejects the changed metadata before business execution
+
+### Requirement: Keep model iteration in workflow composition
+
+Each LLM node execution SHALL issue at most one model request. A completed tool batch SHALL return
+correlated history and opaque continuation without issuing another request. The workflow SHALL own
+iteration limits, termination, and usage accumulation. Continuation MUST retain the provider's complete
+message state and MUST NOT inject another user prompt when resumed.
+
+#### Scenario: Stop after one tool response
+
+- **WHEN** a model response requests a valid tool batch
+- **THEN** the node executes only that batch and returns `tool_calls` status
+- **AND** it returns the current request's usage and a continuation without another provider request
+
+#### Scenario: Continue through an existing workflow loop
+
+- **WHEN** a workflow carries history and continuation to its next iteration
+- **THEN** the node replays complete provider state without duplicating the user prompt
+- **AND** the workflow decides whether to continue and how to combine usage and text
+
+#### Scenario: Exhaust the graph-owned request limit
+
+- **WHEN** the example reaches its loop limit before a final model answer
+- **THEN** it returns a failed chat result and the collected usage through the normal application contract

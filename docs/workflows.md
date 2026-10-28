@@ -415,21 +415,28 @@ and outputs are also redacted. Literal configuration and parameter defaults rema
 
 ### LLM configuration and conversation values
 
-The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing one authoritative terminal result and optional text deltas:
+The opt-in `mfn-llm` package registers `builtin.llm`. Each execution makes exactly one model request,
+optionally dispatches its completed tool batch, and returns one result with optional text deltas:
 
 | Direction | Port | Type | Required |
 | --- | --- | --- | --- |
 | Input | `prompt` | `string` | Yes |
 | Input | `system` | `string` | No |
 | Input | `history` | `List(Object)` | No |
+| Input | `continuation` | `any` (opaque state or null) | No |
+| Output | `status` | `string` | Yes |
+| Output | `usages` | `List(Object)` | Yes |
+| Output | `continuation` | `any` (opaque state or null) | Yes |
 | Output | `text` | `string` | Yes |
 | Output | `history` | `List(Object)` | Yes |
 | Output | `usage` | `Map(Int64)` | No |
 | Output | `finish_reason` | `string` | No |
+| Output | `error` | `string` | No |
+| Output | `metadata` | `object` | No |
 | Stream output | `delta` | `Object` | Yes, per emission |
 
 The `delta` payload contains `text` and `model_call_id`. A connected graph edge or selected native output
-selects streaming requests for every model round; an unconsumed invocation sends ordinary requests and emits nothing.
+selects streaming for that request; an unconsumed invocation sends one ordinary request and emits nothing.
 There is no per-node streaming flag or fallback request. Terminal text, history, finish reason, and usages
 come from the completed provider response. Delivered prefixes remain provisional on failure or cancellation.
 
@@ -513,8 +520,8 @@ Each invocation enforces its resolved deadline through the runtime future driver
 invocation-specific credentials, endpoint, or deadline.
 
 Request messages are optional system instructions, the supplied history in order, and the current user prompt.
-On success, returned history preserves the supplied records and appends the current user prompt and complete assistant
-text, including intervening tool calls and results. System instructions are excluded and must be supplied again
+Returned history preserves the supplied records and appends one assistant response and its tool results. A fresh
+request also appends the current user prompt; a continuation request does not append that prompt again. System instructions are excluded and must be supplied again
 for each turn. The node does not retain conversation state or automatically trim history. Unsupported history roles and response content
 fail rather than being silently rewritten. A nonempty reply truncated at its token limit retains the `length` reason.
 
@@ -534,7 +541,8 @@ workflow thread. Async hosts use a blocking thread for synchronous workflow entr
 The [chat workflow with tools](../examples/chat-tools-flow.json) exposes a callable CEL node. Its `amount`
 argument comes from `chat`, while an ordinary connection supplies `factor` from a configuration parameter.
 The model sees only `amount`. The workflow uses the existing chat contract: `prompt`, `system`, and `history`
-inputs, streamed `answer` output, and terminal `status`, `text`, and per-request `usages` outputs.
+inputs and terminal `status`, `text`, and per-request `usages` outputs. The example uses `workflow.loop`
+to schedule each model request; it currently uses terminal chat output because child-stream forwarding is separate.
 The same binding and execution rules apply to terminal tasks, TaskStream nodes, and callable Flow wrappers.
 
 Declare `config.call_outputs` as a static name-to-type map on the LLM node, then connect those slots with
@@ -566,15 +574,24 @@ call with exactly one result. History preserves these records:
 ```
 
 Supply all results before another user or assistant message. Plain history records retain their existing
-shape; metadata stays local. Full SDK assistant content is replayed between rounds of one invocation,
-while the public persisted history contains visible text and structured tool exchanges. Provider-specific
-reasoning state is not persisted across workflow invocations.
+shape; metadata stays local.
 
-`max_tool_rounds` defaults to 8 (range 1–32) and `max_tool_calls` to 32 (range 1–128). A tool round is one
-assistant batch, followed by another model request, so the maximum provider request count is rounds plus one.
-Both limits accept configuration templates. One `timeout_ms` deadline covers all rounds and tool calls;
-runtime cancellation, invocation depth, and shared execution budgets remain in force. Limit checks precede
-batch execution. Already executed tools are not rolled back when a later round fails.
+A response requesting tools returns `status: "tool_calls"`, completed call/result history, and a non-null
+`continuation`. The node then finishes. Pass both `history` and `continuation` into another execution to
+request the next model response; `prompt` and `system` initialize only fresh requests. Continuation is
+versioned opaque state bound to the model and endpoint. It preserves complete SDK messages, including
+sealed reasoning, and is marked secret. Do not edit it or send it to another model. A final response returns
+`status: "succeeded"` and null continuation; captured errors return `status: "failed"` and null continuation.
+
+`max_tool_calls` defaults to 32 (range 1–128) and limits the current response's tool batch. It accepts
+configuration templates. `max_tool_rounds` is not supported: loop policy belongs to the workflow.
+One `timeout_ms` deadline covers this model request and its tool batch; runtime cancellation, invocation
+depth, and shared execution budgets remain in force. Already executed tools are not rolled back on failure.
+
+The example uses the existing `workflow.loop` with `max_iterations: 4`, stopping when `status` differs from
+`tool_calls`. It explicitly accumulates usage lists and carries history and continuation with loop variables.
+If the limit is reached with tools still pending, a normal CEL node returns a failed chat result while
+retaining the collected usage. The LLM node never schedules the next model request itself.
 
 Tool arguments and results are each limited to 64 KiB of JSON, argument batches to 256 KiB, and tool
 declarations to 256 KiB, with at most 128 tools and 256 public parameters per tool. Oversized results are replaced with a generic error rather than truncated JSON.
@@ -583,11 +600,11 @@ skips, and domain failures return generic tool feedback; typed runtime control f
 The adapter does not retry requests or tools automatically. A model may explicitly request a tool again;
 side-effecting tools must enforce their own idempotency policy.
 
-`text` concatenates visible assistant text across rounds, matching emitted deltas. `history` preserves each
-round separately. `usages` contains one entry per actual model request with a distinct call ID; aggregate
-`usage` includes only counters reported by every round. With `capture_errors`, a recoverable failure returns
-`status: "failed"`, the original input history, and collected request facts. Delivery failures and runtime
-control failures still propagate.
+`text` contains this response's visible text and matches this request's deltas; it may be empty for a tool
+response. `usage` contains this request's sparse counters, and `usages` contains exactly one entry per
+execution that attempted a model request. The workflow owns cross-request accumulation. With `capture_errors`,
+a recoverable failure returns `status: "failed"`, the input history, and that request's facts. Delivery
+failures and runtime control failures still propagate.
 
 ```sh
 mf compile examples/chat-tools-flow.json --output ./chat-tools-flow

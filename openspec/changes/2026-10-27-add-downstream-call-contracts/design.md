@@ -307,7 +307,8 @@ Schema can be proven equivalent to custom codecs. Runtime decoding and business 
 authoritative. Provider schema conversion must not silently change omission, null, or numeric semantics.
 
 LLM integration consumes the generic callable view and maps public aliases back to prepared bindings.
-It owns provider tool descriptions, structured call/result history, and bounded multi-round dialogue.
+It owns provider tool descriptions, structured call/result history, and one model request per execution.
+Workflow composition owns repeated requests, continuation state, accumulation, and termination.
 It dispatches only complete, validated tool calls, including when arguments arrive incrementally.
 The runtime owns execution and returns typed outcomes; the LLM layer decides how supported failures
 are represented in tool-result messages. Cancellation and exhausted budgets remain terminal control
@@ -325,8 +326,11 @@ Opaque schemas and binary32 contracts fail before network activity. The adapter 
 executes calls sequentially through the context dispatcher, and replays SDK assistant messages with correlated results.
 Public history carries optional structured `tool_calls` and `tool_call_id` fields. Marked result secrets are redacted;
 arguments/results are bounded to 64 KiB each and batches/declarations to 256 KiB. Generic feedback hides domain failures.
-An invocation has one deadline, at most 32 tool rounds and 128 requested calls (defaults 8 and 32).
-Each provider request has independent usage facts; aggregate counters require every round to report them.
+An invocation has one model request and its tool batch under one deadline; the batch is limited to 128 calls
+(default 32). A tool response returns `tool_calls` status, history, and secret opaque continuation preserving
+SDK message state. The caller explicitly schedules the next invocation. There is no `max_tool_rounds` setting.
+The chat example uses the existing `workflow.loop` and CEL nodes to bound requests and collect usage.
+The LLM node reports only current-request usage. Loop child streaming is delivered in a separate PR.
 Failure capture retains the original history and never intercepts runtime dispatch control failures.
 
 ## Alternatives and risks

@@ -494,91 +494,84 @@ fn composed_conversation_compiles_without_application_nodes() {
 fn directed_llm_tools_match_memory_and_generated_finite_and_native_execution() {
     fn stable(mut values: Vec<Value>) -> Vec<Value> {
         for value in &mut values {
-            if let Some(usages) = value.get_mut("usages").and_then(Value::as_array_mut) {
-                for usage in usages {
-                    let usage = usage.as_object_mut().unwrap();
-                    usage.remove("call_id");
-                    usage.remove("started_at");
-                }
-            }
-            if let Some(delta) = value.get_mut("answer") {
-                delta.as_object_mut().unwrap().remove("model_call_id");
+            for usage in value["usages"].as_array_mut().unwrap() {
+                let usage = usage.as_object_mut().unwrap();
+                usage.remove("call_id");
+                usage.remove("started_at");
             }
         }
         values
     }
-    for (native, streaming) in [(false, false), (true, false), (true, true)] {
-        let tool = if streaming {
-            let mut reply = Reply::stream_text("");
-            let start = json!({"id":"first","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":null}]});
-            let finish = json!({"id":"first","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]});
-            reply.body = format!("data: {start}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
-            reply
-        } else {
-            Reply::json(
-                json!({"id":"first","object":"chat.completion","created":0,"model":"example-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":"tool_calls"}]}),
-            )
-        };
-        let final_reply = if streaming {
-            Reply::stream_text("42")
-        } else {
-            Reply::text("42")
-        };
-        let server = Server::start(vec![tool.clone(), final_reply.clone(), tool, final_reply]);
-        let mut definition: Value =
-            serde_json::from_str(include_str!("../../../examples/chat-tools-flow.json")).unwrap();
-        definition["dependencies"] = dependencies();
-        definition["dependencies"]["code"] =
-            json!({"package":"mfn-code","path":common::crates_dir().join("builtin-nodes/code")});
-        definition["outputs"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"name":"history","node":"chat","port":"history"}));
-        if native {
-            definition["execution"] = json!({"limits":{"workers":1,"max_pending_messages":2}});
-        }
-        if !streaming {
+    for native in [false, true] {
+        for limit in [1, 4] {
+            let tool = Reply::json(
+                json!({"id":"first","object":"chat.completion","created":0,"model":"example-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}),
+            );
+            let replies = if limit == 1 {
+                vec![tool.clone(), tool]
+            } else {
+                vec![tool.clone(), Reply::text("42"), tool, Reply::text("42")]
+            };
+            let server = Server::start(replies);
+            let mut definition: Value =
+                serde_json::from_str(include_str!("../../../examples/chat-tools-flow.json"))
+                    .unwrap();
+            definition["dependencies"] = dependencies();
+            definition["dependencies"]["code"] = json!({"package":"mfn-code","path":common::crates_dir().join("builtin-nodes/code")});
+            definition["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|node| node["id"] == "repeat")
+                .unwrap()["loop"]["max_iterations"] = limit.into();
             definition["outputs"]
                 .as_array_mut()
                 .unwrap()
-                .retain(|output| output["name"] != "answer");
-        }
-        let root = tempfile::tempdir().unwrap();
-        let executable = compile(&definition, root.path());
-        assert!(server.requests().is_empty());
-        let inputs = json!({"params.prompt":"Use multiply to double 21","params.base_url":server.base_url,"params.model":"example-model"});
-        let memory = stable(run_memory(&definition, &inputs));
-        let generated = stable(run(&executable, &inputs));
-        assert_eq!(generated, memory);
-        let terminal = memory
-            .iter()
-            .find(|value| value.get("status").is_some())
-            .unwrap();
-        assert_eq!(terminal["status"], "succeeded");
-        assert_eq!(terminal["text"], "42");
-        assert_eq!(terminal["usages"].as_array().unwrap().len(), 2);
-        assert_eq!(terminal["history"].as_array().unwrap().len(), 4);
-        if streaming {
-            let previews: Vec<_> = memory
-                .iter()
-                .filter_map(|value| value.get("answer"))
-                .cloned()
-                .collect();
-            assert_eq!(previews, vec![json!({"text":"42"})]);
-        }
-        let requests = server.requests();
-        assert_eq!(requests.len(), 4);
-        for request in [&requests[0], &requests[2]] {
-            let properties = &request.body["tools"][0]["function"]["parameters"]["properties"];
-            assert!(properties.get("amount").is_some());
-            assert!(properties.get("factor").is_none());
-        }
-        for request in [&requests[1], &requests[3]] {
-            assert_eq!(request.body["messages"][2]["tool_call_id"], "a");
-            let result: Value =
-                serde_json::from_str(request.body["messages"][2]["content"].as_str().unwrap())
-                    .unwrap();
-            assert_eq!(result, json!({"result":42}));
+                .push(json!({"name":"history","node":"repeat","port":"history"}));
+            if native {
+                definition["execution"] = json!({"limits":{"workers":1,"max_pending_messages":2}});
+            }
+            let root = tempfile::tempdir().unwrap();
+            let executable = compile(&definition, root.path());
+            assert!(server.requests().is_empty());
+            let inputs = json!({"params.prompt":"Use multiply to double 21","params.base_url":server.base_url,"params.model":"example-model"});
+            let memory = stable(run_memory(&definition, &inputs));
+            assert_eq!(stable(run(&executable, &inputs)), memory);
+            assert_eq!(memory.len(), 1);
+            let output = &memory[0];
+            let calls = if limit == 1 { 1 } else { 2 };
+            assert_eq!(output["usages"].as_array().unwrap().len(), calls);
+            assert_eq!(output["history"].as_array().unwrap().len(), calls + 2);
+            if limit == 1 {
+                assert_eq!(output["status"], "failed");
+                assert_eq!(output["error"], "Tool round limit reached");
+            } else {
+                assert_eq!(output["status"], "succeeded");
+                assert_eq!(output["text"], "42");
+            }
+            let requests = server.requests();
+            assert_eq!(requests.len(), calls * 2);
+            for request in [&requests[0], &requests[calls]] {
+                let properties = &request.body["tools"][0]["function"]["parameters"]["properties"];
+                assert!(properties.get("amount").is_some());
+                assert!(properties.get("factor").is_none());
+            }
+            if limit > 1 {
+                for request in [&requests[1], &requests[3]] {
+                    let messages = request.body["messages"].as_array().unwrap();
+                    assert_eq!(
+                        messages
+                            .iter()
+                            .filter(|message| message["role"] == "user")
+                            .count(),
+                        1
+                    );
+                    assert_eq!(messages[2]["tool_call_id"], "a");
+                    let result: Value =
+                        serde_json::from_str(messages[2]["content"].as_str().unwrap()).unwrap();
+                    assert_eq!(result, json!({"result":42}));
+                }
+            }
         }
     }
 }
