@@ -284,6 +284,17 @@ The worker prerequisite itself does not activate tools or serialize node instanc
 
 ## Schema and LLM boundary
 
+Typed input codecs now reflect provider-neutral `ValueSchema` refinements. Struct fields and tagged
+variants are closed; renames, defaults, optionality, nullable values, and explicit field descriptions
+follow their codecs. Reflection never runs defaults or reads values. Manual codecs default to opaque,
+and recursive or over-budget reflection remains explicitly incomplete. Shared payloads retain their
+underlying decoded contract without forcing eager decoding.
+
+`NodeMetadata.input_schemas` carries only refinements absent from coarse ports. Resolved inputs retain
+them, and public projections include only caller-owned refinements. Static call descriptions are public;
+external opaque configuration stays outside the caller interface. Generated metadata checks detect
+schema-only drift. Coarse argument binding remains compatible; decoded validation is an explicit API.
+
 The caller parameter schema is the full target input contract projected onto caller-owned inputs.
 External inputs are absent from this schema. Node purpose and parameter descriptions remain public,
 while values and internal binding details do not become model-visible metadata.

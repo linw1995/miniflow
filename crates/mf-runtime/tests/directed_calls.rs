@@ -52,6 +52,7 @@ fn binding(caller: usize, target: usize, name: &str, target_id: &str) -> Prepare
             path: vec![],
         },
         binding: ResolvedCallBinding {
+            description: None,
             id: CallBindingId::new(0),
             name: name.into(),
             caller: NodeId::new(caller),
@@ -170,11 +171,13 @@ fn composes_external_secrets_and_repeats_only_the_selected_tool_in_isolated_scop
     let mut call = binding(1, 2, "search", "tool");
     call.binding.inputs = vec![
         ResolvedCallInput {
+            schema: None,
             port: port("text"),
             source: CallInputSource::Output(port("query")),
             secret: false,
         },
         ResolvedCallInput {
+            schema: None,
             port: port("token"),
             source: CallInputSource::External,
             secret: true,
@@ -302,6 +305,7 @@ fn skipped_external_inputs_skip_only_the_selected_invocation() {
     ];
     let mut call = binding(1, 2, "tool", "tool");
     call.binding.inputs.push(ResolvedCallInput {
+        schema: None,
         port: port("token"),
         source: CallInputSource::External,
         secret: false,
@@ -815,6 +819,7 @@ fn default_arguments_distinguish_null_from_omission_without_retaining_previous_o
     ];
     let mut call = binding(0, 1, "tool", "tool");
     call.binding.inputs.push(ResolvedCallInput {
+        schema: None,
         port: PortSpec::new(
             "value",
             ValueType::Nullable(Box::new(ValueType::String)),
@@ -840,6 +845,7 @@ fn prepared_calls_reject_overlapping_caller_and_external_suppliers() {
     ];
     let mut call = binding(0, 1, "tool", "tool");
     call.binding.inputs.push(ResolvedCallInput {
+        schema: None,
         port: port("value"),
         source: CallInputSource::Default,
         secret: false,

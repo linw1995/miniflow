@@ -15,6 +15,11 @@ use std::{
 };
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
+    #[snafu(display("node `{definition_id}` input schemas: {source}"))]
+    InputSchemas {
+        definition_id: DefinitionId,
+        source: mf_runtime::SchemaContractError,
+    },
     #[snafu(transparent)]
     CallDispatch {
         source: mf_runtime::CallDispatchError,
@@ -385,11 +390,18 @@ impl FlowBuilder {
             let bindings = bindings
                 .iter()
                 .map(|binding| {
-                    mf_runtime::CallBinding::new(
+                    let resolved = mf_runtime::CallBinding::new(
                         binding.name(),
                         indices[&definition.nodes[binding.target().index()].id],
                         binding.ports().to_vec(),
                         binding.defaults(),
+                    )?;
+                    Ok::<_, mf_runtime::CallContractError>(
+                        if let Some(description) = binding.description() {
+                            resolved.with_description(description)
+                        } else {
+                            resolved
+                        },
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -748,6 +760,11 @@ impl FlowBuilder {
         crate::validate_exclusive_inputs(&connections)?;
         let mut definition_indices = BTreeMap::new();
         for (index, node) in nodes.iter().enumerate() {
+            node.metadata
+                .validate_input_schemas()
+                .context(InputSchemasSnafu {
+                    definition_id: node.definition_id.clone(),
+                })?;
             node.metadata
                 .validate_call_outputs()
                 .context(CallOutputsSnafu {

@@ -32,7 +32,8 @@
 
 ## 3. LLM integration
 
-- [ ] 3.1 Add sufficient value-schema reflection and reject tool contracts that cannot be accurately represented.
+- [x] 3.1 Reflect decoded structs, enums, collections, presence, and descriptions; mark unknown or recursive codecs opaque.
+- [ ] 3.1a Reject unsupported schema projections at the LLM boundary before provider requests.
 - [ ] 3.2 Build provider tool definitions from caller-visible projections and validate returned tool names.
 - [ ] 3.3 Extend message history with structured tool calls, results, and correlation identities.
 - [ ] 3.4 Add bounded multi-round dispatch and buffer streamed arguments until each call is complete.

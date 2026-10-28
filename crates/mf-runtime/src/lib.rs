@@ -31,6 +31,7 @@ mod task_stream;
 mod typed_inputs;
 mod typed_outputs;
 mod value;
+mod value_schema;
 mod worker;
 mod workflow_inputs;
 mod workflow_manifest;
@@ -140,6 +141,9 @@ pub use typed_outputs::{
 };
 
 pub use value::{ValueKind, ValueRef};
+pub use value_schema::{
+    SchemaContractError, SchemaField, SchemaOpacity, ValueSchema, ValueSchemaContext,
+};
 pub use worker::{
     ExecutionWorkers, RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError,
     WorkerReservation, WorkerResource,

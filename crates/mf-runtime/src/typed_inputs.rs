@@ -32,6 +32,23 @@ use std::collections::BTreeMap;
 pub trait NodeInputs: Sized {
     fn ports() -> Vec<PortSpec>;
 
+    fn input_schemas() -> BTreeMap<String, crate::ValueSchema> {
+        Self::input_schemas_with_context(&mut crate::ValueSchemaContext::default())
+    }
+    fn input_schemas_with_context(
+        _: &mut crate::ValueSchemaContext,
+    ) -> BTreeMap<String, crate::ValueSchema> {
+        Self::ports()
+            .into_iter()
+            .map(|port| {
+                (
+                    port.name.to_string(),
+                    crate::ValueSchema::opaque(port.value_type),
+                )
+            })
+            .collect()
+    }
+
     fn from_inputs(inputs: Inputs) -> Result<Self, InputDecodeError>;
 }
 
@@ -44,6 +61,10 @@ pub trait NodeInputs: Sized {
 /// `Option` is intentionally only an [`InputField`], not an element value codec.
 pub trait InputValue: Sized {
     fn value_type() -> ValueType;
+
+    fn value_schema(_: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        crate::ValueSchema::opaque(Self::value_type())
+    }
 
     fn decode(value: ValueRef) -> Result<Self, TypeMismatch>;
 }
@@ -58,6 +79,10 @@ pub trait InputField: Sized {
 
     fn value_type() -> ValueType;
 
+    fn value_schema(_: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        crate::ValueSchema::opaque(Self::value_type())
+    }
+
     fn decode_field(port: &str, value: Option<ValueRef>) -> Result<Self, InputDecodeError>;
 
     fn port(name: &'static str) -> PortSpec {
@@ -71,7 +96,7 @@ pub enum InputDecodeError {
     MissingField { port: String },
     #[snafu(display("unknown input `{port}`"))]
     UnknownField { port: String },
-    #[snafu(display("input `{port}`: {source}"))]
+    #[snafu(display("input `{port}`: {source}"), visibility(pub))]
     InvalidValue { port: String, source: TypeMismatch },
     #[snafu(display("input `{port}` has an invalid descriptor: {source}"))]
     InvalidType {
@@ -155,6 +180,8 @@ macro_rules! required_field {
                 <Self as InputValue>::value_type()
             }
 
+            fn value_schema(context: &mut crate::ValueSchemaContext) -> crate::ValueSchema { context.describe::<Self>() }
+
             fn decode_field(port: &str, value: Option<ValueRef>) -> Result<Self, InputDecodeError> {
                 decode_required_input(port, value)
             }
@@ -216,6 +243,9 @@ pub fn unknown_enum_tag<T>(tag: &str) -> Result<T, InputDecodeError> {
 }
 
 impl InputValue for bool {
+    fn value_schema(_: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        crate::ValueSchema::Type(<Self as InputValue>::value_type())
+    }
     fn value_type() -> ValueType {
         ValueType::Boolean
     }
@@ -229,6 +259,9 @@ required_field!(bool);
 macro_rules! numeric_value {
     ($ty:ty, $descriptor:ident, $convert:ident) => {
         impl InputValue for $ty {
+            fn value_schema(_: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+                crate::ValueSchema::Type(ValueType::$descriptor)
+            }
             fn value_type() -> ValueType {
                 ValueType::$descriptor
             }
@@ -258,6 +291,9 @@ pub enum Nullable<T> {
 }
 
 impl<T: InputValue> InputValue for Nullable<T> {
+    fn value_schema(context: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        context.describe::<T>().nullable()
+    }
     fn value_type() -> ValueType {
         ValueType::Nullable(Box::new(T::value_type()))
     }
@@ -317,6 +353,9 @@ impl<T: InputValue> Shared<T> {
 }
 
 impl<T: InputValue> InputValue for Shared<T> {
+    fn value_schema(context: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        context.describe::<T>()
+    }
     fn value_type() -> ValueType {
         T::value_type()
     }
@@ -328,6 +367,9 @@ impl<T: InputValue> InputValue for Shared<T> {
 required_field!(Shared<T>, T);
 
 impl InputValue for String {
+    fn value_schema(_: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        crate::ValueSchema::Type(<Self as InputValue>::value_type())
+    }
     fn value_type() -> ValueType {
         ValueType::String
     }
@@ -340,6 +382,9 @@ impl InputValue for String {
 required_field!(String);
 
 impl InputValue for ValueRef {
+    fn value_schema(_: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        crate::ValueSchema::Type(<Self as InputValue>::value_type())
+    }
     fn value_type() -> ValueType {
         ValueType::Any
     }
@@ -351,6 +396,9 @@ impl InputValue for ValueRef {
 required_field!(ValueRef);
 
 impl<T: InputValue> InputValue for Vec<T> {
+    fn value_schema(context: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        context.describe::<T>().list()
+    }
     fn value_type() -> ValueType {
         ValueType::List(Box::new(T::value_type()))
     }
@@ -376,6 +424,9 @@ impl<T: InputValue> InputValue for Vec<T> {
 required_field!(Vec<T>, T);
 
 impl<T: InputValue> InputValue for BTreeMap<String, T> {
+    fn value_schema(context: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        context.describe::<T>().map()
+    }
     fn value_type() -> ValueType {
         ValueType::Map(Box::new(T::value_type()))
     }
@@ -402,6 +453,10 @@ required_field!(BTreeMap<String, T>, T);
 
 impl<T: InputValue> InputField for Option<T> {
     const REQUIRED: bool = false;
+
+    fn value_schema(context: &mut crate::ValueSchemaContext) -> crate::ValueSchema {
+        context.describe::<T>()
+    }
 
     fn value_type() -> ValueType {
         T::value_type()

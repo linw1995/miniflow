@@ -66,6 +66,8 @@ pub type CallDefinitions = std::collections::BTreeMap<
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CallDefinition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub target: crate::DefinitionId,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<CallPortMapping>,
@@ -81,6 +83,7 @@ pub struct CallDefinition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallBinding {
     name: String,
+    description: Option<String>,
     target: NodeId,
     ports: Vec<CallPortMapping>,
     defaults: CallInputDefaults,
@@ -106,10 +109,19 @@ impl CallBinding {
         }
         Ok(Self {
             name,
+            description: None,
             target,
             ports,
             defaults,
         })
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
     pub fn name(&self) -> &str {
@@ -281,6 +293,8 @@ pub enum CallInputSource {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedCallInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<crate::ValueSchema>,
     pub port: PortSpec,
     pub source: CallInputSource,
     pub secret: bool,
@@ -294,6 +308,8 @@ pub struct ResolvedCallInput {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedCallBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub id: CallBindingId,
     pub name: String,
     pub caller: NodeId,

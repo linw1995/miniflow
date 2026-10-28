@@ -8,6 +8,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn binding(name: &str, id: usize) -> ResolvedCallBinding {
     ResolvedCallBinding {
+        description: None,
         id: CallBindingId::new(id),
         name: name.into(),
         caller: NodeId::new(7),
@@ -27,6 +28,7 @@ fn input(
     secret: bool,
 ) -> ResolvedCallInput {
     ResolvedCallInput {
+        schema: None,
         port: PortSpec::owned(name, value_type, required),
         source,
         secret,
@@ -357,6 +359,62 @@ fn context_catalogs_restore_across_errors_panics_and_child_scopes() {
                 assert!(ctx.current_node().is_none());
                 Ok::<_, ()>(())
             })
+        })
+        .unwrap();
+}
+
+#[test]
+fn schema_projection_keeps_decoded_refinements_and_descriptions_without_external_fields() {
+    let mut call = binding("search", 0);
+    call.description = Some("Search with a structured request".into());
+    let schema = mf_runtime::ValueSchema::Object(std::collections::BTreeMap::from([(
+        "query".into(),
+        mf_runtime::SchemaField {
+            schema: mf_runtime::ValueSchema::Type(ValueType::String).described("Search text"),
+            required: true,
+        },
+    )]));
+    call.inputs = vec![
+        mf_runtime::ResolvedCallInput {
+            schema: Some(schema.clone()),
+            port: PortSpec::new("private_payload", ValueType::Object, true),
+            source: CallInputSource::Output(PortSpec::new("payload", ValueType::Any, true)),
+            secret: false,
+        },
+        mf_runtime::ResolvedCallInput {
+            schema: Some(mf_runtime::ValueSchema::opaque(ValueType::Object)),
+            port: PortSpec::new("secret_config", ValueType::Object, true),
+            source: CallInputSource::External,
+            secret: true,
+        },
+    ];
+    let interface = call.interface();
+    assert_eq!(
+        interface.description(),
+        Some("Search with a structured request")
+    );
+    assert_eq!(interface.outputs()[0].schema_constraints(), &[schema]);
+    let encoded = serde_json::to_string(&interface).unwrap();
+    assert!(
+        !encoded.contains("private_payload")
+            && !encoded.contains("secret_config")
+            && !encoded.contains("opaque")
+    );
+    let incomplete = CallArguments {
+        outputs: NodeValues::from([("payload".into(), json!({}).into())]),
+        ..Default::default()
+    };
+    interface.validate_arguments(&incomplete).unwrap();
+    let error = interface
+        .validate_decoded_arguments(&incomplete)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("payload") && !error.to_string().contains("private_payload")
+    );
+    interface
+        .validate_decoded_arguments(&CallArguments {
+            outputs: NodeValues::from([("payload".into(), json!({"query":"example"}).into())]),
+            ..Default::default()
         })
         .unwrap();
 }

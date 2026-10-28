@@ -446,3 +446,27 @@ skip evidence MUST remain a selected-call outcome rather than suppressing the ca
 - **WHEN** a native workflow is lowered into a standalone runner
 - **THEN** startup prerequisites, visibility, call bindings, and success guards are frozen at build time
 - **AND** startup checks scope identity and provider metadata before enabling dispatch
+
+### Requirement: Reflect decoded input contracts without executing codecs
+
+Typed input reflection SHALL retain closed struct fields, enum variants, collection elements,
+nullable values, presence rules, and explicit descriptions. Reflection MUST NOT decode values,
+evaluate field defaults, or read runtime configuration. Manual or recursive codecs without a complete
+structural description SHALL remain explicitly opaque. Public call projections SHALL include only
+caller-owned decoded refinements, and all refinements for a shared caller parameter SHALL apply.
+
+#### Scenario: Hide an external opaque credential
+
+- **WHEN** a tool has a reflected request object and an externally bound opaque credential codec
+- **THEN** Parent sees the complete request schema without the credential or its opacity marker
+
+#### Scenario: Keep lazy decoding and generic calls compatible
+
+- **WHEN** a shared payload has a strict decoded schema
+- **THEN** reflection exposes that schema without eagerly decoding the payload
+- **AND** generic argument binding retains its existing coarse checks while decoded validation is explicit
+
+#### Scenario: Detect schema-only drift
+
+- **WHEN** a provider changes nested required fields while its coarse input port remains `object`
+- **THEN** generated startup rejects the changed metadata before business execution

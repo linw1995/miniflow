@@ -1148,3 +1148,38 @@ Catalog construction validates registrations without invoking their factories. T
 to request a definition and handles its typed `DefinitionParseError`. Each provider owns its source
 and dependency declarations. Factories must not execute the Flow or perform business I/O.
 The catalog exposes definitions independently of compilation and execution.
+
+### Decoded input schemas
+
+`NodeInputs`, `NodeValue`, and `NodeEnum` derive structural input schemas alongside their coarse
+`ValueType` ports. Schemas retain closed object fields, string and tagged enum variants, collection
+elements, nullable values, and requiredness. Field defaults affect presence without running the
+function or publishing its value. Explicit descriptions are public metadata:
+
+```rust
+#[derive(mf_runtime::NodeEnum)]
+enum MatchMode { Exact, Prefix }
+
+#[derive(mf_runtime::NodeValue)]
+struct SearchRequest {
+    #[value(description = "Text to find")]
+    query: String,
+    mode: MatchMode,
+    limit: Option<u64>,
+}
+```
+
+Input-only derives accept `#[input(description = "...")]`. Typed task, event, stream, and combined
+constructors populate `NodeMetadata::input_schemas`; plain schemas already expressed by the port
+are omitted. Typed constructors reject manual schema overrides. Dynamic providers may declare
+refinements directly in metadata, subject to input-name, type-compatibility, and schema-size checks.
+
+Manual `InputValue`, `InputField`, `NodeInputs`, and `NodeValue` implementations default to opaque
+schemas. Override their schema hook when the codec has a representable contract, and use
+`ValueSchemaContext::describe` for nested codecs. Recursive types and exhausted reflection budgets
+remain explicitly opaque. Readers requiring a complete contract must check `is_complete()`.
+
+Reflection never decodes input data. `Shared<T>` exposes the underlying decoded schema while retaining
+lazy decoding. Ordinary codecs and coarse argument binding keep their existing behavior; callers may
+opt into `CallInterface::validate_decoded_arguments` to check known strict refinements. Generated
+runners include schema metadata in startup drift checks, even when coarse port types stay unchanged.
