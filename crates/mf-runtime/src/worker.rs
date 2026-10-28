@@ -1,16 +1,61 @@
 use snafu::{ResultExt, Snafu};
 use std::{
     any::Any,
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::VecDeque,
     io,
+    marker::PhantomData,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    rc::Rc,
     sync::{Arc, Condvar, Mutex, Weak, mpsc},
     thread::{self, JoinHandle},
 };
 
 thread_local! {
     static CURRENT_WORKER: Cell<usize> = const { Cell::new(0) };
+    static RESERVED_RESOURCES: RefCell<Vec<WorkerResource>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Identity of a serialized executor that a worker job may enter.
+#[derive(Clone, Debug, Default)]
+pub struct WorkerResource(Arc<()>);
+
+impl WorkerResource {
+    /// Reserves the resource before waiting for its executor lock. Reentry is rejected.
+    /// The reservation belongs to this thread and must outlive the executor lock guard.
+    pub fn reserve(&self) -> Option<WorkerReservation> {
+        RESERVED_RESOURCES.with(|reserved| {
+            let mut reserved = reserved.borrow_mut();
+            if reserved.iter().any(|other| Arc::ptr_eq(&self.0, &other.0)) {
+                return None;
+            }
+            reserved.push(self.clone());
+            Some(WorkerReservation {
+                resource: self.clone(),
+                thread: PhantomData,
+            })
+        })
+    }
+}
+
+/// A thread-bound reservation; releasing out of acquisition order is supported.
+pub struct WorkerReservation {
+    resource: WorkerResource,
+    thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for WorkerReservation {
+    fn drop(&mut self) {
+        RESERVED_RESOURCES.with(|reserved| {
+            reserved
+                .borrow_mut()
+                .retain(|other| !Arc::ptr_eq(&self.resource.0, &other.0));
+        });
+    }
+}
+
+fn has_reservations() -> bool {
+    RESERVED_RESOURCES.with(|reserved| !reserved.borrow().is_empty())
 }
 
 #[derive(Debug, Snafu)]
@@ -191,6 +236,7 @@ impl<Job: Send + 'static> WorkerHandle<Job> {
     }
 
     /// Waits for queue space, helping queued jobs when called by a worker in this pool.
+    /// With an active executor reservation, runs accepted children inline instead.
     pub fn submit(&self, job: Job) -> Result<(), mpsc::TrySendError<Job>> {
         if self.worker_count == 0 {
             return Err(mpsc::TrySendError::Disconnected(job));
@@ -198,8 +244,14 @@ impl<Job: Send + 'static> WorkerHandle<Job> {
         let Some(state) = self.state.upgrade() else {
             return Err(mpsc::TrySendError::Disconnected(job));
         };
-        let mut job = Some(job);
         let mut queue = state.queue.lock().unwrap();
+        if has_reservations() && !queue.closed {
+            // Queuing children behind unrelated callers waiting for this executor can deadlock.
+            drop(queue);
+            self.execute(job);
+            return Ok(());
+        }
+        let mut job = Some(job);
         loop {
             if queue.closed {
                 return Err(mpsc::TrySendError::Disconnected(
@@ -238,9 +290,10 @@ impl<Job: Send + 'static> WorkerHandle<Job> {
         CURRENT_WORKER.with(|current| current.get() == worker_id)
     }
 
-    /// Executes one queued job on the current worker; callers outside this pool do no work.
+    /// Executes one queued job on the current worker unless it holds an executor reservation.
+    /// Callers outside this pool do no work.
     pub fn help_one(&self) -> bool {
-        if !self.is_current_worker() {
+        if has_reservations() || !self.is_current_worker() {
             return false;
         }
         let Some(state) = self.state.upgrade() else {
@@ -308,12 +361,13 @@ impl WorkerHandle<WorkerJob> {
             std::iter::repeat_with(|| None).take(count).collect();
         let mut completed = 0;
         while completed < count {
-            if self.help_one() {
-                continue;
-            }
-            let (index, result) = receiver
-                .recv()
-                .expect("every submitted worker task reports completion");
+            let (index, result) = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) if self.help_one() => continue,
+                _ => receiver
+                    .recv()
+                    .expect("every submitted worker task reports completion"),
+            };
             results[index] = Some(result);
             completed += 1;
         }
@@ -377,6 +431,134 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
+
+    #[test]
+    fn reservations_reject_reentry_and_release_on_unwind() {
+        let first = WorkerResource::default();
+        let second = WorkerResource::default();
+        let first_guard = first.reserve().unwrap();
+        let second_guard = second.reserve().unwrap();
+        assert!(first.clone().reserve().is_none());
+        drop(first_guard);
+        assert!(first.reserve().is_some());
+        assert!(second.reserve().is_none());
+        drop(second_guard);
+        let result = catch_unwind(|| {
+            let _guard = second.reserve().unwrap();
+            panic!("release reservation");
+        });
+        assert!(result.is_err());
+        assert!(second.reserve().is_some());
+    }
+
+    #[test]
+    fn reserved_worker_runs_children_inline_without_helping_unrelated_jobs() {
+        let pool = WorkerPool::new(1, WorkerJob::run).unwrap();
+        let handle = pool.handle();
+        let nested = handle.clone();
+        let (sent, received) = mpsc::channel();
+        handle
+            .submit(WorkerJob::new(move || {
+                let resource = WorkerResource::default();
+                let _guard = resource.reserve().unwrap();
+                let queued = sent.clone();
+                nested
+                    .try_submit(WorkerJob::new(move || queued.send("queued").unwrap()))
+                    .unwrap();
+                assert!(!nested.help_one());
+                let parent_thread = thread::current().id();
+                let threads =
+                    nested.run_parallel(vec![|| thread::current().id(), || thread::current().id()]);
+                assert_eq!(threads, [parent_thread, parent_thread]);
+                sent.send("parent").unwrap();
+            }))
+            .unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "parent"
+        );
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "queued"
+        );
+    }
+
+    #[test]
+    fn reserved_external_caller_runs_children_without_pool_capacity() {
+        let pool = WorkerPool::new(1, WorkerJob::run).unwrap();
+        let (started, received) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        pool.try_submit(WorkerJob::new(move || {
+            started.send(()).unwrap();
+            let _ = released.recv();
+        }))
+        .unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        let _release = release;
+        let resource = WorkerResource::default();
+        let guard = resource.reserve().unwrap();
+        let parent_thread = thread::current().id();
+        assert_eq!(
+            pool.handle().run_parallel(vec![|| thread::current().id()]),
+            [parent_thread]
+        );
+        drop(guard);
+        assert!(!has_reservations());
+    }
+
+    #[test]
+    fn two_reserved_workers_do_not_form_a_cross_instance_help_cycle() {
+        let pool = WorkerPool::new(2, WorkerJob::run).unwrap();
+        let barriers = Arc::new(std::sync::Barrier::new(2));
+        let locks = [Arc::new(Mutex::new(())), Arc::new(Mutex::new(()))];
+        let (sent, received) = mpsc::channel();
+        for index in 0..2 {
+            let barriers = barriers.clone();
+            let owned = locks[index].clone();
+            let other = locks[1 - index].clone();
+            let handle = pool.handle();
+            let sent = sent.clone();
+            pool.handle()
+                .submit(WorkerJob::new(move || {
+                    let resource = WorkerResource::default();
+                    let _reservation = resource.reserve().unwrap();
+                    let _lock = owned.lock().unwrap();
+                    barriers.wait();
+                    let queued = sent.clone();
+                    handle
+                        .try_submit(WorkerJob::new(move || {
+                            let _lock = other.lock().unwrap();
+                            queued.send("queued").unwrap();
+                        }))
+                        .unwrap();
+                    barriers.wait();
+                    assert!(!handle.help_one());
+                    assert_eq!(handle.run_parallel(vec![|| 1, || 2]), [1, 2]);
+                    sent.send("parent").unwrap();
+                }))
+                .unwrap();
+        }
+        drop(sent);
+        let mut events = Vec::new();
+        for _ in 0..4 {
+            events.push(received.recv_timeout(Duration::from_secs(5)).unwrap());
+        }
+        events.sort_unstable();
+        assert_eq!(events, ["parent", "parent", "queued", "queued"]);
+    }
+
+    #[test]
+    fn reservations_are_thread_local() {
+        let resource = WorkerResource::default();
+        let _guard = resource.reserve().unwrap();
+        assert!(has_reservations());
+        thread::spawn(move || {
+            assert!(!has_reservations());
+            assert!(resource.reserve().is_some());
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn concurrent_initialization_shares_one_execution_pool() {

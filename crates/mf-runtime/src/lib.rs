@@ -140,6 +140,7 @@ pub use typed_outputs::{
 pub use value::{ValueKind, ValueRef};
 pub use worker::{
     ExecutionWorkers, RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError,
+    WorkerReservation, WorkerResource,
 };
 
 pub use snapshot::{NodeSnapshot, SnapshotEvent, SnapshotOutcome, SnapshotRecorder};

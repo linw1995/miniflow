@@ -28,6 +28,7 @@
 - [ ] 2.5 Serialize calls to each prepared tool instance and preserve progress with one shared worker.
 - [ ] 2.6 Record stable caller, target, binding, and invocation identities for observation and snapshots.
 - [x] 2.7 Define and validate dynamic invocation scope identities and receiver/TUI support independently of dispatch.
+- [x] 2.8 Add thread-bound reservations and inline nested worker execution for serialized calls.
 
 ## 3. LLM integration
 

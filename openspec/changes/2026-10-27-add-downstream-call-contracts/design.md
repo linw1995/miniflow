@@ -270,6 +270,19 @@ construction policy before they are eligible. Reuse the shared worker mechanisms
 verify progress with a worker limit of one. Reject recursive callable bindings initially and enforce
 runtime depth, step, deadline, and cancellation limits across child calls.
 
+A thread-bound `WorkerResource` reservation starts before waiting for the executor lock, rejects
+recursive entry, and outlives the lock guard. While any reservation is active, workers do not help
+unrelated queued jobs and blocking child submissions execute inline on the submitting thread. This
+also applies to an external caller holding an executor while using the pool. Queuing nested work
+could otherwise place it behind callers waiting for that executor, including cross-thread wait cycles.
+Completed child results are consumed before helping unrelated work.
+
+This first implementation trades parallelism inside a tool invocation for predictable progress:
+ordinary callers retain parallel scheduling, while a tool's nested work shares its current thread.
+Dispatch must hold the reservation across lock acquisition and execution. Nonblocking `try_submit`
+retains its queue-only contract and must not be used for children awaited while holding a reservation.
+The worker prerequisite itself does not activate tools or serialize node instances.
+
 ## Schema and LLM boundary
 
 The caller parameter schema is the full target input contract projected onto caller-owned inputs.
