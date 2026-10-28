@@ -130,6 +130,39 @@ within one callable instance; separate instances or separately scoped callable b
 
 ## Connection views and callable bindings
 
+The third implementation provides caller-visible projections and explicit scope attachment.
+`ResolvedCallBinding::interface()` retains the binding ID and public alias, then groups caller-owned
+arguments into separate output and default namespaces. It never retains external or omitted inputs,
+destination names for explicit mappings, node indexes, dependencies, resource configuration, or values.
+The projected fields are immutable and serializable for inspection. Provider descriptions and complete
+JSON Schema reflection remain later additions rather than inferred text or invented object fields.
+
+A shared source output becomes one parameter whose requiredness and sensitivity are the OR of all
+mapped obligations. Its deduplicated type constraints are conjunctive: both the source and every target
+must accept the value. Keeping the conjunction avoids lossy widening and incorrect disjointness
+assumptions, including the null overlap of different nullable types. Parameters sort by name and type
+constraints by their descriptor display. Public validation and resolved input binding accept the same
+caller values while reporting errors in their respective public and internal namespaces.
+
+The compiler constructs `CallInterfaces` from a caller-indexed map of declarations. Normal scope
+preparation runs once with the union of declared targets. The catalog uses definition IDs for caller
+lookup, preserves local binding IDs, and rejects duplicate callers, IDs, and aliases. Distinct callers
+may reuse IDs and aliases. Catalog debug output summarizes the caller count without dumping other
+callers' interfaces. An empty catalog does not allocate storage.
+
+Hosts explicitly attach catalogs to a `Flow` or `PreparedStream`, with known-task-owner validation.
+`ExecutionContext::call_targets` exposes only the active node's slice. Graph-owned dispatch installs
+its own catalog even when empty. Scoped guards restore the previous catalog and current-node identity
+on normal return, errors, and panics. Domain/stream forks share immutable catalogs, while body forks
+start empty. The same rules cover generated domain callbacks, snapshot fallbacks, combined producer
+jobs, and isolated task execution. Same-named nodes in different prepared scopes remain independent.
+
+This attachment is discovery-only: it does not attach executors, modify activation, or validate a live
+dispatch capability. Existing ordinary nodes still follow their ordinary schedule. A prototype Flow
+must not be executed with the expectation that catalog attachment makes tool targets lazy. Versioned
+call definitions, generated catalog persistence, complete binding drift validation, and executable
+invocation wiring remain deferred until the scheduling phase.
+
 Keep three concepts distinct:
 
 1. A node interface describes its full public input and output contract.

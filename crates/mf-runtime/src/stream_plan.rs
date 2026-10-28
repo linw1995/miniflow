@@ -93,6 +93,7 @@ pub struct StreamPlan {
     program: StreamProgram,
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
+    call_interfaces: crate::CallInterfaces,
     emission_nodes: Vec<Option<FlowNode<()>>>,
 }
 
@@ -118,6 +119,22 @@ impl std::fmt::Debug for PreparedStream {
 }
 
 impl PreparedStream {
+    /// Installs discovery metadata only for task callers, including combined task/stream nodes.
+    pub fn with_call_interfaces(
+        mut self,
+        interfaces: crate::CallInterfaces,
+    ) -> Result<Self, crate::CallInterfaceError> {
+        interfaces.validate_callers(
+            self.plan
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, node)| self.task_node(index).map(|_| &node.definition_id)),
+        )?;
+        self.plan.call_interfaces = interfaces;
+        Ok(self)
+    }
+
     pub fn task_node(&self, node: usize) -> Option<&dyn TaskNode> {
         self.plan
             .nodes
@@ -200,6 +217,7 @@ impl PreparedStream {
             program,
             input_schema,
             generated_domains: BTreeMap::new(),
+            call_interfaces: Default::default(),
             emission_nodes,
         };
         Self {
@@ -226,6 +244,10 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
+    pub fn call_interfaces(&self) -> &crate::CallInterfaces {
+        &self.call_interfaces
+    }
+
     pub fn emission_node(&self, node: usize) -> &FlowNode<()> {
         self.emission_nodes[node]
             .as_ref()
@@ -335,15 +357,17 @@ impl StreamPlan {
             definition_id: node.definition_id.clone(),
             message: "stream execution domain contains a non-task node",
         })?;
-        crate::execute_resolved_node_in_context(
-            node,
-            context,
-            |ctx, inputs| resolve(node, ctx, inputs),
-            |inputs, ctx| {
-                task.execute(inputs, ctx)
-                    .map(crate::GeneratedNodeResult::Dynamic)
-            },
-        )
+        context.with_call_interfaces(&self.call_interfaces, |context| {
+            crate::execute_resolved_node_in_context(
+                node,
+                context,
+                |ctx, inputs| resolve(node, ctx, inputs),
+                |inputs, ctx| {
+                    task.execute(inputs, ctx)
+                        .map(crate::GeneratedNodeResult::Dynamic)
+                },
+            )
+        })
     }
 
     pub fn execute_domain(
@@ -351,22 +375,24 @@ impl StreamPlan {
         id: usize,
         context: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
-        if let Some(executor) = self.generated_domains.get(&id) {
-            return executor(self, context);
-        }
-        let domain = self.execution_domain(id);
-        for &position in domain.positions.iter() {
-            if context.cancellation().failure().is_some() {
-                break;
+        context.with_call_interfaces(&self.call_interfaces, |context| {
+            if let Some(executor) = self.generated_domains.get(&id) {
+                return executor(self, context);
             }
-            self.execute_resolved_position(position, context, |node, ctx, inputs| {
-                let _ = node;
-                self.resolve_inputs(position, ctx, inputs, Default::default())
-            })?;
-            if context.scope_exit_requested() {
-                break;
+            let domain = self.execution_domain(id);
+            for &position in domain.positions.iter() {
+                if context.cancellation().failure().is_some() {
+                    break;
+                }
+                self.execute_resolved_position(position, context, |node, ctx, inputs| {
+                    let _ = node;
+                    self.resolve_inputs(position, ctx, inputs, Default::default())
+                })?;
+                if context.scope_exit_requested() {
+                    break;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }

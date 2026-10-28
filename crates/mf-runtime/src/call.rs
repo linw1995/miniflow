@@ -11,7 +11,8 @@ use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::BTreeSet;
 
 /// An index into one caller's prepared binding table in its owning scope.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(transparent)]
 pub struct CallBindingId(usize);
 
 impl CallBindingId {
@@ -185,17 +186,23 @@ pub enum CallContractError {
         port: String,
         source: crate::TypeDepthError,
     },
-    #[snafu(display("unknown call {namespace} argument `{name}`"))]
+    #[snafu(display("unknown call {namespace} argument `{name}`"), visibility(pub))]
     UnknownArgument {
         namespace: &'static str,
         name: String,
     },
-    #[snafu(display("missing required call {namespace} argument `{name}`"))]
+    #[snafu(
+        display("missing required call {namespace} argument `{name}`"),
+        visibility(pub)
+    )]
     MissingArgument {
         namespace: &'static str,
         name: String,
     },
-    #[snafu(display("call {namespace} argument `{name}`: {source}"))]
+    #[snafu(
+        display("call {namespace} argument `{name}`: {source}"),
+        visibility(pub)
+    )]
     ArgumentType {
         namespace: &'static str,
         name: String,

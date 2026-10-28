@@ -98,6 +98,19 @@ struct NodeInvocationGuard<'a> {
     previous: Option<crate::DefinitionId>,
 }
 
+struct CallInterfaceGuard<'a> {
+    context: &'a mut ExecutionContext,
+    interfaces: crate::CallInterfaces,
+    node: Option<crate::DefinitionId>,
+}
+
+impl Drop for CallInterfaceGuard<'_> {
+    fn drop(&mut self) {
+        self.context.call_interfaces = std::mem::take(&mut self.interfaces);
+        self.context.current_node = self.node.take();
+    }
+}
+
 impl Drop for NodeInvocationGuard<'_> {
     fn drop(&mut self) {
         self.context.current_node = self.previous.take();
@@ -199,6 +212,7 @@ pub struct ExecutionContext {
     pending_loop_write: Option<(String, Value)>,
     current_position: Option<usize>,
     current_node: Option<crate::DefinitionId>,
+    call_interfaces: crate::CallInterfaces,
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
@@ -223,6 +237,7 @@ impl Default for ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
+            call_interfaces: Default::default(),
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
@@ -240,6 +255,37 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// The current caller's immutable interfaces. Outside a node invocation this is empty.
+    pub fn call_targets(&self) -> &[crate::CallInterface] {
+        self.current_node
+            .as_ref()
+            .map_or(&[], |node| self.call_interfaces.for_caller(node))
+    }
+
+    /// Installs discovery data for one scope and restores its enclosing scope on every exit.
+    pub fn with_call_interfaces<T, E>(
+        &mut self,
+        interfaces: &crate::CallInterfaces,
+        run: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        if self.call_interfaces.is_empty() && interfaces.is_empty() && self.current_node.is_none() {
+            return run(self);
+        }
+        let previous = std::mem::replace(&mut self.call_interfaces, interfaces.clone());
+        let node = self.current_node.take();
+        let guard = CallInterfaceGuard {
+            context: self,
+            interfaces: previous,
+            node,
+        };
+        run(guard.context)
+    }
+
+    // Producer jobs own their context and install the plan's scope before invoking callbacks.
+    pub(super) fn set_call_interfaces(&mut self, interfaces: crate::CallInterfaces) {
+        self.call_interfaces = interfaces;
+    }
+
     /// Identifies the executing node independently of optional observation.
     pub fn current_node(&self) -> Option<&str> {
         self.current_node.as_ref().map(crate::DefinitionId::as_str)
@@ -311,6 +357,7 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
+            call_interfaces: self.call_interfaces.clone(),
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
             scope_prefix: self.scope_prefix.clone(),
@@ -502,6 +549,7 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
+            call_interfaces: self.call_interfaces.clone(),
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),

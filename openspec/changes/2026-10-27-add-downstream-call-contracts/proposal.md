@@ -22,9 +22,10 @@ parameter ownership and permit callers to override externally supplied values.
 The eventual implementation affects workflow definitions, compiler preparation and generated plans,
 runtime invocation contexts, interface reflection, and observation. LLM protocol changes are a later
 integration phase. The implementation provides the runtime's call/output model, compiler-backed
-ownership resolution, and validation/remapping of caller-owned arguments. It reuses ordinary node
-preparation, type compatibility, and exclusive-branch proofs. Scheduling, context discovery, and
-workflow-format changes remain subsequent phases.
+ownership resolution, validation/remapping of caller-owned arguments, and scope-bound read-only
+discovery through the execution context. It reuses ordinary node preparation, type compatibility, and
+exclusive-branch proofs. Scheduling, provider descriptions/schema conversion, and workflow-format
+changes remain subsequent phases.
 
 Runtime topology mutation, dynamically loaded providers, arbitrary cross-scope discovery, and stream
 or event nodes as callable tools are outside the initial scope.

@@ -220,8 +220,8 @@ fn bind_call_arguments(
 Current targets must be ordinary terminal Tasks without external context references, stdin, or startup
 environment/default bindings. TaskStream callers and terminal TaskStream producer values are supported;
 stream emissions cannot serve as external input values. Input sensitivity declarations remain supported.
-These APIs do not activate targets, compose external values, expose context discovery, or provide a
-dispatcher. Workflow JSON syntax for callable activation remains deferred until scheduling is available.
+These APIs do not activate targets, compose external values, or provide a dispatcher. Workflow JSON
+syntax for callable activation remains deferred until scheduling is available.
 A future dispatcher must validate composed inputs, allocate invocation numbers uniquely within the
 workflow execution across callers, scopes, and stream frames, and track pending/completed requests.
 Binding indexes are local to a caller's prepared table. Identities are not retry idempotency keys.
@@ -235,6 +235,63 @@ output values, structured dependency skip causes, or a typed `WorkflowRunError`;
 remain absent. Child loop effects are not returned through this contract.
 `CallContractError` converts transparently into `NodeBuildError` and `NodeExecutionError`, allowing
 factories and node implementations to propagate declaration and correlation failures with `?`.
+
+### Caller-visible interfaces
+
+`ResolvedCallBinding::interface()` projects an immutable `CallInterface`: a local binding ID, public
+alias, and separate `outputs` and `defaults` parameter lists. External and omitted inputs, destination
+port names for explicit mappings, node indexes, dependency keys, and configuration values are absent.
+The view can be serialized for inspection without serializing the private execution plan.
+
+Each `CallParameter` exposes its caller-side name, requiredness, sensitivity, and a list of `ValueType`
+constraints that **all** must hold. A shared output appears once, combining every source and destination
+constraint without widening to `Any`. Requiredness and sensitivity are combined with logical OR.
+For example, nullable strings and nullable integers intersect at null, so treating either as a union
+or rejecting the pair as disjoint would change the contract. Constraints are deduplicated and ordered
+by their descriptor display; parameter names are sorted within each namespace. `validate_arguments`
+checks this public contract without modifying values or performing target execution. Producers should
+preserve value sensitivity and use the parameter's sensitivity flag when handling caller-side data.
+The runtime binding still marks target inputs as sensitive during mapping.
+
+`FlowBuilder::call_interfaces` and `CompiledWorkflow::call_interfaces` take a `BTreeMap<NodeId,
+Vec<CallBinding>>` and produce a `CallInterfaces` catalog indexed by caller definition ID. The compiled
+entry point prepares the union of all declared targets once, retaining ordinary validation elsewhere.
+Aliases and binding IDs must be unique per caller; the same IDs and aliases can occur in another caller.
+Catalogs retain binding IDs rather than renumbering them, so an ID is not necessarily its position in
+a filtered interface list. Catalog diagnostics expose only the caller count.
+
+Attach the catalog explicitly with `Flow::with_call_interfaces` or
+`PreparedStream::with_call_interfaces`. Attachment checks that catalog owners are task nodes in that
+scope, including TaskStream nodes. Inside execution, `ExecutionContext::call_targets()` returns only
+the current node's immutable view, or an empty slice outside a node invocation. Raw node invocations
+can install a catalog with `ExecutionContext::with_call_interfaces`; graph-owned entry points always
+use their own catalog, including an empty one, instead of inheriting a different Flow's data.
+
+```rust
+fn attach_discovery(
+    flow: mf_runtime::Flow,
+    interfaces: mf_runtime::CallInterfaces,
+) -> Result<mf_runtime::Flow, mf_runtime::CallInterfaceError> {
+    flow.with_call_interfaces(interfaces)
+}
+
+fn advertised_tools(ctx: &mf_runtime::ExecutionContext) -> Vec<&str> {
+    ctx.call_targets().iter().map(|interface| interface.name()).collect()
+}
+```
+
+Dynamic and generated domains, snapshot fallbacks, stream messages, combined producers, and isolated
+task targets use the prepared scope's catalog. Domain and stream context forks share immutable data;
+body forks start without an inherited catalog. Nested scopes restore their enclosing catalog and node
+identity on success, error, or unwinding. Configure each prepared child Flow independently. Catalogs
+belong to a prepared scope, so shared node implementations must not cache them globally by binding ID.
+Scopes without discovery metadata do not allocate catalog storage.
+
+Discovery does not change ordinary scheduling or make tools invocable. Do not execute a prototype Flow
+containing tool nodes expecting discovery attachment to make them lazy. Provider descriptions, full
+JSON Schema conversion, versioned call syntax, generated catalog persistence/drift checks, and the
+actual invocation scheduler remain separate work. In particular, a serialized `CallInterface` is not
+a provider tool definition: its constraint list is conjunctive, and its two namespaces remain distinct.
 
 ## Context-aware execution
 

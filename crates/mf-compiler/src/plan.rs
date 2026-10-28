@@ -111,38 +111,62 @@ impl CompiledWorkflow {
         caller: mf_runtime::NodeId,
         bindings: &[mf_runtime::CallBinding],
     ) -> Result<Vec<mf_runtime::ResolvedCallBinding>, crate::CallBindingError> {
-        // The builder owns index validation. Validate before provider construction as well.
+        self.prepare_call_scope(registry, std::iter::once((caller, bindings)))?
+            .resolve_call_bindings(caller, bindings)
+    }
+
+    /// Prepares one shared scope and exposes only each caller's owned parameter contracts.
+    pub fn call_interfaces(
+        &self,
+        registry: &mf_runtime::NodeRegistry,
+        declarations: &BTreeMap<mf_runtime::NodeId, Vec<mf_runtime::CallBinding>>,
+    ) -> Result<mf_runtime::CallInterfaces, crate::CallBindingError> {
+        self.prepare_call_scope(
+            registry,
+            declarations
+                .iter()
+                .map(|(caller, bindings)| (*caller, bindings.as_slice())),
+        )?
+        .call_interfaces(declarations)
+    }
+
+    fn prepare_call_scope<'a>(
+        &self,
+        registry: &mf_runtime::NodeRegistry,
+        declarations: impl IntoIterator<Item = (mf_runtime::NodeId, &'a [mf_runtime::CallBinding])>,
+    ) -> Result<crate::FlowBuilder, crate::CallBindingError> {
         let unknown = |role, index| crate::call_bindings::UnknownNodeSnafu { role, index }.build();
-        self.definition
-            .nodes
-            .get(caller.index())
-            .ok_or_else(|| unknown("caller", caller.index()))?;
         let mut targets = std::collections::BTreeSet::new();
-        for binding in bindings {
-            let index = binding.target().index();
-            targets.insert(
-                self.definition
-                    .nodes
-                    .get(index)
-                    .ok_or_else(|| unknown("target", index))?
-                    .id
-                    .clone(),
-            );
+        for (caller, bindings) in declarations {
+            self.definition
+                .nodes
+                .get(caller.index())
+                .ok_or_else(|| unknown("caller", caller.index()))?;
+            for binding in bindings {
+                let index = binding.target().index();
+                targets.insert(
+                    self.definition
+                        .nodes
+                        .get(index)
+                        .ok_or_else(|| unknown("target", index))?
+                        .id
+                        .clone(),
+                );
+            }
         }
         let (nodes, order) =
             crate::compiler::prepare_call_scope(&self.definition, registry, targets)?;
         if order != self.execution_order {
             return Err(crate::compiler::NonCanonicalPlanOrderSnafu.build().into());
         }
-        let flow = crate::FlowBuilder::prepare(
+        Ok(crate::FlowBuilder::prepare(
             nodes,
             self.definition.edges.clone(),
             order,
             self.definition.outputs.clone(),
         )?
         .with_control_edges(self.definition.control_edges.clone())?
-        .with_order_edges(self.definition.order_edges.clone())?;
-        flow.resolve_call_bindings(caller, bindings)
+        .with_order_edges(self.definition.order_edges.clone())?)
     }
 
     pub fn manifest(

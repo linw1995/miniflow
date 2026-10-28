@@ -264,6 +264,25 @@ pub struct FlowBuilder {
 }
 
 impl FlowBuilder {
+    /// Projects caller-owned parameters from resolved bindings into one scope's discovery catalog.
+    pub fn call_interfaces(
+        &self,
+        declarations: &BTreeMap<NodeId, Vec<mf_runtime::CallBinding>>,
+    ) -> Result<mf_runtime::CallInterfaces, crate::CallBindingError> {
+        let mut entries = Vec::new();
+        for (caller, bindings) in declarations {
+            let resolved = self.resolve_call_bindings(*caller, bindings)?;
+            entries.push((
+                self.nodes[caller.index()].definition_id.clone(),
+                resolved
+                    .iter()
+                    .map(mf_runtime::ResolvedCallBinding::interface)
+                    .collect(),
+            ));
+        }
+        Ok(mf_runtime::CallInterfaces::new(entries)?)
+    }
+
     /// Resolves directed-call contracts against this prepared scope without changing its schedule.
     pub fn resolve_call_bindings(
         &self,

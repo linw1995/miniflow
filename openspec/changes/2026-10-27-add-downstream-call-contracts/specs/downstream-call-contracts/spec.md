@@ -1,5 +1,67 @@
 ## ADDED Requirements
 
+### Requirement: Preserve the exact caller parameter constraints
+
+A caller-visible interface SHALL retain local binding identity and alias with separate output and
+default namespaces. Shared outputs SHALL appear once with conjunctive source/destination constraints,
+OR-combined requiredness and sensitivity, and deterministic ordering. External inputs, omitted inputs,
+target indexes, dependency keys, and configuration values MUST NOT be retained in the public view.
+
+#### Scenario: Preserve a nullable intersection
+
+- **WHEN** one caller output feeds both a nullable string and a nullable integer input
+- **THEN** the interface requires both constraints and accepts null as their shared value
+- **AND** it does not widen the parameter to Any or treat the types as alternatives
+
+#### Scenario: Keep argument namespaces distinct
+
+- **WHEN** a caller output and an unrelated default input share a name
+- **THEN** they remain separate parameters in separate namespaces
+- **AND** public validation agrees with resolved argument binding on acceptance
+
+#### Scenario: Serialize a public view safely
+
+- **WHEN** a resolved binding has external credentials and internal prerequisite nodes
+- **THEN** serialized and debug representations of its public interface omit those records
+- **AND** the caller-owned parameter types and sensitivity remain available
+
+### Requirement: Bind discovery to the prepared execution scope
+
+A prepared Flow or stream SHALL accept an explicit immutable interface catalog for its task callers.
+Execution SHALL expose only the active caller's interfaces and override any enclosing graph's catalog,
+including with an empty catalog. Scope exit SHALL restore enclosing metadata and node identity on
+success, failure, and unwinding. Discovery attachment MUST NOT activate targets or alter scheduling.
+
+#### Scenario: Reject ambiguous catalogs
+
+- **WHEN** a catalog repeats a caller or a caller-local binding ID or alias
+- **THEN** construction fails before attachment
+- **AND** attachment rejects unknown or non-task owners
+
+#### Scenario: Isolate same-named nodes in nested flows
+
+- **WHEN** nested prepared flows contain the same node definition ID
+- **THEN** each node sees only its own Flow's catalog
+- **AND** a child without a catalog sees no interfaces and the enclosing view is restored afterward
+
+#### Scenario: Preserve discovery across execution paths
+
+- **WHEN** a task executes dynamically, through a generated domain, via snapshot fallback, or in isolation
+- **THEN** it observes the same owning scope's interfaces
+- **AND** combined producers on subsequent stream messages retain their scope's catalog
+
+#### Scenario: Preserve fork boundaries
+
+- **WHEN** a context forks a domain or stream frame
+- **THEN** immutable catalog storage is shared without carrying an active caller identity
+- **AND** a body fork starts without an inherited catalog
+
+#### Scenario: Prepare multiple callers together
+
+- **WHEN** different callers bind different partially supplied targets in one scope
+- **THEN** catalog preparation validates the union of target declarations through one prepared scope
+- **AND** unrelated required inputs retain ordinary validation
+
 ### Requirement: Declare call outputs independently
 
 Providers SHALL declare explicit call output slots separately from ordinary and stream outputs.

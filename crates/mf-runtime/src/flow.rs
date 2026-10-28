@@ -201,6 +201,7 @@ struct FlowData {
     plan: FlowPlan,
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedDomainExecutor>>,
+    call_interfaces: crate::CallInterfaces,
 }
 
 impl Flow {
@@ -264,9 +265,24 @@ impl Flow {
                 plan,
                 input_schema,
                 generated_domains: BTreeMap::new(),
+                call_interfaces: Default::default(),
             }),
         }
     }
+    /// Installs read-only discovery metadata without changing node activation or scheduling.
+    pub fn with_call_interfaces(
+        mut self,
+        interfaces: crate::CallInterfaces,
+    ) -> Result<Self, crate::CallInterfaceError> {
+        interfaces.validate_callers(self.inner.nodes.iter().map(|node| &node.definition_id))?;
+        self.data_mut().call_interfaces = interfaces;
+        Ok(self)
+    }
+
+    pub fn call_interfaces(&self) -> &crate::CallInterfaces {
+        &self.inner.call_interfaces
+    }
+
     /// Binds compiler-validated typed bodies without changing the domain graph.
     pub fn with_generated_domains(
         mut self,
@@ -360,12 +376,14 @@ impl Flow {
     ) -> Result<(), crate::WorkflowRunError> {
         let node = &self.inner.nodes[self.inner.plan.execution_order[position].index()];
         let previous = state.replace_execution_position(Some(position));
-        let result = crate::execute_resolved_node_in_context(
-            node,
-            state,
-            |ctx, inputs| resolve(node, ctx, inputs),
-            invoke,
-        );
+        let result = state.with_call_interfaces(&self.inner.call_interfaces, |state| {
+            crate::execute_resolved_node_in_context(
+                node,
+                state,
+                |ctx, inputs| resolve(node, ctx, inputs),
+                invoke,
+            )
+        });
         state.replace_execution_position(previous);
         result
     }
@@ -656,10 +674,12 @@ impl Flow {
         domain: &ExecutionDomain,
         state: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
-        if let Some(executor) = self.inner.generated_domains.get(&domain.id) {
-            return executor(self, state);
-        }
-        self.execute_domain_positions(domain, state)
+        state.with_call_interfaces(&self.inner.call_interfaces, |state| {
+            if let Some(executor) = self.inner.generated_domains.get(&domain.id) {
+                return executor(self, state);
+            }
+            self.execute_domain_positions(domain, state)
+        })
     }
 
     fn execute_domain_positions(

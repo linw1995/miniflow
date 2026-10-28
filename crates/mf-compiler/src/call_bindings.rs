@@ -9,6 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Snafu)]
 pub enum CallBindingError {
     #[snafu(transparent)]
+    Interfaces {
+        source: mf_runtime::CallInterfaceError,
+    },
+    #[snafu(transparent)]
     Preparation {
         #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
         source: Box<crate::WorkflowCompileError>,

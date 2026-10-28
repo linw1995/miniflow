@@ -1,4 +1,5 @@
 mod call;
+mod call_interface;
 mod cancellation;
 mod config_template;
 mod context;
@@ -38,6 +39,7 @@ pub use call::{
     CallInputSource, CallOutcome, CallPortMapping, CallRequest, CallResponse, ResolvedCallBinding,
     ResolvedCallInput,
 };
+pub use call_interface::{CallInterface, CallInterfaceError, CallInterfaces, CallParameter};
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
