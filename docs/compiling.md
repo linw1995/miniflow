@@ -139,6 +139,19 @@ The terminal and multi-turn LLM examples declare `mfn-llm` and require a configu
 credentials; their build validation performs no provider request. See
 [terminal conversations](workflows.md#llm-configuration-and-conversation-values).
 
+The DeepSeek examples declare `mfn-deepseek` and read `DEEPSEEK_API_KEY` only during execution. Compile them
+without credentials, then supply a query or URL override through the parameter-driven startup interface:
+
+```sh
+mf compile examples/deepseek-search.json --output ./deepseek-search
+./deepseek-search --params.query 'DeepSeek Search API documentation'
+mf compile examples/deepseek-fetch.json --output ./deepseek-fetch
+./deepseek-fetch --params.url 'https://api-docs.deepseek.com/zh-cn/guides/search'
+```
+
+Both examples default to `https://api.deepseek.com`; override `params.base_url` for a compatible endpoint.
+See [DeepSeek web search and fetch](workflows.md#deepseek-web-search-and-fetch).
+
 ## Build failures
 
 Diagnostics identify the failed stage: input parsing, graph validation, dependency resolution, runtime compatibility, compilation, lock persistence, or installation. Cargo diagnostics remain visible. Failures after project creation report its retained location for inspection, including `Cargo.toml`, `workflow-plan.json`, generated source, and build artifacts.

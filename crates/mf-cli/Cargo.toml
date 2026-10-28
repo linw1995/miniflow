@@ -27,6 +27,7 @@ snafu.workspace = true
 [dev-dependencies]
 # Chat persistence assertions and model fixtures.
 diesel = { workspace = true, features = ["sqlite"] }
+mfn-deepseek = { workspace = true, features = ["test-support"] }
 mfn-llm = { workspace = true, features = ["test-support"] }
 
 # Package fixtures and artifact verification.

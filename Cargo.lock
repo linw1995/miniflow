@@ -1773,6 +1773,7 @@ dependencies = [
  "mf-runtime",
  "mf-telemetry",
  "mf-tui",
+ "mfn-deepseek",
  "mfn-llm",
  "nix",
  "opentelemetry-proto",

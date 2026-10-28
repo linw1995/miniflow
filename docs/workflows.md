@@ -572,7 +572,8 @@ as `chat.messages`. The Loop example expresses these operations explicitly with 
 The opt-in `mfn-deepseek` package registers `builtin.deepseek.search` and `builtin.deepseek.fetch`.
 They call the [DeepSeek Search and Fetch APIs](https://api-docs.deepseek.com/zh-cn/guides/search),
 with one JSON POST per node invocation and no implicit model call. Declare the package in the Flow's
-`dependencies` and use either kind independently.
+`dependencies` and use either kind independently. The [Search example](../examples/deepseek-search.json)
+and [Fetch example](../examples/deepseek-fetch.json) are complete parameter-driven Flows.
 
 Both nodes accept this configuration:
 

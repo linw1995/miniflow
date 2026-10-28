@@ -2,7 +2,7 @@
 
 Release archives target x86_64 and aarch64 Linux, and Apple Silicon macOS.
 
-A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The runtime also requires `mf-telemetry` and `mf-runtime-derive`; publish them before packages depending on them. The bundled examples and optional DeepSeek nodes require available `mfn-core`, `mfn-code`, `mfn-deepseek`, and `mfn-llm` packages. Prepare and publish these support packages before publishing the matching CLI release. `mf-tui` is a CLI dependency and is excluded from runner support packages.
+A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The runtime also requires `mf-telemetry` and `mf-runtime-derive`; publish them before packages depending on them. The bundled examples require available `mfn-core`, `mfn-code`, `mfn-deepseek`, and `mfn-llm` packages. Prepare and publish these support packages before publishing the matching CLI release. `mf-tui` is a CLI dependency and is excluded from runner support packages.
 
 The refined port-type API changes `ValueType` from `Copy` to `Clone` and enforces declared output types during execution. Publish matching runtime and compiler versions before rebuilding node packages; review plugin port declarations before distributing runners built with the new runtime.
 
