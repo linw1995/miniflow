@@ -12,11 +12,16 @@ tokio = ["mf-runtime/tokio"]
 test-support = []
 
 [dependencies]
+# Node contracts and registration.
 inventory.workspace = true
 mf-runtime = { workspace = true, features = ["async"] }
+
+# Native HTTP transport and portable asynchronous driving.
 reqwest = { workspace = true, features = ["json", "rustls"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+url.workspace = true
+
+# Configuration, structured responses, and typed diagnostics.
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 snafu.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
-url.workspace = true
