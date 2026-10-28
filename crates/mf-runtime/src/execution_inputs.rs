@@ -135,13 +135,26 @@ impl ExecutionInputs {
         node: &FlowNode<N>,
         in_scope: bool,
         dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
+        lookup: impl FnMut(
+            ExecutionDependency<'a>,
+        ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
+        inputs: &mut Inputs,
+        causes: BTreeSet<SkipCause>,
+    ) -> Result<InputResolution, WorkflowRunError> {
+        *inputs = self.initial(node, in_scope);
+        Self::resolve_composed_inputs(node, dependencies, lookup, inputs, causes)
+    }
+
+    /// Resolves external values into an explicit initial input map through the shared validator.
+    pub fn resolve_composed_inputs<'a, 'value, N>(
+        node: &FlowNode<N>,
+        dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
         mut lookup: impl FnMut(
             ExecutionDependency<'a>,
         ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
         inputs: &mut Inputs,
         mut causes: BTreeSet<SkipCause>,
     ) -> Result<InputResolution, WorkflowRunError> {
-        *inputs = self.initial(node, in_scope);
         for (name, value) in inputs.iter_mut() {
             if node
                 .metadata

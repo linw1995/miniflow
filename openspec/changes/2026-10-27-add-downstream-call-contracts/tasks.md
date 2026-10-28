@@ -46,3 +46,9 @@
 - [ ] 4.4 Compare dynamic and generated behavior, including a TaskStream caller and worker-limit-one execution.
 - [ ] 4.5 Document eager external producers versus lazy per-call configuration inside a callable Flow.
 - [ ] 4.6 Run affected tests, repository validation, and specification checks for each implementation phase.
+
+## Runtime prerequisite delivery
+
+- [x] Bind prepared calls to isolated execution with shared limits, typed outcomes, and instance serialization.
+- [x] Cover repeated and nested calls, external skips and secrets, capability restoration, lock deadlines, and worker limits.
+- [ ] Install prepared call tables from compiler scheduling, generated runners, and native stream frames.

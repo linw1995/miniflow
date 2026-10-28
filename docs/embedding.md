@@ -235,3 +235,31 @@ Cargo's resolved manifest declarations, including workspace inheritance. The emb
 retains portable registry requirements rather than checkout paths. Source factories return
 metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
 catalog to prepare or execute its nodes.
+
+### Prepared directed calls
+
+`Flow::with_prepared_calls` binds a compiler-validated call table to task instances. The supplied
+`FlowPlan` must already exclude callable targets from ordinary execution domains and arrange the
+callers' external prerequisites. Each `PreparedCall` carries a resolved binding, target identity,
+snapshot visibility, and a prepared success guard. This low-level API does not build or validate a
+workflow dependency graph. Versioned definition execution remains gated until compiler scheduling
+and generated-runner integration install these contracts.
+
+During a node invocation, `ExecutionContext::invoke_call` selects a `CallBindingId` and accepts one
+atomic `CallArguments` group. The runtime combines caller-owned values with visible external values,
+then uses the ordinary input validation and node lifecycle in an isolated child context. Results
+return as `CallResponse`; they never publish target outputs or completion into the caller's DAG.
+Repeated and nested calls share an invocation sequence, step budget, and cancellation signal.
+`invoke_call_with_deadline` also bounds lock waiting and propagates a cooperative deadline into nested
+calls and asynchronous operations. Synchronous providers must cooperate; they cannot be preempted.
+
+Calls to one prepared target are serialized. While holding or waiting for that instance, nested
+worker submissions execute inline to avoid reentrant queue deadlocks. Independent ordinary callers
+can still run concurrently. Unselected targets never execute. Target failures retain typed sources
+in `CallOutcome::Failed`; cancellation, deadlines, depth limits, and exhausted step budgets return
+terminal errors. Tool execution is never automatically retried.
+
+Discovery data alone does not grant execution: installing `with_call_interfaces` clears the local
+executable capability and scoped context overlays restore it on return or unwind. Contexts hold only
+weak references to their owning executor graph. Native stream programs still expose discovery only;
+frame-owned executable dispatch is integrated separately.

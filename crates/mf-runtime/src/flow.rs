@@ -202,6 +202,7 @@ struct FlowData {
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedDomainExecutor>>,
     call_interfaces: crate::CallInterfaces,
+    calls: Option<FlowCalls>,
 }
 
 impl Flow {
@@ -266,6 +267,7 @@ impl Flow {
                 input_schema,
                 generated_domains: BTreeMap::new(),
                 call_interfaces: Default::default(),
+                calls: None,
             }),
         }
     }
@@ -276,6 +278,7 @@ impl Flow {
     ) -> Result<Self, crate::CallInterfaceError> {
         interfaces.validate_callers(self.inner.nodes.iter().map(|node| &node.definition_id))?;
         self.data_mut().call_interfaces = interfaces;
+        self.data_mut().calls = None;
         Ok(self)
     }
 
@@ -376,7 +379,7 @@ impl Flow {
     ) -> Result<(), crate::WorkflowRunError> {
         let node = &self.inner.nodes[self.inner.plan.execution_order[position].index()];
         let previous = state.replace_execution_position(Some(position));
-        let result = state.with_call_interfaces(&self.inner.call_interfaces, |state| {
+        let result = self.with_call_scope(state, |state| {
             crate::execute_resolved_node_in_context(
                 node,
                 state,
@@ -674,7 +677,7 @@ impl Flow {
         domain: &ExecutionDomain,
         state: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
-        state.with_call_interfaces(&self.inner.call_interfaces, |state| {
+        self.with_call_scope(state, |state| {
             if let Some(executor) = self.inner.generated_domains.get(&domain.id) {
                 return executor(self, state);
             }
@@ -712,5 +715,198 @@ fn release_domain_successors(
         if remaining[successor.id] == 0 {
             ready.insert((successor.first_position, successor.id));
         }
+    }
+}
+
+struct CallInstance {
+    lock: std::sync::Mutex<()>,
+    resource: crate::WorkerResource,
+}
+
+struct FlowCalls {
+    callers: BTreeMap<crate::DefinitionId, Vec<crate::PreparedCall>>,
+    instances: BTreeMap<NodeId, CallInstance>,
+}
+
+impl Flow {
+    /// Binds executable calls to a plan whose ordinary domains already exclude all targets.
+    pub fn with_prepared_calls(
+        mut self,
+        calls: Vec<crate::PreparedCall>,
+    ) -> Result<Self, crate::CallDispatchError> {
+        use crate::invocation::InvalidPlanSnafu;
+        use snafu::{OptionExt, ensure};
+        let mut callers: BTreeMap<crate::DefinitionId, Vec<crate::PreparedCall>> = BTreeMap::new();
+        let mut instances = BTreeMap::new();
+        let scheduled: BTreeSet<_> = self
+            .execution_domains()
+            .domains()
+            .iter()
+            .flat_map(|domain| domain.nodes.iter().copied())
+            .collect();
+        for call in calls {
+            let caller =
+                self.nodes()
+                    .get(call.binding.caller.index())
+                    .context(InvalidPlanSnafu {
+                        message: "unknown caller",
+                    })?;
+            let target =
+                self.nodes()
+                    .get(call.binding.target.index())
+                    .context(InvalidPlanSnafu {
+                        message: "unknown target",
+                    })?;
+            ensure!(
+                target.definition_id.as_str() == call.target.id,
+                InvalidPlanSnafu {
+                    message: "target identity mismatch"
+                }
+            );
+            ensure!(
+                !scheduled.contains(&call.binding.target),
+                InvalidPlanSnafu {
+                    message: "call target remains in ordinary execution domains"
+                }
+            );
+            ensure!(
+                !call.binding.inputs.iter().any(|input| {
+                    matches!(
+                        input.source,
+                        crate::CallInputSource::Output(_) | crate::CallInputSource::Default
+                    ) && call.binding.dependencies.iter().any(|dependency| {
+                        dependency.input.as_deref() == Some(input.port.name.as_ref())
+                    })
+                }),
+                InvalidPlanSnafu {
+                    message: "caller and external inputs overlap"
+                }
+            );
+            instances
+                .entry(call.binding.target)
+                .or_insert_with(|| CallInstance {
+                    lock: std::sync::Mutex::new(()),
+                    resource: crate::WorkerResource::default(),
+                });
+            let bindings = callers.entry(caller.definition_id.clone()).or_default();
+            ensure!(
+                call.binding.id.index() == bindings.len(),
+                InvalidPlanSnafu {
+                    message: "binding indexes must be contiguous and ordered"
+                }
+            );
+            bindings.push(call);
+        }
+        let interfaces = crate::CallInterfaces::new(callers.iter().map(|(caller, calls)| {
+            (
+                caller.clone(),
+                calls.iter().map(|call| call.binding.interface()).collect(),
+            )
+        }))?;
+        let data = self.data_mut();
+        data.call_interfaces = interfaces;
+        data.calls = (!callers.is_empty()).then_some(FlowCalls { callers, instances });
+        Ok(self)
+    }
+
+    fn with_call_scope<T, E>(
+        &self,
+        state: &mut crate::ExecutionContext,
+        run: impl FnOnce(&mut crate::ExecutionContext) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let dispatcher = self.inner.calls.as_ref().map(|_| {
+            let dispatcher: Arc<dyn crate::invocation::CallDispatcher> = self.inner.clone();
+            Arc::downgrade(&dispatcher)
+        });
+        state.with_call_dispatcher(&self.inner.call_interfaces, dispatcher, run)
+    }
+}
+
+impl crate::invocation::CallDispatcher for FlowData {
+    fn dispatch(
+        &self,
+        caller: &crate::DefinitionId,
+        id: crate::CallId,
+        arguments: crate::CallArguments,
+        context: &mut crate::ExecutionContext,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
+        use crate::invocation::{
+            ExecutionSnafu, PoisonedSnafu, ReentrantSnafu, UnavailableSnafu, UnknownBindingSnafu,
+        };
+        use snafu::{OptionExt, ResultExt};
+        let calls = self.calls.as_ref().context(UnavailableSnafu)?;
+        let call = calls
+            .callers
+            .get(caller)
+            .and_then(|bindings| bindings.get(id.binding.index()))
+            .context(UnknownBindingSnafu {
+                caller: caller.clone(),
+                binding: id.binding,
+            })?;
+        let initial = call.binding.bind_arguments(&arguments)?;
+        let node = &self.nodes[call.binding.target.index()];
+        let instance = &calls.instances[&call.binding.target];
+        context.run_directed_call(
+            id,
+            &call.target,
+            call.visibility.clone(),
+            deadline,
+            |child| {
+                let _reservation = instance.resource.reserve().context(ReentrantSnafu)?;
+                let _lock = loop {
+                    child.check_call_limits(deadline)?;
+                    match instance.lock.try_lock() {
+                        Ok(lock) => break lock,
+                        Err(std::sync::TryLockError::Poisoned(_)) => return PoisonedSnafu.fail(),
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            std::thread::park_timeout(std::time::Duration::from_millis(1));
+                        }
+                    }
+                };
+                let mut skipped = Vec::new();
+                let result = crate::execute_resolved_node_in_context(
+                    node,
+                    child,
+                    |ctx, inputs| {
+                        *inputs = initial;
+                        let resolution = crate::ExecutionInputs::resolve_composed_inputs(
+                            node,
+                            call.binding
+                                .dependencies
+                                .iter()
+                                .map(crate::FlowDependency::borrowed),
+                            |dependency| ctx.output(&dependency.source_key).map(Some),
+                            inputs,
+                            (call.guard)(ctx)?,
+                        )?;
+                        skipped = resolution.causes.iter().cloned().collect();
+                        Ok(resolution)
+                    },
+                    |inputs, ctx| {
+                        node.node
+                            .execute(inputs, ctx)
+                            .map(crate::GeneratedNodeResult::Dynamic)
+                    },
+                );
+                child.check_call_limits(deadline)?;
+                if let Err(source) = result {
+                    if source.is_terminal_control() {
+                        return Err(source).context(ExecutionSnafu);
+                    }
+                    return Ok(crate::CallOutcome::Failed { source });
+                }
+                if !skipped.is_empty() {
+                    return Ok(crate::CallOutcome::Skipped { causes: skipped });
+                }
+                let mut outputs = crate::Outputs::new();
+                for (port, key) in node.metadata.ports.outputs.iter().zip(node.output_keys()) {
+                    if let Ok(crate::ContextValue::Value(value)) = child.output(key) {
+                        outputs.insert(port.name.to_string(), value.clone());
+                    }
+                }
+                Ok(crate::CallOutcome::Succeeded(outputs))
+            },
+        )
     }
 }

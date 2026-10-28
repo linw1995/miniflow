@@ -10,6 +10,7 @@ mod execution_outputs;
 mod flow;
 #[cfg(feature = "async")]
 mod future_execution;
+mod invocation;
 mod iteration;
 mod loop_node;
 mod node;
@@ -69,6 +70,7 @@ pub use flow::{
 pub use future_execution::FutureExecutionError;
 #[doc(hidden)]
 pub use inventory::submit as __submit_builtin_flow;
+pub use invocation::{CallDispatchError, CallGuard, PreparedCall};
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
