@@ -26,6 +26,111 @@ fn parameters(contract: &ChatContract) -> WorkflowArguments {
     .unwrap()
 }
 
+fn add_provider_input(manifest: &mut WorkflowManifest, name: &str) {
+    let mut node = manifest.definition.nodes[0].clone();
+    node.id = "provider".into();
+    manifest.definition.nodes.push(node);
+    manifest.execution_order.insert(0, "provider".into());
+    let port = manifest.input_schema.inputs["params"][name].clone();
+    manifest
+        .input_schema
+        .inputs
+        .insert("provider".into(), [(name.into(), port)].into());
+}
+
+#[test]
+fn builtin_titles_reuse_unique_resolved_provider_inputs_and_preserve_secrets() {
+    let mut manifest = manifest();
+    add_provider_input(&mut manifest, "api_key");
+    manifest
+        .input_schema
+        .inputs
+        .get_mut("params")
+        .unwrap()
+        .remove("api_key");
+    let contract = ChatContract::from_manifest(&manifest).unwrap();
+    let parameters = mf_runtime::resolve_workflow_inputs(
+        &contract.parameters,
+        &WorkflowArguments::try_from(json!({"params.model":"chosen-model"})).unwrap(),
+        |name| (name == "MODEL_API_KEY").then(|| "synthetic-key".into()),
+    )
+    .unwrap();
+    let title = contract.builtin_title_parameters(&parameters).unwrap();
+    assert_eq!(title.0["input.model"].as_str(), Some("chosen-model"));
+    assert_eq!(
+        title.0["input.base_url"].as_str(),
+        Some("https://api.openai.com/v1")
+    );
+    assert_eq!(title.0["input.api_key"].as_str(), Some("synthetic-key"));
+    assert!(title.0["input.api_key"].is_secret());
+    assert_eq!(title.0.len(), 3);
+}
+
+#[test]
+fn builtin_titles_skip_missing_ambiguous_wrongly_typed_or_empty_provider_inputs() {
+    let original = manifest();
+    for name in ["model", "base_url", "api_key"] {
+        for variant in ["missing", "ambiguous", "type", "unresolved", "empty"] {
+            let mut manifest = original.clone();
+            let original_contract = ChatContract::from_manifest(&manifest).unwrap();
+            let mut parameters = parameters(&original_contract);
+            match variant {
+                "missing" => {
+                    manifest
+                        .input_schema
+                        .inputs
+                        .get_mut("params")
+                        .unwrap()
+                        .remove(name);
+                }
+                "ambiguous" => {
+                    add_provider_input(&mut manifest, name);
+                }
+                "type" => {
+                    let port = manifest
+                        .input_schema
+                        .inputs
+                        .get_mut("params")
+                        .unwrap()
+                        .get_mut(name)
+                        .unwrap();
+                    port.value_type = mf_runtime::ValueType::Boolean;
+                    port.binding = Default::default();
+                }
+                "unresolved" => {
+                    parameters.0.remove(&format!("params.{name}"));
+                }
+                "empty" => {
+                    parameters.0.insert(format!("params.{name}"), "  ".into());
+                }
+                _ => unreachable!(),
+            }
+            let contract = ChatContract::from_manifest(&manifest).unwrap();
+            assert!(
+                contract.builtin_title_parameters(&parameters).is_none(),
+                "{name}: {variant}"
+            );
+        }
+    }
+}
+
+#[test]
+fn declared_title_output_reserves_title_generation_for_the_user_flow() {
+    let mut manifest = manifest();
+    manifest.definition.outputs.push(
+        serde_json::from_value(json!({
+            "name":"title", "node":"chat", "port":"text", "optional":true
+        }))
+        .unwrap(),
+    );
+    let contract = ChatContract::from_manifest(&manifest).unwrap();
+    assert!(
+        contract
+            .builtin_title_parameters(&parameters(&contract))
+            .is_none()
+    );
+}
+
 #[test]
 fn conversation_inputs_are_bound_separately_from_parameters() {
     let manifest = manifest();

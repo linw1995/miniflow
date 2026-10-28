@@ -1157,8 +1157,8 @@ Per-domain ordering and native delivery acknowledgment remain enforced. Successf
 waits for connected work to drain, and terminal values are never reconstructed from increments.
 
 Use application event nodes when several delivery kinds must share one ordered protocol. The conversation
-Flow routes preview events and releases final settlement inputs on upstream close, so the graph owns their
-ordering.
+Flow routes preview events and publishes a completed-conversation event on upstream close, so the graph
+owns their ordering.
 
 ## Streaming through the in-memory API
 

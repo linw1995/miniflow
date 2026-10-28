@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-19",
+  "version": "2026-10-25",
   "dependencies": {
     "chat": {
       "package": "mf-chat",
@@ -48,25 +48,174 @@
       }
     },
     {
-      "id": "settle",
-      "kind": "mf_chat.turn.settle",
+      "id": "prepare_title",
+      "kind": "mf_chat.title.prepare",
       "inputs": {
-        "database_path": {
+        "completed": {
           "from": {
             "node": "route",
-            "port": "database_path"
+            "port": "completed"
+          }
+        }
+      }
+    },
+    {
+      "id": "title_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "prepare_title.enabled",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "title",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "title"
+      },
+      "inputs": {
+        "input.prompt": {
+          "from": {
+            "node": "prepare_title",
+            "port": "prompt"
           }
         },
-        "invocation": {
+        "input.text": {
           "from": {
-            "node": "route",
-            "port": "invocation"
+            "node": "prepare_title",
+            "port": "text"
           }
         },
-        "response": {
+        "input.status": {
+          "from": {
+            "node": "prepare_title",
+            "port": "status"
+          }
+        },
+        "input.context": {
+          "from": {
+            "node": "prepare_title",
+            "port": "context"
+          }
+        },
+        "input.model": {
+          "from": {
+            "node": "prepare_title",
+            "port": "model"
+          }
+        },
+        "input.base_url": {
+          "from": {
+            "node": "prepare_title",
+            "port": "base_url"
+          }
+        },
+        "input.api_key": {
+          "from": {
+            "node": "prepare_title",
+            "port": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "title_available",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "title.title",
+                "path": ""
+              },
+              "operator": "exists"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "selected_title",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "title",
+            "port": "title"
+          }
+        }
+      }
+    },
+    {
+      "id": "missing_title",
+      "kind": "builtin.constant",
+      "config": {
+        "value": null
+      }
+    },
+    {
+      "id": "no_title",
+      "kind": "builtin.constant",
+      "config": {
+        "value": null
+      }
+    },
+    {
+      "id": "no_title_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "finish",
+      "kind": "mf_chat.conversation.finish",
+      "inputs": {
+        "title": {
+          "exclusive": [
+            {
+              "node": "selected_title",
+              "port": "value"
+            },
+            {
+              "node": "missing_title",
+              "port": "value"
+            },
+            {
+              "node": "no_title",
+              "port": "value"
+            }
+          ]
+        },
+        "title_usages": {
+          "exclusive": [
+            {
+              "node": "title",
+              "port": "usages"
+            },
+            {
+              "node": "no_title_usages",
+              "port": "value"
+            }
+          ]
+        },
+        "completed": {
           "from": {
             "node": "route",
-            "port": "response"
+            "port": "completed"
           }
         }
       }
@@ -81,9 +230,49 @@
     },
     {
       "name": "settlement",
-      "node": "settle",
+      "node": "finish",
       "port": "settlement",
       "optional": true
+    }
+  ],
+  "flows": {
+    "title": {
+      "builtin": "mf-chat.chat-title"
+    }
+  },
+  "edges": [
+    {
+      "from_node": "prepare_title",
+      "to_node": "title_route"
+    },
+    {
+      "from_node": "title_route",
+      "from_output": "yes",
+      "to_node": "title"
+    },
+    {
+      "from_node": "title_route",
+      "from_output": "else",
+      "to_node": "no_title"
+    },
+    {
+      "from_node": "title",
+      "to_node": "title_available"
+    },
+    {
+      "from_node": "title_available",
+      "from_output": "else",
+      "to_node": "missing_title"
+    },
+    {
+      "from_node": "title_route",
+      "from_output": "else",
+      "to_node": "no_title_usages"
+    },
+    {
+      "from_node": "title_available",
+      "from_output": "yes",
+      "to_node": "selected_title"
     }
   ]
 }

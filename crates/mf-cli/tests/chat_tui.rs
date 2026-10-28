@@ -326,7 +326,9 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     second.header_delay = Duration::from_millis(500);
     let server = Server::start(vec![
         Reply::text("first reply"),
+        Reply::text("hello"),
         second,
+        Reply::text("session B prompt"),
         failure,
         Reply::text("retried reply"),
         Reply::text("retained reply"),
@@ -364,10 +366,10 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     assert!(!root.path().join("home").exists());
     let observed = interact(&binary, &path, false);
     assert!(!observed.contains("synthetic-key"));
-    assert_eq!(server.requests().len(), 5);
+    assert_eq!(server.requests().len(), 7);
     interact(&binary, &path, true);
     let requests = server.requests();
-    assert_eq!(requests.len(), 6);
+    assert_eq!(requests.len(), 8);
     assert!(
         requests
             .iter()
@@ -377,7 +379,7 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
         messages(&requests[0]).last().unwrap()["content"],
         "hello 🦀\nsecond line"
     );
-    assert_eq!(messages(&requests[3]), messages(&requests[2]));
+    assert_eq!(messages(&requests[5]), messages(&requests[4]));
     let database = ChatDatabase::open(&path).unwrap();
     let sessions = database.list_sessions(false, 50, None).unwrap().sessions;
     assert_eq!(sessions.len(), 2);
@@ -418,12 +420,12 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
             .unwrap()
             .overall
             .attempted_calls,
-        6
+        8
     );
     let usage = database.usage(Default::default()).unwrap();
-    assert_eq!(usage.overall.attempted_calls, 6);
+    assert_eq!(usage.overall.attempted_calls, 8);
     assert_eq!(usage.overall.total_tokens.missing_calls, 1);
-    assert_eq!(usage.overall.performance.elapsed.reported_calls, 6);
+    assert_eq!(usage.overall.performance.elapsed.reported_calls, 8);
     let retained = transcript
         .iter()
         .find(|message| message.message.content == "retained reply")
@@ -437,23 +439,35 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     assert!(
         sessions
             .iter()
-            .all(|session| session.title_source == "provisional")
+            .all(|session| session.title_source == "generated")
     );
+    let title_usage = transcript
+        .iter()
+        .flat_map(|message| message.usages.iter().flatten())
+        .find(|usage| {
+            usage
+                .attribution
+                .as_ref()
+                .and_then(|labels| labels.purpose.as_deref())
+                == Some("title")
+        })
+        .expect("the parent flow records the built-in title call");
+    assert_eq!(title_usage.node.as_ref().unwrap().path[0].node, "title");
     application_exit(
         &binary,
         &root.path().join("owner.sqlite"),
         &server,
-        7,
+        9,
         false,
     );
     application_exit(
         &binary,
         &root.path().join("display.sqlite"),
         &server,
-        8,
+        10,
         true,
     );
-    assert_eq!(server.requests().len(), 8);
+    assert_eq!(server.requests().len(), 10);
     loop_conversations();
 }
 fn application_exit(
@@ -600,6 +614,7 @@ fn loop_conversations() {
     let server = Server::start(vec![
         Reply::text("intermediate answer"),
         Reply::text("final answer"),
+        Reply::text("Loop title"),
         Reply::text("partial answer"),
         failure,
     ]);
@@ -677,7 +692,8 @@ fn loop_conversations() {
                             )
                         };
                         assert_eq!(completion.result.text, "final answer");
-                        assert_eq!(completion.result.usages.len(), 2);
+                        assert_eq!(completion.result.usages.len(), 3);
+                        assert_eq!(completion.result.title.as_deref(), Some("Loop title"));
                         assert_eq!(
                             serde_json::to_value(completion.result.metadata).unwrap(),
                             serde_json::json!({"strategy":"iterative"})
@@ -709,10 +725,10 @@ fn loop_conversations() {
         mfn_llm::ChatMessage::Assistant { metadata: Some(metadata), .. }
             if serde_json::to_value(metadata).unwrap() == serde_json::json!({"strategy":"iterative"})
     ));
-    for invocation in &invocations {
+    for (index, invocation) in invocations.iter().enumerate() {
         let call = database.call(&invocation.call_id).unwrap();
         let usages = call.usages.unwrap();
-        assert_eq!(usages.len(), 2);
+        assert_eq!(usages.len(), if index == 0 { 3 } else { 2 });
         assert_ne!(usages[0].call_id, usages[1].call_id);
         assert!(usages.iter().all(|usage| usage.model == "loop-model"));
         assert!(usages.iter().all(|usage| {
@@ -727,14 +743,14 @@ fn loop_conversations() {
         );
     }
     let statistics = database.usage(Default::default()).unwrap();
-    assert_eq!(statistics.overall.attempted_calls, 4);
-    assert_eq!(statistics.overall.statuses["succeeded"], 3);
+    assert_eq!(statistics.overall.attempted_calls, 5);
+    assert_eq!(statistics.overall.statuses["succeeded"], 4);
     assert_eq!(statistics.overall.statuses["failed"], 1);
     assert_eq!(statistics.unreported_invocations, 0);
     let requests = server.requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 5);
     assert!(
-        messages(&requests[2])
+        messages(&requests[3])
             .iter()
             .any(|message| message["content"] == "final answer")
     );
