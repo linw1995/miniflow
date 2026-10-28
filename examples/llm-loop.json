@@ -43,7 +43,7 @@
               "kind": "builtin.llm",
               "config": {
                 "model": "your-model",
-                "api_key_env": "MODEL_API_KEY"
+                "api_key_env": "OPENAI_API_KEY"
               },
               "inputs": {
                 "messages": {

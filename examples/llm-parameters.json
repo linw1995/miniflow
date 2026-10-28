@@ -18,7 +18,7 @@
         "parameters": {
           "api_key": {
             "type": "string",
-            "env": "MODEL_API_KEY"
+            "env": "OPENAI_API_KEY"
           },
           "model": {
             "type": "string",

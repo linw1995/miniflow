@@ -287,7 +287,7 @@ impl ChatContract {
             }
             arguments
                 .0
-                .insert(mf_runtime::output_id("input", name), value.clone());
+                .insert(mf_runtime::output_id("params", name), value.clone());
         }
         Some(arguments)
     }

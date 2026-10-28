@@ -255,7 +255,7 @@ fn run_memory(value: &Value, inputs: &Value) -> Vec<Value> {
         .args(["--exact", "memory_probe", "--ignored", "--nocapture"])
         .env("MINIFLOW_LLM_DEFINITION", value.to_string())
         .env("MINIFLOW_LLM_INPUTS", inputs.to_string())
-        .env("MODEL_API_KEY", "synthetic-key")
+        .env("OPENAI_API_KEY", "synthetic-key")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .output()
@@ -280,7 +280,7 @@ fn configure(value: &mut Value, server: &Server) {
     if let Some(nodes) = value.get_mut("nodes").and_then(Value::as_array_mut) {
         for node in nodes {
             if node["kind"] == "builtin.llm" {
-                node["config"] = json!({"model": "example-model", "base_url": server.base_url, "api_key_env": "MODEL_API_KEY"});
+                node["config"] = json!({"model": "example-model", "base_url": server.base_url, "api_key_env": "OPENAI_API_KEY"});
             }
             if let Some(body) = node.get_mut("loop").and_then(|value| value.get_mut("body")) {
                 configure(body, server);
@@ -329,7 +329,7 @@ fn run(executable: &Path, inputs: &Value) -> Vec<Value> {
         .args(["--inputs", &inputs.to_string()])
         .env_clear()
         .env("PATH", "")
-        .env("MODEL_API_KEY", "synthetic-key")
+        .env("OPENAI_API_KEY", "synthetic-key")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .output()
@@ -467,14 +467,14 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
         let mut definition: Value =
             serde_json::from_str(include_str!("../../../examples/llm-tools.json")).unwrap();
         definition["dependencies"] = dependencies();
-        definition["nodes"][0]["config"] = json!({"model":"example-model","base_url":server.base_url,"api_key_env":"MODEL_API_KEY"});
+        definition["nodes"][0]["config"] = json!({"model":"example-model","base_url":server.base_url,"api_key_env":"OPENAI_API_KEY"});
         definition["nodes"][0]["inputs"] = json!({
-            "messages":{"from":{"node":"input","port":"messages"}},
-            "tools":{"from":{"node":"input","port":"tools"}},
-            "tool_results":{"from":{"node":"input","port":"tool_results"}}
+            "messages":{"from":{"node":"params","port":"messages"}},
+            "tools":{"from":{"node":"params","port":"tools"}},
+            "tool_results":{"from":{"node":"params","port":"tool_results"}}
         });
         definition["nodes"].as_array_mut().unwrap().push(json!({
-            "id":"input","kind":"builtin.parameters","config":{"parameters":{
+            "id":"params","kind":"builtin.parameters","config":{"parameters":{
                 "messages":{"type":{"list":"object"},"secret":false},
                 "tools":{"type":{"list":"object"},"default":[],"secret":false},
                 "tool_results":{"type":{"list":"object"},"default":[],"secret":false}
@@ -492,8 +492,8 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
             ]);
         }
         let inputs = json!({
-            "input.messages":[{"role":"user","content":"Look up 42 and 43"}],
-            "input.tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}]
+            "params.messages":[{"role":"user","content":"Look up 42 and 43"}],
+            "params.tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}]
         });
         let root = tempfile::tempdir().unwrap();
         let executable = compile(&definition, root.path());
@@ -542,9 +542,9 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
             {"tool_call_id":terminal["tool_calls"][1]["id"],"content":"{\"id\":43,\"available\":true}"},
             {"tool_call_id":terminal["tool_calls"][0]["id"],"content":"{\"id\":42,\"available\":true}"}
         ]);
-        let continuation = json!({"input.messages":[
-            inputs["input.messages"][0], terminal["message"]
-        ],"input.tool_results":results});
+        let continuation = json!({"params.messages":[
+            inputs["params.messages"][0], terminal["message"]
+        ],"params.tool_results":results});
         let mut memory = run_memory(&definition, &continuation);
         let mut generated = run(&executable, &continuation);
         for outputs in [&mut memory, &mut generated] {
@@ -570,7 +570,7 @@ fn tool_calls_and_results_round_trip_in_memory_and_standalone_runners() {
         for request in &requests[2..] {
             let sent = request.body["messages"].as_array().unwrap();
             assert_eq!(sent.len(), 4);
-            assert_eq!(sent[0], inputs["input.messages"][0]);
+            assert_eq!(sent[0], inputs["params.messages"][0]);
             assert_eq!(sent[1]["role"], "assistant");
             assert_eq!(sent[1]["tool_calls"], calls);
             for (sent, result) in sent[2..].iter().zip(results.as_array().unwrap()) {
@@ -641,16 +641,16 @@ fn composed_conversation_compiles_without_application_nodes() {
     let arguments = mf_runtime::resolve_workflow_inputs(
         &manifest.input_schema,
         &arguments(&json!({
-            "input.prompt":"Hello",
-            "input.api_key":"synthetic-key",
-            "input.context":{"title":{"source":"provisional","revision":0,"attempted":false,"enabled":true}}
+            "params.prompt":"Hello",
+            "params.api_key":"synthetic-key",
+            "params.context":{"title":{"source":"provisional","revision":0,"attempted":false,"enabled":true}}
         })),
         |_| None,
     ).unwrap();
     manifest.input_schema.validate(&arguments).unwrap();
-    assert_eq!(arguments.0["input.system"].as_str(), Some(""));
+    assert_eq!(arguments.0["params.system"].as_str(), Some(""));
     assert_eq!(
-        serde_json::to_value(&arguments).unwrap()["input.history"],
+        serde_json::to_value(&arguments).unwrap()["params.history"],
         json!([])
     );
     instantiate_stream(&plan, &registry).unwrap();

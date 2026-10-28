@@ -85,43 +85,43 @@
         "flow": "title"
       },
       "inputs": {
-        "input.prompt": {
+        "params.prompt": {
           "from": {
             "node": "prepare_title",
             "port": "prompt"
           }
         },
-        "input.text": {
+        "params.text": {
           "from": {
             "node": "prepare_title",
             "port": "text"
           }
         },
-        "input.status": {
+        "params.status": {
           "from": {
             "node": "prepare_title",
             "port": "status"
           }
         },
-        "input.context": {
+        "params.context": {
           "from": {
             "node": "prepare_title",
             "port": "context"
           }
         },
-        "input.model": {
+        "params.model": {
           "from": {
             "node": "prepare_title",
             "port": "model"
           }
         },
-        "input.base_url": {
+        "params.base_url": {
           "from": {
             "node": "prepare_title",
             "port": "base_url"
           }
         },
-        "input.api_key": {
+        "params.api_key": {
           "from": {
             "node": "prepare_title",
             "port": "api_key"

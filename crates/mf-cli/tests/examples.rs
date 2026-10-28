@@ -173,7 +173,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             .env("MF_DEV_SUPPORT_ROOT", workspace().join("crates"))
             .env("CARGO_NET_OFFLINE", "true")
             .env("CARGO_TERM_COLOR", "never")
-            .env_remove("MODEL_API_KEY")
+            .env_remove("OPENAI_API_KEY")
             .arg("compile")
             .arg(&definition)
             .arg("--output")
@@ -208,8 +208,6 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         if let Some(server) = &server {
             let inputs = if name == "llm-loop.json" {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
-            } else if matches!(name, "chat-title-flow.json" | "chat-nested-title-flow.json") {
-                json!({"input.prompt":"Hello", "input.model":"example-model", "input.base_url":server.base_url})
             } else if name.starts_with("chat-") {
                 json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-tools.json" {
@@ -221,7 +219,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             };
             command
                 .args(["--inputs", &inputs.to_string()])
-                .env("MODEL_API_KEY", "synthetic-key")
+                .env("OPENAI_API_KEY", "synthetic-key")
                 .env("NO_PROXY", "127.0.0.1,localhost")
                 .env("no_proxy", "127.0.0.1,localhost");
         }

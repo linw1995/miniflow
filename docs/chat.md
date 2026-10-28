@@ -99,7 +99,7 @@ If cleanup also fails, `ChatError::Execution` retains both typed errors and invo
 Run the two-turn example with an available model and credentials in the environment:
 
 ```sh
-MODEL_API_KEY=your-key nix develop --command cargo run -p mf-chat --example conversation -- state/chat.sqlite examples/chat-title-flow.json
+OPENAI_API_KEY=your-key nix develop --command cargo run -p mf-chat --example conversation -- state/chat.sqlite examples/chat-title-flow.json
 ```
 
 Configure the model and endpoint in the supplied workflow. The example prints complete results with their session, turn, and call identities.
@@ -133,7 +133,7 @@ compiled and used directly with `--chat`:
 
 ```sh
 mf compile examples/chat-title-flow.json --output chat-title-flow
-mf run ./chat-title-flow --chat --chat-db state/chat.sqlite --input.model your-model
+mf run ./chat-title-flow --chat --chat-db state/chat.sqlite --params.model your-model
 ```
 
 Both model configurations belong to this user flow; change `title_model.config` to use a different model
