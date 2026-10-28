@@ -615,6 +615,12 @@ before navigating back. The footer shows only common controls. Press `?` in the 
 for the remaining shortcuts, and `?` or Esc to dismiss help. Help consumes navigation keys while open.
 The header keeps the observed workflow outcome separate from the child process result. Arrow keys
 pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. `e` cycles connection views.
+When at least two display nodes run concurrently in the current scope, picture-in-picture local graphs
+center on and highlight each running node without changing the main graph's selection, pan state, or
+layout. The PiP grid recomputes its rows, columns, and visible count from the running-node count and
+available terminal area on every frame. It shows every running node when space permits and reports a
+`+N more` overflow otherwise. Completed nodes leave the grid, and fewer than two running nodes removes
+it entirely. Compact chat execution summaries retain their existing presentation.
 Declared node clusters show a labeled boundary and a wrapped annotation inside the graph and in Details.
 Cluster boundaries, member node borders, and labels share a stable color from a six-color palette.
 Node titles and status markers retain their execution-state colors. Annotations wrap at word boundaries;

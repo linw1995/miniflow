@@ -1282,6 +1282,113 @@ fn scroll_into_view(offset: (u32, u32), node: GraphRect, size: (u16, u16)) -> (u
     )
 }
 
+const PIP_MIN_WIDTH: u16 = 32;
+const PIP_MIN_HEIGHT: u16 = 8;
+
+fn running_display_nodes(layout: &GraphLayout, observations: &[NodeObservation]) -> Vec<usize> {
+    (0..layout.nodes().len())
+        .filter(|display| {
+            layout.sources(*display).iter().any(|source| {
+                let expected = layout.all_nodes().get(*source);
+                observations
+                    .get(*source)
+                    .filter(|observation| {
+                        expected.is_some_and(|expected| expected.id == observation.id)
+                    })
+                    .is_some_and(|observation| observation.status == NodeStatus::Running)
+            })
+        })
+        .collect()
+}
+
+fn centered_offset(node: GraphRect, size: (u16, u16)) -> (u32, u32) {
+    (
+        node.x
+            .saturating_add(node.width / 2)
+            .saturating_sub(u32::from(size.0) / 2),
+        node.y
+            .saturating_add(node.height / 2)
+            .saturating_sub(u32::from(size.1) / 2),
+    )
+}
+
+fn parallel_pip_areas(count: usize, area: Rect) -> (Vec<Rect>, usize) {
+    if count < 2 {
+        return (Vec::new(), 0);
+    }
+    let max_columns = usize::from(area.width / PIP_MIN_WIDTH);
+    let max_rows = usize::from(area.height / 2 / PIP_MIN_HEIGHT);
+    let capacity = max_columns.saturating_mul(max_rows);
+    let visible = count.min(capacity);
+    if visible == 0 {
+        return (Vec::new(), count);
+    }
+    let ideal_columns = (1..=visible)
+        .find(|columns| *columns >= visible.div_ceil(*columns))
+        .unwrap_or(visible);
+    let columns = ideal_columns
+        .max(visible.div_ceil(max_rows))
+        .min(max_columns);
+    let rows = visible.div_ceil(columns);
+    let grid_height = u16::try_from(rows).unwrap_or(u16::MAX) * PIP_MIN_HEIGHT;
+    let column_width = area.width / columns as u16;
+    let top = area.y + area.height - grid_height;
+    let areas = (0..visible)
+        .map(|index| {
+            let row = index / columns;
+            let column = index % columns;
+            Rect {
+                x: area.x + column as u16 * column_width,
+                y: top + row as u16 * PIP_MIN_HEIGHT,
+                width: if column + 1 == columns {
+                    area.width - column as u16 * column_width
+                } else {
+                    column_width
+                },
+                height: PIP_MIN_HEIGHT,
+            }
+        })
+        .collect();
+    (areas, count - visible)
+}
+
+fn draw_parallel_pips(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    layout: &GraphLayout,
+    observations: &[NodeObservation],
+    receiver: &ObservationReader,
+    elapsed_ns: u64,
+) {
+    let running = running_display_nodes(layout, observations);
+    let (areas, overflow) = parallel_pip_areas(running.len(), area);
+    let visible = areas.len();
+    for (position, (display, rect)) in running.into_iter().zip(areas).enumerate() {
+        let node = &layout.nodes()[display];
+        let title = display_text(&node.id).replace('\n', " ");
+        let mut block = Block::default()
+            .title(format!(" Running: {title} "))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+        if overflow > 0 && position + 1 == visible {
+            block = block.title_bottom(format!(" +{overflow} more "));
+        }
+        let inner = block.inner(rect);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(block, rect);
+        let offset = centered_offset(node.rect, (inner.width, inner.height));
+        frame.render_widget(
+            GraphView::new(layout)
+                .reader(receiver)
+                .nodes(observations)
+                .selected(display)
+                .offset(offset.0, offset.1)
+                .elapsed_ns(elapsed_ns),
+            inner,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
@@ -1374,9 +1481,17 @@ fn draw(
             graph_view = graph_view.nodes(nodes);
         }
         frame.render_widget(graph_view, graph);
+        let observations = display_nodes.as_deref().unwrap_or(&snapshot.nodes);
+        draw_parallel_pips(
+            frame,
+            graph,
+            layout,
+            observations,
+            receiver,
+            elapsed.as_nanos().min(u64::MAX as u128) as u64,
+        );
         if let Some(details) = details {
             view_state.details_height = usize::from(details.height.saturating_sub(2));
-            let observations = display_nodes.as_deref().unwrap_or(&snapshot.nodes);
             let selected = view_state.selected;
             let collapsed_cluster = layout.is_collapsed_cluster(selected);
             let selected_node = (!collapsed_cluster)
@@ -2512,6 +2627,182 @@ mod tests {
                 "control_edges":[],"execution_order":["%loop","source","target"]
             })))
         })).unwrap()
+    }
+
+    fn parallel_fixture(count: usize) -> WorkflowDescription {
+        WorkflowDescription {
+            order_edges: Vec::new(),
+            version: WorkflowDescriptionVersion::V2026_10_23,
+            workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            nodes: (0..count)
+                .map(|index| NodeDescription {
+                    id: format!("parallel-{index}"),
+                    kind: "fixture.task".into(),
+                })
+                .collect(),
+            data_edges: Vec::new(),
+            control_edges: Vec::new(),
+            execution_order: (0..count)
+                .map(|index| format!("parallel-{index}"))
+                .collect(),
+            execution: Some(ExecutionDescription {
+                mode: ExecutionMode::Single,
+            }),
+            loop_bodies: Vec::new(),
+            clusters: Vec::new(),
+        }
+    }
+
+    fn render_parallel_pips(
+        description: &WorkflowDescription,
+        snapshot: &StateSnapshot,
+        receiver: &ObservationReader,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let layout = GraphLayout::with_view(description, ConnectionView::Execution).unwrap();
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_parallel_pips(
+                    frame,
+                    frame.area(),
+                    &layout,
+                    &snapshot.nodes,
+                    receiver,
+                    1_000_000_000,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn parallel_pip_grid_adapts_to_running_count_and_window_size() {
+        let area = Rect::new(5, 7, 128, 64);
+        for count in [2, 4, 10, 16] {
+            let (areas, overflow) = parallel_pip_areas(count, area);
+            assert_eq!(areas.len(), count);
+            assert_eq!(overflow, 0);
+            assert!(areas.iter().all(|rect| {
+                rect.x >= area.x
+                    && rect.y >= area.y
+                    && rect.right() <= area.right()
+                    && rect.bottom() <= area.bottom()
+            }));
+        }
+        let (small, small_overflow) = parallel_pip_areas(6, Rect::new(0, 0, 64, 32));
+        assert_eq!(small.len(), 4);
+        assert_eq!(small_overflow, 2);
+        let (large, large_overflow) = parallel_pip_areas(6, Rect::new(0, 0, 192, 64));
+        assert_eq!(large.len(), 6);
+        assert_eq!(large_overflow, 0);
+        assert!(parallel_pip_areas(1, area).0.is_empty());
+        assert_eq!(parallel_pip_areas(3, Rect::default()).0, Vec::new());
+        assert_eq!(parallel_pip_areas(3, Rect::new(0, 0, 31, 7)).1, 3);
+        assert_eq!(
+            centered_offset(
+                GraphRect {
+                    x: 40,
+                    y: 20,
+                    width: 24,
+                    height: 4
+                },
+                (50, 10)
+            ),
+            (27, 17)
+        );
+        assert_eq!(
+            centered_offset(
+                GraphRect {
+                    x: 0,
+                    y: 0,
+                    width: 4,
+                    height: 4
+                },
+                (50, 10)
+            ),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn parallel_pips_render_running_nodes_and_disappear_below_parallelism() {
+        let description = parallel_fixture(6);
+        let receiver = LoopbackReceiver::bind(description.clone(), RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        snapshot.nodes[0].status = NodeStatus::Running;
+        assert!(
+            !render_parallel_pips(&description, &snapshot, &reader, 128, 64).contains("Running:")
+        );
+        snapshot.nodes[1].status = NodeStatus::Running;
+        let text = render_parallel_pips(&description, &snapshot, &reader, 128, 64);
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+        assert!(text.contains(" Running: parallel-0 "), "{text}");
+        assert!(text.contains(" Running: parallel-1 "), "{text}");
+        snapshot.nodes[1].status = NodeStatus::Succeeded;
+        assert!(
+            !render_parallel_pips(&description, &snapshot, &reader, 128, 64).contains("Running:")
+        );
+        for node in &mut snapshot.nodes {
+            node.status = NodeStatus::Running;
+        }
+        let small = render_parallel_pips(&description, &snapshot, &reader, 64, 32);
+        assert_eq!(small.matches(" Running: ").count(), 4, "{small}");
+        assert!(small.contains("+2 more"), "{small}");
+        let large = render_parallel_pips(&description, &snapshot, &reader, 192, 64);
+        assert_eq!(large.matches(" Running: ").count(), 6, "{large}");
+        assert!(!large.contains("more"), "{large}");
+        for (width, height) in [(0, 0), (1, 1), (31, 7), (64, 16)] {
+            render_parallel_pips(&description, &snapshot, &reader, width, height);
+        }
+    }
+
+    #[test]
+    fn parallel_pips_deduplicate_collapsed_clusters_and_use_supplied_body_observations() {
+        let mut description = parallel_fixture(3);
+        description.clusters = vec![ClusterDescription {
+            label: "parallel group".into(),
+            annotation: "Parallel branches".into(),
+            nodes: vec!["parallel-0".into(), "parallel-1".into()],
+        }];
+        let layout = GraphLayout::with_view_and_collapsed(
+            &description,
+            ConnectionView::Execution,
+            &BTreeSet::from([0]),
+        )
+        .unwrap();
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        snapshot.nodes[0].status = NodeStatus::Running;
+        snapshot.nodes[1].status = NodeStatus::Running;
+        assert_eq!(running_display_nodes(&layout, &snapshot.nodes).len(), 1);
+        snapshot.nodes[2].status = NodeStatus::Running;
+        assert_eq!(running_display_nodes(&layout, &snapshot.nodes).len(), 2);
+
+        let description = scope_fixture();
+        let body = GraphLayout::from_loop_body(&description, &["first".into()]).unwrap();
+        let mut observations: Vec<_> = body
+            .all_nodes()
+            .iter()
+            .map(|node| NodeObservation::pending(&node.id, &node.kind))
+            .collect();
+        observations[1].status = NodeStatus::Running;
+        observations[2].status = NodeStatus::Running;
+        assert_eq!(running_display_nodes(&body, &observations), vec![1, 2]);
     }
 
     #[test]
