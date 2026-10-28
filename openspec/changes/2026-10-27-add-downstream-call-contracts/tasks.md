@@ -13,7 +13,7 @@
 - [x] 1.3 Define public interface projections and scope-local connection indexes without exposing internal values.
 - [x] 1.4 Project caller parameters from final resolved contracts, preserving optionality and null semantics.
 - [x] 1.5 Expose read-only context views across dynamic, generated, nested, and TaskStream execution paths.
-- [ ] 1.6 Add deterministic generation and startup contract checks for interfaces and binding layouts.
+- [x] 1.6 Add deterministic generation and startup contract checks for interfaces and binding layouts.
 - [x] 1.7 Declare and validate separate call-output slots using normal node preparation and metadata drift checks.
 - [x] 1.8 Reuse prepared graph types and exclusive-branch proofs; retain external prerequisites and reject wait cycles.
 - [x] 1.9 Validate and remap caller-owned arguments without resolving external values or activating targets.
@@ -52,4 +52,5 @@
 - [x] Bind prepared calls to isolated execution with shared limits, typed outcomes, and instance serialization.
 - [x] Cover repeated and nested calls, external skips and secrets, capability restoration, lock deadlines, and worker limits.
 - [x] Install prepared call tables and readiness scheduling for finite definitions and nested bodies.
-- [ ] Install prepared call tables from generated runners and native stream frames.
+- [x] Install frozen call tables in generated finite runners with scope identity and full metadata drift checks.
+- [ ] Install prepared call tables in native stream frames.

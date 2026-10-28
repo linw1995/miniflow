@@ -282,6 +282,14 @@ impl Flow {
         Ok(self)
     }
 
+    /// Host-side compiler contracts; node discovery remains limited to `call_targets`.
+    pub fn prepared_calls(&self) -> impl Iterator<Item = &crate::PreparedCall> {
+        self.inner
+            .calls
+            .iter()
+            .flat_map(|calls| calls.callers.values().flatten())
+    }
+
     pub fn call_interfaces(&self) -> &crate::CallInterfaces {
         &self.inner.call_interfaces
     }

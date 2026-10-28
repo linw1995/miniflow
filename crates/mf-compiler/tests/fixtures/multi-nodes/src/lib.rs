@@ -89,3 +89,5 @@ mod task_stream;
 mod typed_fixture;
 
 pub mod generated_fixture;
+
+mod directed_fixture;

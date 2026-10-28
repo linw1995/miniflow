@@ -345,7 +345,12 @@ validation before canonical ordering. They never become caller skip predicates. 
 back to the complete canonical order, while target snapshots include transitive input and success-guard
 evidence. Callable targets are omitted from workflow startup input schemas, including targets without
 ordinary input edges. Static Flow and Iteration bodies own separate call tables and templates.
-Generated runners and native stream dispatch remain rejected until their plans carry these contracts.
+Generated finite runners freeze call tables, visibility, and success guards alongside execution domains.
+Bindings use generated node positions, including nested scopes whose definition order differs. Startup
+compares complete provider metadata and the generated scope fingerprint before enabling dispatch; it
+neither rebuilds adjacency nor sorts the graph. Typed transfer paths are disabled in call-bearing scopes
+with a `directed_call` fallback, preserving their external snapshots and semantic guard bodies.
+Native stream dispatch remains rejected until its frame-owned plans carry these contracts.
 Compiler declarations reject recursion, unknown endpoints, duplicate caller mappings, and targets used
 as ordinary producers or workflow outputs.
 

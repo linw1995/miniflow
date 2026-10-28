@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "snake_case")]
 pub enum TypedFallbackReason {
     UnsupportedMode,
+    DirectedCall,
     IncrementalOutput,
     CustomRunner,
     ProviderMissing,
@@ -111,8 +112,12 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
             }
         }
     }
+    let directed_calls = flow.prepared_calls().next().is_some();
     let classify = |source: usize, target: usize| -> Option<TypedFallbackReason> {
         use TypedFallbackReason::*;
+        if directed_calls {
+            return Some(DirectedCall);
+        }
         if exclusive_targets[target] {
             return Some(ExclusiveInput);
         }

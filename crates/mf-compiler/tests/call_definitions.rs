@@ -161,7 +161,7 @@ fn planning_rejects_unknown_endpoints_mixed_activation_and_recursive_calls() {
 }
 
 #[test]
-fn finite_execution_prepares_calls_while_unintegrated_backends_fail_closed() {
+fn finite_execution_and_generation_prepare_calls_while_native_streams_fail_closed() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = mf_compiler::compile_definition(&parse(document()), &registry).unwrap();
     let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
@@ -175,11 +175,11 @@ fn finite_execution_prepares_calls_while_unintegrated_backends_fail_closed() {
     assert!(plan.manifest(&registry).is_ok());
     #[cfg(feature = "codegen")]
     {
-        assert!(plan.generate_artifacts().is_err());
-        assert!(plan.generate_embedded_artifacts().is_err());
-        assert!(plan.generate_runner_artifacts().is_err());
-        assert!(plan.generate_execution_plans(&registry).is_err());
-        assert!(plan.generate_runner_execution_plans(&registry).is_err());
+        assert!(plan.generate_artifacts().is_ok());
+        assert!(plan.generate_embedded_artifacts().is_ok());
+        assert!(plan.generate_runner_artifacts().is_ok());
+        assert!(plan.generate_execution_plans(&registry).is_ok());
+        assert!(plan.generate_runner_execution_plans(&registry).is_ok());
     }
 }
 

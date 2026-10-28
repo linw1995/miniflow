@@ -243,8 +243,9 @@ catalog to prepare or execute its nodes.
 callers' external prerequisites. Each `PreparedCall` carries a resolved binding, target identity,
 snapshot visibility, and a prepared success guard. This low-level API does not build or validate a
 workflow dependency graph. `compile_definition` and `instantiate_compiled` install these contracts
-for finite definitions, including nested Flow and Iteration bodies. Generated runners and native
-stream dispatch remain gated until their prepared plans carry the same contracts.
+for finite definitions, including nested Flow and Iteration bodies. Generated finite runners freeze
+the same call tables, snapshot visibility, and success guards at build time. Startup checks complete
+node metadata and scope identity before binding executors. Native stream dispatch remains gated.
 
 During a node invocation, `ExecutionContext::invoke_call` selects a `CallBindingId` and accepts one
 atomic `CallArguments` group. The runtime combines caller-owned values with visible external values,
