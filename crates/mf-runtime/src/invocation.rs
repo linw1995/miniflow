@@ -1,5 +1,5 @@
 use crate::{
-    CallArguments, CallBindingId, CallId, CallResponse, DefinitionId, ExecutionContext, NodeId,
+    CallArguments, CallBindingId, CallId, CallResponse, DefinitionId, ExecutionContext,
     OutputVisibility, ResolvedCallBinding, SkipCause, WorkflowRunError,
 };
 use snafu::Snafu;
@@ -48,10 +48,6 @@ pub enum CallDispatchError {
     DeadlineExceeded,
     #[snafu(display("directed call cancelled: {source}"))]
     Cancelled { source: crate::StreamError },
-    #[snafu(display("directed call cannot reenter the same prepared executor"))]
-    Reentrant,
-    #[snafu(display("directed call executor was poisoned by a previous panic"))]
-    Poisoned,
     #[snafu(display("directed call execution stopped: {source}"))]
     Execution {
         #[snafu(source(from(WorkflowRunError, Box::new)))]
@@ -76,15 +72,9 @@ pub trait CallDispatcher: Send + Sync {
     ) -> Result<CallResponse, CallDispatchError>;
 }
 
-struct CallInstance {
-    lock: std::sync::Mutex<()>,
-    resource: crate::WorkerResource,
-}
-
 /// Shared finite and streaming bindings; executors remain owned by their enclosing plan.
 pub struct CallTable {
     callers: BTreeMap<crate::DefinitionId, Vec<crate::PreparedCall>>,
-    instances: BTreeMap<NodeId, CallInstance>,
     interfaces: crate::CallInterfaces,
 }
 
@@ -108,7 +98,6 @@ impl CallTable {
             return Ok(None);
         }
         let mut callers: BTreeMap<crate::DefinitionId, Vec<crate::PreparedCall>> = BTreeMap::new();
-        let mut instances = BTreeMap::new();
         let scheduled: BTreeSet<_> = domains
             .domains()
             .iter()
@@ -150,12 +139,6 @@ impl CallTable {
                     message: "caller and external inputs overlap"
                 }
             );
-            instances
-                .entry(call.binding.target)
-                .or_insert_with(|| CallInstance {
-                    lock: std::sync::Mutex::new(()),
-                    resource: crate::WorkerResource::default(),
-                });
             let bindings = callers.entry(caller.definition_id.clone()).or_default();
             ensure!(
                 call.binding.id.index() == bindings.len(),
@@ -173,7 +156,6 @@ impl CallTable {
         }))?;
         Ok((!callers.is_empty()).then_some(Self {
             callers,
-            instances,
             interfaces,
         }))
     }
@@ -191,9 +173,7 @@ impl CallTable {
             &mut crate::ExecutionContext,
         ) -> Result<crate::NodeResult, crate::NodeExecutionError>,
     ) -> Result<crate::CallResponse, crate::CallDispatchError> {
-        use crate::invocation::{
-            ExecutionSnafu, PoisonedSnafu, ReentrantSnafu, UnknownBindingSnafu,
-        };
+        use crate::invocation::{ExecutionSnafu, UnknownBindingSnafu};
         use snafu::{OptionExt, ResultExt};
         let calls = self;
         let crate::CallRequest { id, arguments } = request;
@@ -207,24 +187,12 @@ impl CallTable {
             })?;
         let initial = call.binding.bind_arguments(&arguments)?;
         let node = &nodes[call.binding.target.index()];
-        let instance = &calls.instances[&call.binding.target];
         context.run_directed_call(
             id,
             &call.target,
             call.visibility.clone(),
             deadline,
             |child| {
-                let _reservation = instance.resource.reserve().context(ReentrantSnafu)?;
-                let _lock = loop {
-                    child.check_call_limits(deadline)?;
-                    match instance.lock.try_lock() {
-                        Ok(lock) => break lock,
-                        Err(std::sync::TryLockError::Poisoned(_)) => return PoisonedSnafu.fail(),
-                        Err(std::sync::TryLockError::WouldBlock) => {
-                            std::thread::park_timeout(std::time::Duration::from_millis(1));
-                        }
-                    }
-                };
                 let mut skipped = Vec::new();
                 let result = crate::execute_resolved_node_in_context(
                     node,

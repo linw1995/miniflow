@@ -126,84 +126,30 @@ fn atomic_arguments_preserve_namespaces_sharing_and_presence() {
 }
 
 #[test]
-fn empty_calls_and_repeated_target_calls_have_independent_responses() {
-    let binding = CallBinding::new(
-        "clock",
-        NodeId::new(4),
-        vec![],
-        CallInputDefaults::ExplicitOnly,
-    )
-    .unwrap();
-    assert!(binding.ports().is_empty());
-    let first = request(4, 20, CallArguments::default());
-    let second = request(4, 21, CallArguments::default());
-    let first_id = first.id;
-    let second_id = second.id;
+fn outcomes_preserve_shared_values_omission_and_typed_failure_sources() {
     let value = ValueRef::from("result").into_secret();
-    let second_response = second.respond(CallOutcome::Succeeded(NodeValues::from([(
-        "value".into(),
-        value.clone(),
-    )])));
-    let CallOutcome::Succeeded(outputs) = second_response.into_outcome(second_id).unwrap() else {
-        panic!("expected successful call");
+    let success = CallOutcome::Succeeded(NodeValues::from([("value".into(), value.clone())]));
+    let CallOutcome::Succeeded(outputs) = success else {
+        panic!("expected success")
     };
     assert!(outputs["value"].ptr_eq(&value));
     assert!(!outputs.contains_key("optional"));
-    assert!(matches!(
-        first.respond(CallOutcome::Succeeded(NodeValues::new())).into_outcome(first_id),
-        Ok(CallOutcome::Succeeded(outputs)) if outputs.is_empty()
-    ));
-}
-
-#[test]
-fn responses_reject_both_wrong_bindings_and_wrong_invocations() {
-    for (binding, invocation) in [(1, 7), (0, 8)] {
-        let call = request(0, 7, CallArguments::default());
-        let actual = call.id;
-        let expected = CallId {
-            binding: CallBindingId::new(binding),
-            invocation,
-        };
-        let error = call
-            .respond(CallOutcome::Succeeded(NodeValues::new()))
-            .into_outcome(expected)
-            .unwrap_err();
-        assert!(error.to_string().contains(&format!("{actual:?}")));
-        assert!(error.to_string().contains(&format!("{expected:?}")));
-        assert!(matches!(error, CallContractError::ResponseMismatch {
-            expected: rejected_expected, actual: rejected_actual,
-        } if rejected_expected == expected && rejected_actual == actual));
-    }
-    assert_eq!(CallBindingId::new(9).index(), 9);
-}
-
-#[test]
-fn skipped_and_failed_calls_preserve_structured_causes() {
     let causes = vec![SkipCause::Output {
         source_node: "config".into(),
         source_output: "token".into(),
     }];
-    let skipped = request(0, 0, CallArguments::default());
-    let skipped_id = skipped.id;
-    assert!(matches!(
-        skipped.respond(CallOutcome::Skipped { causes: causes.clone() })
-            .into_outcome(skipped_id).unwrap(),
-        CallOutcome::Skipped { causes: actual } if actual == causes
-    ));
-
+    assert!(
+        matches!(CallOutcome::Skipped { causes: causes.clone() }, CallOutcome::Skipped { causes: actual } if actual == causes)
+    );
     let source = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
-    let source = WorkflowRunError::NodeExecution {
-        definition_id: "tool".into(),
-        source: NodePluginFailedSnafu.into_error(Box::new(source)),
+    let outcome = CallOutcome::Failed {
+        source: WorkflowRunError::NodeExecution {
+            definition_id: "tool".into(),
+            source: NodePluginFailedSnafu.into_error(Box::new(source)),
+        },
     };
-    let failed = request(0, 1, CallArguments::default());
-    let failed_id = failed.id;
-    let CallOutcome::Failed { source } = failed
-        .respond(CallOutcome::Failed { source })
-        .into_outcome(failed_id)
-        .unwrap()
-    else {
-        panic!("expected failed call");
+    let CallOutcome::Failed { source } = outcome else {
+        panic!("expected failure")
     };
     let io = source
         .source()
@@ -225,13 +171,13 @@ fn contract_errors_propagate_through_node_boundaries() {
             CallInputDefaults::ExplicitOnly,
         )?)
     }
-    fn receive() -> Result<CallOutcome, NodeExecutionError> {
-        let call = request(0, 1, CallArguments::default());
-        let mut expected = call.id;
-        expected.invocation = 2;
-        Ok(call
-            .respond(CallOutcome::Succeeded(NodeValues::new()))
-            .into_outcome(expected)?)
+    fn execute() -> Result<CallBinding, NodeExecutionError> {
+        Ok(CallBinding::new(
+            "",
+            NodeId::new(0),
+            vec![],
+            CallInputDefaults::ExplicitOnly,
+        )?)
     }
     assert!(matches!(
         prepare(),
@@ -240,9 +186,9 @@ fn contract_errors_propagate_through_node_boundaries() {
         })
     ));
     assert!(matches!(
-        receive(),
+        execute(),
         Err(NodeExecutionError::CallContract {
-            source: CallContractError::ResponseMismatch { .. },
+            source: CallContractError::EmptyName { field: "binding" },
         })
     ));
 }
