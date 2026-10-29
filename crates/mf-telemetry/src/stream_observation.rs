@@ -474,7 +474,16 @@ impl StreamCallback {
     pub fn started(&mut self) {
         self.run.node_started(self.step.as_mut().unwrap());
     }
-    pub fn succeeded(mut self, emissions: usize, ports: Vec<String>) {
+    pub fn succeeded(self, emissions: usize, ports: Vec<String>) {
+        self.succeeded_with_loop_summary(emissions, ports, None);
+    }
+
+    pub fn succeeded_with_loop_summary(
+        mut self,
+        emissions: usize,
+        ports: Vec<String>,
+        summary: Option<crate::event::LoopSummary>,
+    ) {
         *self
             .run
             .stream
@@ -485,8 +494,12 @@ impl StreamCallback {
             .unwrap() = i64::try_from(emissions)
             .ok()
             .and_then(|value| Count::try_from(value).ok());
-        self.run
-            .node_succeeded(self.step.take().unwrap(), ports, Vec::new());
+        self.run.node_succeeded_with_loop_summary(
+            self.step.take().unwrap(),
+            ports,
+            Vec::new(),
+            summary,
+        );
     }
     pub fn failed(mut self, phase: FailurePhase, message: String) {
         self.run

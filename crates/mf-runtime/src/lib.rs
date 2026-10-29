@@ -51,7 +51,9 @@ pub use definition::{
     WorkflowDefinitionVersion, WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
-pub use execution_inputs::{ExecutionInputs, InputResolution, resolve_workflow_inputs};
+pub use execution_inputs::{
+    ExecutionGuard, ExecutionInputs, InputResolution, resolve_workflow_inputs,
+};
 pub use execution_outputs::{ContextValue, ExecutionOutputs, OutputVisibility};
 pub use flow::{
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
@@ -113,7 +115,7 @@ pub use stream_plan::{
     StreamEmissionBinding, StreamInputResolver, StreamMessageInitializer, StreamMessageProgram,
     StreamOutputSelector, StreamPlan, StreamProgram,
 };
-pub use subgraph::PreparedSubgraph;
+pub use subgraph::{PreparedSubgraph, SubgraphStreamOutput};
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,
     TypedTaskStreamNode,

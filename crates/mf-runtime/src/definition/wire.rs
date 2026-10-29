@@ -57,7 +57,21 @@ fn decode_scope(
         return Ok(());
     };
     ensure!(
-        version == WorkflowDefinitionVersion::V2026_10_25
+        version.supports_child_streams()
+            || scope
+                .get("nodes")
+                .and_then(Value::as_array)
+                .is_none_or(|nodes| nodes.iter().all(|node| {
+                    node.pointer("/loop/stream_outputs")
+                        .is_none_or(|outputs| outputs.as_object().is_some_and(Map::is_empty))
+                })),
+        InvalidSnafu {
+            path,
+            message: "Loop child streams require version 2026-10-28"
+        }
+    );
+    ensure!(
+        version.supports_nested_flows()
             || (!scope.contains_key("flows")
                 && scope
                     .get("nodes")
@@ -206,7 +220,21 @@ fn encode_scope(
         return Ok(());
     };
     ensure!(
-        version == WorkflowDefinitionVersion::V2026_10_25
+        version.supports_child_streams()
+            || scope
+                .get("nodes")
+                .and_then(Value::as_array)
+                .is_none_or(|nodes| nodes.iter().all(|node| {
+                    node.pointer("/loop/stream_outputs")
+                        .is_none_or(|outputs| outputs.as_object().is_some_and(Map::is_empty))
+                })),
+        InvalidSnafu {
+            path,
+            message: "Loop child streams require version 2026-10-28"
+        }
+    );
+    ensure!(
+        version.supports_nested_flows()
             || (!scope.contains_key("flows")
                 && scope
                     .get("nodes")

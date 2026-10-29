@@ -784,6 +784,10 @@ fn generate_scope(
             let bind = format_ident!("bind_success_guards_{scope}");
             preparations.push(quote! { let #flow_ident = #bind(#flow_ident); });
         }
+        if enclosing.is_some_and(|definition| !definition.stream_outputs.is_empty()) {
+            let bind = format_ident!("bind_stream_outputs_{scope}");
+            preparations.push(quote! { let #flow_ident = #bind(#flow_ident)?; });
+        }
         statements.push(quote! { runtime.execute_in_context(&#flow_ident, state) });
     }
     Ok((preparations, statements, flow_ident))
@@ -950,18 +954,21 @@ fn subgraph_preparation(
             }
         }
     };
+    let run_body = if enclosing.is_some_and(|definition| !definition.stream_outputs.is_empty()) {
+        quote! { #body_flow.execute_with_sink(state, sink) }
+    } else {
+        quote! { let _ = sink; let runtime = mf_runtime::FlowRuntime::default(); #(#execution)* }
+    };
     Ok(quote! {
         let #body_flow = (|| -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
             #(#preparations)*
             Ok(#body_flow)
         })().context(mf_compiler::WorkflowSubgraphSnafu { definition_id: #outer_id })?;
         let input_schema = #body_flow.input_schema().clone();
-        let #body_ident = mf_runtime::PreparedSubgraph::new(
-            vec![#(#nodes),*], vec![#(#outputs),*],
-            move |state| {
-                let runtime = mf_runtime::FlowRuntime::default();
-                #(#execution)*
-            },
+        let stream_ports = #body_flow.stream_output_ports();
+        let #body_ident = mf_runtime::PreparedSubgraph::streaming(
+            vec![#(#nodes),*], vec![#(#outputs),*], stream_ports,
+            move |state, sink| { #run_body },
         );
         let #body_ident = #body_ident.with_input_schema(input_schema);
         let mut #node_ident = mf_compiler::instantiate_subgraph_with_metadata(
@@ -1017,7 +1024,7 @@ impl CompiledWorkflow {
         &self,
         nodes: Vec<crate::FlowNode>,
         order: Vec<DefinitionId>,
-        body_layouts: BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>,
+        body_layouts: crate::compiler::ScopeLayouts,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
         let node_targets_json =
@@ -1335,14 +1342,7 @@ fn typed_preparation_tokens(
                 .iter()
                 .find(|segment| segment.positions.contains(&position))
             else {
-                statements.push(task_call_tokens(
-                    &workflow.definition,
-                    &workflow.execution_order,
-                    "root",
-                    position,
-                    &[],
-                    None,
-                ));
+                statements.push(task_call_tokens(position, &[], None));
                 continue;
             };
             let node = &flow.nodes()[flow.execution_order()[position].index()];
@@ -1413,14 +1413,7 @@ fn typed_preparation_tokens(
                 let result = #handle.execute(input, ctx)?;
                 #publication
             } };
-            statements.push(task_call_tokens(
-                &workflow.definition,
-                &workflow.execution_order,
-                "root",
-                position,
-                &transfers,
-                Some(invoke),
-            ));
+            statements.push(task_call_tokens(position, &transfers, Some(invoke)));
         }
         let id = domain.id;
         bindings.push(quote! { (#id, std::sync::Arc::new(move |flow: &mf_runtime::Flow, state: &mut mf_runtime::ExecutionContext| {
@@ -1527,7 +1520,7 @@ fn task_layout_tokens(
             key: std::borrow::Cow::Borrowed(#key),
         } }
     });
-    let guards = task_guard_tokens(definition, order, scope, domains);
+    let guards = task_guard_tokens(definition, order, scope);
     let domains = domain_tokens(domains);
     quote! { #guards pub static #ident: mf_runtime::FlowPlan = mf_runtime::FlowPlan {
         connections: std::borrow::Cow::Borrowed(&[#(#connections),*]), dependencies: std::borrow::Cow::Borrowed(&[#(#dependencies),*]),
@@ -1537,12 +1530,37 @@ fn task_layout_tokens(
 }
 
 #[cfg(feature = "codegen")]
+fn subgraph_stream_tokens(
+    scope: &str,
+    id: &DefinitionId,
+    outputs: &[mf_runtime::SubgraphStreamOutput],
+) -> Result<TokenStream, PlanError> {
+    let bind = format_ident!("bind_stream_outputs_{scope}");
+    let id = LitStr::new(id.as_str(), Span::call_site());
+    let bindings = outputs.iter().map(|output| {
+        let node = output.node.index();
+        let name = LitStr::new(&output.name,Span::call_site());
+        let port = LitStr::new(&serde_json::to_string(&output.port).context(SerializeSnafu)?,Span::call_site());
+        Ok(quote! { mf_runtime::SubgraphStreamOutput {
+            node:mf_runtime::NodeId::new(#node), name:#name.into(),
+            port:serde_json::from_str(#port).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {definition_id:#id})?,
+        } })
+    }).collect::<Result<Vec<_>,PlanError>>()?;
+    Ok(quote! {
+        fn #bind(flow:mf_runtime::Flow) -> Result<mf_runtime::Flow,mf_compiler::WorkflowBuildError> {
+            use snafu::ResultExt as _;
+            flow.with_stream_outputs(vec![#(#bindings),*]).context(mf_compiler::WorkflowNodeConstructionSnafu {definition_id:#id})
+        }
+    })
+}
+
+#[cfg(feature = "codegen")]
 fn collect_body_layouts(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
     scope: &str,
     path: &mut Vec<DefinitionId>,
-    body_layouts: &BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>,
+    body_layouts: &crate::compiler::ScopeLayouts,
     layouts: &mut Vec<TokenStream>,
 ) -> Result<(), PlanError> {
     for (index, id) in order.iter().enumerate() {
@@ -1574,8 +1592,12 @@ fn collect_body_layouts(
         };
         let body_order = crate::compiler::structural_order_graph(&body)?;
         path.push(id.clone());
-        let domains = &body_layouts[path.as_slice()];
+        let (domains, streams) = &body_layouts[path.as_slice()];
         let body_scope = format!("{scope}_{index}");
+        if !streams.is_empty() {
+            layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
+        }
+
         layouts.push(task_layout_tokens(&body, &body_order, &body_scope, domains));
         collect_body_layouts(&body, &body_order, &body_scope, path, body_layouts, layouts)?;
         path.pop();
@@ -1639,33 +1661,15 @@ fn success_guard_tokens(
 
 #[cfg(feature = "codegen")]
 fn task_call_tokens(
-    definition: &WorkflowDefinition,
-    order: &[DefinitionId],
-    scope: &str,
     position: usize,
     transfers: &[LitStr],
     invoke: Option<TokenStream>,
 ) -> TokenStream {
-    let guarded = definition
-        .order_edges
-        .iter()
-        .any(|edge| edge.to_node == order[position]);
-    if !guarded {
-        return match invoke {
-            Some(invoke) => {
-                quote! { flow.execute_generated_position(#position, &[#(#transfers),*], state, #invoke)?; }
-            }
-            None => quote! { flow.execute_position(#position, state)?; },
-        };
-    }
-    let guard = format_ident!("success_guard_{scope}_{position}");
-    let invoke = invoke.unwrap_or_else(|| quote! { |inputs, ctx| {
-        flow.nodes()[flow.execution_order()[#position].index()].node.execute(inputs, ctx).map(mf_runtime::GeneratedNodeResult::Dynamic)
-    } });
-    quote! {
-        flow.execute_resolved_position(#position, state, |node, ctx, inputs| {
-            ctx.resolve_node_inputs(node, flow.plan().dependencies[#position].iter().map(mf_runtime::FlowDependency::borrowed), &[#(#transfers),*], inputs, #guard(ctx)?)
-        }, #invoke)?;
+    match invoke {
+        Some(invoke) => {
+            quote! { flow.execute_generated_position(#position, &[#(#transfers),*], state, #invoke)?; }
+        }
+        None => quote! { flow.execute_position(#position, state)?; },
     }
 }
 
@@ -1674,51 +1678,18 @@ fn task_guard_tokens(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
     scope: &str,
-    domains: &mf_runtime::ExecutionDomains,
 ) -> TokenStream {
     let guards = success_guard_tokens(definition, order, scope);
-    let mut functions = Vec::new();
-    let mut bindings = Vec::new();
-    for domain in domains.domains() {
-        if !domain.positions.iter().any(|&position| {
-            definition
-                .order_edges
-                .iter()
-                .any(|edge| edge.to_node == order[position])
-        }) {
-            continue;
-        }
-        let name = format_ident!("execute_domain_{scope}_{}", domain.id);
-        let statements = domain.positions.iter().map(|&position| {
-            let call = task_call_tokens(definition, order, scope, position, &[], None);
-            let cutoff = if position == 0 {
-                quote! { state.scope_exit_requested() }
-            } else {
-                quote! { #position > state.scope_exit_cutoff() || state.scope_exit_requested() }
-            };
-            quote! {
-                if #cutoff { return Ok(()); }
-                #call
-            }
-        });
-        functions.push(quote! {
-            fn #name(flow: &mf_runtime::Flow, state: &mut mf_runtime::ExecutionContext) -> Result<(), mf_runtime::WorkflowRunError> {
-                #(#statements)*
-                Ok(())
-            }
-        });
-        let id = domain.id;
-        bindings.push(quote! { (#id, std::sync::Arc::new(#name) as std::sync::Arc<mf_runtime::GeneratedDomainExecutor>) });
-    }
+    let bindings: Vec<_> = order.iter().enumerate().filter_map(|(position,id)| {
+        if !definition.order_edges.iter().any(|edge| &edge.to_node == id) { return None; }
+        let guard = format_ident!("success_guard_{scope}_{position}");
+        Some(quote! { (mf_runtime::NodeId::new(#position), std::sync::Arc::new(#guard) as std::sync::Arc<mf_runtime::ExecutionGuard>) })
+    }).collect();
     let bind = format_ident!("bind_success_guards_{scope}");
-    let binding = (!bindings.is_empty()).then(|| {
-        quote! {
-            fn #bind(flow: mf_runtime::Flow) -> mf_runtime::Flow {
-                flow.with_prepared_domains(vec![#(#bindings),*])
-            }
-        }
+    let binding = (!bindings.is_empty()).then(|| quote! {
+        fn #bind(flow:mf_runtime::Flow) -> mf_runtime::Flow { flow.with_input_guards(vec![#(#bindings),*]) }
     });
-    quote! { #(#guards)* #(#functions)* #binding }
+    quote! { #(#guards)* #binding }
 }
 
 #[cfg(feature = "codegen")]

@@ -171,6 +171,25 @@ fn validate_loop(
     dependencies: &BTreeMap<String, mf_runtime::NodeDependency>,
     version: WorkflowDefinitionVersion,
 ) -> Result<(), WorkflowCompileError> {
+    if !loop_definition.stream_outputs.is_empty() && !version.supports_child_streams() {
+        return Err(invalid(
+            path,
+            "Loop child streams require version 2026-10-28",
+        ));
+    }
+    for name in loop_definition.stream_outputs.keys() {
+        if name.trim().is_empty()
+            || loop_definition
+                .variables
+                .iter()
+                .any(|variable| &variable.name == name)
+        {
+            return Err(invalid(
+                path,
+                "Loop stream names must be nonblank and distinct from variables",
+            ));
+        }
+    }
     if !loop_definition.body.clusters.is_empty() && !version.supports_clusters() {
         return Err(invalid(path, "node clusters require version 2026-10-23"));
     }
@@ -261,4 +280,46 @@ fn validate_loop(
         validate_node(node, Some(&types), depth, path, dependencies, version)?;
     }
     Ok(())
+}
+
+pub fn prepare_stream_outputs(
+    definition: &LoopDefinition,
+    nodes: &[crate::FlowNode],
+    id: &DefinitionId,
+) -> Result<Vec<mf_runtime::SubgraphStreamOutput>, WorkflowCompileError> {
+    definition
+        .stream_outputs
+        .iter()
+        .map(|(name, reference)| {
+            let index = nodes
+                .iter()
+                .position(|node| node.definition_id == reference.node)
+                .ok_or_else(|| {
+                    invalid(
+                        std::slice::from_ref(id),
+                        format!("unknown stream child `{}`", reference.node),
+                    )
+                })?;
+            let port = nodes[index]
+                .metadata
+                .stream_outputs
+                .iter()
+                .find(|port| port.name == reference.port)
+                .cloned()
+                .ok_or_else(|| {
+                    invalid(
+                        std::slice::from_ref(id),
+                        format!(
+                            "child `{}` has no TaskStream output `{}`",
+                            reference.node, reference.port
+                        ),
+                    )
+                })?;
+            Ok(mf_runtime::SubgraphStreamOutput {
+                node: mf_runtime::NodeId::new(index),
+                port,
+                name: name.clone(),
+            })
+        })
+        .collect()
 }

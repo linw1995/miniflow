@@ -12,6 +12,10 @@ use std::{
     sync::Arc,
 };
 
+/// Prepared node-success prerequisites checked before resolving task inputs.
+pub type ExecutionGuard =
+    dyn Fn(&crate::ExecutionContext) -> Result<BTreeSet<SkipCause>, WorkflowRunError> + Send + Sync;
+
 #[derive(Clone, Debug, Default)]
 pub struct InputResolution {
     pub causes: BTreeSet<SkipCause>,

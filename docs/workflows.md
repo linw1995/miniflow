@@ -893,6 +893,40 @@ pass index when execution has begun. This feature follows Dify's
 array [Iteration](https://docs.dify.ai/en/cloud/use-dify/nodes/iteration), export format,
 conversation variables, parallel execution, and error-continue modes are separate features.
 
+### Forwarding child streams
+
+Version `2026-10-28` adds an optional `loop.stream_outputs` map. Each key is a stream port on the Loop;
+its value selects a TaskStream output from a node in that body's local scope:
+
+```json
+{
+  "stream_outputs": {
+    "answer": {"node":"chat", "port":"delta"}
+  }
+}
+```
+
+Select `repeat.answer` as a public workflow output or connect it to a downstream consumer. The
+[chat Loop example](../examples/chat-loop-flow.json) forwards each model request's deltas while carrying
+history and usage through ordinary loop variables. Its terminal result remains the final variable state.
+
+Forwarding is synchronous: a slow consumer applies the existing stream backpressure to the child and
+pauses the current pass. Cancellation or delivery failure propagates through the normal execution path;
+previously delivered prefixes remain provisional. The Loop publishes its terminal values and pass summary
+once, after its body finishes. Native message domains retain independent delivery ordering: receiving
+a terminal record does not replace draining pending increments. The Loop does not collect deltas to
+reconstruct the terminal result.
+
+With no stream subscriber, children retain terminal-only execution. A nested Loop can export another
+Loop's stream port, with an explicit mapping at each scope boundary. Export names must be nonblank and
+must not overlap loop variable names. Ordinary child outputs, unknown ports, and free-running Stream or
+Event producers cannot be exported through this finite-body mechanism.
+
+Emissions from different children remain separate packets. Ports belonging to other children are absent
+from that packet; select such public outputs with `optional: true`. A single child retains its own stream
+port requiredness. Existing dependency guards, loop assignments, and exit cutoffs apply before invoking
+any child. Generated runners freeze the selected port contracts and reject declaration drift before execution.
+
 ## Validation
 
 The CLI checks node IDs, edge endpoints, selected output names, reserved Loop controls, and cycles in every scope before generating runner code. The compiled runner requires a registered Loop declaration and validates ordinary kinds, configuration, ports, type compatibility, required input connections, and Loop state contracts before installation. Every failure returns a nonzero status and preserves an existing output executable.
