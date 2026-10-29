@@ -376,7 +376,7 @@ impl Resolver {
                     })
                 };
                 ensure!(
-                    child.execution.is_none(),
+                    child.execution.is_none() || version.supports_child_streams(),
                     InvalidSnafu {
                         reference: &config.flow,
                         message: "Flow calls require a terminal child interface"

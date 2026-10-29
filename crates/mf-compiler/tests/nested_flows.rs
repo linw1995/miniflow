@@ -331,7 +331,9 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
     )
     .unwrap_err();
     assert!(
-        error.to_string().contains("terminal child ports"),
+        error
+            .to_string()
+            .contains("streams require version 2026-10-28"),
         "{error}"
     );
 }
