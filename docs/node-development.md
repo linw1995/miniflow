@@ -278,6 +278,12 @@ attachment step on `Flow` or `PreparedStream`, so advertised routes and executab
 be configured independently. Isolated task inspection uses a scoped read-only overlay without
 granting dispatch authority; nested graph entry points always install their own table.
 
+A node may declare `NodeMetadata.call_interface_source` to read another call-owning node's interfaces
+in the same prepared scope. `call_targets()` resolves that read-only view; `can_invoke_calls()` stays
+false for the viewer, and invocation cannot borrow the source's authority. Preparation rejects missing
+owners, chained views, or a viewer that also declares its own calls. The reference adds no scheduling
+edge and is included in generated metadata drift checks. Ordinary metadata omits the empty field.
+
 ```rust
 fn advertised_tools(ctx: &mf_runtime::ExecutionContext) -> Vec<&str> {
     ctx.call_targets().iter().map(|interface| interface.name()).collect()

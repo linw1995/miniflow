@@ -263,7 +263,9 @@ Unselected targets never execute. Target failures retain typed sources
 in `CallOutcome::Failed`; cancellation, deadlines, depth limits, and exhausted step budgets return
 terminal errors. Tool execution is never automatically retried.
 
-Prepared scopes derive discovery metadata from their executable call tables. Isolated target
+Prepared scopes derive discovery metadata from their executable call tables. A declared
+`NodeMetadata.call_interface_source` exposes a read-only view of one owner in the same scope; it does
+not add execution dependencies or dispatch capability. Isolated target
 inspection exposes a read-only context overlay, restoring the enclosing capability on return or unwind. Contexts hold only
 weak references to their owning executor graph. Native frames share invocation identities across
 messages while retaining independent frame budgets and immutable input snapshots.
