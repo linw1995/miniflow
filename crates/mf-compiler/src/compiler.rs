@@ -37,11 +37,6 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
-    #[snafu(
-        display("directed calls are not supported by this execution backend"),
-        visibility(pub)
-    )]
-    DirectedCallExecution,
     #[snafu(transparent)]
     DirectedCalls {
         #[snafu(source(from(crate::CallBindingError, Box::new)))]
@@ -1245,13 +1240,6 @@ pub fn compile_definition(
     compile_resolved_definition(&resolved.definition, registry)
 }
 
-pub fn require_no_directed_calls(
-    definition: &WorkflowDefinition,
-) -> Result<(), WorkflowCompileError> {
-    ensure!(!definition.has_directed_calls(), DirectedCallExecutionSnafu);
-    Ok(())
-}
-
 /// Prepares a frozen definition whose sources and dependency ownership are already resolved.
 pub fn compile_resolved_definition(
     definition: &WorkflowDefinition,
@@ -1271,7 +1259,6 @@ pub fn compile_resolved_definition(
     .with_declared_calls(&definition)?;
 
     if let Some(execution) = &definition.execution {
-        require_no_directed_calls(&definition)?;
         flow.into_stream(execution.clone())
             .context(StreamConstructionSnafu)?;
     } else {

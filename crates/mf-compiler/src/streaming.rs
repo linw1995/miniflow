@@ -20,7 +20,6 @@ pub fn instantiate_stream(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<PreparedStream, WorkflowCompileError> {
-    crate::compiler::require_no_directed_calls(&plan.definition)?;
     let (resolved, flow) = crate::compiler::prepare_compiled_plan(plan, registry)?;
     let execution = resolved.definition.execution.unwrap_or_default();
     flow.into_stream(execution).context(StreamConstructionSnafu)

@@ -446,10 +446,15 @@ impl ExecutionContext {
         run(guard.context)
     }
 
-    // Producer jobs own their context and install the plan's scope before invoking callbacks.
-    pub(super) fn set_call_interfaces(&mut self, interfaces: crate::CallInterfaces) {
+    pub(super) fn set_call_scope(
+        &mut self,
+        interfaces: crate::CallInterfaces,
+        dispatcher: Option<Weak<dyn crate::invocation::CallDispatcher>>,
+        sequence: Arc<AtomicU64>,
+    ) {
         self.call_interfaces = interfaces;
-        self.call_dispatcher = None;
+        self.call_dispatcher = dispatcher;
+        self.call_sequence = sequence;
     }
 
     /// Identifies the executing node independently of optional observation.
@@ -695,6 +700,23 @@ impl ExecutionContext {
         let mut context = Self::default();
         context.publish(source, Some(result))?;
         Ok(context)
+    }
+
+    pub(super) fn capture_visible_outputs(
+        &self,
+        visibility: &crate::OutputVisibility,
+    ) -> ExecutionOutputs {
+        let mut snapshot = ExecutionOutputs::default();
+        snapshot.merge_visible(&self.outputs, visibility);
+        snapshot
+    }
+
+    pub(super) fn import_visible_outputs(
+        &mut self,
+        snapshot: &ExecutionOutputs,
+        visibility: &crate::OutputVisibility,
+    ) {
+        self.outputs.merge_visible(snapshot, visibility);
     }
 
     pub fn fork_domain_snapshot(

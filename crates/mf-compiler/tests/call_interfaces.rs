@@ -3,8 +3,9 @@ use mf_compiler::{FlowBuilder, NodeRegistry};
 use mf_runtime::{
     CallBindingId, CallInterfaces, ExecutionContext, Flow, FlowNode, GeneratedDomainExecutor,
     GeneratedNodeResult, Inputs, NodeExecution, NodeExecutionError, NodeId, NodeMetadata,
-    NodePorts, NodeResult, NodeTarget, Outputs, PortSpec, PreparedNode, ResolvedCallBinding,
-    SnapshotRecorder, TaskNode, ValueType, WorkflowArguments,
+    NodePortContract, NodePorts, NodeResult, NodeTarget, Outputs, PortSpec, PreparedNode,
+    ResolvedCallBinding, SnapshotRecorder, StreamExecution, StreamOptions, TaskNode, ValueType,
+    WorkflowArguments,
 };
 use serde_json::{Value, json};
 use snafu::ResultExt;
@@ -349,6 +350,169 @@ fn nested_flows_override_inherited_catalogs_and_restore_the_host_scope() {
     );
 }
 
+type Seen = Arc<Mutex<Vec<(String, Value)>>>;
+struct Combined {
+    root: bool,
+    seen: Seen,
+}
+impl NodePortContract for Combined {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: if self.root {
+                vec![]
+            } else {
+                vec![PortSpec::new("trigger", ValueType::String, true)]
+            },
+            outputs: vec![PortSpec::new("tools", ValueType::Array, true)],
+        }
+    }
+    fn stream_outputs(&self) -> Vec<PortSpec> {
+        vec![PortSpec::new("item", ValueType::String, true)]
+    }
+}
+impl mf_runtime::TaskStreamNode for Combined {
+    fn execute(
+        &self,
+        _: Inputs,
+        ctx: &mut ExecutionContext,
+        emitter: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        let tools = visible(ctx)?;
+        self.seen.lock().unwrap().push((
+            ctx.current_node().unwrap().into(),
+            serde_json::to_value(&tools).unwrap(),
+        ));
+        emitter.send(Outputs::from([("item".into(), "tick".into())]).into())?;
+        Ok(Outputs::from([("tools".into(), tools)]).into())
+    }
+}
+
+#[test]
+fn stream_messages_and_combined_producers_receive_the_owning_scope() {
+    let seen: Seen = Arc::default();
+    let nodes = vec![
+        FlowNode::new(
+            "source",
+            PreparedNode::task_stream(
+                Combined {
+                    root: true,
+                    seen: seen.clone(),
+                },
+                NodeMetadata::default(),
+            )
+            .unwrap(),
+        ),
+        FlowNode::new(
+            "middle",
+            PreparedNode::task_stream(
+                Combined {
+                    root: false,
+                    seen: seen.clone(),
+                },
+                NodeMetadata::default(),
+            )
+            .unwrap(),
+        ),
+        inspector(
+            "leaf",
+            None,
+            vec![PortSpec::new("trigger", ValueType::String, true)],
+        ),
+    ];
+    let prepared = prepare(
+        nodes,
+        serde_json::from_value(json!([
+            {"from_node":"source","from_output":"item","to_node":"middle","to_input":"trigger"},
+            {"from_node":"middle","from_output":"item","to_node":"leaf","to_input":"trigger"}
+        ]))
+        .unwrap(),
+        vec!["source".into(), "middle".into(), "leaf".into()],
+        serde_json::from_value(json!([
+            {"name":"tools","node":"leaf","port":"tools"}
+        ]))
+        .unwrap(),
+        catalog(&[
+            ("source", "source_tool"),
+            ("middle", "middle_tool"),
+            ("leaf", "leaf_tool"),
+        ]),
+    )
+    .unwrap()
+    .into_stream(StreamExecution::default())
+    .unwrap();
+    let leaf = prepared
+        .plan()
+        .execution_domains()
+        .domains()
+        .iter()
+        .find(|domain| domain.nodes.contains(&NodeId::new(2)))
+        .unwrap();
+    let domain_id = leaf.id;
+    let positions = leaf.positions.clone();
+    let generated = Arc::new(AtomicUsize::new(0));
+    let recorded = generated.clone();
+    let executor: Arc<mf_runtime::GeneratedStreamDomainExecutor> = Arc::new(move |plan, ctx| {
+        assert!(ctx.call_targets().is_empty());
+        recorded.fetch_add(1, Ordering::SeqCst);
+        for &position in positions.iter() {
+            plan.execute_resolved_position(position, ctx, |_, ctx, inputs| {
+                plan.resolve_inputs(position, ctx, inputs, Default::default())
+            })?;
+        }
+        Ok(())
+    });
+    let prepared = prepared.with_prepared_domains([(domain_id, executor)]);
+    let instance = prepared
+        .start_with_options(StreamOptions::default())
+        .unwrap();
+    let result = instance.recv().unwrap().unwrap();
+    assert_eq!(result.outputs["tools"][0]["name"], json!("leaf_tool"));
+    assert!(instance.recv().unwrap().is_none());
+    instance.join().unwrap();
+    assert_eq!(generated.load(Ordering::SeqCst), 1);
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    for (name, tools) in seen.iter() {
+        assert_eq!(tools[0]["name"], json!(format!("{name}_tool")));
+    }
+}
+
+struct NativeSource;
+impl mf_runtime::StreamNode for NativeSource {
+    fn execute(
+        &mut self,
+        _: Inputs,
+        _: &mut ExecutionContext,
+        _: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<(), NodeExecutionError> {
+        panic!("catalog attachment must not start a source")
+    }
+}
+
+#[test]
+fn stream_catalogs_reject_non_task_callers_before_starting_sources() {
+    let source = FlowNode::new(
+        "source",
+        PreparedNode::from_parts(
+            NodeExecution::Stream(Box::new(NativeSource)),
+            NodeMetadata::new(NodePorts {
+                inputs: vec![],
+                outputs: vec![PortSpec::new("item", ValueType::String, true)],
+            }),
+        ),
+    );
+    assert!(
+        prepare(
+            vec![source],
+            vec![],
+            vec!["source".into()],
+            vec![],
+            catalog(&[("source", "tool")]),
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn isolated_targets_use_their_prepared_scope_without_retaining_it_in_the_host() {
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -377,4 +541,25 @@ fn isolated_targets_use_their_prepared_scope_without_retaining_it_in_the_host() 
         .unwrap();
     assert_eq!(output["tools"][0]["name"], json!("isolated"));
     assert!(ctx.call_targets().is_empty());
+    let stream = prepare(
+        vec![inspector("parent", None, vec![])],
+        vec![],
+        vec!["parent".into()],
+        vec![],
+        catalog(&[("parent", "stream_isolated")]),
+    )
+    .unwrap()
+    .into_stream(StreamExecution::default())
+    .unwrap();
+    let mut record = targets[0].clone();
+    record.worker_limit = std::num::NonZeroUsize::new(stream.plan().execution().limits.workers);
+    let selected = record.bind_stream(&stream).unwrap();
+    let output = mf_runtime::FlowRuntime::default()
+        .execute_target(
+            &selected,
+            WorkflowArguments::default(),
+            WorkflowArguments::default(),
+        )
+        .unwrap();
+    assert_eq!(output["tools"][0]["name"], json!("stream_isolated"));
 }

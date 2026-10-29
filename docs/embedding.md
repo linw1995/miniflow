@@ -267,4 +267,15 @@ Prepared scopes derive discovery metadata from their executable call tables. A d
 `NodeMetadata.call_interface_source` exposes a read-only view of one owner in the same scope; it does
 not add execution dependencies or dispatch capability. Isolated target
 inspection exposes a read-only context overlay, restoring the enclosing capability on return or unwind. Contexts hold only
-weak references to their owning executor graph.
+weak references to their owning executor graph. Native frames share invocation identities across
+messages while retaining independent frame budgets and immutable input snapshots.
+
+Native calls may combine values from their own message with initial configuration produced by finite
+Task chains. Message admission waits only for the required initial execution domains, then imports
+selected shared values and skip evidence. Ordinary cross-message edges remain invalid. Initial
+prerequisites depending on a connected streaming producer are rejected because its terminal result
+may wait for the very messages needing that prerequisite. Initial configuration is eager even when
+no tool is selected; place a configuration service inside a callable Flow for fresh per-call execution.
+
+TaskStream targets use their terminal task contract. Their incremental emissions are validated and
+remain disconnected from ordinary channels. Callers may still emit their own incremental results.

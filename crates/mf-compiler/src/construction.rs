@@ -272,6 +272,31 @@ pub struct PreparedCallLayout {
 }
 
 impl PreparedScopeLayout {
+    #[cfg(feature = "codegen")]
+    pub fn capture_stream(plan: &mf_runtime::StreamPlan) -> Self {
+        let calls: Vec<_> = plan
+            .prepared_calls()
+            .map(|call| PreparedCallLayout {
+                target: call.target.clone(),
+                binding: call.binding.clone(),
+                visibility: call.visibility.keys().map(str::to_owned).collect(),
+            })
+            .collect();
+        let metadata = if calls.is_empty() {
+            vec![]
+        } else {
+            plan.nodes()
+                .iter()
+                .map(|node| node.metadata.clone())
+                .collect()
+        };
+        Self {
+            domains: plan.execution_domains().clone(),
+            calls,
+            metadata,
+        }
+    }
+
     pub fn capture(flow: &mf_runtime::Flow) -> Self {
         let positions: BTreeMap<_, _> = flow
             .execution_order()
@@ -590,13 +615,35 @@ impl FlowBuilder {
         self,
         execution: crate::StreamExecution,
     ) -> Result<crate::PreparedStream, StreamBuildError> {
-        ensure!(
-            self.calls.is_empty(),
-            InvalidPlanSnafu {
-                message: "native streaming directed calls are not yet supported"
-            }
-        );
         let data = self;
+        let positions: BTreeMap<_, _> = data
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (*id, NodeId::new(position)))
+            .collect();
+        let calls = data
+            .calls
+            .into_iter()
+            .map(|mut call| {
+                call.binding.caller = positions[&call.binding.caller];
+                call.binding.target = positions[&call.binding.target];
+                for id in call
+                    .binding
+                    .prerequisites
+                    .iter_mut()
+                    .chain(call.binding.success_dependencies.iter_mut())
+                {
+                    *id = positions[id];
+                }
+                call
+            })
+            .collect();
+        let readiness = data
+            .call_readiness
+            .into_iter()
+            .map(|(source, target)| (positions[&source], positions[&target]))
+            .collect();
         let outputs = data
             .outputs
             .iter()
@@ -619,7 +666,7 @@ impl FlowBuilder {
             })
             .collect();
         let dependencies = data.dependencies;
-        prepare_stream(execution, ordered, dependencies, outputs)
+        prepare_stream_with_calls(execution, ordered, dependencies, outputs, calls, readiness)
     }
 }
 
@@ -1366,6 +1413,22 @@ pub fn build_stream_program(
     dependencies: &[Vec<FlowDependency>],
     outputs: &[WorkflowOutputDefinition],
 ) -> Result<mf_runtime::StreamProgram, StreamBuildError> {
+    build_stream_program_with_calls(nodes, dependencies, outputs, &[], &[])
+}
+
+fn build_stream_program_with_calls(
+    nodes: &[FlowNode],
+    dependencies: &[Vec<FlowDependency>],
+    outputs: &[WorkflowOutputDefinition],
+    calls: &[mf_runtime::PreparedCall],
+    readiness: &[(NodeId, NodeId)],
+) -> Result<mf_runtime::StreamProgram, StreamBuildError> {
+    let targets: BTreeSet<_> = calls
+        .iter()
+        .map(|call| call.binding.target.index())
+        .collect();
+    let mut startup_sources = BTreeMap::<usize, BTreeSet<usize>>::new();
+    let mut startup_nodes = BTreeMap::<usize, BTreeSet<usize>>::new();
     let mut indices = BTreeMap::new();
     let mut output_index = BTreeMap::new();
     for (index, node) in nodes.iter().enumerate() {
@@ -1464,7 +1527,7 @@ pub fn build_stream_program(
                 output_domains[source]
             });
         }
-        ensure!(incoming_domains.len() <= 1, {
+        ensure!(targets.contains(&index) || incoming_domains.len() <= 1, {
             let edges = dependencies[index]
                 .iter()
                 .map(|dependency| {
@@ -1489,6 +1552,57 @@ pub fn build_stream_program(
             }
         });
         let domain = incoming_domains.first().copied().unwrap_or(0);
+        if !targets.contains(&index) {
+            for &(source, caller) in readiness
+                .iter()
+                .filter(|(_, caller)| caller.index() == index)
+            {
+                let source = source.index();
+                ensure!(
+                    source < index,
+                    InvalidPlanSnafu {
+                        message: "call readiness must precede its caller"
+                    }
+                );
+                let owner = output_domains[source];
+                ensure!(
+                    owner == domain || (owner == 0 && domain > 0),
+                    InvalidPlanSnafu {
+                        message: format!(
+                            "caller `{}` and call prerequisite `{}` belong to different messages",
+                            nodes[caller.index()].definition_id,
+                            nodes[source].definition_id
+                        )
+                    }
+                );
+                if owner != domain {
+                    let mut pending = vec![source];
+                    let mut seen = BTreeSet::new();
+                    while let Some(ancestor) = pending.pop() {
+                        if !seen.insert(ancestor) {
+                            continue;
+                        }
+                        ensure!(
+                            !matches!(
+                                nodes[ancestor].node,
+                                Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
+                            ) && stream_output_domains[ancestor].is_none(),
+                            InvalidPlanSnafu {
+                                message: "startup call prerequisites cannot wait for a connected streaming producer"
+                            }
+                        );
+                        pending.extend(
+                            dependencies[ancestor]
+                                .iter()
+                                .map(|dependency| indices[dependency.borrowed().source_node()]),
+                        );
+                    }
+                    startup_sources.entry(domain).or_default().insert(source);
+                    startup_nodes.entry(domain).or_default().extend(seen);
+                }
+            }
+        }
+
         ensure!(
             !incoming_domains.is_empty() || !matches!(node.node, Some(NodeExecution::Event(_))),
             InvalidPlanSnafu {
@@ -1590,30 +1704,115 @@ pub fn build_stream_program(
         ));
     }
 
+    let order: Vec<_> = (0..nodes.len())
+        .filter(|index| !targets.contains(index))
+        .map(NodeId::new)
+        .collect();
+    let positions: BTreeMap<_, _> = order
+        .iter()
+        .enumerate()
+        .map(|(position, id)| (id.index(), position))
+        .collect();
     let mut execution_edges = Vec::new();
-    for (target, node_dependencies) in dependencies.iter().enumerate() {
+    for (target, node_dependencies) in dependencies
+        .iter()
+        .enumerate()
+        .filter(|(target, _)| !targets.contains(target))
+    {
         for dependency in node_dependencies {
             let source = indices[dependency.borrowed().source_node()];
             if node_message_domains[source] == node_message_domains[target] {
-                execution_edges.push((source, target));
+                execution_edges.push((positions[&source], positions[&target]));
             }
         }
     }
-    let order: Vec<_> = (0..nodes.len()).map(NodeId::new).collect();
-    let boundaries: Vec<_> = nodes
+    for &(source, target) in readiness {
+        if !targets.contains(&target.index())
+            && node_message_domains[source.index()] == node_message_domains[target.index()]
+        {
+            execution_edges.push((positions[&source.index()], positions[&target.index()]));
+        }
+    }
+    let boundaries: Vec<_> = order
         .iter()
-        .enumerate()
-        .map(|(index, node)| {
+        .map(|id| {
             matches!(
-                node.node,
+                nodes[id.index()].node,
                 Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
-            ) || stream_output_domains[index].is_some()
+            ) || stream_output_domains[id.index()].is_some()
         })
         .collect();
-    let execution_domains = partition_execution_domains(&order, &execution_edges, &boundaries);
-    let execution_domains = bind_domain_snapshots(execution_domains, nodes, |execution| {
-        sources[node_message_domains[execution.nodes[0].index()]]
-    });
+    let partitioned = partition_execution_domains(&order, &execution_edges, &boundaries);
+    let ancestors = (0..partitioned.len())
+        .map(|id| partitioned.ancestor_domains(id).to_vec().into())
+        .collect::<Vec<_>>();
+    let domains = partitioned
+        .domains()
+        .iter()
+        .cloned()
+        .map(|mut domain| {
+            domain.positions = domain
+                .positions
+                .iter()
+                .map(|position| order[*position].index())
+                .collect::<Vec<_>>()
+                .into();
+            domain.first_position = order[domain.first_position].index();
+            domain
+        })
+        .collect::<Vec<_>>();
+    let execution_domains = bind_domain_snapshots(
+        ExecutionDomains::from_parts(domains.into(), ancestors.into()),
+        nodes,
+        |execution| sources[node_message_domains[execution.nodes[0].index()]],
+    );
+    let mut startup_visibility = vec![BTreeSet::<String>::new(); sources.len()];
+    let mut visibility = Vec::new();
+    for domain in execution_domains.domains() {
+        let message = node_message_domains[domain.nodes[0].index()];
+        let mut keys: BTreeSet<_> = domain
+            .snapshot_visibility
+            .keys()
+            .map(str::to_owned)
+            .collect();
+        if message > 0 {
+            for call in calls
+                .iter()
+                .filter(|call| domain.nodes.contains(&call.binding.caller))
+            {
+                for key in call.visibility.keys() {
+                    if output_index.get(key).is_some_and(|(source, stream)| {
+                        !stream
+                            && output_domains[*source] == 0
+                            && startup_nodes
+                                .get(&message)
+                                .is_some_and(|nodes| nodes.contains(source))
+                    }) {
+                        keys.insert(key.to_owned());
+                        startup_visibility[message].insert(key.to_owned());
+                    }
+                }
+            }
+        }
+        visibility.push(mf_runtime::OutputVisibility::from_sorted(
+            keys.into_iter().collect(),
+        ));
+    }
+    let execution_domains = execution_domains.with_snapshot_visibility(visibility);
+    let startup_capture = mf_runtime::OutputVisibility::from_sorted(
+        startup_visibility
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    );
+    let node_domains: BTreeMap<_, _> = execution_domains
+        .domains()
+        .iter()
+        .flat_map(|domain| domain.nodes.iter().map(move |id| (id.index(), domain.id)))
+        .collect();
     let messages: Vec<_> = selected_outputs
         .into_iter()
         .enumerate()
@@ -1632,6 +1831,18 @@ pub fn build_stream_program(
                 }) as std::sync::Arc<mf_runtime::StreamOutputSelector>
             });
             mf_runtime::StreamMessageProgram {
+                startup_dependencies: startup_sources
+                    .get(&message)
+                    .into_iter()
+                    .flatten()
+                    .map(|source| node_domains[source])
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                startup_visibility: mf_runtime::OutputVisibility::from_sorted(
+                    startup_visibility[message].iter().cloned().collect(),
+                ),
                 source: sources[message],
                 schedule: build_message_schedule(
                     &execution_domains,
@@ -1690,6 +1901,7 @@ pub fn build_stream_program(
         })
         .collect();
     Ok(mf_runtime::StreamProgram {
+        startup_visibility: startup_capture,
         execution_domains,
         messages,
         emissions,
@@ -1938,6 +2150,17 @@ pub fn prepare_stream(
     dependencies: Vec<Vec<crate::FlowDependency>>,
     outputs: Vec<WorkflowOutputDefinition>,
 ) -> Result<mf_runtime::PreparedStream, StreamBuildError> {
+    prepare_stream_with_calls(execution, nodes, dependencies, outputs, vec![], vec![])
+}
+
+fn prepare_stream_with_calls(
+    execution: crate::StreamExecution,
+    nodes: Vec<FlowNode>,
+    dependencies: Vec<Vec<crate::FlowDependency>>,
+    outputs: Vec<WorkflowOutputDefinition>,
+    calls: Vec<mf_runtime::PreparedCall>,
+    readiness: Vec<(NodeId, NodeId)>,
+) -> Result<mf_runtime::PreparedStream, StreamBuildError> {
     validate_stream_limits(&execution.limits)?;
     ensure!(
         nodes.len() == dependencies.len(),
@@ -1945,7 +2168,8 @@ pub fn prepare_stream(
             message: "stream nodes and dependencies must have equal lengths"
         }
     );
-    let program = build_stream_program(&nodes, &dependencies, &outputs)?;
+    let program =
+        build_stream_program_with_calls(&nodes, &dependencies, &outputs, &calls, &readiness)?;
     validate_exclusive_branches(nodes.iter().zip(&dependencies).map(|(node, dependencies)| {
         (
             node,
@@ -1975,7 +2199,15 @@ pub fn prepare_stream(
             )
         },
     ));
-    let initial: Vec<_> = dependencies.iter().map(Vec::is_empty).collect();
+    let targets: BTreeSet<_> = calls
+        .iter()
+        .map(|call| call.binding.target.index())
+        .collect();
+    let initial: Vec<_> = dependencies
+        .iter()
+        .enumerate()
+        .map(|(index, deps)| deps.is_empty() && !targets.contains(&index))
+        .collect();
     let dependencies: Vec<_> = dependencies
         .into_iter()
         .map(|deps| {
@@ -1989,6 +2221,9 @@ pub fn prepare_stream(
     let schema =
         stream_workflow_inputs(&nodes, &dependencies, &initial).context(WorkflowInputsSnafu)?;
     let prepared = mf_runtime::PreparedStream::from_plan(execution, nodes, program, schema);
+    let prepared = prepared
+        .with_prepared_calls(calls)
+        .map_err(FlowBuildError::from)?;
     Ok(crate::dependencies::bind_stream_guards(prepared, guards))
 }
 #[cfg(test)]

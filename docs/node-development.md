@@ -306,8 +306,8 @@ fn advertised_tools(ctx: &mf_runtime::ExecutionContext) -> Vec<&str> {
 }
 ```
 
-Dynamic and generated domains, snapshot fallbacks, combined terminal producers, and isolated
-task targets use the prepared scope's catalog. Domain context forks share immutable data;
+Dynamic and generated domains, snapshot fallbacks, stream messages, combined producers, and isolated
+task targets use the prepared scope's catalog. Domain and stream context forks share immutable data;
 body forks start without an inherited catalog. Nested scopes restore their enclosing catalog and node
 identity on success, error, or unwinding. Configure each prepared child Flow independently. Catalogs
 belong to a prepared scope, so shared node implementations must not cache them globally by binding ID.

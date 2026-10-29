@@ -110,9 +110,12 @@ fn program(
 ) -> mf_runtime::StreamProgram {
     use mf_runtime::{MessageSchedule, StreamEmissionBinding, StreamMessageProgram, StreamProgram};
     StreamProgram {
+        startup_visibility: mf_runtime::OutputVisibility::Borrowed(&[]),
         execution_domains,
         messages: vec![
             StreamMessageProgram {
+                startup_dependencies: vec![].into_boxed_slice(),
+                startup_visibility: mf_runtime::OutputVisibility::Borrowed(&[]),
                 source: None,
                 schedule: MessageSchedule {
                     domains: vec![0].into(),
@@ -123,6 +126,8 @@ fn program(
                 select_outputs: None,
             },
             StreamMessageProgram {
+                startup_dependencies: vec![].into_boxed_slice(),
+                startup_visibility: mf_runtime::OutputVisibility::Borrowed(&[]),
                 source: Some(0),
                 schedule: MessageSchedule {
                     domains: vec![1].into(),
