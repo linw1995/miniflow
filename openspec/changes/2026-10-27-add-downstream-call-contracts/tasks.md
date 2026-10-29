@@ -4,7 +4,7 @@
 - [x] 0.2 Separate intermediate call requests from ordinary task results and stream emissions.
 - [x] 0.3 Preserve explicit-output and default-input namespaces, shared values, and sensitivity.
 - [x] 0.4 Correlate success, skip, and typed failure responses by binding and invocation identity.
-- [x] 0.5 Cover local declaration errors, empty calls, repeated calls, mismatches, and payload preservation.
+- [x] 0.5 Cover local declaration errors, empty calls, repeated calls, observation identities, and payload preservation.
 
 ## 1. Binding resolution and derived interfaces
 
@@ -25,10 +25,10 @@
 - [ ] 2.2 Resolve external prerequisites and reject invocation dependency cycles before execution.
 - [ ] 2.3 Compose atomic caller arguments with scoped external inputs and isolate each invocation's results.
 - [ ] 2.4 Preserve shared values, sensitivity, typed errors, skips, cancellation, deadlines, and execution budgets.
-- [ ] 2.5 Serialize calls to each prepared tool instance and preserve progress with one shared worker.
+- [ ] 2.5 Reuse shared Task instances and preserve progress with one shared worker.
 - [ ] 2.6 Record stable caller, target, binding, and invocation identities for observation and snapshots.
 - [x] 2.7 Define and validate dynamic invocation scope identities and receiver/TUI support independently of dispatch.
-- [x] 2.8 Add thread-bound reservations and inline nested worker execution for serialized calls.
+- [x] 2.8 Reuse ordinary worker scheduling without target locks or resource reservations.
 
 ## 3. LLM integration
 
@@ -49,6 +49,6 @@
 
 ## Runtime prerequisite delivery
 
-- [x] Bind prepared calls to isolated execution with shared limits, typed outcomes, and instance serialization.
-- [x] Cover repeated and nested calls, external skips and secrets, capability restoration, lock deadlines, and worker limits.
+- [x] Bind prepared calls to isolated execution with shared limits, typed outcomes, and ordinary shared-instance execution.
+- [x] Cover repeated and nested calls, external skips and secrets, capability restoration, cooperative deadlines, and worker limits.
 - [ ] Install prepared call tables from compiler scheduling, generated runners, and native stream frames.

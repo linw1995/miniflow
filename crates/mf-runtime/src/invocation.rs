@@ -44,10 +44,6 @@ pub enum CallDispatchError {
     DeadlineExceeded,
     #[snafu(display("directed call cancelled: {source}"))]
     Cancelled { source: crate::StreamError },
-    #[snafu(display("directed call cannot reenter the same prepared executor"))]
-    Reentrant,
-    #[snafu(display("directed call executor was poisoned by a previous panic"))]
-    Poisoned,
     #[snafu(display("directed call execution stopped: {source}"))]
     Execution {
         #[snafu(source(from(WorkflowRunError, Box::new)))]

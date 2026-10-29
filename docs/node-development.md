@@ -187,7 +187,7 @@ input composition, not to this caller-owned envelope.
 
 ```rust
 use mf_runtime::{
-    CallArguments, CallBinding, CallBindingId, CallId, CallInputDefaults, CallOutcome,
+    CallArguments, CallBinding, CallBindingId, CallId, CallInputDefaults,
     CallPortMapping, CallRequest, NodeId, NodeValues,
 };
 
@@ -204,12 +204,10 @@ let request = CallRequest {
         ..Default::default()
     },
 };
-let expected = request.id;
-let response = request.respond(CallOutcome::Succeeded(NodeValues::new()));
-let outcome = response.into_outcome(expected)?;
 ```
 
-The example only constructs contracts; `respond` does not execute the target. Declare explicit caller
+The example constructs contracts without executing a target. Runtime invocation returns its response
+synchronously, including the observation identity. Declare explicit caller
 output slots in `NodeMetadata.call_outputs`. They are separate from ordinary and stream outputs, and
 cannot share names with either. Factories still return complete nodes; ordinary result validation and
 output references exclude these slots. Empty call-output metadata retains the existing serialized form,
@@ -266,7 +264,7 @@ Binding indexes are local to a caller's prepared table. Identities are not retry
 its argument group atomically, including an empty group. Calls must eventually be submitted before
 the Parent's final result to support waiting and continuation. Ordinary output publication does not
 dispatch requests. Multiple requests may select the same binding; unselected bindings are not skipped.
-`CallResponse::into_outcome` rejects a mismatched binding or invocation. `CallOutcome` preserves successful
+`CallResponse` retains the completed invocation identity. `CallOutcome` preserves successful
 output values, structured dependency skip causes, or a typed `WorkflowRunError`; optional result omissions
 remain absent. Child loop effects are not returned through this contract.
 `CallContractError` converts transparently into `NodeBuildError` and `NodeExecutionError`, allowing
