@@ -1,6 +1,6 @@
 //! Process-wide interrupt handling explicitly installed by standalone runners.
 
-use crate::{StreamCancellation, StreamError};
+use crate::StreamCancellation;
 use signal_hook::{
     SigId,
     consts::{SIGINT, SIGTERM},
@@ -104,9 +104,12 @@ impl RunnerSignals {
 }
 
 fn cancel(cancellation: &StreamCancellation, signal: i32) {
-    cancellation.cancel(StreamError::Execution {
-        message: format!("workflow interrupted by signal {signal}"),
-    });
+    cancellation.cancel(
+        crate::StreamExecutionSnafu {
+            message: format!("workflow interrupted by signal {signal}"),
+        }
+        .build(),
+    );
 }
 
 impl Drop for RunnerSignals {

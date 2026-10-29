@@ -324,7 +324,7 @@ impl TypeInferenceState {
                 .inputs
                 .iter()
                 .find(|port| port.name == input_name)
-                .ok_or_else(|| WorkflowCompileError::InvalidNodeMetadata {
+                .with_context(|| InvalidNodeMetadataSnafu {
                     definition_id: id.clone(),
                     message: format!("unknown input `{input_name}` in type binding"),
                 })?;
@@ -338,7 +338,7 @@ impl TypeInferenceState {
                         .expect("input output source")
                         .to_owned(),
                 ))
-                .ok_or_else(|| WorkflowCompileError::UnavailableInferredOutput {
+                .with_context(|| UnavailableInferredOutputSnafu {
                     from_node: source_id.clone(),
                     from_output: dependency
                         .source_output()
@@ -364,7 +364,7 @@ impl TypeInferenceState {
             } else if source.value_type.compatibility_with(&input.value_type)
                 == TypeCompatibility::Incompatible
             {
-                return Err(WorkflowCompileError::IncompatiblePortTypes {
+                return IncompatiblePortTypesSnafu {
                     from_node: source_id,
                     from_output: dependency
                         .source_output()
@@ -374,7 +374,8 @@ impl TypeInferenceState {
                     to_node: id.clone(),
                     to_input: input_name.to_owned(),
                     input_type: Box::new(input.value_type.clone()),
-                });
+                }
+                .fail();
             }
             let value_type = if source.value_type.is_assignable_to(&input.value_type) {
                 source.value_type.clone()
@@ -474,13 +475,14 @@ impl TypeInferenceState {
             } else if fact.value_type.compatibility_with(&declared)
                 == TypeCompatibility::Incompatible
             {
-                return Err(WorkflowCompileError::InvalidNodeMetadata {
+                return InvalidNodeMetadataSnafu {
                     definition_id: id.clone(),
                     message: format!(
                         "output `{}` forwards {} but declares {declared}",
                         output.name, fact.value_type
                     ),
-                });
+                }
+                .fail();
             }
             if !fact.value_type.is_assignable_to(&declared) {
                 fact.value_type = declared;
@@ -1068,12 +1070,13 @@ fn validate_clusters(
 }
 
 fn control_error(edge: &crate::ControlEdgeDefinition, message: &str) -> WorkflowCompileError {
-    WorkflowCompileError::InvalidControlEdge {
+    InvalidControlEdgeSnafu {
         from_node: edge.from_node.clone(),
         from_output: edge.from_output.to_string(),
         to_node: edge.to_node.clone(),
-        message: message.into(),
+        message,
     }
+    .build()
 }
 
 fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, DefinitionId)> {

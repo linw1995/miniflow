@@ -7,7 +7,7 @@ use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instanti
 use mf_runtime::{
     EventContext, EventEffects, EventNode, ExecutionContext, Inputs, NodeEvent, NodeExecutionError,
     NodeFactory, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode,
-    StreamCancellation, StreamError, StreamNode, StreamOptions, TaskNode, TimerUpdate, ValueType,
+    StreamCancellation, StreamNode, StreamOptions, TaskNode, TimerUpdate, ValueType,
 };
 use mf_telemetry::{
     INSTRUMENTATION_SCOPE,
@@ -38,9 +38,12 @@ static TELEMETRY_CANCELLATION: OnceLock<StreamCancellation> = OnceLock::new();
 static GATE: OnceLock<(Mutex<(bool, bool)>, Condvar)> = OnceLock::new();
 
 fn cancel(cancellation: &StreamCancellation) {
-    cancellation.cancel(StreamError::Execution {
-        message: "callback cancellation".into(),
-    });
+    cancellation.cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "callback cancellation",
+        }
+        .build(),
+    );
 }
 
 #[derive(Debug)]

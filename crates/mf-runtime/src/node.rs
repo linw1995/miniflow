@@ -1323,9 +1323,10 @@ impl NodeRegistration {
     pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
             NodeFactory::Plain(factory) => factory(config),
-            NodeFactory::Subgraph(_) => Err(NodeBuildError::InvalidSubgraph {
+            NodeFactory::Subgraph(_) => crate::NodeInvalidSubgraphSnafu {
                 message: format!("node `{}` requires a prepared body", self.kind),
-            }),
+            }
+            .fail(),
         }
     }
 
@@ -1338,9 +1339,10 @@ impl NodeRegistration {
     ) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
             NodeFactory::Subgraph(factory) => factory(id, config, options, body),
-            NodeFactory::Plain(_) => Err(NodeBuildError::InvalidSubgraph {
+            NodeFactory::Plain(_) => crate::NodeInvalidSubgraphSnafu {
                 message: format!("node `{}` does not accept a prepared body", self.kind),
-            }),
+            }
+            .fail(),
         }
     }
 }

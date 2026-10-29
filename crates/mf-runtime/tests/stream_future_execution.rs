@@ -3,8 +3,8 @@
 use mf_runtime::{
     Emitter, ExecutionContext, ExecutionDomain, ExecutionDomains, FlowDependency, FlowNode, Inputs,
     NodeExecution, NodeExecutionError, NodeId, NodePorts, NodeResult, OutputVisibility, Outputs,
-    PortSpec, PreparedNode, PreparedStream, StreamError, StreamExecution, StreamLimits, StreamNode,
-    TaskNode, ValueType,
+    PortSpec, PreparedNode, PreparedStream, StreamExecution, StreamLimits, StreamNode, TaskNode,
+    ValueType,
 };
 use serde_json::json;
 use std::{
@@ -294,9 +294,12 @@ fn cancellation_drops_pending_message_futures_and_the_shared_backend() {
     .unwrap();
     assert_eq!(instance.recv().unwrap().unwrap().outputs["item"], json!(0));
     receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-    instance.cancellation().cancel(StreamError::Execution {
-        message: "stop pending message".into(),
-    });
+    instance.cancellation().cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "stop pending message",
+        }
+        .build(),
+    );
     assert!(instance.join().is_err());
     assert!(pending_dropped.load(Ordering::SeqCst));
     assert!(backend_dropped.load(Ordering::SeqCst));

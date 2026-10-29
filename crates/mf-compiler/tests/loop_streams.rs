@@ -133,9 +133,12 @@ fn a_child_prefix_arrives_before_completion_and_cancellation_stops_remaining_pas
         assert_eq!(first.output().outputs["increment"], json!(0));
         first.acknowledge().unwrap();
         if cancelled {
-            cancellation.cancel(StreamError::Execution {
-                message: "stop after prefix".into(),
-            });
+            cancellation.cancel(
+                mf_runtime::StreamExecutionSnafu {
+                    message: "stop after prefix",
+                }
+                .build(),
+            );
             assert!(instance.join().is_err());
         } else {
             std::fs::write(release, "continue").unwrap();
@@ -174,9 +177,10 @@ fn child_delivery_errors_stop_forwarding_and_keep_typed_sources() {
     impl mf_runtime::EmissionSink for Reject {
         fn send(&mut self, _: mf_runtime::NodeResult) -> Result<(), StreamError> {
             self.0 += 1;
-            Err(StreamError::Execution {
-                message: "delivery sentinel".into(),
-            })
+            mf_runtime::StreamExecutionSnafu {
+                message: "delivery sentinel",
+            }
+            .fail()
         }
     }
     let mut value = definition();

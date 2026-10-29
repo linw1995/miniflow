@@ -10,7 +10,7 @@ use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
     observation::{BodyNodeObservation, BodyObservation, NodeObservation, RunObservation},
 };
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{
@@ -36,9 +36,12 @@ impl ExecutionScope {
         variables: Outputs,
         types: BTreeMap<String, crate::ValueType>,
     ) -> Result<Self, NodeExecutionError> {
-        i64::try_from(index).map_err(|_| NodeExecutionError::ExecutionFailed {
-            message: "scope index exceeds the signed 64-bit range".into(),
-        })?;
+        ensure!(
+            i64::try_from(index).is_ok(),
+            crate::NodeExecutionFailedSnafu {
+                message: "scope index exceeds the signed 64-bit range",
+            }
+        );
         Ok(Self {
             node_id: node_id.into(),
             source_id: source_id.into(),
@@ -918,8 +921,8 @@ impl ExecutionContext {
         let frame = self
             .scopes
             .last()
-            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                message: "scope source is outside an execution scope".into(),
+            .with_context(|| crate::NodeExecutionFailedSnafu {
+                message: "scope source is outside an execution scope",
             })?;
         let mut values = frame.variables.clone();
         values.insert("index".into(), Value::from(frame.index as i64));
@@ -930,8 +933,8 @@ impl ExecutionContext {
         let frame = self
             .scopes
             .last_mut()
-            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                message: "scope exit is outside an execution scope".into(),
+            .with_context(|| crate::NodeExecutionFailedSnafu {
+                message: "scope exit is outside an execution scope",
             })?;
         frame.exit_requested = true;
         if let Some(position) = self.current_position {
@@ -952,14 +955,14 @@ impl ExecutionContext {
         let frame = self
             .scopes
             .last()
-            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                message: "Loop assignment is outside a Loop frame".into(),
+            .with_context(|| crate::NodeExecutionFailedSnafu {
+                message: "Loop assignment is outside a Loop frame",
             })?;
         let value_type =
             frame
                 .types
                 .get(variable)
-                .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                .with_context(|| crate::NodeExecutionFailedSnafu {
                     message: format!("unknown Loop variable `{variable}`"),
                 })?;
         value_type
@@ -1556,11 +1559,12 @@ mod tests {
         contexts[0].remaining_steps.0.store(0, Ordering::Release);
         assert!(contexts[0].reserve_step("task").is_err());
         assert!(contexts[1].reserve_step("task").is_ok());
-        contexts[0]
-            .cancellation()
-            .cancel(crate::StreamError::Execution {
-                message: "first message cancelled".into(),
-            });
+        contexts[0].cancellation().cancel(
+            crate::StreamExecutionSnafu {
+                message: "first message cancelled",
+            }
+            .build(),
+        );
         assert!(contexts[0].execute_future(async {}, None).is_err());
         assert!(contexts[1].execute_future(async {}, None).is_ok());
         for (index, context) in contexts.iter().enumerate() {

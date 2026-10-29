@@ -9,9 +9,7 @@ static TRACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct ContextNode(Value);
 fn failure(message: impl Into<String>) -> NodeExecutionError {
-    NodeExecutionError::ExecutionFailed {
-        message: message.into(),
-    }
+    mf_runtime::NodeExecutionFailedSnafu { message }.build()
 }
 impl TaskNode for ContextNode {
     fn supports_success_dependencies(&self) -> bool {

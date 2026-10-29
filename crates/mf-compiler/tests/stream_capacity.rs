@@ -92,9 +92,10 @@ impl mf_runtime::TaskNode for Sink {
             .and_then(|items| items.first())
             .and_then(ValueRef::as_i64);
         if first.is_some() && first == self.fail_at {
-            return Err(NodeExecutionError::ExecutionFailed {
-                message: "deliberate batch failure".into(),
-            });
+            return mf_runtime::NodeExecutionFailedSnafu {
+                message: "deliberate batch failure",
+            }
+            .fail();
         }
         Ok((Outputs::from([("value".into(), value)])).into())
     }
@@ -340,9 +341,12 @@ fn cancellation_suppresses_followup_work_after_a_running_call_returns() {
         "emitting the second message while the first sink is blocked",
         || instance.summary().emitted_messages == 4,
     );
-    instance.fail(StreamError::Execution {
-        message: "cancelled during task".into(),
-    });
+    instance.fail(
+        mf_runtime::StreamExecutionSnafu {
+            message: "cancelled during task",
+        }
+        .build(),
+    );
     assert!(matches!(
         instance.recv(),
         Err(StreamError::Execution { .. })

@@ -95,14 +95,18 @@ impl mf_runtime::EmissionSink for DeltaSink {
         self.values
             .push(serde_json::to_value(result.outputs).unwrap());
         if self.disconnect {
-            return Err(StreamError::Execution {
-                message: "receiver disconnected".into(),
-            });
+            return mf_runtime::StreamExecutionSnafu {
+                message: "receiver disconnected",
+            }
+            .fail();
         }
         if self.cancel_after_prefix {
-            self.cancellation.cancel(StreamError::Execution {
-                message: "cancelled after prefix".into(),
-            });
+            self.cancellation.cancel(
+                mf_runtime::StreamExecutionSnafu {
+                    message: "cancelled after prefix",
+                }
+                .build(),
+            );
         }
         if let Some(error) = self.cancellation.failure() {
             return Err(error);
@@ -145,9 +149,12 @@ fn execution_probe() {
             let cancellation = cancellation.clone();
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(300));
-                cancellation.cancel(StreamError::Execution {
-                    message: "requested cancellation".into(),
-                });
+                cancellation.cancel(
+                    mf_runtime::StreamExecutionSnafu {
+                        message: "requested cancellation",
+                    }
+                    .build(),
+                );
             });
         }
         let mut messages = Vec::new();

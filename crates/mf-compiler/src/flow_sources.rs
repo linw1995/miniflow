@@ -1,6 +1,6 @@
 use crate::{NodeDependency, WorkflowDefinition};
 use mf_runtime::{CALL_KIND, CallConfig, FlowSource, MAX_CALL_DEPTH, NodeDefinition};
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
@@ -344,14 +344,14 @@ impl Resolver {
                     })?;
                     Box::new(match source {
                         FlowSource::Path { path } => {
-                            let directory = directory.ok_or_else(|| InvalidSnafu { reference: &config.flow, message: "local Flow references require load_workflow or a source directory" }.build())?;
+                            let directory = directory.with_context(|| InvalidSnafu { reference: &config.flow, message: "local Flow references require load_workflow or a source directory" })?;
                             self.file(&directory.join(path), available, depth + 1)?
                         }
                         FlowSource::Builtin { builtin } => {
                             let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
-                            let registration = registry.get(builtin).ok_or_else(|| InvalidSnafu {
+                            let registration = registry.get(builtin).with_context(|| InvalidSnafu {
                                 reference: builtin, message: "unknown built-in Flow; link its provider before resolving sources"
-                            }.build())?;
+                            })?;
                             let mut definition =
                                 (registration.definition)().context(ParseSnafu {
                                     path: PathBuf::from(format!("builtin:{builtin}")),

@@ -178,10 +178,7 @@ impl BuildDirectory {
                 false
             }
             Err(source) => {
-                return Err(CacheError::Io {
-                    path: marker,
-                    source,
-                });
+                return Err(source).context(IoSnafu { path: marker });
             }
         };
         Ok(Self {

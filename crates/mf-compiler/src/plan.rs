@@ -629,7 +629,7 @@ fn generate_scope(
             .iter()
             .map(|id| LitStr::new(id, Span::call_site()))
             .collect();
-        let node = nodes_by_id.get(id).ok_or_else(|| PlanError::UnknownNode {
+        let node = nodes_by_id.get(id).with_context(|| UnknownNodeSnafu {
             definition_id: id.clone(),
         })?;
         let node_ident = format_ident!("node_{scope}_{index}");
@@ -707,7 +707,7 @@ fn generate_scope(
                             .iter()
                             .find(|variable| variable.name == target)
                     })
-                    .ok_or_else(|| PlanError::InvalidLoopConfig {
+                    .with_context(|| InvalidLoopConfigSnafu {
                         definition_id: id.clone(),
                         message: format!("unknown assignment variable `{target}`"),
                     })?;
@@ -720,9 +720,9 @@ fn generate_scope(
             crate::EXIT_LOOP_KIND => quote! { mf_runtime::prepared_loop_exit(#id_lit) },
             ITERATION_INPUT_KIND => quote! { mf_runtime::iteration_input_flow_node() },
             crate::LOOP_SOURCE_ID => {
-                let variables = enclosing.ok_or_else(|| PlanError::InvalidLoopConfig {
+                let variables = enclosing.with_context(|| InvalidLoopConfigSnafu {
                     definition_id: id.clone(),
-                    message: "Loop source has no parent Loop".into(),
+                    message: "Loop source has no parent Loop",
                 })?;
                 let variables_json =
                     serde_json::to_string(&variables.variables).context(SerializeSnafu)?;
@@ -836,9 +836,9 @@ fn subgraph_preparation(
         let definition =
             node.loop_definition
                 .as_deref()
-                .ok_or_else(|| PlanError::InvalidLoopConfig {
+                .with_context(|| InvalidLoopConfigSnafu {
                     definition_id: node.id.clone(),
-                    message: "missing Loop definition".into(),
+                    message: "missing Loop definition",
                 })?;
         body_static_scope.push(node.id.to_string());
         (

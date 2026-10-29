@@ -17,7 +17,7 @@ use mf_telemetry::{
     transport::{DeliveryAdmission, DeliveryError, DeliveryTracker},
 };
 use sha2::{Digest, Sha256};
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
@@ -284,16 +284,16 @@ struct SequenceWitness {
 impl SessionState {
     pub fn new(description: WorkflowDescription, run_id: RunId) -> Result<Self, StateError> {
         description.validate().context(DescriptionSnafu)?;
-        if description
-            .static_node_count()
-            .context(DescriptionSnafu)?
-            .get()
-            > MAX_SESSION_NODES as i64
-        {
-            return Err(StateError::TooManyNodes {
-                limit: MAX_SESSION_NODES,
-            });
-        }
+        ensure!(
+            description
+                .static_node_count()
+                .context(DescriptionSnafu)?
+                .get()
+                <= MAX_SESSION_NODES as i64,
+            TooManyNodesSnafu {
+                limit: MAX_SESSION_NODES
+            }
+        );
         let described: BTreeMap<_, _> = description
             .nodes
             .iter()
@@ -400,20 +400,19 @@ impl SessionState {
             }
             .fail();
         }
-        if self.closed {
-            return Err(StateError::Closed);
-        }
+        ensure!(!self.closed, ClosedSnafu);
         if event.run_id != self.run_id || event.workflow_id != self.description.workflow_id {
             self.note("ignored event from another workflow or run");
             return Ok(Admission::UnrelatedRun);
         }
         event.validate().context(EventSnafu)?;
         let encoded = serde_json::to_vec(&event.event).context(SerializeSnafu)?;
-        if encoded.len() > MAX_EVENT_BYTES {
-            return Err(StateError::TooLarge {
-                limit: MAX_EVENT_BYTES,
-            });
-        }
+        ensure!(
+            encoded.len() <= MAX_EVENT_BYTES,
+            TooLargeSnafu {
+                limit: MAX_EVENT_BYTES
+            }
+        );
         let signature: [u8; 32] = Sha256::digest(&encoded).into();
         let witness = SequenceWitness {
             signature,

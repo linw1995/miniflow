@@ -104,9 +104,12 @@ fn execution_probe() {
         let cancellation = cancellation.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(300));
-            cancellation.cancel(StreamError::Execution {
-                message: "requested cancellation".into(),
-            });
+            cancellation.cancel(
+                mf_runtime::StreamExecutionSnafu {
+                    message: "requested cancellation",
+                }
+                .build(),
+            );
         });
     }
     let mut context = ExecutionContext::default();

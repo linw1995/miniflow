@@ -6,9 +6,7 @@ use crate::{
 use std::collections::BTreeMap;
 
 fn structural_error(message: impl Into<String>) -> NodeExecutionError {
-    NodeExecutionError::ExecutionFailed {
-        message: message.into(),
-    }
+    crate::NodeExecutionFailedSnafu { message }.build()
 }
 
 pub fn loop_variable_types(

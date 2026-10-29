@@ -13,9 +13,10 @@ impl TaskNode for Source {
         _ctx: &mut mf_runtime::ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         if cfg!(feature = "fail-execution") {
-            return Err(NodeExecutionError::ExecutionFailed {
-                message: "execution sentinel".into(),
-            });
+            return mf_runtime::NodeExecutionFailedSnafu {
+                message: "execution sentinel",
+            }
+            .fail();
         }
         Ok((Outputs::from([(
             "value".into(),

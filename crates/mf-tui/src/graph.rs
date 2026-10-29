@@ -19,7 +19,7 @@ use ratatui::{
     widgets::Widget,
 };
 use rust_sugiyama::{configure::Config, from_vertices_and_edges};
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::RangeInclusive,
@@ -169,7 +169,7 @@ impl GraphLayout {
         view: ConnectionView,
         collapsed: &BTreeSet<usize>,
     ) -> Result<Self, GraphError> {
-        let body = description.body(path).ok_or(GraphError::MissingLoopBody)?;
+        let body = description.body(path).context(MissingLoopBodySnafu)?;
         let scope = WorkflowDescription {
             order_edges: body.order_edges.clone(),
             version: if description.version.supports_iteration_bodies() {
@@ -239,11 +239,12 @@ impl GraphLayout {
         collapsed: &BTreeSet<usize>,
     ) -> Result<Self, GraphError> {
         description.validate().context(DescriptionSnafu)?;
-        if description.nodes.len() > MAX_SESSION_NODES {
-            return Err(GraphError::TooManyNodes {
-                limit: MAX_SESSION_NODES,
-            });
-        }
+        ensure!(
+            description.nodes.len() <= MAX_SESSION_NODES,
+            TooManyNodesSnafu {
+                limit: MAX_SESSION_NODES
+            }
+        );
 
         let compact = Self::with_attachment_spacing(
             description,

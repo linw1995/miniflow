@@ -6,7 +6,7 @@ use mf_runtime::{
     ValueType, deserialize_config, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
@@ -157,8 +157,8 @@ impl IterationNode {
             .outputs
             .iter()
             .find(|port| port.name == "result" && port.required)
-            .ok_or_else(|| NodeBuildError::InvalidSubgraph {
-                message: "iteration body must declare a required result output".into(),
+            .with_context(|| mf_runtime::NodeInvalidSubgraphSnafu {
+                message: "iteration body must declare a required result output",
             })?
             .value_type
             .clone();
@@ -212,8 +212,8 @@ impl IterationNode {
                 state.run_scope(scope, |state| body.execute_with_sink(state, sink))?;
             outputs
                 .remove("result")
-                .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                    message: "iteration body did not produce `result`".into(),
+                .with_context(|| mf_runtime::NodeExecutionFailedSnafu {
+                    message: "iteration body did not produce `result`",
                 })
         });
         let result = result.context(IterationItemFailureSnafu { index });
@@ -240,9 +240,10 @@ impl IterationNode {
                     (ValueRef::new(ValueKind::String(key.clone())), item.clone())
                 })),
                 _ => {
-                    return Err(NodeExecutionError::ExecutionFailed {
-                        message: "iteration requires an array or object input `items`".into(),
-                    });
+                    return mf_runtime::NodeExecutionFailedSnafu {
+                        message: "iteration requires an array or object input `items`",
+                    }
+                    .fail();
                 }
             };
         let mut results = Vec::with_capacity(items.len());
