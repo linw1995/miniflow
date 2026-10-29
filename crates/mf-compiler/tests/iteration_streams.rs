@@ -250,6 +250,56 @@ fn streamed_parallel_items_keep_correlated_observation_and_failure_outcomes() {
 }
 
 #[test]
+fn parallel_iterations_forward_called_flow_streams_with_item_observation() {
+    let child = json!({"version":"2026-10-28","dependencies":{},
+        "nodes":[{"id":"step","kind":"fixture.task_stream"}],
+        "outputs":[{"name":"delta","node":"step","port":"delta"},
+                   {"name":"count","node":"step","port":"total"}]
+    });
+    let mut value = definition("parallel", json!({}));
+    value["nodes"][0]["config"]["stream_outputs"] =
+        json!({"increment":{"node":"invoke","port":"delta"}});
+    value["nodes"][0]["config"]["body"] = json!({
+        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"child","definition":child},
+            "inputs":{"step.count":{"from":{"node":"%iteration","port":"item"}}}}],
+        "result":{"node":"invoke","port":"count"}
+    });
+    value["execution"] = json!({"limits":{"workers":2,"max_pending_messages":2}});
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), Default::default())
+        .unwrap();
+    let instance = instantiate_stream(&plan, &registry)
+        .unwrap()
+        .start_with_options(StreamOptions {
+            arguments: WorkflowArguments::try_from(json!({"each.items":[1,2]})).unwrap(),
+            observation: Some(observation),
+            ..Default::default()
+        })
+        .unwrap();
+    let values = drain(instance);
+    let mut emitted = increments(&values);
+    emitted.sort_unstable();
+    assert_eq!(emitted, vec![0, 0, 1]);
+    assert_eq!(results(&values), vec![json!([1, 2])]);
+
+    let records = harness.records();
+    for index in 0..2 {
+        for node in ["invoke", "step"] {
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record.event_name == "mf.iteration.node.started"
+                        && record.attributes["mf.iteration.index"] == index
+                        && record.attributes["mf.node.id"] == node)
+            );
+        }
+    }
+}
+
+#[test]
 fn delivery_failure_is_fatal_under_every_item_policy_and_borrowed_sinks_stay_local() {
     use std::{cell::Cell, rc::Rc};
     struct Reject {

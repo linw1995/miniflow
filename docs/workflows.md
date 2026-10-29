@@ -74,8 +74,8 @@ markers cross the boundary without JSON conversion. Configuration references sta
 
 Calls have isolated input bindings, outputs, and Loop state. They share cancellation, bounded workers,
 future driving, and the caller's remaining step budget. Provider failures retain their typed error
-chains with call context. Children cannot consume stdin. Calls inside an
-Iteration body retain its task-only restriction and cannot hide another Loop or Iteration.
+chains with call context. Children cannot consume stdin. Calls inside an Iteration body may expose
+finite TaskStream ports, but cannot hide another Loop or Iteration.
 
 With parent version `2026-10-28`, a call also exposes the child's selected TaskStream outputs under
 their public names. Ordinary outputs remain terminal ports; incremental outputs remain separate
