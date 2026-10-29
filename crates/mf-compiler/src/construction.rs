@@ -256,6 +256,65 @@ where
     Ok(())
 }
 
+/// Build-time contracts retained for generated scopes, without retaining executors.
+#[cfg_attr(not(feature = "codegen"), allow(dead_code))]
+pub struct PreparedScopeLayout {
+    pub domains: ExecutionDomains,
+    pub calls: Vec<PreparedCallLayout>,
+    pub metadata: Vec<crate::NodeMetadata>,
+}
+
+#[cfg_attr(not(feature = "codegen"), allow(dead_code))]
+pub struct PreparedCallLayout {
+    pub target: mf_runtime::NodeIdentity,
+    pub binding: mf_runtime::ResolvedCallBinding,
+    pub visibility: Vec<String>,
+}
+
+impl PreparedScopeLayout {
+    pub fn capture(flow: &mf_runtime::Flow) -> Self {
+        let positions: BTreeMap<_, _> = flow
+            .execution_order()
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (*id, NodeId::new(position)))
+            .collect();
+        let calls: Vec<_> = flow
+            .prepared_calls()
+            .map(|call| {
+                let mut binding = call.binding.clone();
+                binding.caller = positions[&binding.caller];
+                binding.target = positions[&binding.target];
+                for id in binding
+                    .prerequisites
+                    .iter_mut()
+                    .chain(binding.success_dependencies.iter_mut())
+                {
+                    *id = positions[id];
+                }
+                PreparedCallLayout {
+                    target: call.target.clone(),
+                    binding,
+                    visibility: call.visibility.keys().map(str::to_owned).collect(),
+                }
+            })
+            .collect();
+        let metadata = if calls.is_empty() {
+            vec![]
+        } else {
+            flow.execution_order()
+                .iter()
+                .map(|id| flow.nodes()[id.index()].metadata.clone())
+                .collect()
+        };
+        Self {
+            domains: flow.execution_domains().clone(),
+            calls,
+            metadata,
+        }
+    }
+}
+
 pub struct FlowBuilder {
     nodes: Vec<FlowNode>,
     connections: Vec<FlowConnection>,

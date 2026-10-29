@@ -299,7 +299,9 @@ impl CompiledWorkflow {
     /// Generate a self-contained module that prepares nodes from the host registry.
     #[cfg(feature = "codegen")]
     pub fn generate_embedded_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-        crate::compiler::require_no_directed_calls(&self.definition)?;
+        if self.definition.execution.is_some() {
+            crate::compiler::require_no_directed_calls(&self.definition)?;
+        }
         ensure!(
             crate::structural_order(&self.definition)? == self.execution_order,
             InvalidExecutionOrderSnafu
@@ -359,7 +361,9 @@ impl CompiledWorkflow {
         &self,
         include_helpers: bool,
     ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-        crate::compiler::require_no_directed_calls(&self.definition)?;
+        if self.definition.execution.is_some() {
+            crate::compiler::require_no_directed_calls(&self.definition)?;
+        }
         if self.definition.execution.is_some() {
             return generate_stream_artifacts(self);
         }
@@ -790,6 +794,11 @@ fn generate_scope(
             let bind = format_ident!("bind_success_guards_{scope}");
             preparations.push(quote! { let #flow_ident = #bind(#flow_ident); });
         }
+        if !definition.calls.is_empty() {
+            let bind = format_ident!("bind_calls_{scope}");
+            let identity = call_scope_identity(definition, order)?;
+            preparations.push(quote! { let #flow_ident = #bind(#flow_ident, #identity)?; });
+        }
         statements.push(quote! { runtime.execute_in_context(&#flow_ident, state) });
     }
     Ok((preparations, statements, flow_ident))
@@ -1003,7 +1012,9 @@ impl CompiledWorkflow {
         registry: &mf_runtime::NodeRegistry,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
-        crate::compiler::require_no_directed_calls(&self.definition)?;
+        if self.definition.execution.is_some() {
+            crate::compiler::require_no_directed_calls(&self.definition)?;
+        }
         let mut body_layouts = BTreeMap::new();
         let (nodes, order) = crate::compiler::prepare_definition_with_layouts(
             &self.definition,
@@ -1024,7 +1035,7 @@ impl CompiledWorkflow {
         &self,
         nodes: Vec<crate::FlowNode>,
         order: Vec<DefinitionId>,
-        body_layouts: BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>,
+        body_layouts: BTreeMap<Vec<DefinitionId>, crate::construction::PreparedScopeLayout>,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
         let node_targets_json =
@@ -1037,7 +1048,9 @@ impl CompiledWorkflow {
         )
         .and_then(|flow| flow.with_control_edges(self.definition.control_edges.clone()))
         .and_then(|flow| flow.with_order_edges(self.definition.order_edges.clone()))
-        .map_err(crate::WorkflowBuildError::from)?;
+        .map_err(crate::WorkflowBuildError::from)?
+        .with_declared_calls(&self.definition)
+        .map_err(crate::WorkflowCompileError::from)?;
         let flow = if self.definition.version.supports_startup_inputs() {
             flow.with_workflow_inputs()
                 .map_err(crate::WorkflowBuildError::from)?
@@ -1048,6 +1061,7 @@ impl CompiledWorkflow {
         let mut layouts = Vec::new();
         let mut typed_plan = crate::TypedPlan::default();
         if let Some(execution) = &self.definition.execution {
+            crate::compiler::require_no_directed_calls(&self.definition)?;
             typed_plan.connections = self
                 .definition
                 .edges
@@ -1108,6 +1122,8 @@ impl CompiledWorkflow {
             )?;
         } else {
             let flow = flow.into_tasks().map_err(crate::WorkflowBuildError::from)?;
+            let calls = crate::construction::PreparedScopeLayout::capture(&flow);
+            layouts.push(call_scope_tokens(&self.definition, &order, "root", &calls)?);
             typed_plan = crate::plan_typed_segments(&flow, standard, true);
             if standard {
                 layouts.push(typed_preparation_tokens(self, &flow, &typed_plan)?);
@@ -1494,6 +1510,69 @@ fn domain_tokens(plan: &mf_runtime::ExecutionDomains) -> TokenStream {
 }
 
 #[cfg(feature = "codegen")]
+fn call_scope_identity(
+    definition: &WorkflowDefinition,
+    order: &[DefinitionId],
+) -> Result<LitStr, PlanError> {
+    let order: Vec<_> = order.iter().map(ToString::to_string).collect();
+    let identity = mf_telemetry::identity::WorkflowId::from_definition(definition, &order)
+        .context(crate::compiler::ContractSnafu)?;
+    Ok(LitStr::new(identity.as_str(), Span::call_site()))
+}
+
+#[cfg(feature = "codegen")]
+fn call_scope_tokens(
+    definition: &WorkflowDefinition,
+    order: &[DefinitionId],
+    scope: &str,
+    layout: &crate::construction::PreparedScopeLayout,
+) -> Result<TokenStream, PlanError> {
+    if layout.calls.is_empty() {
+        return Ok(quote! {});
+    }
+    let name = format_ident!("bind_calls_{scope}");
+    let identity = call_scope_identity(definition, order)?;
+    let checks = layout.metadata.iter().enumerate().map(|(index, metadata)| {
+        let id = LitStr::new(order[index].as_str(), Span::call_site());
+        let expected = LitStr::new(&serde_json::to_string(metadata).context(SerializeSnafu)?, Span::call_site());
+        Ok(quote! {
+            let expected = serde_json::from_str(#expected).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
+                definition_id: mf_runtime::DefinitionId::from(#id),
+            })?;
+            mf_runtime::verify_generated_metadata(&flow.nodes()[#index].metadata, &expected)
+                .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: mf_runtime::DefinitionId::from(#id) })?;
+        })
+    }).collect::<Result<Vec<_>, PlanError>>()?;
+    let calls = layout.calls.iter().map(|call| {
+        let target = LitStr::new(&call.target.id, Span::call_site());
+        let kind = LitStr::new(&call.target.kind, Span::call_site());
+        let binding = LitStr::new(&serde_json::to_string(&call.binding).context(SerializeSnafu)?, Span::call_site());
+        let visibility = &call.visibility;
+        let position = call.binding.target.index();
+        let guard = if definition.order_edges.iter().any(|edge| edge.to_node == order[position]) {
+            let name = format_ident!("success_guard_{scope}_{position}");
+            quote! { std::sync::Arc::new(#name) }
+        } else { quote! { std::sync::Arc::new(|_| Ok(std::collections::BTreeSet::new())) } };
+        Ok(quote! { mf_runtime::PreparedCall {
+            target: mf_runtime::NodeIdentity { id: #target.into(), kind: #kind.into(), path: vec![] },
+            binding: serde_json::from_str(#binding).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
+                definition_id: mf_runtime::DefinitionId::from(#target),
+            })?,
+            visibility: mf_runtime::OutputVisibility::Borrowed(&[#(#visibility),*]),
+            guard: #guard,
+        } })
+    }).collect::<Result<Vec<_>, PlanError>>()?;
+    Ok(quote! {
+        pub fn #name(flow: mf_runtime::Flow, identity: &str) -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
+            use snafu::ResultExt as _;
+            snafu::ensure!(identity == #identity, mf_compiler::WorkflowInvalidDefinitionSnafu { definition_id: #scope, message: "generated call scope identity differs from the frozen layout" });
+            #(#checks)*
+            Ok(flow.with_prepared_calls(vec![#(#calls),*]).map_err(mf_compiler::FlowBuildError::from)?)
+        }
+    })
+}
+
+#[cfg(feature = "codegen")]
 fn task_layout_tokens(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
@@ -1549,7 +1628,7 @@ fn collect_body_layouts(
     order: &[DefinitionId],
     scope: &str,
     path: &mut Vec<DefinitionId>,
-    body_layouts: &BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>,
+    body_layouts: &BTreeMap<Vec<DefinitionId>, crate::construction::PreparedScopeLayout>,
     layouts: &mut Vec<TokenStream>,
 ) -> Result<(), PlanError> {
     for (index, id) in order.iter().enumerate() {
@@ -1581,9 +1660,15 @@ fn collect_body_layouts(
         };
         let body_order = crate::compiler::structural_order_graph(&body)?;
         path.push(id.clone());
-        let domains = &body_layouts[path.as_slice()];
+        let layout = &body_layouts[path.as_slice()];
         let body_scope = format!("{scope}_{index}");
-        layouts.push(task_layout_tokens(&body, &body_order, &body_scope, domains));
+        layouts.push(task_layout_tokens(
+            &body,
+            &body_order,
+            &body_scope,
+            &layout.domains,
+        ));
+        layouts.push(call_scope_tokens(&body, &body_order, &body_scope, layout)?);
         collect_body_layouts(&body, &body_order, &body_scope, path, body_layouts, layouts)?;
         path.pop();
     }
@@ -1593,9 +1678,14 @@ fn collect_body_layouts(
 #[cfg(feature = "codegen")]
 fn initial_nodes(definition: &WorkflowDefinition, order: &[DefinitionId]) -> Vec<bool> {
     let incoming = crate::compiler::incoming_dependencies(definition);
+    let targets: std::collections::BTreeSet<_> = definition
+        .calls
+        .values()
+        .flat_map(|aliases| aliases.values().map(|call| &call.target))
+        .collect();
     order
         .iter()
-        .map(|id| incoming.get(id.as_str()).is_none_or(Vec::is_empty))
+        .map(|id| !targets.contains(id) && incoming.get(id.as_str()).is_none_or(Vec::is_empty))
         .collect()
 }
 
@@ -1718,7 +1808,7 @@ fn task_guard_tokens(
         bindings.push(quote! { (#id, std::sync::Arc::new(#name) as std::sync::Arc<mf_runtime::GeneratedDomainExecutor>) });
     }
     let bind = format_ident!("bind_success_guards_{scope}");
-    let binding = (!bindings.is_empty()).then(|| {
+    let binding = (!definition.order_edges.is_empty()).then(|| {
         quote! {
             fn #bind(flow: mf_runtime::Flow) -> mf_runtime::Flow {
                 flow.with_prepared_domains(vec![#(#bindings),*])

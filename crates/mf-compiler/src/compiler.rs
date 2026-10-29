@@ -542,7 +542,9 @@ pub fn prepare_definition(
 pub fn prepare_definition_with_layouts(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
-    body_layouts: Option<&mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
+    body_layouts: Option<
+        &mut BTreeMap<Vec<DefinitionId>, crate::construction::PreparedScopeLayout>,
+    >,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
@@ -560,7 +562,8 @@ pub fn prepare_definition_with_layouts(
 
 struct GraphPreparation<'a> {
     registry: &'a NodeRegistry,
-    body_layouts: Option<&'a mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
+    body_layouts:
+        Option<&'a mut BTreeMap<Vec<DefinitionId>, crate::construction::PreparedScopeLayout>>,
     path: Vec<DefinitionId>,
 }
 
@@ -1821,7 +1824,7 @@ fn bind_subgraph_node(
     if let Some(layouts) = preparation.body_layouts.as_mut() {
         layouts.insert(
             path.expect("layout collection has a body path"),
-            flow.execution_domains().clone(),
+            crate::construction::PreparedScopeLayout::capture(&flow),
         );
     }
     let body = PreparedSubgraph::new(identities, outputs, move |state| {

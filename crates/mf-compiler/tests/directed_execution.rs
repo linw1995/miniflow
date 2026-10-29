@@ -5,65 +5,9 @@ use mf_runtime::*;
 use serde_json::{Value, json};
 use std::num::NonZeroUsize;
 
-struct Caller {
-    alias: String,
-    result: String,
-    repeat: usize,
-}
-impl TaskNode for Caller {
-    fn execute(
-        &self,
-        _: Inputs,
-        context: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        let interface = context
-            .call_targets()
-            .iter()
-            .find(|call| call.name() == self.alias)
-            .unwrap()
-            .clone();
-        let mut value = ValueRef::from("unselected");
-        for _ in 0..self.repeat {
-            let arguments = CallArguments {
-                outputs: interface
-                    .outputs()
-                    .iter()
-                    .map(|parameter| (parameter.name().into(), "query:".into()))
-                    .collect(),
-                defaults: interface
-                    .defaults()
-                    .iter()
-                    .map(|parameter| (parameter.name().into(), "default".into()))
-                    .collect(),
-            };
-            let response = context.invoke_call(interface.id(), arguments)?;
-            value = match response.outcome {
-                CallOutcome::Succeeded(outputs) => outputs[&self.result].clone(),
-                CallOutcome::Skipped { .. } => "skipped".into(),
-                CallOutcome::Failed { source } => return Err(source.into()),
-            };
-        }
-        Ok(Outputs::from([("value".into(), value)]).into())
-    }
-}
-fn caller(config: Value) -> Result<PreparedNode, NodeBuildError> {
-    Ok(PreparedNode::from_parts(
-        NodeExecution::Task(Box::new(Caller {
-            alias: config["alias"].as_str().unwrap_or("search").into(),
-            result: config["result"].as_str().unwrap_or("text").into(),
-            repeat: config["repeat"].as_u64().unwrap_or(1) as usize,
-        })),
-        NodeMetadata {
-            ports: NodePorts {
-                inputs: vec![],
-                outputs: vec![PortSpec::new("value", ValueType::Any, true)],
-            },
-            call_outputs: vec![PortSpec::new("query", ValueType::String, true)],
-            ..Default::default()
-        },
-    ))
-}
-inventory::submit! { NodeRegistration { kind: "test.directed_caller", factory: NodeFactory::Plain(caller) } }
+#[path = "fixtures/multi-nodes/src/directed_fixture.rs"]
+mod caller;
+
 fn document() -> Value {
     json!({"version":"2026-10-28","dependencies":{},"nodes":[
         {"id":"a_parent","kind":"test.directed_caller","config":{"repeat":2}},

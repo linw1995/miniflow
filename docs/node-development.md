@@ -177,8 +177,10 @@ caller declarations, duplicate destination mappings, and recursive call graphs f
 Caller and target IDs are exact names in the same scope, not paths through nested graphs.
 
 Executable preparation resolves declarations into `PreparedCall` records shared by runtime dispatch
-and caller-visible interface projection. Generated and native-stream execution reject call definitions
-until those backends install the same prepared contracts.
+and caller-visible interface projection. Generated runners freeze these records in the existing
+`PreparedScopeLayout`, alongside execution domains, visibility, and success guards. Startup checks
+the scope identity and complete provider metadata before installing the table. No separate serialized
+call-layout artifact or independently versioned layout contract is required.
 
 Exhaustive `WorkflowDefinition`, `LoopBodyDefinition`, and `IterationBodyDefinition` literals must add
 `calls: Default::default()` to preserve ordinary behavior.
@@ -304,15 +306,16 @@ fn advertised_tools(ctx: &mf_runtime::ExecutionContext) -> Vec<&str> {
 }
 ```
 
-Finite task domains, combined terminal producers, and isolated task targets use the prepared scope's catalog. Domain context forks share immutable data;
+Dynamic and generated domains, snapshot fallbacks, combined terminal producers, and isolated
+task targets use the prepared scope's catalog. Domain context forks share immutable data;
 body forks start without an inherited catalog. Nested scopes restore their enclosing catalog and node
 identity on success, error, or unwinding. Configure each prepared child Flow independently. Catalogs
 belong to a prepared scope, so shared node implementations must not cache them globally by binding ID.
 Scopes without discovery metadata do not allocate catalog storage.
 
 Discovery alone does not grant invocation authority. Prepared call declarations control target
-activation and supply executable bindings. Provider descriptions, full JSON Schema conversion, and
-generated executable catalog checks are added separately. A serialized `CallInterface` is not
+activation and supply executable bindings. Provider descriptions and full JSON Schema conversion
+are added separately. A serialized `CallInterface` is not
 a provider tool definition: its constraint list is conjunctive, and its two namespaces remain distinct.
 
 ## Context-aware execution
