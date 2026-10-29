@@ -358,7 +358,7 @@ impl Flow {
                 crate::PortSpec::owned(
                     &output.name,
                     output.port.value_type.clone(),
-                    sources.len() == 1 && output.port.required,
+                    sources.len() == 1 && !output.optional,
                 )
             })
             .collect()
@@ -538,6 +538,7 @@ impl Flow {
                             sink,
                             outputs: &self.inner.stream_outputs,
                             node: id,
+                            definition_id: &self.nodes()[id.index()].definition_id,
                         };
                         self.execute_generated_position(
                             position,

@@ -1664,6 +1664,46 @@ fn registration_for(
     Ok(registration)
 }
 
+fn prepare_stream_outputs(
+    references: &BTreeMap<String, mf_runtime::OutputReferenceDefinition>,
+    nodes: &[FlowNode],
+    node: &crate::NodeDefinition,
+) -> Result<Vec<mf_runtime::SubgraphStreamOutput>, WorkflowCompileError> {
+    references
+        .iter()
+        .map(|(name, reference)| {
+            let index = nodes
+                .iter()
+                .position(|child| child.definition_id == reference.node)
+                .with_context(|| mf_runtime::NodeInvalidSubgraphSnafu {
+                    message: format!("unknown stream child `{}`", reference.node),
+                })?;
+            let port = nodes[index]
+                .metadata
+                .stream_outputs
+                .iter()
+                .find(|port| port.name == reference.port)
+                .cloned()
+                .with_context(|| mf_runtime::NodeInvalidSubgraphSnafu {
+                    message: format!(
+                        "child `{}` has no TaskStream output `{}`",
+                        reference.node, reference.port
+                    ),
+                })?;
+            Ok(mf_runtime::SubgraphStreamOutput {
+                node: mf_runtime::NodeId::new(index),
+                optional: !port.required,
+                port,
+                name: name.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, NodeBuildError>>()
+        .context(NodeConstructionSnafu {
+            definition_id: node.id.clone(),
+            kind: node.kind.clone(),
+        })
+}
+
 fn bind_subgraph_node(
     node: &crate::NodeDefinition,
     preparation: &mut GraphPreparation<'_>,
@@ -1701,7 +1741,7 @@ fn bind_subgraph_node(
         })?
     };
     let mut stream_outputs = if let Some(definition) = &node.loop_definition {
-        crate::loops::prepare_stream_outputs(definition, &nodes, &node.id)?
+        prepare_stream_outputs(&definition.stream_outputs, &nodes, node)?
     } else {
         Vec::new()
     };
@@ -1724,6 +1764,7 @@ fn bind_subgraph_node(
                 node: mf_runtime::NodeId::new(index),
                 port: port.clone(),
                 name: output.name.to_string(),
+                optional: output.optional,
             });
         } else {
             let port = source
@@ -1814,6 +1855,7 @@ fn resolve_nodes_in_scope(
         .map(|node| {
             if node.kind == mf_runtime::CALL_KIND {
                 let body = crate::calls::body_definition(node)?;
+                crate::validate_execution(&body).context(StreamConstructionSnafu)?;
                 ensure!(!allow_iteration_input || !crate::calls::contains_iteration_containers(&body)?, InvalidCallSnafu {
                     definition_id: node.id.clone(), message: "calls inside Iteration cannot contain Loop or Iteration constructs"
                 });

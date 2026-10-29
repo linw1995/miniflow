@@ -909,6 +909,7 @@ fn subgraph_preparation(
             let kind = LitStr::new(&node.kind, Span::call_site());
             quote! { mf_runtime::NodeIdentity { id: #id.into(), kind: #kind.into(), path: Vec::new() } }
         });
+    let call = node.kind == mf_runtime::CALL_KIND;
     let outputs = body.outputs.iter().map(|output| {
         let position = order
             .iter()
@@ -920,7 +921,7 @@ fn subgraph_preparation(
         let source = LitStr::new(output.node.as_str(), Span::call_site());
         let required = !output.optional;
         quote! {
-            if stream_ports.iter().any(|port| port.name == #name) {
+            if #call && stream_ports.iter().any(|port| port.name == #name) {
                 None
             } else {
                 Some(mf_runtime::PortSpec::owned(#name, #body_flow.node_metadata(&mf_runtime::NodeId::new(#position_lit))
@@ -1540,10 +1541,12 @@ fn subgraph_stream_tokens(
     let id = LitStr::new(id.as_str(), Span::call_site());
     let bindings = outputs.iter().map(|output| {
         let node = output.node.index();
+        let optional = output.optional;
         let name = LitStr::new(&output.name,Span::call_site());
         let port = LitStr::new(&serde_json::to_string(&output.port).context(SerializeSnafu)?,Span::call_site());
         Ok(quote! { mf_runtime::SubgraphStreamOutput {
             node:mf_runtime::NodeId::new(#node), name:#name.into(),
+            optional: #optional,
             port:serde_json::from_str(#port).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {definition_id:#id})?,
         } })
     }).collect::<Result<Vec<_>,PlanError>>()?;
@@ -1598,8 +1601,10 @@ fn collect_body_layouts(
         if node.kind == mf_runtime::CALL_KIND || !streams.is_empty() {
             layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
         }
-        body.outputs
-            .retain(|output| !streams.iter().any(|stream| stream.name == output.name));
+        if node.kind == mf_runtime::CALL_KIND {
+            body.outputs
+                .retain(|output| !streams.iter().any(|stream| stream.name == output.name));
+        }
 
         layouts.push(task_layout_tokens(&body, &body_order, &body_scope, domains));
         collect_body_layouts(&body, &body_order, &body_scope, path, body_layouts, layouts)?;

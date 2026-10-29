@@ -462,6 +462,7 @@ fn stream_bindings_reject_invalid_sources_names_and_contracts() {
         node: NodeId::new(0),
         port,
         name: "increment".into(),
+        optional: false,
     };
     for invalid in [
         SubgraphStreamOutput {
