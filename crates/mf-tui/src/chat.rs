@@ -465,7 +465,6 @@ impl Controller {
                 model: None,
             },
             retry_of,
-            max_history_bytes: mf_chat::DEFAULT_HISTORY_BYTES,
         };
         let preview_consumer = self.launch.contract.answer_stream.then(|| {
             let outer_cancellation = cancellation.clone();

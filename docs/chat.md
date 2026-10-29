@@ -29,12 +29,12 @@ database.archive_session(&session.id)?;
 database.restore_session(&session.id)?;
 let page = database.list_sessions(false, 50, None)?;
 let messages = database.messages(&session.id, 50, None)?;
-let context = database.history(&session.id, mf_chat::DEFAULT_HISTORY_BYTES)?;
+let context = database.history(&session.id)?;
 ```
 
 Lists use bounded keyset pages. Pass `next_after` back as the next cursor. Session order is creation time followed by stable ID; message order uses a per-session sequence. Message results include each turn's state, so unsuccessful submissions remain inspectable. Archiving retains messages and call records and prevents new turns until restoration.
 
-History includes only completed successful turns from the requested session. It keeps system instructions separate and excludes unsuccessful submissions and the current prompt. The default canonical history JSON bound is 1 MiB; exceeding it fails explicitly without deleting or trimming messages.
+History includes only completed successful turns from the requested session. It keeps system instructions separate and excludes unsuccessful submissions and the current prompt. History is neither truncated nor rejected based on its encoded size; model request failures are reported by the LLM call.
 
 Registered kinds are `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.archive`, `.restore`, `mf_chat.messages.list`, and `mf_chat.history.load`. All node inputs name an explicit database path; node preparation never reads storage.
 
@@ -182,8 +182,8 @@ summary and cannot update the title. A successful result requires nonempty text.
 not confirmation that a concurrent rename allowed it to be applied. Read the saved session for its title.
 
 Context and optional outputs can later carry compaction state and a summary proposal. No compaction is
-implemented: history loading still enforces the canonical byte bound before execution. A future compaction
-stage also needs a history-loading policy and revision-checked summary persistence.
+implemented: history loading passes all successful messages to execution without a byte bound. A future
+compaction stage also needs a history-loading policy and revision-checked summary persistence.
 
 ## Usage statistics
 
@@ -351,8 +351,8 @@ preserves annotations on existing messages; the LLM node returns only its curren
 The chat application persists response metadata on the new assistant message, including through save retries and database reopen. Workflow history outputs never replace
 stored messages or change their metadata. New user messages currently have no metadata.
 
-Metadata contributes to the canonical encoded history limit and the executable response limit. Existing
-SQLite databases receive a forward migration; old messages retain absent metadata.
+Metadata is retained in history and contributes to the executable response limit. Existing SQLite
+databases receive a forward migration; old messages retain absent metadata.
 
 ## Workflow results and reported calls
 

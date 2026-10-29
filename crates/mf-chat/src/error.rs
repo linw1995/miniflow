@@ -99,8 +99,6 @@ pub enum ChatError {
     },
     #[snafu(display("chat session {id:?} does not exist"))]
     SessionMissing { id: String },
-    #[snafu(display("history exceeds the {limit}-byte bound"))]
-    HistoryTooLarge { limit: usize },
     #[snafu(display("could not {operation}: integer range exceeded"))]
     Arithmetic { operation: &'static str },
     #[snafu(display("could not read UTC time: {source}"))]

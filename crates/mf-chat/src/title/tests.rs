@@ -12,7 +12,6 @@ fn begin(database: &ChatDatabase, session_id: &str) -> crate::nodes::TurnStarted
                 model: None,
             },
             None,
-            1024,
         )
         .unwrap()
 }

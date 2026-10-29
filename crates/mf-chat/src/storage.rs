@@ -235,7 +235,6 @@ mod tests {
                         model: Some("old-model".into()),
                     },
                     None,
-                    1024,
                 )
                 .unwrap();
             let counters = BTreeMap::from([("input_tokens".into(), tokens)]);
@@ -317,7 +316,7 @@ mod tests {
             assert_eq!(call.result_text, original.result_text);
             assert_eq!(call.metadata, metadata);
             assert!(matches!(
-                &reopened.history(&session.id, 1024).unwrap().history[1],
+                &reopened.history(&session.id).unwrap().history[1],
                 mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &metadata
             ));
             assert_eq!(

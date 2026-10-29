@@ -255,7 +255,6 @@ fn pre_cancelled_requests_do_not_begin_application_or_embedded_flows() {
                 model: None,
             },
             retry_of: None,
-            max_history_bytes: mf_chat::DEFAULT_HISTORY_BYTES,
         },
         backend.clone(),
         cancellation.clone(),
@@ -352,7 +351,7 @@ fn streaming_retries_use_new_invocations_and_preserve_failed_history() {
     assert!(original.join().is_err());
     assert!(
         host.database()
-            .history(&session.id, 1024)
+            .history(&session.id)
             .unwrap()
             .history
             .is_empty()
@@ -369,11 +368,7 @@ fn streaming_retries_use_new_invocations_and_preserve_failed_history() {
         "failed"
     );
     assert_eq!(
-        host.database()
-            .history(&session.id, 1024)
-            .unwrap()
-            .history
-            .len(),
+        host.database().history(&session.id).unwrap().history.len(),
         2
     );
     assert_eq!(backend.0.load(Ordering::SeqCst), 2);

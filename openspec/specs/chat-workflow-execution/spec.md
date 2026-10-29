@@ -58,10 +58,11 @@ session, turn, and call.
 - **THEN** the second request includes the first completed user and assistant messages before its own prompt once
 - **AND** each completed turn has one saved user message and one saved assistant message
 
-#### Scenario: Exceed the configured context bound
+#### Scenario: Load complete successful history
 
-- **WHEN** loaded history exceeds the host's configured finite history byte bound
-- **THEN** the request fails before provider execution without silently deleting or trimming stored messages
+- **WHEN** a session has accumulated successful history
+- **THEN** the request includes all successful messages without deleting, trimming, or enforcing a local byte bound
+- **AND** model context failures surface from provider execution
 
 #### Scenario: Omit optional model fields
 

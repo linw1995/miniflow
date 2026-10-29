@@ -117,7 +117,7 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
     let database = ChatDatabase::open(path).unwrap();
     let id = session_id.unwrap();
     assert_eq!(database.session(&id).unwrap().title, "Generated title");
-    assert_eq!(database.history(&id, 4096).unwrap().history.len(), 4);
+    assert_eq!(database.history(&id).unwrap().history.len(), 4);
     assert_eq!(
         database
             .usage(mf_chat::UsageQuery {
@@ -723,7 +723,7 @@ fn loop_conversations() {
     controller.close().unwrap();
     let database = ChatDatabase::open(path).unwrap();
     let history = database
-        .history(session_id.as_ref().unwrap(), 4096)
+        .history(session_id.as_ref().unwrap())
         .unwrap()
         .history;
     assert_eq!(history.len(), 2);

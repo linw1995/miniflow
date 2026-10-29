@@ -24,7 +24,6 @@ extern crate mfn_core as _;
 pub struct HostConfig {
     pub profiles: BTreeMap<String, crate::WorkflowProfile>,
     pub max_active: usize,
-    pub max_history_bytes: usize,
     /// A local observer without export is used when none is supplied.
     pub observer: Option<Observer>,
     pub automatic_titles: bool,
@@ -35,7 +34,6 @@ impl HostConfig {
         Self {
             profiles: BTreeMap::from([(profile.name.clone(), profile)]),
             max_active: 4,
-            max_history_bytes: crate::DEFAULT_HISTORY_BYTES,
             observer: None,
             automatic_titles: true,
         }
@@ -121,9 +119,9 @@ impl Drop for ChatJob {
 impl ChatHost {
     pub fn open(path: impl AsRef<Path>, config: HostConfig) -> Result<Self, ChatError> {
         ensure!(
-            config.max_active > 0 && config.max_history_bytes > 0,
+            config.max_active > 0,
             InvalidSnafu {
-                field: "host limits",
+                field: "max_active",
                 reason: "must be positive",
             }
         );
@@ -274,7 +272,6 @@ impl ChatHost {
                 model: None,
             },
             retry_of,
-            max_history_bytes: self.inner.config.max_history_bytes,
         };
         let completed = Arc::new(AtomicBool::new(false));
         let worker_completed = completed.clone();
