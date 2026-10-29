@@ -55,6 +55,12 @@ fn builtin_title_runs_once_and_persists_usage_with_the_answer() {
             (!failed).then_some("Generated title")
         );
         assert_eq!(first.result.usages.len(), 2);
+        let conversation = first.result.usages[0].node.as_ref().unwrap();
+        assert_eq!(conversation.id, "chat");
+        assert_eq!(
+            serde_json::to_value(&conversation.path).unwrap(),
+            json!([{"node":"workflow","index":0}])
+        );
         assert_eq!(
             host.database().session(&session.id).unwrap().title,
             if failed {

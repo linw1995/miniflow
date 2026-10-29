@@ -500,6 +500,7 @@ pub fn validate_definition(
     compile_definition(definition, registry).map(|_| ())
 }
 
+/// Prepares an already resolved graph using host-linked providers and returns its canonical order.
 pub fn prepare_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,

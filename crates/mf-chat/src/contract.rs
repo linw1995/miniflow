@@ -177,6 +177,10 @@ pub struct ChatContract {
 }
 
 impl ChatContract {
+    pub(super) fn input_targets(&self) -> impl Iterator<Item = &str> {
+        self.inputs.values().map(String::as_str)
+    }
+
     pub fn from_manifest(manifest: &WorkflowManifest) -> Result<Self, ChatError> {
         manifest.validate()?;
         ensure!(
