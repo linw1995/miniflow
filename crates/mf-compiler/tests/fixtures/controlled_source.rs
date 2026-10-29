@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-use snafu::OptionExt;
-
 use mf_runtime::{
     Emitter, ExecutionContext, Inputs, NodeExecutionError, NodeFactory, NodePorts,
     NodeRegistration, Outputs, PortSpec, PreparedNode, PreparedStream, StreamError, StreamInstance,
@@ -36,8 +34,11 @@ pub struct Controller(Arc<Control>);
 impl Controller {
     pub fn send(&self, value: impl Into<ValueRef>) -> Result<(), StreamError> {
         let sender = self.0.sender.lock().unwrap();
-        let sender = sender.as_ref().context(mf_runtime::StreamExecutionSnafu {
-            message: "test source is closed",
+        let sender = sender.as_ref().ok_or_else(|| {
+            mf_runtime::StreamExecutionSnafu {
+                message: "test source is closed",
+            }
+            .build()
         })?;
         sender.send(value.into()).map_err(|_| {
             mf_runtime::StreamExecutionSnafu {
