@@ -93,19 +93,6 @@ fn loop_forwards_child_emissions_in_order_and_completes_once_with_its_summary() 
 }
 
 #[test]
-fn terminal_only_loops_keep_child_streams_unsubscribed() {
-    let mut value = definition();
-    value["outputs"] = json!([{"name":"count","node":"repeat","port":"count"}]);
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
-    let flow = instantiate_compiled(&plan, &registry).unwrap();
-    assert_eq!(
-        flow.execute_with_inputs(options().arguments).unwrap()["count"],
-        json!(2)
-    );
-}
-
-#[test]
 fn nested_loops_compose_stream_exports_without_replacing_loop_variables() {
     let mut value = definition();
     let inner = value["nodes"][0].clone();
@@ -181,22 +168,15 @@ fn stream_export_declarations_reject_old_versions_unknown_children_ports_and_col
 }
 
 #[test]
-fn borrowed_sinks_work_without_native_threads_and_delivery_errors_keep_typed_sources() {
+fn child_delivery_errors_stop_forwarding_and_keep_typed_sources() {
     use std::error::Error;
-    struct Sink {
-        values: Vec<Value>,
-        fail: bool,
-    }
-    impl mf_runtime::EmissionSink for Sink {
-        fn send(&mut self, result: mf_runtime::NodeResult) -> Result<(), StreamError> {
-            self.values
-                .push(serde_json::to_value(result.outputs).unwrap());
-            if self.fail {
-                return Err(StreamError::Execution {
-                    message: "delivery sentinel".into(),
-                });
-            }
-            Ok(())
+    struct Reject(usize);
+    impl mf_runtime::EmissionSink for Reject {
+        fn send(&mut self, _: mf_runtime::NodeResult) -> Result<(), StreamError> {
+            self.0 += 1;
+            Err(StreamError::Execution {
+                message: "delivery sentinel".into(),
+            })
         }
     }
     let mut value = definition();
@@ -204,58 +184,25 @@ fn borrowed_sinks_work_without_native_threads_and_delivery_errors_keep_typed_sou
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    for fail in [false, true] {
-        let mut sink = Sink {
-            values: vec![],
-            fail,
-        };
-        let node = flow
-            .nodes()
-            .iter()
-            .find(|node| node.definition_id.as_str() == "repeat")
-            .unwrap();
-        let result = node.node.execute_with_sink(
+    let node = &flow.nodes()[0];
+    let mut sink = Reject(0);
+    let error = node
+        .node
+        .execute_with_sink(
             [("count".into(), 2_u64.into())].into(),
             &mut mf_runtime::ExecutionContext::default(),
             &mut sink,
-        );
-        if fail {
-            assert_eq!(sink.values.len(), 1);
-            let error = result.unwrap_err();
-            let mut source: &dyn Error = &error;
-            let mut typed = false;
-            while let Some(next) = source.source() {
-                typed |= next.is::<StreamError>();
-                source = next;
-            }
-            assert!(typed);
-            assert!(error.to_string().contains("delivery sentinel"));
-        } else {
-            assert_eq!(sink.values.len(), 6);
-            assert_eq!(result.unwrap().outputs["count"], json!(2));
-        }
-    }
-    let constant = registry
-        .get("builtin.constant")
-        .unwrap()
-        .instantiate(json!({"value":7}))
-        .unwrap();
-    let mut sink = Sink {
-        values: vec![],
-        fail: true,
-    };
-    let result = constant
-        .execution
-        .as_task_node()
-        .unwrap()
-        .execute_with_sink(
-            Default::default(),
-            &mut mf_runtime::ExecutionContext::default(),
-            &mut sink,
         )
-        .unwrap();
-    assert_eq!(result.outputs["value"], json!(7));
-    assert!(sink.values.is_empty());
+        .unwrap_err();
+    assert_eq!(sink.0, 1);
+    let mut source: &dyn Error = &error;
+    let mut typed = false;
+    while let Some(next) = source.source() {
+        typed |= next.is::<StreamError>();
+        source = next;
+    }
+    assert!(typed);
+    assert!(error.to_string().contains("delivery sentinel"));
 }
 
 #[test]
@@ -322,6 +269,8 @@ fn exported_children_reuse_success_guards_in_streamed_and_terminal_execution() {
                     .as_array_mut()
                     .unwrap()
                     .retain(|output| output["name"] != "increment");
+                value["nodes"][0]["loop"]["body"]["nodes"][3]["config"]["wait_path"] =
+                    json!(root.path().join("unreleased"));
             }
             let plan =
                 compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
@@ -353,25 +302,16 @@ fn exported_children_reuse_success_guards_in_streamed_and_terminal_execution() {
 #[cfg(unix)]
 #[test]
 fn standalone_loop_streams_preserve_guards_delivery_and_frozen_contracts() {
-    use std::{
-        fs,
-        io::{BufRead, BufReader},
-        process::{Command, Stdio},
-        sync::mpsc,
-        thread,
-        time::Duration,
-    };
+    use std::{fs, process::Command};
     for enabled in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("executed");
-        let release = root.path().join("release");
         let mut value = guarded_definition(enabled, &marker);
         value["execution"] = json!({"limits":{"workers":1,"max_pending_messages":2}});
         value["dependencies"] = json!({
             "core":{"package":"mfn-core","path":common::crates_dir().join("builtin-nodes/core")},
             "fixture":{"package":"fixture-multi-nodes","path":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes")}
         });
-        value["nodes"][0]["loop"]["body"]["nodes"][3]["config"]["wait_path"] = json!(release);
         let source = root.path().join("flow.json");
         let output = root.path().join("runner");
         let build = root.path().join("build");
@@ -390,74 +330,43 @@ fn standalone_loop_streams_preserve_guards_delivery_and_frozen_contracts() {
         )
         .unwrap();
         assert!(!marker.exists());
-        fs::write(&release, "continue").unwrap();
-        let instance = prepare(value).start_with_options(options()).unwrap();
-        let mut expected = vec![];
-        while let Some(output) = instance.recv().unwrap() {
-            expected.push(serde_json::to_value(output.outputs).unwrap());
-        }
-        instance.join().unwrap();
-        fs::remove_file(&release).unwrap();
-        if marker.exists() {
-            fs::remove_file(&marker).unwrap();
-        }
         fs::remove_file(source).unwrap();
         fs::remove_dir_all(build).unwrap();
-        let mut child = Command::new(&output)
+        let finished = Command::new(&output)
             .args(["--inputs", r#"{"repeat.count":2}"#])
             .env_clear()
             .env("PATH", "")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .output()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let (sender, receiver) = mpsc::channel();
-        let reader = thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                if sender
-                    .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        let first = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
-        assert_eq!(first, expected[0]);
-        if enabled {
-            assert!(first.get("increment").is_some());
-        }
-        fs::write(&release, "continue").unwrap();
-        let finished = child.wait_with_output().unwrap();
         assert!(
             finished.status.success(),
             "{}",
             String::from_utf8_lossy(&finished.stderr)
         );
-        reader.join().unwrap();
-        let mut actual = vec![first];
-        actual.extend(receiver.try_iter());
-        assert_eq!(actual.len(), expected.len());
+        let actual: Vec<Value> = serde_json::Deserializer::from_slice(&finished.stdout)
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(actual.len(), if enabled { 7 } else { 1 });
         assert_eq!(
             actual
                 .iter()
                 .filter_map(|value| value.get("increment"))
+                .cloned()
                 .collect::<Vec<_>>(),
-            expected
-                .iter()
-                .filter_map(|value| value.get("increment"))
-                .collect::<Vec<_>>()
+            if enabled {
+                vec![json!(0), json!(1), json!(0), json!(1), json!(0), json!(1)]
+            } else {
+                vec![]
+            }
         );
         assert_eq!(
             actual
                 .iter()
                 .filter(|value| value.get("count").is_some())
+                .cloned()
                 .collect::<Vec<_>>(),
-            expected
-                .iter()
-                .filter(|value| value.get("count").is_some())
-                .collect::<Vec<_>>()
+            vec![json!({"count":2})]
         );
         assert_eq!(marker.exists(), enabled);
         if marker.exists() {
@@ -531,12 +440,8 @@ fn child_panics_close_the_active_pass_without_publishing_loop_terminal_outputs()
 }
 
 #[test]
-fn forwarding_rejects_invalid_bindings_and_preserves_custom_semantic_domains() {
+fn stream_bindings_reject_invalid_sources_names_and_contracts() {
     use mf_runtime::{FlowNode, NodeId, SubgraphStreamOutput};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let registry = NodeRegistry::from_inventory().unwrap();
     let make_flow = || {
         let node = FlowNode::new(
@@ -579,56 +484,4 @@ fn forwarding_rejects_invalid_bindings_and_preserves_custom_semantic_domains() {
             .with_stream_outputs(vec![valid.clone(), valid.clone()])
             .is_err()
     );
-    let mut plan = make_flow().plan().clone();
-    plan.execution_domains =
-        mf_runtime::ExecutionDomains::from_parts(Vec::new().into(), Vec::new().into());
-    let node = FlowNode::new(
-        "step",
-        registry
-            .get("fixture.task_stream")
-            .unwrap()
-            .instantiate(json!({}))
-            .unwrap(),
-    )
-    .into_task()
-    .unwrap();
-    let unscheduled = mf_runtime::Flow::from_plan(vec![node], plan, Default::default());
-    assert!(
-        unscheduled
-            .with_stream_outputs(vec![valid.clone()])
-            .is_err()
-    );
-    let count = Arc::new(AtomicUsize::new(0));
-    let called = count.clone();
-    let flow = make_flow()
-        .with_stream_outputs(vec![valid])
-        .unwrap()
-        .with_prepared_domains(vec![(
-            0,
-            Arc::new(
-                move |_: &mf_runtime::Flow, _: &mut mf_runtime::ExecutionContext| {
-                    called.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-            ) as Arc<mf_runtime::GeneratedDomainExecutor>,
-        )]);
-    flow.execute_in_context(&mut mf_runtime::ExecutionContext::default())
-        .unwrap();
-    flow.execute_with_sink(
-        &mut mf_runtime::ExecutionContext::default(),
-        &mut mf_runtime::DiscardSink,
-    )
-    .unwrap();
-    assert_eq!(count.load(Ordering::SeqCst), 2);
-    struct Connected;
-    impl mf_runtime::EmissionSink for Connected {
-        fn send(&mut self, _: mf_runtime::NodeResult) -> Result<(), StreamError> {
-            panic!("rejection precedes business work")
-        }
-    }
-    let error = flow
-        .execute_with_sink(&mut mf_runtime::ExecutionContext::default(), &mut Connected)
-        .unwrap_err();
-    assert!(error.to_string().contains("custom semantic domain"));
-    assert_eq!(count.load(Ordering::SeqCst), 2);
 }

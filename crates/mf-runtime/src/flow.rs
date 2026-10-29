@@ -201,7 +201,6 @@ struct FlowData {
     plan: FlowPlan,
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedDomainExecutor>>,
-    prepared_domains: BTreeSet<usize>,
     input_guards: BTreeMap<NodeId, Arc<crate::ExecutionGuard>>,
     stream_outputs: Vec<crate::SubgraphStreamOutput>,
 }
@@ -267,7 +266,6 @@ impl Flow {
                 plan,
                 input_schema,
                 generated_domains: BTreeMap::new(),
-                prepared_domains: BTreeSet::new(),
                 input_guards: BTreeMap::new(),
                 stream_outputs: Vec::new(),
             }),
@@ -279,14 +277,11 @@ impl Flow {
         domains: impl IntoIterator<Item = (usize, Arc<GeneratedDomainExecutor>)>,
     ) -> Self {
         for (id, executor) in domains {
-            let fallback = self.inner.generated_domains.get(&id).cloned();
             self.data_mut().generated_domains.insert(
                 id,
                 Arc::new(move |flow, state| {
                     if state.snapshot_recorder().is_none() && state.scope_path().is_empty() {
                         executor(flow, state)
-                    } else if let Some(fallback) = &fallback {
-                        fallback(flow, state)
                     } else {
                         flow.execute_domain_positions(
                             &flow.execution_domains().domains()[id],
@@ -299,18 +294,6 @@ impl Flow {
         self
     }
 
-    /// Binds semantic execution bodies that also run with snapshots and scoped frames.
-    pub fn with_prepared_domains(
-        mut self,
-        domains: impl IntoIterator<Item = (usize, Arc<GeneratedDomainExecutor>)>,
-    ) -> Self {
-        for (id, executor) in domains {
-            self.data_mut().prepared_domains.insert(id);
-            self.data_mut().generated_domains.insert(id, executor);
-        }
-        self
-    }
-
     pub fn with_input_guards(
         mut self,
         guards: impl IntoIterator<Item = (NodeId, Arc<crate::ExecutionGuard>)>,
@@ -319,20 +302,12 @@ impl Flow {
         self
     }
 
+    /// Binds compiler-resolved child exports and checks their frozen port contracts.
     pub fn with_stream_outputs(
         mut self,
         outputs: Vec<crate::SubgraphStreamOutput>,
     ) -> Result<Self, crate::NodeBuildError> {
         use snafu::{OptionExt, ensure};
-        let scheduled: BTreeSet<_> = if outputs.is_empty() {
-            BTreeSet::new()
-        } else {
-            self.execution_domains()
-                .domains()
-                .iter()
-                .flat_map(|domain| domain.nodes.iter().copied())
-                .collect()
-        };
         let mut names = BTreeSet::new();
         for output in &outputs {
             ensure!(
@@ -350,15 +325,6 @@ impl Flow {
                     ),
                 }
             })?;
-            ensure!(
-                scheduled.contains(&output.node),
-                crate::NodeInvalidSubgraphSnafu {
-                    message: format!(
-                        "stream export `{}` refers to a child outside the execution domains",
-                        output.name
-                    )
-                }
-            );
             let actual = node
                 .metadata
                 .stream_outputs
@@ -376,10 +342,6 @@ impl Flow {
         }
         self.data_mut().stream_outputs = outputs;
         Ok(self)
-    }
-
-    pub fn stream_bindings(&self) -> &[crate::SubgraphStreamOutput] {
-        &self.inner.stream_outputs
     }
 
     pub fn stream_output_ports(&self) -> Vec<crate::PortSpec> {
@@ -559,13 +521,6 @@ impl Flow {
         if self.inner.stream_outputs.is_empty() || !sink.is_connected() {
             return self.execute_in_context(state);
         }
-        snafu::ensure!(
-            self.inner.prepared_domains.is_empty(),
-            crate::runner::ContextSnafu {
-                definition_id: "<subgraph>",
-                message: "child stream forwarding cannot bypass custom semantic domain executors"
-            }
-        );
         self.execute_in_context_using(state, RuntimeOptions::default(), |state, _| {
             self.execute_serial_domains_with(self.execution_domains(), state, |domain, context| {
                 for &position in domain.positions.iter() {

@@ -247,7 +247,3 @@ observation, publication, and domain-output merging. It borrows the sink synchro
 a forwarding worker or add a queue. Disconnected sinks use the ordinary execution path. The compiler uses
 `with_input_guards` to bind success prerequisites once; dynamic execution, generated execution, and stream
 forwarding all consume those guards. Typed generated-domain optimizations retain their normal fallback.
-
-Custom semantic bodies installed with `with_prepared_domains` cannot be bypassed safely by a generic
-stream adapter. Connected forwarding rejects such a scope before business work; ordinary or disconnected
-execution continues to use its custom executor. Use the normal prepared task path for stream-exporting bodies.

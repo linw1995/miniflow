@@ -106,7 +106,7 @@ impl FlowDependency {
     }
 }
 
-use mf_runtime::{ExecutionContext, NodeExecutionError, SkipCause, WorkflowRunError};
+use mf_runtime::{ExecutionContext, NodeExecutionError, SkipCause};
 use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -168,8 +168,7 @@ pub fn success_conditions<'a>(
 }
 
 type Predicate = Box<dyn Fn(&ExecutionContext) -> Result<bool, NodeExecutionError> + Send + Sync>;
-type Guard =
-    Box<dyn Fn(&ExecutionContext) -> Result<BTreeSet<SkipCause>, WorkflowRunError> + Send + Sync>;
+type Guard = Box<mf_runtime::ExecutionGuard>;
 
 // Preparation binds the predicate structure once; execution does not walk a dependency graph.
 fn bind_condition(clauses: BTreeSet<Clause>) -> Predicate {

@@ -1757,17 +1757,8 @@ fn bind_subgraph_node(
         builder
     };
     let flow = builder.into_tasks().context(FlowConstructionSnafu)?;
-    let flow = flow
-        .with_stream_outputs(stream_outputs)
-        .context(NodeConstructionSnafu {
-            definition_id: node.id.clone(),
-            kind: node.kind.clone(),
-        })?;
-    let input_schema = flow.input_schema().clone();
-    let stream_ports = flow.stream_output_ports();
     if let Some(layouts) = preparation.body_layouts.as_mut() {
-        let streams = flow
-            .stream_bindings()
+        let streams = stream_outputs
             .iter()
             .cloned()
             .map(|mut output| {
@@ -1785,6 +1776,14 @@ fn bind_subgraph_node(
             (flow.execution_domains().clone(), streams),
         );
     }
+    let flow = flow
+        .with_stream_outputs(stream_outputs)
+        .context(NodeConstructionSnafu {
+            definition_id: node.id.clone(),
+            kind: node.kind.clone(),
+        })?;
+    let input_schema = flow.input_schema().clone();
+    let stream_ports = flow.stream_output_ports();
     let body =
         PreparedSubgraph::streaming(identities, outputs, stream_ports, move |state, sink| {
             flow.execute_with_sink(state, sink)

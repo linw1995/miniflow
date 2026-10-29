@@ -14,7 +14,7 @@ worker threads. Connected child scopes execute synchronously through shared seri
 Finite success guards are stored by node identity rather than wrapped in separate domain executors.
 The ordinary input resolver applies them for dynamic and generated invocation. Stream forwarding uses
 the same resolver and node lifecycle, retaining snapshots, typed errors, assignments, and exit cutoffs.
-Opaque custom semantic domain overrides are rejected for connected forwarding rather than bypassed.
+The former finite-Flow semantic-domain override is removed; success guards no longer require it.
 
 Parent emitters enforce their own output contract after child validation. Different children produce
 sparse packets; other aliases are skipped. Source requiredness is retained for a single child, while
@@ -31,5 +31,4 @@ one parent completion and per-pass child scopes.
 
 Only finite TaskStream children are exported. General Event/Stream producers and workflow.call stream
 exports remain outside this change. Slow consumers intentionally delay the active Loop pass. Delivered
-prefixes remain provisional on failure, and arbitrary semantic domain overrides cannot be adapted
-without an explicit streaming contract.
+prefixes remain provisional on failure.

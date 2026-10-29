@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-/// Prepared activation evidence shared by ordinary and adapted task execution.
+/// Prepared node-success prerequisites checked before resolving task inputs.
 pub type ExecutionGuard =
     dyn Fn(&crate::ExecutionContext) -> Result<BTreeSet<SkipCause>, WorkflowRunError> + Send + Sync;
 
