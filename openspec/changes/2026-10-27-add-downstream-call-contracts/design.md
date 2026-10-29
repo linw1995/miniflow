@@ -34,17 +34,12 @@ Ordinary result publication retains its existing behavior. A future dispatch int
 requests before the Parent returns its final `NodeResult`, allowing calls and continuations within a
 single Parent invocation. Requests must never be inferred merely from output presence.
 
-`CallId` combines the caller-local binding index with an invocation number. The future dispatcher
-must allocate invocation numbers uniquely throughout one workflow execution, including nested scopes
-and stream frames. These numbers are not provider tool-call IDs or retry idempotency keys. Allocation,
-pending-call tracking, duplicate completion detection, and cross-execution transport are not supplied
-by the first contract-only implementation.
-
-`CallRequest::respond` retains the request identity in `CallResponse`. `into_outcome(expected)` rejects
-a different binding or invocation. `CallOutcome` distinguishes successful output values, a dependency
-skip with structured causes, and failure with the original typed `WorkflowRunError`. An omitted optional
-result remains absent. Loop scope effects are not part of the response envelope. A missing request for
-another binding does not skip that binding or prevent a later request.
+`CallId` combines the caller-local binding index with a workflow-execution-unique invocation number,
+including nested scopes and stream frames. These are observation identities, not provider tool-call
+IDs or retry idempotency keys. `CallResponse` returns synchronously from invocation with that identity
+and its `CallOutcome`: shared outputs, structured dependency skips, or typed runtime failures.
+There is no separate pending-response protocol, response-construction helper, or mismatch validator.
+Optional results remain absent, and loop scope effects stay inside the invocation.
 
 This borrows branch selection from IfElse but not `exclusive_outputs`: one call can carry several
 parameters, and a Parent can select multiple targets or the same target repeatedly. The first graph
@@ -260,25 +255,13 @@ execution and `ExecutionContext::run_call`, but do not reuse the assumption that
 all inputs. Tool results belong to the invocation and return to its caller; they must not publish a
 parent-graph completion for the reusable target instance or activate its ordinary successors.
 
-Unselected targets produce no invocations and do not delay completion. Calls to the same prepared
-instance are initially serialized; independent invocation contexts do not imply that provider-owned
-state is fresh or that repeated calls are pure. Providers requiring fresh state need an explicit
-construction policy before they are eligible. Reuse the shared worker mechanisms for nested work and
-verify progress with a worker limit of one. Reject recursive callable bindings initially and enforce
-runtime depth, step, deadline, and cancellation limits across child calls.
-
-A thread-bound `WorkerResource` reservation starts before waiting for the executor lock, rejects
-recursive entry, and outlives the lock guard. While any reservation is active, workers do not help
-unrelated queued jobs and blocking child submissions execute inline on the submitting thread. This
-also applies to an external caller holding an executor while using the pool. Queuing nested work
-could otherwise place it behind callers waiting for that executor, including cross-thread wait cycles.
-Completed child results are consumed before helping unrelated work.
-
-This first implementation trades parallelism inside a tool invocation for predictable progress:
-ordinary callers retain parallel scheduling, while a tool's nested work shares its current thread.
-Dispatch must hold the reservation across lock acquisition and execution. Nonblocking `try_submit`
-retains its queue-only contract and must not be used for children awaited while holding a reservation.
-The worker prerequisite itself does not activate tools or serialize node instances.
+Unselected targets produce no invocations and do not delay completion. Calls reuse the ordinary
+`TaskNode` and `TaskStreamNode` contract: shared `Send + Sync` instances execute through `&self`, with
+invocation-local contexts. Nodes own synchronization and recovery of their internal state. Reuse does
+not imply fresh state or pure operations. The runtime adds no target mutex, poisoning, resource
+reservation, or forced-inline worker policy. Existing bounded worker scheduling handles nested work,
+including worker-limit-one execution. Preparation rejects recursive callable bindings; runtime scope,
+step, deadline, and cancellation limits remain shared across calls.
 
 ## Schema and LLM boundary
 
@@ -343,8 +326,8 @@ ordinary input edges. Static Flow and Iteration bodies own separate call tables 
 Generated finite runners freeze call tables, visibility, and success guards alongside execution domains.
 Bindings use generated node positions, including nested scopes whose definition order differs. Startup
 compares complete provider metadata and the generated scope fingerprint before enabling dispatch; it
-neither rebuilds adjacency nor sorts the graph. Typed transfer paths are disabled in call-bearing scopes
-with a `directed_call` fallback, preserving their external snapshots and semantic guard bodies.
+neither rebuilds adjacency nor sorts the graph. Typed transfers retain ordinary ownership and domain
+checks, including external input reads by callable targets. Eligible unrelated chains remain optimizable.
 Native plans retain ordinary message ownership. Calls may read same-frame producers and pure initial
 configuration chains; they reject joins with other message owners. Per-message startup prerequisites
 wait only for required initial execution domains, then import a fixed visibility set. This preserves
