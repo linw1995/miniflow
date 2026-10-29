@@ -140,7 +140,11 @@ impl WorkflowDefinitionVersion {
         matches!(self, Self::V2026_10_28)
     }
 
-    pub fn supports_flows(self) -> bool {
+    pub fn supports_child_streams(self) -> bool {
+        matches!(self, Self::V2026_10_28)
+    }
+
+    pub fn supports_nested_flows(self) -> bool {
         matches!(self, Self::V2026_10_25 | Self::V2026_10_28)
     }
 
@@ -240,6 +244,8 @@ pub const MAX_SCHEDULED_STEPS: usize = 10_000;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopDefinition {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stream_outputs: BTreeMap<String, OutputReferenceDefinition>,
     pub max_iterations: u16,
     pub variables: Vec<LoopVariableDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

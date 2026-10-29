@@ -764,6 +764,16 @@ pub trait TaskNode: Send + Sync {
         inputs: Inputs,
         ctx: &mut crate::ExecutionContext,
     ) -> Result<crate::NodeResult, NodeExecutionError>;
+
+    /// Executes with an explicitly connected sink when a containing scope exports emissions.
+    fn execute_with_sink(
+        &self,
+        inputs: Inputs,
+        context: &mut crate::ExecutionContext,
+        _sink: &mut dyn crate::EmissionSink,
+    ) -> Result<crate::NodeResult, NodeExecutionError> {
+        self.execute(inputs, context)
+    }
 }
 
 /// Reflects an instance's dynamic input and output contracts before execution.

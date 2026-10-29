@@ -284,3 +284,15 @@ Call declarations may add a static public `description`. Each projected `CallPar
 `schema_constraints()` for decoded-value refinements; every constraint applies. External schemas are
 removed before projection, including opaque credentials or configuration types. These descriptors are
 provider-neutral and contain no runtime values, environment values, or field-default results.
+
+## Forwarding finite child emissions
+
+`Flow::with_stream_outputs` installs compiler-resolved `SubgraphStreamOutput` bindings. Each binding
+retains its child node index, exact source `PortSpec`, parent-facing alias, and exported optionality. `stream_output_ports`
+projects the containing node's emission contract. Shared values and sensitivity markers survive projection.
+
+`Flow::execute_with_sink` executes a connected scope in order through its normal input resolution,
+observation, publication, and domain-output merging. It borrows the sink synchronously and does not spawn
+a forwarding worker or add a queue. Disconnected sinks use the ordinary execution path. The compiler uses
+`with_input_guards` to bind success prerequisites once; dynamic execution, generated execution, and stream
+forwarding all consume those guards. Typed generated-domain optimizations retain their normal fallback.

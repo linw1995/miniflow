@@ -831,7 +831,7 @@ impl ExecutionContext {
         executor: &crate::TaskStreamExecutor,
         inputs: Inputs,
         sink: &mut dyn crate::EmissionSink,
-    ) -> Result<(), crate::NodeExecutionError> {
+    ) -> Result<Option<LoopSummary>, crate::NodeExecutionError> {
         let snapshot_inputs = self.snapshots.as_ref().map(|_| inputs.clone());
         self.capture_node(node, &inputs, None, crate::SnapshotOutcome::Started, None);
         let result = self.with_node(node.definition_id.clone(), |context| {
@@ -839,6 +839,7 @@ impl ExecutionContext {
         });
         let result = result.and_then(|result| {
             let snapshot = self.snapshots.as_ref().map(|_| result.clone());
+            let summary = result.loop_summary.clone();
             self.publish(node, Some(result))?;
             if let Some(inputs) = &snapshot_inputs {
                 self.capture_node(
@@ -849,7 +850,7 @@ impl ExecutionContext {
                     None,
                 );
             }
-            Ok(())
+            Ok(summary)
         });
         if let Err(error) = &result
             && let Some(inputs) = &snapshot_inputs

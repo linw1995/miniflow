@@ -190,7 +190,7 @@ fn conversation_example_hosts_a_supplied_workflow() {
     let database = mf_chat::ChatDatabase::open(path).unwrap();
     let id = completions[0]["invocation"]["session_id"].as_str().unwrap();
     assert_eq!(database.session(id).unwrap().title, "Generated title");
-    assert_eq!(database.history(id, 4096).unwrap().history.len(), 4);
+    assert_eq!(database.history(id).unwrap().history.len(), 4);
     assert_eq!(
         database
             .usage(Default::default())

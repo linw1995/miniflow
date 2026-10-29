@@ -14,6 +14,8 @@ enum Error {
     },
     #[snafu(display("timed out waiting for fixture delivery gate `{}`", path.display()))]
     DeliveryGateTimeout { path: PathBuf },
+    #[snafu(display("fixture iteration item {count} failed"))]
+    ItemFailed { count: usize },
 }
 
 #[derive(NodeValue)]
@@ -245,5 +247,73 @@ inventory::submit! {
     NodeRegistration {
         kind: "fixture.task_stream_join",
         factory: NodeFactory::Plain(|_| PreparedNode::typed_task(Join, NodeMetadata::default())),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IterationProbe {
+    #[serde(default)]
+    wait_first: Option<PathBuf>,
+    #[serde(default)]
+    marker_dir: Option<PathBuf>,
+    #[serde(default)]
+    fail_count: Option<usize>,
+}
+
+impl TypedTaskStreamNode for IterationProbe {
+    type Input = Request;
+    type Output = Reply;
+    type Emission = Increment;
+
+    fn execute(
+        &self,
+        input: Request,
+        context: &mut ExecutionContext,
+        emitter: &mut TypedEmitter<'_, '_, Increment>,
+    ) -> Result<TypedNodeResult<Reply>, NodeExecutionError> {
+        if let Some(directory) = &self.marker_dir {
+            let path = directory.join(input.count.to_string());
+            std::fs::write(&path, "started")
+                .context(WriteMarkerSnafu { path })
+                .boxed()?;
+        }
+        if emitter.is_connected() {
+            if input.count == 1
+                && let Some(path) = &self.wait_first
+            {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !path.exists() {
+                    if let Some(error) = context.cancellation().failure() {
+                        return Err(error.into());
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        DeliveryGateTimeoutSnafu { path }.fail::<()>().boxed()?;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            emitter.send(Increment { delta: input.count })?;
+        }
+        if self.fail_count == Some(input.count) {
+            ItemFailedSnafu { count: input.count }
+                .fail::<()>()
+                .boxed()?;
+        }
+        Ok(Reply { total: input.count }.into())
+    }
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "fixture.iteration_stream",
+        factory: NodeFactory::Plain(|config| {
+            let node = mf_runtime::deserialize_config(config)?;
+            let mut prepared = PreparedNode::typed_task_stream::<IterationProbe>(node, NodeMetadata::default())?;
+            if std::env::var_os("MF_FIXTURE_STREAM_CONTRACT_CHANGE").is_some() {
+                prepared.metadata.stream_outputs[0].value_type = mf_runtime::ValueType::String;
+            }
+            Ok(prepared)
+        }),
     }
 }

@@ -106,7 +106,7 @@ impl FlowDependency {
     }
 }
 
-use mf_runtime::{ExecutionContext, NodeExecutionError, SkipCause, WorkflowRunError};
+use mf_runtime::{ExecutionContext, NodeExecutionError, SkipCause};
 use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -169,8 +169,7 @@ pub fn success_conditions<'a>(
 }
 
 type Predicate = Box<dyn Fn(&ExecutionContext) -> Result<bool, NodeExecutionError> + Send + Sync>;
-type Guard =
-    Box<dyn Fn(&ExecutionContext) -> Result<BTreeSet<SkipCause>, WorkflowRunError> + Send + Sync>;
+type Guard = Box<mf_runtime::ExecutionGuard>;
 
 // Preparation binds the predicate structure once; execution does not walk a dependency graph.
 fn bind_condition(clauses: BTreeSet<Clause>) -> Predicate {
@@ -222,70 +221,22 @@ pub fn bind_task_guards(
     flow: mf_runtime::Flow,
     guards: Vec<Vec<SuccessCondition>>,
 ) -> mf_runtime::Flow {
-    let mut guards: Vec<_> = guards
+    let guards: Vec<_> = guards
         .into_iter()
         .enumerate()
-        .map(|(position, conditions)| {
-            (!conditions.is_empty()).then(|| {
-                bind_guards(
-                    flow.nodes()[flow.execution_order()[position].index()]
-                        .definition_id
-                        .to_string(),
-                    conditions,
-                )
-            })
+        .filter_map(|(position, conditions)| {
+            if conditions.is_empty() {
+                return None;
+            }
+            let node = flow.execution_order()[position];
+            let guard: Arc<mf_runtime::ExecutionGuard> = Arc::from(bind_guards(
+                flow.nodes()[node.index()].definition_id.to_string(),
+                conditions,
+            ));
+            Some((node, guard))
         })
         .collect();
-    let mut executors = Vec::new();
-    for domain in flow.execution_domains().domains() {
-        if !domain
-            .positions
-            .iter()
-            .any(|&position| guards[position].is_some())
-        {
-            continue;
-        }
-        let positions: Vec<_> = domain
-            .positions
-            .iter()
-            .map(|&position| (position, guards[position].take()))
-            .collect();
-        let executor: Arc<mf_runtime::GeneratedDomainExecutor> = Arc::new(move |flow, ctx| {
-            for (position, guard) in &positions {
-                if *position > ctx.scope_exit_cutoff() || ctx.scope_exit_requested() {
-                    break;
-                }
-                if let Some(guard) = guard {
-                    let node = &flow.nodes()[flow.execution_order()[*position].index()];
-                    flow.execute_resolved_position(
-                        *position,
-                        ctx,
-                        |node, ctx, inputs| {
-                            ctx.resolve_node_inputs(
-                                node,
-                                flow.plan().dependencies[*position]
-                                    .iter()
-                                    .map(mf_runtime::FlowDependency::borrowed),
-                                &[],
-                                inputs,
-                                guard(ctx)?,
-                            )
-                        },
-                        |inputs, ctx| {
-                            node.node
-                                .execute(inputs, ctx)
-                                .map(mf_runtime::GeneratedNodeResult::Dynamic)
-                        },
-                    )?;
-                } else {
-                    flow.execute_position(*position, ctx)?;
-                }
-            }
-            Ok(())
-        });
-        executors.push((domain.id, executor));
-    }
-    flow.with_prepared_domains(executors)
+    flow.with_input_guards(guards)
 }
 
 pub fn bind_stream_guards(

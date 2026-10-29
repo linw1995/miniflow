@@ -117,7 +117,7 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
     let database = ChatDatabase::open(path).unwrap();
     let id = session_id.unwrap();
     assert_eq!(database.session(&id).unwrap().title, "Generated title");
-    assert_eq!(database.history(&id, 4096).unwrap().history.len(), 4);
+    assert_eq!(database.history(&id).unwrap().history.len(), 4);
     assert_eq!(
         database
             .usage(mf_chat::UsageQuery {
@@ -220,7 +220,7 @@ fn tool_chat_workflow_reuses_the_application_contract() {
     let database = ChatDatabase::open(path).unwrap();
     let id = session_id.unwrap();
     assert_eq!(database.session(&id).unwrap().title, "Tool title");
-    let history = database.history(&id, 4096).unwrap().history;
+    let history = database.history(&id).unwrap().history;
     assert_eq!(history.len(), 4);
     assert!(
         matches!(&history[1],mfn_llm::ChatMessage::Assistant {content,..} if content=="first answer")
@@ -731,10 +731,10 @@ fn loop_conversations() {
         Reply::json(serde_json::json!({"error":{"message":"second iteration failed"}}));
     failure.status = 400;
     let server = Server::start(vec![
-        Reply::text("intermediate answer"),
-        Reply::text("final answer"),
+        Reply::stream_text("intermediate answer"),
+        Reply::stream_text("final answer"),
         Reply::text("Loop title"),
-        Reply::text("partial answer"),
+        Reply::stream_text("partial answer"),
         failure,
     ]);
     let root = tempfile::tempdir().unwrap();
@@ -777,6 +777,7 @@ fn loop_conversations() {
                 prompt: prompt.into(),
             })
             .unwrap();
+        let mut saw_preview = false;
         loop {
             match next() {
                 ChatEvent::Submitted {
@@ -788,12 +789,17 @@ fn loop_conversations() {
                     invocations.push(invocation);
                 }
                 ChatEvent::Observing(_) => {}
+                ChatEvent::Preview { preview, .. } => {
+                    saw_preview = true;
+                    assert!(!preview.segments.is_empty());
+                }
                 ChatEvent::Finished {
                     resolution,
                     status,
                     capture_error,
                     ..
                 } => {
+                    assert!(saw_preview);
                     assert!(status.unwrap().success());
                     assert!(capture_error.is_none());
                     let resolution = resolution.unwrap();
@@ -836,7 +842,7 @@ fn loop_conversations() {
     controller.close().unwrap();
     let database = ChatDatabase::open(path).unwrap();
     let history = database
-        .history(session_id.as_ref().unwrap(), 4096)
+        .history(session_id.as_ref().unwrap())
         .unwrap()
         .history;
     assert_eq!(history.len(), 2);

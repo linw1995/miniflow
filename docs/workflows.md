@@ -37,7 +37,7 @@ syntax within their existing scope and message-domain restrictions.
 
 ## Reusable Flows
 
-Version `2026-10-25` adds `workflow.call`, a terminal node supplied by `mfn-core`. Declare reusable
+Version `2026-10-25` adds `workflow.call`, supplied by `mfn-core`. Declare reusable
 sources in `flows`; Cargo node packages remain in `dependencies`:
 
 ```json
@@ -74,9 +74,21 @@ markers cross the boundary without JSON conversion. Configuration references sta
 
 Calls have isolated input bindings, outputs, and Loop state. They share cancellation, bounded workers,
 future driving, and the caller's remaining step budget. Provider failures retain their typed error
-chains with call context. Children cannot consume stdin or expose stream ports in this version;
-terminal LLM calls are supported, and a parent may independently stream its answer. Calls inside an
-Iteration body retain its task-only restriction and cannot hide another Loop or Iteration.
+chains with call context. Children cannot consume stdin. Calls inside an Iteration body may expose
+finite TaskStream ports, but cannot hide another Loop or Iteration.
+
+With parent version `2026-10-28`, a call also exposes the child's selected TaskStream outputs under
+their public names. Ordinary outputs remain terminal ports; incremental outputs remain separate
+stream ports. Nested calls and exported Loop streams compose through these same public interfaces,
+without an additional export map on the call. A child may declare its stream interface using an
+earlier workflow version; the caller must support child streams.
+
+Connected calls forward increments synchronously with the normal backpressure, cancellation,
+guards, snapshots, and typed error chains. Without a stream consumer, the child runs terminal-only.
+Each source keeps its emission packets; multiple sources produce sparse packets and their selected
+workflow outputs require `optional: true` where appropriate. Child Event/Stream producers and internal
+stream dataflow edges remain unsupported in these finite bodies. The parent owns stream scheduling
+and limits; a child's explicit `execution` configuration does not create a nested stream runtime.
 
 All referenced providers join the root dependency build and adjacent lock. Each child's provider paths
 resolve against its own file. Compatible declarations of the same package combine features and default
@@ -968,6 +980,40 @@ pass index when execution has begun. This feature follows Dify's
 array [Iteration](https://docs.dify.ai/en/cloud/use-dify/nodes/iteration), export format,
 conversation variables, parallel execution, and error-continue modes are separate features.
 
+### Forwarding child streams
+
+Version `2026-10-28` adds an optional `loop.stream_outputs` map. Each key is a stream port on the Loop;
+its value selects a TaskStream output from a node in that body's local scope:
+
+```json
+{
+  "stream_outputs": {
+    "answer": {"node":"chat", "port":"delta"}
+  }
+}
+```
+
+Select `repeat.answer` as a public workflow output or connect it to a downstream consumer. The
+[chat Loop example](../examples/chat-loop-flow.json) forwards each model request's deltas while carrying
+history and usage through ordinary loop variables. Its terminal result remains the final variable state.
+
+Forwarding is synchronous: a slow consumer applies the existing stream backpressure to the child and
+pauses the current pass. Cancellation or delivery failure propagates through the normal execution path;
+previously delivered prefixes remain provisional. The Loop publishes its terminal values and pass summary
+once, after its body finishes. Native message domains retain independent delivery ordering: receiving
+a terminal record does not replace draining pending increments. The Loop does not collect deltas to
+reconstruct the terminal result.
+
+With no stream subscriber, children retain terminal-only execution. A nested Loop can export another
+Loop's stream port, with an explicit mapping at each scope boundary. Export names must be nonblank and
+must not overlap loop variable names. Ordinary child outputs, unknown ports, and free-running Stream or
+Event producers cannot be exported through this finite-body mechanism.
+
+Emissions from different children remain separate packets. Ports belonging to other children are absent
+from that packet; select such public outputs with `optional: true`. A single child retains its own stream
+port requiredness. Existing dependency guards, loop assignments, and exit cutoffs apply before invoking
+any child. Generated runners freeze the selected port contracts and reject declaration drift before execution.
+
 ## Validation
 
 The CLI checks node IDs, edge endpoints, selected output names, reserved Loop controls, and cycles in every scope before generating runner code. The compiled runner requires a registered Loop declaration and validates ordinary kinds, configuration, ports, type compatibility, required input connections, and Loop state contracts before installation. Every failure returns a nonzero status and preserves an existing output executable.
@@ -1038,12 +1084,40 @@ JSON null at each failed input position. `remove_failed` omits failed results wh
 A skipped body result counts as an item failure. `continue_on_error` exposes `List(Any)` because the array may contain
 null; the other policies expose a list of the selected body's output type.
 
+Version `2026-10-28` also allows `config.stream_outputs` to export local body TaskStream ports:
+
+```json
+{
+  "mode": "parallel",
+  "stream_outputs": {
+    "answer": {"node": "model", "port": "delta"}
+  }
+}
+```
+
+Add the map alongside `mode`, `on_error`, and `body`, then select `iteration.answer` as a workflow
+output or connect it to a stream consumer. Export names must be nonblank and distinct from `results`.
+The body still requires an ordinary terminal `result`; incremental outputs cannot replace it.
+Each export preserves its source value type and packet ownership, including sparse packets from
+different children. Nested stream dataflow and free-running Event/Stream children remain unsupported.
+
+Sequential items forward increments synchronously. Parallel items remain concurrent and forward
+increments in arrival order; terminal `results` retain input order. Values are forwarded unchanged,
+so include item identity in the child's emission when consumers need to distinguish items. Parallel
+forwarding uses a rendezvous and acknowledges each emission after delivery to the parent sink,
+keeping backpressure bounded without buffering an item's complete stream. The borrowed sink stays
+on the caller thread. Runtime worker limits still cap item concurrency, including a one-worker run.
+
+Body failure policies continue to govern collected item results. Already delivered prefixes from a
+failed item are provisional and are not retracted. Cancellation and stream delivery failure remain
+fatal under every policy. Without a stream subscriber, the original terminal-only execution path
+and item scheduling apply.
+
 The current scope supports one iteration level. Body graphs cannot contain another Iteration node, a structured Loop construct, or access outer
 context outputs directly. Pass values through the input collection or add nodes inside the body. The runner description and
 terminal UI show the Iteration node as one outer graph node. OTel emits separate item and body-node spans and logs with
 the outer node ID and item index; failures remain visible even under `continue_on_error` and `remove_failed`. See
-[observation contracts](observability.md#iteration-observation). Answer-node streaming is outside the current workflow
-runner's output contract.
+[observation contracts](observability.md#iteration-observation).
 
 ## Dependency locks
 

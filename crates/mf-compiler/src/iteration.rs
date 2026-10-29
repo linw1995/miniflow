@@ -16,6 +16,16 @@ pub fn body_definition(
     parent: &WorkflowDefinition,
     config: &IterationConfig,
 ) -> Result<WorkflowDefinition, String> {
+    if !config.stream_outputs.is_empty() && !parent.version.supports_child_streams() {
+        return Err("Iteration child streams require version 2026-10-28".into());
+    }
+    if config
+        .stream_outputs
+        .keys()
+        .any(|name| name.trim().is_empty() || name == "results")
+    {
+        return Err("Iteration stream names must be nonblank and distinct from results".into());
+    }
     for node in &config.body.nodes {
         if node.id.as_str() == ITERATION_INPUT_ID {
             return Err(format!("body node ID `{ITERATION_INPUT_ID}` is reserved"));

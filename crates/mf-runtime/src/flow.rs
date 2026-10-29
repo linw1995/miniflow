@@ -203,6 +203,8 @@ struct FlowData {
     generated_domains: BTreeMap<usize, Arc<GeneratedDomainExecutor>>,
     call_interfaces: crate::CallInterfaces,
     calls: Option<crate::invocation::CallTable>,
+    input_guards: BTreeMap<NodeId, Arc<crate::ExecutionGuard>>,
+    stream_outputs: Vec<crate::SubgraphStreamOutput>,
 }
 
 impl Flow {
@@ -268,6 +270,8 @@ impl Flow {
                 generated_domains: BTreeMap::new(),
                 call_interfaces: Default::default(),
                 calls: None,
+                input_guards: BTreeMap::new(),
+                stream_outputs: Vec::new(),
             }),
         }
     }
@@ -289,14 +293,11 @@ impl Flow {
         domains: impl IntoIterator<Item = (usize, Arc<GeneratedDomainExecutor>)>,
     ) -> Self {
         for (id, executor) in domains {
-            let fallback = self.inner.generated_domains.get(&id).cloned();
             self.data_mut().generated_domains.insert(
                 id,
                 Arc::new(move |flow, state| {
                     if state.snapshot_recorder().is_none() && state.scope_path().is_empty() {
                         executor(flow, state)
-                    } else if let Some(fallback) = &fallback {
-                        fallback(flow, state)
                     } else {
                         flow.execute_domain_positions(
                             &flow.execution_domains().domains()[id],
@@ -309,13 +310,74 @@ impl Flow {
         self
     }
 
-    /// Binds semantic execution bodies that also run with snapshots and scoped frames.
-    pub fn with_prepared_domains(
+    pub fn with_input_guards(
         mut self,
-        domains: impl IntoIterator<Item = (usize, Arc<GeneratedDomainExecutor>)>,
+        guards: impl IntoIterator<Item = (NodeId, Arc<crate::ExecutionGuard>)>,
     ) -> Self {
-        self.data_mut().generated_domains.extend(domains);
+        self.data_mut().input_guards.extend(guards);
         self
+    }
+
+    /// Binds compiler-resolved child exports and checks their frozen port contracts.
+    pub fn with_stream_outputs(
+        mut self,
+        outputs: Vec<crate::SubgraphStreamOutput>,
+    ) -> Result<Self, crate::NodeBuildError> {
+        use snafu::{OptionExt, ensure};
+        let mut names = BTreeSet::new();
+        for output in &outputs {
+            ensure!(
+                !output.name.trim().is_empty() && names.insert(&output.name),
+                crate::NodeInvalidSubgraphSnafu {
+                    message: "child stream output names must be nonblank and unique"
+                }
+            );
+            let node = self.nodes().get(output.node.index()).with_context(|| {
+                crate::NodeInvalidSubgraphSnafu {
+                    message: format!(
+                        "stream export `{}` refers to unknown child index {}",
+                        output.name,
+                        output.node.index()
+                    ),
+                }
+            })?;
+            let actual = node
+                .metadata
+                .stream_outputs
+                .iter()
+                .find(|port| port.name == output.port.name);
+            ensure!(
+                actual == Some(&output.port),
+                crate::NodeInvalidSubgraphSnafu {
+                    message: format!(
+                        "stream export `{}` source `{}`.`{}` differs from its prepared port contract",
+                        output.name, node.definition_id, output.port.name
+                    )
+                }
+            );
+        }
+        self.data_mut().stream_outputs = outputs;
+        Ok(self)
+    }
+
+    pub fn stream_output_ports(&self) -> Vec<crate::PortSpec> {
+        let sources: BTreeSet<_> = self
+            .inner
+            .stream_outputs
+            .iter()
+            .map(|output| output.node)
+            .collect();
+        self.inner
+            .stream_outputs
+            .iter()
+            .map(|output| {
+                crate::PortSpec::owned(
+                    &output.name,
+                    output.port.value_type.clone(),
+                    sources.len() == 1 && !output.optional,
+                )
+            })
+            .collect()
     }
 
     pub fn execute_position(
@@ -353,7 +415,10 @@ impl Flow {
                         .map(crate::FlowDependency::borrowed),
                     transferred_inputs,
                     inputs,
-                    BTreeSet::new(),
+                    self.inner
+                        .input_guards
+                        .get(&self.execution_order()[position])
+                        .map_or_else(|| Ok(BTreeSet::new()), |guard| guard(ctx))?,
                 )
             },
             invoke,
@@ -459,13 +524,72 @@ impl Flow {
         state: &mut crate::ExecutionContext,
         options: RuntimeOptions,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        self.execute_in_context_using(state, options, |state, worker_limit| {
+            self.execute_domains(self.execution_domains(), state, worker_limit)
+        })
+    }
+
+    /// Projects selected child emissions synchronously through the caller's sink.
+    /// The ordered scope retains ordinary input guards, snapshots, and Loop exit cutoffs.
+    pub fn execute_with_sink(
+        &self,
+        state: &mut crate::ExecutionContext,
+        sink: &mut dyn crate::EmissionSink,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        if self.inner.stream_outputs.is_empty() || !sink.is_connected() {
+            return self.execute_in_context(state);
+        }
+        self.execute_in_context_using(state, RuntimeOptions::default(), |state, _| {
+            self.execute_serial_domains_with(self.execution_domains(), state, |domain, context| {
+                for &position in domain.positions.iter() {
+                    if position > context.scope_exit_cutoff() || context.scope_exit_requested() {
+                        break;
+                    }
+                    let id = self.execution_order()[position];
+                    if self
+                        .inner
+                        .stream_outputs
+                        .iter()
+                        .any(|output| output.node == id)
+                    {
+                        let mut projected = crate::subgraph::ProjectedSink {
+                            sink,
+                            outputs: &self.inner.stream_outputs,
+                            node: id,
+                            definition_id: &self.nodes()[id.index()].definition_id,
+                        };
+                        self.execute_generated_position(
+                            position,
+                            &[],
+                            context,
+                            |inputs, context| {
+                                self.nodes()[id.index()]
+                                    .node
+                                    .execute_with_sink(inputs, context, &mut projected)
+                                    .map(crate::GeneratedNodeResult::Dynamic)
+                            },
+                        )?;
+                    } else {
+                        self.execute_position(position, context)?;
+                    }
+                }
+                Ok(())
+            })
+        })
+    }
+
+    fn execute_in_context_using(
+        &self,
+        state: &mut crate::ExecutionContext,
+        options: RuntimeOptions,
+        execute: impl FnOnce(&mut crate::ExecutionContext, usize) -> Result<(), crate::WorkflowRunError>,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
         if state.invocation_path().is_empty() {
             state.configure_worker_limit(options.max_parallel_domains);
         }
         if state.scope_path().is_empty() {
             state.bind_workflow_inputs(&self.inner.input_schema)?;
         }
-        let domains = &self.inner.plan.execution_domains;
         // Scoped domains retain their ordering for Loop writes and exit cutoffs;
         // parallel work inside those domains still uses the full shared pool.
         let worker_limit = if state.scope_path().is_empty() {
@@ -476,7 +600,7 @@ impl Flow {
         // Nested parallel work initializes this scope's pool on demand and shares
         // it across domains, Loop passes, and Iteration items.
         let _owned_workers = state.worker_scope();
-        self.execute_domains(domains, state, worker_limit)?;
+        execute(state, worker_limit)?;
         let mut workflow_outputs = FlowOutputs::new();
         for output in self.inner.plan.outputs.iter() {
             let id = self.inner.nodes[output.node_id.index()]
@@ -646,6 +770,20 @@ impl Flow {
         plan: &ExecutionDomains,
         state: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
+        self.execute_serial_domains_with(plan, state, |domain, context| {
+            self.execute_domain(domain, context)
+        })
+    }
+
+    fn execute_serial_domains_with(
+        &self,
+        plan: &ExecutionDomains,
+        state: &mut crate::ExecutionContext,
+        mut execute: impl FnMut(
+            &ExecutionDomain,
+            &mut crate::ExecutionContext,
+        ) -> Result<(), crate::WorkflowRunError>,
+    ) -> Result<(), crate::WorkflowRunError> {
         for domain in plan.domains() {
             if domain.first_position > state.scope_exit_cutoff() {
                 continue;
@@ -654,7 +792,7 @@ impl Flow {
                 state.observation().cloned(),
                 domain.snapshot_visibility.clone(),
             );
-            if let Err(error) = self.execute_domain(domain, &mut context) {
+            if let Err(error) = execute(domain, &mut context) {
                 state.select_observation_failure(&error);
                 return Err(error);
             }

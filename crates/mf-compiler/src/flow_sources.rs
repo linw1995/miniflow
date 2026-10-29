@@ -218,7 +218,7 @@ impl Resolver {
             }
         );
         ensure!(
-            definition.flows.is_empty() || definition.version.supports_flows(),
+            definition.flows.is_empty() || definition.version.supports_nested_flows(),
             InvalidSnafu {
                 reference,
                 message: "Flow sources require version 2026-10-25"
@@ -312,7 +312,7 @@ impl Resolver {
                         node: node.id.as_str(),
                     })?;
                 ensure!(
-                    version.supports_flows(),
+                    version.supports_nested_flows(),
                     InvalidSnafu {
                         reference: node.id.as_str(),
                         message: "Flow calls require version 2026-10-25"
@@ -376,7 +376,7 @@ impl Resolver {
                     })
                 };
                 ensure!(
-                    child.execution.is_none(),
+                    child.execution.is_none() || version.supports_child_streams(),
                     InvalidSnafu {
                         reference: &config.flow,
                         message: "Flow calls require a terminal child interface"

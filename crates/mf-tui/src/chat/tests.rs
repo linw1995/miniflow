@@ -239,7 +239,7 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
             if abandon { 1 } else { 2 }
         );
         if !abandon {
-            let history = database.history(&invocation.session_id, 4096).unwrap();
+            let history = database.history(&invocation.session_id).unwrap();
             let message = history.history[1].clone().encode().unwrap();
             assert_eq!(message["metadata"], json!({"source":"fixture"}));
         }
@@ -299,7 +299,6 @@ fn history_pages_start_at_the_tail_and_do_not_overlap_across_failed_turns() {
                     model: None,
                 },
                 None,
-                4096,
             )
             .unwrap();
         database

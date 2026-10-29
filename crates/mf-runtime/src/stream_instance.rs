@@ -91,7 +91,10 @@ pub enum StreamError {
         #[snafu(source(from(crate::NodeExecutionError, Arc::new)))]
         source: Arc<crate::NodeExecutionError>,
     },
-    #[snafu(display("stream producer node `{definition_id}` failed: {source}"))]
+    #[snafu(
+        display("stream producer node `{definition_id}` failed: {source}"),
+        visibility(pub)
+    )]
     Producer {
         definition_id: crate::DefinitionId,
         #[snafu(source(from(NodeExecutionError, Arc::new)))]
@@ -500,6 +503,7 @@ fn run_producer(
         publication_failed: false,
     };
     let failure = shared.state.lock().unwrap().failure.clone();
+    let mut loop_summary = None;
     let result = if let Some(error) = failure {
         Err(error)
     } else {
@@ -531,10 +535,10 @@ fn run_producer(
                         result
                     })
             }
-            ProducerNode::TaskStream(node) => {
-                job.context
-                    .execute_task_stream(&plan.nodes()[index], node, job.inputs, &mut sink)
-            }
+            ProducerNode::TaskStream(node) => job
+                .context
+                .execute_task_stream(&plan.nodes()[index], node, job.inputs, &mut sink)
+                .map(|summary| loop_summary = summary),
         }))
         .unwrap_or_else(|payload| Err(panic_error(payload).into()))
         .context(ProducerSnafu {
@@ -565,7 +569,11 @@ fn run_producer(
     }
     if let Some(callback) = job.callback {
         match &result {
-            Ok(()) => callback.succeeded(sink.emitted, sink.ports.into_iter().collect()),
+            Ok(()) => callback.succeeded_with_loop_summary(
+                sink.emitted,
+                sink.ports.into_iter().collect(),
+                loop_summary,
+            ),
             Err(error) => callback.failed(
                 if sink.publication_failed || error.phase() == "output" {
                     FailurePhase::Publication

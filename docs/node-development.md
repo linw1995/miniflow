@@ -845,8 +845,15 @@ impl TypedTaskStreamNode for Count {
 One invocation calls this entry point once. Returning without an emission is valid, even with a connected sink.
 `NodeExecution::as_task_node` and `into_task_node` also accept combined executors; terminal-only adaptation
 uses a discard sink and never allocates an unread receiver. `TaskStreamExecutor::execute_with_sink` accepts
-an explicit `EmissionSink` for direct incremental consumption. Required stream fields constrain each actual
+an explicit `EmissionSink` for direct incremental consumption. The default `TaskNode::execute_with_sink`
+keeps ordinary task behavior; combined executors override it to use the same validated emitter. Required stream fields constrain each actual
 emission, not how many emissions an invocation produces.
+
+Containing nodes can use `PreparedSubgraph::streaming` with declared stream ports and a sink-aware body.
+Its `execute_in_context` path uses a discard sink; `execute_with_sink` forwards through the caller's
+borrowed sink. Loop uses this path for explicit child stream exports, including nested Loops.
+`ExecutionContext::execute_task_stream` returns the optional Loop summary after publishing the terminal
+result so native observation can preserve the container's completion facts.
 
 Every attempted emission is encoded and validated even when discarded. `is_connected()` allows providers
 to skip constructing incremental values. Use `?` to propagate send errors, or explicitly handle a

@@ -165,6 +165,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                         llm_support::Reply::stream_text("reply"),
                         llm_support::Reply::text("reply"),
                     ]
+                } else if name == "chat-loop-flow.json" {
+                    vec![llm_support::Reply::stream_text("reply"); 2]
                 } else {
                     vec![llm_support::Reply::text("reply"); 2]
                 },
@@ -284,31 +286,40 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        let mut actual: Value =
-            if matches!(name, "chat-title-flow.json" | "chat-nested-title-flow.json") {
-                let records: Vec<Value> = serde_json::Deserializer::from_slice(&output.stdout)
-                    .into_iter()
-                    .collect::<Result<_, _>>()
-                    .unwrap();
-                let answer: String = records
-                    .iter()
-                    .filter_map(|record| record.get("answer"))
-                    .map(|delta| delta["text"].as_str().unwrap())
-                    .collect();
-                assert_eq!(answer, "reply");
-                assert_eq!(server.as_ref().unwrap().requests()[0].body["stream"], true);
-                records
-                    .into_iter()
-                    .find(|record| record.get("status").is_some())
-                    .unwrap()
-            } else {
-                serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-                    panic!(
-                        "{name}: invalid JSON output: {error}\n{}",
-                        String::from_utf8_lossy(&output.stdout)
-                    )
-                })
-            };
+        let mut actual: Value = if matches!(
+            name,
+            "chat-title-flow.json" | "chat-nested-title-flow.json" | "chat-loop-flow.json"
+        ) {
+            let records: Vec<Value> = serde_json::Deserializer::from_slice(&output.stdout)
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let answer: String = records
+                .iter()
+                .filter_map(|record| record.get("answer"))
+                .map(|delta| delta["text"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                answer,
+                if name == "chat-loop-flow.json" {
+                    "replyreply"
+                } else {
+                    "reply"
+                }
+            );
+            assert_eq!(server.as_ref().unwrap().requests()[0].body["stream"], true);
+            records
+                .into_iter()
+                .find(|record| record.get("status").is_some())
+                .unwrap()
+        } else {
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "{name}: invalid JSON output: {error}\n{}",
+                    String::from_utf8_lossy(&output.stdout)
+                )
+            })
+        };
         if name.starts_with("chat-") || name == "llm-tools.json" {
             let mut identities = std::collections::BTreeSet::new();
             for usage in actual["usages"].as_array_mut().unwrap() {

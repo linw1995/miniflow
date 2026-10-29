@@ -172,6 +172,25 @@ fn validate_loop(
     dependencies: &BTreeMap<String, mf_runtime::NodeDependency>,
     version: WorkflowDefinitionVersion,
 ) -> Result<(), WorkflowCompileError> {
+    if !loop_definition.stream_outputs.is_empty() && !version.supports_child_streams() {
+        return Err(invalid(
+            path,
+            "Loop child streams require version 2026-10-28",
+        ));
+    }
+    for name in loop_definition.stream_outputs.keys() {
+        if name.trim().is_empty()
+            || loop_definition
+                .variables
+                .iter()
+                .any(|variable| &variable.name == name)
+        {
+            return Err(invalid(
+                path,
+                "Loop stream names must be nonblank and distinct from variables",
+            ));
+        }
+    }
     if !loop_definition.body.clusters.is_empty() && !version.supports_clusters() {
         return Err(invalid(path, "node clusters require version 2026-10-23"));
     }

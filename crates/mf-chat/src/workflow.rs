@@ -1214,28 +1214,25 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let profile =
             WorkflowProfile::with_backend("custom", Arc::new(Backend(Arc::clone(&calls)))).unwrap();
-        let mut config = crate::HostConfig::new(profile);
-        config.max_history_bytes = 32;
-        let host = crate::ChatHost::open(directory.path().join("chat.sqlite"), config).unwrap();
+        let host = crate::ChatHost::open(
+            directory.path().join("chat.sqlite"),
+            crate::HostConfig::new(profile),
+        )
+        .unwrap();
         let session = host
             .database()
             .create_session("custom", None, None)
             .unwrap();
         host.submit(&session.id, "first").unwrap().join().unwrap();
-        let error = host
-            .submit(&session.id, "second")
-            .unwrap()
-            .join()
-            .unwrap_err();
-        assert!(error.to_string().contains("history exceeds"));
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        host.submit(&session.id, "second").unwrap().join().unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert_eq!(
             host.database()
                 .messages(&session.id, 10, None)
                 .unwrap()
                 .messages
                 .len(),
-            2
+            4
         );
         host.close().unwrap();
     }
@@ -1279,7 +1276,6 @@ mod tests {
                 model: None,
             },
             retry_of: None,
-            max_history_bytes: crate::DEFAULT_HISTORY_BYTES,
         };
         let result = run_conversation(
             &database,

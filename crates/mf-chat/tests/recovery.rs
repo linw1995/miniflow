@@ -1,7 +1,7 @@
 use diesel::{Connection, connection::SimpleConnection};
 use mf_chat::contract::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit};
 use mf_chat::{ChatDatabase, ConversationResult, ModelIdentity};
-use mf_runtime::{NodeValue, OutputValue};
+use mf_runtime::NodeValue;
 use serde_json::json;
 
 fn begin(database: &ChatDatabase) -> mf_chat::Invocation {
@@ -12,7 +12,7 @@ fn begin(database: &ChatDatabase) -> mf_chat::Invocation {
     };
     let invocation = mf_chat::Invocation::new(&session.id);
     let begun = database
-        .begin_turn_with_invocation(invocation.clone(), "prompt", profile.clone(), None, 1024)
+        .begin_turn_with_invocation(invocation.clone(), "prompt", profile.clone(), None)
         .unwrap();
     assert_eq!(begun.invocation, invocation);
     invocation
@@ -99,7 +99,7 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
     let saved = database.save_recovered(pending.clone()).unwrap();
     assert!(matches!(
         &database
-            .history(&invocation.session_id, 1024)
+            .history(&invocation.session_id)
             .unwrap()
             .history[1],
         mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &Some(metadata())
@@ -120,25 +120,6 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
     assert!(
         database
             .complete_turn(invocation.clone(), conflicting)
-            .is_err()
-    );
-    let history = database
-        .history(&invocation.session_id, 1024)
-        .unwrap()
-        .history;
-    let encoded = serde_json::to_vec(
-        &history
-            .into_iter()
-            .map(|message| message.encode().unwrap())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    database
-        .history(&invocation.session_id, encoded.len())
-        .unwrap();
-    assert!(
-        database
-            .history(&invocation.session_id, encoded.len() - 1)
             .is_err()
     );
 
@@ -302,7 +283,7 @@ fn late_output_cannot_admit_or_revive_a_conversation() {
     }
     assert!(
         database
-            .history(&cancelled.session_id, 1024)
+            .history(&cancelled.session_id)
             .unwrap()
             .history
             .is_empty()
@@ -373,7 +354,7 @@ fn failed_workflow_persists_all_reported_calls_atomically_without_an_assistant_m
     );
     assert!(
         database
-            .history(&invocation.session_id, 1024)
+            .history(&invocation.session_id)
             .unwrap()
             .history
             .is_empty()
@@ -422,7 +403,7 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
         model: Some("fixture-model".into()),
     };
     let second = database
-        .begin_turn(&first.session_id, "next", profile.clone(), None, 1024)
+        .begin_turn(&first.session_id, "next", profile.clone(), None)
         .unwrap();
     assert!(matches!(&second.request.history.unwrap()[1],
         mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &Some(metadata())
@@ -444,7 +425,7 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
         panic!("expected retained reply");
     };
     database.save_recovered(pending).unwrap();
-    let history = database.history(&first.session_id, 4096).unwrap().history;
+    let history = database.history(&first.session_id).unwrap().history;
     assert_eq!(
         history[1],
         mfn_llm::ChatMessage::Assistant {
@@ -470,7 +451,7 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
         model: None,
     };
     let begun = database
-        .begin_turn(&owner.id, "first", identity.clone(), None, 1024)
+        .begin_turn(&owner.id, "first", identity.clone(), None)
         .unwrap();
     assert_eq!(
         database
@@ -483,7 +464,7 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
         .fail_turn(begun.invocation, "interrupted", "process stopped")
         .unwrap();
     let known_empty = database
-        .begin_turn(&owner.id, "second", identity, None, 1024)
+        .begin_turn(&owner.id, "second", identity, None)
         .unwrap();
     database
         .complete_turn(

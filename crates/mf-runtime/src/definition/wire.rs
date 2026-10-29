@@ -57,7 +57,27 @@ fn decode_scope(
         return Ok(());
     };
     ensure!(
-        version.supports_flows()
+        version.supports_child_streams()
+            || scope
+                .get("nodes")
+                .and_then(Value::as_array)
+                .is_none_or(|nodes| nodes.iter().all(|node| {
+                    node.pointer("/loop/stream_outputs")
+                        .is_none_or(|outputs| outputs.as_object().is_some_and(Map::is_empty))
+                        && (node["kind"] != crate::ITERATION_KIND
+                            || node
+                                .pointer("/config/stream_outputs")
+                                .is_none_or(|outputs| {
+                                    outputs.as_object().is_some_and(Map::is_empty)
+                                }))
+                })),
+        InvalidSnafu {
+            path,
+            message: "Child streams require version 2026-10-28"
+        }
+    );
+    ensure!(
+        version.supports_nested_flows()
             || (!scope.contains_key("flows")
                 && scope
                     .get("nodes")
@@ -213,7 +233,27 @@ fn encode_scope(
         return Ok(());
     };
     ensure!(
-        version.supports_flows()
+        version.supports_child_streams()
+            || scope
+                .get("nodes")
+                .and_then(Value::as_array)
+                .is_none_or(|nodes| nodes.iter().all(|node| {
+                    node.pointer("/loop/stream_outputs")
+                        .is_none_or(|outputs| outputs.as_object().is_some_and(Map::is_empty))
+                        && (node["kind"] != crate::ITERATION_KIND
+                            || node
+                                .pointer("/config/stream_outputs")
+                                .is_none_or(|outputs| {
+                                    outputs.as_object().is_some_and(Map::is_empty)
+                                }))
+                })),
+        InvalidSnafu {
+            path,
+            message: "Child streams require version 2026-10-28"
+        }
+    );
+    ensure!(
+        version.supports_nested_flows()
             || (!scope.contains_key("flows")
                 && scope
                     .get("nodes")

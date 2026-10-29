@@ -16,7 +16,7 @@ fn performance_uses_paired_weighted_facts_and_survives_reopen_and_replay() {
     let database = ChatDatabase::open(&path).unwrap();
     let session = database.create_session("default", None, None).unwrap();
     let begun = database
-        .begin_turn(&session.id, "question", identity(), None, 1024)
+        .begin_turn(&session.id, "question", identity(), None)
         .unwrap();
     let cases = [
         ("stream", Some((2_000_000, Some(500_000))), Some(100), None),
@@ -143,7 +143,7 @@ fn invalid_timing_is_rejected_before_persistence_and_overflow_is_explicit() {
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
     let session = database.create_session("default", None, None).unwrap();
     let begun = database
-        .begin_turn(&session.id, "question", identity(), None, 1024)
+        .begin_turn(&session.id, "question", identity(), None)
         .unwrap();
     let mut usage = crate::CallUsage {
         attribution: None,
@@ -209,7 +209,7 @@ fn complete(
     usage: Option<BTreeMap<String, i64>>,
 ) -> crate::Invocation {
     let begun = database
-        .begin_turn(session, "question", identity(), None, 1024)
+        .begin_turn(session, "question", identity(), None)
         .unwrap();
     database
         .complete_turn(
@@ -260,7 +260,7 @@ fn sparse_usage_and_failed_attempts_preserve_unknown_counters_and_group_totals()
         Some(BTreeMap::from([("output_tokens".into(), 3)])),
     );
     let failed = database
-        .begin_turn(&a.id, "cancelled", identity(), None, 1024)
+        .begin_turn(&a.id, "cancelled", identity(), None)
         .unwrap();
     database
         .fail_turn(failed.invocation, "cancelled", "cancelled")
@@ -418,7 +418,7 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
         identity.profile = profile.into();
         identity.model = Some(model.into());
         let begun = database
-            .begin_turn(&owner.id, "question", identity, None, 1024)
+            .begin_turn(&owner.id, "question", identity, None)
             .unwrap();
         database
             .complete_turn(

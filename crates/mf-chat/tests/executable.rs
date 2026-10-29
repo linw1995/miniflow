@@ -352,7 +352,6 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
                     model: None,
                 },
                 None,
-                1024,
             )
             .unwrap();
         let arguments = contract.arguments(begun.request, &parameters).unwrap();
@@ -412,6 +411,7 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
             "../../../examples/chat-loop-flow.json"
         ))
         .unwrap();
+        definition.outputs.retain(|output| output.name != "answer");
         definition.outputs.push(
             serde_json::from_value(json!({"name":"history","node":"repeat","port":"history"}))
                 .unwrap(),
@@ -488,7 +488,6 @@ fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_p
                 model: None,
             },
             None,
-            1024,
         )
         .unwrap();
     let mut definition = manifest().definition;
