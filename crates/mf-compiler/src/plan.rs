@@ -902,6 +902,14 @@ fn subgraph_preparation(
             ScopeBuild::Dynamic
         },
     )?;
+    let stream_binding =
+        if node.kind == ITERATION_KIND && !parse_config(node)?.stream_outputs.is_empty() {
+            let bind = format_ident!("bind_stream_outputs_{body_scope}");
+            Some(quote! { let #body_flow = #bind(#body_flow)?; })
+        } else {
+            None
+        };
+    let preparations = preparations.into_iter().chain(stream_binding);
     let nodes = body.nodes.iter()
         .filter(|node| node.kind != ITERATION_INPUT_KIND && node.kind != crate::LOOP_SOURCE_ID)
         .map(|node| {

@@ -49,6 +49,7 @@ filter = '''
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mfn-test-affected::flow) |
 binary_id(=mfn-test-affected::process) |
+(binary_id(=mf-compiler::iteration_streams) & test(=standalone_iterations_keep_parallel_streams_and_frozen_contracts_without_sources)) |
 (binary_id(=mf-chat::packaging) & (
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics) |
     test(=conversation_example_hosts_a_supplied_workflow)
@@ -98,6 +99,7 @@ binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-compiler::call_streams) & test(=standalone_calls_forward_frozen_streams_without_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mf-compiler::single_node_runner) |
+(binary_id(=mf-compiler::iteration_streams) & test(=standalone_iterations_keep_parallel_streams_and_frozen_contracts_without_sources)) |
 binary_id(=mf-compiler::runner_signals) |
 (binary_id(=mf-compiler::parameters) & test(=standalone_parameters_share_transports_and_binding_rules)) |
 (binary_id(=mf-cli::runner_observability) & (
@@ -154,6 +156,7 @@ filter = '''
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mfn-test-affected::flow) |
 binary_id(=mfn-test-affected::process) |
+(binary_id(=mf-compiler::iteration_streams) & test(=standalone_iterations_keep_parallel_streams_and_frozen_contracts_without_sources)) |
 (binary_id(=mf-chat::packaging) & (
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics) |
     test(=conversation_example_hosts_a_supplied_workflow)
@@ -203,6 +206,7 @@ binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-compiler::call_streams) & test(=standalone_calls_forward_frozen_streams_without_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mf-compiler::single_node_runner) |
+(binary_id(=mf-compiler::iteration_streams) & test(=standalone_iterations_keep_parallel_streams_and_frozen_contracts_without_sources)) |
 binary_id(=mf-compiler::runner_signals) |
 (binary_id(=mf-compiler::parameters) & test(=standalone_parameters_share_transports_and_binding_rules)) |
 (binary_id(=mf-cli::runner_observability) & (

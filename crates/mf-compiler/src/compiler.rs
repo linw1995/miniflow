@@ -1745,6 +1745,29 @@ fn bind_subgraph_node(
     } else {
         Vec::new()
     };
+    if node.kind == ITERATION_KIND {
+        let config = parse_config(node)?;
+        stream_outputs.extend(prepare_stream_outputs(
+            &config.stream_outputs,
+            &nodes,
+            node,
+        )?);
+        ensure!(
+            nodes
+                .iter()
+                .any(|child| child.definition_id == config.body.result.node
+                    && child
+                        .metadata
+                        .ports
+                        .outputs
+                        .iter()
+                        .any(|port| port.name == config.body.result.port)),
+            InvalidIterationSnafu {
+                definition_id: node.id.clone(),
+                message: "Iteration result must select a terminal body output"
+            }
+        );
+    }
     let mut terminal_outputs = Vec::new();
     let mut outputs = Vec::new();
     for output in &body.outputs {

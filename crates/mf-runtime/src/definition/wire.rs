@@ -64,10 +64,16 @@ fn decode_scope(
                 .is_none_or(|nodes| nodes.iter().all(|node| {
                     node.pointer("/loop/stream_outputs")
                         .is_none_or(|outputs| outputs.as_object().is_some_and(Map::is_empty))
+                        && (node["kind"] != crate::ITERATION_KIND
+                            || node
+                                .pointer("/config/stream_outputs")
+                                .is_none_or(|outputs| {
+                                    outputs.as_object().is_some_and(Map::is_empty)
+                                }))
                 })),
         InvalidSnafu {
             path,
-            message: "Loop child streams require version 2026-10-28"
+            message: "Child streams require version 2026-10-28"
         }
     );
     ensure!(
@@ -227,10 +233,16 @@ fn encode_scope(
                 .is_none_or(|nodes| nodes.iter().all(|node| {
                     node.pointer("/loop/stream_outputs")
                         .is_none_or(|outputs| outputs.as_object().is_some_and(Map::is_empty))
+                        && (node["kind"] != crate::ITERATION_KIND
+                            || node
+                                .pointer("/config/stream_outputs")
+                                .is_none_or(|outputs| {
+                                    outputs.as_object().is_some_and(Map::is_empty)
+                                }))
                 })),
         InvalidSnafu {
             path,
-            message: "Loop child streams require version 2026-10-28"
+            message: "Child streams require version 2026-10-28"
         }
     );
     ensure!(

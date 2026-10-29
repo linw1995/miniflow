@@ -1,16 +1,18 @@
 use mf_runtime::{
-    ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy, IterationMode,
-    NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, NodeValue,
-    OutputDerivation, Outputs, PreparedSubgraph, TaskNode, TypedNodeResult, TypedTaskNode,
-    ValueKind, ValueRef, ValueType, deserialize_config, execute_typed_task,
+    EmissionSink, ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy,
+    IterationMode, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts,
+    NodeRegistration, NodeResult, NodeValue, OutputDerivation, Outputs, PreparedSubgraph,
+    StreamCancellation, StreamError, TaskNode, TypedNodeResult, TypedTaskNode, ValueKind, ValueRef,
+    ValueType, deserialize_config, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
 };
 pub const MAX_PARALLEL_ITEMS: usize = 10;
@@ -30,7 +32,11 @@ fn factory(
         output_derivations: vec![node.result_derivation()],
         ..Default::default()
     };
-    mf_runtime::PreparedNode::typed_task(node, metadata)
+    if node.body.stream_outputs.is_empty() {
+        mf_runtime::PreparedNode::typed_task(node, metadata)
+    } else {
+        mf_runtime::PreparedNode::task_stream(node, metadata)
+    }
 }
 
 inventory::submit! {
@@ -70,6 +76,68 @@ impl From<IterationItemFailure> for NodeExecutionError {
     }
 }
 
+#[derive(Debug, Snafu)]
+enum ForwardingError {
+    #[snafu(display("iteration stream forwarding channel closed: {source}"))]
+    Send { source: mpsc::SendError<()> },
+    #[snafu(display("iteration stream acknowledgement closed: {source}"))]
+    Acknowledge { source: mpsc::RecvError },
+    #[snafu(display("could not start iteration stream coordinator: {source}"))]
+    Coordinator { source: std::io::Error },
+}
+
+struct Emission {
+    result: NodeResult,
+    acknowledge: mpsc::SyncSender<Result<(), StreamError>>,
+}
+
+struct ItemSink {
+    id: String,
+    sender: mpsc::SyncSender<Emission>,
+    cancellation: StreamCancellation,
+}
+
+impl EmissionSink for ItemSink {
+    fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
+        let result: Result<(), NodeExecutionError> = (|| {
+            let (acknowledge, reply) = mpsc::sync_channel(0);
+            self.sender
+                .send(Emission {
+                    result,
+                    acknowledge,
+                })
+                // A disconnected channel needs no payload in its diagnostic.
+                .map_err(|_| mpsc::SendError(()))
+                .context(SendSnafu)
+                .boxed()?;
+            reply.recv().context(AcknowledgeSnafu).boxed()??;
+            Ok(())
+        })();
+        result
+            .context(mf_runtime::StreamProducerSnafu {
+                definition_id: self.id.clone(),
+            })
+            .inspect_err(|error| self.cancellation.cancel(error.clone()))
+    }
+}
+
+struct DeliverySink<'a> {
+    sink: &'a mut dyn EmissionSink,
+    cancellation: StreamCancellation,
+}
+
+impl EmissionSink for DeliverySink<'_> {
+    fn is_connected(&self) -> bool {
+        self.sink.is_connected()
+    }
+
+    fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
+        self.sink
+            .send(result)
+            .inspect_err(|error| self.cancellation.cancel(error.clone()))
+    }
+}
+
 impl IterationNode {
     pub fn new(
         id: impl Into<String>,
@@ -77,6 +145,14 @@ impl IterationNode {
         on_error: IterationErrorPolicy,
         body: PreparedSubgraph,
     ) -> Result<Self, NodeBuildError> {
+        ensure!(
+            body.stream_outputs
+                .iter()
+                .all(|port| port.name != "results"),
+            mf_runtime::NodeInvalidSubgraphSnafu {
+                message: "Iteration stream outputs must not overlap results"
+            }
+        );
         let result_type = body
             .outputs
             .iter()
@@ -111,11 +187,11 @@ impl IterationNode {
     fn run_item(
         id: &str,
         body: &PreparedSubgraph,
-        item: ValueRef,
-        key: ValueRef,
+        (key, item): (ValueRef, ValueRef),
         index: usize,
         observation: Option<&IterationObservation>,
         parent: &ExecutionContext,
+        sink: &mut dyn EmissionSink,
     ) -> Result<mf_runtime::ValueRef, NodeExecutionError> {
         let mut step = observation.and_then(|observation| observation.begin_item(index));
         let _context = step.as_ref().map(ItemObservation::enter);
@@ -133,7 +209,7 @@ impl IterationNode {
         )
         .and_then(|scope| {
             let (mut outputs, _, _) =
-                state.run_scope(scope, |state| body.execute_in_context(state))?;
+                state.run_scope(scope, |state| body.execute_with_sink(state, sink))?;
             outputs
                 .remove("result")
                 .ok_or_else(|| NodeExecutionError::ExecutionFailed {
@@ -153,6 +229,7 @@ impl IterationNode {
         items: ValueRef,
         observation: Option<IterationObservation>,
         parent: &mut ExecutionContext,
+        sink: &mut dyn EmissionSink,
     ) -> Result<IterationOutputs, NodeExecutionError> {
         let items: Box<dyn ExactSizeIterator<Item = (ValueRef, ValueRef)>> =
             match items.kind() {
@@ -169,17 +246,26 @@ impl IterationNode {
                 }
             };
         let mut results = Vec::with_capacity(items.len());
-        match self.mode {
+        // A single active item can borrow the caller's sink directly.
+        let mode = if sink.is_connected() && parent.worker_limit().get() == 1 {
+            IterationMode::Sequential
+        } else {
+            self.mode
+        };
+        match mode {
             IterationMode::Sequential => {
                 for (index, (key, item)) in items.enumerate() {
+                    if let Some(error) = parent.cancellation().failure() {
+                        return Err(error.into());
+                    }
                     results.push(Self::run_item(
                         &self.id,
                         &self.body,
-                        item,
-                        key,
+                        (key, item),
                         index,
                         observation.as_ref(),
                         parent,
+                        sink,
                     ));
                     if matches!(self.on_error, IterationErrorPolicy::Terminate)
                         && results.last().is_some_and(Result::is_err)
@@ -194,52 +280,93 @@ impl IterationNode {
                 let completed = Arc::new(Mutex::new(Vec::new()));
                 let stopped = Arc::new(AtomicBool::new(false));
                 let observation = observation.map(Arc::new);
-                parent.run_parallel(worker_count, |parent| {
-                    (0..worker_count)
-                        .map(|_| {
-                            let queue = Arc::clone(&queue);
-                            let completed = Arc::clone(&completed);
-                            let stopped = Arc::clone(&stopped);
-                            let observation = observation.clone();
-                            let id = self.id.clone();
-                            let on_error = self.on_error;
-                            let body = Arc::clone(&self.body);
-                            let parent = parent.fork_body(None);
-                            move || loop {
-                                let next = {
-                                    let mut queue = queue.lock().unwrap();
-                                    if stopped.load(Ordering::Acquire) {
-                                        None
-                                    } else {
-                                        queue.pop_front()
+                let run_workers =
+                    |parent: &mut ExecutionContext, sender: Option<mpsc::SyncSender<Emission>>| {
+                        parent.run_parallel(worker_count, |parent| {
+                            (0..worker_count)
+                                .map(|_| {
+                                    let queue = Arc::clone(&queue);
+                                    let completed = Arc::clone(&completed);
+                                    let stopped = Arc::clone(&stopped);
+                                    let observation = observation.clone();
+                                    let id = self.id.clone();
+                                    let on_error = self.on_error;
+                                    let body = Arc::clone(&self.body);
+                                    let parent = parent.fork_body(None);
+                                    let sender = sender.clone();
+                                    move || loop {
+                                        let next = {
+                                            let mut queue = queue.lock().unwrap();
+                                            if stopped.load(Ordering::Acquire) {
+                                                None
+                                            } else {
+                                                queue.pop_front()
+                                            }
+                                        };
+                                        let Some((index, (key, item))) = next else {
+                                            break;
+                                        };
+                                        let mut forwarded =
+                                            sender.as_ref().map(|sender| ItemSink {
+                                                id: id.clone(),
+                                                sender: sender.clone(),
+                                                cancellation: parent.cancellation(),
+                                            });
+                                        let sink: &mut dyn EmissionSink = match &mut forwarded {
+                                            Some(sink) => sink,
+                                            None => &mut mf_runtime::DiscardSink,
+                                        };
+                                        let result = Self::run_item(
+                                            &id,
+                                            &body,
+                                            (key, item),
+                                            index,
+                                            observation.as_deref(),
+                                            &parent,
+                                            sink,
+                                        );
+                                        if parent.cancellation().failure().is_some()
+                                            || (result.is_err()
+                                                && matches!(
+                                                    on_error,
+                                                    IterationErrorPolicy::Terminate
+                                                ))
+                                        {
+                                            stopped.store(true, Ordering::Release);
+                                        }
+                                        completed.lock().unwrap().push((index, result));
                                     }
-                                };
-                                let Some((index, (key, item))) = next else {
-                                    break;
-                                };
-                                let result = Self::run_item(
-                                    &id,
-                                    &body,
-                                    item,
-                                    key,
-                                    index,
-                                    observation.as_deref(),
-                                    &parent,
-                                );
-                                if result.is_err()
-                                    && matches!(on_error, IterationErrorPolicy::Terminate)
-                                {
-                                    stopped.store(true, Ordering::Release);
-                                }
-                                completed.lock().unwrap().push((index, result));
-                            }
+                                })
+                                .collect()
                         })
-                        .collect()
-                })?;
+                    };
+                if sink.is_connected() && worker_count > 0 {
+                    std::thread::scope(|scope| -> Result<(), NodeExecutionError> {
+                        let (sender, receiver) = mpsc::sync_channel::<Emission>(0);
+                        let worker = std::thread::Builder::new()
+                            .name(format!("iteration-stream-{}", self.id))
+                            .spawn_scoped(scope, || run_workers(parent, Some(sender)))
+                            .context(CoordinatorSnafu)
+                            .boxed()?;
+                        for emission in receiver {
+                            let result = sink.send(emission.result);
+                            let _ = emission.acknowledge.send(result);
+                        }
+                        worker
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                        Ok(())
+                    })?;
+                } else {
+                    run_workers(parent, None)?;
+                }
                 let mut completed = completed.lock().unwrap().drain(..).collect::<Vec<_>>();
                 completed.sort_by_key(|(index, _)| *index);
                 results.extend(completed.into_iter().map(|(_, result)| result));
             }
+        }
+        if let Some(error) = parent.cancellation().failure() {
+            return Err(error.into());
         }
         let mut values = Vec::with_capacity(results.len());
         for result in results {
@@ -271,7 +398,7 @@ impl TypedTaskNode for IterationNode {
         let observation = ctx.observation().and_then(|run| {
             run.iteration_observation(&self.id, &ctx.invocation_path(), self.body.nodes.clone())
         });
-        self.execute_items(inputs.items, observation, ctx)
+        self.execute_items(inputs.items, observation, ctx, &mut mf_runtime::DiscardSink)
             .map(Into::into)
     }
 }
@@ -286,6 +413,44 @@ impl TaskNode for IterationNode {
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         execute_typed_task(self, inputs, ctx)
+    }
+}
+
+impl NodePortContract for IterationNode {
+    fn ports(&self) -> NodePorts {
+        IterationNode::ports(self)
+    }
+
+    fn stream_outputs(&self) -> Vec<mf_runtime::PortSpec> {
+        self.body.stream_outputs.clone()
+    }
+}
+
+impl mf_runtime::TaskStreamNode for IterationNode {
+    fn supports_success_dependencies(&self) -> bool {
+        false
+    }
+
+    fn execute(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        emitter: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        let inputs = <IterationInputs as mf_runtime::NodeInputs>::from_inputs(inputs).boxed()?;
+        let observation = context.observation().and_then(|run| {
+            run.iteration_observation(
+                &self.id,
+                &context.invocation_path(),
+                self.body.nodes.clone(),
+            )
+        });
+        let mut sink = DeliverySink {
+            sink: emitter,
+            cancellation: context.cancellation(),
+        };
+        let outputs = self.execute_items(inputs.items, observation, context, &mut sink)?;
+        mf_runtime::encode_typed_result(outputs.into())
     }
 }
 

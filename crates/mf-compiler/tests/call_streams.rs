@@ -345,3 +345,45 @@ fn declared_child_execution_limits_are_validated_before_calling() {
         assert!(error.to_string().contains("stream limits must be positive"));
     }
 }
+
+#[test]
+fn calls_forward_parallel_iteration_streams_and_keep_collected_results() {
+    let body = json!({"version":"2026-10-28","dependencies":{},
+        "nodes":[
+            {"id":"items","kind":"builtin.constant","config":{"value":[1,2]}},
+            {"id":"each","kind":"builtin.iteration","inputs":{"items":{"from":{"node":"items","port":"value"}}},
+             "config":{"mode":"parallel","stream_outputs":{"result":{"node":"step","port":"delta"}},
+                "body":{"nodes":[{"id":"step","kind":"fixture.iteration_stream","inputs":{"count":{"from":{"node":"%iteration","port":"item"}}}}],
+                        "result":{"node":"step","port":"total"}}}}
+        ],
+        "outputs":[{"name":"increment","node":"each","port":"result"},{"name":"count","node":"each","port":"results"}]
+    });
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut value = caller(body);
+    value["execution"] = json!({"limits":{"workers":2}});
+    let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
+    let instance = instantiate_stream(&plan, &registry)
+        .unwrap()
+        .start()
+        .unwrap();
+    let mut values = Vec::new();
+    while let Some(output) = instance.recv().unwrap() {
+        values.push(serde_json::to_value(output.outputs).unwrap());
+    }
+    instance.join().unwrap();
+    let mut increments: Vec<_> = values
+        .iter()
+        .filter_map(|value| value.get("increment"))
+        .cloned()
+        .collect();
+    increments.sort_by_key(|value| value.as_u64().unwrap());
+    assert_eq!(increments, vec![json!(1), json!(2)]);
+    assert_eq!(
+        values
+            .iter()
+            .filter_map(|value| value.get("count"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![json!([1, 2])]
+    );
+}
