@@ -326,7 +326,7 @@ fn skipped_external_inputs_skip_only_the_selected_invocation() {
 }
 
 #[test]
-fn serializes_shared_instances_and_nested_parallel_work_progresses_at_each_worker_limit() {
+fn shared_instances_and_nested_parallel_work_progress_at_each_worker_limit() {
     for limit in [1, 2, 4] {
         let active = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -342,14 +342,8 @@ fn serializes_shared_instances_and_nested_parallel_work_progresses_at_each_worke
             node("left", vec![], vec![], parent),
             node("right", vec![], vec![], parent),
             node("tool", vec![], vec![], move |_, ctx| {
-                assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
-                let thread = std::thread::current().id();
-                assert_eq!(
-                    ctx.run_parallel(2, |_| vec![|| std::thread::current().id(), || {
-                        std::thread::current().id()
-                    }])?,
-                    [thread, thread]
-                );
+                active.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(ctx.run_parallel(2, |_| vec![|| 1, || 2])?, [1, 2]);
                 std::thread::sleep(Duration::from_millis(2));
                 active.fetch_sub(1, Ordering::SeqCst);
                 executed.fetch_add(1, Ordering::SeqCst);
@@ -538,7 +532,9 @@ fn cancellation_is_terminal_and_never_returns_successful_tool_outputs() {
 }
 
 #[test]
-fn poisoned_instances_cannot_be_reused_after_a_panic() {
+fn panics_restore_the_parent_scope_without_overriding_node_recovery_policy() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let target_attempts = attempts.clone();
     let nodes = vec![
         node("parent", vec![], vec![], |_, ctx| {
             let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -547,18 +543,25 @@ fn poisoned_instances_cannot_be_reused_after_a_panic() {
             assert!(panic.is_err());
             assert_eq!(ctx.current_node(), Some("parent"));
             assert!(matches!(
-                ctx.invoke_call(CallBindingId::new(0), CallArguments::default()),
-                Err(CallDispatchError::Poisoned)
+                ctx.invoke_call(CallBindingId::new(0), CallArguments::default())?
+                    .outcome,
+                CallOutcome::Succeeded(_)
             ));
             Ok(NodeResult::default())
         }),
-        node("tool", vec![], vec![], |_, _| panic!("tool panic")),
+        node("tool", vec![], vec![], move |_, _| {
+            if target_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("first explicit attempt");
+            }
+            Ok(NodeResult::default())
+        }),
     ];
     flow(nodes, &[0], true)
         .with_prepared_calls(vec![binding(0, 1, "tool", "tool")])
         .unwrap()
         .execute()
         .unwrap();
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -596,7 +599,7 @@ fn retaining_a_child_context_does_not_retain_its_executor_graph() {
 }
 
 #[test]
-fn waiting_for_a_busy_instance_obeys_the_invocation_deadline() {
+fn concurrent_invocations_obey_their_own_cooperative_deadlines() {
     let entered = Arc::new(AtomicUsize::new(0));
     let waiting = entered.clone();
     let target = entered.clone();
@@ -641,7 +644,7 @@ fn waiting_for_a_busy_instance_obeys_the_invocation_deadline() {
             max_parallel_domains: NonZeroUsize::new(2).unwrap(),
         })
         .unwrap();
-    assert_eq!(entered.load(Ordering::SeqCst), 1);
+    assert_eq!(entered.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -729,7 +732,7 @@ fn success_prerequisites_and_missing_external_values_keep_their_existing_outcome
 }
 
 #[test]
-fn invalid_recursive_prepared_tables_fail_without_reentering_a_locked_executor() {
+fn invalid_recursive_prepared_tables_stop_at_the_existing_scope_limit() {
     let nodes = vec![
         node("parent", vec![], vec![], |_, ctx| {
             assert!(
@@ -803,6 +806,10 @@ fn default_arguments_distinguish_null_from_omission_without_retaining_previous_o
                     panic!("expected success")
                 };
                 assert_eq!(outputs.contains_key("value"), present);
+                assert!(
+                    ctx.output("tool.value").is_err(),
+                    "call results must not publish into the parent"
+                );
             }
             Ok(NodeResult::default())
         }),
@@ -945,5 +952,47 @@ fn observations_record_each_invocation_without_root_target_completion() {
             };
             assert!(body.iter().any(|(key, _)| key.as_str() == "loop_path"));
         }
+    }
+}
+
+#[test]
+fn directed_targets_preserve_the_existing_shared_task_concurrency_contract() {
+    for directed in [false, true] {
+        let entered = Arc::new(AtomicUsize::new(0));
+        let shared = entered.clone();
+        let target = node("tool", vec![], vec![], move |_, _| {
+            shared.fetch_add(1, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while shared.load(Ordering::SeqCst) < 2 {
+                assert!(
+                    Instant::now() < deadline,
+                    "shared task invocations must overlap"
+                );
+                std::thread::yield_now();
+            }
+            Ok(NodeResult::default())
+        });
+        let prepared = if directed {
+            let parent = node("parent", vec![], vec![], |_, ctx| {
+                assert!(matches!(
+                    ctx.invoke_call(CallBindingId::new(0), CallArguments::default())?
+                        .outcome,
+                    CallOutcome::Succeeded(_)
+                ));
+                Ok(NodeResult::default())
+            });
+            flow(vec![parent, target], &[0], true)
+                .with_prepared_calls(vec![binding(0, 1, "tool", "tool")])
+                .unwrap()
+        } else {
+            flow(vec![target], &[0], true)
+        };
+        std::thread::scope(|scope| {
+            let left = scope.spawn(|| prepared.execute().unwrap());
+            let right = scope.spawn(|| prepared.execute().unwrap());
+            left.join().unwrap();
+            right.join().unwrap();
+        });
+        assert_eq!(entered.load(Ordering::SeqCst), 2);
     }
 }

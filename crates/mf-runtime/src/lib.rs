@@ -146,7 +146,6 @@ pub use value_schema::{
 };
 pub use worker::{
     ExecutionWorkers, RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError,
-    WorkerReservation, WorkerResource,
 };
 
 pub use snapshot::{NodeSnapshot, SnapshotEvent, SnapshotOutcome, SnapshotRecorder};

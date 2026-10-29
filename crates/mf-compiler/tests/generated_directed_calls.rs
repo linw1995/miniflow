@@ -4,6 +4,10 @@ extern crate mfn_core as _;
 mod common;
 #[path = "fixtures/multi-nodes/src/directed_fixture.rs"]
 mod fixture;
+// Other constructors in this shared fixture are exercised by typed_fast_paths.
+#[allow(dead_code)]
+#[path = "fixtures/multi-nodes/src/generated_fixture.rs"]
+mod typed_fixture;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
 use serde_json::{Value, json};
 use std::{fs, process::Command};
@@ -25,18 +29,22 @@ fn definition() -> WorkflowDefinition {
         {"id":"delegate","kind":"workflow.call","config":{"flow":"child","definition":child}},
         {"id":"unused","kind":"builtin.code","config":{"language":"cel","inputs":{},"code":{"text":"1 / 0"}}},
         {"id":"z_source","kind":"builtin.constant","config":{"value":"ordinary"}},
-        {"id":"z_sink","kind":"builtin.identity","inputs":{"input":{"from":{"node":"z_source","port":"value"}}}}
+        {"id":"z_middle","kind":"fixture.typed_text","inputs":{"text":{"from":{"node":"z_source","port":"value"}}}},
+        {"id":"z_sink","kind":"fixture.typed_text","inputs":{"text":{"from":{"node":"z_middle","port":"text"}}}}
     ],"calls":{"parent":{"search":{"target":"delegate"},"unused":{"target":"unused"}}},
     "outputs":[{"name":"result","node":"parent","port":"value"}]})).unwrap()
 }
 
 #[test]
-fn generated_layouts_freeze_calls_and_disable_transfers_without_dropping_guards() {
+fn generated_layouts_freeze_calls_and_preserve_ordinary_transfer_rules() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition(), &registry).unwrap();
-    for artifacts in [
-        plan.generate_execution_plans(&registry).unwrap(),
-        plan.generate_runner_execution_plans(&registry).unwrap(),
+    for (standard, artifacts) in [
+        (false, plan.generate_execution_plans(&registry).unwrap()),
+        (
+            true,
+            plan.generate_runner_execution_plans(&registry).unwrap(),
+        ),
     ] {
         assert!(artifacts.rust_source.contains("bind_calls_root"));
         assert!(artifacts.rust_source.contains("PreparedCall"));
@@ -45,16 +53,45 @@ fn generated_layouts_freeze_calls_and_disable_transfers_without_dropping_guards(
         assert!(!artifacts.rust_source.contains("FlowBuilder"));
         let typed: mf_compiler::TypedPlan =
             serde_json::from_str(&artifacts.typed_plan_json).unwrap();
-        assert!(typed.segments.is_empty());
-        assert!(!typed.connections.is_empty());
-        assert!(
-            typed
-                .connections
-                .iter()
-                .all(|edge| edge.fallback == Some(mf_compiler::TypedFallbackReason::DirectedCall))
+        let ordinary = typed
+            .connections
+            .iter()
+            .find(|edge| edge.source == "z_middle" && edge.target == "z_sink")
+            .unwrap();
+        assert_eq!(
+            ordinary.fallback,
+            if standard {
+                None
+            } else {
+                Some(mf_compiler::TypedFallbackReason::CustomRunner)
+            }
         );
+        assert_eq!(typed.segments.is_empty(), !standard);
         mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
     }
+}
+
+#[test]
+fn ordinary_transfer_rules_preserve_values_read_by_call_targets() {
+    let mut value = serde_json::to_value(definition()).unwrap();
+    value["nodes"][0]["config"]["result"] = "value".into();
+    value["nodes"][1] = json!({"id":"delegate","kind":"builtin.identity",
+        "inputs":{"input":{"from":{"node":"z_middle","port":"text"}}}});
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
+    let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
+    let typed: mf_compiler::TypedPlan = serde_json::from_str(&artifacts.typed_plan_json).unwrap();
+    let shared = typed
+        .connections
+        .iter()
+        .find(|edge| edge.source == "z_middle" && edge.target == "z_sink")
+        .unwrap();
+    assert!(shared.fallback.is_some());
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    assert_eq!(
+        flow.execute().unwrap()["result"],
+        mf_runtime::ValueRef::from("ordinary")
+    );
 }
 
 #[test]

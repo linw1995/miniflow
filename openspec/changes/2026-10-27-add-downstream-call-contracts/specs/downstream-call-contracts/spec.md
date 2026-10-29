@@ -231,20 +231,15 @@ argument presence, SHALL select a binding. Declaring these contracts MUST NOT en
 ### Requirement: Correlate structured call outcomes
 
 A call identity SHALL include its caller-local binding and a workflow-execution-unique invocation
-number allocated by the dispatcher. A response SHALL retain that identity and SHALL support checking
-it against an expected request before yielding its outcome. Outcomes SHALL distinguish successful
+number allocated by the dispatcher. A synchronous response SHALL retain that observation identity.
+Outcomes SHALL distinguish successful
 outputs, dependency skips, and typed runtime failures without encoding errors as strings or propagating
 loop scope effects in the response.
 
 #### Scenario: Complete repeated calls independently
 
 - **WHEN** two requests select the same binding with different invocation numbers
-- **THEN** their responses can be correlated independently, including in reverse completion order
-
-#### Scenario: Reject a mismatched response
-
-- **WHEN** a response is checked against a different binding or invocation number
-- **THEN** outcome extraction fails with both the actual and expected identity
+- **THEN** each synchronous response retains its distinct observation identity
 
 #### Scenario: Retain structured failure and skip causes
 
@@ -391,8 +386,8 @@ skip MUST NOT reassign input ownership to Parent.
 
 Preparation SHALL establish external prerequisites without introducing waits on caller completion.
 Invocation execution SHALL preserve runtime validation, observation, cancellation, deadlines, shared
-worker limits, and execution budgets. The initial implementation SHALL serialize calls to each
-prepared target instance and reject recursive callable dependencies.
+worker limits, and execution budgets. Calls SHALL reuse the ordinary shared Task concurrency contract
+and worker pool, while preparation rejects recursive callable dependencies.
 
 #### Scenario: Reject a caller completion cycle
 
@@ -439,7 +434,7 @@ skip evidence MUST remain a selected-call outcome rather than suppressing the ca
 
 - **WHEN** callers from different message owners invoke the same prepared target
 - **THEN** invocations have distinct identities and retain their message attribution
-- **AND** calls share the target's serialized instance while nested work shares its frame budget
+- **AND** calls share the ordinary thread-safe target instance while nested work shares its frame budget
 
 #### Scenario: Generate the same startup prerequisites
 
