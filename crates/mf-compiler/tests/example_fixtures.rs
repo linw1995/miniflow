@@ -39,6 +39,25 @@ fn typed_plan_benchmark_covers_chains_and_control_reads() {
     }
 }
 
+#[cfg(feature = "codegen")]
+#[test]
+fn typed_plan_benchmark_reports_both_scenarios() {
+    let mut reports = Vec::new();
+    benchmark_typed_plan::run(&["4".into(), "2".into()], |report| reports.push(report));
+    assert_eq!(reports.len(), 2);
+    for (report, control_reads) in reports.iter().zip([false, true]) {
+        assert_eq!(report["nodes"], 4);
+        assert_eq!(report["iterations"], 2);
+        assert_eq!(report["control_reads"], control_reads);
+        assert_eq!(report["connections"], 3);
+        assert_eq!(report["segments"], usize::from(!control_reads));
+        for name in ["prepare_ms", "typed_plan_median_ms"] {
+            let elapsed = report[name].as_f64().unwrap();
+            assert!(elapsed.is_finite() && elapsed >= 0.0);
+        }
+    }
+}
+
 #[test]
 fn stream_example_preserves_file_records_without_execution_configuration() {
     let directory = tempfile::tempdir().unwrap();

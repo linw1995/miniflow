@@ -6,7 +6,7 @@ extern crate mfn_core as _;
 use mf_compiler::{
     NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled, plan_typed_segments,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{hint::black_box, time::Instant};
 
 pub fn definition(count: usize, control_reads: bool) -> WorkflowDefinition {
@@ -36,13 +36,12 @@ pub fn definition(count: usize, control_reads: bool) -> WorkflowDefinition {
     .unwrap()
 }
 
-fn main() {
-    let args: Vec<_> = std::env::args().collect();
+pub fn run(args: &[String], mut report: impl FnMut(Value)) {
     let count = args
-        .get(1)
+        .first()
         .map_or(4096, |value| value.parse().expect("node count"));
     let iterations = args
-        .get(2)
+        .get(1)
         .map_or(20, |value| value.parse().expect("iteration count"));
     assert!(iterations > 0);
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -66,13 +65,15 @@ fn main() {
             assert_eq!(black_box(plan), expected);
         }
         samples.sort_by(f64::total_cmp);
-        println!(
-            "{}",
-            json!({
-                "nodes": count, "control_reads": control_reads, "iterations": iterations,
-                "prepare_ms": prepare_ms, "typed_plan_median_ms": samples[iterations / 2],
-                "segments": expected.segments.len(), "connections": expected.connections.len(),
-            })
-        );
+        report(json!({
+            "nodes": count, "control_reads": control_reads, "iterations": iterations,
+            "prepare_ms": prepare_ms, "typed_plan_median_ms": samples[iterations / 2],
+            "segments": expected.segments.len(), "connections": expected.connections.len(),
+        }));
     }
+}
+
+fn main() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    run(&args, |report| println!("{report}"));
 }
