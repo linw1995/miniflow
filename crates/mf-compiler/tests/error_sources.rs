@@ -341,27 +341,6 @@ fn lock_contention_preserves_the_typed_lock_error() {
 }
 
 #[test]
-fn pipeline_context_preserves_definition_parse_errors() {
-    let root = tempfile::tempdir().unwrap();
-    let definition = root.path().join("invalid.json");
-    let output = root.path().join("runner");
-    fs::write(&definition, "{").unwrap();
-    let support = SupportPackages::Local {
-        crates_dir: root.path().to_owned(),
-    };
-    let error = compile_project(&CompileRequest {
-        definition: &definition,
-        output: &output,
-        locked: false,
-        build_dir: None,
-        support: &support,
-    })
-    .unwrap_err();
-    assert_eq!(error.stage, "definition parsing");
-    assert!(find_source::<serde_json::Error>(&error).unwrap().is_eof());
-}
-
-#[test]
 fn fixture_io_failures_preserve_sources_during_construction_and_execution() {
     let root = tempfile::tempdir().unwrap();
     let blocked = root.path().join("blocked");
@@ -470,4 +449,25 @@ fn native_producer_io_failures_preserve_the_original_source() {
         io::ErrorKind::NotFound
     );
     assert!(instance.join().is_err());
+}
+
+#[test]
+fn pipeline_context_preserves_definition_parse_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let definition = root.path().join("invalid.json");
+    let output = root.path().join("runner");
+    fs::write(&definition, "{").unwrap();
+    let support = SupportPackages::Local {
+        crates_dir: root.path().to_owned(),
+    };
+    let error = compile_project(&CompileRequest {
+        definition: &definition,
+        output: &output,
+        locked: false,
+        build_dir: None,
+        support: &support,
+    })
+    .unwrap_err();
+    assert_eq!(error.stage, "definition parsing");
+    assert!(find_source::<serde_json::Error>(&error).unwrap().is_eof());
 }
