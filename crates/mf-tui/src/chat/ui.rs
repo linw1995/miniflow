@@ -1095,7 +1095,6 @@ mod tests {
                     model: None,
                 },
                 None,
-                1024,
             )
             .unwrap();
         let calls: Vec<mf_chat::CallUsage> = serde_json::from_value(serde_json::json!([
@@ -1400,7 +1399,6 @@ mod tests {
                     model: None,
                 },
                 None,
-                4096,
             )
             .unwrap();
         database.complete_turn(started.invocation, mf_chat::ConversationResult {
@@ -1527,7 +1525,6 @@ mod tests {
                         model: None,
                     },
                     None,
-                    8192,
                 )
                 .unwrap();
             if index == 0 {

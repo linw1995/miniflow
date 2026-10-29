@@ -12,14 +12,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const DEFAULT_HISTORY_BYTES: usize = 1024 * 1024;
 pub const MAX_PAGE_SIZE: usize = 1000;
 
 pub fn default_page_size() -> usize {
     50
-}
-pub fn default_history_bytes() -> usize {
-    DEFAULT_HISTORY_BYTES
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -102,8 +98,6 @@ pub struct MessagePageOutputs {
 pub struct HistoryInputs {
     pub database_path: String,
     pub session_id: String,
-    #[value(default = "default_history_bytes")]
-    pub max_bytes: usize,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -147,21 +141,9 @@ pub fn load(connection: &mut SqliteConnection, id: &str) -> Result<Session, Chat
         .context(SessionMissingSnafu { id })
 }
 
-pub fn history(
-    connection: &mut SqliteConnection,
-    id: &str,
-    maximum: usize,
-) -> Result<HistoryContext, ChatError> {
-    ensure!(
-        maximum > 0,
-        InvalidSnafu {
-            field: "max_bytes",
-            reason: "must be positive"
-        }
-    );
+pub fn history(connection: &mut SqliteConnection, id: &str) -> Result<HistoryContext, ChatError> {
     let session = load(connection, id)?;
     let mut result = Vec::new();
-    let mut bytes = 2usize;
     let mut after = -1i64;
     loop {
         let page: Vec<Message> = messages::table
@@ -185,24 +167,16 @@ pub fn history(
                 ("content".into(), message.content.into()),
             ]);
             mf_runtime::encode_output(&mut values, "metadata", message.metadata)?;
-            let encoded = serde_json::to_vec(&values).context(JsonSnafu)?;
             let history_message = mf_runtime::decode_required_input(
                 "history",
                 Some(mf_runtime::ValueRef::object(
                     values.into_iter().map(|(key, value)| (key.into(), value)),
                 )),
             )?;
-            bytes = bytes
-                .checked_add(encoded.len() + usize::from(!result.is_empty()))
-                .context(ArithmeticSnafu {
-                    operation: "count history bytes",
-                })?;
-            ensure!(bytes <= maximum, HistoryTooLargeSnafu { limit: maximum });
             after = message.sequence;
             result.push(history_message);
         }
     }
-    ensure!(bytes <= maximum, HistoryTooLargeSnafu { limit: maximum });
     Ok(HistoryContext {
         history: result,
         system: session.system,
@@ -430,8 +404,7 @@ fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> 
 fn load_history(input: HistoryInputs) -> Result<HistoryOutputs, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     Ok(HistoryOutputs {
-        context: connection
-            .transaction(|connection| history(connection, &input.session_id, input.max_bytes))?,
+        context: connection.transaction(|connection| history(connection, &input.session_id))?,
     })
 }
 
@@ -621,7 +594,7 @@ impl ChatDatabase {
         Ok(result.page)
     }
 
-    pub fn history(&self, id: &str, max_bytes: usize) -> Result<HistoryContext, ChatError> {
+    pub fn history(&self, id: &str) -> Result<HistoryContext, ChatError> {
         let result: HistoryOutputs = load_history(HistoryInputs {
             database_path: self
                 .path()
@@ -629,7 +602,6 @@ impl ChatDatabase {
                 .context(PathSnafu { path: self.path() })?
                 .into(),
             session_id: id.into(),
-            max_bytes,
         })?;
         Ok(result.context)
     }
@@ -711,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn history_excludes_unsuccessful_turns_and_limits_encoded_bytes() {
+    fn history_excludes_unsuccessful_turns_and_has_no_byte_limit() {
         let directory = tempfile::tempdir().unwrap();
         let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
         let session = database
@@ -724,28 +696,21 @@ mod tests {
                 "INSERT INTO turns VALUES ('good', '{}', NULL, 0, 'succeeded', 1, 2, NULL);
              INSERT INTO turns VALUES ('bad', '{}', NULL, 2, 'failed', 3, 4, 'failed');
              INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('u', '{}', 'good', 0, 'user', 'question', 1);
-             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('a', '{}', 'good', 1, 'assistant', 'answer', 2);
+             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('a', '{}', 'good', 1, 'assistant', replace(hex(zeroblob(1048576)), '00', 'x'), 2);
              INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('b', '{}', 'bad', 2, 'user', 'failed question', 3);",
                 session.id, session.id, session.id, session.id, session.id
             ))
             .unwrap();
-        let context = database.history(&session.id, 1024).unwrap();
+        let context = database.history(&session.id).unwrap();
         assert_eq!(context.history.len(), 2);
         assert!(
             matches!(&context.history[0], mfn_llm::ChatMessage::User { content, .. } if content == "question")
         );
         assert!(
-            matches!(&context.history[1], mfn_llm::ChatMessage::Assistant { content, .. } if content == "answer")
+            matches!(&context.history[1], mfn_llm::ChatMessage::Assistant { content, .. } if content.len() == 1048576)
         );
         assert_eq!(context.system.as_deref(), Some("instructions"));
-        assert!(database.history(&session.id, 2).is_err());
-        assert!(
-            database
-                .history(&other.id, 1024)
-                .unwrap()
-                .history
-                .is_empty()
-        );
+        assert!(database.history(&other.id).unwrap().history.is_empty());
         let page = database.messages(&session.id, 2, None).unwrap();
         let tail = database.messages(&session.id, 2, page.next_after).unwrap();
         assert_eq!(tail.messages[0].turn_state, "failed");
@@ -799,18 +764,6 @@ mod tests {
             ("session_id".into(), owner.id.clone().into()),
         ]))
         .unwrap();
-        assert_eq!(default.max_bytes, DEFAULT_HISTORY_BYTES);
         assert!(load_history(default).unwrap().context.history.is_empty());
-        assert!(matches!(
-            load_history(HistoryInputs {
-                database_path: database.path().to_str().unwrap().into(),
-                session_id: owner.id,
-                max_bytes: 0,
-            }),
-            Err(ChatError::Invalid {
-                field: "max_bytes",
-                ..
-            })
-        ));
     }
 }

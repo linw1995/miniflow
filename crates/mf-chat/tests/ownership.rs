@@ -12,10 +12,10 @@ fn exact_cleanup_keeps_other_sessions_and_committed_success() {
     let a = database.create_session("default", None, None).unwrap();
     let b = database.create_session("default", None, None).unwrap();
     let first = database
-        .begin_turn(&a.id, "first", profile.clone(), None, 1024)
+        .begin_turn(&a.id, "first", profile.clone(), None)
         .unwrap();
     let second = database
-        .begin_turn(&b.id, "second", profile.clone(), None, 1024)
+        .begin_turn(&b.id, "second", profile.clone(), None)
         .unwrap();
     let mut wrong_session = first.invocation.clone();
     wrong_session.session_id = b.id.clone();

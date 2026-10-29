@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "title_b":reopened.database().session(&b.id)?.title,
             "messages_a":reopened.database().messages(&a.id, 50, None)?.messages.len(),
             "messages_b":reopened.database().messages(&b.id, 50, None)?.messages.len(),
-            "history_b":reopened.database().history(&b.id, 1024)?.history.len(),
+            "history_b":reopened.database().history(&b.id)?.history.len(),
         })
     );
     reopened.close()?;

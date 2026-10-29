@@ -255,7 +255,7 @@ fn execution_probe() {
             job.cancel();
             assert!(job.join().is_err());
             json!({"state":host.database().turn(&invocation.turn_id).unwrap().state,
-                "history":host.database().history(&session.id, 1024).unwrap().history.len(),
+                "history":host.database().history(&session.id).unwrap().history.len(),
                 "unreported":host.database().usage(Default::default()).unwrap().unreported_invocations})
         }
         "title_auto" | "title_before" | "title_rename" | "title_failure" | "title_persistence" => {
@@ -327,7 +327,7 @@ fn execution_probe() {
         "conversation" | "no_metadata" => {
             let first = host.submit(&session.id, "first").unwrap().join().unwrap();
             let second = host.submit(&session.id, "second").unwrap().join().unwrap();
-            json!({"first":first, "second":second, "messages":host.database().history(&session.id, 1024).unwrap().history.len()})
+            json!({"first":first, "second":second, "messages":host.database().history(&session.id).unwrap().history.len()})
         }
         "cancel" => {
             let job = host.submit(&session.id, "cancel me").unwrap();
@@ -336,7 +336,7 @@ fn execution_probe() {
             job.cancel();
             assert!(job.join().is_err());
             json!({"state":host.database().turn(&invocation.turn_id).unwrap().state,
-                "history":host.database().history(&session.id, 1024).unwrap().history.len()})
+                "history":host.database().history(&session.id).unwrap().history.len()})
         }
         "capacity" => {
             let job = host.submit(&session.id, "pending").unwrap();
@@ -372,7 +372,7 @@ fn execution_probe() {
             );
             first.cancel();
             assert!(first.join().is_err());
-            json!({"fast":second.result.text, "other_messages":host.database().history(&other.id, 1024).unwrap().history.len()})
+            json!({"fast":second.result.text, "other_messages":host.database().history(&other.id).unwrap().history.len()})
         }
         "persistence" => {
             let mut connection =
@@ -466,7 +466,7 @@ fn execution_probe() {
                 })
             ));
             json!({"result":result, "original_state":host.database().turn(&invocation.turn_id).unwrap().state,
-                "history":host.database().history(&session.id, 1024).unwrap().history.len()})
+                "history":host.database().history(&session.id).unwrap().history.len()})
         }
         "cleanup" => {
             let mut connection =

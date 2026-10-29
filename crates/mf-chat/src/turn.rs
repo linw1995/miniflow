@@ -43,8 +43,6 @@ pub struct BeginTurnInputs {
     pub prompt: String,
     pub model: ModelIdentity,
     pub retry_of: Option<String>,
-    #[value(default = "session::default_history_bytes")]
-    pub max_history_bytes: usize,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -212,7 +210,7 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
                 }
             );
         }
-        let context = session::history(connection, &owner.id, input.max_history_bytes)?;
+        let context = session::history(connection, &owner.id)?;
         let timestamp = session::now()?;
         let next = owner
             .next_sequence
@@ -772,15 +770,8 @@ impl ChatDatabase {
         prompt: &str,
         model: ModelIdentity,
         retry_of: Option<String>,
-        max_history_bytes: usize,
     ) -> Result<TurnStarted, ChatError> {
-        self.begin_turn_with_invocation(
-            Invocation::new(session_id),
-            prompt,
-            model,
-            retry_of,
-            max_history_bytes,
-        )
+        self.begin_turn_with_invocation(Invocation::new(session_id), prompt, model, retry_of)
     }
 
     pub fn begin_turn_with_invocation(
@@ -789,7 +780,6 @@ impl ChatDatabase {
         prompt: &str,
         model: ModelIdentity,
         retry_of: Option<String>,
-        max_history_bytes: usize,
     ) -> Result<TurnStarted, ChatError> {
         begin(BeginTurnInputs {
             database_path: self
@@ -803,7 +793,6 @@ impl ChatDatabase {
             prompt: prompt.into(),
             model,
             retry_of,
-            max_history_bytes,
         })
     }
 
@@ -953,7 +942,7 @@ mod tests {
         let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
         let session = database.create_session("default", None, None).unwrap();
         let begun = database
-            .begin_turn(&session.id, "question", identity(), None, 1024)
+            .begin_turn(&session.id, "question", identity(), None)
             .unwrap();
         let mut connection = storage::connect(database.path()).unwrap();
         connection.batch_execute("CREATE TRIGGER reject_completion BEFORE UPDATE ON model_calls WHEN NEW.state = 'succeeded' BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;").unwrap();
@@ -1027,7 +1016,7 @@ mod tests {
         let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
         let session = database.create_session("default", None, None).unwrap();
         let first = database
-            .begin_turn(&session.id, "first", identity(), None, 1024)
+            .begin_turn(&session.id, "first", identity(), None)
             .unwrap();
         database
             .fail_turn(first.invocation.clone(), "failed", "provider failure")
@@ -1038,7 +1027,6 @@ mod tests {
                 "retry",
                 identity(),
                 Some(first.invocation.turn_id.clone()),
-                1024,
             )
             .unwrap();
         assert_ne!(first.invocation.call_id, second.invocation.call_id);
@@ -1047,7 +1035,7 @@ mod tests {
         database
             .complete_turn(second.invocation.clone(), reply("answer"))
             .unwrap();
-        let history = database.history(&session.id, 1024).unwrap();
+        let history = database.history(&session.id).unwrap();
         assert_eq!(history.history.len(), 2);
         assert!(
             matches!(&history.history[0], mfn_llm::ChatMessage::User { content, .. } if content == "retry")
@@ -1067,7 +1055,7 @@ mod tests {
         database.archive_session(&session.id).unwrap();
         assert!(
             database
-                .begin_turn(&session.id, "archived", identity(), None, 1024)
+                .begin_turn(&session.id, "archived", identity(), None)
                 .is_err()
         );
     }
@@ -1078,10 +1066,8 @@ mod tests {
         let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
         let session = database.create_session("default", None, None).unwrap();
         let results = std::thread::scope(|scope| {
-            let first =
-                scope.spawn(|| database.begin_turn(&session.id, "a", identity(), None, 1024));
-            let second =
-                scope.spawn(|| database.begin_turn(&session.id, "b", identity(), None, 1024));
+            let first = scope.spawn(|| database.begin_turn(&session.id, "a", identity(), None));
+            let second = scope.spawn(|| database.begin_turn(&session.id, "b", identity(), None));
             [
                 first.join().unwrap().is_ok(),
                 second.join().unwrap().is_ok(),
@@ -1091,7 +1077,7 @@ mod tests {
         let other = database.create_session("default", None, None).unwrap();
         assert!(
             database
-                .begin_turn(&other.id, "other", identity(), None, 1024)
+                .begin_turn(&other.id, "other", identity(), None)
                 .is_ok()
         );
     }
@@ -1103,7 +1089,7 @@ mod tests {
         let database = ChatDatabase::open(&path).unwrap();
         let session = database.create_session("default", None, None).unwrap();
         let begun = database
-            .begin_turn(&session.id, "pending", identity(), None, 1024)
+            .begin_turn(&session.id, "pending", identity(), None)
             .unwrap();
         assert!(matches!(
             ChatDatabase::open(&path),
@@ -1122,13 +1108,7 @@ mod tests {
         let call = reopened.call(&begun.invocation.call_id).unwrap();
         assert_eq!(call.state, "interrupted");
         assert_eq!(call.total_tokens, None);
-        assert!(
-            reopened
-                .history(&session.id, 1024)
-                .unwrap()
-                .history
-                .is_empty()
-        );
+        assert!(reopened.history(&session.id).unwrap().history.is_empty());
     }
 
     #[test]
@@ -1138,7 +1118,7 @@ mod tests {
         let owner = database.create_session("default", None, None).unwrap();
         let other = database.create_session("default", None, None).unwrap();
         let previous = database
-            .begin_turn(&other.id, "other", identity(), None, 1024)
+            .begin_turn(&other.id, "other", identity(), None)
             .unwrap();
         database
             .fail_turn(previous.invocation.clone(), "failed", "failed")
@@ -1151,7 +1131,6 @@ mod tests {
             prompt: "question".into(),
             model: identity(),
             retry_of: None,
-            max_history_bytes: 1024,
         };
         let mut prompt = base.clone();
         prompt.prompt.clear();
@@ -1191,7 +1170,7 @@ mod tests {
         let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
         let owner = database.create_session("default", None, None).unwrap();
         let begun = database
-            .begin_turn(&owner.id, "question", identity(), None, 1024)
+            .begin_turn(&owner.id, "question", identity(), None)
             .unwrap();
         let base = CompleteTurnInputs {
             database_path: database.path().to_str().unwrap().into(),

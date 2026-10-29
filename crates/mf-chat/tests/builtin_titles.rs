@@ -90,11 +90,7 @@ fn builtin_title_runs_once_and_persists_usage_with_the_answer() {
         assert_eq!(second.result.usages.len(), 1);
         assert!(second.result.title.is_none());
         assert_eq!(
-            host.database()
-                .history(&session.id, 4096)
-                .unwrap()
-                .history
-                .len(),
+            host.database().history(&session.id).unwrap().history.len(),
             4
         );
         assert_eq!(
@@ -178,7 +174,7 @@ fn cancelling_the_builtin_title_does_not_commit_an_intermediate_answer() {
     );
     assert!(
         host.database()
-            .history(&session.id, 4096)
+            .history(&session.id)
             .unwrap()
             .history
             .is_empty()
@@ -218,7 +214,7 @@ fn conversation_finish_retains_the_title_for_save_only_retry() {
     );
     assert!(
         host.database()
-            .history(&session.id, 4096)
+            .history(&session.id)
             .unwrap()
             .history
             .is_empty()
@@ -233,11 +229,7 @@ fn conversation_finish_retains_the_title_for_save_only_retry() {
         "Generated title"
     );
     assert_eq!(
-        host.database()
-            .history(&session.id, 4096)
-            .unwrap()
-            .history
-            .len(),
+        host.database().history(&session.id).unwrap().history.len(),
         2
     );
     assert_eq!(server.requests().len(), 2);

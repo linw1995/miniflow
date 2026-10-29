@@ -352,7 +352,6 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
                     model: None,
                 },
                 None,
-                1024,
             )
             .unwrap();
         let arguments = contract.arguments(begun.request, &parameters).unwrap();
@@ -489,7 +488,6 @@ fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_p
                 model: None,
             },
             None,
-            1024,
         )
         .unwrap();
     let mut definition = manifest().definition;
