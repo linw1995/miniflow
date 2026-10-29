@@ -824,6 +824,9 @@ pub struct NodeMetadata {
     /// Caller-owned output slots, published only through directed call requests.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub call_outputs: Vec<PortSpec>,
+    /// Reads another node's prepared call interfaces without acquiring its dispatch capability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_interface_source: Option<crate::DefinitionId>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stream_outputs: Vec<PortSpec>,
     /// At most one listed output may produce a value per task invocation.
