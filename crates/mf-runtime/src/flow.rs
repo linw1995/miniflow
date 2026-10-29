@@ -718,14 +718,8 @@ fn release_domain_successors(
     }
 }
 
-struct CallInstance {
-    lock: std::sync::Mutex<()>,
-    resource: crate::WorkerResource,
-}
-
 struct FlowCalls {
     callers: BTreeMap<crate::DefinitionId, Vec<crate::PreparedCall>>,
-    instances: BTreeMap<NodeId, CallInstance>,
 }
 
 impl Flow {
@@ -737,7 +731,6 @@ impl Flow {
         use crate::invocation::InvalidPlanSnafu;
         use snafu::{OptionExt, ensure};
         let mut callers: BTreeMap<crate::DefinitionId, Vec<crate::PreparedCall>> = BTreeMap::new();
-        let mut instances = BTreeMap::new();
         let scheduled: BTreeSet<_> = self
             .execution_domains()
             .domains()
@@ -782,12 +775,6 @@ impl Flow {
                     message: "caller and external inputs overlap"
                 }
             );
-            instances
-                .entry(call.binding.target)
-                .or_insert_with(|| CallInstance {
-                    lock: std::sync::Mutex::new(()),
-                    resource: crate::WorkerResource::default(),
-                });
             let bindings = callers.entry(caller.definition_id.clone()).or_default();
             ensure!(
                 call.binding.id.index() == bindings.len(),
@@ -805,7 +792,7 @@ impl Flow {
         }))?;
         let data = self.data_mut();
         data.call_interfaces = interfaces;
-        data.calls = (!callers.is_empty()).then_some(FlowCalls { callers, instances });
+        data.calls = (!callers.is_empty()).then_some(FlowCalls { callers });
         Ok(self)
     }
 
@@ -831,9 +818,7 @@ impl crate::invocation::CallDispatcher for FlowData {
         context: &mut crate::ExecutionContext,
         deadline: Option<std::time::Instant>,
     ) -> Result<crate::CallResponse, crate::CallDispatchError> {
-        use crate::invocation::{
-            ExecutionSnafu, PoisonedSnafu, ReentrantSnafu, UnavailableSnafu, UnknownBindingSnafu,
-        };
+        use crate::invocation::{ExecutionSnafu, UnavailableSnafu, UnknownBindingSnafu};
         use snafu::{OptionExt, ResultExt};
         let calls = self.calls.as_ref().context(UnavailableSnafu)?;
         let call = calls
@@ -846,24 +831,12 @@ impl crate::invocation::CallDispatcher for FlowData {
             })?;
         let initial = call.binding.bind_arguments(&arguments)?;
         let node = &self.nodes[call.binding.target.index()];
-        let instance = &calls.instances[&call.binding.target];
         context.run_directed_call(
             id,
             &call.target,
             call.visibility.clone(),
             deadline,
             |child| {
-                let _reservation = instance.resource.reserve().context(ReentrantSnafu)?;
-                let _lock = loop {
-                    child.check_call_limits(deadline)?;
-                    match instance.lock.try_lock() {
-                        Ok(lock) => break lock,
-                        Err(std::sync::TryLockError::Poisoned(_)) => return PoisonedSnafu.fail(),
-                        Err(std::sync::TryLockError::WouldBlock) => {
-                            std::thread::park_timeout(std::time::Duration::from_millis(1));
-                        }
-                    }
-                };
                 let mut skipped = Vec::new();
                 let result = crate::execute_resolved_node_in_context(
                     node,

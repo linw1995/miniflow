@@ -251,12 +251,13 @@ atomic `CallArguments` group. The runtime combines caller-owned values with visi
 then uses the ordinary input validation and node lifecycle in an isolated child context. Results
 return as `CallResponse`; they never publish target outputs or completion into the caller's DAG.
 Repeated and nested calls share an invocation sequence, step budget, and cancellation signal.
-`invoke_call_with_deadline` also bounds lock waiting and propagates a cooperative deadline into nested
+`invoke_call_with_deadline` propagates a cooperative deadline into nested
 calls and asynchronous operations. Synchronous providers must cooperate; they cannot be preempted.
 
-Calls to one prepared target are serialized. While holding or waiting for that instance, nested
-worker submissions execute inline to avoid reentrant queue deadlocks. Independent ordinary callers
-can still run concurrently. Unselected targets never execute. Target failures retain typed sources
+Targets retain the ordinary `TaskNode` and `TaskStreamNode` shared-instance concurrency contract.
+Directed calls do not add executor locks, poisoning, or worker reservations. Providers own their
+internal synchronization and recovery policy; nested work uses the existing bounded worker pool.
+Unselected targets never execute. Target failures retain typed sources
 in `CallOutcome::Failed`; cancellation, deadlines, depth limits, and exhausted step budgets return
 terminal errors. Tool execution is never automatically retried.
 
