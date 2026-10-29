@@ -28,6 +28,8 @@ pub enum IterationErrorPolicy {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IterationConfig {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stream_outputs: BTreeMap<String, crate::OutputReferenceDefinition>,
     #[serde(default)]
     pub mode: IterationMode,
     #[serde(default)]

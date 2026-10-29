@@ -1,4 +1,5 @@
 use crate::{ExecutionContext, FlowOutputs, NodeIdentity, PortSpec, WorkflowRunError};
+use snafu::ResultExt;
 
 type SubgraphBody = dyn Fn(&mut ExecutionContext, &mut dyn crate::EmissionSink) -> Result<FlowOutputs, WorkflowRunError>
     + Send
@@ -73,12 +74,14 @@ pub struct SubgraphStreamOutput {
     pub node: crate::NodeId,
     pub port: PortSpec,
     pub name: String,
+    pub optional: bool,
 }
 
 pub(super) struct ProjectedSink<'a> {
     pub sink: &'a mut dyn crate::EmissionSink,
     pub outputs: &'a [SubgraphStreamOutput],
     pub node: crate::NodeId,
+    pub definition_id: &'a crate::DefinitionId,
 }
 
 impl crate::EmissionSink for ProjectedSink<'_> {
@@ -94,6 +97,21 @@ impl crate::EmissionSink for ProjectedSink<'_> {
             {
                 projected.outputs.insert(output.name.clone(), value.clone());
             } else {
+                if output.node == self.node && !output.optional {
+                    return Err(crate::NodeExecutionError::from(
+                        crate::runner::InvalidOutputSnafu {
+                            definition_id: self.definition_id.clone(),
+                            message: format!(
+                                "missing required exported stream output `{}`",
+                                output.name
+                            ),
+                        }
+                        .build(),
+                    ))
+                    .context(crate::stream_instance::ProducerSnafu {
+                        definition_id: self.definition_id.clone(),
+                    });
+                }
                 projected.skipped.insert(output.name.clone());
             }
         }
@@ -124,11 +142,13 @@ mod tests {
                 node: NodeId::new(0),
                 port: PortSpec::new("value", ValueType::Object, true),
                 name: "selected".into(),
+                optional: false,
             },
             SubgraphStreamOutput {
                 node: NodeId::new(1),
                 port: PortSpec::new("value", ValueType::String, true),
                 name: "other".into(),
+                optional: false,
             },
         ];
         let mut collected = Collect(None);
@@ -136,6 +156,7 @@ mod tests {
             sink: &mut collected,
             outputs: &outputs,
             node: NodeId::new(0),
+            definition_id: &"child".into(),
         };
         assert!(sink.is_connected());
         sink.send(crate::Outputs::from([("value".into(), payload.clone())]).into())

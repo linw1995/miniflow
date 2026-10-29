@@ -997,12 +997,40 @@ JSON null at each failed input position. `remove_failed` omits failed results wh
 A skipped body result counts as an item failure. `continue_on_error` exposes `List(Any)` because the array may contain
 null; the other policies expose a list of the selected body's output type.
 
+Version `2026-10-28` also allows `config.stream_outputs` to export local body TaskStream ports:
+
+```json
+{
+  "mode": "parallel",
+  "stream_outputs": {
+    "answer": {"node": "model", "port": "delta"}
+  }
+}
+```
+
+Add the map alongside `mode`, `on_error`, and `body`, then select `iteration.answer` as a workflow
+output or connect it to a stream consumer. Export names must be nonblank and distinct from `results`.
+The body still requires an ordinary terminal `result`; incremental outputs cannot replace it.
+Each export preserves its source value type and packet ownership, including sparse packets from
+different children. Nested stream dataflow and free-running Event/Stream children remain unsupported.
+
+Sequential items forward increments synchronously. Parallel items remain concurrent and forward
+increments in arrival order; terminal `results` retain input order. Values are forwarded unchanged,
+so include item identity in the child's emission when consumers need to distinguish items. Parallel
+forwarding uses a rendezvous and acknowledges each emission after delivery to the parent sink,
+keeping backpressure bounded without buffering an item's complete stream. The borrowed sink stays
+on the caller thread. Runtime worker limits still cap item concurrency, including a one-worker run.
+
+Body failure policies continue to govern collected item results. Already delivered prefixes from a
+failed item are provisional and are not retracted. Cancellation and stream delivery failure remain
+fatal under every policy. Without a stream subscriber, the original terminal-only execution path
+and item scheduling apply.
+
 The current scope supports one iteration level. Body graphs cannot contain another Iteration node, a structured Loop construct, or access outer
 context outputs directly. Pass values through the input collection or add nodes inside the body. The runner description and
 terminal UI show the Iteration node as one outer graph node. OTel emits separate item and body-node spans and logs with
 the outer node ID and item index; failures remain visible even under `continue_on_error` and `remove_failed`. See
-[observation contracts](observability.md#iteration-observation). Answer-node streaming is outside the current workflow
-runner's output contract.
+[observation contracts](observability.md#iteration-observation).
 
 ## Dependency locks
 

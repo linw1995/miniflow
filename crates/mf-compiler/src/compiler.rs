@@ -1664,6 +1664,46 @@ fn registration_for(
     Ok(registration)
 }
 
+fn prepare_stream_outputs(
+    references: &BTreeMap<String, mf_runtime::OutputReferenceDefinition>,
+    nodes: &[FlowNode],
+    node: &crate::NodeDefinition,
+) -> Result<Vec<mf_runtime::SubgraphStreamOutput>, WorkflowCompileError> {
+    references
+        .iter()
+        .map(|(name, reference)| {
+            let index = nodes
+                .iter()
+                .position(|child| child.definition_id == reference.node)
+                .with_context(|| mf_runtime::NodeInvalidSubgraphSnafu {
+                    message: format!("unknown stream child `{}`", reference.node),
+                })?;
+            let port = nodes[index]
+                .metadata
+                .stream_outputs
+                .iter()
+                .find(|port| port.name == reference.port)
+                .cloned()
+                .with_context(|| mf_runtime::NodeInvalidSubgraphSnafu {
+                    message: format!(
+                        "child `{}` has no TaskStream output `{}`",
+                        reference.node, reference.port
+                    ),
+                })?;
+            Ok(mf_runtime::SubgraphStreamOutput {
+                node: mf_runtime::NodeId::new(index),
+                optional: !port.required,
+                port,
+                name: name.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, NodeBuildError>>()
+        .context(NodeConstructionSnafu {
+            definition_id: node.id.clone(),
+            kind: node.kind.clone(),
+        })
+}
+
 fn bind_subgraph_node(
     node: &crate::NodeDefinition,
     preparation: &mut GraphPreparation<'_>,
@@ -1709,11 +1749,34 @@ fn bind_subgraph_node(
             }
         );
     }
-    let stream_outputs = if let Some(definition) = &node.loop_definition {
-        crate::loops::prepare_stream_outputs(definition, &nodes, &node.id)?
+    let mut stream_outputs = if let Some(definition) = &node.loop_definition {
+        prepare_stream_outputs(&definition.stream_outputs, &nodes, node)?
     } else {
         Vec::new()
     };
+    if node.kind == ITERATION_KIND {
+        let config = parse_config(node)?;
+        stream_outputs.extend(prepare_stream_outputs(
+            &config.stream_outputs,
+            &nodes,
+            node,
+        )?);
+        ensure!(
+            nodes
+                .iter()
+                .any(|child| child.definition_id == config.body.result.node
+                    && child
+                        .metadata
+                        .ports
+                        .outputs
+                        .iter()
+                        .any(|port| port.name == config.body.result.port)),
+            InvalidIterationSnafu {
+                definition_id: node.id.clone(),
+                message: "Iteration result must select a terminal body output"
+            }
+        );
+    }
     let outputs = body
         .outputs
         .iter()

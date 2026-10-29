@@ -887,7 +887,7 @@ fn subgraph_preparation(
         })?
     };
     let body_scope = format!("{scope}_{index}");
-    let (preparations, execution, body_flow) = generate_scope(
+    let (preparations, _, body_flow) = generate_scope(
         &body,
         &order,
         &body_scope,
@@ -900,6 +900,14 @@ fn subgraph_preparation(
             ScopeBuild::Dynamic
         },
     )?;
+    let stream_binding =
+        if node.kind == ITERATION_KIND && !parse_config(node)?.stream_outputs.is_empty() {
+            let bind = format_ident!("bind_stream_outputs_{body_scope}");
+            Some(quote! { let #body_flow = #bind(#body_flow)?; })
+        } else {
+            None
+        };
+    let preparations = preparations.into_iter().chain(stream_binding);
     let nodes = body.nodes.iter()
         .filter(|node| node.kind != ITERATION_INPUT_KIND && node.kind != crate::LOOP_SOURCE_ID)
         .map(|node| {
@@ -954,11 +962,6 @@ fn subgraph_preparation(
             }
         }
     };
-    let run_body = if enclosing.is_some_and(|definition| !definition.stream_outputs.is_empty()) {
-        quote! { #body_flow.execute_with_sink(state, sink) }
-    } else {
-        quote! { let _ = sink; let runtime = mf_runtime::FlowRuntime::default(); #(#execution)* }
-    };
     Ok(quote! {
         let #body_flow = (|| -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
             #(#preparations)*
@@ -968,7 +971,7 @@ fn subgraph_preparation(
         let stream_ports = #body_flow.stream_output_ports();
         let #body_ident = mf_runtime::PreparedSubgraph::streaming(
             vec![#(#nodes),*], vec![#(#outputs),*], stream_ports,
-            move |state, sink| { #run_body },
+            move |state, sink| { #body_flow.execute_with_sink(state, sink) },
         );
         let #body_ident = #body_ident.with_input_schema(input_schema);
         let mut #node_ident = mf_compiler::instantiate_subgraph_with_metadata(
@@ -1539,10 +1542,12 @@ fn subgraph_stream_tokens(
     let id = LitStr::new(id.as_str(), Span::call_site());
     let bindings = outputs.iter().map(|output| {
         let node = output.node.index();
+        let optional = output.optional;
         let name = LitStr::new(&output.name,Span::call_site());
         let port = LitStr::new(&serde_json::to_string(&output.port).context(SerializeSnafu)?,Span::call_site());
         Ok(quote! { mf_runtime::SubgraphStreamOutput {
             node:mf_runtime::NodeId::new(#node), name:#name.into(),
+            optional: #optional,
             port:serde_json::from_str(#port).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {definition_id:#id})?,
         } })
     }).collect::<Result<Vec<_>,PlanError>>()?;
