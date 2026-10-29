@@ -334,7 +334,7 @@ fn tool_probe() {
     )
     .into_task()
     .unwrap();
-    let mut dispatch_config = json!({"call_outputs":{"query":"string"}});
+    let mut dispatch_config = json!({"outputs":{"query":"string"}});
     if let Some(patch) = options["dispatch_config"].as_object() {
         dispatch_config
             .as_object_mut()

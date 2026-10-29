@@ -236,54 +236,30 @@ retains portable registry requirements rather than checkout paths. Source factor
 metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
 catalog to prepare or execute its nodes.
 
-### Prepared directed calls
+### Prepared workflow invocations
 
-`Flow::with_prepared_calls` binds a compiler-validated call table to task instances. The supplied
-`FlowPlan` must already exclude callable targets from ordinary execution domains and arrange the
-callers' external prerequisites. Each `PreparedCall` carries a resolved binding, target identity,
-snapshot visibility, and a prepared success guard. This low-level API does not build or validate a
-workflow dependency graph. `compile_definition` and `instantiate_compiled` install these contracts
-for finite definitions, including nested Flow and Iteration bodies. Generated finite runners freeze
-the same call tables, snapshot visibility, and success guards at build time. Startup checks complete
-node metadata and scope identity before binding executors. Native stream runners freeze the same
-contracts together with message ownership and startup prerequisites.
+`compile_definition` and `instantiate_compiled` bind each scope's selectable `workflow.call` nodes.
+The normal target input connections determine caller-owned and external arguments. The selected
+workflow runs its ordinary body through the existing `PreparedSubgraph` and Flow executor, and only
+its explicit `outputs` return to the caller. Tool result formatting belongs in that connected body.
 
-During a node invocation, `ExecutionContext::invoke_call` selects a `CallBindingId` and accepts one
-atomic `CallArguments` group. The runtime combines caller-owned values with visible external values,
-then uses the ordinary input validation and node lifecycle in an isolated child context. Results
-return as `CallResponse`; they never publish target outputs or completion into the caller's DAG.
-Repeated and nested calls share an invocation sequence, step budget, and cancellation signal.
-`invoke_call_with_deadline` propagates a cooperative deadline into nested
-calls and asynchronous operations. Synchronous providers must cooperate; they cannot be preempted.
+`Flow::with_prepared_calls` is the host-level adapter for a compiler-validated plan. Each
+`PreparedCall` carries a resolved binding, workflow identity, external snapshot visibility, and a
+prepared success guard. The supplied plan excludes call sites from ordinary activation and orders
+external prerequisites before their callers. It does not derive a second workflow graph at runtime.
 
-Targets retain the ordinary `TaskNode` and `TaskStreamNode` shared-instance concurrency contract.
-Directed calls do not add executor locks, poisoning, or worker reservations. Providers own their
-internal synchronization and recovery policy; nested work uses the existing bounded worker pool.
-Unselected targets never execute. Target failures retain typed sources
-in `CallOutcome::Failed`; cancellation, deadlines, depth limits, and exhausted step budgets return
-terminal errors. Tool execution is never automatically retried.
+`ExecutionContext::invoke_call` accepts a binding ID and one atomic `CallArguments` envelope. Each
+invocation receives its own context, observation identity, and input values. Repeated and nested
+calls share the established execution budget, cancellation signal, and bounded worker pool.
+`invoke_call_with_deadline` supplies a cooperative deadline. Domain errors retain typed workflow
+sources, while cancellation and exhausted execution limits remain terminal. Providers retain their
+normal shared-instance concurrency contract.
 
-Prepared scopes derive discovery metadata from their executable call tables. A declared
-`NodeMetadata.call_interface_source` exposes a read-only view of one owner in the same scope; it does
-not add execution dependencies or dispatch capability. Isolated target
-inspection exposes a read-only context overlay, restoring the enclosing capability on return or unwind. Contexts hold only
-weak references to their owning executor graph. Native frames share invocation identities across
-messages while retaining independent frame budgets and immutable input snapshots.
-
-Native calls may combine values from their own message with initial configuration produced by finite
-Task chains. Message admission waits only for the required initial execution domains, then imports
-selected shared values and skip evidence. Ordinary cross-message edges remain invalid. Initial
-prerequisites depending on a connected streaming producer are rejected because its terminal result
-may wait for the very messages needing that prerequisite. Initial configuration is eager even when
-no tool is selected; place a configuration service inside a callable Flow for fresh per-call execution.
-
-TaskStream targets use their terminal task contract. Their incremental emissions are validated and
-remain disconnected from ordinary channels. Callers may still emit their own incremental results.
-
-Call declarations may add a static public `description`. Each projected `CallParameter` also exposes
-`schema_constraints()` for decoded-value refinements; every constraint applies. External schemas are
-removed before projection, including opaque credentials or configuration types. These descriptors are
-provider-neutral and contain no runtime values, environment values, or field-default results.
+Generated programs freeze the same prepared contracts in existing scope layouts and verify provider
+metadata at startup. Flow input interfaces propagate decoded schemas across workflow boundaries.
+Native message frames use the same tables with selected startup values and message-local inputs;
+ordinary cross-message dependencies remain invalid. Catalog nodes read immutable interface views
+and acquire no invocation capability. Nested scopes restore the enclosing view and capability.
 
 ## Forwarding finite child emissions
 

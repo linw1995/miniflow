@@ -2,6 +2,8 @@
 extern crate mfn_code as _;
 extern crate mfn_core as _;
 mod common;
+#[path = "fixtures/connected_tools.rs"]
+mod connected;
 #[path = "fixtures/multi-nodes/src/directed_fixture.rs"]
 mod fixture;
 // Other constructors in this shared fixture are exercised by typed_fast_paths.
@@ -13,13 +15,10 @@ use serde_json::{Value, json};
 use std::{fs, process::Command};
 
 fn definition() -> WorkflowDefinition {
-    let child = json!({"version":"2026-10-28","dependencies":{},"nodes":[
-        {"id":"tool","kind":"builtin.code","config":{"language":"cel","inputs":{"query":"string","token":"string"},"code":{"text":"query + token"}},"inputs":{"token":{"from":{"node":"z_config","port":"value"}}}},
-        {"id":"a_parent","kind":"test.directed_caller","config":{"repeat":2,"allow_drift":true}},
-        {"id":"z_config","kind":"builtin.constant","config":{"value":"credential"}}
-    ],"edges":[{"from_node":"z_config","to_node":"tool"}],
-    "calls":{"a_parent":{"search":{"target":"tool","ports":[{"output":"query","input":"query"}]}}},
-    "outputs":[{"name":"result","node":"a_parent","port":"value"}]});
+    let mut child = connected::document();
+    child["nodes"][0]["config"]["allow_drift"] = true.into();
+    child["edges"] = json!([{"from_node":"z_config","to_node":"tool"}]);
+    let unused = child["nodes"][3].clone();
     serde_json::from_value(json!({"version":"2026-10-28","dependencies":{
         "core":{"package":"mfn-core","path":common::crates_dir().join("builtin-nodes/core")},
         "code":{"package":"mfn-code","path":common::crates_dir().join("builtin-nodes/code")},
@@ -27,7 +26,7 @@ fn definition() -> WorkflowDefinition {
     },"nodes":[
         {"id":"parent","kind":"test.directed_caller","config":{"repeat":2,"result":"result"}},
         {"id":"delegate","kind":"workflow.call","config":{"flow":"child","definition":child}},
-        {"id":"unused","kind":"builtin.code","config":{"language":"cel","inputs":{},"code":{"text":"1 / 0"}}},
+        unused,
         {"id":"z_source","kind":"builtin.constant","config":{"value":"ordinary"}},
         {"id":"z_middle","kind":"fixture.typed_text","inputs":{"text":{"from":{"node":"z_source","port":"value"}}}},
         {"id":"z_sink","kind":"fixture.typed_text","inputs":{"text":{"from":{"node":"z_middle","port":"text"}}}}
@@ -75,8 +74,11 @@ fn generated_layouts_freeze_calls_and_preserve_ordinary_transfer_rules() {
 fn ordinary_transfer_rules_preserve_values_read_by_call_targets() {
     let mut value = serde_json::to_value(definition()).unwrap();
     value["nodes"][0]["config"]["result"] = "value".into();
-    value["nodes"][1] = json!({"id":"delegate","kind":"builtin.identity",
-        "inputs":{"input":{"from":{"node":"z_middle","port":"text"}}}});
+    value["nodes"][1] = json!({"id":"delegate","kind":"workflow.call",
+        "config":{"flow":"read","definition":{"version":"2026-10-28","dependencies":{},
+            "nodes":[{"id":"read","kind":"builtin.identity"}],
+            "outputs":[{"name":"value","node":"read","port":"value"}]}},
+        "inputs":{"read.input":{"from":{"node":"z_middle","port":"text"}}}});
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
     let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
@@ -160,7 +162,9 @@ fn mismatched_call_scope_is_rejected_before_dispatch() {
         .unwrap();
     assert!(!failed.status.success());
     assert!(
-        String::from_utf8_lossy(&failed.stderr).contains("metadata differs"),
+        (String::from_utf8_lossy(&failed.stderr).contains("metadata differs")
+            || String::from_utf8_lossy(&failed.stderr)
+                .contains("cannot connect `a_parent`.`query`")),
         "{}",
         String::from_utf8_lossy(&failed.stderr)
     );

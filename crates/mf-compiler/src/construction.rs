@@ -24,11 +24,6 @@ pub enum FlowBuildError {
     CallDispatch {
         source: mf_runtime::CallDispatchError,
     },
-    #[snafu(display("node `{definition_id}` call outputs: {source}"))]
-    CallOutputs {
-        definition_id: DefinitionId,
-        source: mf_runtime::CallContractError,
-    },
     #[snafu(display("invalid node-success dependency `{from_node}` -> `{to_node}`: {message}"))]
     InvalidSuccessDependency {
         from_node: String,
@@ -393,7 +388,6 @@ impl FlowBuilder {
                     let resolved = mf_runtime::CallBinding::new(
                         binding.name(),
                         indices[&definition.nodes[binding.target().index()].id],
-                        binding.ports().to_vec(),
                         binding.defaults(),
                     )?;
                     Ok::<_, mf_runtime::CallContractError>(
@@ -431,20 +425,7 @@ impl FlowBuilder {
         let mut readiness = BTreeSet::new();
         for bindings in resolved.values() {
             for binding in bindings {
-                let mut pending = vec![binding.target];
-                let mut targets = BTreeSet::new();
                 let mut sources: BTreeSet<_> = binding.prerequisites.iter().copied().collect();
-                while let Some(target) = pending.pop() {
-                    if !targets.insert(target) {
-                        continue;
-                    }
-                    if let Some(nested) = resolved.get(&target) {
-                        for binding in nested {
-                            sources.extend(binding.prerequisites.iter().copied());
-                            pending.push(binding.target);
-                        }
-                    }
-                }
                 for source in &sources {
                     ensure!(
                         node_positions[source] < node_positions[&binding.caller],
@@ -744,11 +725,6 @@ impl FlowBuilder {
             node.metadata
                 .validate_input_schemas()
                 .context(InputSchemasSnafu {
-                    definition_id: node.definition_id.clone(),
-                })?;
-            node.metadata
-                .validate_call_outputs()
-                .context(CallOutputsSnafu {
                     definition_id: node.definition_id.clone(),
                 })?;
             ensure!(
@@ -2020,6 +1996,11 @@ pub fn workflow_input_schema<'a, N: 'a>(
                             WorkflowInput {
                                 value_type: port.value_type.clone(),
                                 required: port.required,
+                                schema: node
+                                    .metadata
+                                    .input_schemas
+                                    .get(port.name.as_ref())
+                                    .cloned(),
                                 binding: node
                                     .metadata
                                     .input_bindings

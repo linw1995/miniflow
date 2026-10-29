@@ -38,8 +38,8 @@ mod workflow_manifest;
 
 pub use call::{
     CallArguments, CallBinding, CallBindingId, CallContractError, CallDefinition, CallDefinitions,
-    CallId, CallInputDefaults, CallInputSource, CallOutcome, CallPortMapping, CallRequest,
-    CallResponse, ResolvedCallBinding, ResolvedCallInput,
+    CallId, CallInputDefaults, CallInputSource, CallOutcome, CallRequest, CallResponse,
+    ResolvedCallBinding, ResolvedCallInput,
 };
 pub use call_interface::{CallInterface, CallInterfaceError, CallInterfaces, CallParameter};
 #[cfg(feature = "async")]

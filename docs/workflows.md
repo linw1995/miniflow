@@ -221,7 +221,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
 | `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
 | `mfn-llm` | [`builtin.tool_catalog`](#node-backed-tools) | Static Dispatch `source` in the same scope | None | Read-only `tools` definitions |
-| `mfn-llm` | [`builtin.tool_dispatch`](#node-backed-tools) | `call_outputs`, batch limit, and independent deadline | `outcome`, `tool_calls` | Correlated `tool_results` |
+| `mfn-llm` | [`builtin.tool_dispatch`](#node-backed-tools) | `outputs`, batch limit, and independent deadline | `outcome`, `tool_calls` | Correlated `tool_results` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -849,19 +849,31 @@ The workflow explicitly separates three nodes supplied by `mfn-llm`:
 | --- | --- | --- | --- |
 | `builtin.tool_catalog` | Static `source`: the Dispatch node ID in the same scope | None | `tools`, using the existing `ToolDefinition` type |
 | `builtin.llm` | Model request configuration | `messages`, `tools`, optional explicit `tool_results` | Current assistant `message`, `tool_calls`, `outcome`, usage, and normal streams |
-| `builtin.tool_dispatch` | Static `call_outputs`, `max_tool_calls`, independent `timeout_ms` | `outcome`, `tool_calls` | `tool_results`, using the existing `ToolResult` type |
+| `builtin.tool_dispatch` | Ordinary argument `outputs`, `max_tool_calls`, independent `timeout_ms` | `outcome`, `tool_calls` | `tool_results`, using the existing `ToolResult` type |
 
 Declare the scope's `calls` on the Dispatch node. Catalog reads a preparation-time, read-only projection
 of that same binding table; it never invokes Dispatch or a tool. This metadata reference is not an
-execution dependency, so `catalog -> chat -> dispatch` remains acyclic. The example maps Dispatch's
-`amount` slot to `multiply.amount`; an ordinary connection supplies `multiply.factor` from `%loop.factor`.
-Only `amount` appears in the model's schema. Explicit port ownership wins, and `remaining_inputs`
-continues to opt into otherwise unbound target inputs.
+execution dependency, so `catalog -> chat -> dispatch` remains acyclic. The example connects Dispatch's
+ordinary `amount` output to `multiply_flow`'s `multiply.amount` input; another ordinary connection
+supplies `multiply.factor` from `%loop.factor`. Only `amount` appears in the model's schema.
+`calls` declares the selectable workflow and its description; actual port connections determine
+argument ownership. `remaining_inputs` opts into otherwise unbound Flow inputs.
+
+`multiply_flow` is an existing `workflow.call` boundary. Inside it, `multiply.result` feeds
+`format_result.product` through a normal data connection. The child Flow explicitly exports
+`format_result.text` as `content`. Dispatch encodes those selected workflow outputs as the tool result;
+internal business outputs are not collected automatically.
 
 ```mermaid
 flowchart LR
     Catalog[Tool Catalog] -->|tools| Model[LLM]
     Model -->|outcome and tool_calls| Dispatch[Tool Dispatch]
+    Dispatch -.->|selected workflow with amount| Multiply
+    subgraph ToolBody[Multiply workflow.call body]
+        Multiply -->|result to product| FormatResult
+        FormatResult -->|content| FlowOutput[Workflow output]
+    end
+    FlowOutput -.->|selected Flow outputs| Dispatch
     Dispatch -->|tool_results| Collect[Message assembly]
     Model -->|message and usage| Collect
 ```
@@ -888,7 +900,7 @@ an unknown-tool error for names outside its own binding table.
 Dispatch's `max_tool_calls` defaults to 32 (range 1-128), and `timeout_ms` defaults to 60000. Both support
 normal configuration templates. Its deadline starts at Dispatch execution and inherits any enclosing
 runtime deadline; it does not inherit the completed model request's local timeout. The model's
-`timeout_ms` covers only that model request. `call_outputs` and `max_tool_calls` are no longer LLM
+`timeout_ms` covers only that model request. `outputs` and `max_tool_calls` are Dispatch
 configuration fields. Neither node owns a multi-round loop.
 
 Tool arguments/results are limited to 64 KiB each, argument batches and generated declarations to

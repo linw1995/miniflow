@@ -735,7 +735,7 @@ fn directed_llm_tools_match_memory_and_generated_finite_and_native_execution() {
                     assert_eq!(messages[2]["tool_call_id"], "a");
                     let result: Value =
                         serde_json::from_str(messages[2]["content"].as_str().unwrap()).unwrap();
-                    assert_eq!(result, json!({"result":42}));
+                    assert_eq!(result, json!({"content":"The product is 42"}));
                 }
             }
         }

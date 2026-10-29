@@ -851,9 +851,6 @@ pub struct NodeMetadata {
     /// Codec refinements beyond coarse port types; never contains runtime values or defaults.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub input_schemas: std::collections::BTreeMap<String, crate::ValueSchema>,
-    /// Caller-owned output slots, published only through directed call requests.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub call_outputs: Vec<PortSpec>,
     /// Reads another node's prepared call interfaces without acquiring its dispatch capability.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_interface_source: Option<crate::DefinitionId>,
@@ -1128,7 +1125,6 @@ fn reflected_node_metadata(
         ConflictingStreamDeclarationsSnafu
     );
     metadata.ports = ports;
-    metadata.validate_call_outputs()?;
     metadata.validate_input_schemas()?;
     Ok(metadata)
 }
@@ -1231,7 +1227,6 @@ impl PreparedNode {
         mut metadata: NodeMetadata,
     ) -> Result<Self, NodeBuildError> {
         metadata.stream_outputs = outputs.clone();
-        metadata.validate_call_outputs()?;
         Ok(Self::from_parts(
             NodeExecution::TaskStream(Box::new(crate::TaskStreamExecutor::new(task, outputs))),
             metadata,

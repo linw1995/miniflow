@@ -1,31 +1,23 @@
-## Why
+# Connected workflow tools
 
-An upstream node cannot currently discover the input contract of a connected downstream node during
-execution. Future LLM tool dispatch needs that contract, but a tool may also receive inputs from
-constants or configuration services. Exposing every target input to the caller would misrepresent
-parameter ownership and permit callers to override externally supplied values.
+## Motivation
 
-## What Changes
+A model needs the input contract of selectable downstream tools before it emits a request. Tools can
+combine model-provided arguments with credentials or configuration supplied by other nodes. The same
+workflow must preserve explicit data flow through tool execution, result processing, and output selection.
 
-- Expose immutable, scope-local downstream interface views through the execution context.
-- Resolve parameter ownership from explicit port connections first.
-- Treat a node-level invocation connection as a default binding for remaining target inputs.
-- Project each caller's parameter interface from the resolved bindings, preserving types, requiredness,
-  and public descriptions without exposing internal configuration or values.
-- Define a separate invocation contract for atomic argument submission and runtime composition with
-  inputs from other producers. Ordinary data and control connections retain their existing behavior.
-- Stage implementation so generic discovery and binding resolution precede runtime invocation and
-  provider-specific LLM ToolUse support.
+## Change
+
+- Declare selectable `workflow.call` sites by caller ID and public alias.
+- Derive argument ownership from existing node input connections and ordinary output ports.
+- Reuse workflow input interfaces, node validation, child execution, and explicit Flow output selection.
+- Reflect decoded schemas through workflow input boundaries and advertise only caller-owned arguments.
+- Keep Catalog, one model request, and Dispatch as explicit nodes composed by a normal chat workflow.
+- Support memory execution and generated programs in finite and native stream scopes.
 
 ## Impact
 
-The implementation affects workflow definitions, compiler preparation and generated plans, runtime
-invocation contexts, decoded schema reflection, observation, and LLM protocol adaptation. It reuses
-ordinary node preparation, input resolution, node execution, exclusive-branch proofs, success guards,
-and the shared worker pool. LLM nodes execute one model request and reuse the existing explicit messages, calls, and results contracts;
-workflow loops own repeated requests, termination, and usage accumulation. The chat tool
-example uses the application's existing conversation contract. Loop child-stream forwarding is a
-separate change.
-
-Runtime topology mutation, dynamically loaded providers, arbitrary cross-scope discovery, and stream
-or event nodes as callable tools are outside the initial scope.
+`calls` adds routing metadata to the workflow format. A selected target is an existing workflow call
+site whose body contains normal nodes and connections. Runtime records are compiled from that graph.
+Plugins use normal `NodeMetadata.ports`; workflow input interfaces optionally carry decoded schemas.
+The example includes a connected calculation and result formatter inside its tool Flow.

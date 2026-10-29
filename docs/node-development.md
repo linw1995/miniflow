@@ -153,172 +153,103 @@ Rebuild plugins against the matching runtime package and correct declarations th
 
 Declare context reads in `NodeMetadata.context_references`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
 
-## Directed call contracts
+## Directed workflow calls
 
-Workflow version `2026-10-28` adds a scope-local `calls` map indexed by caller definition ID and public
-alias. Each entry names an exact `target`, explicit `ports` mappings, and a `defaults` policy:
+Workflow version `2026-10-28` adds scope-local selectable workflow call sites. Each `calls` entry names
+an existing `workflow.call` node, a public alias, an optional description, and a default-input policy:
 
 ```json
 {
   "calls": {
     "parent": {
       "search": {
-        "target": "search-node",
-        "ports": [{"output": "query", "input": "query"}],
-        "defaults": "remaining_inputs"
+        "target": "search_flow",
+        "description": "Search the configured service"
       }
     }
   }
 }
 ```
 
-The default policy is `explicit_only`; an empty port group does not enable node-level fallback.
-Normal target input connections retain external parameter ownership. A declared call target cannot
-also feed ordinary connections or selected workflow outputs. Unknown endpoints, blank aliases, empty
-caller declarations, duplicate destination mappings, and recursive call graphs fail during planning.
-Caller and target IDs are exact names in the same scope, not paths through nested graphs.
+The target uses the existing Flow interface. Its body contains ordinary nodes and connections, and its
+`outputs` explicitly select the values returned to the caller. Computation, formatting, validation,
+branching, and output selection inside the tool therefore use the same workflow capabilities as an
+ordinary `workflow.call`. A business node can be placed in that body and connected to downstream nodes.
+Calls never discover a business node's outputs and implicitly turn them into a tool result.
 
-Executable preparation resolves declarations into `PreparedCall` records shared by runtime dispatch
-and caller-visible interface projection. Generated runners freeze these records in the existing
-`PreparedScopeLayout`, alongside execution domains, visibility, and success guards. Startup checks
-the scope identity and complete provider metadata before installing the table. No separate serialized
-call-layout artifact or independently versioned layout contract is required.
+Argument ownership comes from ordinary target `inputs` connections. For example, an existing
+`search_flow` call site can bind one input to a caller output and another to a configuration producer:
 
-Exhaustive `WorkflowDefinition`, `LoopBodyDefinition`, and `IterationBodyDefinition` literals must add
-`calls: Default::default()` to preserve ordinary behavior.
-
-`CallBinding` declares a directed call independently of ordinary data publication. It names a target
-`NodeId`, a group of `CallPortMapping` entries, and a `CallInputDefaults` policy. Each mapping names an
-exact caller output and target input; dots are literal port-name characters. Construction rejects
-empty names and duplicate destination inputs, while allowing one source output to feed multiple inputs.
-`ExplicitOnly` is the default. `RemainingInputs` explicitly requests that later graph preparation assign
-otherwise unbound target inputs to the caller after resolving all explicit port connections.
-
-The argument envelope separates `outputs`, keyed by caller output names, from `defaults`, keyed by
-target input names. Both preserve `ValueRef` sharing and sensitivity. An absent optional argument is
-omitted; null remains a supplied value. External constants and configuration values belong to runtime
-input composition, not to this caller-owned envelope.
-
-```rust
-use mf_runtime::{
-    CallArguments, CallBinding, CallBindingId, CallId, CallInputDefaults,
-    CallPortMapping, CallRequest, NodeId, NodeValues,
-};
-
-let binding = CallBinding::new(
-    "search",
-    NodeId::new(3),
-    vec![CallPortMapping { output: "query".into(), input: "query".into() }],
-    CallInputDefaults::ExplicitOnly,
-)?;
-let request = CallRequest {
-    id: CallId { binding: CallBindingId::new(0), invocation: 42 },
-    arguments: CallArguments {
-        outputs: NodeValues::from([("query".into(), "runtime contracts".into())]),
-        ..Default::default()
-    },
-};
-```
-
-The example constructs contracts without executing a target. Runtime invocation returns its response
-synchronously, including the observation identity. Declare explicit caller
-output slots in `NodeMetadata.call_outputs`. They are separate from ordinary and stream outputs, and
-cannot share names with either. Factories still return complete nodes; ordinary result validation and
-output references exclude these slots. Empty call-output metadata retains the existing serialized form,
-while the existing `verify_generated_metadata` comparison includes nonempty declarations.
-Exhaustive `NodeMetadata` literals must add `call_outputs: Vec::new()`; constructors and literals using
-`..Default::default()` require no migration.
-
-Normal workflow preparation resolves the scope's declared calls with existing type inference and
-exclusive-branch proofs. Only declared targets defer required-input checks to binding resolution;
-nested scopes retain their own declarations. `FlowBuilder::resolve_call_bindings` remains the shared
-resolver for already prepared nodes. The compiler has no separate call-only preparation mode.
-
-Explicit output mappings claim their target inputs first. Existing data connections claim external
-inputs and conflict with explicit caller mappings. Node-level defaults fill only the remaining inputs.
-An unbound optional input stays omitted, while an unbound required input is rejected. Control and success
-dependencies remain prerequisites and never claim parameters. External exclusive groups use ordinary
-branch proofs; caller/external mixtures are rejected. Unknown ports, duplicate aliases, incompatible
-types, self-calls, and waits on the caller or another callable target fail during resolution.
-
-The returned `ResolvedCallBinding` records each input's source and sensitivity, ordinary output
-dependencies, success dependencies, and direct prerequisite nodes. These are execution-planning records,
-not a model-facing schema: external input names and internal dependency keys must not be advertised as
-caller arguments. `bind_arguments(&CallArguments)` checks allowed names, requiredness, source contracts,
-and destination contracts before returning caller-owned inputs keyed by target port names. A shared
-source is checked against every destination. Source requiredness applies only within a selected binding.
-Sensitivity and shared payloads are preserved. External and omitted inputs are not inserted or read.
-
-```rust
-fn bind_call_arguments(
-    call: &mf_runtime::PreparedCall,
-    arguments: &mf_runtime::CallArguments,
-) -> Result<mf_runtime::Inputs, mf_runtime::CallContractError> {
-    call.binding.bind_arguments(arguments)
+```json
+{
+  "inputs": {
+    "request.query": {"from": {"node": "parent", "port": "query"}},
+    "request.token": {"from": {"node": "config", "port": "token"}}
+  }
 }
 ```
 
-Current targets must be terminal tasks without external context references, stdin, or startup
-environment/default bindings. TaskStream callers and terminal TaskStream producer values are supported;
-stream emissions cannot serve as external input values. Input sensitivity declarations remain supported.
+Both names are normal Flow input ports, including their literal dots. `parent.query` is declared in
+`NodeMetadata.ports.outputs`; its connection supplies the selected invocation's `request.query` input.
+The configuration connection retains external ownership. The upstream interface exposes only `query`,
+including the destination's requiredness, sensitivity, and decoded schema refinements. Ordinary
+connection validation and type inference check both edges. Caller argument connections must each
+have one non-exclusive source; external exclusive inputs retain ordinary branch proofs.
 
-`CallRequest` is separate from `NodeResult` and stream emissions: it selects one binding and submits
-its argument group atomically, including an empty group. Calls must eventually be submitted before
-the Parent's final result to support waiting and continuation. Ordinary output publication does not
-dispatch requests. Multiple requests may select the same binding; unselected bindings are not skipped.
-`CallResponse` retains the completed invocation identity. `CallOutcome` preserves successful
-output values, structured dependency skip causes, or a typed `WorkflowRunError`; optional result omissions
-remain absent. Child loop effects are not returned through this contract.
-`CallContractError` converts transparently into `NodeBuildError` and `NodeExecutionError`, allowing
-factories and node implementations to propagate declaration and correlation failures with `?`.
+The default policy is `explicit_only`. `remaining_inputs` assigns otherwise unbound target inputs to
+the caller after every explicit connection is resolved. Unbound optional inputs remain omitted;
+unbound required inputs fail preparation. Output and fallback argument names remain distinct in
+`CallArguments`, and both preserve shared values and sensitivity. Null is a supplied value.
 
-### Caller-visible interfaces
-
-`ResolvedCallBinding::interface()` projects an immutable `CallInterface`: a local binding ID, public
-alias, and separate `outputs` and `defaults` parameter lists. External and omitted inputs, destination
-port names for explicit mappings, node indexes, dependency keys, and configuration values are absent.
-The view can be serialized for inspection without serializing the private execution plan.
-
-Each `CallParameter` exposes its caller-side name, requiredness, sensitivity, and a list of `ValueType`
-constraints that **all** must hold. A shared output appears once, combining every source and destination
-constraint without widening to `Any`. Requiredness and sensitivity are combined with logical OR.
-For example, nullable strings and nullable integers intersect at null, so treating either as a union
-or rejecting the pair as disjoint would change the contract. Constraints are deduplicated and ordered
-by their descriptor display; parameter names are sorted within each namespace. `validate_arguments`
-checks this public contract without modifying values or performing target execution. Producers should
-preserve value sensitivity and use the parameter's sensitivity flag when handling caller-side data.
-The runtime binding still marks target inputs as sensitive during mapping.
-
-The prepared scope derives its immutable `CallInterfaces` catalog from the executable call table.
-Aliases and binding IDs are unique within each caller. `ExecutionContext::call_targets()` returns
-only the current node's view and is empty outside node execution. There is no separate catalog
-attachment step on `Flow` or `PreparedStream`, so advertised routes and executable routes cannot
-be configured independently. Isolated task inspection uses a scoped read-only overlay without
-granting dispatch authority; nested graph entry points always install their own table.
-
-A node may declare `NodeMetadata.call_interface_source` to read another call-owning node's interfaces
-in the same prepared scope. `call_targets()` resolves that read-only view; `can_invoke_calls()` stays
-false for the viewer, and invocation cannot borrow the source's authority. Preparation rejects missing
-owners, chained views, or a viewer that also declares its own calls. The reference adds no scheduling
-edge and is included in generated metadata drift checks. Ordinary metadata omits the empty field.
+`CallBinding` contains only a public name, prepared target `NodeId`, default policy, and optional
+description. `FlowBuilder::resolve_call_bindings` resolves it from that builder's ordinary connections.
+The compiled `ResolvedCallBinding` records the resulting input sources and external prerequisites.
+The caller does not maintain a second port mapping.
 
 ```rust
-fn advertised_tools(ctx: &mf_runtime::ExecutionContext) -> Vec<&str> {
-    ctx.call_targets().iter().map(|interface| interface.name()).collect()
-}
+use mf_runtime::{CallArguments, CallBinding, CallInputDefaults, NodeId, NodeValues};
+
+let binding = CallBinding::new("search", NodeId::new(3), CallInputDefaults::ExplicitOnly)?;
+let arguments = CallArguments {
+    outputs: NodeValues::from([("query".into(), "runtime contracts".into())]),
+    ..Default::default()
+};
 ```
 
-Dynamic and generated domains, snapshot fallbacks, stream messages, combined producers, and isolated
-task targets use the prepared scope's catalog. Domain and stream context forks share immutable data;
-body forks start without an inherited catalog. Nested scopes restore their enclosing catalog and node
-identity on success, error, or unwinding. Configure each prepared child Flow independently. Catalogs
-belong to a prepared scope, so shared node implementations must not cache them globally by binding ID.
-Scopes without discovery metadata do not allocate catalog storage.
+The runtime selects a compiled binding through `ExecutionContext::invoke_call`. It composes connected
+caller arguments with a snapshot of external inputs, then invokes the ordinary workflow call site in
+an isolated execution context. The existing Flow executor runs the entire tool body and selects its
+explicit outputs. An omitted optional workflow output stays absent. A failure retains the ordinary
+workflow error chain; cancellation, deadlines, depth limits, and step-budget failures remain terminal.
+Calls are not retried automatically.
 
-Discovery does not change ordinary scheduling or make tools invocable. Do not execute a prototype Flow
-containing tool nodes expecting discovery attachment to make them lazy. Executable bindings use the runtime call dispatcher. Tool Catalog converts caller-visible parameters
-into provider schemas; Tool Dispatch executes requests from the explicit-message protocol. In particular, a serialized `CallInterface` is not
-a provider tool definition: its constraint list is conjunctive, and its two namespaces remain distinct.
+The call declaration establishes an invocation boundary. Its caller-owned argument values belong to
+that invocation and are not broadcast as the caller's final outputs. Argument ports may therefore be
+optional in an ordinary caller result even when a selected workflow requires their values. A dynamic
+router should mark unpublished argument outputs skipped in its terminal result. The call site is
+excluded from ordinary activation, and its public outputs return through the selected invocation.
+The body still publishes, routes, and selects its values using normal Flow semantics.
+
+External producers are scheduled before the caller without making the caller inherit their skip
+state. Missing or skipped prerequisites affect the selected invocation. Native frames compose values
+from their own message with selected startup snapshots; cross-message joins and waits on connected
+streaming producers fail preparation. TaskStream callers retain their ordinary streaming behavior.
+
+Compiled calls share the existing execution domains and generated scope layouts. Generated programs
+freeze resolved bindings and provider metadata; startup verifies the current contracts before
+execution. Normal graph checks may reject incompatible port drift before metadata comparison. Flow
+input descriptors carry codec schemas through nested workflow boundaries without executing codecs or
+default providers during reflection.
+
+Prepared scopes derive read-only discovery data from the executable table. A node may declare
+`NodeMetadata.call_interface_source` to inspect one owner in the same scope. `call_targets()` exposes
+that projection, while `can_invoke_calls()` remains false for a read-only viewer. Missing sources,
+chained views, and mixed ownership fail preparation. The reference creates no execution dependency.
+Nested workflows install their own scope and restore the enclosing one on return or unwinding.
+
+Exhaustive `WorkflowDefinition`, `LoopBodyDefinition`, and `IterationBodyDefinition` literals include
+`calls: Default::default()` for ordinary workflows. Exhaustive `WorkflowInput` literals include
+`schema: None` when no decoded refinement is available.
 
 ## Context-aware execution
 

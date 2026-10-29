@@ -197,6 +197,7 @@ impl CallTable {
             deadline,
             |child| {
                 let mut skipped = Vec::new();
+                let mut outputs = crate::Outputs::new();
                 let result = crate::execute_resolved_node_in_context(
                     node,
                     child,
@@ -216,7 +217,9 @@ impl CallTable {
                         Ok(resolution)
                     },
                     |inputs, ctx| {
-                        invoke(node, inputs, ctx).map(crate::GeneratedNodeResult::Dynamic)
+                        let result = invoke(node, inputs, ctx)?;
+                        outputs = result.outputs.clone();
+                        Ok(crate::GeneratedNodeResult::Dynamic(result))
                     },
                 );
                 child.check_call_limits(deadline)?;
@@ -228,12 +231,6 @@ impl CallTable {
                 }
                 if !skipped.is_empty() {
                     return Ok(crate::CallOutcome::Skipped { causes: skipped });
-                }
-                let mut outputs = crate::Outputs::new();
-                for (port, key) in node.metadata.ports.outputs.iter().zip(node.output_keys()) {
-                    if let Ok(crate::ContextValue::Value(value)) = child.output(key) {
-                        outputs.insert(port.name.to_string(), value.clone());
-                    }
                 }
                 Ok(crate::CallOutcome::Succeeded(outputs))
             },

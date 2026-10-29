@@ -140,9 +140,11 @@ fn caller(_: Value) -> Result<PreparedNode, NodeBuildError> {
         NodeMetadata {
             ports: NodePorts {
                 inputs: vec![],
-                outputs: vec![PortSpec::new("value", ValueType::String, true)],
+                outputs: vec![
+                    PortSpec::new("value", ValueType::String, true),
+                    PortSpec::new("request", ValueType::Any, false),
+                ],
             },
-            call_outputs: vec![PortSpec::new("request", ValueType::Any, true)],
             ..Default::default()
         },
     ))

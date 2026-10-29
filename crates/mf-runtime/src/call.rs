@@ -1,11 +1,10 @@
-//! Contracts for directed calls, separate from ordinary output publication.
+//! Scoped workflow invocation contracts resolved from ordinary graph connections.
 //!
 //! These types do not schedule nodes. A dispatcher must consume resolved bindings, validate
 //! composed inputs, allocate invocation identities, and execute through runtime boundaries.
 
 use crate::{
-    FlowDependency, Inputs, NodeId, NodeMetadata, NodeValues, Outputs, PortSpec, SkipCause,
-    WorkflowRunError,
+    FlowDependency, Inputs, NodeId, NodeValues, Outputs, PortSpec, SkipCause, WorkflowRunError,
 };
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::BTreeSet;
@@ -38,19 +37,10 @@ pub struct CallId {
     pub invocation: u64,
 }
 
-/// One caller output mapped to an exact target input name, without field-path interpretation.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CallPortMapping {
-    pub output: String,
-    pub input: String,
-}
-
-/// How a callable group handles target inputs not claimed by explicit port connections.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallInputDefaults {
-    /// Only explicitly mapped caller outputs supply arguments.
+    /// Only graph-connected caller outputs supply arguments.
     #[default]
     ExplicitOnly,
     /// A node-level invocation connection assigns remaining inputs to the caller.
@@ -69,23 +59,18 @@ pub struct CallDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub target: crate::DefinitionId,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ports: Vec<CallPortMapping>,
     #[serde(default)]
     pub defaults: CallInputDefaults,
 }
 
-/// A declaration of one directed call and its atomic group of caller outputs.
+/// Selects a prepared workflow call site; graph connections determine argument ownership.
 ///
-/// Construction checks local names and duplicate target mappings only. Preparation must still
-/// check port existence, types, external sources, alias uniqueness, and target eligibility.
-/// Ordinary data/control edges do not become callable by constructing this declaration.
+/// Preparation validates ports, external sources, alias uniqueness, and the workflow boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallBinding {
     name: String,
     description: Option<String>,
     target: NodeId,
-    ports: Vec<CallPortMapping>,
     defaults: CallInputDefaults,
 }
 
@@ -93,25 +78,14 @@ impl CallBinding {
     pub fn new(
         name: impl Into<String>,
         target: NodeId,
-        ports: Vec<CallPortMapping>,
         defaults: CallInputDefaults,
     ) -> Result<Self, CallContractError> {
         let name = name.into();
         ensure!(!name.trim().is_empty(), EmptyNameSnafu { field: "binding" });
-        let mut inputs = BTreeSet::new();
-        for port in &ports {
-            ensure!(!port.output.is_empty(), EmptyNameSnafu { field: "output" });
-            ensure!(!port.input.is_empty(), EmptyNameSnafu { field: "input" });
-            ensure!(
-                inputs.insert(&port.input),
-                DuplicateInputSnafu { input: &port.input }
-            );
-        }
         Ok(Self {
             name,
             description: None,
             target,
-            ports,
             defaults,
         })
     }
@@ -132,10 +106,6 @@ impl CallBinding {
         self.target
     }
 
-    pub fn ports(&self) -> &[CallPortMapping] {
-        &self.ports
-    }
-
     pub const fn defaults(&self) -> CallInputDefaults {
         self.defaults
     }
@@ -148,7 +118,7 @@ impl CallBinding {
 /// Values retain sharing and sensitivity; omission is not represented by JSON null.
 #[derive(Clone, Debug, Default)]
 pub struct CallArguments {
-    /// Values keyed by caller output names from explicit port mappings.
+    /// Values keyed by caller output names from graph connections.
     pub outputs: NodeValues,
     /// Values keyed by target input names assigned through a node-level default connection.
     pub defaults: NodeValues,
@@ -185,13 +155,6 @@ pub struct CallResponse {
 
 #[derive(Debug, Snafu)]
 pub enum CallContractError {
-    #[snafu(display("invalid call output `{port}`: {reason}"))]
-    InvalidOutput { port: String, reason: &'static str },
-    #[snafu(display("call output `{port}`: {source}"))]
-    OutputDepth {
-        port: String,
-        source: crate::TypeDepthError,
-    },
     #[snafu(display("unknown call {namespace} argument `{name}`"), visibility(pub))]
     UnknownArgument {
         namespace: &'static str,
@@ -217,37 +180,6 @@ pub enum CallContractError {
     },
     #[snafu(display("call {field} name must not be empty"))]
     EmptyName { field: &'static str },
-    #[snafu(display("call input `{input}` has multiple explicit caller mappings"))]
-    DuplicateInput { input: String },
-}
-
-impl NodeMetadata {
-    /// Validates the distinct call-output namespace without publishing it as ordinary data.
-    pub fn validate_call_outputs(&self) -> Result<(), CallContractError> {
-        let mut names = BTreeSet::new();
-        for port in &self.call_outputs {
-            ensure!(
-                !port.name.is_empty() && names.insert(&port.name),
-                InvalidOutputSnafu {
-                    port: port.name.as_ref(),
-                    reason: "names must be nonempty and unique",
-                }
-            );
-            ensure!(
-                !self
-                    .output_ports()
-                    .any(|ordinary| ordinary.name == port.name),
-                InvalidOutputSnafu {
-                    port: port.name.as_ref(),
-                    reason: "ordinary and call outputs must not share a name",
-                }
-            );
-            port.value_type.check_depth().context(OutputDepthSnafu {
-                port: port.name.as_ref(),
-            })?;
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

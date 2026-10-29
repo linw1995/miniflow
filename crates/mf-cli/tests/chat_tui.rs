@@ -247,7 +247,7 @@ fn tool_chat_workflow_reuses_the_application_contract() {
     assert_eq!(result["tool_call_id"], "multiply-1");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(result["content"].as_str().unwrap()).unwrap(),
-        serde_json::json!({"result":63})
+        serde_json::json!({"content":"The product is 63"})
     );
     assert!(
         messages(&requests[3])

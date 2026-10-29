@@ -5,6 +5,8 @@ struct Caller {
     alias: String,
     result: String,
     repeat: usize,
+    capture_outputs: bool,
+    omit_optional: bool,
 }
 impl TaskNode for Caller {
     fn execute(
@@ -24,6 +26,7 @@ impl TaskNode for Caller {
                 outputs: interface
                     .outputs()
                     .iter()
+                    .filter(|parameter| !self.omit_optional || parameter.required())
                     .map(|parameter| (parameter.name().into(), "query:".into()))
                     .collect(),
                 defaults: interface
@@ -34,7 +37,17 @@ impl TaskNode for Caller {
             };
             let response = context.invoke_call(interface.id(), arguments)?;
             value = match response.outcome {
-                CallOutcome::Succeeded(outputs) => outputs[&self.result].clone(),
+                CallOutcome::Succeeded(outputs) => {
+                    if self.capture_outputs {
+                        ValueRef::object(
+                            outputs
+                                .into_iter()
+                                .map(|(name, value)| (name.into(), value)),
+                        )
+                    } else {
+                        outputs[&self.result].clone()
+                    }
+                }
                 CallOutcome::Skipped { .. } => "skipped".into(),
                 CallOutcome::Failed { source } => return Err(source.into()),
             };
@@ -55,15 +68,47 @@ fn caller(config: Value) -> Result<PreparedNode, NodeBuildError> {
             alias: config["alias"].as_str().unwrap_or("search").into(),
             result: config["result"].as_str().unwrap_or("text").into(),
             repeat: config["repeat"].as_u64().unwrap_or(1) as usize,
+            capture_outputs: config["capture_outputs"].as_bool().unwrap_or(false),
+            omit_optional: config["omit_optional"].as_bool().unwrap_or(false),
         })),
         NodeMetadata {
             ports: NodePorts {
                 inputs: vec![],
-                outputs: vec![PortSpec::new("value", ValueType::Any, true)],
+                outputs: vec![
+                    PortSpec::new("value", ValueType::Any, true),
+                    PortSpec::new("query", call_type, false),
+                ],
             },
-            call_outputs: vec![PortSpec::new("query", call_type, true)],
             ..Default::default()
         },
     ))
 }
 inventory::submit! { NodeRegistration { kind: "test.directed_caller", factory: NodeFactory::Plain(caller) } }
+
+#[derive(NodeValue)]
+struct OptionalInputs {
+    value: Option<String>,
+}
+#[derive(NodeValue)]
+struct OptionalOutputs {
+    value: String,
+}
+struct OptionalTool;
+impl TypedTaskNode for OptionalTool {
+    type Input = OptionalInputs;
+    type Output = OptionalOutputs;
+    fn execute(
+        &self,
+        input: OptionalInputs,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<OptionalOutputs>, NodeExecutionError> {
+        Ok(OptionalOutputs {
+            value: input.value.unwrap_or_else(|| "fallback".into()),
+        }
+        .into())
+    }
+}
+fn optional_tool(_: Value) -> Result<PreparedNode, NodeBuildError> {
+    PreparedNode::typed_task(OptionalTool, NodeMetadata::default())
+}
+inventory::submit! { NodeRegistration { kind: "fixture.optional_tool", factory: NodeFactory::Plain(optional_tool) } }

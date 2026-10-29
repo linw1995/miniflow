@@ -147,6 +147,19 @@ fn factory(
                 })
         })
         .collect();
+    let input_schemas = body
+        .inputs
+        .inputs
+        .iter()
+        .flat_map(|(node, ports)| {
+            ports.iter().filter_map(move |(name, input)| {
+                input
+                    .schema
+                    .as_ref()
+                    .map(|schema| (mf_runtime::output_id(node, name), schema.clone()))
+            })
+        })
+        .collect();
     let streaming = !body.stream_outputs.is_empty();
     let node = CallNode {
         id: id.into(),
@@ -155,6 +168,7 @@ fn factory(
     };
     let metadata = NodeMetadata {
         input_bindings,
+        input_schemas,
         ..Default::default()
     };
     if streaming {

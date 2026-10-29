@@ -131,6 +131,7 @@ impl WorkflowInterface {
                 input.value_type.check_depth().context(TypeDepthSnafu {
                     path: pointer(&pointer("", node), name),
                 })?;
+                input.validate_schema(&qualified)?;
                 input.binding.validate(&qualified, &input.value_type)?;
             }
         }
@@ -170,6 +171,8 @@ pub struct WorkflowInput {
     #[serde(rename = "type")]
     pub value_type: ValueType,
     pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<crate::ValueSchema>,
     #[serde(default, skip_serializing_if = "InputBinding::is_empty")]
     pub binding: InputBinding,
 }
@@ -224,6 +227,23 @@ impl InputBinding {
 }
 
 impl WorkflowInput {
+    fn validate_schema(&self, name: &str) -> Result<(), WorkflowInputError> {
+        if let Some(schema) = &self.schema {
+            crate::value_schema::validate_port_schemas(
+                &[crate::PortSpec::owned(
+                    name,
+                    self.value_type.clone(),
+                    self.required,
+                )],
+                &BTreeMap::from([(name.into(), schema.clone())]),
+            )
+            .context(SchemaSnafu {
+                path: pointer("", name),
+            })?;
+        }
+        Ok(())
+    }
+
     /// Uses the same text representation for named arguments and environment values.
     pub fn parse_text(&self, text: &str) -> Result<crate::ValueRef, serde_json::Error> {
         let value = match &self.value_type {
@@ -271,6 +291,11 @@ pub enum WorkflowInputError {
     TooLarge { limit: usize },
     #[snafu(display("workflow input `{path}`: {message}"), visibility(pub))]
     Invalid { path: String, message: String },
+    #[snafu(display("workflow input `{path}` schema: {source}"))]
+    Schema {
+        path: String,
+        source: crate::SchemaContractError,
+    },
     #[snafu(display("workflow input `{path}`: {source}"), visibility(pub))]
     TypeDepth {
         path: String,
@@ -349,6 +374,7 @@ impl WorkflowInputSchema {
         for (node, ports) in &self.inputs {
             for (port, input) in ports {
                 let name = crate::output_id(node, port);
+                input.validate_schema(&name)?;
                 input.binding.validate(&name, &input.value_type)?;
                 if input.required
                     && input.binding.env.is_none()

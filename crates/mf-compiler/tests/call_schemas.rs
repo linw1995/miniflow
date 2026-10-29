@@ -13,8 +13,11 @@ fn definition() -> WorkflowDefinition {
     },"nodes":[
         {"id":"parent","kind":"fixture.schema_caller"},
         {"id":"config","kind":"builtin.constant","config":{"value":"never-advertise-this-value"}},
-        {"id":"tool","kind":"fixture.schema_tool","config":{"allow_drift":true},"inputs":{"token":{"from":{"node":"config","port":"value"}}}}
-    ],"calls":{"parent":{"lookup":{"description":"Find a record","target":"tool","ports":[{"output":"request","input":"payload"}]}}},
+        {"id":"tool","kind":"workflow.call","config":{"flow":"lookup","definition":{
+            "version":"2026-10-28","dependencies":{},"nodes":[{"id":"operation","kind":"fixture.schema_tool","config":{"allow_drift":true}}],
+            "outputs":[{"name":"value","node":"operation","port":"value"}]
+        }},"inputs":{"operation.payload":{"from":{"node":"parent","port":"request"}},"operation.token":{"from":{"node":"config","port":"value"}}}}
+    ],"calls":{"parent":{"lookup":{"description":"Find a record","target":"tool"}}},
     "outputs":[{"name":"result","node":"parent","port":"value"}]})).unwrap()
 }
 

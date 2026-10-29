@@ -221,6 +221,7 @@ fn sample() -> WorkflowManifest {
                     WorkflowInput {
                         value_type: mf_runtime::ValueType::String,
                         required: false,
+                        schema: None,
                         binding: Default::default(),
                     },
                 )]

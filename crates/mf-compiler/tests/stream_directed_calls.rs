@@ -12,9 +12,17 @@ fn document() -> Value {
         {"id":"a_source","kind":"fixture.directed_source"},
         {"id":"parent","kind":"fixture.directed_stream_caller","inputs":{"message":{"from":{"node":"a_source","port":"item"}}}},
         {"id":"z_config","kind":"fixture.directed_config"},
-        {"id":"tool","kind":"builtin.code","config":{"language":"cel","inputs":{"query":"string","token":"string"},"code":{"text":"query + token"}},"inputs":{"token":{"from":{"node":"z_config","port":"token"}}}},
-        {"id":"aaa_unused","kind":"builtin.code","config":{"language":"cel","inputs":{},"code":{"text":"1 / 0"}}}
-    ],"calls":{"parent":{"search":{"target":"tool","ports":[{"output":"query","input":"query"}]},"unused":{"target":"aaa_unused"}}},
+        {"id":"tool","kind":"workflow.call","config":{"flow":"tool","definition":{
+            "version":"2026-10-28","dependencies":{},"nodes":[
+                {"id":"operation","kind":"builtin.code","config":{"language":"cel","inputs":{"query":"string","token":"string"},"code":{"text":"query + token"}}},
+                {"id":"render","kind":"builtin.identity","inputs":{"input":{"from":{"node":"operation","port":"text"}}}}
+            ],"outputs":[{"name":"text","node":"render","port":"value"}]
+        }},"inputs":{"operation.query":{"from":{"node":"parent","port":"query"}},"operation.token":{"from":{"node":"z_config","port":"token"}}}},
+        {"id":"aaa_unused","kind":"workflow.call","config":{"flow":"unused","definition":{
+            "version":"2026-10-28","dependencies":{},"nodes":[{"id":"operation","kind":"builtin.code","config":{"language":"cel","inputs":{},"code":{"text":"1 / 0"}}}],
+            "outputs":[{"name":"text","node":"operation","port":"text"}]
+        }}}
+    ],"calls":{"parent":{"search":{"target":"tool"},"unused":{"target":"aaa_unused"}}},
     "outputs":[{"name":"chunk","node":"parent","port":"increment"},{"name":"result","node":"parent","port":"value"}]})
 }
 fn parse(value: Value) -> WorkflowDefinition {
@@ -124,8 +132,8 @@ fn caller_frame_and_startup_inputs_compose_without_a_latest_value_cache() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut value = document();
     value["nodes"].as_array_mut().unwrap().push(json!({"id":"query","kind":"builtin.identity","inputs":{"input":{"from":{"node":"a_source","port":"item"}}}}));
-    value["nodes"][3]["inputs"]["query"] = json!({"from":{"node":"query","port":"value"}});
-    value["calls"]["parent"]["search"]["ports"] = json!([]);
+    value["nodes"][3]["inputs"]["operation.query"] =
+        json!({"from":{"node":"query","port":"value"}});
     let plan = compile_definition(&parse(value), &registry).unwrap();
     let prepared = instantiate_stream(&plan, &registry).unwrap();
     assert_eq!(
@@ -161,7 +169,7 @@ fn rejects_cross_message_inputs_and_terminal_producer_backpressure_cycles() {
                 json!({"id":"other","kind":"fixture.directed_source"}),
                 json!({"id":"other_config","kind":"builtin.identity","inputs":{"input":{"from":{"node":"other","port":"item"}}}}),
             ]);
-            value["nodes"][3]["inputs"]["token"] =
+            value["nodes"][3]["inputs"]["operation.token"] =
                 json!({"from":{"node":"other_config","port":"value"}});
         }
         let error = compile_definition(&parse(value), &registry).unwrap_err();
@@ -181,9 +189,14 @@ fn zero_output_startup_success_dependencies_still_gate_callers() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut value = document();
     value["nodes"][2]["config"] = json!({"empty":true});
-    value["nodes"][3]["inputs"] = json!({});
-    value["nodes"][3]["config"]["inputs"] = json!({"query":"string"});
-    value["nodes"][3]["config"]["code"]["text"] = "query".into();
+    value["nodes"][3]["inputs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("operation.token");
+    value["nodes"][3]["config"]["definition"]["nodes"][0]["config"]["inputs"] =
+        json!({"query":"string"});
+    value["nodes"][3]["config"]["definition"]["nodes"][0]["config"]["code"]["text"] =
+        "query".into();
     value["edges"] = json!([{"from_node":"z_config","to_node":"tool"}]);
     let plan = compile_definition(&parse(value), &registry).unwrap();
     let prepared = instantiate_stream(&plan, &registry).unwrap();
@@ -206,8 +219,9 @@ fn zero_output_startup_success_dependencies_still_gate_callers() {
 fn task_stream_tools_return_terminal_results_without_activating_emission_channels() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut value = document();
-    value["nodes"][3]["kind"] = "fixture.directed_stream_tool".into();
-    value["nodes"][3]["config"] = json!({});
+    value["nodes"][3]["config"]["definition"]["nodes"][0]["kind"] =
+        "fixture.directed_stream_tool".into();
+    value["nodes"][3]["config"]["definition"]["nodes"][0]["config"] = json!({});
     let plan = compile_definition(&parse(value), &registry).unwrap();
     let prepared = instantiate_stream(&plan, &registry).unwrap();
     assert_eq!(prepared.plan().program().messages.len(), 3);
@@ -325,7 +339,7 @@ fn invocation_ids_and_secret_snapshots_remain_scoped_across_native_frames() {
     assert!(
         tools
             .iter()
-            .all(|event| event.snapshot.inputs["token"].as_str() == Some("[REDACTED]"))
+            .all(|event| event.snapshot.inputs["operation.token"].as_str() == Some("[REDACTED]"))
     );
 }
 
@@ -338,7 +352,12 @@ fn concurrent_message_owners_share_unique_call_ids_and_one_startup_snapshot() {
         json!({"id":"other_source","kind":"fixture.directed_source","config":{"values":["other1","other2","other3","other4"]}}),
         json!({"id":"other_parent","kind":"fixture.directed_stream_caller","inputs":{"message":{"from":{"node":"other_source","port":"item"}}}}),
     ]);
+    let mut other_tool = value["nodes"][3].clone();
+    other_tool["id"] = "other_tool".into();
+    other_tool["inputs"]["operation.query"]["from"]["node"] = "other_parent".into();
+    value["nodes"].as_array_mut().unwrap().push(other_tool);
     value["calls"]["other_parent"] = value["calls"]["parent"].clone();
+    value["calls"]["other_parent"]["search"]["target"] = "other_tool".into();
     value["outputs"].as_array_mut().unwrap().extend([
         json!({"name":"other_chunk","node":"other_parent","port":"increment"}),
         json!({"name":"other_result","node":"other_parent","port":"value"}),
@@ -432,7 +451,12 @@ fn native_scope_identity_mismatch_is_rejected() {
         .output()
         .unwrap();
     assert!(!drift.status.success());
-    assert!(String::from_utf8_lossy(&drift.stderr).contains("metadata differs"));
+    assert!(
+        String::from_utf8_lossy(&drift.stderr).contains("metadata differs")
+            || String::from_utf8_lossy(&drift.stderr).contains("cannot connect `parent`.`query`"),
+        "{}",
+        String::from_utf8_lossy(&drift.stderr)
+    );
     let installed = root.path().join("stream");
     fs::copy(binary, &installed).unwrap();
     fs::remove_dir_all(project).unwrap();

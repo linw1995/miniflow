@@ -147,13 +147,13 @@ fn caller(config: Value) -> Result<PreparedNode, NodeBuildError> {
     } else {
         ValueType::String
     };
-    PreparedNode::task_stream(
-        Caller,
-        NodeMetadata {
-            call_outputs: vec![PortSpec::new("query", call_type, true)],
-            ..Default::default()
-        },
-    )
+    let mut prepared = PreparedNode::task_stream(Caller, NodeMetadata::default())?;
+    prepared
+        .metadata
+        .ports
+        .outputs
+        .push(PortSpec::new("query", call_type, false));
+    Ok(prepared)
 }
 inventory::submit! { NodeRegistration { kind:"fixture.directed_source", factory:NodeFactory::Plain(source) } }
 inventory::submit! { NodeRegistration { kind:"fixture.directed_config", factory:NodeFactory::Plain(config) } }

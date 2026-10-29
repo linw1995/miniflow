@@ -47,11 +47,6 @@ pub enum WorkflowCompileError {
         #[snafu(source(from(crate::CallBindingError, Box::new)))]
         source: Box<crate::CallBindingError>,
     },
-    #[snafu(display("node `{definition_id}` call outputs: {source}"))]
-    CallOutputs {
-        definition_id: DefinitionId,
-        source: mf_runtime::CallContractError,
-    },
     #[snafu(transparent)]
     FlowResolution { source: crate::FlowResolutionError },
     #[snafu(
@@ -734,11 +729,6 @@ fn validate_base_metadata(
             .context(InputSchemasSnafu {
                 definition_id: node.definition_id.clone(),
             })?;
-        node.metadata
-            .validate_call_outputs()
-            .context(CallOutputsSnafu {
-                definition_id: node.definition_id.clone(),
-            })?;
         let ports = registrations[&node.definition_id];
         for (name, binding) in &ports.input_bindings {
             let port = ports
@@ -1388,14 +1378,7 @@ pub fn normalize_plan(
     outputs.sort_by(|left, right| {
         (&left.name, &left.node, &left.port).cmp(&(&right.name, &right.node, &right.port))
     });
-    let mut calls = definition.calls.clone();
-    for aliases in calls.values_mut() {
-        for call in aliases.values_mut() {
-            call.ports.sort_by(|left, right| {
-                (&left.input, &left.output).cmp(&(&right.input, &right.output))
-            });
-        }
-    }
+    let calls = definition.calls.clone();
 
     Ok(CompiledWorkflow {
         definition: WorkflowDefinition {
@@ -1495,7 +1478,6 @@ pub fn instantiate_compiled_with_observation(
             && let WorkflowCompileError::NodeConstruction { definition_id, .. }
             | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
             | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
-            | WorkflowCompileError::CallOutputs { definition_id, .. }
             | WorkflowCompileError::TypedGeneration { definition_id, .. }
             | WorkflowCompileError::OutputDerivation { definition_id, .. }
             | WorkflowCompileError::PortTypeDepth { definition_id, .. }

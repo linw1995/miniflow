@@ -137,6 +137,7 @@ pub struct ToolDispatchOutputs {
 struct DispatchNode {
     limit: mf_runtime::ConfigTemplate,
     timeout: mf_runtime::ConfigTemplate,
+    argument_outputs: Vec<String>,
 }
 
 impl TypedTaskNode for DispatchNode {
@@ -148,7 +149,10 @@ impl TypedTaskNode for DispatchNode {
         inputs: ToolDispatchInputs,
         context: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<ToolDispatchOutputs>, NodeExecutionError> {
-        Ok(self.dispatch(inputs, context)?.into())
+        let mut result: TypedNodeResult<ToolDispatchOutputs> =
+            self.dispatch(inputs, context)?.into();
+        result.skipped.extend(self.argument_outputs.iter().cloned());
+        Ok(result)
     }
 }
 
@@ -249,7 +253,7 @@ pub fn prepare_tool_dispatch(config: Value) -> Result<PreparedNode, NodeBuildErr
     #[serde(deny_unknown_fields)]
     struct Config {
         #[serde(default)]
-        call_outputs: BTreeMap<String, mf_runtime::ValueType>,
+        outputs: BTreeMap<String, mf_runtime::ValueType>,
         #[serde(default = "default_limit")]
         max_tool_calls: Value,
         #[serde(default = "default_timeout")]
@@ -263,18 +267,37 @@ pub fn prepare_tool_dispatch(config: Value) -> Result<PreparedNode, NodeBuildErr
         .into_iter()
         .chain(timeout.references("timeout_ms"))
         .collect();
-    PreparedNode::typed_task(
-        DispatchNode { limit, timeout },
+    let mut prepared = PreparedNode::typed_task(
+        DispatchNode {
+            limit,
+            timeout,
+            argument_outputs: config.outputs.keys().cloned().collect(),
+        },
         NodeMetadata {
             context_references,
-            call_outputs: config
-                .call_outputs
-                .into_iter()
-                .map(|(name, value_type)| mf_runtime::PortSpec::owned(name, value_type, false))
-                .collect(),
             ..Default::default()
         },
-    )
+    )?;
+    for (name, value_type) in config.outputs {
+        ensure!(
+            !name.is_empty()
+                && !prepared
+                    .metadata
+                    .output_ports()
+                    .any(|port| port.name == name),
+            InvalidSnafu {
+                field: "outputs",
+                requirement: "nonempty names distinct from protocol outputs"
+            }
+        );
+        prepared
+            .metadata
+            .ports
+            .outputs
+            .push(mf_runtime::PortSpec::owned(name, value_type, false));
+    }
+    prepared.metadata.typed_generation = None;
+    Ok(prepared)
 }
 
 fn validate_setting(
@@ -339,7 +362,7 @@ mod tests {
             json!({"max_tool_calls":129}),
             json!({"max_tool_calls":1.5}),
             json!({"timeout_ms":0}),
-            json!({"call_outputs":{"tool_results":"array"}}),
+            json!({"outputs":{"tool_results":"array"}}),
         ] {
             assert!(prepare_tool_dispatch(config).is_err());
         }

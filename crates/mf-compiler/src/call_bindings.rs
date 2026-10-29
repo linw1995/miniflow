@@ -54,8 +54,6 @@ pub enum CallBindingError {
         port: String,
         source: mf_runtime::TypeDepthError,
     },
-    #[snafu(display("call `{name}` input `{input}` has both caller and external port bindings"))]
-    ConflictingInput { name: String, input: String },
     #[snafu(display("call `{name}` required input `{input}` has no source"))]
     MissingInput { name: String, input: String },
     #[snafu(display("call `{name}` connection: {source}"))]
@@ -121,12 +119,15 @@ pub fn declarations(
                         declaration.target
                     ),
                 })?;
-            let binding = CallBinding::new(
-                name,
-                *target,
-                declaration.ports.clone(),
-                declaration.defaults,
-            )?;
+            ensure!(
+                definition.nodes[target.index()].kind == mf_runtime::CALL_KIND,
+                DefinitionSnafu {
+                    message: format!(
+                        "call `{caller}`.`{name}` must target a workflow.call with explicit workflow outputs"
+                    ),
+                }
+            );
+            let binding = CallBinding::new(name, *target, declaration.defaults)?;
             bindings.push(if let Some(description) = &declaration.description {
                 binding.with_description(description)
             } else {
@@ -161,27 +162,6 @@ pub fn declarations(
             message: "on-demand targets cannot publish through ordinary connections or workflow outputs",
         }
     );
-    // A call graph is separate from the data DAG, but must also be acyclic initially.
-    for start in definition.calls.keys() {
-        let mut visited = BTreeSet::new();
-        let mut pending: Vec<_> = definition.calls[start]
-            .values()
-            .map(|call| &call.target)
-            .collect();
-        while let Some(target) = pending.pop() {
-            ensure!(
-                target != start,
-                DefinitionSnafu {
-                    message: format!("recursive directed-call graph reaches `{start}`")
-                }
-            );
-            if visited.insert(target)
-                && let Some(aliases) = definition.calls.get(target)
-            {
-                pending.extend(aliases.values().map(|call| &call.target));
-            }
-        }
-    }
     Ok(result)
 }
 
@@ -243,7 +223,7 @@ pub fn resolve(
             reason: "a task executor is required",
         }
     );
-    let outputs = ports(parent, "call output", &parent.metadata.call_outputs)?;
+    let outputs = ports(parent, "output", &parent.metadata.ports.outputs)?;
     let indices: BTreeMap<_, _> = nodes
         .iter()
         .enumerate()
@@ -312,42 +292,54 @@ pub fn resolve(
         );
         let inputs = ports(target, "input", &target.metadata.ports.inputs)?;
         let mut mapped = BTreeMap::new();
-        for mapping in binding.ports() {
-            let source = outputs
-                .get(mapping.output.as_str())
-                .context(UnknownPortSnafu {
-                    node: parent.definition_id.clone(),
-                    direction: "call output",
-                    port: &mapping.output,
-                })?;
-            let input = inputs
-                .get(mapping.input.as_str())
-                .context(UnknownPortSnafu {
-                    node: target.definition_id.clone(),
-                    direction: "input",
-                    port: &mapping.input,
-                })?;
+        for dependency in by_node[target_id.index()] {
+            let dependency = dependency.borrowed();
+            if dependency.source_node() != parent.definition_id.as_str() {
+                continue;
+            }
+            let Some(input_name) = dependency.input() else {
+                continue;
+            };
+            ensure!(
+                !dependency.exclusive(),
+                DefinitionSnafu {
+                    message: "caller argument inputs require one non-exclusive port connection"
+                }
+            );
+            let output_name = dependency
+                .source_output()
+                .expect("data connection has an output");
+            let source = outputs.get(output_name).context(UnknownPortSnafu {
+                node: parent.definition_id.clone(),
+                direction: "output",
+                port: output_name,
+            })?;
+            let input = inputs.get(input_name).context(UnknownPortSnafu {
+                node: target.definition_id.clone(),
+                direction: "input",
+                port: input_name,
+            })?;
             crate::compiler::validate_connection_types(
                 &parent.definition_id,
-                &source.name,
+                output_name,
                 &source.value_type,
                 &target.definition_id,
-                &input.name,
+                input_name,
                 &input.value_type,
             )
             .context(ConnectionTypeSnafu { name })?;
-            if let Some(schema) = target.metadata.input_schemas.get(mapping.input.as_str()) {
+            if let Some(schema) = target.metadata.input_schemas.get(input_name) {
                 crate::compiler::validate_connection_types(
                     &parent.definition_id,
-                    &source.name,
+                    output_name,
                     &source.value_type,
                     &target.definition_id,
-                    &input.name,
+                    input_name,
                     &schema.value_type(),
                 )
                 .context(ConnectionTypeSnafu { name })?;
             }
-            mapped.insert(mapping.input.as_str(), *source);
+            mapped.insert(input_name, *source);
         }
         let mut external = BTreeSet::new();
         let mut prerequisites = BTreeSet::new();
@@ -356,6 +348,9 @@ pub fn resolve(
         for dependency in by_node[target_id.index()] {
             let dep = dependency.borrowed();
             let source_id = indices[dep.source_node()];
+            if source_id == caller && dep.input().is_some_and(|input| mapped.contains_key(input)) {
+                continue;
+            }
             let source = &nodes[source_id.index()];
             ensure!(
                 source
@@ -390,10 +385,6 @@ pub fn resolve(
                 })?;
                 if let Some(input) = dep.input() {
                     let input_port = inputs[input];
-                    ensure!(
-                        !mapped.contains_key(input),
-                        ConflictingInputSnafu { name, input }
-                    );
                     crate::compiler::validate_connection_types(
                         &source.definition_id,
                         output,
@@ -456,37 +447,31 @@ pub fn readiness_pairs(
     let ordinary: Vec<_> = definition
         .edges
         .iter()
-        .map(|edge| (&edge.from_node, &edge.to_node))
+        .map(|edge| (&edge.from_node, &edge.to_node, true))
         .chain(
             definition
                 .control_edges
                 .iter()
-                .map(|edge| (&edge.from_node, &edge.to_node)),
+                .map(|edge| (&edge.from_node, &edge.to_node, false)),
         )
         .chain(
             definition
                 .order_edges
                 .iter()
-                .map(|edge| (&edge.from_node, &edge.to_node)),
+                .map(|edge| (&edge.from_node, &edge.to_node, false)),
         )
         .collect();
     let mut pairs = BTreeSet::new();
     for (caller, aliases) in &definition.calls {
-        let mut pending: Vec<_> = aliases.values().map(|call| &call.target).collect();
-        let mut visited = BTreeSet::new();
-        while let Some(target) = pending.pop() {
-            if !visited.insert(target) {
-                continue;
-            }
+        for call in aliases.values() {
             pairs.extend(
                 ordinary
                     .iter()
-                    .filter(|(_, to)| *to == target)
-                    .map(|(from, _)| ((*from).clone(), caller.clone())),
+                    .filter(|(from, to, argument)| {
+                        **to == call.target && (!argument || *from != caller)
+                    })
+                    .map(|(from, _, _)| ((*from).clone(), caller.clone())),
             );
-            if let Some(nested) = definition.calls.get(target) {
-                pending.extend(nested.values().map(|call| &call.target));
-            }
         }
     }
     pairs
