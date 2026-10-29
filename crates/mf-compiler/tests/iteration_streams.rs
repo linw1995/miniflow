@@ -336,6 +336,21 @@ fn iteration_stream_bindings_reject_invalid_versions_aliases_sources_and_stream_
             .to_string()
             .contains("terminal body output")
     );
+    for (from, to) in [("edge", "each"), ("each", "edge")] {
+        let mut value = definition("parallel", json!({}));
+        value["nodes"].as_array_mut().unwrap().push(json!({
+            "id":"edge", "kind":"builtin.constant", "config":{"value":1}
+        }));
+        value["edges"] = json!([{"from_node":from,"to_node":to}]);
+        let error =
+            compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("endpoints must be ordinary Tasks"),
+            "{error}"
+        );
+    }
 }
 
 #[cfg(unix)]
