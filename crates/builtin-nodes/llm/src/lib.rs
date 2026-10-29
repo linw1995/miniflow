@@ -1,7 +1,12 @@
 pub mod call;
 pub use call::{CallOutcome, ToolCall, ToolCallEvent, ToolDefinition, ToolResult};
 mod streaming;
+mod tool_nodes;
 mod tools;
+pub use tool_nodes::{
+    ToolConfigError, ToolDispatchError, ToolDispatchInputs, ToolDispatchOutputs,
+    prepare_tool_catalog, prepare_tool_dispatch,
+};
 pub use tools::ToolSchemaError;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
@@ -118,7 +123,6 @@ pub struct LlmOutputs {
     pub status: String,
     pub outcome: CallOutcome,
     pub tool_calls: Vec<ToolCall>,
-    pub tool_results: Vec<ToolResult>,
     pub usages: Vec<CallUsage>,
     pub error: Option<String>,
     pub text: String,
@@ -150,7 +154,6 @@ struct Config {
     max_tokens: Option<u64>,
     timeout_ms: u64,
     capture_errors: bool,
-    max_tool_calls: u64,
     attribution: Option<UsageAttribution>,
 }
 
@@ -188,30 +191,12 @@ impl From<LlmConfigError> for NodeBuildError {
 }
 
 struct PreparedConfig {
-    call_outputs: Vec<mf_runtime::PortSpec>,
     fields: BTreeMap<String, ConfigTemplate>,
 }
 
 impl PreparedConfig {
     fn parse(value: Value) -> Result<Self, NodeBuildError> {
         let mut fields: BTreeMap<String, Value> = deserialize_config(value)?;
-        let call_outputs: BTreeMap<String, mf_runtime::ValueType> = fields
-            .remove("call_outputs")
-            .map(deserialize_config)
-            .transpose()?
-            .unwrap_or_default();
-        let call_outputs: Vec<_> = call_outputs
-            .into_iter()
-            .map(|(name, value_type)| mf_runtime::PortSpec::owned(name, value_type, false))
-            .collect();
-        mf_runtime::NodeMetadata {
-            ports: mf_runtime::NodePorts::from_types::<LlmInputs, LlmOutputs>(),
-            stream_outputs: <LlmEmission as mf_runtime::NodeOutputs>::ports(),
-            call_outputs: call_outputs.clone(),
-            ..Default::default()
-        }
-        .validate_call_outputs()?;
-
         ensure!(
             fields.contains_key("model"),
             InvalidConfigSnafu {
@@ -231,7 +216,6 @@ impl PreparedConfig {
             ("api_key_env", Value::from("OPENAI_API_KEY")),
             ("timeout_ms", Value::from(60_000_u64)),
             ("capture_errors", Value::from(false)),
-            ("max_tool_calls", Value::from(32_u64)),
         ] {
             fields.entry(name.into()).or_insert(value);
         }
@@ -273,10 +257,7 @@ impl PreparedConfig {
             }
             templates.insert(field, template);
         }
-        Ok(Self {
-            call_outputs,
-            fields: templates,
-        })
+        Ok(Self { fields: templates })
     }
 
     fn references(&self) -> Vec<ContextReference> {
@@ -341,13 +322,6 @@ fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
             Some("a finite number from 0 to 2")
         }
         "max_tokens" | "timeout_ms" if value.as_f64() == Some(0.0) => Some("a positive integer"),
-        "max_tool_calls"
-            if !value
-                .as_f64()
-                .is_some_and(|value| (1.0..=128.0).contains(&value)) =>
-        {
-            Some("an integer from 1 to 128")
-        }
         "base_url" => {
             let base = url::Url::parse(value.as_str().unwrap()).context(BaseUrlSnafu)?;
             ensure!(
@@ -389,16 +363,10 @@ fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
 
 #[derive(Snafu)]
 pub enum LlmExecutionError {
-    #[snafu(transparent)]
-    ToolSchema { source: ToolSchemaError },
     #[snafu(display("LLM tool {resource} limit exceeded"))]
     ToolLimit { resource: &'static str },
     #[snafu(display("LLM tool arguments are not complete unambiguous JSON"))]
     ToolArgumentsJson { source: serde_json::Error },
-    #[snafu(display("LLM tool dispatch stopped"))]
-    ToolDispatch {
-        source: mf_runtime::CallDispatchError,
-    },
     #[snafu(transparent)]
     Configuration { source: LlmConfigError },
     #[snafu(display("LLM input `{path}` requires {requirement}"))]
@@ -524,8 +492,8 @@ impl TypedTaskStreamNode for LlmNode {
 impl LlmNode {
     fn complete(
         &self,
-        mut inputs: LlmInputs,
-        context: &mut ExecutionContext,
+        inputs: LlmInputs,
+        context: &ExecutionContext,
         emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
     ) -> Result<LlmOutputs, LlmExecutionError> {
         let deadline_origin = Instant::now();
@@ -534,45 +502,23 @@ impl LlmNode {
             .checked_add(Duration::from_millis(config.timeout_ms))
             .context(DeadlineRangeSnafu)?;
         context.check_future_limits(Some(deadline))?;
-        let catalog = tools::ToolCatalog::new(context)?;
-        let manual_tools: std::collections::BTreeSet<_> =
-            inputs.tools.iter().map(|tool| tool.name.clone()).collect();
-        inputs.tools.extend(
-            catalog
-                .definitions()
-                .into_iter()
-                .map(|tool| ToolDefinition {
-                    name: tool.name,
-                    description: tool.description,
-                    input_schema: tool.parameters.into(),
-                }),
-        );
         let request = call::prepare_request(&inputs)?
             .temperature(config.temperature)
             .max_tokens(config.max_tokens);
         let allow_tools = !inputs.tools.is_empty();
-        let (response, mut usage) = self.request(
-            request,
-            &config,
-            context,
-            emitter,
-            deadline,
-            (!catalog.is_empty()).then_some(&manual_tools),
-        )?;
+        let (response, mut usage) =
+            self.request(request, &config, context, emitter, deadline, &inputs.tools)?;
         let result = response.and_then(|response| {
             if usage.usage.is_none() {
                 usage.usage = reported_usage(&response.usage).ok().flatten();
             }
             terminal_outputs(response, allow_tools).and_then(|mut result| {
-                if result.outcome == CallOutcome::ToolCalls && !catalog.is_empty() {
-                    dispatch_tools(
-                        &catalog,
-                        &manual_tools,
-                        &mut result,
-                        context,
-                        deadline,
-                        config.max_tool_calls,
-                    )?;
+                for call in &mut result.tool_calls {
+                    call.mark_arguments(&inputs.tools);
+                }
+                if let Some(ChatMessage::Assistant { tool_calls, .. }) = &mut result.message {
+                    *tool_calls =
+                        (!result.tool_calls.is_empty()).then(|| result.tool_calls.clone());
                 }
                 context.check_future_limits(Some(deadline))?;
                 Ok(result)
@@ -582,11 +528,7 @@ impl LlmNode {
             Ok(result) => result,
             Err(error)
                 if config.capture_errors
-                    && !matches!(
-                        error,
-                        LlmExecutionError::Publication { .. }
-                            | LlmExecutionError::ToolDispatch { .. }
-                    ) =>
+                    && !matches!(error, LlmExecutionError::Publication { .. }) =>
             {
                 context.check_future_limits(None)?;
                 let error = error.to_string();
@@ -595,7 +537,6 @@ impl LlmNode {
                     status: "failed".into(),
                     outcome: CallOutcome::Failed,
                     tool_calls: Vec::new(),
-                    tool_results: Vec::new(),
                     text: String::new(),
                     message: None,
                     usage: usage.usage.clone(),
@@ -618,7 +559,7 @@ impl LlmNode {
         context: &ExecutionContext,
         emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
         deadline: Instant,
-        external_tools: Option<&std::collections::BTreeSet<String>>,
+        tools: &[ToolDefinition],
     ) -> Result<(Result<CompletionResponse, LlmExecutionError>, CallUsage), LlmExecutionError> {
         let key = if let Some(key) = &config.api_key {
             key.value()
@@ -665,7 +606,6 @@ impl LlmNode {
         usage.started_at =
             mf_telemetry::events::record(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
                 .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
-        let allow_tools = !request.tools.is_empty();
         let response = if emitter.is_connected() {
             streaming::complete(
                 model.stream(request),
@@ -673,8 +613,7 @@ impl LlmNode {
                 &usage.call_id,
                 deadline,
                 context,
-                allow_tools,
-                external_tools,
+                tools,
             )
         } else {
             context
@@ -708,73 +647,6 @@ impl LlmNode {
         });
         Ok((response, usage))
     }
-}
-
-fn dispatch_tools(
-    catalog: &tools::ToolCatalog,
-    manual: &std::collections::BTreeSet<String>,
-    output: &mut LlmOutputs,
-    context: &mut ExecutionContext,
-    deadline: Instant,
-    limit: u64,
-) -> Result<(), LlmExecutionError> {
-    ensure!(
-        output.tool_calls.len() as u64 <= limit,
-        ToolLimitSnafu { resource: "call" }
-    );
-    let mut bytes = 0usize;
-    for call in &output.tool_calls {
-        let encoded = tools::bounded_json(&call.arguments, tools::MAX_TOOL_ARGUMENT_BYTES)
-            .ok()
-            .context(ToolLimitSnafu {
-                resource: "argument bytes",
-            })?;
-        bytes = bytes.saturating_add(encoded.len());
-        ensure!(
-            call.id.len() <= 256 && bytes <= tools::MAX_TOOL_BATCH_ARGUMENT_BYTES,
-            ToolLimitSnafu {
-                resource: "batch arguments or identity"
-            }
-        );
-    }
-    for call in &mut output.tool_calls {
-        if manual.contains(&call.name) {
-            continue;
-        }
-        context.check_future_limits(Some(deadline))?;
-        let arguments = serde_json::to_value(&call.arguments).context(ToolArgumentsJsonSnafu)?;
-        call.arguments = catalog.mark_arguments(&call.name, &arguments);
-        let error = |message: &str| serde_json::json!({"error":message}).to_string();
-        let content = match catalog.arguments(&call.name, &arguments) {
-            Err(tools::ToolArgumentsError::UnknownTool) => error("unknown tool name"),
-            Err(_) => error("arguments do not match the tool contract"),
-            Ok((binding, arguments)) => match context
-                .invoke_call_with_deadline(binding, arguments, Some(deadline))
-                .context(ToolDispatchSnafu)?
-                .outcome
-            {
-                mf_runtime::CallOutcome::Succeeded(outputs) => match tools::tool_result(outputs) {
-                    Ok(content) => content,
-                    Err(tools::ToolEncodingError::Size) => {
-                        error("tool result exceeds the size limit")
-                    }
-                    Err(_) => error("tool result could not be encoded"),
-                },
-                mf_runtime::CallOutcome::Skipped { .. } => {
-                    error("tool was skipped because a prerequisite was unavailable")
-                }
-                mf_runtime::CallOutcome::Failed { .. } => error("tool execution failed"),
-            },
-        };
-        output.tool_results.push(ToolResult {
-            tool_call_id: call.id.clone(),
-            content,
-        });
-    }
-    if let Some(ChatMessage::Assistant { tool_calls, .. }) = &mut output.message {
-        *tool_calls = Some(output.tool_calls.clone());
-    }
-    Ok(())
 }
 
 fn reported_usage(
@@ -822,7 +694,6 @@ fn terminal_outputs(
         status: "succeeded".into(),
         outcome: result.outcome,
         tool_calls: result.tool_calls,
-        tool_results: Vec::new(),
         usages: Vec::new(),
         error: None,
         metadata: None,
@@ -837,7 +708,6 @@ fn terminal_outputs(
 pub fn prepare_llm(value: Value) -> Result<PreparedNode, NodeBuildError> {
     let config = PreparedConfig::parse(value)?;
     let metadata = NodeMetadata {
-        call_outputs: config.call_outputs.clone(),
         context_references: config.references(),
         ..Default::default()
     };
@@ -946,12 +816,8 @@ mod tests {
         for patch in [
             json!({"api_key":{"$template":"literal-key"}}),
             json!({"api_key_env":{"$ref":"params.name"}}),
-            json!({"call_outputs":{"$ref":"params.ports"}}),
-            json!({"call_outputs":{"message":"object"}}),
-            json!({"call_outputs":{"tool_call":"object"}}),
-            json!({"call_outputs":{"tool_results":"array"}}),
-            json!({"max_tool_calls":0}),
-            json!({"max_tool_calls":129}),
+            json!({"call_outputs":{"query":"string"}}),
+            json!({"max_tool_calls":32}),
             json!({"max_tool_rounds":1}),
             json!({"model":{"$ref":"params.model", "unexpected":true}}),
         ] {
@@ -1001,7 +867,6 @@ mod tests {
             status: "succeeded".into(),
             outcome: CallOutcome::Completed,
             tool_calls: Vec::new(),
-            tool_results: Vec::new(),
             usages: Vec::new(),
             error: None,
             metadata: None,

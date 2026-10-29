@@ -179,6 +179,13 @@
         "body": {
           "nodes": [
             {
+              "id": "catalog",
+              "kind": "builtin.tool_catalog",
+              "config": {
+                "source": "dispatch"
+              }
+            },
+            {
               "id": "chat",
               "kind": "builtin.llm",
               "config": {
@@ -191,17 +198,43 @@
                 "api_key": {
                   "$ref": "%loop.api_key"
                 },
-                "capture_errors": true,
-                "call_outputs": {
-                  "amount": "int"
-                },
-                "max_tool_calls": 8
+                "capture_errors": true
               },
               "inputs": {
                 "messages": {
                   "from": {
                     "node": "%loop",
                     "port": "messages"
+                  }
+                },
+                "tools": {
+                  "from": {
+                    "node": "catalog",
+                    "port": "tools"
+                  }
+                }
+              }
+            },
+            {
+              "id": "dispatch",
+              "kind": "builtin.tool_dispatch",
+              "config": {
+                "call_outputs": {
+                  "amount": "int"
+                },
+                "max_tool_calls": 8
+              },
+              "inputs": {
+                "outcome": {
+                  "from": {
+                    "node": "chat",
+                    "port": "outcome"
+                  }
+                },
+                "tool_calls": {
+                  "from": {
+                    "node": "chat",
+                    "port": "tool_calls"
                   }
                 }
               }
@@ -293,7 +326,7 @@
                 },
                 "results": {
                   "from": {
-                    "node": "chat",
+                    "node": "dispatch",
                     "port": "tool_results"
                   }
                 }
@@ -391,7 +424,7 @@
             }
           ],
           "calls": {
-            "chat": {
+            "dispatch": {
               "multiply": {
                 "target": "multiply",
                 "description": "Multiply an integer by the configured factor.",

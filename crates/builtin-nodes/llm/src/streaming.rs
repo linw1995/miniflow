@@ -8,7 +8,7 @@ use rig_core::{
     streaming::{Item, StreamEvent, Streamed},
 };
 use snafu::{OptionExt, ResultExt, ensure};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 pub fn complete(
@@ -17,9 +17,9 @@ pub fn complete(
     call_id: &str,
     deadline: Instant,
     context: &mf_runtime::ExecutionContext,
-    allow_tools: bool,
-    external_tools: Option<&BTreeSet<String>>,
+    tools: &[crate::ToolDefinition],
 ) -> Result<CompletionResponse, LlmExecutionError> {
+    let allow_tools = !tools.is_empty();
     let mut response = response.with_context(|source| crate::ProviderSnafu {
         kind: source.kind().code(),
         status: source
@@ -120,18 +120,17 @@ pub fn complete(
             Item::Event(StreamEvent::End {
                 content: AssistantContent::ToolCall(call),
                 ..
-            }) if allow_tools
-                && external_tools
-                    .is_none_or(|names| names.contains(call.function.name.as_str())) =>
-            {
-                LlmEmission {
-                    delta: None,
-                    tool_call: Some(ToolCallEvent {
-                        model_call_id: call_id.into(),
-                        call: ToolCall::from_provider(call)?,
-                    }),
-                }
-            }
+            }) if allow_tools => LlmEmission {
+                delta: None,
+                tool_call: Some(ToolCallEvent {
+                    model_call_id: call_id.into(),
+                    call: {
+                        let mut call = ToolCall::from_provider(call)?;
+                        call.mark_arguments(tools);
+                        call
+                    },
+                }),
+            },
             _ => continue,
         };
         let skipped = if emission.delta.is_some() {

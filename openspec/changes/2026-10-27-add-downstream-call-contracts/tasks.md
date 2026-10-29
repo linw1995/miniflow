@@ -33,10 +33,10 @@
 ## 3. LLM integration
 
 - [x] 3.1 Reflect decoded structs, enums, collections, presence, and descriptions; mark unknown or recursive codecs opaque.
-- [x] 3.1a Reject unsupported schema projections at the LLM boundary before provider requests.
-- [x] 3.2 Build provider tool definitions from caller-visible projections and validate returned tool names.
+- [x] 3.1a Reject unsupported schema projections in Catalog before provider requests.
+- [x] 3.2 Build tool definitions in a read-only Catalog and validate returned tool names in Dispatch.
 - [x] 3.3 Extend message history with structured tool calls, results, and correlation identities.
-- [x] 3.4 Execute one model request per invocation, buffer complete tool batches, and reuse explicit messages/results for workflow-owned loops.
+- [x] 3.4 Keep model requests separate from Dispatch execution, with explicit Flow edges and independent deadlines.
 - [x] 3.5 Define result sensitivity, size limits, and error export without automatic side-effect retries.
 
 ## 4. Verification and documentation

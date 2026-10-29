@@ -287,36 +287,38 @@ Check structural agreement with the reflected ports, but do not claim arbitrary 
 Schema can be proven equivalent to custom codecs. Runtime decoding and business validation remain
 authoritative. Provider schema conversion must not silently change omission, null, or numeric semantics.
 
-LLM integration consumes the generic callable view and maps public aliases back to prepared bindings.
-It owns provider tool descriptions, structured call/result history, and one model request per execution.
-Workflow composition owns repeated requests, explicit messages/results, accumulation, and termination.
-It dispatches only complete, validated tool calls, including when arguments arrive incrementally.
-The runtime owns execution and returns typed outcomes; the LLM layer decides how supported failures
-are represented in tool-result messages. Cancellation and exhausted budgets remain terminal control
-outcomes, not opportunities to continue an unbounded model retry loop.
+Tool Catalog converts the generic read-only callable view into provider tool descriptions. The LLM
+node owns one model request and returns structured tool calls. Tool Dispatch maps those public aliases
+back to its prepared bindings and executes accepted, complete batches through the runtime. The Flow
+owns history, repeated requests, result assembly, and termination. Dispatch converts supported domain
+failures into tool results; cancellation and exhausted budgets remain terminal controls.
 
 Preserve sensitivity metadata when composing values. Result export to the model needs an explicit
 policy for sensitive values and size limits. Invocation identifiers support correlation but do not
 guarantee idempotency; side-effecting tools must not be retried automatically after ambiguous failures.
 
-### Delivered LLM boundary
+### Delivered model and execution boundaries
 
-`builtin.llm` declares static `config.call_outputs`; resolved public schemas become existing `ToolDefinition`
-values. Request assembly, message validation, response classification, `ChatMessage`, `ToolCall`, `ToolResult`,
-and streamed manual calls reuse the main branch's `call` module. There is no separate history or continuation DTO.
-Flat arguments remain flat unless explicit/default names collide. Opaque schemas and binary32 contracts fail
-before network activity. Complete accepted call batches use the runtime dispatcher. Manual tools remain
-external; duplicate manual/bound aliases are rejected by the shared request validator.
+`builtin.llm` consumes the existing `ToolDefinition` values and returns one assistant `message`,
+`tool_calls`, outcome, and usage. It does not inspect call bindings or execute tools. Its existing
+message conversion, response classification, and streams remain the provider protocol boundary.
 
-Each invocation makes one model request. Bound results are returned in `tool_results`; the graph appends them
-and the returned assistant `message` to its own message list. Bound calls do not also emit manual `tool_call`
-events. `outcome` retains the existing completed/tool_calls/truncated/refused/incomplete/failed classification.
-Only accepted tool-call outcomes dispatch. The model node has no `max_tool_rounds` setting and owns no loop.
+`builtin.tool_dispatch` owns `call_outputs` and the scope's `calls` declarations. It accepts outcome
+and tool calls, validates the batch, invokes runtime bindings, and returns correlated `tool_results`.
+Its timeout and lifecycle are separate from the model request. Tool failures produce sanitized
+feedback; typed cancellation, deadlines, and budget exhaustion remain terminal controls.
 
-Arguments/results are bounded to 64 KiB each and batches/declarations to 256 KiB. Sensitive results are redacted;
-domain failures use generic feedback. The batch is limited to 128 calls (default 32). Runtime control and delivery
-failures propagate. The chat example uses existing Loop/CEL primitives to stop, assemble messages, and collect usage;
-Loop child streaming remains an independent PR based on origin/main.
+`builtin.tool_catalog` names Dispatch through `NodeMetadata.call_interface_source`. Preparation derives
+that read-only view from the same executable table. No second declarations table, dispatch authority,
+or execution dependency is created. Catalog emits provider definitions through a normal data edge
+before the model runs. Missing owners, chained views, and mixed view/executable ownership are rejected.
+Generated metadata checks include the source reference. External inputs remain absent from projection.
+
+Secret parameters use `writeOnly` schema annotations so model outputs and stream events retain their
+sensitivity before Dispatch starts. Dispatch preserves existing `ValueRef` flags and redacts results.
+The Flow selects the batch or streaming execution path and routes manually declared tools explicitly.
+The existing Loop owns continuation, message assembly, limits, and usage collection. The chat example
+uses this explicit Catalog/LLM/Dispatch graph; child-stream forwarding remains independent of it.
 
 ## Alternatives and risks
 

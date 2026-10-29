@@ -94,9 +94,6 @@ impl CallTable {
     ) -> Result<Option<Self>, crate::CallDispatchError> {
         use crate::invocation::InvalidPlanSnafu;
         use snafu::{OptionExt, ensure};
-        if calls.is_empty() {
-            return Ok(None);
-        }
         let mut callers: BTreeMap<crate::DefinitionId, Vec<crate::PreparedCall>> = BTreeMap::new();
         let scheduled: BTreeSet<_> = domains
             .domains()
@@ -153,6 +150,12 @@ impl CallTable {
                 caller.clone(),
                 calls.iter().map(|call| call.binding.interface()).collect(),
             )
+        }))?
+        .with_views(nodes.iter().filter_map(|node| {
+            node.metadata
+                .call_interface_source
+                .as_ref()
+                .map(|owner| (node.definition_id.clone(), owner.clone()))
         }))?;
         Ok((!callers.is_empty()).then_some(Self {
             callers,

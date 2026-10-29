@@ -195,6 +195,15 @@ impl ResolvedCallBinding {
 
 #[derive(Debug, Snafu)]
 pub enum CallInterfaceError {
+    #[snafu(display("node `{viewer}` references no executable call catalog `{owner}`"))]
+    MissingSource {
+        viewer: DefinitionId,
+        owner: DefinitionId,
+    },
+    #[snafu(display("node `{viewer}` cannot both own calls and project another call catalog"))]
+    MixedOwnership { viewer: DefinitionId },
+    #[snafu(display("node `{viewer}` declares more than one call catalog source"))]
+    DuplicateSource { viewer: DefinitionId },
     #[snafu(display("call interface caller name must not be blank"))]
     InvalidCaller,
     #[snafu(display("call interface caller `{caller}` is declared more than once"))]
@@ -211,6 +220,7 @@ pub enum CallInterfaceError {
 #[derive(Clone, Default)]
 pub struct CallInterfaces {
     callers: Option<Arc<BTreeMap<DefinitionId, Vec<CallInterface>>>>,
+    views: Option<Arc<BTreeMap<DefinitionId, DefinitionId>>>,
 }
 
 impl fmt::Debug for CallInterfaces {
@@ -267,7 +277,46 @@ impl CallInterfaces {
         }
         Ok(Self {
             callers: (!callers.is_empty()).then(|| Arc::new(callers)),
+            views: None,
         })
+    }
+
+    /// Resolves declared read-only projections against actual owners, never against other views.
+    pub fn with_views(
+        mut self,
+        entries: impl IntoIterator<Item = (DefinitionId, DefinitionId)>,
+    ) -> Result<Self, CallInterfaceError> {
+        let mut views = BTreeMap::new();
+        for (viewer, owner) in entries {
+            ensure!(
+                !self.for_caller(&owner).is_empty(),
+                MissingSourceSnafu {
+                    viewer: viewer.clone(),
+                    owner,
+                }
+            );
+            ensure!(
+                self.for_caller(&viewer).is_empty(),
+                MixedOwnershipSnafu {
+                    viewer: viewer.clone(),
+                }
+            );
+            ensure!(
+                views.insert(viewer.clone(), owner).is_none(),
+                DuplicateSourceSnafu { viewer }
+            );
+        }
+        self.views = (!views.is_empty()).then(|| Arc::new(views));
+        Ok(self)
+    }
+
+    pub fn for_node(&self, node: &DefinitionId) -> &[CallInterface] {
+        let owner = self
+            .views
+            .as_ref()
+            .and_then(|views| views.get(node))
+            .unwrap_or(node);
+        self.for_caller(owner)
     }
 
     pub fn is_empty(&self) -> bool {

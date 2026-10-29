@@ -21,9 +21,21 @@ impl TaskNode for Task {
         (self.0)(inputs, context)
     }
 }
-struct Sink(Arc<Mutex<Vec<Value>>>);
+struct Sink(Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<Value>>>);
 impl EmissionSink for Sink {
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
+        self.1.lock().unwrap().push(
+            serde_json::to_value(
+                ValueRef::object(
+                    result
+                        .outputs
+                        .iter()
+                        .map(|(name, value)| (name.clone().into(), value.clone())),
+                )
+                .redacted(),
+            )
+            .unwrap(),
+        );
         self.0
             .lock()
             .unwrap()
@@ -70,70 +82,97 @@ fn probe(server: &Server, options: Value) -> Value {
 fn tool_probe() {
     let options: Value =
         serde_json::from_str(&std::env::var("MINIFLOW_TOOL_OPTIONS").unwrap()).unwrap();
-    let mut config = json!({"model":"example-model","api_key_env":"MINIFLOW_TOOL_KEY","base_url":std::env::var("MINIFLOW_TOOL_URL").unwrap(),"call_outputs":{"query":"string"}});
+    let mut config = json!({"model":"example-model","api_key_env":"MINIFLOW_TOOL_KEY","base_url":std::env::var("MINIFLOW_TOOL_URL").unwrap()});
     if let Some(patch) = options["config"].as_object() {
         config.as_object_mut().unwrap().extend(patch.clone());
     }
     let prepared = mfn_llm::prepare_llm(config).unwrap();
     let mut metadata = prepared.metadata;
-    metadata.ports.inputs.clear();
+    metadata.ports.inputs = vec![PortSpec::new("tools", ValueType::Array, true)];
     metadata.input_schemas.clear();
     let NodeExecution::TaskStream(executor) = prepared.execution else {
         panic!("expected task stream")
     };
+    let seen = Arc::new(Mutex::new(Vec::new()));
     let results = Arc::new(Mutex::new(None));
     let recorded = results.clone();
     let deltas = Arc::new(Mutex::new(Vec::new()));
     let emitted = deltas.clone();
+    let masked_events = Arc::new(Mutex::new(Vec::new()));
+    let masked = masked_events.clone();
+    let masked_model = Arc::new(Mutex::new(None));
+    let model_snapshot = masked_model.clone();
     let streaming = options["stream"] == true;
     let initial_messages = options
         .get("messages")
         .cloned()
         .unwrap_or_else(|| json!([{ "role":"user","content":"question" }]));
     let manual_tools = options.get("tools").cloned();
+    let manual_names: BTreeSet<_> = manual_tools
+        .as_ref()
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect();
     let messages = Arc::new(Mutex::new(initial_messages));
     let transcript = messages.clone();
-    let rounds = options["rounds"].as_u64().unwrap_or(1);
-    let steps = Arc::new(Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    let steps = Arc::new(Mutex::new(Vec::<Value>::new()));
     let completed = steps.clone();
     let parent: TaskFlowNode = FlowNode {
         definition_id: "parent".into(),
         metadata,
         output_keys: Default::default(),
-        node: Box::new(Task(Box::new(move |_, context| {
-            let mut inputs =
-                Inputs::from([("messages".into(), transcript.lock().unwrap().clone().into())]);
-            if let Some(tools) = &manual_tools {
-                inputs.insert("tools".into(), tools.clone().into());
-            }
-            let mut result = NodeResult::default();
-            // The caller appends explicit messages and results between node invocations.
-            for _ in 0..rounds {
-                result = if streaming {
-                    executor.execute_with_sink(inputs.clone(), context, &mut Sink(emitted.clone()))
-                } else {
-                    executor.execute(inputs.clone(), context)
-                }?;
-                completed
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::to_value(&result.outputs).unwrap());
-                let mut current = transcript.lock().unwrap();
-                if let Some(message) = result.outputs.get("message") {
-                    current
-                        .as_array_mut()
+        node: Box::new(Task(Box::new(move |inputs, context| {
+            assert!(context.call_targets().is_empty());
+            assert!(!context.can_invoke_calls());
+            let before = observed.lock().unwrap().len();
+            let mut tools = inputs["tools"].as_array().unwrap().to_vec();
+            if let Some(extra) = &manual_tools {
+                tools.extend(
+                    extra
+                        .as_array()
                         .unwrap()
-                        .push(serde_json::to_value(message).unwrap());
-                }
-                for result in result.outputs["tool_results"].as_array().unwrap() {
-                    current.as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":result["tool_call_id"],"content":result["content"]}));
-                }
-                inputs.insert("messages".into(), current.clone().into());
-                if result.outputs["outcome"] != ValueRef::from("tool_calls") {
-                    break;
-                }
+                        .iter()
+                        .cloned()
+                        .map(ValueRef::from),
+                );
             }
-            *recorded.lock().unwrap() = Some(serde_json::to_value(&result.outputs).unwrap());
+            let inputs = Inputs::from([
+                ("messages".into(), transcript.lock().unwrap().clone().into()),
+                ("tools".into(), ValueRef::array(tools)),
+            ]);
+            let result = if streaming {
+                executor.execute_with_sink(
+                    inputs,
+                    context,
+                    &mut Sink(emitted.clone(), masked.clone()),
+                )
+            } else {
+                executor.execute(inputs, context)
+            }?;
+            assert_eq!(
+                observed.lock().unwrap().len(),
+                before,
+                "model execution must not execute a tool"
+            );
+            assert!(!result.outputs.contains_key("tool_results"));
+            *model_snapshot.lock().unwrap() = Some(
+                serde_json::to_value(
+                    ValueRef::object(
+                        result
+                            .outputs
+                            .iter()
+                            .map(|(name, value)| (name.clone().into(), value.clone())),
+                    )
+                    .redacted(),
+                )
+                .unwrap(),
+            );
+            let output = serde_json::to_value(&result.outputs).unwrap();
+            completed.lock().unwrap().push(output.clone());
+            *recorded.lock().unwrap() = Some(output);
             Ok(result)
         }))),
     };
@@ -183,7 +222,6 @@ fn tool_probe() {
             .input_schemas
             .insert("text".into(), schema.clone());
     }
-    let seen = Arc::new(Mutex::new(Vec::new()));
     let invoked = seen.clone();
     let tool: TaskFlowNode = FlowNode {
         definition_id: "tool".into(),
@@ -193,11 +231,24 @@ fn tool_probe() {
             assert!(inputs["token"].is_secret());
             assert_eq!(inputs["token"], ValueRef::from("private-token"));
             assert_eq!(context.invocation_path().len(), 1);
+            assert_eq!(context.invocation_path()[0].node_id(), "dispatch");
             invoked
                 .lock()
                 .unwrap()
                 .push(serde_json::to_value(&inputs).unwrap());
             let text = inputs["text"].as_str().unwrap();
+            if text == "deadline" {
+                assert!(
+                    context
+                        .effective_deadline(None)
+                        .unwrap()
+                        .saturating_duration_since(std::time::Instant::now())
+                        > std::time::Duration::from_secs(30)
+                );
+            }
+            if text == "slow" {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             if text == "control" {
                 return Err(Box::<dyn std::error::Error + Send + Sync>::from(
                     WorkflowRunError::StepBudget {
@@ -233,7 +284,7 @@ fn tool_probe() {
             } else {
                 CallInputSource::Output(port("query"))
             },
-            secret: false,
+            secret: options["secret_argument"] == true,
             schema,
         },
         ResolvedCallInput {
@@ -261,8 +312,8 @@ fn tool_probe() {
             id: CallBindingId::new(0),
             name: "search".into(),
             description: Some("Search the configured service".into()),
-            caller: NodeId::new(1),
-            target: NodeId::new(2),
+            caller: NodeId::new(3),
+            target: NodeId::new(4),
             inputs,
             dependencies: vec![FlowDependency {
                 exclusive: false,
@@ -277,37 +328,128 @@ fn tool_probe() {
         visibility: OutputVisibility::Borrowed(&["config.token"]),
         guard: Arc::new(|_| Ok(BTreeSet::new())),
     };
-    let domains = (0..2)
+    let catalog = FlowNode::new(
+        "catalog",
+        mfn_llm::prepare_tool_catalog(json!({"source":"dispatch"})).unwrap(),
+    )
+    .into_task()
+    .unwrap();
+    let mut dispatch_config = json!({"call_outputs":{"query":"string"}});
+    if let Some(patch) = options["dispatch_config"].as_object() {
+        dispatch_config
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.clone());
+    }
+    let prepared = mfn_llm::prepare_tool_dispatch(dispatch_config).unwrap();
+    let NodeExecution::Task(dispatcher) = prepared.execution else {
+        panic!("expected task dispatch")
+    };
+    let dispatched = Arc::new(Mutex::new(None));
+    let captured = dispatched.clone();
+    let dispatch = TaskFlowNode {
+        definition_id: "dispatch".into(),
+        metadata: prepared.metadata,
+        output_keys: Default::default(),
+        node: Box::new(Task(Box::new(move |mut inputs, context| {
+            assert!(context.can_invoke_calls());
+            // Explicit Flow routing leaves manually declared tools to their own handlers.
+            let calls = inputs["tool_calls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|call| !manual_names.contains(call["name"].as_str().unwrap()))
+                .cloned();
+            let calls = ValueRef::array(calls);
+            inputs.insert("tool_calls".into(), calls);
+            let result = dispatcher.execute(inputs, context)?;
+            *captured.lock().unwrap() =
+                Some(serde_json::to_value(&result.outputs["tool_results"]).unwrap());
+            Ok(result)
+        }))),
+    };
+    let dependency =
+        |node: &'static str, output: &'static str, input: &'static str| FlowDependency {
+            exclusive: false,
+            input: Some(input.into()),
+            source_node: node.into(),
+            source_output: output.into(),
+            source_key: output_id(node, output).into(),
+        };
+    let keys = [
+        "catalog.tools",
+        "config.token",
+        "parent.outcome",
+        "parent.tool_calls",
+    ];
+    let domains = (0..4)
         .map(|id| ExecutionDomain {
             id,
             nodes: vec![NodeId::new(id)].into(),
             positions: vec![id].into(),
-            predecessors: if id == 1 { vec![0] } else { vec![] }.into(),
-            successors: if id == 0 { vec![1] } else { vec![] }.into(),
+            predecessors: if id > 0 { vec![id - 1] } else { vec![] }.into(),
+            successors: if id < 3 { vec![id + 1] } else { vec![] }.into(),
             first_position: id,
-            snapshot_visibility: OutputVisibility::Borrowed(&["config.token"]),
+            snapshot_visibility: OutputVisibility::from_sorted(
+                keys.iter().map(|key| (*key).into()).collect(),
+            ),
         })
         .collect::<Vec<_>>();
     let flow = Flow::from_plan(
-        vec![supplied, parent, tool],
+        vec![catalog, parent, supplied, dispatch, tool],
         FlowPlan {
             connections: vec![].into(),
-            dependencies: vec![vec![].into(); 3].into(),
-            execution_order: vec![NodeId::new(0), NodeId::new(1), NodeId::new(2)].into(),
+            dependencies: vec![
+                vec![].into(),
+                vec![dependency("catalog", "tools", "tools")].into(),
+                vec![].into(),
+                vec![
+                    dependency("parent", "outcome", "outcome"),
+                    dependency("parent", "tool_calls", "tool_calls"),
+                ]
+                .into(),
+                vec![].into(),
+            ]
+            .into(),
+            execution_order: (0..5).map(NodeId::new).collect::<Vec<_>>().into(),
             outputs: vec![].into(),
             execution_domains: ExecutionDomains::from_parts(
                 domains.into(),
-                vec![vec![].into(), vec![0].into()].into(),
+                (0..4)
+                    .map(|id| (0..id).collect::<Vec<_>>().into())
+                    .collect::<Vec<_>>()
+                    .into(),
             ),
         },
         WorkflowInputSchema::default(),
     )
     .with_prepared_calls(vec![call])
     .unwrap();
-    let outcome = flow.execute_in_context(&mut ExecutionContext::default());
+    let mut context = ExecutionContext::default();
+    let mut outcome = Ok(Outputs::new());
+    for _ in 0..options["rounds"].as_u64().unwrap_or(1) {
+        outcome = flow.execute_in_context(&mut context);
+        if outcome.is_err() {
+            break;
+        }
+        let mut output = results.lock().unwrap().clone().unwrap();
+        output["tool_results"] = dispatched.lock().unwrap().clone().unwrap();
+        *results.lock().unwrap() = Some(output.clone());
+        *steps.lock().unwrap().last_mut().unwrap() = output.clone();
+        let mut current = messages.lock().unwrap();
+        if let Some(message) = output.get("message") {
+            current.as_array_mut().unwrap().push(message.clone());
+        }
+        for result in output["tool_results"].as_array().unwrap() {
+            current.as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":result["tool_call_id"],"content":result["content"]}));
+        }
+        if output["outcome"] != "tool_calls" {
+            break;
+        }
+    }
     println!(
         "TOOL_RESULT:{}",
-        json!({"ok":outcome.is_ok(),"error":outcome.err().map(|error| error.to_string()),"outputs":*results.lock().unwrap(),"calls":*seen.lock().unwrap(),"deltas":*deltas.lock().unwrap(),"steps":*steps.lock().unwrap(),"messages":*messages.lock().unwrap()})
+        json!({"ok":outcome.is_ok(),"error":outcome.err().map(|error| error.to_string()),"outputs":*results.lock().unwrap(),"calls":*seen.lock().unwrap(),"deltas":*deltas.lock().unwrap(),"steps":*steps.lock().unwrap(),"messages":*messages.lock().unwrap(),"observed_model":*masked_model.lock().unwrap(),"observed_events":*masked_events.lock().unwrap()})
     );
 }
 
@@ -452,6 +594,79 @@ fn decoded_contract_is_validated_before_tool_execution() {
 }
 
 #[test]
+fn dispatch_uses_its_own_deadline_after_model_completion() {
+    let server = Server::start(vec![reply(vec![call(
+        "a",
+        "search",
+        json!({"query":"deadline"}),
+    )])]);
+    let result = probe(
+        &server,
+        json!({"config":{"timeout_ms":10000},"dispatch_config":{"timeout_ms":60000}}),
+    );
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["outputs"]["status"], "succeeded");
+    assert_eq!(
+        result["outputs"]["tool_results"][0]["content"],
+        "{\"reply\":\"deadline\"}"
+    );
+    assert_eq!(result["calls"].as_array().unwrap().len(), 1);
+
+    let server = Server::start(vec![reply(vec![call(
+        "a",
+        "search",
+        json!({"query":"slow"}),
+    )])]);
+    let result = probe(&server, json!({"dispatch_config":{"timeout_ms":5}}));
+    assert_eq!(result["ok"], false, "{result}");
+    assert_eq!(result["steps"][0]["status"], "succeeded");
+    assert_eq!(result["steps"][0]["usages"][0]["usage"]["total_tokens"], 3);
+    assert!(
+        !result["steps"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("tool_results")
+    );
+    assert!(result["error"].as_str().unwrap().contains("deadline"));
+}
+
+#[test]
+fn catalog_sensitivity_marks_model_outputs_and_events_before_dispatch() {
+    for stream in [false, true] {
+        let response = if stream {
+            stream_call("{\"query\":\"private-query\"}", true)
+        } else {
+            reply(vec![call("a", "search", json!({"query":"private-query"}))])
+        };
+        let server = Server::start(vec![response]);
+        let result = probe(&server, json!({"stream":stream,"secret_argument":true}));
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["calls"][0]["text"], "private-query");
+        assert!(
+            !result["observed_model"]
+                .to_string()
+                .contains("private-query")
+        );
+        assert!(
+            !result["observed_events"]
+                .to_string()
+                .contains("private-query")
+        );
+        assert!(result["observed_model"].to_string().contains("[REDACTED]"));
+        assert!(
+            !result["outputs"]["tool_results"]
+                .to_string()
+                .contains("private-query")
+        );
+        assert_eq!(
+            server.requests()[0].body["tools"][0]["function"]["parameters"]["properties"]["query"]
+                ["writeOnly"],
+            true
+        );
+    }
+}
+
+#[test]
 fn budgets_and_ambiguous_batches_stop_before_any_new_side_effect() {
     let mut duplicate_json = call("a", "search", json!({}));
     duplicate_json["function"]["arguments"] = "{\"query\":\"first\",\"query\":\"second\"}".into();
@@ -473,7 +688,7 @@ fn budgets_and_ambiguous_batches_stop_before_any_new_side_effect() {
         ),
     ] {
         let server = Server::start(vec![reply(batch)]);
-        let result = probe(&server, json!({"config":config}));
+        let result = probe(&server, json!({"dispatch_config":config}));
         assert_eq!(result["ok"], false, "{result}");
         assert!(result["calls"].as_array().unwrap().is_empty());
         assert_eq!(server.requests().len(), 1);
@@ -523,7 +738,20 @@ fn streamed_arguments_are_buffered_until_complete_and_rounds_keep_distinct_usage
         result["outputs"]["usage"],
         json!({"input_tokens":2,"output_tokens":1,"total_tokens":3})
     );
-    let deltas = result["deltas"].as_array().unwrap();
+    let events = result["deltas"].as_array().unwrap();
+    let deltas: Vec<_> = events
+        .iter()
+        .filter(|event| event.get("delta").is_some())
+        .collect();
+    let calls: Vec<_> = events
+        .iter()
+        .filter_map(|event| event.get("tool_call"))
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0]["model_call_id"],
+        result["steps"][0]["usages"][0]["call_id"]
+    );
     assert_eq!(
         deltas
             .iter()
@@ -577,7 +805,14 @@ fn runtime_control_failures_propagate_even_when_provider_errors_are_captured() {
     )])]);
     let result = probe(&server, json!({"config":{"capture_errors":true}}));
     assert_eq!(result["ok"], false, "{result}");
-    assert!(result["outputs"].is_null());
+    assert_eq!(result["outputs"]["status"], "succeeded");
+    assert_eq!(result["outputs"]["usages"][0]["usage"]["total_tokens"], 3);
+    assert!(
+        !result["outputs"]
+            .as_object()
+            .unwrap()
+            .contains_key("tool_results")
+    );
     assert_eq!(result["calls"].as_array().unwrap().len(), 1);
     assert_eq!(server.requests().len(), 1);
 }
@@ -652,8 +887,9 @@ fn manual_tools_keep_external_dispatch_while_bound_calls_use_runtime_execution()
         "bound"
     );
     let events = result["deltas"].as_array().unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["tool_call"]["call"]["id"], "manual");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["tool_call"]["call"]["id"], "bound");
+    assert_eq!(events[1]["tool_call"]["call"]["id"], "manual");
     assert_eq!(server.requests().len(), 1);
     assert_eq!(
         server.requests()[0].body["tools"].as_array().unwrap().len(),

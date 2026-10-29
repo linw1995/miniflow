@@ -358,6 +358,32 @@ fn context_catalogs_restore_across_errors_panics_and_child_scopes() {
 }
 
 #[test]
+fn read_only_views_share_owner_interfaces_and_reject_ambiguous_sources() {
+    let interfaces = catalog("lookup")
+        .with_views([("viewer".into(), "parent".into())])
+        .unwrap();
+    assert!(std::ptr::eq(
+        interfaces.for_node(&"viewer".into()),
+        interfaces.for_caller(&"parent".into())
+    ));
+    assert!(interfaces.for_caller(&"viewer".into()).is_empty());
+    assert!(
+        interfaces
+            .clone()
+            .with_views([("other".into(), "viewer".into())])
+            .is_err()
+    );
+    assert!(
+        catalog("lookup")
+            .with_views([
+                ("viewer".into(), "parent".into()),
+                ("viewer".into(), "parent".into())
+            ])
+            .is_err()
+    );
+}
+
+#[test]
 fn schema_projection_keeps_decoded_refinements_and_descriptions_without_external_fields() {
     let mut call = binding("search", 0);
     call.description = Some("Search with a structured request".into());

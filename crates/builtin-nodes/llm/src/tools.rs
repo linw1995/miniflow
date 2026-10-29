@@ -19,8 +19,6 @@ pub const MAX_TOOL_CALLS: usize = 128;
 
 #[derive(Debug, Snafu)]
 pub enum ToolSchemaError {
-    #[snafu(display("LLM tools require executable call bindings, not discovery-only metadata"))]
-    Unavailable,
     #[snafu(display(
         "tool alias `{name}` requires 1 to 64 ASCII letters, digits, underscores, or hyphens"
     ))]
@@ -101,10 +99,6 @@ pub struct ToolCatalog {
 impl ToolCatalog {
     pub fn new(context: &ExecutionContext) -> Result<Self, ToolSchemaError> {
         let interfaces = context.call_targets();
-        ensure!(
-            interfaces.is_empty() || context.can_invoke_calls(),
-            UnavailableSnafu
-        );
         ensure!(interfaces.len() <= MAX_TOOL_CALLS, DeclarationsLimitSnafu);
         let mut tools = BTreeMap::new();
         let mut schema_bytes = 2usize;
@@ -184,9 +178,6 @@ impl ToolCatalog {
         );
         Ok(catalog)
     }
-    pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
-    }
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .values()
@@ -196,7 +187,7 @@ impl ToolCatalog {
     pub fn arguments(
         &self,
         name: &str,
-        value: &Value,
+        value: &ValueRef,
     ) -> Result<(CallBindingId, CallArguments), ToolArgumentsError> {
         ensure!(
             bounded_json(value, MAX_TOOL_ARGUMENT_BYTES).is_ok(),
@@ -205,8 +196,8 @@ impl ToolCatalog {
         let tool = self.tools.get(name).context(UnknownToolSnafu)?;
         let object = value.as_object().context(ShapeSnafu)?;
         let mut arguments = CallArguments::default();
-        let convert = |name: &str, value: &Value, parameters: &[CallParameter]| {
-            let value = ValueRef::from(value.clone());
+        let convert = |name: &str, value: &ValueRef, parameters: &[CallParameter]| {
+            let value = value.clone();
             if parameters
                 .iter()
                 .any(|parameter| parameter.name() == name && parameter.is_secret())
@@ -220,7 +211,7 @@ impl ToolCatalog {
             ensure!(
                 object
                     .keys()
-                    .all(|key| matches!(key.as_str(), "outputs" | "defaults")),
+                    .all(|key| matches!(key.as_ref(), "outputs" | "defaults")),
                 ShapeSnafu
             );
             for (namespace, parameters, values) in [
@@ -233,7 +224,7 @@ impl ToolCatalog {
             ] {
                 if let Some(object) = object.get(namespace) {
                     for (name, value) in object.as_object().context(ShapeSnafu)? {
-                        values.insert(name.clone(), convert(name, value, parameters));
+                        values.insert(name.to_string(), convert(name, value, parameters));
                     }
                 }
             }
@@ -243,14 +234,15 @@ impl ToolCatalog {
                     .interface
                     .outputs()
                     .iter()
-                    .any(|parameter| parameter.name() == name)
+                    .any(|parameter| parameter.name() == name.as_ref())
                 {
-                    arguments
-                        .outputs
-                        .insert(name.clone(), convert(name, value, tool.interface.outputs()));
+                    arguments.outputs.insert(
+                        name.to_string(),
+                        convert(name, value, tool.interface.outputs()),
+                    );
                 } else {
                     arguments.defaults.insert(
-                        name.clone(),
+                        name.to_string(),
                         convert(name, value, tool.interface.defaults()),
                     );
                 }
@@ -258,55 +250,6 @@ impl ToolCatalog {
         }
         tool.interface.validate_decoded_arguments(&arguments)?;
         Ok((tool.interface.id(), arguments))
-    }
-
-    pub fn mark_arguments(&self, name: &str, value: &Value) -> ValueRef {
-        let Some(tool) = self.tools.get(name) else {
-            return value.clone().into();
-        };
-        let Some(object) = value.as_object() else {
-            return value.clone().into();
-        };
-        let mark = |object: &serde_json::Map<String, Value>, parameters: &[CallParameter]| {
-            ValueRef::object(object.iter().map(|(name, value)| {
-                let value = ValueRef::from(value.clone());
-                let value = if parameters
-                    .iter()
-                    .any(|parameter| parameter.name() == name && parameter.is_secret())
-                {
-                    value.into_secret()
-                } else {
-                    value
-                };
-                (name.as_str().into(), value)
-            }))
-        };
-        if tool.namespaced {
-            ValueRef::object(object.iter().map(|(name, value)| {
-                let parameters = match name.as_str() {
-                    "outputs" => tool.interface.outputs(),
-                    "defaults" => tool.interface.defaults(),
-                    _ => &[],
-                };
-                let value = if let Some(object) = value.as_object() {
-                    mark(object, parameters)
-                } else if parameters.iter().any(CallParameter::is_secret) {
-                    ValueRef::from(value.clone()).into_secret()
-                } else {
-                    value.clone().into()
-                };
-                (name.as_str().into(), value)
-            }))
-        } else {
-            let parameters: Vec<_> = tool
-                .interface
-                .outputs()
-                .iter()
-                .chain(tool.interface.defaults())
-                .cloned()
-                .collect();
-            mark(object, &parameters)
-        }
     }
 }
 
@@ -322,11 +265,14 @@ fn parameters(tool: &str, parameters: &[CallParameter]) -> Result<Value, ToolSch
             constraints.push(lower_schema(schema, tool, parameter.name())?);
         }
         constraints.retain(|value| value.as_object().is_none_or(|object| !object.is_empty()));
-        let schema = match constraints.len() {
+        let mut schema = match constraints.len() {
             0 => json!({}),
             1 => constraints.pop().unwrap(),
             _ => json!({"allOf":constraints}),
         };
+        if parameter.is_secret() {
+            schema["writeOnly"] = true.into();
+        }
         properties.insert(parameter.name().into(), schema);
         if parameter.required() {
             required.push(parameter.name());
@@ -717,32 +663,51 @@ mod tests {
                 prerequisites: vec![],
             }
             .interface();
-            let catalog = ToolCatalog {
-                tools: BTreeMap::from([(
-                    "search".into(),
-                    Tool {
-                        interface,
-                        namespaced,
-                        definition: ToolDefinition {
-                            name: "search".into(),
-                            description: String::new(),
-                            parameters: json!({}),
-                        },
-                    },
-                )]),
+            let interfaces =
+                mf_runtime::CallInterfaces::new([("caller".into(), vec![interface])]).unwrap();
+            let mut context = ExecutionContext::default();
+            let catalog = context
+                .with_call_interfaces(&interfaces, |ctx| {
+                    ctx.with_node("caller".into(), |ctx| ToolCatalog::new(ctx))
+                })
+                .unwrap();
+            let definitions: Vec<_> = catalog
+                .definitions()
+                .into_iter()
+                .map(|tool| crate::ToolDefinition {
+                    name: tool.name,
+                    description: tool.description,
+                    input_schema: tool.parameters.into(),
+                })
+                .collect();
+            let mark = |value: &Value| {
+                let mut call = crate::ToolCall {
+                    id: "a".into(),
+                    name: "search".into(),
+                    arguments: value.clone().into(),
+                };
+                call.mark_arguments(&definitions);
+                call.arguments
             };
             let value = if namespaced {
                 json!({"outputs":{"key":"first-secret"},"defaults":{"key":"second-secret"}})
             } else {
                 json!({"key":"first-secret"})
             };
-            let (_, arguments) = catalog.arguments("search", &value).unwrap();
+            let (_, arguments) = catalog.arguments("search", &value.clone().into()).unwrap();
             assert!(arguments.outputs["key"].is_secret());
             if namespaced {
                 assert!(arguments.defaults["key"].is_secret());
             }
-            let history =
-                serde_json::to_value(catalog.mark_arguments("search", &value).redacted()).unwrap();
+            let supplied = ValueRef::from(value.clone()).into_secret();
+            let (_, shared) = catalog.arguments("search", &supplied).unwrap();
+            let original = if namespaced {
+                &supplied["outputs"]["key"]
+            } else {
+                &supplied["key"]
+            };
+            assert!(shared.outputs["key"].ptr_eq(original));
+            let history = serde_json::to_value(mark(&value).redacted()).unwrap();
             assert!(!history.to_string().contains("first-secret"));
             assert!(!history.to_string().contains("second-secret"));
             let bad = if namespaced {
@@ -750,17 +715,14 @@ mod tests {
             } else {
                 json!({"key":false})
             };
-            assert!(catalog.arguments("search", &bad).is_err());
+            assert!(catalog.arguments("search", &bad.clone().into()).is_err());
             assert!(
-                !serde_json::to_string(&catalog.mark_arguments("search", &bad).redacted())
+                !serde_json::to_string(&mark(&bad).redacted())
                     .unwrap()
                     .contains("invalid-secret")
             );
-            assert!(catalog.arguments("search", &json!(null)).is_err());
-            assert_eq!(
-                catalog.mark_arguments("search", &json!(null)),
-                ValueRef::null()
-            );
+            assert!(catalog.arguments("search", &ValueRef::null()).is_err());
+            assert_eq!(mark(&json!(null)), ValueRef::null());
         }
     }
     #[test]

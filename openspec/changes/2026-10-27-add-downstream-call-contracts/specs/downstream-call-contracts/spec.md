@@ -466,23 +466,50 @@ caller-owned decoded refinements, and all refinements for a shared caller parame
 - **WHEN** a provider changes nested required fields while its coarse input port remains `object`
 - **THEN** generated startup rejects the changed metadata before business execution
 
+### Requirement: Separate model requests from tool execution
+
+The LLM node SHALL issue at most one model request and SHALL return its assistant message, tool calls,
+outcome, and usage without executing bound nodes. Tool Dispatch SHALL own executable bindings and
+process only accepted tool-call outcomes. The Flow SHALL own continuation and result routing.
+
+#### Scenario: Finish the model before executing tools
+
+- **WHEN** a model requests a valid tool batch
+- **THEN** the model node completes with tool calls and usage before any tool executes
+- **AND** Tool Dispatch uses its own lifecycle and deadline to return correlated results
+- **AND** a tool control failure does not retroactively turn model usage into a model failure
+
+### Requirement: Derive read-only catalog views without execution dependencies
+
+A declared catalog source SHALL reference an executable caller in the same prepared scope. It SHALL
+project that caller's interfaces without granting invocation capability or adding a readiness edge.
+
+#### Scenario: Prepare an acyclic catalog and dispatch graph
+
+- **WHEN** Catalog feeds definitions to an LLM whose tool calls feed Dispatch
+- **THEN** Catalog reads Dispatch metadata without waiting for Dispatch execution
+- **AND** neither Catalog nor the model acquires Dispatch's invocation capability
+
+#### Scenario: Reject invalid metadata ownership
+
+- **WHEN** a catalog source is missing, references another view, or overrides the viewer's own calls
+- **THEN** preparation fails before business execution
+
+#### Scenario: Preserve sensitivity before dispatch
+
+- **WHEN** a catalog contains secret caller parameters
+- **THEN** definitions carry write-only annotations and the LLM marks those arguments before publication
+- **AND** Dispatch preserves existing sensitivity and redacts secret results
+
 ### Requirement: Keep model iteration in workflow composition
 
-Each LLM node execution SHALL issue at most one model request. A completed tool batch SHALL return
-the existing assistant message and correlated tool results without issuing another request. The workflow SHALL own
-iteration limits, termination, message assembly, and usage accumulation. The node MUST reuse the existing
-explicit-message conversion and response classification, without injecting another user prompt.
-
-#### Scenario: Stop after one tool response
-
-- **WHEN** a model response requests a valid tool batch
-- **THEN** the node executes only that batch and returns `tool_calls` outcome
-- **AND** it returns the current request's usage and explicit results without another provider request
+The workflow SHALL own iteration limits, termination, message assembly, and usage accumulation.
+Neither the model nor Dispatch SHALL request another model turn automatically.
 
 #### Scenario: Continue through an existing workflow loop
 
 - **WHEN** a workflow appends the assistant message and tool results for its next iteration
-- **THEN** the node submits the caller-owned message list without duplicating the user prompt
+- **THEN** the model submits the caller-owned message list without duplicating the user prompt
 - **AND** the workflow decides whether to continue and how to combine usage and text
 
 #### Scenario: Exhaust the graph-owned request limit

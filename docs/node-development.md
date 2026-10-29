@@ -20,6 +20,8 @@ Its factory validates configuration without credentials or I/O; execution uses o
 The node also accepts function `tools` and explicit `tool_results`, both optional list inputs, and returns
 tool calls in its current assistant message and its `tool_calls` output. Explicit results follow `messages`
 in the provider request and must match pending assistant call IDs. Flows own history and persistence.
+`builtin.tool_catalog` and `builtin.tool_dispatch` provide explicit graph-owned tool discovery and execution.
+The model node consumes definitions and returns requests without executing tools.
 `ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;
 `ChatMessage` derives `NodeEnum` with the `role` tag and has `System`, `User`, `Assistant`, and
 `ToolResult` variants. Only the assistant variant carries `tool_calls`; the tool-result variant
@@ -294,6 +296,12 @@ attachment step on `Flow` or `PreparedStream`, so advertised routes and executab
 be configured independently. Isolated task inspection uses a scoped read-only overlay without
 granting dispatch authority; nested graph entry points always install their own table.
 
+A node may declare `NodeMetadata.call_interface_source` to read another call-owning node's interfaces
+in the same prepared scope. `call_targets()` resolves that read-only view; `can_invoke_calls()` stays
+false for the viewer, and invocation cannot borrow the source's authority. Preparation rejects missing
+owners, chained views, or a viewer that also declares its own calls. The reference adds no scheduling
+edge and is included in generated metadata drift checks. Ordinary metadata omits the empty field.
+
 ```rust
 fn advertised_tools(ctx: &mf_runtime::ExecutionContext) -> Vec<&str> {
     ctx.call_targets().iter().map(|interface| interface.name()).collect()
@@ -308,8 +316,8 @@ belong to a prepared scope, so shared node implementations must not cache them g
 Scopes without discovery metadata do not allocate catalog storage.
 
 Discovery does not change ordinary scheduling or make tools invocable. Do not execute a prototype Flow
-containing tool nodes expecting discovery attachment to make them lazy. Executable bindings use the runtime call dispatcher; the LLM adapter converts only caller-visible
-parameters into provider schemas and reuses the existing explicit-message protocol. In particular, a serialized `CallInterface` is not
+containing tool nodes expecting discovery attachment to make them lazy. Executable bindings use the runtime call dispatcher. Tool Catalog converts caller-visible parameters
+into provider schemas; Tool Dispatch executes requests from the explicit-message protocol. In particular, a serialized `CallInterface` is not
 a provider tool definition: its constraint list is conjunctive, and its two namespaces remain distinct.
 
 ## Context-aware execution

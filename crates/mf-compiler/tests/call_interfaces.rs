@@ -172,6 +172,72 @@ fn target_factory(_: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> 
 inventory::submit! { mf_runtime::NodeRegistration { kind:"test.interface_inspector", factory:mf_runtime::NodeFactory::Plain(inspector_factory) } }
 inventory::submit! { mf_runtime::NodeRegistration { kind:"test.interface_target", factory:mf_runtime::NodeFactory::Plain(target_factory) } }
 
+struct ReadCatalog;
+impl TaskNode for ReadCatalog {
+    fn execute(
+        &self,
+        _: Inputs,
+        ctx: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        assert!(!ctx.can_invoke_calls());
+        let id = ctx.call_targets()[0].id();
+        assert!(matches!(
+            ctx.invoke_call(id, Default::default()),
+            Err(mf_runtime::CallDispatchError::UnknownBinding { .. })
+        ));
+        Ok(Outputs::from([("tools".into(), visible(ctx)?)]).into())
+    }
+}
+fn read_catalog(config: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
+    Ok(PreparedNode::from_parts(
+        NodeExecution::Task(Box::new(ReadCatalog)),
+        NodeMetadata {
+            ports: NodePorts {
+                inputs: vec![],
+                outputs: vec![PortSpec::new("tools", ValueType::Array, true)],
+            },
+            call_interface_source: Some(config["source"].as_str().unwrap().into()),
+            ..Default::default()
+        },
+    ))
+}
+inventory::submit! { mf_runtime::NodeRegistration { kind:"test.read_catalog", factory:mf_runtime::NodeFactory::Plain(read_catalog) } }
+
+#[test]
+fn prepared_catalog_views_are_read_only_and_do_not_depend_on_owner_execution() {
+    let document = json!({"version":"2026-10-28","dependencies":{},"nodes":[
+        {"id":"catalog","kind":"test.read_catalog","config":{"source":"dispatch"}},
+        {"id":"dispatch","kind":"test.interface_inspector"},
+        {"id":"tool","kind":"test.interface_empty"}
+    ],"edges":[{"from_node":"catalog","to_node":"dispatch"}],
+    "calls":{"dispatch":{"lookup":{"target":"tool"}}},
+    "outputs":[{"name":"view","node":"catalog","port":"tools"},{"name":"owner","node":"dispatch","port":"tools"}]});
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition = serde_json::from_value(document.clone()).unwrap();
+    let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
+    let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
+    assert!(
+        flow.call_interfaces()
+            .for_caller(&"catalog".into())
+            .is_empty()
+    );
+    let result = flow.execute().unwrap();
+    assert_eq!(result["view"], result["owner"]);
+    assert_eq!(result["view"][0]["name"], json!("lookup"));
+    for source in ["missing", "catalog", "tool"] {
+        let mut invalid = document.clone();
+        invalid["nodes"][0]["config"]["source"] = source.into();
+        let definition = serde_json::from_value(invalid).unwrap();
+        assert!(mf_compiler::compile_definition(&definition, &registry).is_err());
+    }
+    let mut mixed = document;
+    mixed["calls"]["catalog"] = json!({"lookup":{"target":"tool"}});
+    assert!(
+        mf_compiler::compile_definition(&serde_json::from_value(mixed).unwrap(), &registry)
+            .is_err()
+    );
+}
+
 #[test]
 fn compiled_catalogs_prepare_all_callers_together_without_advertising_external_inputs() {
     let definition = serde_json::from_value(json!({

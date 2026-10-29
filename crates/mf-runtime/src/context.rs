@@ -394,7 +394,9 @@ impl ExecutionContext {
 
     /// Whether the active node has a live executable call scope.
     pub fn can_invoke_calls(&self) -> bool {
-        self.current_node.is_some()
+        self.current_node
+            .as_ref()
+            .is_some_and(|node| !self.call_interfaces.for_caller(node).is_empty())
             && self
                 .call_dispatcher
                 .as_ref()
@@ -406,7 +408,7 @@ impl ExecutionContext {
     pub fn call_targets(&self) -> &[crate::CallInterface] {
         self.current_node
             .as_ref()
-            .map_or(&[], |node| self.call_interfaces.for_caller(node))
+            .map_or(&[], |node| self.call_interfaces.for_node(node))
     }
 
     /// Installs discovery data for one scope and restores its enclosing scope on every exit.

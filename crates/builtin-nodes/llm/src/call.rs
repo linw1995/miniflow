@@ -46,6 +46,13 @@ pub struct ToolCallEvent {
 }
 
 impl ToolCall {
+    /// Preserve declared argument sensitivity before publishing model outputs or stream events.
+    pub fn mark_arguments(&mut self, definitions: &[ToolDefinition]) {
+        if let Some(definition) = definitions.iter().find(|tool| tool.name == self.name) {
+            self.arguments = mark_schema(&self.arguments, &definition.input_schema);
+        }
+    }
+
     pub fn from_provider(call: rig::ToolCall) -> Result<Self, LlmExecutionError> {
         let id = call.id.wire().into_owned();
         ensure!(
@@ -60,6 +67,41 @@ impl ToolCall {
             arguments: call.function.arguments.into(),
         })
     }
+}
+
+fn mark_schema(value: &ValueRef, schema: &ValueRef) -> ValueRef {
+    if value.is_secret() || schema["writeOnly"].as_bool() == Some(true) {
+        return value.clone().into_secret();
+    }
+    if let (Some(values), Some(properties)) = (value.as_object(), schema["properties"].as_object())
+    {
+        return ValueRef::object(values.iter().map(|(name, value)| {
+            let value = properties
+                .get(name)
+                .map_or_else(|| value.clone(), |schema| mark_schema(value, schema));
+            (name.clone(), value)
+        }));
+    }
+    if let Some(values) = value.as_array()
+        && let Some(items) = schema.get("items")
+    {
+        return ValueRef::array(values.iter().map(|value| mark_schema(value, items)));
+    }
+    if (schema["properties"].as_object().is_some() && !value.is_object()
+        || schema.get("items").is_some() && !value.is_array())
+        && schema_contains_private(schema)
+    {
+        return value.clone().into_secret();
+    }
+    value.clone()
+}
+
+fn schema_contains_private(schema: &ValueRef) -> bool {
+    schema["writeOnly"].as_bool() == Some(true)
+        || schema["properties"]
+            .as_object()
+            .is_some_and(|properties| properties.values().any(schema_contains_private))
+        || schema.get("items").is_some_and(schema_contains_private)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeEnum)]
@@ -247,7 +289,7 @@ fn require(
     Ok(())
 }
 
-fn valid_name(name: &str) -> bool {
+pub fn valid_name(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && name
             .bytes()
