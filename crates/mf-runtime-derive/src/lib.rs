@@ -64,9 +64,10 @@ fn field_attributes(
     attrs: &[syn::Attribute],
     attribute: &str,
     allow_default: bool,
-) -> syn::Result<(Option<LitStr>, Option<FieldDefault>)> {
+) -> syn::Result<(Option<LitStr>, Option<FieldDefault>, Option<LitStr>)> {
     let mut renamed = None;
     let mut default = None;
+    let mut description = None;
     for attr in attrs {
         if attr.path().is_ident(attribute) {
             attr.parse_nested_meta(|meta| {
@@ -75,6 +76,11 @@ fn field_attributes(
                         return Err(meta.error(format!("duplicate {attribute} rename")));
                     }
                     renamed = Some(meta.value()?.parse::<LitStr>()?);
+                } else if allow_default && meta.path.is_ident("description") {
+                    if description.is_some() {
+                        return Err(meta.error("duplicate field description"));
+                    }
+                    description = Some(meta.value()?.parse::<LitStr>()?);
                 } else if allow_default && meta.path.is_ident("default") {
                     if default.is_some() {
                         return Err(meta.error("duplicate field default"));
@@ -88,14 +94,18 @@ fn field_attributes(
                 } else {
                     return Err(meta.error(format!(
                         "expected `rename = \"port-name\"`{} on an {attribute} field",
-                        if allow_default { " or `default`" } else { "" }
+                        if allow_default {
+                            " or `default` or `description`"
+                        } else {
+                            ""
+                        }
                     )));
                 }
                 Ok(())
             })?;
         }
     }
-    Ok((renamed, default))
+    Ok((renamed, default, description))
 }
 
 fn default_tokens(default: &FieldDefault, ty: &syn::Type) -> proc_macro2::TokenStream {
@@ -175,6 +185,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     let runtime: Path = runtime.unwrap_or_else(|| parse_quote!(::mf_runtime));
     let mut generics = input.generics;
     let mut ports = Vec::new();
+    let mut schemas = Vec::new();
     let mut decoded = Vec::new();
     let mut encoded = Vec::new();
     let mut names = BTreeSet::new();
@@ -185,7 +196,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     let mut typed_checks = Vec::new();
     for field in fields.named {
         let ident = field.ident.expect("named field");
-        let (renamed, default) = field_attributes(
+        let (renamed, default, description) = field_attributes(
             &field.attrs,
             attribute,
             !matches!(direction, Direction::Output),
@@ -249,6 +260,16 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
             quote!(<#ty as #field_trait>::port(#port))
         };
         ports.push(port_spec.clone());
+        if !matches!(direction, Direction::Output) {
+            let schema = quote!(<#ty as #runtime::InputField>::value_schema(__mf_schema_context));
+            let schema = if let Some(description) = description {
+                quote!(#schema.described(#description))
+            } else {
+                schema
+            };
+            schemas.push(quote!((#port.into(), #schema)));
+        }
+
         if typed {
             let rust_type = quote!(<#ty as #runtime::TypedField>::rust_type());
             let rust_type = if default.is_some() {
@@ -312,10 +333,22 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
             },
         ),
     };
+    let schema_method = if matches!(direction, Direction::Output) {
+        quote! {}
+    } else {
+        quote! {
+            fn input_schemas_with_context(__mf_schema_context: &mut #runtime::ValueSchemaContext) -> ::std::collections::BTreeMap<::std::string::String, #runtime::ValueSchema> {
+                ::std::collections::BTreeMap::from([#(#schemas),*])
+            }
+        }
+    };
     let bridges = if matches!(direction, Direction::Value) {
         quote! {
             impl #impl_generics #runtime::NodeInputs for #name #type_generics #where_clause {
                 fn ports() -> ::std::vec::Vec<#runtime::PortSpec> { <Self as #runtime::NodeValue>::ports() }
+                fn input_schemas_with_context(context: &mut #runtime::ValueSchemaContext) -> ::std::collections::BTreeMap<::std::string::String, #runtime::ValueSchema> {
+                    <Self as #runtime::NodeValue>::input_schemas_with_context(context)
+                }
                 fn from_inputs(values: #runtime::Inputs) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
                     <Self as #runtime::NodeValue>::from_values(values)
                 }
@@ -327,6 +360,9 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
                 }
             }
             impl #impl_generics #runtime::InputValue for #name #type_generics #where_clause {
+                fn value_schema(context: &mut #runtime::ValueSchemaContext) -> #runtime::ValueSchema {
+                    #runtime::ValueSchema::object(<Self as #runtime::NodeValue>::ports(), <Self as #runtime::NodeValue>::input_schemas_with_context(context))
+                }
                 fn value_type() -> #runtime::ValueType { #runtime::ValueType::Object }
                 fn decode(value: #runtime::ValueRef) -> ::std::result::Result<Self, #runtime::TypeMismatch> {
                     #runtime::decode_node_value(value)
@@ -334,6 +370,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
             }
             impl #impl_generics #runtime::InputField for #name #type_generics #where_clause {
                 const REQUIRED: bool = true;
+                fn value_schema(context: &mut #runtime::ValueSchemaContext) -> #runtime::ValueSchema { context.describe::<Self>() }
                 fn value_type() -> #runtime::ValueType { #runtime::ValueType::Object }
                 fn decode_field(port: &str, value: ::std::option::Option<#runtime::ValueRef>) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
                     #runtime::decode_required_input(port, value)
@@ -383,6 +420,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
                 ::std::vec![#(#ports),*]
             }
 
+            #schema_method
             #conversion
         }
     })
@@ -449,9 +487,10 @@ fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut wire_names = BTreeSet::new();
     let mut decoded = Vec::new();
     let mut encoded = Vec::new();
+    let mut variants = Vec::new();
     for variant in data.variants {
         let ident = variant.ident;
-        let (rename, _) = field_attributes(&variant.attrs, "value", false)?;
+        let (rename, _, _) = field_attributes(&variant.attrs, "value", false)?;
         let wire = rename.unwrap_or_else(|| LitStr::new(&ident.unraw().to_string(), ident.span()));
         if wire.value().is_empty() {
             return Err(syn::Error::new(
@@ -467,13 +506,15 @@ fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             let mut field_names = Vec::new();
             let mut field_decoders = Vec::new();
             let mut field_encoders = Vec::new();
+            let mut field_schemas = Vec::new();
             let unit = matches!(variant.fields, Fields::Unit);
             match variant.fields {
                 Fields::Unit => {}
                 Fields::Named(fields) => {
                     for field in fields.named {
                         let ident = field.ident.expect("named field");
-                        let (rename, default) = field_attributes(&field.attrs, "value", true)?;
+                        let (rename, default, description) =
+                            field_attributes(&field.attrs, "value", true)?;
                         let port = rename.unwrap_or_else(|| {
                             LitStr::new(&ident.unraw().to_string(), ident.span())
                         });
@@ -503,6 +544,18 @@ fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                             .make_where_clause()
                             .predicates
                             .push(parse_quote!(#ty: #runtime::InputField + #runtime::OutputField));
+                        let required = if default.is_some() {
+                            quote!(false)
+                        } else {
+                            quote!(<#ty as #runtime::InputField>::REQUIRED)
+                        };
+                        let schema = quote!(<#ty as #runtime::InputField>::value_schema(__mf_schema_context));
+                        let schema = if let Some(description) = description {
+                            quote!(#schema.described(#description))
+                        } else {
+                            schema
+                        };
+                        field_schemas.push(quote!((#port.into(), #runtime::SchemaField { schema: #schema, required: #required })));
                         let decode = if let Some(default) = default {
                             if matches!(default, FieldDefault::Trait) {
                                 generics
@@ -527,6 +580,9 @@ fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     ));
                 }
             }
+            variants.push(
+                quote!((#wire.into(), ::std::collections::BTreeMap::from([#(#field_schemas),*]))),
+            );
             let construction = if unit {
                 quote!(Self::#ident)
             } else {
@@ -555,6 +611,7 @@ fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     "string NodeEnum requires unit variants; use `#[value(tag = \"kind\")]` for payloads",
                 ));
             }
+            variants.push(quote!(#wire.into()));
             decoded.push(quote!(#wire => Ok(Self::#ident)));
             encoded.push(quote!(Self::#ident => Ok(#runtime::ValueRef::from(#wire))));
         }
@@ -563,6 +620,11 @@ fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         quote!(#runtime::ValueType::Object)
     } else {
         quote!(#runtime::ValueType::String)
+    };
+    let schema = if let Some(tag) = &tag {
+        quote!(#runtime::ValueSchema::Tagged { tag: #tag.into(), variants: ::std::collections::BTreeMap::from([#(#variants),*]) })
+    } else {
+        quote!(#runtime::ValueSchema::Enum(vec![#(#variants),*]))
     };
     let decode = if let Some(tag) = &tag {
         quote!(#runtime::decode_object_value(value, |mut __mf_inputs| {
@@ -583,11 +645,13 @@ fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     Ok(quote! {
         impl #impl_generics #runtime::InputValue for #name #type_generics #where_clause {
+            fn value_schema(__mf_schema_context: &mut #runtime::ValueSchemaContext) -> #runtime::ValueSchema { #schema }
             fn value_type() -> #runtime::ValueType { #descriptor }
             fn decode(value: #runtime::ValueRef) -> ::std::result::Result<Self, #runtime::TypeMismatch> { #decode }
         }
         impl #impl_generics #runtime::InputField for #name #type_generics #where_clause {
             const REQUIRED: bool = true;
+            fn value_schema(context: &mut #runtime::ValueSchemaContext) -> #runtime::ValueSchema { context.describe::<Self>() }
             fn value_type() -> #runtime::ValueType { #descriptor }
             fn decode_field(port: &str, value: ::std::option::Option<#runtime::ValueRef>) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
                 #runtime::decode_required_input(port, value)

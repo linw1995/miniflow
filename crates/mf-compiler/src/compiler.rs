@@ -37,6 +37,11 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("node `{definition_id}` input schemas: {source}"))]
+    InputSchemas {
+        definition_id: DefinitionId,
+        source: mf_runtime::SchemaContractError,
+    },
     #[snafu(transparent)]
     DirectedCalls {
         #[snafu(source(from(crate::CallBindingError, Box::new)))]
@@ -719,6 +724,11 @@ fn validate_base_metadata(
     };
     let mut output_index = BTreeMap::new();
     for node in nodes {
+        node.metadata
+            .validate_input_schemas()
+            .context(InputSchemasSnafu {
+                definition_id: node.definition_id.clone(),
+            })?;
         node.metadata
             .validate_call_outputs()
             .context(CallOutputsSnafu {

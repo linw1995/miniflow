@@ -92,3 +92,4 @@ pub mod generated_fixture;
 
 mod directed_fixture;
 mod native_directed_fixture;
+mod schema_fixture;

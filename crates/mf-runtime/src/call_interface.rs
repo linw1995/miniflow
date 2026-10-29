@@ -17,6 +17,8 @@ pub struct CallParameter {
     name: String,
     required: bool,
     constraints: Vec<ValueType>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    schemas: Vec<crate::ValueSchema>,
     secret: bool,
 }
 
@@ -29,6 +31,9 @@ impl CallParameter {
     }
     pub fn constraints(&self) -> &[ValueType] {
         &self.constraints
+    }
+    pub fn schema_constraints(&self) -> &[crate::ValueSchema] {
+        &self.schemas
     }
     pub const fn is_secret(&self) -> bool {
         self.secret
@@ -43,6 +48,8 @@ impl CallParameter {
 pub struct CallInterface {
     id: CallBindingId,
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     outputs: Vec<CallParameter>,
     defaults: Vec<CallParameter>,
 }
@@ -54,6 +61,34 @@ impl CallInterface {
     pub fn name(&self) -> &str {
         &self.name
     }
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    /// Validates decoded refinements as well as port types. Opaque schemas require separate admission.
+    pub fn validate_decoded_arguments(
+        &self,
+        arguments: &CallArguments,
+    ) -> Result<(), CallContractError> {
+        self.validate_arguments(arguments)?;
+        for (namespace, values, parameters) in [
+            ("output", &arguments.outputs, &self.outputs),
+            ("default", &arguments.defaults, &self.defaults),
+        ] {
+            for parameter in parameters {
+                if let Some(value) = values.get(&parameter.name) {
+                    for schema in &parameter.schemas {
+                        schema.validate_shared(value).context(ArgumentTypeSnafu {
+                            namespace,
+                            name: &parameter.name,
+                        })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn outputs(&self) -> &[CallParameter] {
         &self.outputs
     }
@@ -61,7 +96,8 @@ impl CallInterface {
         &self.defaults
     }
 
-    /// Checks exactly the caller-visible constraints, without reading or mapping target inputs.
+    /// Checks caller-owned port types without reading or mapping target inputs.
+    /// Strict codec refinements are available through `validate_decoded_arguments`.
     pub fn validate_arguments(&self, arguments: &CallArguments) -> Result<(), CallContractError> {
         for (namespace, values, parameters) in [
             ("output", &arguments.outputs, &self.outputs),
@@ -116,10 +152,17 @@ impl ResolvedCallBinding {
                     name: source.name.to_string(),
                     required: false,
                     constraints: Vec::new(),
+                    schemas: Vec::new(),
                     secret: false,
                 });
             parameter.required |= source.required || input.port.required;
             parameter.secret |= input.secret;
+            if let Some(schema) = &input.schema
+                && !parameter.schemas.contains(schema)
+            {
+                parameter.schemas.push(schema.clone());
+            }
+
             for constraint in [&source.value_type, &input.port.value_type] {
                 if !parameter.constraints.contains(constraint) {
                     parameter.constraints.push(constraint.clone());
@@ -133,6 +176,9 @@ impl ResolvedCallBinding {
                     parameter
                         .constraints
                         .sort_by_cached_key(ToString::to_string);
+                    parameter.schemas.sort_by_cached_key(|schema| {
+                        serde_json::to_string(schema).expect("validated schema serializes")
+                    });
                     parameter
                 })
                 .collect()
@@ -140,6 +186,7 @@ impl ResolvedCallBinding {
         CallInterface {
             id: self.id,
             name: self.name.clone(),
+            description: self.description.clone(),
             outputs: normalize(outputs),
             defaults: normalize(defaults),
         }

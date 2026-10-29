@@ -279,3 +279,8 @@ no tool is selected; place a configuration service inside a callable Flow for fr
 
 TaskStream targets use their terminal task contract. Their incremental emissions are validated and
 remain disconnected from ordinary channels. Callers may still emit their own incremental results.
+
+Call declarations may add a static public `description`. Each projected `CallParameter` also exposes
+`schema_constraints()` for decoded-value refinements; every constraint applies. External schemas are
+removed before projection, including opaque credentials or configuration types. These descriptors are
+provider-neutral and contain no runtime values, environment values, or field-default results.

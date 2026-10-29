@@ -8,6 +8,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn binding(name: &str, id: usize) -> ResolvedCallBinding {
     ResolvedCallBinding {
+        description: None,
         id: CallBindingId::new(id),
         name: name.into(),
         caller: NodeId::new(7),
@@ -27,6 +28,7 @@ fn input(
     secret: bool,
 ) -> ResolvedCallInput {
     ResolvedCallInput {
+        schema: None,
         port: PortSpec::owned(name, value_type, required),
         source,
         secret,
@@ -379,4 +381,104 @@ fn read_only_views_share_owner_interfaces_and_reject_ambiguous_sources() {
             ])
             .is_err()
     );
+}
+
+#[test]
+fn schema_projection_keeps_decoded_refinements_and_descriptions_without_external_fields() {
+    let mut call = binding("search", 0);
+    call.description = Some("Search with a structured request".into());
+    let schema = mf_runtime::ValueSchema::Object(std::collections::BTreeMap::from([(
+        "query".into(),
+        mf_runtime::SchemaField {
+            schema: mf_runtime::ValueSchema::Type(ValueType::String).described("Search text"),
+            required: true,
+        },
+    )]));
+    call.inputs = vec![
+        mf_runtime::ResolvedCallInput {
+            schema: Some(schema.clone()),
+            port: PortSpec::new("private_payload", ValueType::Object, true),
+            source: CallInputSource::Output(PortSpec::new("payload", ValueType::Any, true)),
+            secret: false,
+        },
+        mf_runtime::ResolvedCallInput {
+            schema: Some(mf_runtime::ValueSchema::opaque(ValueType::Object)),
+            port: PortSpec::new("secret_config", ValueType::Object, true),
+            source: CallInputSource::External,
+            secret: true,
+        },
+    ];
+    let interface = call.interface();
+    assert_eq!(
+        interface.description(),
+        Some("Search with a structured request")
+    );
+    assert_eq!(interface.outputs()[0].schema_constraints(), &[schema]);
+    let encoded = serde_json::to_string(&interface).unwrap();
+    assert!(
+        !encoded.contains("private_payload")
+            && !encoded.contains("secret_config")
+            && !encoded.contains("opaque")
+    );
+    let incomplete = CallArguments {
+        outputs: NodeValues::from([("payload".into(), json!({}).into())]),
+        ..Default::default()
+    };
+    interface.validate_arguments(&incomplete).unwrap();
+    let error = interface
+        .validate_decoded_arguments(&incomplete)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("payload") && !error.to_string().contains("private_payload")
+    );
+    interface
+        .validate_decoded_arguments(&CallArguments {
+            outputs: NodeValues::from([("payload".into(), json!({"query":"example"}).into())]),
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+#[test]
+fn decoded_fanout_intersects_schemas_deterministically_and_allows_optional_omission() {
+    use mf_runtime::ValueSchema;
+    let mut binding = binding("lookup", 0);
+    for (name, variants) in [("left", vec!["a", "b"]), ("right", vec!["b", "c"])] {
+        let mut parameter = input(
+            name,
+            ValueType::String,
+            false,
+            CallInputSource::Output(PortSpec::new("query", ValueType::String, false)),
+            false,
+        );
+        parameter.schema = Some(ValueSchema::Enum(
+            variants.into_iter().map(String::from).collect(),
+        ));
+        binding.inputs.push(parameter);
+    }
+    let interface = binding.interface();
+    assert_eq!(interface.outputs()[0].schema_constraints().len(), 2);
+    interface
+        .validate_decoded_arguments(&CallArguments::default())
+        .unwrap();
+    for (value, accepted) in [("a", false), ("b", true), ("c", false)] {
+        let arguments = CallArguments {
+            outputs: NodeValues::from([("query".into(), value.into())]),
+            ..Default::default()
+        };
+        assert!(interface.validate_arguments(&arguments).is_ok());
+        assert_eq!(
+            interface.validate_decoded_arguments(&arguments).is_ok(),
+            accepted
+        );
+    }
+    binding.inputs.reverse();
+    assert_eq!(binding.interface(), interface);
+    let map = ValueSchema::Map(Box::new(ValueSchema::Enum(vec!["a".into()])));
+    assert_eq!(
+        map.value_type(),
+        ValueType::Map(Box::new(ValueType::String))
+    );
+    map.validate_shared(&json!({"field":"a"}).into()).unwrap();
+    assert!(map.validate_shared(&json!({"field":"b"}).into()).is_err());
 }

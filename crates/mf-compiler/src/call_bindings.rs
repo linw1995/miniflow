@@ -121,12 +121,17 @@ pub fn declarations(
                         declaration.target
                     ),
                 })?;
-            bindings.push(CallBinding::new(
+            let binding = CallBinding::new(
                 name,
                 *target,
                 declaration.ports.clone(),
                 declaration.defaults,
-            )?);
+            )?;
+            bindings.push(if let Some(description) = &declaration.description {
+                binding.with_description(description)
+            } else {
+                binding
+            });
         }
         result.insert(*caller_id, bindings);
     }
@@ -331,6 +336,17 @@ pub fn resolve(
                 &input.value_type,
             )
             .context(ConnectionTypeSnafu { name })?;
+            if let Some(schema) = target.metadata.input_schemas.get(mapping.input.as_str()) {
+                crate::compiler::validate_connection_types(
+                    &parent.definition_id,
+                    &source.name,
+                    &source.value_type,
+                    &target.definition_id,
+                    &input.name,
+                    &schema.value_type(),
+                )
+                .context(ConnectionTypeSnafu { name })?;
+            }
             mapped.insert(mapping.input.as_str(), *source);
         }
         let mut external = BTreeSet::new();
@@ -408,6 +424,7 @@ pub fn resolve(
                 CallInputSource::Omitted
             };
             resolved_inputs.push(ResolvedCallInput {
+                schema: target.metadata.input_schemas.get(input).cloned(),
                 port: port.clone(),
                 source,
                 secret: target
@@ -418,6 +435,7 @@ pub fn resolve(
             });
         }
         resolved.push(ResolvedCallBinding {
+            description: binding.description().map(str::to_owned),
             id: CallBindingId::new(index),
             name: name.to_owned(),
             caller,

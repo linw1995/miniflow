@@ -17,6 +17,7 @@ use std::sync::{
 fn catalog(entries: &[(&str, &str)]) -> CallInterfaces {
     CallInterfaces::new(entries.iter().map(|(caller, alias)| {
         let binding = ResolvedCallBinding {
+            description: None,
             id: CallBindingId::new(0),
             name: (*alias).into(),
             caller: NodeId::new(0),

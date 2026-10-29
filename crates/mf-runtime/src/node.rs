@@ -25,6 +25,19 @@ pub type Outputs = NodeValues;
 /// ```
 pub trait NodeValue: Sized {
     fn ports() -> Vec<PortSpec>;
+    fn input_schemas_with_context(
+        _: &mut crate::ValueSchemaContext,
+    ) -> std::collections::BTreeMap<String, crate::ValueSchema> {
+        Self::ports()
+            .into_iter()
+            .map(|port| {
+                (
+                    port.name.to_string(),
+                    crate::ValueSchema::opaque(port.value_type),
+                )
+            })
+            .collect()
+    }
     fn from_values(values: NodeValues) -> Result<Self, crate::InputDecodeError>;
     fn into_values(self) -> Result<NodeValues, crate::OutputEncodeError>;
 }
@@ -647,6 +660,10 @@ pub fn output_id(node: &str, port: &str) -> String {
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
     #[snafu(transparent)]
+    InputSchemas { source: crate::SchemaContractError },
+    #[snafu(display("input schemas must be reflected from the typed input contract"))]
+    ConflictingInputSchemas,
+    #[snafu(transparent)]
     CallContract { source: crate::CallContractError },
     #[snafu(display("could not serialize generated metadata: {source}"))]
     GenerationMetadata { source: serde_json::Error },
@@ -821,6 +838,9 @@ impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
+    /// Codec refinements beyond coarse port types; never contains runtime values or defaults.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub input_schemas: std::collections::BTreeMap<String, crate::ValueSchema>,
     /// Caller-owned output slots, published only through directed call requests.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub call_outputs: Vec<PortSpec>,
@@ -840,6 +860,10 @@ pub struct NodeMetadata {
 }
 
 impl NodeMetadata {
+    pub fn validate_input_schemas(&self) -> Result<(), crate::SchemaContractError> {
+        crate::value_schema::validate_port_schemas(&self.ports.inputs, &self.input_schemas)
+    }
+
     pub fn output_ports(&self) -> impl Iterator<Item = &PortSpec> {
         self.ports.outputs.iter().chain(&self.stream_outputs)
     }
@@ -1003,7 +1027,7 @@ where
         constructor: TypedConstructor,
         context_free: bool,
     ) -> Result<Self, NodeBuildError> {
-        let mut metadata = reflected_node_metadata(
+        let mut metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
@@ -1095,6 +1119,29 @@ fn reflected_node_metadata(
     );
     metadata.ports = ports;
     metadata.validate_call_outputs()?;
+    metadata.validate_input_schemas()?;
+    Ok(metadata)
+}
+
+fn reflected_typed_metadata<I: crate::NodeInputs>(
+    ports: NodePorts,
+    metadata: NodeMetadata,
+) -> Result<NodeMetadata, NodeBuildError> {
+    ensure!(
+        metadata.input_schemas.is_empty(),
+        ConflictingInputSchemasSnafu
+    );
+    let mut metadata = reflected_node_metadata(ports, metadata)?;
+    metadata.input_schemas = I::input_schemas();
+    metadata.input_schemas.retain(|name, schema| {
+        match metadata.ports.inputs.iter().find(|port| port.name == *name) {
+            // Preserve the established diagnostic boundary for invalid coarse descriptors.
+            Some(port) if port.value_type.check_depth().is_err() => false,
+            Some(port) => *schema != crate::ValueSchema::Type(port.value_type.clone()),
+            None => true,
+        }
+    });
+    metadata.validate_input_schemas()?;
     Ok(metadata)
 }
 
@@ -1148,7 +1195,7 @@ impl PreparedNode {
         task: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let metadata = reflected_node_metadata(
+        let metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
@@ -1186,7 +1233,7 @@ impl PreparedNode {
         state: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let metadata = reflected_node_metadata(
+        let metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
@@ -1201,7 +1248,7 @@ impl PreparedNode {
         producer: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let metadata = reflected_node_metadata(
+        let metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
@@ -1287,7 +1334,7 @@ impl PreparedNode {
         task: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let metadata = reflected_node_metadata(
+        let metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;

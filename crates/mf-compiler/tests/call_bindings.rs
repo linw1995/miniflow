@@ -1080,3 +1080,31 @@ fn root_call_targets_do_not_waive_nested_input_requirements() {
     let error = mf_compiler::compile_definition(&definition, &registry).unwrap_err();
     assert!(error.to_string().contains("tool") && error.to_string().contains("requires input"));
 }
+
+#[test]
+fn decoded_schema_kinds_reject_impossible_explicit_caller_mappings() {
+    let mut target = tool(vec![port("input", ValueType::Any, true)]);
+    target.metadata.input_schemas.insert(
+        "input".into(),
+        mf_runtime::ValueSchema::Enum(vec!["ready".into()]),
+    );
+    let flow = build(
+        vec![
+            caller(vec![port("selection", ValueType::Boolean, true)]),
+            target,
+        ],
+        vec![],
+    );
+    let error = flow
+        .resolve_call_bindings(
+            NodeId::new(0),
+            &[declaration(
+                "tool",
+                1,
+                &[("selection", "input")],
+                CallInputDefaults::ExplicitOnly,
+            )],
+        )
+        .unwrap_err();
+    assert!(matches!(error, CallBindingError::ConnectionType { .. }));
+}
