@@ -151,6 +151,108 @@ Rebuild plugins against the matching runtime package and correct declarations th
 
 Declare context reads in `NodeMetadata.context_references`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
 
+## Directed call contracts
+
+`CallBinding` declares a directed call independently of ordinary data publication. It names a target
+`NodeId`, a group of `CallPortMapping` entries, and a `CallInputDefaults` policy. Each mapping names an
+exact caller output and target input; dots are literal port-name characters. Construction rejects
+empty names and duplicate destination inputs, while allowing one source output to feed multiple inputs.
+`ExplicitOnly` is the default. `RemainingInputs` explicitly requests that later graph preparation assign
+otherwise unbound target inputs to the caller after resolving all explicit port connections.
+
+The argument envelope separates `outputs`, keyed by caller output names, from `defaults`, keyed by
+target input names. Both preserve `ValueRef` sharing and sensitivity. An absent optional argument is
+omitted; null remains a supplied value. External constants and configuration values belong to runtime
+input composition, not to this caller-owned envelope.
+
+```rust
+use mf_runtime::{
+    CallArguments, CallBinding, CallBindingId, CallId, CallInputDefaults,
+    CallPortMapping, CallRequest, NodeId, NodeValues,
+};
+
+let binding = CallBinding::new(
+    "search",
+    NodeId::new(3),
+    vec![CallPortMapping { output: "query".into(), input: "query".into() }],
+    CallInputDefaults::ExplicitOnly,
+)?;
+let request = CallRequest {
+    id: CallId { binding: CallBindingId::new(0), invocation: 42 },
+    arguments: CallArguments {
+        outputs: NodeValues::from([("query".into(), "runtime contracts".into())]),
+        ..Default::default()
+    },
+};
+```
+
+The example constructs contracts without executing a target. Runtime invocation returns its response
+synchronously, including the observation identity. Declare explicit caller
+output slots in `NodeMetadata.call_outputs`. They are separate from ordinary and stream outputs, and
+cannot share names with either. Factories still return complete nodes; ordinary result validation and
+output references exclude these slots. Empty call-output metadata retains the existing serialized form,
+while the existing `verify_generated_metadata` comparison includes nonempty declarations.
+Exhaustive `NodeMetadata` literals must add `call_outputs: Vec::new()`; constructors and literals using
+`..Default::default()` require no migration.
+
+`FlowBuilder::resolve_call_bindings` resolves already prepared metadata using ordinary type
+compatibility and exclusive-branch proofs, without changing the builder's schedule.
+
+Explicit output mappings claim their target inputs first. Existing data connections claim external
+inputs and conflict with explicit caller mappings. Node-level defaults fill only the remaining inputs.
+An unbound optional input stays omitted, while an unbound required input is rejected. Control and success
+dependencies remain prerequisites and never claim parameters. External exclusive groups use ordinary
+branch proofs; caller/external mixtures are rejected. Unknown ports, duplicate aliases, incompatible
+types, self-calls, and waits on the caller or another callable target fail during resolution.
+
+The returned `ResolvedCallBinding` records each input's source and sensitivity, ordinary output
+dependencies, success dependencies, and direct prerequisite nodes. These are execution-planning records,
+not a model-facing schema: external input names and internal dependency keys must not be advertised as
+caller arguments. `bind_arguments(&CallArguments)` checks allowed names, requiredness, source contracts,
+and destination contracts before returning caller-owned inputs keyed by target port names. A shared
+source is checked against every destination. Source requiredness applies only within a selected binding.
+Sensitivity and shared payloads are preserved. External and omitted inputs are not inserted or read.
+
+```rust
+fn bind_call_arguments(
+    call: &mf_runtime::ResolvedCallBinding,
+    arguments: &mf_runtime::CallArguments,
+) -> Result<mf_runtime::Inputs, mf_runtime::CallContractError> {
+    call.bind_arguments(arguments)
+}
+```
+
+Current targets must be terminal tasks without external context references, stdin, or startup
+environment/default bindings. TaskStream callers and terminal TaskStream producer values are supported;
+stream emissions cannot serve as external input values. Input sensitivity declarations remain supported.
+
+`CallRequest` is separate from `NodeResult` and stream emissions: it selects one binding and submits
+its argument group atomically, including an empty group. Calls must eventually be submitted before
+the Parent's final result to support waiting and continuation. Ordinary output publication does not
+dispatch requests. Multiple requests may select the same binding; unselected bindings are not skipped.
+`CallResponse` retains the completed invocation identity. `CallOutcome` preserves successful
+output values, structured dependency skip causes, or a typed `WorkflowRunError`; optional result omissions
+remain absent. Child loop effects are not returned through this contract.
+`CallContractError` converts transparently into `NodeBuildError` and `NodeExecutionError`, allowing
+factories and node implementations to propagate declaration and correlation failures with `?`.
+
+### Caller-visible interfaces
+
+`ResolvedCallBinding::interface()` projects an immutable `CallInterface`: a local binding ID, public
+alias, and separate `outputs` and `defaults` parameter lists. External and omitted inputs, destination
+port names for explicit mappings, node indexes, dependency keys, and configuration values are absent.
+The view can be serialized for inspection without serializing the private execution plan.
+
+Each `CallParameter` exposes its caller-side name, requiredness, sensitivity, and a list of `ValueType`
+constraints that **all** must hold. A shared output appears once, combining every source and destination
+constraint without widening to `Any`. Requiredness and sensitivity are combined with logical OR.
+For example, nullable strings and nullable integers intersect at null, so treating either as a union
+or rejecting the pair as disjoint would change the contract. Constraints are deduplicated and ordered
+by their descriptor display; parameter names are sorted within each namespace. `validate_arguments`
+checks this public contract without modifying values or performing target execution. Producers should
+preserve value sensitivity and use the parameter's sensitivity flag when handling caller-side data.
+The runtime binding still marks target inputs as sensitive during mapping.
+
 ## Context-aware execution
 
 ### Optional future execution

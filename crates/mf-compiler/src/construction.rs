@@ -15,6 +15,12 @@ use std::{
 };
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
+    #[snafu(display("node `{definition_id}` call outputs: {source}"))]
+    CallOutputs {
+        definition_id: DefinitionId,
+        source: mf_runtime::CallContractError,
+    },
+
     #[snafu(display("invalid node-success dependency `{from_node}` -> `{to_node}`: {message}"))]
     InvalidSuccessDependency {
         from_node: String,
@@ -259,6 +265,21 @@ pub struct FlowBuilder {
 }
 
 impl FlowBuilder {
+    /// Resolves caller-owned inputs against already prepared metadata without changing activation.
+    pub fn resolve_call_bindings(
+        &self,
+        caller: NodeId,
+        bindings: &[mf_runtime::CallBinding],
+    ) -> Result<Vec<mf_runtime::ResolvedCallBinding>, crate::CallBindingError> {
+        crate::call_bindings::resolve(
+            &self.nodes,
+            &self.execution_order,
+            &self.dependencies,
+            caller,
+            bindings,
+        )
+    }
+
     pub fn into_tasks(self) -> Result<mf_runtime::Flow, FlowBuildError> {
         for target in &self.nodes {
             for reference in &target.metadata.context_references {
@@ -456,6 +477,11 @@ impl FlowBuilder {
         crate::validate_exclusive_inputs(&connections)?;
         let mut definition_indices = BTreeMap::new();
         for (index, node) in nodes.iter().enumerate() {
+            node.metadata
+                .validate_call_outputs()
+                .context(CallOutputsSnafu {
+                    definition_id: node.definition_id.clone(),
+                })?;
             ensure!(
                 node.metadata.stream_outputs.is_empty()
                     || matches!(node.node, Some(NodeExecution::TaskStream(_))),

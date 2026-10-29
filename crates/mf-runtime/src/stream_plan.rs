@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 type OperatorStates = Vec<Option<NodeExecution>>;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowDependency {
     /// Candidates with the same target input form one exclusive group.
     pub exclusive: bool,
