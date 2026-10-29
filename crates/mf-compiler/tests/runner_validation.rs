@@ -1,6 +1,6 @@
 mod common;
 use mf_compiler::{SupportPackages, plan_definition, resolve_project, write_dependency_project};
-use std::process::Command;
+use std::{fs, process::Command};
 
 #[test]
 fn build_validates_without_execution_and_reports_plugin_errors() {
@@ -40,6 +40,14 @@ fn build_validates_without_execution_and_reports_plugin_errors() {
     let execution = Command::new(&runner).output().unwrap();
     assert!(!execution.status.success());
     assert!(String::from_utf8_lossy(&execution.stderr).contains("execution sentinel"));
+    // Preserve the executed plugin's maps before later builds replace the runner.
+    if let Some(coverage) = std::env::var_os("MF_COVERAGE_BINARIES_DIR") {
+        fs::copy(
+            &runner,
+            std::path::Path::new(&coverage).join("mf-compiler-plugin-error-fixture"),
+        )
+        .unwrap();
+    }
     for invalid in ["config", "kind", "port", "duplicate"] {
         let mut invalid_definition = definition.clone();
         match invalid {

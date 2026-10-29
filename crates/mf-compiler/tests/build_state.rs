@@ -87,3 +87,56 @@ fn rejects_symbolic_guards_without_creating_their_targets() {
     assert!(BuildGuard::acquire(&guard).is_err());
     assert!(!missing_lock.exists());
 }
+
+#[test]
+fn state_io_failures_keep_sources_and_leave_existing_files_intact() {
+    use mf_compiler::{StateError, write_if_changed};
+    use std::{error::Error, io, path::Path};
+    fn check(error: StateError, expected: &Path, exact: bool, kind: io::ErrorKind) {
+        assert_eq!(
+            error
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            kind
+        );
+        let StateError::Io { path, .. } = error else {
+            panic!("expected an I/O context")
+        };
+        if exact {
+            assert_eq!(path, expected)
+        } else {
+            assert_eq!(path.parent(), Some(expected))
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("file");
+    fs::write(&parent, "original").unwrap();
+    let child = parent.join("child");
+    let error = BuildGuard::acquire(&child).err().unwrap();
+    check(error, &child, true, io::ErrorKind::NotADirectory);
+    check(
+        atomic_write(&child, b"changed").unwrap_err(),
+        &parent,
+        false,
+        io::ErrorKind::NotADirectory,
+    );
+    check(
+        write_if_changed(&child, b"changed").unwrap_err(),
+        &child,
+        true,
+        io::ErrorKind::NotADirectory,
+    );
+    let directory = root.path().join("directory");
+    fs::create_dir(&directory).unwrap();
+    check(
+        write_if_changed(&directory, b"changed").unwrap_err(),
+        &directory,
+        true,
+        io::ErrorKind::IsADirectory,
+    );
+    assert_eq!(fs::read(&parent).unwrap(), b"original");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+}

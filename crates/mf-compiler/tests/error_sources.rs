@@ -1,3 +1,7 @@
+#[path = "fixtures/multi-nodes/src/line_producer.rs"]
+mod line_producer;
+#[path = "fixtures/multi-nodes/src/stream_fixture.rs"]
+mod stream_fixture;
 extern crate mfn_code as _;
 extern crate mfn_core as _;
 
@@ -355,4 +359,115 @@ fn pipeline_context_preserves_definition_parse_errors() {
     .unwrap_err();
     assert_eq!(error.stage, "definition parsing");
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_eof());
+}
+
+#[test]
+fn fixture_io_failures_preserve_sources_during_construction_and_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let blocked = root.path().join("blocked");
+    fs::write(&blocked, "file").unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let registration = registry.get("fixture.stream_echo").unwrap();
+    let error = registration
+        .instantiate(json!({"trace": blocked.join("trace")}))
+        .err()
+        .unwrap();
+    assert_eq!(
+        find_source::<io::Error>(&error).unwrap().kind(),
+        io::ErrorKind::NotADirectory
+    );
+
+    let trace = root.path().join("trace");
+    let prepared = registration.instantiate(json!({"trace": trace})).unwrap();
+    fs::remove_file(&trace).unwrap();
+    fs::create_dir(&trace).unwrap();
+    let error = prepared
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(
+            Inputs::from([("input".into(), json!(1).into())]),
+            &mut ExecutionContext::default(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        find_source::<io::Error>(&error).unwrap().kind(),
+        io::ErrorKind::IsADirectory
+    );
+}
+
+#[test]
+fn filesystem_contexts_preserve_the_failing_path_and_io_source() {
+    let root = tempfile::tempdir().unwrap();
+    let definition = root.path().join("flow.json");
+    fs::write(
+        &definition,
+        r#"{"version":"2026-09-26","dependencies":{},"nodes":[]}"#,
+    )
+    .unwrap();
+    let blocked = root.path().join("blocked");
+    fs::write(&blocked, "file").unwrap();
+    let child = blocked.join("child");
+    let inputs = mf_compiler::BuildInputs::new(&definition).unwrap();
+    let error = inputs.check_output(&child).unwrap_err();
+    assert!(matches!(&error, mf_compiler::InputError::Resolve { path, .. } if path == &child));
+    assert_eq!(
+        find_source::<io::Error>(&error).unwrap().kind(),
+        io::ErrorKind::NotADirectory
+    );
+
+    let plan = plan_definition(
+        &WorkflowDefinition::from_json(&fs::read_to_string(&definition).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let error = mf_compiler::write_dependency_project(&blocked, &plan, &SupportPackages::Registry)
+        .unwrap_err();
+    assert!(
+        matches!(&error, mf_compiler::DependencyProjectError::Write { path, .. } if path == &blocked.join("src"))
+    );
+    assert_eq!(
+        find_source::<io::Error>(&error).unwrap().kind(),
+        io::ErrorKind::NotADirectory
+    );
+
+    let directory = root.path().join("managed");
+    fs::create_dir(&directory).unwrap();
+    let marker = directory.join(".mf-owner.json");
+    fs::create_dir(&marker).unwrap();
+    let error = mf_compiler::BuildDirectory::open(&definition, Some(&directory))
+        .err()
+        .unwrap();
+    assert!(matches!(&error, mf_compiler::CacheError::Io { path, .. } if path == &marker));
+    assert_eq!(
+        find_source::<io::Error>(&error).unwrap().kind(),
+        io::ErrorKind::IsADirectory
+    );
+}
+
+#[test]
+fn native_producer_io_failures_preserve_the_original_source() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("missing.txt");
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-10-03", "execution": {}, "dependencies": {},
+        "nodes": [
+            {"id": "path", "kind": "builtin.constant", "config": {"value": missing}},
+            {"id": "read", "kind": "fixture.read_lines", "config": {}}
+        ],
+        "edges": [{"from_node": "path", "from_output": "value", "to_node": "read", "to_input": "path"}],
+        "outputs": [{"name": "line", "node": "read", "port": "line"}]
+    })).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let instance = instantiate_stream(&plan, &registry)
+        .unwrap()
+        .start()
+        .unwrap();
+    let error = instance.recv().unwrap_err();
+    assert_eq!(error.phase(), "execution");
+    assert_eq!(
+        find_source::<io::Error>(&error).unwrap().kind(),
+        io::ErrorKind::NotFound
+    );
+    assert!(instance.join().is_err());
 }
