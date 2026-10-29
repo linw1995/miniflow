@@ -47,8 +47,9 @@ pub use definition::{
     InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
     LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
     MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
-    NodeDependency, OrderEdgeDefinition, OutputReferenceDefinition, WorkflowDefinition,
-    WorkflowDefinitionVersion, WorkflowOutputDefinition, validate_exclusive_inputs,
+    NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
+    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{
@@ -69,8 +70,8 @@ pub use iteration::{
     iteration_input_flow_node,
 };
 pub use loop_node::{
-    loop_variable_types, prepared_loop_assign, prepared_loop_exit, prepared_loop_source_types,
-    prepared_scope_source,
+    LoopVariableError, loop_variable_types, prepared_loop_assign, prepared_loop_exit,
+    prepared_loop_source_types, prepared_scope_source,
 };
 pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{NodeIdentity, ScopePathEntry, SkipCause};
@@ -83,9 +84,9 @@ pub use node::{
     NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
     NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
-    TypeCompatibility, TypeDepthError, TypeMismatch, TypeMismatchDetails, TypedTaskNode, ValueType,
-    deserialize_config, encode_typed_result, execute_typed_task, output_id, port_names_match,
-    verify_generated_metadata,
+    TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch, TypeMismatchDetails,
+    TypedTaskNode, ValueType, deserialize_config, encode_typed_result, execute_typed_task,
+    output_id, port_names_match, verify_generated_metadata,
 };
 pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,

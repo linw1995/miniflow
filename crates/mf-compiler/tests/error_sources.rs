@@ -356,3 +356,53 @@ fn pipeline_context_preserves_definition_parse_errors() {
     assert_eq!(error.stage, "definition parsing");
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_eof());
 }
+
+#[test]
+fn loop_validation_preserves_variable_and_descriptor_sources() {
+    let mut definition = loop_definition(json!({"nodes": []}));
+    definition.nodes[1]
+        .loop_definition
+        .as_mut()
+        .unwrap()
+        .variables[0]
+        .value_type = json!("unknown");
+    let error = plan_definition(&definition).unwrap_err();
+    assert!(
+        matches!(&error, WorkflowCompileError::LoopVariables { path, .. } if path == "[\"repeat\"]")
+    );
+    assert!(find_source::<mf_runtime::LoopVariableError>(&error).is_some());
+    assert!(
+        matches!(find_source::<mf_runtime::TypeDescriptorError>(&error).unwrap(),
+        mf_runtime::TypeDescriptorError::UnsupportedName { name } if name == "unknown")
+    );
+
+    let error = mf_compiler::prepared_loop_source_from_json(r#"[{"name":"x","type":"unknown"}]"#)
+        .err()
+        .unwrap();
+    assert!(find_source::<mf_runtime::LoopVariableError>(&error).is_some());
+    assert!(find_source::<mf_runtime::TypeDescriptorError>(&error).is_some());
+    let error = mf_compiler::prepared_loop_assign_from_json("assign", "x", r#""unknown""#)
+        .err()
+        .unwrap();
+    assert!(find_source::<mf_runtime::TypeDescriptorError>(&error).is_some());
+}
+
+#[test]
+fn iteration_validation_preserves_the_structural_source() {
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-09-26", "dependencies": {},
+        "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {"body": {
+            "nodes": [{"id": "%iteration", "kind": "builtin.constant", "config": {"value": 1}}],
+            "result": {"node": "%iteration", "port": "value"}
+        }}}]
+    }))
+    .unwrap();
+    let error = plan_definition(&definition).unwrap_err();
+    assert!(
+        matches!(&error, WorkflowCompileError::IterationValidation { definition_id, .. } if definition_id.as_str() == "each")
+    );
+    assert!(
+        matches!(find_source::<mf_compiler::IterationValidationError>(&error).unwrap(),
+        mf_compiler::IterationValidationError::ReservedNode { node } if node.as_str() == "%iteration")
+    );
+}

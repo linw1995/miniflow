@@ -832,6 +832,16 @@ pub enum WorkflowBuildError {
         source: NodeBuildError,
         definition_id: DefinitionId,
     },
+    #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
+    LoopVariables {
+        definition_id: DefinitionId,
+        source: mf_runtime::LoopVariableError,
+    },
+    #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
+    LoopVariableDescriptor {
+        definition_id: DefinitionId,
+        source: mf_runtime::TypeDescriptorError,
+    },
     #[snafu(
         display("invalid definition for node `{definition_id}`: {message}"),
         visibility(pub)
@@ -923,12 +933,8 @@ pub fn prepared_loop_source_from_json(
         serde_json::from_str(variables_json).context(InvalidEmbeddedConfigSnafu {
             definition_id: crate::LOOP_SOURCE_ID,
         })?;
-    let types = mf_runtime::loop_variable_types(&variables).or_else(|message| {
-        InvalidDefinitionSnafu {
-            definition_id: crate::LOOP_SOURCE_ID,
-            message,
-        }
-        .fail()
+    let types = mf_runtime::loop_variable_types(&variables).context(LoopVariablesSnafu {
+        definition_id: crate::LOOP_SOURCE_ID,
     })?;
     Ok(mf_runtime::prepared_loop_source_types(&types))
 }
@@ -940,13 +946,8 @@ pub fn prepared_loop_assign_from_json(
 ) -> Result<FlowNode, WorkflowBuildError> {
     let descriptor: Value = serde_json::from_str(type_json)
         .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    let value_type = ValueType::parse_descriptor(&descriptor).or_else(|message| {
-        InvalidDefinitionSnafu {
-            definition_id: id,
-            message,
-        }
-        .fail()
-    })?;
+    let value_type = ValueType::parse_descriptor(&descriptor)
+        .context(LoopVariableDescriptorSnafu { definition_id: id })?;
     Ok(mf_runtime::prepared_loop_assign(id, variable, value_type))
 }
 #[derive(Debug, Snafu)]

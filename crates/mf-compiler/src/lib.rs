@@ -16,6 +16,7 @@ mod embedding;
 #[cfg(feature = "codegen")]
 mod inputs;
 mod iteration;
+pub use iteration::IterationValidationError;
 mod loops;
 #[cfg(feature = "codegen")]
 mod pipeline;

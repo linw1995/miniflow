@@ -95,10 +95,10 @@ pub enum PlanError {
         definition_id: DefinitionId,
         message: String,
     },
-    #[snafu(display("could not generate iteration node `{definition_id}`: {message}"))]
+    #[snafu(display("could not generate iteration node `{definition_id}`: {source}"))]
     Iteration {
         definition_id: DefinitionId,
-        message: String,
+        source: crate::IterationValidationError,
     },
 }
 
@@ -860,12 +860,10 @@ fn subgraph_preparation(
             None,
         )
     } else {
-        let invalid = |message| PlanError::Iteration {
-            definition_id: node.id.clone(),
-            message,
-        };
         let config = parse_config(node)?;
-        let body = body_definition(parent, &config).map_err(invalid)?;
+        let body = body_definition(parent, &config).context(IterationSnafu {
+            definition_id: node.id.clone(),
+        })?;
         body_static_scope.clear();
         let error = quote! {
             if let Some(observation) = observation.as_deref_mut() {
@@ -1590,15 +1588,10 @@ fn collect_body_layouts(
         } else if node.kind == mf_runtime::CALL_KIND {
             crate::calls::body_definition(node)?
         } else if node.kind == ITERATION_KIND {
-            let invalid = |message| {
-                IterationSnafu {
-                    definition_id: id.clone(),
-                    message,
-                }
-                .build()
-            };
             let config = parse_config(node)?;
-            body_definition(definition, &config).map_err(invalid)?
+            body_definition(definition, &config).context(IterationSnafu {
+                definition_id: id.clone(),
+            })?
         } else {
             continue;
         };

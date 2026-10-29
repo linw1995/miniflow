@@ -248,6 +248,11 @@ pub enum WorkflowCompileError {
     #[snafu(display("invalid Loop at {path}: {message}"), visibility(pub))]
     InvalidLoop { path: String, message: String },
     #[snafu(display("invalid Loop at {path}: {source}"), visibility(pub))]
+    LoopVariables {
+        path: String,
+        source: mf_runtime::LoopVariableError,
+    },
+    #[snafu(display("invalid Loop at {path}: {source}"), visibility(pub))]
     LoopAssignmentConfiguration {
         path: String,
         source: serde_json::Error,
@@ -265,6 +270,14 @@ pub enum WorkflowCompileError {
         path: String,
         #[snafu(source(from(WorkflowCompileError, Box::new)))]
         source: Box<WorkflowCompileError>,
+    },
+    #[snafu(
+        display("invalid iteration node `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    IterationValidation {
+        definition_id: DefinitionId,
+        source: crate::iteration::IterationValidationError,
     },
     #[snafu(
         display("invalid iteration node `{definition_id}`: {source}"),
@@ -1432,6 +1445,7 @@ pub fn instantiate_compiled_with_observation(
             | WorkflowCompileError::PortTypeDepth { definition_id, .. }
             | WorkflowCompileError::KnownOutputValueTypeConflict { definition_id, .. }
             | WorkflowCompileError::InvalidIteration { definition_id, .. }
+            | WorkflowCompileError::IterationValidation { definition_id, .. }
             | WorkflowCompileError::IterationBody { definition_id, .. }
             | WorkflowCompileError::IterationConfiguration { definition_id, .. } = error
         {
@@ -1579,12 +1593,8 @@ fn collect_loop_execution_orders(
             let config = parse_config(node)
                 .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
             body_definition(definition, &config)
-                .map_err(|message| {
-                    InvalidIterationSnafu {
-                        definition_id: node.id.clone(),
-                        message,
-                    }
-                    .build()
+                .context(IterationValidationSnafu {
+                    definition_id: node.id.clone(),
                 })
                 .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?
         } else {
@@ -1955,13 +1965,7 @@ fn resolve_nodes_in_scope(
                     .fail();
                 }
                 let config = parse_config(node)?;
-                let body = body_definition(definition, &config).map_err(|message| {
-                    InvalidIterationSnafu {
-                        definition_id: node.id.clone(),
-                        message,
-                    }
-                    .build()
-                })?;
+                let body = body_definition(definition, &config).context(IterationValidationSnafu { definition_id: node.id.clone() })?;
                 return bind_subgraph_node(node, preparation, &body, None, true, Value::Null);
             }
             let instance = registration_for(node, preparation.registry)?

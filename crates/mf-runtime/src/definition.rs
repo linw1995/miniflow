@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -417,44 +417,61 @@ fn enabled() -> bool {
     true
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+pub enum NodeDependencyError {
+    #[snafu(display("package must be a nonempty Cargo package name"))]
+    InvalidPackage,
+    #[snafu(display("select exactly one source: version, git with rev, or path"))]
+    InvalidSources,
+    #[snafu(display("git must not be empty"))]
+    EmptyGit,
+    #[snafu(display("rev must be a full Git commit hash"))]
+    InvalidRevision,
+    #[snafu(display("rev requires git"))]
+    RevisionWithoutGit,
+    #[snafu(display("version must not be empty"))]
+    EmptyVersion,
+    #[snafu(display("path must not be empty"))]
+    EmptyPath,
+    #[snafu(display("features must not contain empty names"))]
+    EmptyFeature,
+}
+
 impl NodeDependency {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.package.is_empty()
-            || !self
-                .package
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-        {
-            return Err("package must be a nonempty Cargo package name".into());
-        }
+    pub fn validate(&self) -> Result<(), NodeDependencyError> {
+        ensure!(
+            !self.package.is_empty()
+                && self
+                    .package
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
+            InvalidPackageSnafu
+        );
         let sources = usize::from(self.version.is_some())
             + usize::from(self.git.is_some())
             + usize::from(self.path.is_some());
-        if sources != 1 {
-            return Err("select exactly one source: version, git with rev, or path".into());
-        }
+        ensure!(sources == 1, InvalidSourcesSnafu);
         if let Some(git) = &self.git {
-            if git.trim().is_empty() {
-                return Err("git must not be empty".into());
-            }
+            ensure!(!git.trim().is_empty(), EmptyGitSnafu);
             let valid = self.rev.as_ref().is_some_and(|rev| {
                 (rev.len() == 40 || rev.len() == 64) && rev.bytes().all(|c| c.is_ascii_hexdigit())
             });
-            if !valid {
-                return Err("rev must be a full Git commit hash".into());
-            }
-        } else if self.rev.is_some() {
-            return Err("rev requires git".into());
+            ensure!(valid, InvalidRevisionSnafu);
+        } else {
+            ensure!(self.rev.is_none(), RevisionWithoutGitSnafu);
         }
-        if self.version.as_ref().is_some_and(|v| v.trim().is_empty()) {
-            return Err("version must not be empty".into());
-        }
-        if self.path.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
-            return Err("path must not be empty".into());
-        }
-        if self.features.iter().any(|f| f.trim().is_empty()) {
-            return Err("features must not contain empty names".into());
-        }
+        ensure!(
+            !self.version.as_ref().is_some_and(|v| v.trim().is_empty()),
+            EmptyVersionSnafu
+        );
+        ensure!(
+            !self.path.as_ref().is_some_and(|p| p.as_os_str().is_empty()),
+            EmptyPathSnafu
+        );
+        ensure!(
+            !self.features.iter().any(|f| f.trim().is_empty()),
+            EmptyFeatureSnafu
+        );
         Ok(())
     }
 }
