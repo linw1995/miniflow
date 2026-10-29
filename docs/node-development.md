@@ -20,6 +20,8 @@ Its factory validates configuration without credentials or I/O; execution uses o
 The node also accepts function `tools` and explicit `tool_results`, both optional list inputs, and returns
 tool calls in its current assistant message and its `tool_calls` output. Explicit results follow `messages`
 in the provider request and must match pending assistant call IDs. Flows own history and persistence.
+`builtin.tool_catalog` and `builtin.tool_dispatch` provide explicit graph-owned tool discovery and execution.
+The model node consumes definitions and returns requests without executing tools.
 `ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;
 `ChatMessage` derives `NodeEnum` with the `role` tag and has `System`, `User`, `Assistant`, and
 `ToolResult` variants. Only the assistant variant carries `tool_calls`; the tool-result variant
@@ -314,9 +316,8 @@ belong to a prepared scope, so shared node implementations must not cache them g
 Scopes without discovery metadata do not allocate catalog storage.
 
 Discovery does not change ordinary scheduling or make tools invocable. Do not execute a prototype Flow
-containing tool nodes expecting discovery attachment to make them lazy. Provider descriptions, full
-JSON Schema conversion, generated executable catalog checks, and the actual invocation scheduler
-remain separate work. In particular, a serialized `CallInterface` is not
+containing tool nodes expecting discovery attachment to make them lazy. Executable bindings use the runtime call dispatcher. Tool Catalog converts caller-visible parameters
+into provider schemas; Tool Dispatch executes requests from the explicit-message protocol. In particular, a serialized `CallInterface` is not
 a provider tool definition: its constraint list is conjunctive, and its two namespaces remain distinct.
 
 ## Context-aware execution

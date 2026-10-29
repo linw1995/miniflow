@@ -12,6 +12,8 @@ pub enum StreamingTransportError {
     },
     #[snafu(transparent)]
     Normalization { source: LlmExecutionError },
+    #[snafu(display("LLM streaming tool metadata exceeds the size limit"))]
+    ToolMetadataSize,
     #[snafu(display("LLM streaming response contains an incomplete SSE event"))]
     TruncatedEvent,
     #[snafu(display("LLM streaming response contains invalid UTF-8"))]
@@ -25,11 +27,13 @@ struct Frames {
     pending: Bytes,
     frame: Vec<u8>,
     usage: Arc<Mutex<Option<Usage>>>,
+    tool_metadata_bytes: usize,
 }
 
 fn normalize_event(
     bytes: Vec<u8>,
     usage: &Mutex<Option<Usage>>,
+    tool_metadata_bytes: &mut usize,
 ) -> std::result::Result<Bytes, StreamingTransportError> {
     let text = std::str::from_utf8(&bytes).context(Utf8Snafu)?;
     let data = text
@@ -43,7 +47,41 @@ fn normalize_event(
     if data.is_empty() || data == "[DONE]" {
         return Ok(Bytes::from(bytes));
     }
-    let _: Value = mf_runtime::decode_unique_json(data.as_bytes()).context(JsonSnafu)?;
+    let event: Value = mf_runtime::decode_unique_json(data.as_bytes()).context(JsonSnafu)?;
+    for choice in event
+        .get("choices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for call in choice
+            .pointer("/delta/tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            ensure!(
+                call.get("index").is_none_or(|index| {
+                    index
+                        .as_u64()
+                        .is_some_and(|index| index < crate::tools::MAX_TOOL_CALLS as u64)
+                }),
+                ToolMetadataSizeSnafu
+            );
+            for value in [call.get("id"), call.pointer("/function/name")]
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                ensure!(value.len() <= 256, ToolMetadataSizeSnafu);
+                *tool_metadata_bytes = tool_metadata_bytes.saturating_add(value.len());
+                ensure!(
+                    *tool_metadata_bytes <= 8 * crate::tools::MAX_TOOL_BATCH_ARGUMENT_BYTES,
+                    ToolMetadataSizeSnafu
+                );
+            }
+        }
+    }
     // Rig's DTO requires complete counters. Keep sparse values out of that DTO.
     let normalized = normalize(Bytes::from(data), usage)?;
     let mut event = Vec::with_capacity(normalized.len() + 8);
@@ -60,6 +98,7 @@ pub fn normalize_stream(body: BoxedStream, usage: Arc<Mutex<Option<Usage>>>) -> 
             pending: Bytes::new(),
             frame: Vec::new(),
             usage,
+            tool_metadata_bytes: 0,
         },
         |mut state| async move {
             let next = async move {
@@ -91,8 +130,11 @@ pub fn normalize_stream(body: BoxedStream, usage: Arc<Mutex<Option<Usage>>>) -> 
                         .frame
                         .extend_from_slice(&state.pending.split_to(length));
                     if state.frame.ends_with(b"\n\n") || state.frame.ends_with(b"\r\n\r\n") {
-                        let frame =
-                            normalize_event(std::mem::take(&mut state.frame), &state.usage)?;
+                        let frame = normalize_event(
+                            std::mem::take(&mut state.frame),
+                            &state.usage,
+                            &mut state.tool_metadata_bytes,
+                        )?;
                         return Ok(Some((frame, state)));
                     }
                 }

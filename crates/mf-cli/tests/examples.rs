@@ -38,7 +38,7 @@ fn search_result() -> Value {
     })
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 20] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 21] {
     [
         (
             "deepseek-fetch.json",
@@ -49,6 +49,11 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 20] {
             "deepseek-search.json",
             None,
             json!({"results":[search_result()]}),
+        ),
+        (
+            "chat-tools-flow.json",
+            None,
+            json!({"status":"succeeded","text":"reply","usages":[chat_usage(json!([{"node":"repeat","index":0}]))],"error":""}),
         ),
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),

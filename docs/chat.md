@@ -314,6 +314,7 @@ actual model-call identity; they do not need runtime open/close envelopes. A com
 a later failure remains available for explicit save-only recovery, while partial text never becomes history.
 
 The [single-call example](../examples/chat-flow.json), the
+[node-backed tool conversation](../examples/chat-tools-flow.json), the
 [conversation and title example](../examples/chat-title-flow.json), and the
 [loop example](../examples/chat-loop-flow.json) can be compiled directly:
 
@@ -584,3 +585,9 @@ process supervision run on one background worker, keeping terminal rendering and
 Quitting cancels and reaps the child, reconciles retained results, and releases database ownership. It never prints
 turn JSON to stdout. Handled turn failures allow a normal exit; display or cleanup failures return status 1. Unsaved
 replies remain memory-only: restarting recovers abandoned turns as interrupted without resending them.
+
+The node-backed tool example composes ordinary message-building, Loop, and assignment nodes around
+single-step LLM execution. It uses the same `ChatMessage`, `ToolCall`, and `ToolResult` contracts as manual
+tool workflows. The model provides `amount`, while the Flow supplies the configured multiplier. The Loop
+appends the returned assistant message and tool results and explicitly accumulates each request's usage.
+The existing application pipeline saves the final reply and handles automatic titles and accounting.

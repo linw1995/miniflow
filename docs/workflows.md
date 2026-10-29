@@ -208,6 +208,8 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
 | `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
 | `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
+| `mfn-llm` | [`builtin.tool_catalog`](#node-backed-tools) | Static Dispatch `source` in the same scope | None | Read-only `tools` definitions |
+| `mfn-llm` | [`builtin.tool_dispatch`](#node-backed-tools) | `call_outputs`, batch limit, and independent deadline | `outcome`, `tool_calls` | Correlated `tool_results` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -630,8 +632,9 @@ billing and status-specific retry guidance.
 ### LLM tool calls
 
 The existing `builtin.llm` node accepts optional `tools` and `tool_results` inputs, each defaulting to `[]`. Each execution
-still makes exactly one OpenAI-compatible Chat Completions request. The node does not execute tools,
-repeat requests, or expose `tool_choice`. Supply system instructions, previous exchanges, and the
+still makes exactly one OpenAI-compatible Chat Completions request. Manually supplied tools remain
+caller-owned. [Node-backed tools](#node-backed-tools) execute through explicit runtime bindings. The
+node does not repeat model requests or expose `tool_choice`. Supply system instructions, previous exchanges, and the
 current user or assistant tool-call message through `messages`. Supply current execution results
 through `tool_results`, or include them as role tool messages in the conversation.
 
@@ -641,13 +644,13 @@ The public Rust contracts are exported by `mfn_llm`:
 | --- | --- | --- |
 | `ToolDefinition` | `name: String`, `description: String`, `input_schema: ValueRef` | `tools` input |
 | `ToolCall` | `id: String`, `name: String`, `arguments: ValueRef` | `tool_calls` output and assistant messages |
-| `ToolResult` | `tool_call_id: String`, `content: String` | `tool_results` input |
+| `ToolResult` | `tool_call_id: String`, `content: String` | LLM `tool_results` input and Tool Dispatch output |
 | `ToolCallEvent` | `model_call_id: String`, `call: ToolCall` | `tool_call` stream output |
 
 Each tool definition contains `name`, `description`, and `input_schema`. Names must be unique and
 contain 1-64 ASCII letters, digits, underscores, or hyphens. The schema must be an object with
 `type: object`; its remaining JSON Schema semantics are passed to the provider. Generated arguments
-are parsed as JSON but are not validated against that schema by this node. Malformed argument JSON
+for manually supplied tools are parsed as JSON but are not validated against that schema by this node. Malformed argument JSON
 fails the response instead of producing an executable tool call.
 
 For example, pass these inputs to the [tool example](../examples/llm-tools.json):
@@ -820,6 +823,78 @@ text deltas nor a first-text observation. Incomplete or malformed arguments do n
 tool event. Usage, deadlines, cancellation, and error capture retain the same contracts as text calls.
 Cancellation and publication failure remain execution failures even with error capture enabled.
 This interface supports text and function tools, not media inputs.
+
+#### Node-backed tools
+
+The [chat workflow with tools](../examples/chat-tools-flow.json) uses the existing chat contract and
+explicit `messages` protocol. A normal CEL node assembles the initial system/history/user messages once.
+`workflow.loop` owns repeated requests, stopping, and usage accumulation. There is no internal model loop,
+node-owned history, or opaque continuation channel.
+
+The workflow explicitly separates three nodes supplied by `mfn-llm`:
+
+| Node | Configuration | Inputs | Outputs |
+| --- | --- | --- | --- |
+| `builtin.tool_catalog` | Static `source`: the Dispatch node ID in the same scope | None | `tools`, using the existing `ToolDefinition` type |
+| `builtin.llm` | Model request configuration | `messages`, `tools`, optional explicit `tool_results` | Current assistant `message`, `tool_calls`, `outcome`, usage, and normal streams |
+| `builtin.tool_dispatch` | Static `call_outputs`, `max_tool_calls`, independent `timeout_ms` | `outcome`, `tool_calls` | `tool_results`, using the existing `ToolResult` type |
+
+Declare the scope's `calls` on the Dispatch node. Catalog reads a preparation-time, read-only projection
+of that same binding table; it never invokes Dispatch or a tool. This metadata reference is not an
+execution dependency, so `catalog -> chat -> dispatch` remains acyclic. The example maps Dispatch's
+`amount` slot to `multiply.amount`; an ordinary connection supplies `multiply.factor` from `%loop.factor`.
+Only `amount` appears in the model's schema. Explicit port ownership wins, and `remaining_inputs`
+continues to opt into otherwise unbound target inputs.
+
+```mermaid
+flowchart LR
+    Catalog[Tool Catalog] -->|tools| Model[LLM]
+    Model -->|outcome and tool_calls| Dispatch[Tool Dispatch]
+    Dispatch -->|tool_results| Collect[Message assembly]
+    Model -->|message and usage| Collect
+```
+
+The LLM node makes one model request and finishes before tool execution. It neither discovers runtime
+bindings nor calls the runtime dispatcher. Dispatch processes accepted `tool_calls` outcomes in response
+order, checks batch identities and size/count limits before side effects, validates each decoded argument before its invocation, and invokes
+only its bound targets through `ExecutionContext`. Other outcomes return an empty result list. Domain
+failures become generic per-call feedback; cancellation, deadlines, and step-budget failures propagate.
+The Flow appends the assistant message and results before deciding whether to request another model turn.
+
+Catalog retains requiredness, closed records, enum variants, collections, nullability, and conjunctive
+constraints. Unsupported opaque, recursive, or binary32 projections fail in Catalog before a model request.
+Secret caller parameters carry JSON Schema `writeOnly` annotations, which the LLM uses to mark arguments
+before publishing terminal messages or stream events. Dispatch preserves value sensitivity and redacts
+secret result subtrees before exporting them as tool-result content.
+
+Every accepted tool call remains available on the LLM's normal `tool_call` stream. Choose either the
+terminal batch or stream events as an execution path; wiring both to executors would explicitly execute
+both paths. Manually supplied tools use the same protocol. Route those calls to their handlers with
+ordinary Flow filters and combine the correlated results before the next request. Dispatch returns
+an unknown-tool error for names outside its own binding table.
+
+Dispatch's `max_tool_calls` defaults to 32 (range 1-128), and `timeout_ms` defaults to 60000. Both support
+normal configuration templates. Its deadline starts at Dispatch execution and inherits any enclosing
+runtime deadline; it does not inherit the completed model request's local timeout. The model's
+`timeout_ms` covers only that model request. `call_outputs` and `max_tool_calls` are no longer LLM
+configuration fields. Neither node owns a multi-round loop.
+
+Tool arguments/results are limited to 64 KiB each, argument batches and generated declarations to
+256 KiB. Catalog admits at most 128 tools and 256 public parameters per tool. Oversized results use generic
+feedback instead of truncated JSON. There are no automatic request or tool retries. The example's Loop
+runs at most four requests and preserves model usage even when the conversation does not complete.
+For message-driven native graphs, place Catalog in the same message scope as the model using the normal
+input/control wiring; the metadata reference itself never introduces a cross-message value join.
+
+```sh
+mf compile examples/chat-tools-flow.json --output ./chat-tools-flow
+mf run ./chat-tools-flow --chat --chat-db state/chat.sqlite --model your-model --factor 2
+```
+
+Set `OPENAI_API_KEY`. The chat application owns persistence, title
+composition, and accounting. This example uses terminal delivery; Loop child-stream forwarding is an
+independent runtime change. The main branch's manual [LLM tool example](../examples/llm-tools.json) remains
+available for caller-managed tool execution.
 
 ## Structured Loop
 

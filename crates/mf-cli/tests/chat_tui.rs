@@ -137,6 +137,125 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
     );
 }
 
+#[test]
+fn tool_chat_workflow_reuses_the_application_contract() {
+    use mf_chat::contract::CompletionState;
+    use mf_tui::chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions};
+    let tool = Reply::json(
+        serde_json::json!({"id":"tool-round","object":"chat.completion","created":0,"model":"fixture-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"multiply-1","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}),
+    );
+    let server = Server::start(vec![
+        tool,
+        Reply::text("first answer"),
+        Reply::text("Tool title"),
+        Reply::text("second answer"),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let binary = compiled(root.path(), &server, "chat-tools-flow.json");
+    let path = root.path().join("chat.sqlite");
+    let launch = ChatLaunch::prepare(
+        &binary,
+        ChatOptions {
+            database_path: path.clone(),
+            profile: "tools".into(),
+            run: mf_tui::run::RunOptions {
+                arguments: vec![
+                    "--params.model=fixture-model".into(),
+                    "--params.api_key=synthetic-key".into(),
+                    "--params.factor=3".into(),
+                ],
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    let controller = ChatController::open(launch).unwrap();
+    let mut session_id = None;
+    for (prompt, expected, count) in [("first", "first answer", 3), ("second", "second answer", 1)]
+    {
+        controller
+            .send(ChatCommand::Submit {
+                session_id: session_id.clone(),
+                prompt: prompt.into(),
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "tool conversation did not finish"
+            );
+            match controller.try_event() {
+                Some(ChatEvent::Submitted { session, .. }) => session_id = Some(session.id),
+                Some(ChatEvent::Observing(_)) | None => thread::sleep(Duration::from_millis(10)),
+                Some(ChatEvent::Preview { preview, .. }) => assert!(preview.segments.is_empty()),
+                Some(ChatEvent::Finished { resolution, .. }) => {
+                    let resolution = resolution.unwrap();
+                    assert!(
+                        resolution.diagnostics.is_empty(),
+                        "{:?}",
+                        resolution.diagnostics
+                    );
+                    let CompletionState::Committed(completion) = resolution.state else {
+                        panic!("expected a committed tool conversation")
+                    };
+                    assert_eq!(completion.result.text, expected);
+                    assert_eq!(completion.result.usages.len(), count);
+                    assert!(completion.result.usages.iter().all(|usage| {
+                        usage
+                            .timing
+                            .as_ref()
+                            .is_some_and(|timing| timing.is_valid())
+                    }));
+                    break;
+                }
+                Some(ChatEvent::Error { source, .. }) => {
+                    panic!("tool conversation failed: {source}")
+                }
+                _ => panic!("unexpected tool conversation event"),
+            }
+        }
+    }
+    controller.close().unwrap();
+    let database = ChatDatabase::open(path).unwrap();
+    let id = session_id.unwrap();
+    assert_eq!(database.session(&id).unwrap().title, "Tool title");
+    let history = database.history(&id, 4096).unwrap().history;
+    assert_eq!(history.len(), 4);
+    assert!(
+        matches!(&history[1],mfn_llm::ChatMessage::Assistant {content,..} if content=="first answer")
+    );
+    assert_eq!(
+        database
+            .usage(Default::default())
+            .unwrap()
+            .overall
+            .attempted_calls,
+        4
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    let properties = &requests[0].body["tools"][0]["function"]["parameters"]["properties"];
+    assert!(properties.get("amount").is_some());
+    assert!(properties.get("factor").is_none());
+    let result = requests[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .unwrap();
+    assert_eq!(result["tool_call_id"], "multiply-1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(result["content"].as_str().unwrap()).unwrap(),
+        serde_json::json!({"result":63})
+    );
+    assert!(
+        messages(&requests[3])
+            .iter()
+            .any(|message| message["content"] == "first answer")
+    );
+}
+
 fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let definition = root.join("flow.json");

@@ -1,6 +1,13 @@
 pub mod call;
 pub use call::{CallOutcome, ToolCall, ToolCallEvent, ToolDefinition, ToolResult};
 mod streaming;
+mod tool_nodes;
+mod tools;
+pub use tool_nodes::{
+    ToolConfigError, ToolDispatchError, ToolDispatchInputs, ToolDispatchOutputs,
+    prepare_tool_catalog, prepare_tool_dispatch,
+};
+pub use tools::ToolSchemaError;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
 pub mod test_support;
@@ -356,6 +363,10 @@ fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
 
 #[derive(Snafu)]
 pub enum LlmExecutionError {
+    #[snafu(display("LLM tool {resource} limit exceeded"))]
+    ToolLimit { resource: &'static str },
+    #[snafu(display("LLM tool arguments are not complete unambiguous JSON"))]
+    ToolArgumentsJson { source: serde_json::Error },
     #[snafu(transparent)]
     Configuration { source: LlmConfigError },
     #[snafu(display("LLM input `{path}` requires {requirement}"))]
@@ -495,12 +506,20 @@ impl LlmNode {
             .temperature(config.temperature)
             .max_tokens(config.max_tokens);
         let allow_tools = !inputs.tools.is_empty();
-        let (response, mut usage) = self.request(request, &config, context, emitter, deadline)?;
+        let (response, mut usage) =
+            self.request(request, &config, context, emitter, deadline, &inputs.tools)?;
         let result = response.and_then(|response| {
             if usage.usage.is_none() {
                 usage.usage = reported_usage(&response.usage).ok().flatten();
             }
-            terminal_outputs(response, allow_tools).and_then(|result| {
+            terminal_outputs(response, allow_tools).and_then(|mut result| {
+                for call in &mut result.tool_calls {
+                    call.mark_arguments(&inputs.tools);
+                }
+                if let Some(ChatMessage::Assistant { tool_calls, .. }) = &mut result.message {
+                    *tool_calls =
+                        (!result.tool_calls.is_empty()).then(|| result.tool_calls.clone());
+                }
                 context.check_future_limits(Some(deadline))?;
                 Ok(result)
             })
@@ -540,6 +559,7 @@ impl LlmNode {
         context: &ExecutionContext,
         emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
         deadline: Instant,
+        tools: &[ToolDefinition],
     ) -> Result<(Result<CompletionResponse, LlmExecutionError>, CallUsage), LlmExecutionError> {
         let key = if let Some(key) = &config.api_key {
             key.value()
@@ -586,7 +606,6 @@ impl LlmNode {
         usage.started_at =
             mf_telemetry::events::record(REQUEST_STARTED_EVENT, serde_json::json!(&usage))
                 .and_then(|timestamp| i64::try_from(timestamp / 1_000_000).ok());
-        let allow_tools = !request.tools.is_empty();
         let response = if emitter.is_connected() {
             streaming::complete(
                 model.stream(request),
@@ -594,7 +613,7 @@ impl LlmNode {
                 &usage.call_id,
                 deadline,
                 context,
-                allow_tools,
+                tools,
             )
         } else {
             context
@@ -797,6 +816,9 @@ mod tests {
         for patch in [
             json!({"api_key":{"$template":"literal-key"}}),
             json!({"api_key_env":{"$ref":"params.name"}}),
+            json!({"call_outputs":{"query":"string"}}),
+            json!({"max_tool_calls":32}),
+            json!({"max_tool_rounds":1}),
             json!({"model":{"$ref":"params.model", "unexpected":true}}),
         ] {
             let mut config = json!({"model":"example"});

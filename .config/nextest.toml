@@ -56,7 +56,8 @@ binary_id(=mfn-test-affected::process) |
 )) |
 (binary_id(=mf-cli::chat_tui) & (
     test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart) |
-    test(=supplied_title_workflow_runs_inside_the_application_lifecycle)
+    test(=supplied_title_workflow_runs_inside_the_application_lifecycle) |
+    test(=tool_chat_workflow_reuses_the_application_contract)
 )) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
@@ -72,6 +73,7 @@ binary_id(=mfn-test-affected::process) |
     test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::llm_workflows) & (
     test(=llm_workflows_match_memory_and_standalone_runners) |
+    test(=directed_llm_tools_match_memory_and_generated_finite_and_native_execution) |
     test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
     test(=parameter_templates_configure_memory_and_standalone_llm_requests) |
     test(=tool_calls_match_memory_and_standalone_runners)
@@ -160,7 +162,8 @@ binary_id(=mfn-test-affected::process) |
 )) |
 (binary_id(=mf-cli::chat_tui) & (
     test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart) |
-    test(=supplied_title_workflow_runs_inside_the_application_lifecycle)
+    test(=supplied_title_workflow_runs_inside_the_application_lifecycle) |
+    test(=tool_chat_workflow_reuses_the_application_contract)
 )) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
@@ -176,6 +179,7 @@ binary_id(=mfn-test-affected::process) |
     test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::llm_workflows) & (
     test(=llm_workflows_match_memory_and_standalone_runners) |
+    test(=directed_llm_tools_match_memory_and_generated_finite_and_native_execution) |
     test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
     test(=parameter_templates_configure_memory_and_standalone_llm_requests) |
     test(=tool_calls_match_memory_and_standalone_runners)
