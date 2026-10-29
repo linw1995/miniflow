@@ -37,7 +37,7 @@ syntax within their existing scope and message-domain restrictions.
 
 ## Reusable Flows
 
-Version `2026-10-25` adds `workflow.call`, a terminal node supplied by `mfn-core`. Declare reusable
+Version `2026-10-25` adds `workflow.call`, supplied by `mfn-core`. Declare reusable
 sources in `flows`; Cargo node packages remain in `dependencies`:
 
 ```json
@@ -74,9 +74,21 @@ markers cross the boundary without JSON conversion. Configuration references sta
 
 Calls have isolated input bindings, outputs, and Loop state. They share cancellation, bounded workers,
 future driving, and the caller's remaining step budget. Provider failures retain their typed error
-chains with call context. Children cannot consume stdin or expose stream ports in this version;
-terminal LLM calls are supported, and a parent may independently stream its answer. Calls inside an
+chains with call context. Children cannot consume stdin. Calls inside an
 Iteration body retain its task-only restriction and cannot hide another Loop or Iteration.
+
+With parent version `2026-10-28`, a call also exposes the child's selected TaskStream outputs under
+their public names. Ordinary outputs remain terminal ports; incremental outputs remain separate
+stream ports. Nested calls and exported Loop streams compose through these same public interfaces,
+without an additional export map on the call. A child may declare its stream interface using an
+earlier workflow version; the caller must support child streams.
+
+Connected calls forward increments synchronously with the normal backpressure, cancellation,
+guards, snapshots, and typed error chains. Without a stream consumer, the child runs terminal-only.
+Each source keeps its emission packets; multiple sources produce sparse packets and their selected
+workflow outputs require `optional: true` where appropriate. Child Event/Stream producers and internal
+stream dataflow edges remain unsupported in these finite bodies. The parent owns stream scheduling
+and limits; a child's explicit `execution` configuration does not create a nested stream runtime.
 
 All referenced providers join the root dependency build and adjacent lock. Each child's provider paths
 resolve against its own file. Compatible declarations of the same package combine features and default

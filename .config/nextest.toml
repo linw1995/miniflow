@@ -45,6 +45,7 @@ platform = 'cfg(unix)'
 filter = '''
 (binary_id(=mf-compiler::nested_flows) & test(=generated_calls_match_memory_without_flow_sources)) |
 (binary_id(=mf-compiler::loop_streams) & test(=standalone_loop_streams_preserve_guards_delivery_and_frozen_contracts)) |
+(binary_id(=mf-compiler::call_streams) & test(=standalone_calls_forward_frozen_streams_without_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mfn-test-affected::flow) |
 binary_id(=mfn-test-affected::process) |
@@ -95,6 +96,7 @@ binary_id(=mfn-test-affected::process) |
     test(=generated_execution_matches_memory_for_success_and_failures)) |
 (binary_id(=mf-compiler::nested_flows) & test(=generated_calls_match_memory_without_flow_sources)) |
 (binary_id(=mf-compiler::loop_streams) & test(=standalone_loop_streams_preserve_guards_delivery_and_frozen_contracts)) |
+(binary_id(=mf-compiler::call_streams) & test(=standalone_calls_forward_frozen_streams_without_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mf-compiler::single_node_runner) |
 (binary_id(=mf-compiler::iteration_streams) & test(=standalone_iterations_keep_parallel_streams_and_frozen_contracts_without_sources)) |
@@ -150,6 +152,7 @@ platform = 'cfg(unix)'
 filter = '''
 (binary_id(=mf-compiler::nested_flows) & test(=generated_calls_match_memory_without_flow_sources)) |
 (binary_id(=mf-compiler::loop_streams) & test(=standalone_loop_streams_preserve_guards_delivery_and_frozen_contracts)) |
+(binary_id(=mf-compiler::call_streams) & test(=standalone_calls_forward_frozen_streams_without_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mfn-test-affected::flow) |
 binary_id(=mfn-test-affected::process) |
@@ -200,6 +203,7 @@ binary_id(=mfn-test-affected::process) |
     test(=generated_execution_matches_memory_for_success_and_failures)) |
 (binary_id(=mf-compiler::nested_flows) & test(=generated_calls_match_memory_without_flow_sources)) |
 (binary_id(=mf-compiler::loop_streams) & test(=standalone_loop_streams_preserve_guards_delivery_and_frozen_contracts)) |
+(binary_id(=mf-compiler::call_streams) & test(=standalone_calls_forward_frozen_streams_without_sources)) |
 binary_id(=mf-cli::task_stream_runner) |
 binary_id(=mf-compiler::single_node_runner) |
 (binary_id(=mf-compiler::iteration_streams) & test(=standalone_iterations_keep_parallel_streams_and_frozen_contracts_without_sources)) |

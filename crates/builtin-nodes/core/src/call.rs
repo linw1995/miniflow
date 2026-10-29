@@ -35,6 +35,10 @@ impl NodePortContract for CallNode {
             outputs: self.body.outputs.clone(),
         }
     }
+
+    fn stream_outputs(&self) -> Vec<PortSpec> {
+        self.body.stream_outputs.clone()
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -57,12 +61,34 @@ impl TaskNode for CallNode {
         inputs: Inputs,
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
+        self.run(inputs, context, &mut mf_runtime::DiscardSink)
+    }
+}
+
+impl mf_runtime::TaskStreamNode for CallNode {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        emitter: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.run(inputs, context, emitter)
+    }
+}
+
+impl CallNode {
+    fn run(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn mf_runtime::EmissionSink,
+    ) -> Result<NodeResult, NodeExecutionError> {
         let outputs = context
             .run_call(
                 &self.id,
                 WorkflowArguments(inputs),
                 &self.body.nodes,
-                |state| self.body.execute_in_context(state),
+                |state| self.body.execute_with_sink(state, sink),
             )
             .context(CallFailureSnafu {
                 node: &self.id,
@@ -121,17 +147,21 @@ fn factory(
                 })
         })
         .collect();
-    PreparedNode::new(
-        CallNode {
-            id: id.into(),
-            flow: config.flow,
-            body,
-        },
-        NodeMetadata {
-            input_bindings,
-            ..Default::default()
-        },
-    )
+    let streaming = !body.stream_outputs.is_empty();
+    let node = CallNode {
+        id: id.into(),
+        flow: config.flow,
+        body,
+    };
+    let metadata = NodeMetadata {
+        input_bindings,
+        ..Default::default()
+    };
+    if streaming {
+        PreparedNode::task_stream(node, metadata)
+    } else {
+        PreparedNode::new(node, metadata)
+    }
 }
 
 inventory::submit! {

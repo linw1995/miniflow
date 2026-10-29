@@ -784,7 +784,9 @@ fn generate_scope(
             let bind = format_ident!("bind_success_guards_{scope}");
             preparations.push(quote! { let #flow_ident = #bind(#flow_ident); });
         }
-        if enclosing.is_some_and(|definition| !definition.stream_outputs.is_empty()) {
+        if matches!(build, ScopeBuild::Call)
+            || enclosing.is_some_and(|definition| !definition.stream_outputs.is_empty())
+        {
             let bind = format_ident!("bind_stream_outputs_{scope}");
             preparations.push(quote! { let #flow_ident = #bind(#flow_ident)?; });
         }
@@ -915,6 +917,7 @@ fn subgraph_preparation(
             let kind = LitStr::new(&node.kind, Span::call_site());
             quote! { mf_runtime::NodeIdentity { id: #id.into(), kind: #kind.into(), path: Vec::new() } }
         });
+    let call = node.kind == mf_runtime::CALL_KIND;
     let outputs = body.outputs.iter().map(|output| {
         let position = order
             .iter()
@@ -926,7 +929,10 @@ fn subgraph_preparation(
         let source = LitStr::new(output.node.as_str(), Span::call_site());
         let required = !output.optional;
         quote! {
-            mf_runtime::PortSpec::owned(#name, #body_flow.node_metadata(&mf_runtime::NodeId::new(#position_lit))
+            if #call && stream_ports.iter().any(|port| port.name == #name) {
+                None
+            } else {
+                Some(mf_runtime::PortSpec::owned(#name, #body_flow.node_metadata(&mf_runtime::NodeId::new(#position_lit))
                 .into_iter().flat_map(|metadata| metadata.ports.outputs.iter())
                 .find(|port| port.name == #port)
                 .ok_or_else(|| {
@@ -934,7 +940,8 @@ fn subgraph_preparation(
                         definition_id: #outer_id,
                         message: format!("body output `{}`.`{}` is unavailable", #source, #port),
                     }.build()
-                })?.value_type.clone(), #required)
+                })?.value_type.clone(), #required))
+            }
         }
     });
     let options = LitStr::new(
@@ -970,7 +977,7 @@ fn subgraph_preparation(
         let input_schema = #body_flow.input_schema().clone();
         let stream_ports = #body_flow.stream_output_ports();
         let #body_ident = mf_runtime::PreparedSubgraph::streaming(
-            vec![#(#nodes),*], vec![#(#outputs),*], stream_ports,
+            vec![#(#nodes),*], Vec::<Option<mf_runtime::PortSpec>>::from([#(#outputs),*]).into_iter().flatten().collect(), stream_ports,
             move |state, sink| { #body_flow.execute_with_sink(state, sink) },
         );
         let #body_ident = #body_ident.with_input_schema(input_schema);
@@ -1574,7 +1581,7 @@ fn collect_body_layouts(
             .iter()
             .find(|node| &node.id == id)
             .expect("validated node ID");
-        let body = if let Some(loop_definition) = &node.loop_definition {
+        let mut body = if let Some(loop_definition) = &node.loop_definition {
             crate::loops::body_definition(
                 &loop_definition.body,
                 &definition.dependencies,
@@ -1599,8 +1606,12 @@ fn collect_body_layouts(
         path.push(id.clone());
         let (domains, streams) = &body_layouts[path.as_slice()];
         let body_scope = format!("{scope}_{index}");
-        if !streams.is_empty() {
+        if node.kind == mf_runtime::CALL_KIND || !streams.is_empty() {
             layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
+        }
+        if node.kind == mf_runtime::CALL_KIND {
+            body.outputs
+                .retain(|output| !streams.iter().any(|stream| stream.name == output.name));
         }
 
         layouts.push(task_layout_tokens(&body, &body_order, &body_scope, domains));
