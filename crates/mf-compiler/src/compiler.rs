@@ -1664,6 +1664,46 @@ fn registration_for(
     Ok(registration)
 }
 
+fn prepare_stream_outputs(
+    references: &BTreeMap<String, mf_runtime::OutputReferenceDefinition>,
+    nodes: &[FlowNode],
+    node: &crate::NodeDefinition,
+) -> Result<Vec<mf_runtime::SubgraphStreamOutput>, WorkflowCompileError> {
+    references
+        .iter()
+        .map(|(name, reference)| {
+            let index = nodes
+                .iter()
+                .position(|child| child.definition_id == reference.node)
+                .with_context(|| mf_runtime::NodeInvalidSubgraphSnafu {
+                    message: format!("unknown stream child `{}`", reference.node),
+                })?;
+            let port = nodes[index]
+                .metadata
+                .stream_outputs
+                .iter()
+                .find(|port| port.name == reference.port)
+                .cloned()
+                .with_context(|| mf_runtime::NodeInvalidSubgraphSnafu {
+                    message: format!(
+                        "child `{}` has no TaskStream output `{}`",
+                        reference.node, reference.port
+                    ),
+                })?;
+            Ok(mf_runtime::SubgraphStreamOutput {
+                node: mf_runtime::NodeId::new(index),
+                optional: !port.required,
+                port,
+                name: name.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, NodeBuildError>>()
+        .context(NodeConstructionSnafu {
+            definition_id: node.id.clone(),
+            kind: node.kind.clone(),
+        })
+}
+
 fn bind_subgraph_node(
     node: &crate::NodeDefinition,
     preparation: &mut GraphPreparation<'_>,
@@ -1700,42 +1740,48 @@ fn bind_subgraph_node(
             definition_id: node.id.clone(),
         })?
     };
-    if node.kind == mf_runtime::CALL_KIND {
-        ensure!(
-            resolve_execution(body, &nodes)?.execution.is_none(),
-            InvalidCallSnafu {
-                definition_id: node.id.clone(),
-                message: "Flow calls require terminal child ports"
-            }
-        );
-    }
-    let stream_outputs = if let Some(definition) = &node.loop_definition {
-        crate::loops::prepare_stream_outputs(definition, &nodes, &node.id)?
+    let mut stream_outputs = if let Some(definition) = &node.loop_definition {
+        prepare_stream_outputs(&definition.stream_outputs, &nodes, node)?
     } else {
         Vec::new()
     };
-    let outputs = body
-        .outputs
-        .iter()
-        .map(|output| {
-            let port = nodes
+    let mut terminal_outputs = Vec::new();
+    let mut outputs = Vec::new();
+    for output in &body.outputs {
+        let (index, source) = nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| node.definition_id == output.node)
+            .expect("validated body output source");
+        if node.kind == mf_runtime::CALL_KIND
+            && let Some(port) = source
+                .metadata
+                .stream_outputs
                 .iter()
-                .find(|node| node.definition_id == output.node)
-                .and_then(|node| {
-                    node.metadata
-                        .ports
-                        .outputs
-                        .iter()
-                        .find(|port| port.name == output.port)
-                })
+                .find(|port| port.name == output.port)
+        {
+            stream_outputs.push(mf_runtime::SubgraphStreamOutput {
+                node: mf_runtime::NodeId::new(index),
+                port: port.clone(),
+                name: output.name.to_string(),
+                optional: output.optional,
+            });
+        } else {
+            let port = source
+                .metadata
+                .ports
+                .outputs
+                .iter()
+                .find(|port| port.name == output.port)
                 .expect("validated body output");
-            crate::PortSpec::owned(
+            outputs.push(crate::PortSpec::owned(
                 output.name.as_ref(),
                 port.value_type.clone(),
                 !output.optional,
-            )
-        })
-        .collect();
+            ));
+            terminal_outputs.push(output.clone());
+        }
+    }
     let identities = body
         .nodes
         .iter()
@@ -1746,11 +1792,10 @@ fn bind_subgraph_node(
             path: Vec::new(),
         })
         .collect();
-    let builder =
-        crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
-            .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
-            .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
-            .context(FlowConstructionSnafu)?;
+    let builder = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, terminal_outputs)
+        .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
+        .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
+        .context(FlowConstructionSnafu)?;
     let builder = if node.kind == mf_runtime::CALL_KIND {
         builder.with_workflow_inputs()?
     } else {
@@ -1810,11 +1855,16 @@ fn resolve_nodes_in_scope(
         .map(|node| {
             if node.kind == mf_runtime::CALL_KIND {
                 let body = crate::calls::body_definition(node)?;
+                crate::validate_execution(&body).context(StreamConstructionSnafu)?;
                 ensure!(!allow_iteration_input || !crate::calls::contains_iteration_containers(&body)?, InvalidCallSnafu {
                     definition_id: node.id.clone(), message: "calls inside Iteration cannot contain Loop or Iteration constructs"
                 });
                 crate::loops::validate_structure(&body)?;
-                return bind_subgraph_node(node, preparation, &body, None, false, Value::Null);
+                let prepared = bind_subgraph_node(node, preparation, &body, None, false, Value::Null)?;
+                ensure!(prepared.metadata.stream_outputs.is_empty() || definition.version.supports_child_streams(), InvalidCallSnafu {
+                    definition_id: node.id.clone(), message: "Flow call streams require version 2026-10-28"
+                });
+                return Ok(prepared);
             }
             match node.kind.as_str() {
                 crate::LOOP_KIND => {
