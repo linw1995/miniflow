@@ -485,6 +485,8 @@ fn run_producer(
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
 ) {
+    job.context
+        .set_call_interfaces(plan.call_interfaces().clone());
     let index = plan.execution_domain(job.execution_domain).nodes[0].index();
     let _span = job.callback.as_ref().map(StreamCallback::enter);
     let mut sink = ProducerEmitter {
@@ -605,6 +607,7 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::InvalidOutput { definition_id, .. }
         | crate::WorkflowRunError::OutputSelection { definition_id, .. }
         | crate::WorkflowRunError::Context { definition_id, .. }
+        | crate::WorkflowRunError::StepBudget { definition_id }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
         crate::WorkflowRunError::WorkflowInputs { .. }
         | crate::WorkflowRunError::NodeTarget { .. }

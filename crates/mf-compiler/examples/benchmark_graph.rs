@@ -39,6 +39,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
         });
     }
     WorkflowDefinition {
+        calls: Default::default(),
         version: WorkflowDefinitionVersion::CURRENT,
         execution: None,
         flows: Default::default(),

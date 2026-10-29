@@ -49,6 +49,7 @@ pub fn body_definition(
         version: parent.version,
         execution: None,
         flows: Default::default(),
+        calls: config.body.calls.clone(),
         dependencies: parent.dependencies.clone(),
         nodes,
         edges: config.body.edges.clone(),
@@ -102,6 +103,7 @@ pub fn normalize_config(
     normalized
         .nodes
         .retain(|node| node.id.as_str() != ITERATION_INPUT_ID);
+    config.body.calls = normalized.calls;
     config.body.nodes = normalized.nodes;
     config.body.edges = normalized.edges;
     config.body.control_edges = normalized.control_edges;

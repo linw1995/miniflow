@@ -65,6 +65,7 @@ pub fn body_definition(
         version,
         execution: None,
         flows: Default::default(),
+        calls: body.calls.clone(),
         dependencies: dependencies.clone(),
         nodes,
         edges: body.edges.clone(),

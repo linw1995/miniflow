@@ -8,6 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Snafu)]
 pub enum CallBindingError {
+    #[snafu(
+        display("invalid directed-call declaration: {message}"),
+        visibility(pub)
+    )]
+    Definition { message: String },
     #[snafu(transparent)]
     Contract {
         source: mf_runtime::CallContractError,
@@ -69,6 +74,110 @@ pub enum CallBindingError {
     },
     #[snafu(transparent)]
     Flow { source: crate::FlowBuildError },
+}
+
+pub fn declarations(
+    definition: &crate::WorkflowDefinition,
+) -> Result<BTreeMap<NodeId, Vec<CallBinding>>, CallBindingError> {
+    ensure!(
+        definition.calls.is_empty() || definition.version.supports_directed_calls(),
+        DefinitionSnafu {
+            message: "directed calls require version 2026-10-28",
+        }
+    );
+    let indices: BTreeMap<_, _> = definition
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), NodeId::new(index)))
+        .collect();
+    let mut result = BTreeMap::new();
+    for (caller, aliases) in &definition.calls {
+        ensure!(
+            !aliases.is_empty(),
+            DefinitionSnafu {
+                message: format!("caller `{caller}` must declare at least one call")
+            }
+        );
+        let caller_id = indices.get(caller).with_context(|| DefinitionSnafu {
+            message: format!("unknown caller `{caller}`"),
+        })?;
+        ensure!(
+            !matches!(
+                definition.nodes[caller_id.index()].kind.as_str(),
+                mf_runtime::CALL_KIND | mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND
+            ),
+            DefinitionSnafu {
+                message: format!("caller `{caller}` is a container; declare calls inside its body"),
+            }
+        );
+        let mut bindings = Vec::new();
+        for (name, declaration) in aliases {
+            let target = indices
+                .get(&declaration.target)
+                .with_context(|| DefinitionSnafu {
+                    message: format!(
+                        "call `{caller}`.`{name}` references unknown target `{}`",
+                        declaration.target
+                    ),
+                })?;
+            bindings.push(CallBinding::new(
+                name,
+                *target,
+                declaration.ports.clone(),
+                declaration.defaults,
+            )?);
+        }
+        result.insert(*caller_id, bindings);
+    }
+    let targets: BTreeSet<_> = definition
+        .calls
+        .values()
+        .flat_map(|aliases| aliases.values().map(|call| &call.target))
+        .collect();
+    ensure!(
+        !definition
+            .edges
+            .iter()
+            .any(|edge| targets.contains(&edge.from_node))
+            && !definition
+                .control_edges
+                .iter()
+                .any(|edge| targets.contains(&edge.from_node))
+            && !definition
+                .order_edges
+                .iter()
+                .any(|edge| targets.contains(&edge.from_node))
+            && !definition
+                .outputs
+                .iter()
+                .any(|output| targets.contains(&output.node)),
+        DefinitionSnafu {
+            message: "on-demand targets cannot publish through ordinary connections or workflow outputs",
+        }
+    );
+    // A call graph is separate from the data DAG, but must also be acyclic initially.
+    for start in definition.calls.keys() {
+        let mut visited = BTreeSet::new();
+        let mut pending: Vec<_> = definition.calls[start]
+            .values()
+            .map(|call| &call.target)
+            .collect();
+        while let Some(target) = pending.pop() {
+            ensure!(
+                target != start,
+                DefinitionSnafu {
+                    message: format!("recursive directed-call graph reaches `{start}`")
+                }
+            );
+            if visited.insert(target)
+                && let Some(aliases) = definition.calls.get(target)
+            {
+                pending.extend(aliases.values().map(|call| &call.target));
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn ports<'a>(
@@ -320,4 +429,72 @@ pub fn resolve(
         });
     }
     Ok(resolved)
+}
+
+/// Readiness edges order external producers without changing caller skip semantics.
+pub fn readiness_pairs(
+    definition: &crate::WorkflowDefinition,
+) -> BTreeSet<(DefinitionId, DefinitionId)> {
+    let ordinary: Vec<_> = definition
+        .edges
+        .iter()
+        .map(|edge| (&edge.from_node, &edge.to_node))
+        .chain(
+            definition
+                .control_edges
+                .iter()
+                .map(|edge| (&edge.from_node, &edge.to_node)),
+        )
+        .chain(
+            definition
+                .order_edges
+                .iter()
+                .map(|edge| (&edge.from_node, &edge.to_node)),
+        )
+        .collect();
+    let mut pairs = BTreeSet::new();
+    for (caller, aliases) in &definition.calls {
+        let mut pending: Vec<_> = aliases.values().map(|call| &call.target).collect();
+        let mut visited = BTreeSet::new();
+        while let Some(target) = pending.pop() {
+            if !visited.insert(target) {
+                continue;
+            }
+            pairs.extend(
+                ordinary
+                    .iter()
+                    .filter(|(_, to)| *to == target)
+                    .map(|(from, _)| ((*from).clone(), caller.clone())),
+            );
+            if let Some(nested) = definition.calls.get(target) {
+                pending.extend(nested.values().map(|call| &call.target));
+            }
+        }
+    }
+    pairs
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn container_callers_must_declare_calls_inside_their_bodies() {
+        for kind in [
+            mf_runtime::CALL_KIND,
+            mf_runtime::LOOP_KIND,
+            mf_runtime::ITERATION_KIND,
+        ] {
+            let definition = serde_json::from_value(serde_json::json!({
+                "version":"2026-10-28","dependencies":{},
+                "nodes":[{"id":"parent","kind":kind},{"id":"target","kind":"builtin.identity"}],
+                "calls":{"parent":{"run":{"target":"target","defaults":"remaining_inputs"}}}
+            }))
+            .unwrap();
+            assert!(
+                super::declarations(&definition)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("inside its body")
+            );
+        }
+    }
 }

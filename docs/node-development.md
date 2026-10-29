@@ -153,6 +153,36 @@ Declare context reads in `NodeMetadata.context_references`. Each `ContextReferen
 
 ## Directed call contracts
 
+Workflow version `2026-10-28` adds a scope-local `calls` map indexed by caller definition ID and public
+alias. Each entry names an exact `target`, explicit `ports` mappings, and a `defaults` policy:
+
+```json
+{
+  "calls": {
+    "parent": {
+      "search": {
+        "target": "search-node",
+        "ports": [{"output": "query", "input": "query"}],
+        "defaults": "remaining_inputs"
+      }
+    }
+  }
+}
+```
+
+The default policy is `explicit_only`; an empty port group does not enable node-level fallback.
+Normal target input connections retain external parameter ownership. A declared call target cannot
+also feed ordinary connections or selected workflow outputs. Unknown endpoints, blank aliases, empty
+caller declarations, duplicate destination mappings, and recursive call graphs fail during planning.
+Caller and target IDs are exact names in the same scope, not paths through nested graphs.
+
+Executable preparation resolves declarations into `PreparedCall` records shared by runtime dispatch
+and caller-visible interface projection. Generated and native-stream execution reject call definitions
+until those backends install the same prepared contracts.
+
+Exhaustive `WorkflowDefinition`, `LoopBodyDefinition`, and `IterationBodyDefinition` literals must add
+`calls: Default::default()` to preserve ordinary behavior.
+
 `CallBinding` declares a directed call independently of ordinary data publication. It names a target
 `NodeId`, a group of `CallPortMapping` entries, and a `CallInputDefaults` policy. Each mapping names an
 exact caller output and target input; dots are literal port-name characters. Construction rejects
@@ -195,8 +225,10 @@ while the existing `verify_generated_metadata` comparison includes nonempty decl
 Exhaustive `NodeMetadata` literals must add `call_outputs: Vec::new()`; constructors and literals using
 `..Default::default()` require no migration.
 
-`FlowBuilder::resolve_call_bindings` resolves already prepared metadata using ordinary type
-compatibility and exclusive-branch proofs, without changing the builder's schedule.
+Normal workflow preparation resolves the scope's declared calls with existing type inference and
+exclusive-branch proofs. Only declared targets defer required-input checks to binding resolution;
+nested scopes retain their own declarations. `FlowBuilder::resolve_call_bindings` remains the shared
+resolver for already prepared nodes. The compiler has no separate call-only preparation mode.
 
 Explicit output mappings claim their target inputs first. Existing data connections claim external
 inputs and conflict with explicit caller mappings. Node-level defaults fill only the remaining inputs.
@@ -215,10 +247,10 @@ Sensitivity and shared payloads are preserved. External and omitted inputs are n
 
 ```rust
 fn bind_call_arguments(
-    call: &mf_runtime::ResolvedCallBinding,
+    call: &mf_runtime::PreparedCall,
     arguments: &mf_runtime::CallArguments,
 ) -> Result<mf_runtime::Inputs, mf_runtime::CallContractError> {
-    call.bind_arguments(arguments)
+    call.binding.bind_arguments(arguments)
 }
 ```
 
@@ -252,6 +284,36 @@ by their descriptor display; parameter names are sorted within each namespace. `
 checks this public contract without modifying values or performing target execution. Producers should
 preserve value sensitivity and use the parameter's sensitivity flag when handling caller-side data.
 The runtime binding still marks target inputs as sensitive during mapping.
+
+The prepared scope derives its immutable `CallInterfaces` catalog from the executable call table.
+Aliases and binding IDs are unique within each caller. `ExecutionContext::call_targets()` returns
+only the current node's view and is empty outside node execution. There is no separate catalog
+attachment step on `Flow` or `PreparedStream`, so advertised routes and executable routes cannot
+be configured independently. Isolated task inspection uses a scoped read-only overlay without
+granting dispatch authority; nested graph entry points always install their own table.
+
+A node may declare `NodeMetadata.call_interface_source` to read another call-owning node's interfaces
+in the same prepared scope. `call_targets()` resolves that read-only view; `can_invoke_calls()` stays
+false for the viewer, and invocation cannot borrow the source's authority. Preparation rejects missing
+owners, chained views, or a viewer that also declares its own calls. The reference adds no scheduling
+edge and is included in generated metadata drift checks. Ordinary metadata omits the empty field.
+
+```rust
+fn advertised_tools(ctx: &mf_runtime::ExecutionContext) -> Vec<&str> {
+    ctx.call_targets().iter().map(|interface| interface.name()).collect()
+}
+```
+
+Finite task domains, combined terminal producers, and isolated task targets use the prepared scope's catalog. Domain context forks share immutable data;
+body forks start without an inherited catalog. Nested scopes restore their enclosing catalog and node
+identity on success, error, or unwinding. Configure each prepared child Flow independently. Catalogs
+belong to a prepared scope, so shared node implementations must not cache them globally by binding ID.
+Scopes without discovery metadata do not allocate catalog storage.
+
+Discovery alone does not grant invocation authority. Prepared call declarations control target
+activation and supply executable bindings. Provider descriptions, full JSON Schema conversion, and
+generated executable catalog checks are added separately. A serialized `CallInterface` is not
+a provider tool definition: its constraint list is conjunctive, and its two namespaces remain distinct.
 
 ## Context-aware execution
 

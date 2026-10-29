@@ -175,10 +175,14 @@ impl CompiledWorkflow {
                 nodes: vec![original.nodes[index].clone()],
                 data_edges: Vec::new(), control_edges: Vec::new(),
                 execution_order: vec![id.clone()],
-                loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
+                loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default().into_iter()
+                    .filter(|body| body.path.len() != 1 || body.call_targets.is_empty()).collect(),
                 clusters: Vec::new(),
             };
-            if original.version.supports_clusters() {
+            if description.loop_bodies.iter().any(|body| !body.call_targets.is_empty()) {
+                description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_28;
+                description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
+            } else if original.version.supports_clusters() {
                 description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23;
                 description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
             } else if description.loop_bodies.iter().any(|body| !body.order_edges.is_empty() || body.nodes.iter().any(|node| node.id == mf_runtime::ITERATION_INPUT_ID)) {
@@ -295,6 +299,7 @@ impl CompiledWorkflow {
     /// Generate a self-contained module that prepares nodes from the host registry.
     #[cfg(feature = "codegen")]
     pub fn generate_embedded_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        crate::compiler::require_no_directed_calls(&self.definition)?;
         ensure!(
             crate::structural_order(&self.definition)? == self.execution_order,
             InvalidExecutionOrderSnafu
@@ -354,6 +359,7 @@ impl CompiledWorkflow {
         &self,
         include_helpers: bool,
     ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        crate::compiler::require_no_directed_calls(&self.definition)?;
         if self.definition.execution.is_some() {
             return generate_stream_artifacts(self);
         }
@@ -997,6 +1003,7 @@ impl CompiledWorkflow {
         registry: &mf_runtime::NodeRegistry,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
+        crate::compiler::require_no_directed_calls(&self.definition)?;
         let mut body_layouts = BTreeMap::new();
         let (nodes, order) = crate::compiler::prepare_definition_with_layouts(
             &self.definition,

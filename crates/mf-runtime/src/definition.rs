@@ -48,6 +48,7 @@ pub struct WorkflowDefinition {
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub flows: BTreeMap<String, FlowSource>,
+    pub calls: crate::CallDefinitions,
     pub nodes: Vec<NodeDefinition>,
     pub edges: Vec<EdgeDefinition>,
     pub control_edges: Vec<ControlEdgeDefinition>,
@@ -72,6 +73,8 @@ struct DefinitionFields {
     pub dependencies: BTreeMap<String, NodeDependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flows: BTreeMap<String, FlowSource>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub calls: crate::CallDefinitions,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -92,6 +95,10 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 }
 
 impl WorkflowDefinition {
+    pub fn has_directed_calls(&self) -> bool {
+        !self.calls.is_empty() || self.nodes.iter().any(NodeDefinition::has_directed_calls)
+    }
+
     pub fn has_order_edges(&self) -> bool {
         !self.order_edges.is_empty() || self.nodes.iter().any(NodeDefinition::has_order_edges)
     }
@@ -122,27 +129,44 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_23,
     #[serde(rename = "2026-10-25")]
     V2026_10_25,
+    #[serde(rename = "2026-10-28")]
+    V2026_10_28,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_25;
+    pub const CURRENT: Self = Self::V2026_10_28;
+
+    pub fn supports_directed_calls(self) -> bool {
+        matches!(self, Self::V2026_10_28)
+    }
+
+    pub fn supports_flows(self) -> bool {
+        matches!(self, Self::V2026_10_25 | Self::V2026_10_28)
+    }
 
     pub fn supports_startup_inputs(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_03 | Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
+            Self::V2026_10_03
+                | Self::V2026_10_19
+                | Self::V2026_10_23
+                | Self::V2026_10_25
+                | Self::V2026_10_28
         )
     }
 
     pub fn supports_node_success_edges(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
         )
     }
 
     pub fn supports_clusters(self) -> bool {
-        matches!(self, Self::V2026_10_23 | Self::V2026_10_25)
+        matches!(
+            self,
+            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+        )
     }
 }
 
@@ -176,6 +200,18 @@ pub struct NodeDefinition {
 }
 
 impl NodeDefinition {
+    fn has_directed_calls(&self) -> bool {
+        self.loop_definition.as_ref().is_some_and(|definition| {
+            !definition.body.calls.is_empty()
+                || definition
+                    .body
+                    .nodes
+                    .iter()
+                    .any(NodeDefinition::has_directed_calls)
+        }) || (self.kind == crate::ITERATION_KIND && json_scope_has_calls(&self.config["body"]))
+            || (self.kind == CALL_KIND && json_scope_has_calls(&self.config["definition"]))
+    }
+
     pub fn has_order_edges(&self) -> bool {
         self.loop_definition
             .as_ref()
@@ -222,6 +258,8 @@ pub struct LoopVariableDefinition {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopBodyDefinition {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub calls: crate::CallDefinitions,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -231,6 +269,24 @@ pub struct LoopBodyDefinition {
     pub order_edges: Vec<OrderEdgeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<ClusterDefinition>,
+}
+
+fn json_scope_has_calls(value: &Value) -> bool {
+    value
+        .get("calls")
+        .is_some_and(|calls| calls.as_object().is_none_or(|calls| !calls.is_empty()))
+        || value
+            .get("nodes")
+            .and_then(Value::as_array)
+            .is_some_and(|nodes| {
+                nodes.iter().any(|node| {
+                    json_scope_has_calls(&node["loop"]["body"])
+                        || (node["kind"] == crate::ITERATION_KIND
+                            && json_scope_has_calls(&node["config"]["body"]))
+                        || (node["kind"] == CALL_KIND
+                            && json_scope_has_calls(&node["config"]["definition"]))
+                })
+            })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

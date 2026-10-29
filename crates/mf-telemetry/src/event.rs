@@ -40,15 +40,26 @@ pub struct NodeIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ScopePathEntry {
-    Loop { loop_id: String, index: Count },
-    Call { call_id: String },
+    Loop {
+        loop_id: String,
+        index: Count,
+    },
+    Invocation {
+        call_id: String,
+        binding: Count,
+        target_id: String,
+        invocation: Count,
+    },
+    Call {
+        call_id: String,
+    },
 }
 
 impl ScopePathEntry {
     pub fn node_id(&self) -> &str {
         match self {
             Self::Loop { loop_id, .. } => loop_id,
-            Self::Call { call_id } => call_id,
+            Self::Call { call_id } | Self::Invocation { call_id, .. } => call_id,
         }
     }
 
@@ -56,11 +67,12 @@ impl ScopePathEntry {
         match self {
             Self::Loop { index, .. } => *index,
             Self::Call { .. } => Count::ZERO,
+            Self::Invocation { invocation, .. } => *invocation,
         }
     }
 
     pub fn is_call(&self) -> bool {
-        matches!(self, Self::Call { .. })
+        matches!(self, Self::Call { .. } | Self::Invocation { .. })
     }
 }
 
@@ -412,9 +424,13 @@ fn validate_path(path: &[LoopPathEntry]) -> Result<(), ContractError> {
     for entry in path {
         require(
             !entry.node_id().trim().is_empty()
-                && entry.index().get() < i64::from(crate::MAX_LOOP_ITERATIONS),
+                && (matches!(entry, ScopePathEntry::Invocation { .. })
+                    || entry.index().get() < i64::from(crate::MAX_LOOP_ITERATIONS)),
             "invalid Loop path entry",
         )?;
+        if let ScopePathEntry::Invocation { target_id, .. } = entry {
+            require(!target_id.trim().is_empty(), "blank invocation target")?;
+        }
     }
     Ok(())
 }
@@ -487,6 +503,12 @@ impl LifecycleEvent {
         let loop_schema = graph.version.supports_loops() && !graph.is_streaming();
         if let Some((identity, position)) = self.event.node() {
             graph.validate_scope_path(&identity.path)?;
+            if let Some(ScopePathEntry::Invocation { target_id, .. }) = identity.path.last() {
+                require(
+                    identity.id == *target_id,
+                    "node identity disagrees with selected invocation target",
+                )?;
+            }
             require(
                 loop_schema || identity.path.is_empty(),
                 "old event has a Loop path",

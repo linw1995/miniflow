@@ -815,6 +815,33 @@ An unselected candidate is not a skip cause when another candidate successfully 
 
 ## Call scope observation
 
+Directed invocation descriptions use version `2026-10-28`. A dynamic path entry records the caller,
+local binding, selected target, and invocation number:
+
+```json
+{"call_id":"agent","binding":0,"target_id":"search","invocation":42}
+```
+
+The invocation number distinguishes repeated calls and is not a Loop iteration index. Static Call and
+Loop path shapes remain unchanged. Call start/finish events and target node lifecycle records share
+the invocation path; a target cannot report a different node identity at that path. Nested invocation
+callers must match the preceding selected target. Ordinary nested Flow calls can occur between these
+frames without changing their physical graph scope.
+
+`LoopBodyDescription.call_targets` marks a virtual invocation template and maps binding IDs and public
+aliases to target node IDs. A template retains its containing physical graph's identities and dependency
+contracts so input selections and skip causes remain verifiable. Templates are reused through nested
+invocations rather than expanding every call path, and do not increase the static executor count.
+Their bodies provide graph context; only the selected target runs in a particular invocation.
+
+The TUI keeps repeated target outcomes in separate invocation views, preserves the actual caller kind
+for streaming records, and displays invocation/binding/target identity in scope details. Tool events do
+not mark the corresponding root node completed. Built-in Loop, Iteration, and Flow-call containers keep
+their static scope meaning; directed calls must be declared on nodes inside their bodies.
+
+Exhaustive `LoopBodyDescription` literals must initialize `call_targets: Vec::new()`. Older description
+versions reject invocation templates. The following rules continue to apply to static Flow calls.
+
 Call scopes use the existing observation description structure. Descriptions with subgraph support
 recognize `workflow.call` bodies alongside Loop bodies. Iteration bodies retain their existing version rules.
 `ScopePathEntry::Call` serializes as `{"call_id":"title"}`; `ScopePathEntry::Loop`

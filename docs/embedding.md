@@ -235,3 +235,36 @@ Cargo's resolved manifest declarations, including workspace inheritance. The emb
 retains portable registry requirements rather than checkout paths. Source factories return
 metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
 catalog to prepare or execute its nodes.
+
+### Prepared directed calls
+
+`Flow::with_prepared_calls` binds a compiler-validated call table to task instances. The supplied
+`FlowPlan` must already exclude callable targets from ordinary execution domains and arrange the
+callers' external prerequisites. Each `PreparedCall` carries a resolved binding, target identity,
+snapshot visibility, and a prepared success guard. This low-level API does not build or validate a
+workflow dependency graph. `compile_definition` and `instantiate_compiled` install these contracts
+for finite definitions, including nested Flow and Iteration bodies. Generated finite runners freeze
+the same call tables, snapshot visibility, and success guards at build time. Startup checks complete
+node metadata and scope identity before binding executors. Native stream runners freeze the same
+contracts together with message ownership and startup prerequisites.
+
+During a node invocation, `ExecutionContext::invoke_call` selects a `CallBindingId` and accepts one
+atomic `CallArguments` group. The runtime combines caller-owned values with visible external values,
+then uses the ordinary input validation and node lifecycle in an isolated child context. Results
+return as `CallResponse`; they never publish target outputs or completion into the caller's DAG.
+Repeated and nested calls share an invocation sequence, step budget, and cancellation signal.
+`invoke_call_with_deadline` propagates a cooperative deadline into nested
+calls and asynchronous operations. Synchronous providers must cooperate; they cannot be preempted.
+
+Targets retain the ordinary `TaskNode` and `TaskStreamNode` shared-instance concurrency contract.
+Directed calls do not add executor locks, poisoning, or worker reservations. Providers own their
+internal synchronization and recovery policy; nested work uses the existing bounded worker pool.
+Unselected targets never execute. Target failures retain typed sources
+in `CallOutcome::Failed`; cancellation, deadlines, depth limits, and exhausted step budgets return
+terminal errors. Tool execution is never automatically retried.
+
+Prepared scopes derive discovery metadata from their executable call tables. A declared
+`NodeMetadata.call_interface_source` exposes a read-only view of one owner in the same scope; it does
+not add execution dependencies or dispatch capability. Isolated target
+inspection exposes a read-only context overlay, restoring the enclosing capability on return or unwind. Contexts hold only
+weak references to their owning executor graph.

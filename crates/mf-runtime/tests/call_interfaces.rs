@@ -1,8 +1,10 @@
 use mf_runtime::{
-    CallArguments, CallBindingId, CallContractError, CallInputSource, FlowDependency, NodeId,
-    NodeValues, PortSpec, ResolvedCallBinding, ResolvedCallInput, ValueType,
+    CallArguments, CallBindingId, CallContractError, CallInputSource, CallInterfaces, DefinitionId,
+    ExecutionContext, FlowDependency, NodeId, NodeValues, PortSpec, ResolvedCallBinding,
+    ResolvedCallInput, ValueType,
 };
 use serde_json::json;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn binding(name: &str, id: usize) -> ResolvedCallBinding {
     ResolvedCallBinding {
@@ -81,6 +83,14 @@ fn composite() -> ResolvedCallBinding {
     result.prerequisites.push(NodeId::new(42));
     result.success_dependencies.push(NodeId::new(43));
     result
+}
+
+fn catalog(alias: &str) -> CallInterfaces {
+    CallInterfaces::new([(
+        DefinitionId::from("parent"),
+        vec![binding(alias, 0).interface()],
+    )])
+    .unwrap()
 }
 
 #[test]
@@ -224,4 +234,149 @@ fn source_requiredness_optional_omission_and_numeric_constraints_are_preserved()
             resolved.bind_arguments(&args).is_ok()
         );
     }
+}
+
+#[test]
+fn catalogs_preserve_local_ids_and_reject_ambiguous_entries() {
+    let row = |name: &str, id| binding(name, id).interface();
+    let interfaces = CallInterfaces::new([
+        ("right".into(), vec![row("same_alias", 0)]),
+        ("parent".into(), vec![row("later", 5), row("same_alias", 0)]),
+    ])
+    .unwrap();
+    assert_eq!(
+        interfaces
+            .callers()
+            .map(DefinitionId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["parent", "right"]
+    );
+    let parent = interfaces.for_caller(&"parent".into());
+    assert_eq!(
+        parent.iter().map(|p| p.id().index()).collect::<Vec<_>>(),
+        vec![0, 5]
+    );
+    assert!(parent[0].outputs().is_empty() && parent[0].defaults().is_empty());
+    parent[0]
+        .validate_arguments(&CallArguments::default())
+        .unwrap();
+    let clone = interfaces.clone();
+    assert!(std::ptr::eq(parent, clone.for_caller(&"parent".into())));
+    assert!(interfaces.for_caller(&"unknown".into()).is_empty());
+    assert!(!format!("{interfaces:?}").contains("same_alias"));
+    for entries in [
+        vec![(" ".into(), vec![])],
+        vec![("parent".into(), vec![]), ("parent".into(), vec![])],
+        vec![("parent".into(), vec![row(" ", 0)])],
+        vec![("parent".into(), vec![row("a", 0), row("b", 0)])],
+        vec![("parent".into(), vec![row("a", 0), row("a", 1)])],
+    ] {
+        assert!(
+            !CallInterfaces::new(entries)
+                .unwrap_err()
+                .to_string()
+                .is_empty()
+        );
+    }
+    assert!(
+        CallInterfaces::new([("parent".into(), vec![])])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn context_catalogs_restore_across_errors_panics_and_child_scopes() {
+    let outer = catalog("outer");
+    let inner = catalog("inner");
+    let empty = CallInterfaces::default();
+    let mut context = ExecutionContext::default();
+    assert!(context.call_targets().is_empty());
+    context
+        .with_call_interfaces(&outer, |ctx| {
+            assert!(ctx.current_node().is_none() && ctx.call_targets().is_empty());
+            ctx.with_node("parent".into(), |ctx| {
+                assert_eq!(ctx.call_targets()[0].name(), "outer");
+                let expected = ctx.call_targets().as_ptr();
+                for mut fork in [
+                    ctx.fork_domain_with_observation(None),
+                    ctx.fork_stream(None),
+                ] {
+                    assert!(fork.call_targets().is_empty());
+                    fork.with_node("parent".into(), |fork| {
+                        assert_eq!(fork.call_targets().as_ptr(), expected);
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                }
+                let mut child = ctx.fork_body(None);
+                child
+                    .with_node("parent".into(), |child| {
+                        assert!(child.call_targets().is_empty());
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                for scope in [&inner, &empty] {
+                    let failure = ctx.with_call_interfaces(scope, |ctx| {
+                        assert!(ctx.current_node().is_none());
+                        ctx.with_node("parent".into(), |ctx| {
+                            if scope.is_empty() {
+                                assert!(ctx.call_targets().is_empty());
+                            } else {
+                                assert_eq!(ctx.call_targets()[0].name(), "inner");
+                            }
+                            Err::<(), _>("expected failure")
+                        })
+                    });
+                    assert_eq!(failure, Err("expected failure"));
+                    assert_eq!(ctx.current_node(), Some("parent"));
+                    assert_eq!(ctx.call_targets()[0].name(), "outer");
+                }
+                let panic = catch_unwind(AssertUnwindSafe(|| {
+                    let _: Result<(), ()> = ctx.with_call_interfaces(&inner, |ctx| {
+                        ctx.with_node("parent".into(), |_| panic!("scope unwind"))
+                    });
+                }));
+                assert!(panic.is_err());
+                assert_eq!(ctx.call_targets()[0].name(), "outer");
+                assert!(!format!("{ctx:?}").contains("outer"));
+                Ok::<_, ()>(())
+            })
+        })
+        .unwrap();
+    assert!(context.current_node().is_none() && context.call_targets().is_empty());
+    context
+        .with_node("parent".into(), |ctx| {
+            ctx.with_call_interfaces(&empty, |ctx| {
+                assert!(ctx.current_node().is_none());
+                Ok::<_, ()>(())
+            })
+        })
+        .unwrap();
+}
+
+#[test]
+fn read_only_views_share_owner_interfaces_and_reject_ambiguous_sources() {
+    let interfaces = catalog("lookup")
+        .with_views([("viewer".into(), "parent".into())])
+        .unwrap();
+    assert!(std::ptr::eq(
+        interfaces.for_node(&"viewer".into()),
+        interfaces.for_caller(&"parent".into())
+    ));
+    assert!(interfaces.for_caller(&"viewer".into()).is_empty());
+    assert!(
+        interfaces
+            .clone()
+            .with_views([("other".into(), "viewer".into())])
+            .is_err()
+    );
+    assert!(
+        catalog("lookup")
+            .with_views([
+                ("viewer".into(), "parent".into()),
+                ("viewer".into(), "parent".into())
+            ])
+            .is_err()
+    );
 }

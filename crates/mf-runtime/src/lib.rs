@@ -10,6 +10,7 @@ mod execution_outputs;
 mod flow;
 #[cfg(feature = "async")]
 mod future_execution;
+mod invocation;
 mod iteration;
 mod loop_node;
 mod node;
@@ -35,11 +36,11 @@ mod workflow_inputs;
 mod workflow_manifest;
 
 pub use call::{
-    CallArguments, CallBinding, CallBindingId, CallContractError, CallId, CallInputDefaults,
-    CallInputSource, CallOutcome, CallPortMapping, CallRequest, CallResponse, ResolvedCallBinding,
-    ResolvedCallInput,
+    CallArguments, CallBinding, CallBindingId, CallContractError, CallDefinition, CallDefinitions,
+    CallId, CallInputDefaults, CallInputSource, CallOutcome, CallPortMapping, CallRequest,
+    CallResponse, ResolvedCallBinding, ResolvedCallInput,
 };
-pub use call_interface::{CallInterface, CallParameter};
+pub use call_interface::{CallInterface, CallInterfaceError, CallInterfaces, CallParameter};
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
@@ -69,6 +70,7 @@ pub use flow::{
 pub use future_execution::FutureExecutionError;
 #[doc(hidden)]
 pub use inventory::submit as __submit_builtin_flow;
+pub use invocation::{CallDispatchError, CallGuard, PreparedCall};
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,

@@ -37,12 +37,21 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(
+        display("directed calls are not supported by this execution backend"),
+        visibility(pub)
+    )]
+    DirectedCallExecution,
+    #[snafu(transparent)]
+    DirectedCalls {
+        #[snafu(source(from(crate::CallBindingError, Box::new)))]
+        source: Box<crate::CallBindingError>,
+    },
     #[snafu(display("node `{definition_id}` call outputs: {source}"))]
     CallOutputs {
         definition_id: DefinitionId,
         source: mf_runtime::CallContractError,
     },
-
     #[snafu(transparent)]
     FlowResolution { source: crate::FlowResolutionError },
     #[snafu(
@@ -598,12 +607,21 @@ fn prepare_graph(
     let startup = definition.version.supports_startup_inputs()
         && enclosing.is_none()
         && !allow_iteration_input;
-    validate_base_metadata(definition, &nodes, &incoming, startup)?;
+    let call_targets = definition
+        .calls
+        .values()
+        .flat_map(|aliases| aliases.values().map(|call| call.target.clone()))
+        .collect::<BTreeSet<_>>();
+    validate_base_metadata(definition, &nodes, &incoming, startup, &call_targets)?;
     if startup {
         crate::workflow_input_schema(
-            nodes
-                .iter()
-                .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
+            nodes.iter().map(|node| {
+                (
+                    node,
+                    !incoming.contains_key(node.definition_id.as_str())
+                        && !call_targets.contains(&node.definition_id),
+                )
+            }),
             |node, input| {
                 definition
                     .edges
@@ -688,6 +706,7 @@ fn validate_base_metadata(
     nodes: &[FlowNode],
     incoming: &BTreeMap<&str, Vec<ExecutionDependency<'_>>>,
     startup: bool,
+    call_targets: &BTreeSet<DefinitionId>,
 ) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
@@ -881,7 +900,9 @@ fn validate_base_metadata(
 
     for node in &definition.nodes {
         let registration = registrations[&node.id];
-        if startup && !incoming.contains_key(node.id.as_str()) {
+        // Call-owned inputs are validated after explicit external bindings have been resolved.
+        if call_targets.contains(&node.id) || (startup && !incoming.contains_key(node.id.as_str()))
+        {
             continue;
         }
         for port in registration
@@ -926,6 +947,7 @@ pub fn topological_order(
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
+    crate::call_bindings::declarations(definition)?;
     if definition.has_order_edges() && !definition.version.supports_node_success_edges() {
         return InvalidSuccessDependencySnafu {
             message: "node-success edges require version 2026-10-19",
@@ -1113,6 +1135,7 @@ fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, 
                 .iter()
                 .map(|edge| (edge.from_node.clone(), edge.to_node.clone())),
         )
+        .chain(crate::call_bindings::readiness_pairs(definition))
         .collect()
 }
 
@@ -1219,6 +1242,13 @@ pub fn compile_definition(
     compile_resolved_definition(&resolved.definition, registry)
 }
 
+pub fn require_no_directed_calls(
+    definition: &WorkflowDefinition,
+) -> Result<(), WorkflowCompileError> {
+    ensure!(!definition.has_directed_calls(), DirectedCallExecutionSnafu);
+    Ok(())
+}
+
 /// Prepares a frozen definition whose sources and dependency ownership are already resolved.
 pub fn compile_resolved_definition(
     definition: &WorkflowDefinition,
@@ -1234,9 +1264,11 @@ pub fn compile_resolved_definition(
     )
     .and_then(|flow| flow.with_control_edges(definition.control_edges.clone()))
     .and_then(|flow| flow.with_order_edges(definition.order_edges.clone()))
-    .context(FlowConstructionSnafu)?;
+    .context(FlowConstructionSnafu)?
+    .with_declared_calls(&definition)?;
 
     if let Some(execution) = &definition.execution {
+        require_no_directed_calls(&definition)?;
         flow.into_stream(execution.clone())
             .context(StreamConstructionSnafu)?;
     } else {
@@ -1351,12 +1383,21 @@ pub fn normalize_plan(
     outputs.sort_by(|left, right| {
         (&left.name, &left.node, &left.port).cmp(&(&right.name, &right.node, &right.port))
     });
+    let mut calls = definition.calls.clone();
+    for aliases in calls.values_mut() {
+        for call in aliases.values_mut() {
+            call.ports.sort_by(|left, right| {
+                (&left.input, &left.output).cmp(&(&right.input, &right.output))
+            });
+        }
+    }
 
     Ok(CompiledWorkflow {
         definition: WorkflowDefinition {
             version: definition.version,
             execution: definition.execution.clone(),
             flows: definition.flows.clone(),
+            calls,
             dependencies: definition.dependencies.clone(),
             nodes,
             edges,
@@ -1387,6 +1428,7 @@ fn normalize_loop_node(
         .nodes
         .retain(|node| node.id.as_str() != crate::LOOP_SOURCE_ID);
     loop_definition.body.nodes = normalized.nodes;
+    loop_definition.body.calls = normalized.calls;
     loop_definition.body.edges = normalized.edges;
     loop_definition.body.control_edges = normalized.control_edges;
     loop_definition.body.order_edges = normalized.order_edges;
@@ -1427,7 +1469,8 @@ pub fn prepare_compiled_plan(
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
     .and_then(|flow| flow.with_order_edges(plan.definition.order_edges.clone()))
-    .context(FlowConstructionSnafu)?;
+    .context(FlowConstructionSnafu)?
+    .with_declared_calls(&resolved.definition)?;
     let builder = if plan.definition.version.supports_startup_inputs() {
         builder.with_workflow_inputs()?
     } else {
@@ -1447,6 +1490,7 @@ pub fn instantiate_compiled_with_observation(
             && let WorkflowCompileError::NodeConstruction { definition_id, .. }
             | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
             | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
+            | WorkflowCompileError::CallOutputs { definition_id, .. }
             | WorkflowCompileError::TypedGeneration { definition_id, .. }
             | WorkflowCompileError::OutputDerivation { definition_id, .. }
             | WorkflowCompileError::PortTypeDepth { definition_id, .. }
@@ -1765,7 +1809,8 @@ fn bind_subgraph_node(
         crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
             .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
             .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
-            .context(FlowConstructionSnafu)?;
+            .context(FlowConstructionSnafu)?
+            .with_declared_calls(body)?;
     let builder = if node.kind == mf_runtime::CALL_KIND {
         builder.with_workflow_inputs()?
     } else {

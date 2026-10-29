@@ -869,6 +869,67 @@ inventory::submit! { mf_runtime::NodeRegistration { kind: "test.call_parent", fa
 inventory::submit! { mf_runtime::NodeRegistration { kind: "test.call_target", factory: mf_runtime::NodeFactory::Plain(target_factory) } }
 
 #[test]
+fn compiled_call_planning_reuses_normal_preparation_and_type_inference() {
+    let mut definition: mf_compiler::WorkflowDefinition = serde_json::from_value(serde_json::json!({
+        "version": "2026-10-28", "dependencies": {},
+        "nodes": [
+            {"id":"tool", "kind":"test.call_target", "inputs":{"token":{"from":{"node":"lookup","port":"value"}}}},
+            {"id":"parent", "kind":"test.call_parent"},
+            {"id":"lookup", "kind":"builtin.identity", "inputs":{"input":{"from":{"node":"config","port":"value"}}}},
+            {"id":"config", "kind":"builtin.constant", "config":{"value":"secret"}}
+        ]
+    })).unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
+    assert!(matches!(
+        mf_compiler::compile_definition(&definition, &registry),
+        Err(mf_compiler::WorkflowCompileError::MissingRequiredInput { .. })
+    ));
+    definition.calls = serde_json::from_value(serde_json::json!({
+        "parent":{"search":{"target":"tool","ports":[{"output":"query","input":"query"}]}}
+    }))
+    .unwrap();
+    let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
+    let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
+    let binding = &flow.prepared_calls().next().unwrap().binding;
+    assert!(matches!(
+        binding.inputs[0].source,
+        CallInputSource::Output(_)
+    ));
+    assert!(matches!(
+        binding.inputs[1].source,
+        CallInputSource::External
+    ));
+    assert_eq!(binding.dependencies[0].source_key, "lookup.value");
+    let mut invalid = definition.clone();
+    invalid
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "config")
+        .unwrap()
+        .config["value"] = true.into();
+    assert!(mf_compiler::compile_definition(&invalid, &registry).is_err());
+    let mut invalid = plan.clone();
+    invalid.execution_order.reverse();
+    assert!(mf_compiler::instantiate_compiled(&invalid, &registry).is_err());
+    for endpoint in ["caller", "target"] {
+        let mut invalid = definition.clone();
+        if endpoint == "caller" {
+            let aliases = invalid.calls.remove(&"parent".into()).unwrap();
+            invalid.calls.insert("unknown".into(), aliases);
+        } else {
+            invalid
+                .calls
+                .get_mut(&"parent".into())
+                .unwrap()
+                .get_mut("search")
+                .unwrap()
+                .target = "unknown".into();
+        }
+        assert!(mf_compiler::compile_definition(&invalid, &registry).is_err());
+    }
+}
+
+#[test]
 fn ordinary_execution_does_not_require_or_publish_call_outputs() {
     let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
     let definition: mf_compiler::WorkflowDefinition = serde_json::from_value(serde_json::json!({
@@ -1000,4 +1061,22 @@ fn task_stream_callers_and_terminal_producers_keep_emissions_out_of_arguments() 
             .is_ok()
         );
     }
+}
+
+#[test]
+fn root_call_targets_do_not_waive_nested_input_requirements() {
+    let definition: mf_compiler::WorkflowDefinition = serde_json::from_value(serde_json::json!({
+        "version":"2026-10-28", "dependencies":{}, "nodes":[
+            {"id":"parent","kind":"test.call_parent"},
+            {"id":"tool","kind":"test.call_target"},
+            {"id":"repeat","kind":"workflow.loop","loop":{
+                "max_iterations":1,"variables":[{"name":"count","type":"int"}],
+                "body":{"nodes":[{"id":"tool","kind":"test.call_target"}]}
+            }}
+        ], "calls":{"parent":{"tool":{"target":"tool","defaults":"remaining_inputs"}}}
+    }))
+    .unwrap();
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
+    let error = mf_compiler::compile_definition(&definition, &registry).unwrap_err();
+    assert!(error.to_string().contains("tool") && error.to_string().contains("requires input"));
 }

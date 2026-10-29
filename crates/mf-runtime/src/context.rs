@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 #[derive(Clone, Debug)]
@@ -65,12 +65,8 @@ impl StepBudget {
                 remaining.checked_sub(1)
             }) {
             Ok(_) => Ok(()),
-            Err(_) => ContextSnafu {
+            Err(_) => crate::runner::StepBudgetSnafu {
                 definition_id: crate::DefinitionId::from(id),
-                message: format!(
-                    "scheduled-step budget of {} exhausted",
-                    crate::MAX_SCHEDULED_STEPS
-                ),
             }
             .fail(),
         }
@@ -96,6 +92,21 @@ impl Drop for ScopeGuard<'_> {
 struct NodeInvocationGuard<'a> {
     context: &'a mut ExecutionContext,
     previous: Option<crate::DefinitionId>,
+}
+
+struct CallInterfaceGuard<'a> {
+    context: &'a mut ExecutionContext,
+    interfaces: crate::CallInterfaces,
+    node: Option<crate::DefinitionId>,
+    dispatcher: Option<Weak<dyn crate::invocation::CallDispatcher>>,
+}
+
+impl Drop for CallInterfaceGuard<'_> {
+    fn drop(&mut self) {
+        self.context.call_interfaces = std::mem::take(&mut self.interfaces);
+        self.context.current_node = self.node.take();
+        self.context.call_dispatcher = self.dispatcher.take();
+    }
 }
 
 impl Drop for NodeInvocationGuard<'_> {
@@ -199,6 +210,10 @@ pub struct ExecutionContext {
     pending_loop_write: Option<(String, Value)>,
     current_position: Option<usize>,
     current_node: Option<crate::DefinitionId>,
+    call_interfaces: crate::CallInterfaces,
+    call_dispatcher: Option<Weak<dyn crate::invocation::CallDispatcher>>,
+    call_sequence: Arc<AtomicU64>,
+    call_deadline: Option<std::time::Instant>,
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
@@ -223,6 +238,10 @@ impl Default for ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
+            call_interfaces: Default::default(),
+            call_dispatcher: None,
+            call_sequence: Arc::new(AtomicU64::new(0)),
+            call_deadline: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
@@ -240,6 +259,199 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Invokes one executable binding of the current caller with an atomic argument group.
+    pub fn invoke_call(
+        &mut self,
+        binding: crate::CallBindingId,
+        arguments: crate::CallArguments,
+    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
+        self.invoke_call_with_deadline(binding, arguments, None)
+    }
+
+    pub fn invoke_call_with_deadline(
+        &mut self,
+        binding: crate::CallBindingId,
+        arguments: crate::CallArguments,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
+        use crate::invocation::{DepthLimitSnafu, IdentityLimitSnafu, UnavailableSnafu};
+        use snafu::{OptionExt, ensure};
+        let dispatcher = self
+            .call_dispatcher
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .context(UnavailableSnafu)?;
+        let caller = self.current_node.clone().context(UnavailableSnafu)?;
+        ensure!(
+            self.invocation_path().len() < mf_telemetry::MAX_SCOPE_DEPTH,
+            DepthLimitSnafu
+        );
+        let deadline = self.effective_deadline(deadline);
+        self.check_call_limits(deadline)?;
+        let invocation = self
+            .call_sequence
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1).filter(|next| *next <= i64::MAX as u64)
+            })
+            .ok()
+            .context(IdentityLimitSnafu)?;
+        dispatcher.dispatch(
+            &caller,
+            crate::CallId {
+                binding,
+                invocation,
+            },
+            arguments,
+            self,
+            deadline,
+        )
+    }
+
+    /// The effective cooperative deadline inherited by nested work.
+    pub fn effective_deadline(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> Option<std::time::Instant> {
+        match (self.call_deadline, deadline) {
+            (Some(inherited), Some(local)) => Some(inherited.min(local)),
+            (inherited, local) => inherited.or(local),
+        }
+    }
+
+    pub(super) fn check_call_limits(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), crate::CallDispatchError> {
+        if let Some(source) = self.cancellation.failure() {
+            return Err(source).context(crate::invocation::CancelledSnafu);
+        }
+        snafu::ensure!(
+            deadline.is_none_or(|deadline| std::time::Instant::now() < deadline),
+            crate::invocation::DeadlineExceededSnafu
+        );
+        Ok(())
+    }
+
+    pub(super) fn run_directed_call(
+        &mut self,
+        id: crate::CallId,
+        target: &crate::NodeIdentity,
+        visibility: crate::OutputVisibility,
+        deadline: Option<std::time::Instant>,
+        run: impl FnOnce(&mut Self) -> Result<crate::CallOutcome, crate::CallDispatchError>,
+    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
+        use snafu::OptionExt;
+        let caller = self
+            .current_node
+            .as_ref()
+            .context(crate::invocation::UnavailableSnafu)?;
+        let body = self
+            .body_observation
+            .as_ref()
+            .map(|body| body.for_call(std::slice::from_ref(target)));
+        let mut child = self.fork_body(body);
+        child.observation = self.observation.clone();
+        child.call_dispatcher = self.call_dispatcher.clone();
+        child.call_interfaces = self.call_interfaces.clone();
+        child.outputs = self.outputs.fork_snapshot(Some(visibility));
+        child.call_deadline = deadline;
+        let binding = i64::try_from(id.binding.index())
+            .ok()
+            .and_then(|value| mf_telemetry::Count::try_from(value).ok())
+            .context(crate::invocation::IdentityLimitSnafu)?;
+        let invocation = i64::try_from(id.invocation)
+            .ok()
+            .and_then(|value| mf_telemetry::Count::try_from(value).ok())
+            .context(crate::invocation::IdentityLimitSnafu)?;
+        child.scope_prefix.push(LoopPathEntry::Invocation {
+            call_id: caller.to_string(),
+            binding,
+            target_id: target.id.clone(),
+            invocation,
+        });
+        let path = child.invocation_path();
+        if let Some(observation) = child
+            .observation
+            .as_mut()
+            .filter(|run| run.supports_loops())
+        {
+            observation.call_started(path.clone());
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut child)));
+        if let Some(observation) = child
+            .observation
+            .as_mut()
+            .filter(|run| run.supports_loops())
+        {
+            let failed = !matches!(&result, Ok(Ok(outcome)) if !matches!(outcome, crate::CallOutcome::Failed { .. }));
+            observation.call_finished(path, failed);
+        }
+        match result {
+            Ok(result) => result.map(|outcome| crate::CallResponse { id, outcome }),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// Whether the active node has a live executable call scope.
+    pub fn can_invoke_calls(&self) -> bool {
+        self.current_node
+            .as_ref()
+            .is_some_and(|node| !self.call_interfaces.for_caller(node).is_empty())
+            && self
+                .call_dispatcher
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some()
+    }
+
+    /// The current caller's immutable interfaces. Outside a node invocation this is empty.
+    pub fn call_targets(&self) -> &[crate::CallInterface] {
+        self.current_node
+            .as_ref()
+            .map_or(&[], |node| self.call_interfaces.for_node(node))
+    }
+
+    /// Installs discovery data for one scope and restores its enclosing scope on every exit.
+    pub fn with_call_interfaces<T, E>(
+        &mut self,
+        interfaces: &crate::CallInterfaces,
+        run: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.with_call_dispatcher(interfaces, None, run)
+    }
+
+    pub(super) fn with_call_dispatcher<T, E>(
+        &mut self,
+        interfaces: &crate::CallInterfaces,
+        dispatcher: Option<Weak<dyn crate::invocation::CallDispatcher>>,
+        run: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        if self.call_interfaces.is_empty()
+            && interfaces.is_empty()
+            && self.current_node.is_none()
+            && self.call_dispatcher.is_none()
+            && dispatcher.is_none()
+        {
+            return run(self);
+        }
+        let previous = std::mem::replace(&mut self.call_interfaces, interfaces.clone());
+        let previous_dispatcher = std::mem::replace(&mut self.call_dispatcher, dispatcher);
+        let node = self.current_node.take();
+        let guard = CallInterfaceGuard {
+            context: self,
+            interfaces: previous,
+            node,
+            dispatcher: previous_dispatcher,
+        };
+        run(guard.context)
+    }
+
+    // Producer jobs own their context and install the plan's scope before invoking callbacks.
+    pub(super) fn set_call_interfaces(&mut self, interfaces: crate::CallInterfaces) {
+        self.call_interfaces = interfaces;
+        self.call_dispatcher = None;
+    }
+
     /// Identifies the executing node independently of optional observation.
     pub fn current_node(&self) -> Option<&str> {
         self.current_node.as_ref().map(crate::DefinitionId::as_str)
@@ -251,7 +463,7 @@ impl ExecutionContext {
         &self,
         deadline: Option<std::time::Instant>,
     ) -> Result<(), crate::FutureExecutionError> {
-        crate::future_execution::check_limits(&self.cancellation, deadline)
+        crate::future_execution::check_limits(&self.cancellation, self.effective_deadline(deadline))
     }
 
     /// Drives an owned operation on the calling synchronous thread.
@@ -265,7 +477,7 @@ impl ExecutionContext {
         self.future_executor.execute(
             future,
             &self.cancellation,
-            deadline,
+            self.effective_deadline(deadline),
             self.worker_limit.get(),
         )
     }
@@ -311,6 +523,10 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
+            call_interfaces: self.call_interfaces.clone(),
+            call_dispatcher: self.call_dispatcher.clone(),
+            call_sequence: self.call_sequence.clone(),
+            call_deadline: self.call_deadline,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
             scope_prefix: self.scope_prefix.clone(),
@@ -502,6 +718,10 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
+            call_interfaces: self.call_interfaces.clone(),
+            call_dispatcher: self.call_dispatcher.clone(),
+            call_sequence: self.call_sequence.clone(),
+            call_deadline: self.call_deadline,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
@@ -642,7 +862,10 @@ impl ExecutionContext {
 
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
+        child.remaining_steps = self.remaining_steps.clone();
         child.cancellation = self.cancellation.clone();
+        child.call_sequence = self.call_sequence.clone();
+        child.call_deadline = self.call_deadline;
         child.worker_handle = self.worker_handle.clone();
         child.execution_workers = self.execution_workers.clone();
         child.worker_limit = self.worker_limit;
@@ -675,7 +898,6 @@ impl ExecutionContext {
             .as_ref()
             .map(|observation| observation.for_call(nodes));
         let mut child = self.fork_body(body_observation);
-        child.remaining_steps = self.remaining_steps.clone();
         child.observation = self.observation.clone();
         child
             .scope_prefix
@@ -835,7 +1057,8 @@ impl ExecutionContext {
             WorkflowRunError::NodeExecution { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Execution)
             }
-            WorkflowRunError::Context { definition_id, .. } => {
+            WorkflowRunError::Context { definition_id, .. }
+            | WorkflowRunError::StepBudget { definition_id } => {
                 (Some(definition_id.to_string()), FailurePhase::Execution)
             }
             WorkflowRunError::WorkflowInputs { .. } => (None, FailurePhase::Dependency),
@@ -1341,6 +1564,92 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    struct EchoCall;
+    impl crate::invocation::CallDispatcher for EchoCall {
+        fn dispatch(
+            &self,
+            _: &crate::DefinitionId,
+            id: crate::CallId,
+            _: crate::CallArguments,
+            _: &mut ExecutionContext,
+            _: Option<std::time::Instant>,
+        ) -> Result<crate::CallResponse, crate::CallDispatchError> {
+            Ok(crate::CallResponse {
+                id,
+                outcome: crate::CallOutcome::Succeeded(Outputs::new()),
+            })
+        }
+    }
+
+    #[test]
+    fn directed_call_identity_depth_and_budget_limits_remain_typed() {
+        let owner: Arc<dyn crate::invocation::CallDispatcher> = Arc::new(EchoCall);
+        let mut context = ExecutionContext {
+            call_dispatcher: Some(Arc::downgrade(&owner)),
+            current_node: Some("caller".into()),
+            remaining_steps: StepBudget::new(1),
+            ..Default::default()
+        };
+        let binding = crate::CallBindingId::new(0);
+        assert_eq!(
+            context
+                .invoke_call(binding, Default::default())
+                .unwrap()
+                .id
+                .invocation,
+            0
+        );
+        let mut stream = context.fork_stream(None);
+        stream.current_node = Some("caller".into());
+        assert_eq!(
+            stream
+                .invoke_call(binding, Default::default())
+                .unwrap()
+                .id
+                .invocation,
+            1
+        );
+        context.call_sequence.store(u64::MAX, Ordering::Release);
+        assert!(matches!(
+            context.invoke_call(binding, Default::default()),
+            Err(crate::CallDispatchError::IdentityLimit)
+        ));
+        context.call_sequence.store(0, Ordering::Release);
+        context.scope_prefix = vec![
+            LoopPathEntry::Call {
+                call_id: "parent".into()
+            };
+            mf_telemetry::MAX_SCOPE_DEPTH
+        ];
+        assert!(matches!(
+            context.invoke_call(binding, Default::default()),
+            Err(crate::CallDispatchError::DepthLimit)
+        ));
+        context.reserve_step("caller").unwrap();
+        let error = context.reserve_step("target").unwrap_err();
+        assert!(matches!(error, WorkflowRunError::StepBudget { .. }));
+        assert!(error.is_terminal_control());
+        let wrapped = WorkflowRunError::NodeExecution {
+            definition_id: "caller".into(),
+            source: error.into(),
+        };
+        assert!(wrapped.is_terminal_control());
+    }
+
+    #[test]
+    fn nested_bodies_charge_the_parent_step_budget() {
+        let mut context = ExecutionContext {
+            remaining_steps: StepBudget::new(1),
+            ..Default::default()
+        };
+        let child = context.fork_body(None);
+        child.fork_body(None).reserve_step("nested").unwrap();
+        assert!(matches!(
+            context.reserve_step("parent"),
+            Err(WorkflowRunError::StepBudget { .. })
+        ));
+    }
 
     struct EmitNode(Outputs);
 

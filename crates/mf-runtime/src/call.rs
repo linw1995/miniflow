@@ -57,6 +57,22 @@ pub enum CallInputDefaults {
     RemainingInputs,
 }
 
+/// Definition-facing directed-call groups, indexed by caller ID and public alias.
+pub type CallDefinitions = std::collections::BTreeMap<
+    crate::DefinitionId,
+    std::collections::BTreeMap<String, CallDefinition>,
+>;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallDefinition {
+    pub target: crate::DefinitionId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<CallPortMapping>,
+    #[serde(default)]
+    pub defaults: CallInputDefaults,
+}
+
 /// A declaration of one directed call and its atomic group of caller outputs.
 ///
 /// Construction checks local names and duplicate target mappings only. Preparation must still
