@@ -27,7 +27,7 @@ impl CallBindingId {
     }
 }
 
-/// Correlates one request and response within a workflow execution.
+/// Identifies one invocation within a workflow execution.
 ///
 /// The dispatcher must allocate a distinct invocation number for every call in that execution,
 /// including nested calls and repeated calls from stream frames. Binding indexes alone are local
@@ -153,18 +153,6 @@ pub struct CallRequest {
     pub arguments: CallArguments,
 }
 
-impl CallRequest {
-    /// Completes this envelope without losing its request identity.
-    ///
-    /// This only constructs a response; it neither executes a target nor records completion.
-    pub fn respond(self, outcome: CallOutcome) -> CallResponse {
-        CallResponse {
-            id: self.id,
-            outcome,
-        }
-    }
-}
-
 /// A terminal outcome of one call, not a completion of the target in its enclosing DAG.
 #[derive(Debug)]
 pub enum CallOutcome {
@@ -176,25 +164,11 @@ pub enum CallOutcome {
     Failed { source: WorkflowRunError },
 }
 
-/// A response that may arrive independently of other calls from the same Parent.
+/// The synchronous outcome and observation identity of one completed invocation.
 #[derive(Debug)]
 pub struct CallResponse {
     pub id: CallId,
     pub outcome: CallOutcome,
-}
-
-impl CallResponse {
-    /// Rejects a response for another binding or invocation before exposing its outcome.
-    pub fn into_outcome(self, expected: CallId) -> Result<CallOutcome, CallContractError> {
-        ensure!(
-            self.id == expected,
-            ResponseMismatchSnafu {
-                expected,
-                actual: self.id,
-            }
-        );
-        Ok(self.outcome)
-    }
 }
 
 #[derive(Debug, Snafu)]
@@ -233,8 +207,6 @@ pub enum CallContractError {
     EmptyName { field: &'static str },
     #[snafu(display("call input `{input}` has multiple explicit caller mappings"))]
     DuplicateInput { input: String },
-    #[snafu(display("call response identity {actual:?} does not match request {expected:?}"))]
-    ResponseMismatch { expected: CallId, actual: CallId },
 }
 
 impl NodeMetadata {

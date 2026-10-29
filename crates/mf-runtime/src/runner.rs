@@ -101,8 +101,6 @@ impl WorkflowRunError {
                         | crate::CallDispatchError::IdentityLimit
                         | crate::CallDispatchError::DeadlineExceeded
                         | crate::CallDispatchError::Cancelled { .. }
-                        | crate::CallDispatchError::Reentrant
-                        | crate::CallDispatchError::Poisoned
                 )
             ) {
                 return true;
