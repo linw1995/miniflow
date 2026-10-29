@@ -1,3 +1,5 @@
+#[path = "fixtures/observation_capture.rs"]
+mod capture;
 mod common;
 #[path = "fixtures/multi-nodes/src/task_stream.rs"]
 mod fixture;
@@ -150,6 +152,100 @@ fn emitted_prefixes_do_not_change_item_error_policies() {
             assert_eq!(emitted, vec![1, 2]);
             assert_eq!(results(&values), vec![expected]);
         }
+    }
+}
+
+#[test]
+fn streamed_parallel_items_keep_correlated_observation_and_failure_outcomes() {
+    let mut value = definition("parallel", json!({"fail_count":2}));
+    value["nodes"][0]["config"]["on_error"] = json!("continue_on_error");
+    value["execution"] = json!({"limits":{"workers":2,"max_pending_messages":2}});
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), Default::default())
+        .unwrap();
+    let instance = instantiate_stream(&plan, &registry)
+        .unwrap()
+        .start_with_options(StreamOptions {
+            arguments: WorkflowArguments::try_from(json!({"each.items":[1,2]})).unwrap(),
+            observation: Some(observation),
+            ..Default::default()
+        })
+        .unwrap();
+    let values = drain(instance);
+    let mut emitted = increments(&values);
+    emitted.sort_unstable();
+    assert_eq!(emitted, vec![1, 2]);
+    assert_eq!(results(&values), vec![json!([1, null])]);
+
+    let records = harness.records();
+    let spans = harness.spans.get_finished_spans().unwrap();
+    for index in 0..2 {
+        for event in [
+            "mf.iteration.item.started",
+            "mf.iteration.item.finished",
+            "mf.iteration.node.started",
+            "mf.iteration.node.finished",
+        ] {
+            let matching: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    record.event_name == event && record.attributes["mf.iteration.index"] == index
+                })
+                .collect();
+            assert_eq!(matching.len(), 1, "{event} for item {index}");
+            assert_eq!(matching[0].attributes["mf.iteration.id"], "each");
+            assert!(matching[0].trace_context.is_some());
+        }
+        let finished = records
+            .iter()
+            .find(|record| {
+                record.event_name == "mf.iteration.item.finished"
+                    && record.attributes["mf.iteration.index"] == index
+            })
+            .unwrap();
+        assert_eq!(
+            finished.attributes["mf.outcome"],
+            if index == 0 { "succeeded" } else { "failed" }
+        );
+        let node_finished = records
+            .iter()
+            .find(|record| {
+                record.event_name == "mf.iteration.node.finished"
+                    && record.attributes["mf.iteration.index"] == index
+            })
+            .unwrap();
+        assert_eq!(
+            node_finished.attributes["mf.outcome"],
+            if index == 0 { "succeeded" } else { "failed" }
+        );
+        if index == 1 {
+            assert_eq!(node_finished.attributes["mf.failure.phase"], "execution");
+        }
+        let started = |event| {
+            records
+                .iter()
+                .find(|record| {
+                    record.event_name == event && record.attributes["mf.iteration.index"] == index
+                })
+                .unwrap()
+        };
+        let item = started("mf.iteration.item.started")
+            .trace_context
+            .as_ref()
+            .unwrap();
+        let node = started("mf.iteration.node.started")
+            .trace_context
+            .as_ref()
+            .unwrap();
+        assert_eq!(item.trace_id, node.trace_id);
+        let node_span = spans
+            .iter()
+            .find(|span| span.span_context.span_id().to_string() == node.span_id)
+            .unwrap();
+        assert_eq!(node_span.parent_span_id.to_string(), item.span_id);
     }
 }
 
