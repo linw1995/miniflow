@@ -34,13 +34,13 @@ mod worker;
 mod workflow_inputs;
 mod workflow_manifest;
 
-#[cfg(feature = "async")]
 pub use call::{
     CallArguments, CallBinding, CallBindingId, CallContractError, CallId, CallInputDefaults,
     CallInputSource, CallOutcome, CallPortMapping, CallRequest, CallResponse, ResolvedCallBinding,
     ResolvedCallInput,
 };
 pub use call_interface::{CallInterface, CallParameter};
+#[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
