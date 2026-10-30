@@ -298,11 +298,11 @@ span. Each reached user-defined body node emits `mf.iteration.node.started` and
 `mf.node.id` and `mf.node.kind`. Terminal records include an outcome, duration when available, and failure context.
 They exclude item and result values. Plugin-provided failure messages can contain data supplied by that plugin.
 
-New runners also emit `mf.iteration.started` and `mf.iteration.finished` invocation boundaries. Each detail log includes
+New runners also emit an `mf.iteration.finished` invocation boundary. Each detail log includes
 a JSON `mf.iteration.context` attribute with an invocation ID, static Iteration and body paths, the owning Loop/Call
 path and streaming invocation when present, item index, independent detail sequence, and elapsed time from run start.
 The invocation ID separates repeated executions of the same Iteration; body paths distinguish nested Calls with
-same-named nodes. Invocation boundaries use index zero without asserting that an item exists. Detail delivery gaps,
+same-named nodes. The invocation boundary uses index zero without asserting that an item exists. Detail delivery gaps,
 conflicts, and retention limits are reported separately from outer lifecycle integrity.
 
 When an Iteration runs inside a Loop body, item detail spans inherit that pass's Iteration invocation span. The item

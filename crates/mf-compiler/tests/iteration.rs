@@ -383,7 +383,7 @@ fn parallel_iteration_reports_correlated_item_and_body_node_activity() {
         .iter()
         .filter(|record| record.scope == "mf.iteration")
         .collect();
-    assert_eq!(nested.len(), 14);
+    assert_eq!(nested.len(), 13);
     for event in [
         "mf.iteration.item.started",
         "mf.iteration.item.finished",
@@ -573,7 +573,7 @@ fn item_and_body_logs_remain_live_when_traces_are_unsampled() {
             .iter()
             .filter(|record| record.scope == "mf.iteration")
             .count(),
-        10
+        9
     );
     let mut detail: Vec<_> = harness
         .records()
@@ -590,7 +590,7 @@ fn item_and_body_logs_remain_live_when_traces_are_unsampled() {
         })
         .collect();
     detail.sort_by_key(|(_, context)| context.sequence);
-    assert_eq!(detail.first().unwrap().0, "mf.iteration.started");
+    assert_eq!(detail.first().unwrap().0, "mf.iteration.item.started");
     assert_eq!(detail.last().unwrap().0, "mf.iteration.finished");
     for (position, (_, context)) in detail.iter().enumerate() {
         assert_eq!(context.sequence.get(), position as i64 + 1);
@@ -724,7 +724,7 @@ fn main() {
     );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["result"], json!({"results":[10, null, 5]}));
-    assert_eq!(report["nested_records"], 14);
+    assert_eq!(report["nested_records"], 13);
     assert_eq!(report["failed_nodes"], 1);
     assert_eq!(report["item_spans"], 3);
     assert_eq!(report["node_spans"], 3);
@@ -944,7 +944,10 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
     let records = harness.records();
     let starts: Vec<_> = records
         .iter()
-        .filter(|record| record.event_name == "mf.iteration.started")
+        .filter(|record| {
+            record.event_name == "mf.iteration.item.started"
+                && record.attributes["mf.iteration.index"].as_i64() == Some(0)
+        })
         .map(|record| {
             mf_telemetry::iteration::IterationContext::from_json(
                 record.attributes[mf_telemetry::iteration::CONTEXT_ATTRIBUTE]

@@ -122,16 +122,13 @@ fn parallel_items_and_repeated_calls_have_independent_live_nodes() {
 #[test]
 fn reordered_records_and_retransmissions_preserve_terminal_evidence() {
     let mut state = SessionState::new(graph(), RunId::new()).unwrap();
-    let terminal = record(1, 0, 4, finished(Outcome::Succeeded));
+    let terminal = record(1, 0, 3, finished(Outcome::Succeeded));
     state.apply_iteration(terminal.clone()).unwrap();
     let focus = state.snapshot().iterations.latest_node_event.clone();
     state
-        .apply_iteration(record(1, 0, 2, IterationEvent::ItemStarted))
+        .apply_iteration(record(1, 0, 1, IterationEvent::ItemStarted))
         .unwrap();
-    state.apply_iteration(record(1, 0, 3, started())).unwrap();
-    state
-        .apply_iteration(record(1, 0, 1, IterationEvent::InvocationStarted))
-        .unwrap();
+    state.apply_iteration(record(1, 0, 2, started())).unwrap();
     assert_eq!(
         state.apply_iteration(terminal.clone()).unwrap(),
         Admission::Duplicate
@@ -139,7 +136,7 @@ fn reordered_records_and_retransmissions_preserve_terminal_evidence() {
     assert_eq!(state.snapshot().iterations.latest_node_event, focus);
     let node = &state.snapshot().iterations.items[0].nodes[0].node;
     assert_eq!(node.status, NodeStatus::Succeeded);
-    assert_eq!(node.started_elapsed_ns, Some(count(100_003)));
+    assert_eq!(node.started_elapsed_ns, Some(count(100_002)));
     let mut conflicting = terminal;
     conflicting.event = finished(Outcome::Failed);
     assert_eq!(
@@ -157,14 +154,11 @@ fn reordered_records_and_retransmissions_preserve_terminal_evidence() {
 fn missing_item_completion_is_unknown_after_invocation_closes() {
     let mut state = SessionState::new(graph(), RunId::new()).unwrap();
     state
-        .apply_iteration(record(1, 0, 1, IterationEvent::InvocationStarted))
+        .apply_iteration(record(1, 0, 1, IterationEvent::ItemStarted))
         .unwrap();
+    state.apply_iteration(record(1, 0, 2, started())).unwrap();
     state
-        .apply_iteration(record(1, 0, 2, IterationEvent::ItemStarted))
-        .unwrap();
-    state.apply_iteration(record(1, 0, 3, started())).unwrap();
-    state
-        .apply_iteration(record(1, 0, 6, IterationEvent::InvocationFinished))
+        .apply_iteration(record(1, 0, 5, IterationEvent::InvocationFinished))
         .unwrap();
     let snapshot = state.snapshot();
     let item = &snapshot.iterations.items[0];
@@ -174,13 +168,13 @@ fn missing_item_completion_is_unknown_after_invocation_closes() {
     assert!(node.possibly_missing_events);
     assert_eq!(snapshot.iterations.known_missing_count, 2);
     state
-        .apply_iteration(record(1, 0, 4, finished(Outcome::Succeeded)))
+        .apply_iteration(record(1, 0, 3, finished(Outcome::Succeeded)))
         .unwrap();
     state
         .apply_iteration(record(
             1,
             0,
-            5,
+            4,
             IterationEvent::ItemFinished {
                 outcome: Outcome::Succeeded,
                 duration_ns: Some(count(10)),
@@ -195,7 +189,7 @@ fn missing_item_completion_is_unknown_after_invocation_closes() {
     );
     assert!(
         state
-            .apply_iteration(record(1, 0, 7, started()))
+            .apply_iteration(record(1, 0, 6, started()))
             .is_ok_and(|admission| admission == Admission::Conflict)
     );
 }
@@ -224,11 +218,8 @@ fn closure_interrupts_active_items_without_inventing_child_outcomes() {
 #[test]
 fn completed_history_is_bounded_and_evicted_items_cannot_restart() {
     let mut state = SessionState::new(graph(), RunId::new()).unwrap();
-    state
-        .apply_iteration(record(1, 0, 1, IterationEvent::InvocationStarted))
-        .unwrap();
     for index in 0..100 {
-        let sequence = 2 + index * 4;
+        let sequence = 1 + index * 4;
         if index != 0 {
             state
                 .apply_iteration(record(1, index, sequence, IterationEvent::ItemStarted))
@@ -256,7 +247,7 @@ fn completed_history_is_bounded_and_evicted_items_cannot_restart() {
     assert!(state.snapshot().iterations.retention_overflows >= 36);
     assert_eq!(
         state
-            .apply_iteration(record(1, 0, 2, IterationEvent::ItemStarted))
+            .apply_iteration(record(1, 0, 1, IterationEvent::ItemStarted))
             .unwrap(),
         Admission::Duplicate
     );

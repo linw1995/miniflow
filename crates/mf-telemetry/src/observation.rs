@@ -975,21 +975,16 @@ impl IterationObservation {
                     .collect(),
             ),
         };
-        observation.emit_boundary(false);
         Some(observation)
     }
 
-    fn emit_boundary(&self, terminal: bool) {
+    fn emit_boundary(&self) {
         let mut attributes =
             nested_attributes(&self.workflow_id, self.run_id, &self.iteration_id, 0);
         self.scope
-            .attach(&self.scope.path, 0, terminal, &mut attributes);
+            .attach(&self.scope.path, 0, true, &mut attributes);
         (self.backend.emit_nested)(NestedLog {
-            name: if terminal {
-                "mf.iteration.finished"
-            } else {
-                "mf.iteration.started"
-            },
+            name: "mf.iteration.finished",
             attributes,
             context: self.parent.clone(),
         });
@@ -1030,7 +1025,7 @@ impl IterationObservation {
 
 impl Drop for IterationObservation {
     fn drop(&mut self) {
-        self.emit_boundary(true);
+        self.emit_boundary();
     }
 }
 

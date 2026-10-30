@@ -672,7 +672,6 @@ fn receive_iteration(record: LogRecord, context: &Context) -> Result<(), IngestE
     let outcome =
         || -> Result<Outcome, IngestError> { Ok(serde_json::from_value(required("mf.outcome")?)?) };
     let event = match record.event_name.as_str() {
-        "mf.iteration.started" => IterationEvent::InvocationStarted,
         "mf.iteration.finished" => IterationEvent::InvocationFinished,
         "mf.iteration.item.started" => IterationEvent::ItemStarted,
         "mf.iteration.item.finished" => IterationEvent::ItemFinished {

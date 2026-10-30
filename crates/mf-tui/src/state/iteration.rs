@@ -14,7 +14,6 @@ const MAX_DETAIL_WITNESSES: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum IterationEvent {
-    InvocationStarted,
     InvocationFinished,
     ItemStarted,
     ItemFinished {
@@ -292,13 +291,8 @@ impl IterationState {
             }
             DeliveryAdmission::New => {}
         }
-        if matches!(
-            record.event,
-            IterationEvent::InvocationStarted | IterationEvent::InvocationFinished
-        ) {
-            if matches!(record.event, IterationEvent::InvocationFinished) {
-                invocation.finished = Some(context.sequence);
-            }
+        if matches!(record.event, IterationEvent::InvocationFinished) {
+            invocation.finished = Some(context.sequence);
             return Ok((Admission::Applied, false));
         }
         if context.index.get() <= invocation.retired_prefix
@@ -415,7 +409,7 @@ impl IterationState {
                 true
             }
             IterationEvent::ItemStarted | IterationEvent::ItemFinished { .. } => false,
-            IterationEvent::InvocationStarted | IterationEvent::InvocationFinished => {
+            IterationEvent::InvocationFinished => {
                 unreachable!("invocation boundaries were handled")
             }
             event => {

@@ -668,9 +668,8 @@ fn iteration_nodes_update_live_without_spans_or_outer_lifecycle_records() {
     let mut receiver = LoopbackReceiver::bind(observed_iteration_graph(), run_id()).unwrap();
     let initial = receiver.snapshot().lifecycle;
     let payload = iteration_request(vec![
-        iteration_log(1, "mf.iteration.started", Vec::new()),
-        iteration_log(2, "mf.iteration.item.started", Vec::new()),
-        iteration_log(3, "mf.iteration.node.started", Vec::new()),
+        iteration_log(1, "mf.iteration.item.started", Vec::new()),
+        iteration_log(2, "mf.iteration.node.started", Vec::new()),
     ]);
     assert_eq!(
         send(
@@ -690,7 +689,7 @@ fn iteration_nodes_update_live_without_spans_or_outer_lifecycle_records() {
     assert_eq!(snapshot.lifecycle, initial);
     let payload = iteration_request(vec![
         iteration_log(
-            4,
+            3,
             "mf.iteration.node.finished",
             vec![
                 attribute("mf.outcome", string("succeeded")),
@@ -698,11 +697,11 @@ fn iteration_nodes_update_live_without_spans_or_outer_lifecycle_records() {
             ],
         ),
         iteration_log(
-            5,
+            4,
             "mf.iteration.item.finished",
             vec![attribute("mf.outcome", string("succeeded"))],
         ),
-        iteration_log(6, "mf.iteration.finished", Vec::new()),
+        iteration_log(5, "mf.iteration.finished", Vec::new()),
     ]);
     assert_eq!(
         send(
@@ -766,9 +765,8 @@ fn raw_log_retention_does_not_stop_iteration_state_reduction() {
         );
     }
     let payload = iteration_request(vec![
-        iteration_log(1, "mf.iteration.started", Vec::new()),
-        iteration_log(2, "mf.iteration.item.started", Vec::new()),
-        iteration_log(3, "mf.iteration.node.started", Vec::new()),
+        iteration_log(1, "mf.iteration.item.started", Vec::new()),
+        iteration_log(2, "mf.iteration.node.started", Vec::new()),
     ]);
     assert_eq!(
         send(
@@ -780,13 +778,13 @@ fn raw_log_retention_does_not_stop_iteration_state_reduction() {
         200
     );
     assert_eq!(receiver.log_snapshot().records.len(), 4096);
-    assert_eq!(receiver.log_snapshot().local_drops, 3);
+    assert_eq!(receiver.log_snapshot().local_drops, 2);
     assert_eq!(
         receiver.snapshot().iterations.items[0].nodes[0].node.status,
         NodeStatus::Running
     );
     let mut invalid = iteration_log(
-        4,
+        3,
         "mf.iteration.node.finished",
         vec![attribute("mf.outcome", string("succeeded"))],
     );
