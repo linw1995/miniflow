@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn input_validation_enforces_unicode_and_count_limits() {
         for (query, valid) in [
-            ("搜索".to_owned(), true),
+            ("\u{641c}\u{7d22}".to_owned(), true),
             (String::new(), false),
             (" ".into(), false),
             ("é".repeat(128), true),

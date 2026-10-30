@@ -188,18 +188,26 @@ fn search_sends_all_options_and_preserves_the_complete_result() {
 #[test]
 fn search_defaults_and_empty_results_are_successful() {
     let server = Server::start(vec![Reply::search(json!([]))]);
-    let result = probe(SEARCH_KIND, &server, json!({"query":"没有结果"}), json!({}));
+    let result = probe(
+        SEARCH_KIND,
+        &server,
+        json!({"query":"\u{6ca1}\u{6709}\u{7ed3}\u{679c}"}),
+        json!({}),
+    );
     assert_eq!(result["ok"], true, "{result}");
     assert_eq!(result["outputs"]["results"], json!([]));
     assert_eq!(
         server.requests()[0].body,
-        json!({"query":"没有结果","count":10,"need_content":false})
+        json!({"query":"\u{6ca1}\u{6709}\u{7ed3}\u{679c}","count":10,"need_content":false})
     );
 }
 
 #[test]
 fn fetch_preserves_title_and_markdown_content() {
-    let server = Server::start(vec![Reply::fetch("Example", "# Heading\n\n正文")]);
+    let server = Server::start(vec![Reply::fetch(
+        "Example",
+        "# Heading\n\n\u{6b63}\u{6587}",
+    )]);
     let result = probe(
         FETCH_KIND,
         &server,
@@ -209,7 +217,7 @@ fn fetch_preserves_title_and_markdown_content() {
     assert_eq!(result["ok"], true, "{result}");
     assert_eq!(
         result["outputs"],
-        json!({"title":"Example","content":"# Heading\n\n正文"})
+        json!({"title":"Example","content":"# Heading\n\n\u{6b63}\u{6587}"})
     );
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
