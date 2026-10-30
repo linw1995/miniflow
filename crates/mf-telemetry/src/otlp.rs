@@ -395,6 +395,85 @@ mod snapshot_tests {
         crate::identity::WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap()
     }
 
+    #[derive(Debug)]
+    struct CollectSnapshots(Arc<Mutex<Vec<opentelemetry_proto::tonic::logs::v1::LogRecord>>>);
+
+    impl LogExporter for CollectSnapshots {
+        async fn export(&self, batch: LogBatch<'_>) -> OTelSdkResult {
+            use prost::Message;
+            let mut records = self.0.lock().unwrap();
+            for (record, _) in batch.iter() {
+                let wire = opentelemetry_proto::tonic::logs::v1::LogRecord::from(record);
+                records.push(
+                    opentelemetry_proto::tonic::logs::v1::LogRecord::decode(
+                        wire.encode_to_vec().as_slice(),
+                    )
+                    .unwrap(),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn nullable_snapshot_values_survive_sdk_export_and_fragment_reassembly() {
+        use crate::{
+            capture::*,
+            snapshot::{Assembler, CHUNK_BYTES},
+        };
+        use serde_json::json;
+        for size in [0, CHUNK_BYTES * 2] {
+            let collected = Arc::new(Mutex::new(Vec::new()));
+            let exporter = Arc::new(Mutex::new(SnapshotExporter::with_exporter(
+                workflow(),
+                crate::identity::RunId::new(),
+                CollectSnapshots(collected.clone()),
+            )));
+            let sink = exporter.clone();
+            let publisher = SnapshotPublisher::new(move |record| {
+                sink.lock().unwrap().emit(record)?;
+                Ok(())
+            })
+            .unwrap();
+            let outputs = json!({
+                "value": null,
+                "nested": {"metadata": null, "values": [null, {"value": null}, "null", ""]},
+                "text": "x".repeat(size),
+            });
+            publisher.record(SnapshotEvent {
+                scope: vec![],
+                node: "chat".into(),
+                snapshot: NodeSnapshot {
+                    inputs: json!({"messages": [{"role": "assistant", "content": null}]}),
+                    outputs: outputs.clone(),
+                    skipped: Arc::from([]),
+                    outcome: SnapshotOutcome::Succeeded,
+                    error: None,
+                },
+            });
+            publisher.finish();
+            assert!(
+                publisher.diagnostic().is_none(),
+                "{:?}",
+                publisher.diagnostic()
+            );
+            exporter.lock().unwrap().finish().unwrap();
+            let mut assembler = Assembler::default();
+            let records: Vec<_> = collected
+                .lock()
+                .unwrap()
+                .drain(..)
+                .flat_map(|record| assembler.push(record).unwrap())
+                .collect();
+            assert_eq!(records.len(), 3);
+            assert_eq!(records[1]["outputs"], outputs);
+            assert!(records[1]["inputs"]["messages"][0]["content"].is_null());
+            assert!(records[1].get("error").is_none());
+            assert_eq!(records[2], json!({"record": "end"}));
+            assert!(!assembler.has_pending());
+        }
+    }
+
     #[test]
     fn snapshot_backpressure_retains_bursts_larger_than_the_queue() {
         let collected = Arc::new(Mutex::new(Vec::new()));
