@@ -53,7 +53,7 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 21] {
         (
             "chat-tools-flow.json",
             None,
-            json!({"status":"succeeded","text":"reply","usages":[chat_usage(json!([{"node":"repeat","index":0}]))],"error":""}),
+            json!({"status":"succeeded","text":"reply","usages":[chat_usage(json!([{"node":"agent","index":0},{"node":"rounds","index":0}]))],"error":""}),
         ),
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
@@ -152,6 +152,12 @@ fn documented_examples_compile_and_produce_expected_outputs() {
     let definitions = temporary.path().join("examples");
     let runtime = temporary.path().join("runtime");
     fs::create_dir(&definitions).unwrap();
+    fs::create_dir(definitions.join("flows")).unwrap();
+    fs::copy(
+        workspace().join("examples/flows/chat-tools.json"),
+        definitions.join("flows/chat-tools.json"),
+    )
+    .unwrap();
     fs::create_dir(&runtime).unwrap();
     // Preserve the examples' relative paths while keeping lock files out of the checkout.
     symlink(workspace().join("crates"), temporary.path().join("crates")).unwrap();
@@ -167,6 +173,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     ]
                 } else if name == "chat-loop-flow.json" {
                     vec![llm_support::Reply::stream_text("reply"); 2]
+                } else if name == "chat-tools-flow.json" {
+                    vec![llm_support::Reply::stream_text("reply")]
                 } else {
                     vec![llm_support::Reply::text("reply"); 2]
                 },
@@ -288,7 +296,10 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         );
         let mut actual: Value = if matches!(
             name,
-            "chat-title-flow.json" | "chat-nested-title-flow.json" | "chat-loop-flow.json"
+            "chat-title-flow.json"
+                | "chat-nested-title-flow.json"
+                | "chat-loop-flow.json"
+                | "chat-tools-flow.json"
         ) {
             let records: Vec<Value> = serde_json::Deserializer::from_slice(&output.stdout)
                 .into_iter()

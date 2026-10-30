@@ -141,14 +141,16 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
 fn tool_chat_workflow_reuses_the_application_contract() {
     use mf_chat::contract::CompletionState;
     use mf_tui::chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions};
-    let tool = Reply::json(
-        serde_json::json!({"id":"tool-round","object":"chat.completion","created":0,"model":"fixture-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"multiply-1","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}),
-    );
+    let tool = Reply::stream_tool_calls(vec![(
+        "multiply-1",
+        "multiply",
+        serde_json::json!({"amount":21}),
+    )]);
     let server = Server::start(vec![
         tool,
-        Reply::text("first answer"),
+        Reply::stream_text("first answer"),
         Reply::text("Tool title"),
-        Reply::text("second answer"),
+        Reply::stream_text("second answer"),
     ]);
     let root = tempfile::tempdir().unwrap();
     let binary = compiled(root.path(), &server, "chat-tools-flow.json");
@@ -171,6 +173,7 @@ fn tool_chat_workflow_reuses_the_application_contract() {
     .unwrap();
     let controller = ChatController::open(launch).unwrap();
     let mut session_id = None;
+    let mut observation = None;
     for (prompt, expected, count) in [("first", "first answer", 3), ("second", "second answer", 1)]
     {
         controller
@@ -187,9 +190,21 @@ fn tool_chat_workflow_reuses_the_application_contract() {
             );
             match controller.try_event() {
                 Some(ChatEvent::Submitted { session, .. }) => session_id = Some(session.id),
-                Some(ChatEvent::Observing(_)) | None => thread::sleep(Duration::from_millis(10)),
-                Some(ChatEvent::Preview { preview, .. }) => assert!(preview.segments.is_empty()),
-                Some(ChatEvent::Finished { resolution, .. }) => {
+                Some(ChatEvent::Observing(view)) => observation = Some(view),
+                None => thread::sleep(Duration::from_millis(10)),
+                Some(ChatEvent::Preview { preview, .. }) => assert!(preview.segments.len() <= 32),
+                Some(ChatEvent::Finished {
+                    resolution,
+                    stderr,
+                    capture_error,
+                    ..
+                }) => {
+                    assert!(!stderr.contains("data history incomplete"), "{stderr}");
+                    assert!(capture_error.is_none(), "{capture_error:?}");
+                    assert_eq!(
+                        observation.as_ref().unwrap().reader.data_snapshot().status,
+                        "Complete"
+                    );
                     let resolution = resolution.unwrap();
                     assert!(
                         resolution.diagnostics.is_empty(),
@@ -235,7 +250,13 @@ fn tool_chat_workflow_reuses_the_application_contract() {
     );
     let requests = server.requests();
     assert_eq!(requests.len(), 4);
-    let properties = &requests[0].body["tools"][0]["function"]["parameters"]["properties"];
+    let multiply = requests[0].body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "multiply")
+        .unwrap();
+    let properties = &multiply["function"]["parameters"]["properties"];
     assert!(properties.get("amount").is_some());
     assert!(properties.get("factor").is_none());
     let result = requests[1].body["messages"]
@@ -269,6 +290,20 @@ fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
         crates.join("builtin-nodes/core").to_str().unwrap().into();
     if let Some(code) = value["dependencies"].get_mut("code") {
         code["path"] = crates.join("builtin-nodes/code").to_str().unwrap().into();
+    }
+    if example == "chat-tools-flow.json" {
+        value["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["id"] == "agent")
+            .unwrap()["config"]["flows"]["tools"]["path"] = crates
+            .parent()
+            .unwrap()
+            .join("examples/flows/chat-tools.json")
+            .to_str()
+            .unwrap()
+            .into();
     }
     let parameters = &mut value["nodes"][0]["config"]["parameters"];
     parameters["model"]["default"] = "wrong-default-model".into();

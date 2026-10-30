@@ -1,0 +1,832 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "version": "=0.1.0"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "version": "=0.1.0"
+    },
+    "code": {
+      "package": "mfn-code",
+      "version": "=0.1.0"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string",
+            "default": ""
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
+          "tool_inputs": {
+            "type": "object",
+            "default": {},
+            "secret": false
+          },
+          "descriptions": {
+            "type": {
+              "map": "string"
+            },
+            "default": {},
+            "secret": false
+          },
+          "max_rounds": {
+            "type": "int",
+            "default": 4,
+            "secret": false
+          },
+          "max_tool_calls": {
+            "type": "int",
+            "default": 128,
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "zero",
+      "kind": "builtin.constant",
+      "config": {
+        "value": 0
+      }
+    },
+    {
+      "id": "not_done",
+      "kind": "builtin.constant",
+      "config": {
+        "value": false
+      }
+    },
+    {
+      "id": "limits",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "max_rounds": "int",
+          "max_tool_calls": "int"
+        },
+        "code": {
+          "valid": "max_rounds >= 1 && max_rounds <= 1000 && max_tool_calls >= 1 && max_tool_calls <= 128"
+        }
+      },
+      "inputs": {
+        "max_rounds": {
+          "from": {
+            "node": "params",
+            "port": "max_rounds"
+          }
+        },
+        "max_tool_calls": {
+          "from": {
+            "node": "params",
+            "port": "max_tool_calls"
+          }
+        }
+      }
+    },
+    {
+      "id": "limits_valid",
+      "kind": "builtin.assert",
+      "config": {
+        "condition": {
+          "source": {
+            "output": "limits.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        },
+        "message": "Agent limits exceed the supported ranges"
+      }
+    },
+    {
+      "id": "chat_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "history": {
+            "list": "object"
+          },
+          "system": "string"
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        }
+      }
+    },
+    {
+      "id": "empty_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "initial_status",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "succeeded"
+      }
+    },
+    {
+      "id": "initial_outcome",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "tool_calls"
+      }
+    },
+    {
+      "id": "empty_text",
+      "kind": "builtin.constant",
+      "config": {
+        "value": ""
+      }
+    },
+    {
+      "id": "rounds",
+      "kind": "workflow.loop",
+      "loop": {
+        "max_iterations": 1000,
+        "variables": [
+          {
+            "name": "messages",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "usages",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "status",
+            "type": "string"
+          },
+          {
+            "name": "outcome",
+            "type": "string"
+          },
+          {
+            "name": "text",
+            "type": "string"
+          },
+          {
+            "name": "error",
+            "type": "string"
+          },
+          {
+            "name": "model",
+            "type": "string"
+          },
+          {
+            "name": "base_url",
+            "type": "string"
+          },
+          {
+            "name": "api_key",
+            "type": "string"
+          },
+          {
+            "name": "tool_inputs",
+            "type": "object"
+          },
+          {
+            "name": "descriptions",
+            "type": {
+              "map": "string"
+            }
+          },
+          {
+            "name": "max_rounds",
+            "type": "int"
+          },
+          {
+            "name": "max_tool_calls",
+            "type": "int"
+          },
+          {
+            "name": "round",
+            "type": "int"
+          },
+          {
+            "name": "done",
+            "type": "bool"
+          }
+        ],
+        "until": {
+          "variable": "done",
+          "operator": "eq",
+          "value": true
+        },
+        "body": {
+          "nodes": [
+            {
+              "id": "catalog",
+              "kind": "builtin.tool_catalog",
+              "config": {
+                "source": [
+                  "iteration_dispatch",
+                  "invoke"
+                ]
+              },
+              "inputs": {
+                "descriptions": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "descriptions"
+                  }
+                }
+              }
+            },
+            {
+              "id": "chat",
+              "kind": "builtin.llm",
+              "config": {
+                "model": {
+                  "$ref": "%loop.model"
+                },
+                "base_url": {
+                  "$ref": "%loop.base_url"
+                },
+                "api_key": {
+                  "$ref": "%loop.api_key"
+                },
+                "capture_errors": true
+              },
+              "inputs": {
+                "messages": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                },
+                "tools": {
+                  "from": {
+                    "node": "catalog",
+                    "port": "tools"
+                  }
+                }
+              }
+            },
+            {
+              "id": "calls",
+              "kind": "builtin.agent_calls",
+              "config": {
+                "node": "invoke"
+              },
+              "inputs": {
+                "outcome": {
+                  "from": {
+                    "node": "chat",
+                    "port": "outcome"
+                  }
+                },
+                "tool_calls": {
+                  "from": {
+                    "node": "chat",
+                    "port": "tool_calls"
+                  }
+                },
+                "binding": {
+                  "from": {
+                    "node": "catalog",
+                    "port": "binding"
+                  }
+                },
+                "shared": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "tool_inputs"
+                  }
+                },
+                "max_tool_calls": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "max_tool_calls"
+                  }
+                }
+              }
+            },
+            {
+              "id": "iteration_dispatch",
+              "kind": "builtin.iteration",
+              "config": {
+                "input_mode": "arguments",
+                "body": {
+                  "nodes": [
+                    {
+                      "id": "invoke",
+                      "kind": "workflow.call",
+                      "config": {
+                        "flow": "tools"
+                      }
+                    }
+                  ],
+                  "result": {
+                    "node": "invoke",
+                    "port": "result"
+                  }
+                }
+              },
+              "inputs": {
+                "items": {
+                  "from": {
+                    "node": "calls",
+                    "port": "records"
+                  }
+                }
+              }
+            },
+            {
+              "id": "tool_results",
+              "kind": "builtin.tool_results",
+              "config": {},
+              "inputs": {
+                "outcome": {
+                  "from": {
+                    "node": "chat",
+                    "port": "outcome"
+                  }
+                },
+                "tool_calls": {
+                  "from": {
+                    "node": "chat",
+                    "port": "tool_calls"
+                  }
+                },
+                "results": {
+                  "from": {
+                    "node": "iteration_dispatch",
+                    "port": "results"
+                  }
+                }
+              }
+            },
+            {
+              "id": "collect_usages",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "left": {
+                    "list": "object"
+                  },
+                  "right": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "value": "left + right"
+                }
+              },
+              "inputs": {
+                "left": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "usages"
+                  }
+                },
+                "right": {
+                  "from": {
+                    "node": "chat",
+                    "port": "usages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "collect_messages",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "left": {
+                    "list": "object"
+                  },
+                  "message": "object",
+                  "results": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "value": "left + [message] + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
+                }
+              },
+              "inputs": {
+                "left": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                },
+                "message": {
+                  "from": {
+                    "node": "chat",
+                    "port": "message"
+                  }
+                },
+                "results": {
+                  "from": {
+                    "node": "tool_results",
+                    "port": "tool_results"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_messages",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "messages"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "collect_messages",
+                    "port": "value"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_usages",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "usages"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "collect_usages",
+                    "port": "value"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_status",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "status"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "status"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_outcome",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "outcome"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_text",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "text"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "text"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_error",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "error"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "chat",
+                    "port": "error"
+                  }
+                }
+              }
+            },
+            {
+              "id": "next_round",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "round": "int",
+                  "max_rounds": "int",
+                  "outcome": "string"
+                },
+                "code": {
+                  "round": "round + 1",
+                  "done": "outcome != 'tool_calls' || round + 1 >= max_rounds"
+                }
+              },
+              "inputs": {
+                "round": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "round"
+                  }
+                },
+                "max_rounds": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "max_rounds"
+                  }
+                },
+                "outcome": {
+                  "from": {
+                    "node": "chat",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_round",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "round"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "next_round",
+                    "port": "round"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_done",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "done"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "next_round",
+                    "port": "done"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "stream_outputs": {
+          "answer": {
+            "node": "chat",
+            "port": "delta"
+          }
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "chat_messages",
+            "port": "messages"
+          }
+        },
+        "model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "empty_usages",
+            "port": "value"
+          }
+        },
+        "status": {
+          "from": {
+            "node": "initial_status",
+            "port": "value"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "initial_outcome",
+            "port": "value"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "empty_text",
+            "port": "value"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "empty_text",
+            "port": "value"
+          }
+        },
+        "tool_inputs": {
+          "from": {
+            "node": "params",
+            "port": "tool_inputs"
+          }
+        },
+        "descriptions": {
+          "from": {
+            "node": "params",
+            "port": "descriptions"
+          }
+        },
+        "max_rounds": {
+          "from": {
+            "node": "params",
+            "port": "max_rounds"
+          }
+        },
+        "max_tool_calls": {
+          "from": {
+            "node": "params",
+            "port": "max_tool_calls"
+          }
+        },
+        "round": {
+          "from": {
+            "node": "zero",
+            "port": "value"
+          }
+        },
+        "done": {
+          "from": {
+            "node": "not_done",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "settle",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "status": "string",
+          "outcome": "string",
+          "text": "string",
+          "error": "string"
+        },
+        "code": {
+          "status": "status == 'succeeded' && outcome == 'completed' ? 'succeeded' : 'failed'",
+          "text": "outcome == 'completed' ? text : ''",
+          "error": "status == 'failed' ? error : outcome == 'tool_calls' ? 'Tool round limit reached' : outcome == 'completed' ? '' : 'Model response did not complete'"
+        }
+      },
+      "inputs": {
+        "status": {
+          "from": {
+            "node": "rounds",
+            "port": "status"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "rounds",
+            "port": "outcome"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "rounds",
+            "port": "text"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "rounds",
+            "port": "error"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "rounds",
+      "port": "answer",
+      "optional": true
+    },
+    {
+      "name": "status",
+      "node": "settle",
+      "port": "status"
+    },
+    {
+      "name": "text",
+      "node": "settle",
+      "port": "text"
+    },
+    {
+      "name": "usages",
+      "node": "rounds",
+      "port": "usages"
+    },
+    {
+      "name": "error",
+      "node": "settle",
+      "port": "error"
+    }
+  ],
+  "flows": {},
+  "edges": [
+    {
+      "from_node": "limits",
+      "to_node": "limits_valid"
+    },
+    {
+      "from_node": "limits_valid",
+      "to_node": "chat_messages"
+    }
+  ]
+}

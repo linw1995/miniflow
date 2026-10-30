@@ -1,12 +1,8 @@
-use mf_runtime::{GraphInput, ValueRef, ValueSchema, ValueType, WorkflowGraph};
-use rig_core::completion::ToolDefinition;
+use mf_runtime::{GraphInput, NodeValue, ValueSchema, ValueType, WorkflowGraph};
 use serde::Serialize;
 use serde_json::{Value, json};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io::Write,
-};
+use std::{collections::BTreeMap, io::Write};
 
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
@@ -28,33 +24,26 @@ pub enum ToolSchemaError {
     },
     #[snafu(display("LLM tool declarations exceed the supported size or count"))]
     DeclarationsLimit,
-    #[snafu(display("tool output `{name}` must connect to one argument-mode Iteration"))]
+    #[snafu(display("dispatch branch `{name}` requires connected gates and parameter ports"))]
     Connection { name: String },
+    #[snafu(display("tool workflow requires one public dispatch selector and arguments input"))]
+    Entry,
+    #[snafu(display("tool workflow metadata is missing at `{path}`"))]
+    Source { path: String },
+    #[snafu(display("could not encode tool declarations: {source}"))]
+    Encode { source: mf_runtime::TypeMismatch },
     #[snafu(
-        display("connected tool metadata is unavailable outside workflow execution"),
+        display("tool metadata is unavailable outside workflow execution"),
         visibility(pub)
     )]
     Unavailable,
 }
-
 impl From<ToolSchemaError> for mf_runtime::NodeExecutionError {
     fn from(source: ToolSchemaError) -> Self {
         Box::<dyn std::error::Error + Send + Sync>::from(source).into()
     }
 }
 
-#[derive(Debug, Snafu)]
-pub enum ToolArgumentsError {
-    #[snafu(display("tool arguments require the declared object shape"))]
-    Shape,
-    #[snafu(display("tool arguments exceed the size limit"))]
-    Limit,
-    #[snafu(display("tool argument `{parameter}`: {source}"))]
-    Argument {
-        parameter: String,
-        source: mf_runtime::TypeMismatch,
-    },
-}
 #[derive(Debug, Snafu)]
 pub enum ToolEncodingError {
     #[snafu(display("tool data exceeds the size limit"))]
@@ -63,189 +52,184 @@ pub enum ToolEncodingError {
     Json { source: serde_json::Error },
 }
 
+#[derive(Clone, Debug, NodeValue)]
+pub struct DispatchBinding {
+    pub selector: String,
+    pub arguments: String,
+}
+
 struct Parameter {
     name: String,
-    input: String,
-    descriptor: GraphInput,
+    descriptors: Vec<GraphInput>,
 }
 impl Parameter {
     fn name(&self) -> &str {
         &self.name
     }
+    // A selected route publishes every explicitly connected argument value.
     fn required(&self) -> bool {
-        self.descriptor.required
+        true
     }
-    fn constraints(&self) -> &[ValueType] {
-        std::slice::from_ref(&self.descriptor.value_type)
+    fn constraints(&self) -> impl Iterator<Item = &ValueType> {
+        self.descriptors.iter().map(|input| &input.value_type)
     }
     fn schema_constraints(&self) -> impl Iterator<Item = &ValueSchema> {
-        self.descriptor.schema.iter()
+        self.descriptors
+            .iter()
+            .filter_map(|input| input.schema.as_ref())
     }
     fn is_secret(&self) -> bool {
-        self.descriptor.secret
+        self.descriptors.iter().any(|input| input.secret)
     }
-}
-struct Tool {
-    definition: ToolDefinition,
-    parameters: Vec<Parameter>,
-}
-pub struct ConnectedTools {
-    tools: BTreeMap<String, Tool>,
 }
 
-impl ConnectedTools {
-    pub fn new(
+pub struct ToolCatalog {
+    pub tools: Vec<crate::ToolDefinition>,
+    pub binding: DispatchBinding,
+}
+
+fn input_location<'graph>(
+    mut graph: &'graph WorkflowGraph,
+    mut input: &'graph GraphInput,
+) -> (&'graph WorkflowGraph, &'graph GraphInput) {
+    while let Some(child) = graph
+        .nodes
+        .get(&input.node)
+        .and_then(|node| node.subgraph.as_deref())
+        && let Some(origin) = child.inputs.get(&input.port)
+    {
+        graph = child;
+        input = origin;
+    }
+    (graph, input)
+}
+
+impl ToolCatalog {
+    pub fn from_path(
         graph: &WorkflowGraph,
-        source: &str,
-        outputs: &[String],
+        source: &[mf_runtime::DefinitionId],
         descriptions: &BTreeMap<String, String>,
     ) -> Result<Self, ToolSchemaError> {
-        ensure!(outputs.len() <= MAX_TOOL_CALLS, DeclarationsLimitSnafu);
-        let mut tools = BTreeMap::new();
-        for name in outputs {
+        let graph = if source.is_empty() {
+            graph
+        } else {
+            graph
+                .locate(source)
+                .and_then(|(_, node)| node.subgraph.as_deref())
+                .with_context(|| SourceSnafu {
+                    path: source
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                })?
+        };
+        Self::new(graph, descriptions)
+    }
+    pub fn new(
+        graph: &WorkflowGraph,
+        descriptions: &BTreeMap<String, String>,
+    ) -> Result<Self, ToolSchemaError> {
+        let entries: Vec<_> = graph
+            .inputs
+            .iter()
+            .filter_map(|(name, input)| {
+                let (scope, input) = input_location(graph, input);
+                if input.port != "selector" {
+                    return None;
+                }
+                let Some(ValueSchema::Enum(branches)) = input.schema.as_ref() else {
+                    return None;
+                };
+                let arguments = graph.inputs.iter().find(|(_, candidate)| {
+                    let (candidate_scope, candidate) = input_location(graph, candidate);
+                    std::ptr::eq(scope, candidate_scope)
+                        && candidate.node == input.node
+                        && candidate.port == "arguments"
+                })?;
+                let node = scope.nodes.get(&input.node)?;
+                (node.exclusive_outputs == *branches).then_some((
+                    name,
+                    input,
+                    arguments.0,
+                    node,
+                    branches,
+                    scope,
+                ))
+            })
+            .collect();
+        ensure!(entries.len() == 1, EntrySnafu);
+        let (selector, entry, arguments, node, branches, graph) = entries[0];
+        ensure!(branches.len() <= MAX_TOOL_CALLS, DeclarationsLimitSnafu);
+        let mut tools = Vec::new();
+        for name in branches {
             ensure!(crate::call::valid_name(name), AliasSnafu { name });
-            let candidates: Vec<_> = graph
-                .connections
-                .iter()
-                .filter(|edge| {
-                    edge.from_node.as_str() == source
-                        && edge.from_output == *name
-                        && edge.to_input == "items"
-                })
-                .collect();
-            ensure!(candidates.len() == 1, ConnectionSnafu { name });
-            let target = &candidates[0].to_node;
-            let target_node = graph.nodes.get(target).context(ConnectionSnafu { name })?;
-            let body = target_node
-                .subgraph
-                .as_deref()
-                .context(ConnectionSnafu { name })?;
             ensure!(
-                body.nodes.contains_key(&mf_runtime::DefinitionId::from(
-                    mf_runtime::ITERATION_INPUT_ID
-                )) && matches!(
-                    target_node.input_schemas.get("items"),
-                    Some(ValueSchema::List(_))
-                ),
+                graph
+                    .controls
+                    .iter()
+                    .any(|edge| edge.from_node == entry.node && edge.from_output == *name),
                 ConnectionSnafu { name }
             );
-            let external: BTreeSet<_> = graph
-                .connections
-                .iter()
-                .filter(|edge| edge.to_node == *target && edge.to_input != "items")
-                .map(|edge| edge.to_input.as_str())
-                .collect();
-            let inputs: Vec<_> = body
-                .inputs
-                .iter()
-                .filter(|(input, _)| !external.contains(input.as_str()))
-                .collect();
-            ensure!(inputs.len() <= 256, DeclarationsLimitSnafu);
-            let mut counts = BTreeMap::new();
-            for (input, _) in &inputs {
-                let origin = body.input_origin(input).context(ConnectionSnafu { name })?;
-                *counts.entry(origin.port.clone()).or_insert(0usize) += 1;
-            }
+            let prefix = format!("{name}.");
             let mut parameters = Vec::new();
-            for (input, descriptor) in inputs {
-                let origin = body.input_origin(input).context(ConnectionSnafu { name })?;
-                let alias = if counts[&origin.port] == 1 {
-                    origin.port.clone()
-                } else {
-                    input.clone()
-                };
+            for output in node
+                .ports
+                .outputs
+                .iter()
+                .filter(|port| port.name.starts_with(&prefix))
+            {
+                let field = output.name.strip_prefix(&prefix).unwrap();
+                let mut descriptors = Vec::new();
+                for edge in graph
+                    .connections
+                    .iter()
+                    .filter(|edge| edge.from_node == entry.node && edge.from_output == output.name)
+                {
+                    let target = graph
+                        .nodes
+                        .get(&edge.to_node)
+                        .context(ConnectionSnafu { name })?;
+                    let port = target
+                        .ports
+                        .inputs
+                        .iter()
+                        .find(|port| port.name == edge.to_input)
+                        .context(ConnectionSnafu { name })?;
+                    descriptors.push(GraphInput {
+                        node: edge.to_node.clone(),
+                        port: edge.to_input.clone(),
+                        value_type: port.value_type.clone(),
+                        required: true,
+                        schema: target.input_schemas.get(&edge.to_input).cloned(),
+                        secret: target.secret_inputs.contains(&edge.to_input),
+                    });
+                }
+                ensure!(!descriptors.is_empty(), ConnectionSnafu { name });
                 parameters.push(Parameter {
-                    name: alias,
-                    input: input.clone(),
-                    descriptor: descriptor.clone(),
+                    name: field.into(),
+                    descriptors,
                 });
             }
-            parameters.sort_by(|a, b| a.name.cmp(&b.name));
-            let definition = ToolDefinition {
+            parameters.sort_by(|left, right| left.name.cmp(&right.name));
+            tools.push(crate::ToolDefinition {
                 name: name.clone(),
                 description: descriptions.get(name).cloned().unwrap_or_default(),
-                parameters: parameters_schema(name, &parameters)?,
-            };
-            tools.insert(
-                name.clone(),
-                Tool {
-                    definition,
-                    parameters,
-                },
-            );
+                input_schema: parameters_schema(name, &parameters)?.into(),
+            });
         }
-        let definitions: Vec<_> = tools.values().map(|tool| &tool.definition).collect();
+        let encoded = mf_runtime::OutputValue::encode(tools.clone()).context(EncodeSnafu)?;
         ensure!(
-            bounded_json(&definitions, MAX_TOOL_SCHEMA_BYTES).is_ok(),
+            bounded_json(&encoded, MAX_TOOL_SCHEMA_BYTES).is_ok(),
             DeclarationsLimitSnafu
         );
-        Ok(Self { tools })
-    }
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .values()
-            .map(|tool| tool.definition.clone())
-            .collect()
-    }
-    pub fn batches(
-        &self,
-        calls: &[crate::ToolCall],
-    ) -> Result<BTreeMap<String, ValueRef>, ToolArgumentsError> {
-        let mut groups: BTreeMap<String, Vec<ValueRef>> = self
-            .tools
-            .keys()
-            .map(|name| (name.clone(), Vec::new()))
-            .collect();
-        for call in calls {
-            let Some(tool) = self.tools.get(&call.name) else {
-                continue;
-            };
-            ensure!(
-                bounded_json(&call.arguments, MAX_TOOL_ARGUMENT_BYTES).is_ok(),
-                LimitSnafu
-            );
-            let object = call.arguments.as_object().context(ShapeSnafu)?;
-            ensure!(
-                object.keys().all(|name| tool
-                    .parameters
-                    .iter()
-                    .any(|parameter| parameter.name == name.as_ref())),
-                ShapeSnafu
-            );
-            let mut arguments = Vec::new();
-            for parameter in &tool.parameters {
-                let Some(value) = object.get(parameter.name.as_str()) else {
-                    ensure!(!parameter.required(), ShapeSnafu);
-                    continue;
-                };
-                parameter
-                    .descriptor
-                    .value_type
-                    .validate_shared(value)
-                    .context(ArgumentSnafu {
-                        parameter: &parameter.name,
-                    })?;
-                if let Some(schema) = &parameter.descriptor.schema {
-                    schema.validate_shared(value).context(ArgumentSnafu {
-                        parameter: &parameter.name,
-                    })?;
-                }
-                let value = if parameter.is_secret() {
-                    value.clone().into_secret()
-                } else {
-                    value.clone()
-                };
-                arguments.push((parameter.input.clone().into(), value));
-            }
-            groups
-                .get_mut(&call.name)
-                .unwrap()
-                .push(ValueRef::object(arguments));
-        }
-        Ok(groups
-            .into_iter()
-            .map(|(name, values)| (name, ValueRef::array(values)))
-            .collect())
+        Ok(Self {
+            tools,
+            binding: DispatchBinding {
+                selector: selector.clone(),
+                arguments: arguments.clone(),
+            },
+        })
     }
 }
 
@@ -294,6 +278,7 @@ fn parameters_schema(tool: &str, parameters: &[Parameter]) -> Result<Value, Tool
             constraints.push(lower_schema(schema, tool, parameter.name())?);
         }
         constraints.retain(|value| value.as_object().is_none_or(|object| !object.is_empty()));
+        constraints.dedup();
         let mut schema = match constraints.len() {
             0 => json!({}),
             1 => constraints.pop().unwrap(),
@@ -516,8 +501,10 @@ pub fn validate_wire_arguments(reply: &Value) -> Result<(), crate::LlmExecutionE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{DefinitionId, EdgeDefinition, GraphNode, NodePorts};
-    use std::sync::Arc;
+    use mf_runtime::{
+        ControlEdgeDefinition, DefinitionId, EdgeDefinition, GraphNode, NodePorts, PortSpec,
+    };
+    use std::collections::BTreeSet;
     fn node() -> GraphNode {
         GraphNode {
             ports: NodePorts::default(),
@@ -529,157 +516,161 @@ mod tests {
         }
     }
     fn graph() -> WorkflowGraph {
-        let body = WorkflowGraph {
-            inputs: ["amount", "factor"]
-                .into_iter()
-                .map(|port| {
-                    (
-                        format!("calculate.{port}"),
-                        GraphInput {
-                            node: "calculate".into(),
-                            port: port.into(),
-                            value_type: ValueType::Int64,
-                            required: true,
-                            schema: None,
-                            secret: false,
-                        },
-                    )
-                })
-                .collect(),
-            nodes: BTreeMap::from([("calculate".into(), node())]),
-            ..Default::default()
-        };
-        let mut batch = node();
-        batch.subgraph = Some(Arc::new(body));
-        Arc::make_mut(batch.subgraph.as_mut().unwrap())
-            .nodes
-            .insert(mf_runtime::ITERATION_INPUT_ID.into(), node());
-        batch
-            .input_schemas
-            .insert("items".into(), ValueSchema::Object(BTreeMap::new()).list());
+        let mut dispatch = node();
+        dispatch.ports.inputs = vec![
+            PortSpec::new("selector", ValueType::String, true),
+            PortSpec::new("arguments", ValueType::Object, true),
+        ];
+        dispatch.ports.outputs = vec![
+            PortSpec::new("multiply", ValueType::Boolean, false),
+            PortSpec::new("multiply.amount", ValueType::Any, false),
+        ];
+        dispatch.exclusive_outputs = vec!["multiply".into()];
+        dispatch.input_schemas.insert(
+            "selector".into(),
+            ValueSchema::Enum(vec!["multiply".into()]),
+        );
+        let mut calculate = node();
+        calculate.ports.inputs = vec![
+            PortSpec::new("amount", ValueType::Int64, true),
+            PortSpec::new("factor", ValueType::Int64, true),
+        ];
         WorkflowGraph {
-            nodes: BTreeMap::from([("batch".into(), batch)]),
+            inputs: BTreeMap::from([
+                (
+                    "router.selector".into(),
+                    GraphInput {
+                        node: "router".into(),
+                        port: "selector".into(),
+                        value_type: ValueType::String,
+                        required: true,
+                        schema: Some(ValueSchema::Enum(vec!["multiply".into()])),
+                        secret: false,
+                    },
+                ),
+                (
+                    "router.arguments".into(),
+                    GraphInput {
+                        node: "router".into(),
+                        port: "arguments".into(),
+                        value_type: ValueType::Object,
+                        required: true,
+                        schema: None,
+                        secret: false,
+                    },
+                ),
+            ]),
+            nodes: BTreeMap::from([
+                ("router".into(), dispatch),
+                ("calculate".into(), calculate),
+                ("config".into(), node()),
+            ]),
             connections: vec![
                 EdgeDefinition {
                     exclusive: false,
-                    from_node: "model".into(),
-                    from_output: "multiply".into(),
-                    to_node: "batch".into(),
-                    to_input: "items".into(),
+                    from_node: "router".into(),
+                    from_output: "multiply.amount".into(),
+                    to_node: "calculate".into(),
+                    to_input: "amount".into(),
                 },
                 EdgeDefinition {
                     exclusive: false,
                     from_node: "config".into(),
-                    from_output: "value".into(),
-                    to_node: "batch".into(),
-                    to_input: "calculate.factor".into(),
+                    from_output: "factor".into(),
+                    to_node: "calculate".into(),
+                    to_input: "factor".into(),
                 },
             ],
-            ..Default::default()
-        }
-    }
-    fn catalog(graph: &WorkflowGraph) -> ConnectedTools {
-        ConnectedTools::new(graph, "model", &["multiply".into()], &BTreeMap::new()).unwrap()
-    }
-    fn call(id: &str, args: Value) -> crate::ToolCall {
-        crate::ToolCall {
-            id: id.into(),
-            name: "multiply".into(),
-            arguments: args.into(),
-        }
-    }
-    #[test]
-    fn real_connections_hide_shared_inputs_and_generate_normal_workflow_argument_records() {
-        let tools = catalog(&graph());
-        let definitions = tools.definitions();
-        let properties = &definitions[0].parameters["properties"];
-        assert!(properties.get("amount").is_some() && properties.get("factor").is_none());
-        let batches = tools
-            .batches(&[
-                call("first", json!({"amount":2})),
-                call("second", json!({"amount":4})),
-            ])
-            .unwrap();
-        assert_eq!(
-            serde_json::to_value(&batches["multiply"]).unwrap(),
-            json!([{"calculate.amount":2},{"calculate.amount":4}])
-        );
-    }
-    #[test]
-    fn optional_parameters_and_sensitivity_are_preserved_in_the_data_outputs() {
-        let mut graph = graph();
-        let body = Arc::make_mut(
-            graph
-                .nodes
-                .get_mut(&DefinitionId::from("batch"))
-                .unwrap()
-                .subgraph
-                .as_mut()
-                .unwrap(),
-        );
-        let input = body.inputs.get_mut("calculate.amount").unwrap();
-        input.required = false;
-        input.secret = true;
-        let tools = catalog(&graph);
-        assert_eq!(
-            tools.definitions()[0].parameters["properties"]["amount"]["writeOnly"],
-            true
-        );
-        assert!(
-            tools.definitions()[0].parameters["required"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        let batches = tools
-            .batches(&[
-                call("first", json!({})),
-                call("second", json!({"amount":2})),
-            ])
-            .unwrap();
-        assert!(
-            batches["multiply"].as_array().unwrap()[1]
-                .as_object()
-                .unwrap()["calculate.amount"]
-                .is_secret()
-        );
-    }
-    #[test]
-    fn unknown_missing_and_invalid_arguments_do_not_publish_partial_batches() {
-        let tools = catalog(&graph());
-        for args in [
-            json!({}),
-            json!({"amount":null}),
-            json!({"amount":"bad"}),
-            json!({"amount":2,"factor":99}),
-        ] {
-            assert!(
-                tools
-                    .batches(&[call("valid", json!({"amount":1})), call("invalid", args)])
-                    .is_err()
-            );
-        }
-    }
-    #[test]
-    fn missing_or_ambiguous_normal_connections_fail_before_requesting_a_model() {
-        let mut graph = graph();
-        graph.connections.clear();
-        assert!(
-            ConnectedTools::new(&graph, "model", &["multiply".into()], &BTreeMap::new()).is_err()
-        );
-        graph.connections = vec![
-            EdgeDefinition {
-                exclusive: false,
-                from_node: "model".into(),
+            controls: vec![ControlEdgeDefinition {
+                from_node: "router".into(),
                 from_output: "multiply".into(),
-                to_node: "batch".into(),
-                to_input: "items".into()
-            };
-            2
-        ];
-        assert!(
-            ConnectedTools::new(&graph, "model", &["multiply".into()], &BTreeMap::new()).is_err()
+                to_node: "calculate".into(),
+            }],
+        }
+    }
+    #[test]
+    fn dispatch_catalog_uses_linked_ports_and_excludes_other_upstreams() {
+        let catalog = ToolCatalog::new(&graph(), &BTreeMap::new()).unwrap();
+        assert_eq!(catalog.binding.selector, "router.selector");
+        assert_eq!(catalog.binding.arguments, "router.arguments");
+        let schema = &catalog.tools[0].input_schema;
+        assert!(schema["properties"].get("amount").is_some());
+        assert!(schema["properties"].get("factor").is_none());
+        assert_eq!(schema["required"], json!(["amount"]));
+    }
+    #[test]
+    fn reusable_router_calls_keep_their_public_input_names() {
+        let child = graph();
+        let inputs = child
+            .inputs
+            .iter()
+            .map(|(name, input)| {
+                (
+                    format!("wrapper.{name}"),
+                    GraphInput {
+                        node: "wrapper".into(),
+                        port: name.clone(),
+                        ..input.clone()
+                    },
+                )
+            })
+            .collect();
+        let mut wrapper = node();
+        wrapper.subgraph = Some(std::sync::Arc::new(child));
+        let graph = WorkflowGraph {
+            inputs,
+            nodes: BTreeMap::from([("wrapper".into(), wrapper)]),
+            ..Default::default()
+        };
+        let catalog = ToolCatalog::new(&graph, &BTreeMap::new()).unwrap();
+        assert_eq!(catalog.binding.selector, "wrapper.router.selector");
+        assert_eq!(catalog.binding.arguments, "wrapper.router.arguments");
+        assert_eq!(catalog.tools[0].name, "multiply");
+    }
+
+    #[test]
+    fn receiver_sensitivity_marks_model_call_arguments_before_publication() {
+        let mut graph = graph();
+        graph
+            .nodes
+            .get_mut(&DefinitionId::from("calculate"))
+            .unwrap()
+            .secret_inputs
+            .insert("amount".into());
+        let catalog = ToolCatalog::new(&graph, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            catalog.tools[0].input_schema["properties"]["amount"]["writeOnly"],
+            json!(true)
         );
+        let mut call = crate::ToolCall {
+            id: "one".into(),
+            name: "multiply".into(),
+            arguments: json!({"amount":1234}).into(),
+        };
+        call.mark_arguments(&catalog.tools);
+        assert!(call.arguments["amount"].is_secret());
+    }
+    #[test]
+    fn unbound_routes_and_ambiguous_entries_are_rejected_before_model_io() {
+        let mut graph = graph();
+        graph
+            .connections
+            .retain(|edge| edge.from_node.as_str() != "router");
+        assert!(ToolCatalog::new(&graph, &BTreeMap::new()).is_err());
+        let mut graph = super::tests::graph();
+        for port in ["selector", "arguments"] {
+            let mut input = graph.inputs[&format!("router.{port}")].clone();
+            input.node = "another".into();
+            graph.inputs.insert(format!("another.{port}"), input);
+        }
+        graph.nodes.insert(
+            "another".into(),
+            graph.nodes[&DefinitionId::from("router")].clone(),
+        );
+        assert!(matches!(
+            ToolCatalog::new(&graph, &BTreeMap::new()),
+            Err(ToolSchemaError::Entry)
+        ));
     }
     #[test]
     fn wire_argument_budgets_and_duplicate_json_keys_remain_checked() {
@@ -689,7 +680,7 @@ mod tests {
         assert!(validate_wire_arguments(&wire(vec!["{\"key\":1,\"key\":2}".into()])).is_err());
     }
     #[test]
-    fn reflected_scalar_and_container_contracts_validate_model_arguments() {
+    fn schema_projection_supports_nested_decoded_types_and_rejects_incomplete_codecs() {
         use mf_runtime::SchemaField;
         let text = ValueSchema::Type(ValueType::String);
         let fields = BTreeMap::from([
@@ -708,137 +699,47 @@ mod tests {
                 },
             ),
         ]);
-        let cases = vec![
-            (
-                ValueSchema::Type(ValueType::Any),
-                json!({"free": [null, true]}),
-                None,
-            ),
-            (
-                ValueSchema::Type(ValueType::Null),
-                Value::Null,
-                Some(json!(false)),
-            ),
-            (
-                ValueSchema::Type(ValueType::Boolean),
-                json!(true),
-                Some(json!(0)),
-            ),
-            (text.clone(), json!("text"), Some(json!(1))),
-            (
-                ValueSchema::Type(ValueType::Number),
-                json!(1.25),
-                Some(json!("1.25")),
-            ),
-            (
-                ValueSchema::Type(ValueType::Int64),
-                json!(i64::MIN),
-                Some(json!(u64::MAX)),
-            ),
-            (
-                ValueSchema::Type(ValueType::Uint64),
-                json!(u64::MAX),
-                Some(json!(-1)),
-            ),
-            (
-                ValueSchema::Type(ValueType::Usize),
-                json!(usize::MAX),
-                Some(json!(-1)),
-            ),
-            (
-                ValueSchema::Type(ValueType::Float64),
-                json!(1.5),
-                Some(json!(9_007_199_254_740_993_u64)),
-            ),
-            (
-                ValueSchema::Type(ValueType::Array),
-                json!([1, "two"]),
-                Some(json!({})),
-            ),
-            (
-                ValueSchema::Type(ValueType::Object),
-                json!({"free": 1}),
-                Some(json!([])),
-            ),
-            (text.clone().list(), json!(["one"]), Some(json!([1]))),
-            (
-                text.clone().map(),
-                json!({"key": "value"}),
-                Some(json!({"key": 1})),
-            ),
-            (text.clone().nullable(), Value::Null, Some(json!(false))),
-            (
-                ValueSchema::Object(fields.clone()),
-                json!({"label": "ok"}),
-                Some(json!({"note": "missing label"})),
-            ),
-            (
-                ValueSchema::List(Box::new(ValueSchema::Object(fields.clone()))),
-                json!([{"label": "ok"}]),
-                Some(json!([{"label": 1}])),
-            ),
-            (
-                ValueSchema::Map(Box::new(ValueSchema::Object(fields.clone()))),
-                json!({"key": {"label": "ok"}}),
-                Some(json!({"key": {}})),
-            ),
-            (
-                ValueSchema::Nullable(Box::new(ValueSchema::Object(fields.clone()))),
-                Value::Null,
-                Some(json!({})),
-            ),
-            (
-                ValueSchema::Enum(vec!["ready".into(), "done".into()]),
-                json!("ready"),
-                Some(json!("unknown")),
-            ),
-            (
-                ValueSchema::Tagged {
-                    tag: "kind".into(),
-                    variants: BTreeMap::from([("named".into(), fields)]),
-                },
-                json!({"kind": "named", "label": "ok"}),
-                Some(json!({"kind": "unknown"})),
-            ),
-            (
-                text.described("A public label"),
-                json!("ok"),
-                Some(json!(false)),
-            ),
+        let schemas = vec![
+            ValueSchema::Type(ValueType::Any),
+            ValueSchema::Type(ValueType::Null),
+            ValueSchema::Type(ValueType::Boolean),
+            text.clone(),
+            ValueSchema::Type(ValueType::Number),
+            ValueSchema::Type(ValueType::Int64),
+            ValueSchema::Type(ValueType::Uint64),
+            ValueSchema::Type(ValueType::Usize),
+            ValueSchema::Type(ValueType::Float64),
+            ValueSchema::Type(ValueType::Array),
+            ValueSchema::Type(ValueType::Object),
+            text.clone().list(),
+            text.clone().map(),
+            text.clone().nullable(),
+            ValueSchema::Object(fields.clone()),
+            ValueSchema::List(Box::new(ValueSchema::Object(fields.clone()))),
+            ValueSchema::Map(Box::new(ValueSchema::Object(fields.clone()))),
+            ValueSchema::Nullable(Box::new(ValueSchema::Object(fields.clone()))),
+            ValueSchema::Enum(vec!["ready".into()]),
+            ValueSchema::Tagged {
+                tag: "kind".into(),
+                variants: BTreeMap::from([("named".into(), fields)]),
+            },
+            text.described("A public label"),
         ];
-        for (schema, valid, invalid) in cases {
+        for schema in schemas {
             let mut graph = graph();
-            let body = Arc::make_mut(
-                graph
-                    .nodes
-                    .get_mut(&DefinitionId::from("batch"))
-                    .unwrap()
-                    .subgraph
-                    .as_mut()
-                    .unwrap(),
+            let target = graph
+                .nodes
+                .get_mut(&DefinitionId::from("calculate"))
+                .unwrap();
+            target.ports.inputs[0].value_type = schema.value_type();
+            target.input_schemas.insert("amount".into(), schema.clone());
+            let catalog = ToolCatalog::new(&graph, &BTreeMap::new()).unwrap();
+            assert_eq!(
+                catalog.tools[0].input_schema["additionalProperties"],
+                json!(false)
             );
-            let input = body.inputs.get_mut("calculate.amount").unwrap();
-            input.value_type = schema.value_type();
-            input.schema = Some(schema.clone());
-            let tools = catalog(&graph);
-            let definition = &tools.definitions()[0];
-            assert_eq!(definition.parameters["additionalProperties"], false);
-            assert_eq!(definition.parameters["required"], json!(["amount"]));
-            assert!(
-                tools
-                    .batches(&[call("valid", json!({"amount": valid}))])
-                    .is_ok(),
-                "{schema:?}"
-            );
-            if let Some(invalid) = invalid {
-                assert!(
-                    tools
-                        .batches(&[call("invalid", json!({"amount": invalid}))])
-                        .is_err(),
-                    "{schema:?}"
-                );
-            }
-            let encoded = serde_json::to_string(&definition.parameters).unwrap();
+            assert_eq!(catalog.tools[0].input_schema["required"], json!(["amount"]));
+            let encoded = serde_json::to_string(&catalog.tools[0].input_schema).unwrap();
             match schema {
                 ValueSchema::Object(_) => {
                     assert!(encoded.contains("label") && encoded.contains("note"))
@@ -851,10 +752,6 @@ mod tests {
                 _ => {}
             }
         }
-    }
-
-    #[test]
-    fn incomplete_and_unrepresentable_contracts_report_the_tool_parameter() {
         for schema in [
             ValueSchema::Type(ValueType::Float32),
             ValueSchema::Enum(vec![]),
@@ -865,68 +762,16 @@ mod tests {
             ValueSchema::opaque(ValueType::Object),
         ] {
             let mut graph = graph();
-            let body = Arc::make_mut(
-                graph
-                    .nodes
-                    .get_mut(&DefinitionId::from("batch"))
-                    .unwrap()
-                    .subgraph
-                    .as_mut()
-                    .unwrap(),
-            );
-            let input = body.inputs.get_mut("calculate.amount").unwrap();
-            input.value_type = schema.value_type();
-            input.schema = Some(schema);
-            let error =
-                ConnectedTools::new(&graph, "model", &["multiply".into()], &BTreeMap::new())
-                    .err()
-                    .unwrap();
-            assert!(
-                matches!(error, ToolSchemaError::Unsupported { ref tool, ref parameter, .. } if tool == "multiply" && parameter == "amount")
-            );
-        }
-    }
-
-    #[test]
-    fn connected_batches_bound_payloads_and_leave_external_tools_to_the_host() {
-        let mut graph = graph();
-        let body = Arc::make_mut(
-            graph
+            let target = graph
                 .nodes
-                .get_mut(&DefinitionId::from("batch"))
-                .unwrap()
-                .subgraph
-                .as_mut()
-                .unwrap(),
-        );
-        body.inputs.get_mut("calculate.amount").unwrap().value_type = ValueType::Any;
-        let tools = catalog(&graph);
-        let oversized = call(
-            "large",
-            json!({"amount": "x".repeat(MAX_TOOL_ARGUMENT_BYTES)}),
-        );
-        assert!(matches!(
-            tools.batches(&[oversized]),
-            Err(ToolArgumentsError::Limit)
-        ));
-        assert!(matches!(
-            tools.batches(&[call("scalar", json!(1))]),
-            Err(ToolArgumentsError::Shape)
-        ));
-        let mut external = call("host", json!({}));
-        external.name = "external".into();
-        let batches = tools.batches(&[external]).unwrap();
-        assert!(batches["multiply"].as_array().unwrap().is_empty());
-        for outputs in [
-            vec!["invalid name".into()],
-            vec!["multiply".into(); MAX_TOOL_CALLS + 1],
-        ] {
-            assert!(ConnectedTools::new(&graph, "model", &outputs, &BTreeMap::new()).is_err());
+                .get_mut(&DefinitionId::from("calculate"))
+                .unwrap();
+            target.ports.inputs[0].value_type = schema.value_type();
+            target.input_schemas.insert("amount".into(), schema);
+            assert!(matches!(
+                ToolCatalog::new(&graph, &BTreeMap::new()),
+                Err(ToolSchemaError::Unsupported { .. })
+            ));
         }
-        let descriptions = BTreeMap::from([("multiply".into(), "x".repeat(MAX_TOOL_SCHEMA_BYTES))]);
-        assert!(matches!(
-            ConnectedTools::new(&graph, "model", &["multiply".into()], &descriptions),
-            Err(ToolSchemaError::DeclarationsLimit)
-        ));
     }
 }

@@ -1,9 +1,11 @@
+mod agent;
 pub mod call;
+pub use agent::definition as agent_definition;
 pub use call::{CallOutcome, ToolCall, ToolCallEvent, ToolDefinition, ToolResult};
 mod streaming;
 mod tool_nodes;
 mod tools;
-pub use tool_nodes::{ToolResultsError, prepare_tool_results};
+pub use tool_nodes::{AgentCallsError, ToolResultsError, prepare_tool_results};
 pub use tools::ToolSchemaError;
 #[cfg(feature = "test-support")]
 #[path = "../tests/support/mod.rs"]
@@ -13,7 +15,7 @@ mod transport;
 use mf_runtime::{
     ConfigTemplate, ContextReference, ExecutionContext, Inputs, NodeBuildError, NodeEnum,
     NodeExecutionError, NodeFactory, NodeMetadata, NodeRegistration, NodeValue, PreparedNode,
-    Shared, TypedEmitter, TypedNodeResult, ValueRef, deserialize_config,
+    Shared, TypedEmitter, TypedNodeResult, TypedTaskStreamNode, ValueRef, deserialize_config,
 };
 use rig_core::{
     completion::{CompletionRequest, CompletionResponse, FinishReason},
@@ -350,7 +352,7 @@ fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
 
 /// Validates literals and template syntax without resolving runtime values.
 pub fn validate_config(value: Value) -> Result<(), NodeBuildError> {
-    prepare_llm(value).map(|_| ())
+    PreparedConfig::parse(value).map(|_| ())
 }
 
 #[cfg(test)]
@@ -360,8 +362,6 @@ fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
 
 #[derive(Snafu)]
 pub enum LlmExecutionError {
-    #[snafu(transparent)]
-    ConnectedArguments { source: tools::ToolArgumentsError },
     #[snafu(display("LLM tool {resource} limit exceeded"))]
     ToolLimit { resource: &'static str },
     #[snafu(display("LLM tool arguments are not complete unambiguous JSON"))]
@@ -434,9 +434,6 @@ impl From<LlmExecutionError> for NodeExecutionError {
 
 struct LlmNode {
     config: PreparedConfig,
-    outputs: Vec<String>,
-    descriptions: BTreeMap<String, String>,
-    max_tool_calls: usize,
     client: OnceLock<Result<ReqwestClient, Arc<reqwest::Error>>>,
 }
 
@@ -460,57 +457,18 @@ impl LlmNode {
     }
 }
 
-impl mf_runtime::NodePortContract for LlmNode {
-    fn ports(&self) -> mf_runtime::NodePorts {
-        let mut ports = mf_runtime::NodePorts::from_types::<LlmInputs, LlmOutputs>();
-        ports.outputs.extend(self.outputs.iter().map(|name| {
-            mf_runtime::PortSpec::owned(
-                name,
-                mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),
-                true,
-            )
-        }));
-        ports
-    }
-    fn stream_outputs(&self) -> Vec<mf_runtime::PortSpec> {
-        <LlmEmission as mf_runtime::NodeOutputs>::ports()
-    }
-}
-impl mf_runtime::TaskStreamNode for LlmNode {
+impl TypedTaskStreamNode for LlmNode {
+    type Input = LlmInputs;
+    type Output = LlmOutputs;
+    type Emission = LlmEmission;
+
     fn execute(
         &self,
-        inputs: Inputs,
+        inputs: Self::Input,
         context: &mut ExecutionContext,
-        emitter: &mut mf_runtime::Emitter<'_>,
-    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-        let mut inputs = mf_runtime::decode_node_inputs::<LlmInputs>(inputs)?;
-        let connected = if self.outputs.is_empty() {
-            None
-        } else {
-            let graph = context.workflow_graph().context(tools::UnavailableSnafu)?;
-            let source = context.current_node().context(tools::UnavailableSnafu)?;
-            Some(tools::ConnectedTools::new(
-                graph,
-                source,
-                &self.outputs,
-                &self.descriptions,
-            )?)
-        };
-        if let Some(connected) = &connected {
-            inputs.tools.extend(
-                connected
-                    .definitions()
-                    .into_iter()
-                    .map(|tool| ToolDefinition {
-                        name: tool.name,
-                        description: tool.description,
-                        input_schema: tool.parameters.into(),
-                    }),
-            );
-        }
-        let mut emitter = TypedEmitter::new(emitter);
-        let (outputs, batches) =
-            self.complete(inputs, context, &mut emitter, connected.as_ref())?;
+        emitter: &mut TypedEmitter<'_, '_, Self::Emission>,
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        let outputs = self.complete(inputs, context, emitter)?;
         let skipped = [
             ("usage", outputs.usage.is_none()),
             ("finish_reason", outputs.finish_reason.is_none()),
@@ -522,13 +480,11 @@ impl mf_runtime::TaskStreamNode for LlmNode {
         .filter(|(_, absent)| *absent)
         .map(|(name, _)| name.to_owned())
         .collect();
-        let mut result = mf_runtime::encode_typed_result(TypedNodeResult {
+        Ok(TypedNodeResult {
             outputs,
             skipped,
             loop_summary: None,
-        })?;
-        result.outputs.extend(batches);
-        Ok(result)
+        })
     }
 }
 
@@ -538,8 +494,7 @@ impl LlmNode {
         inputs: LlmInputs,
         context: &ExecutionContext,
         emitter: &mut TypedEmitter<'_, '_, LlmEmission>,
-        connected: Option<&tools::ConnectedTools>,
-    ) -> Result<(LlmOutputs, BTreeMap<String, ValueRef>), LlmExecutionError> {
+    ) -> Result<LlmOutputs, LlmExecutionError> {
         let deadline_origin = Instant::now();
         let config = self.config.resolve(context)?;
         let deadline = deadline_origin
@@ -552,33 +507,17 @@ impl LlmNode {
         let allow_tools = !inputs.tools.is_empty();
         let (response, mut usage) =
             self.request(request, &config, context, emitter, deadline, &inputs.tools)?;
-        let mut batches: BTreeMap<String, ValueRef> = self
-            .outputs
-            .iter()
-            .map(|name| (name.clone(), ValueRef::array(Vec::new())))
-            .collect();
         let result = response.and_then(|response| {
             if usage.usage.is_none() {
                 usage.usage = reported_usage(&response.usage).ok().flatten();
             }
             terminal_outputs(response, allow_tools).and_then(|mut result| {
-                ensure!(
-                    result.tool_calls.len() <= self.max_tool_calls,
-                    ToolLimitSnafu {
-                        resource: "configured call count"
-                    }
-                );
                 for call in &mut result.tool_calls {
                     call.mark_arguments(&inputs.tools);
                 }
                 if let Some(ChatMessage::Assistant { tool_calls, .. }) = &mut result.message {
                     *tool_calls =
                         (!result.tool_calls.is_empty()).then(|| result.tool_calls.clone());
-                }
-                if matches!(result.outcome, CallOutcome::ToolCalls)
-                    && let Some(connected) = connected
-                {
-                    batches = connected.batches(&result.tool_calls)?;
                 }
                 context.check_future_limits(Some(deadline))?;
                 Ok(result)
@@ -610,7 +549,7 @@ impl LlmNode {
         };
         usage.usage = result.usage.clone();
         result.usages.push(usage);
-        Ok((result, batches))
+        Ok(result)
     }
     fn request(
         &self,
@@ -765,74 +704,15 @@ fn terminal_outputs(
 }
 
 /// Prepares text/tool streams and their authoritative result without acquiring resources.
-pub fn prepare_llm(mut value: Value) -> Result<PreparedNode, NodeBuildError> {
-    let outputs: Vec<String> = if let Some(object) = value.as_object_mut() {
-        object
-            .remove("outputs")
-            .map(mf_runtime::deserialize_config)
-            .transpose()?
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let descriptions: BTreeMap<String, String> = if let Some(object) = value.as_object_mut() {
-        object
-            .remove("descriptions")
-            .map(mf_runtime::deserialize_config)
-            .transpose()?
-            .unwrap_or_default()
-    } else {
-        BTreeMap::new()
-    };
-    let max_tool_calls: usize = if let Some(object) = value.as_object_mut() {
-        object
-            .remove("max_tool_calls")
-            .map(mf_runtime::deserialize_config)
-            .transpose()?
-            .unwrap_or(tools::MAX_TOOL_CALLS)
-    } else {
-        tools::MAX_TOOL_CALLS
-    };
-    ensure!(
-        (1..=tools::MAX_TOOL_CALLS).contains(&max_tool_calls),
-        InvalidConfigSnafu {
-            field: "max_tool_calls",
-            requirement: "an integer from 1 to 128"
-        }
-    );
-    let base = <LlmOutputs as mf_runtime::NodeOutputs>::ports();
-    let streams = <LlmEmission as mf_runtime::NodeOutputs>::ports();
-    let mut names = std::collections::BTreeSet::new();
-    for name in &outputs {
-        ensure!(
-            call::valid_name(name)
-                && names.insert(name)
-                && !base.iter().chain(&streams).any(|port| port.name == *name),
-            InvalidConfigSnafu {
-                field: "outputs",
-                requirement: "unique non-reserved tool names"
-            }
-        );
-    }
-    ensure!(
-        descriptions.keys().all(|name| outputs.contains(name)),
-        InvalidConfigSnafu {
-            field: "descriptions",
-            requirement: "keys naming declared output ports"
-        }
-    );
+pub fn prepare_llm(value: Value) -> Result<PreparedNode, NodeBuildError> {
     let config = PreparedConfig::parse(value)?;
     let metadata = NodeMetadata {
         context_references: config.references(),
-        input_schemas: <LlmInputs as mf_runtime::NodeInputs>::input_schemas(),
         ..Default::default()
     };
-    PreparedNode::task_stream(
+    PreparedNode::typed_task_stream(
         LlmNode {
             config,
-            outputs,
-            descriptions,
-            max_tool_calls,
             client: OnceLock::new(),
         },
         metadata,
@@ -1158,9 +1038,6 @@ mod tests {
         assert!(prepared.execution.as_task_node().is_some());
         assert!(prepared.metadata.stdin.is_none());
         let node = LlmNode {
-            outputs: Vec::new(),
-            descriptions: BTreeMap::new(),
-            max_tool_calls: tools::MAX_TOOL_CALLS,
             config: PreparedConfig::parse(json!({"model": "example-model"})).unwrap(),
             client: OnceLock::new(),
         };

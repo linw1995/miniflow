@@ -14,6 +14,11 @@
       "path": "../crates/builtin-nodes/code"
     }
   },
+  "flows": {
+    "agent": {
+      "builtin": "mfn-llm.agent"
+    }
+  },
   "nodes": [
     {
       "id": "params",
@@ -51,544 +56,121 @@
             "type": "int",
             "default": 2,
             "secret": false
+          },
+          "descriptions": {
+            "type": {
+              "map": "string"
+            },
+            "default": {
+              "multiply": "Multiply an integer by the configured factor.",
+              "add": "Add two integers."
+            },
+            "secret": false
+          },
+          "max_rounds": {
+            "type": "int",
+            "default": 4,
+            "secret": false
+          },
+          "max_tool_calls": {
+            "type": "int",
+            "default": 128,
+            "secret": false
           }
         }
       }
     },
     {
-      "id": "chat_messages",
+      "id": "tool_inputs",
       "kind": "builtin.code",
       "config": {
         "language": "cel",
         "inputs": {
-          "prompt": "string",
-          "history": {
-            "list": "object"
-          },
-          "system": "string"
+          "factor": "int"
         },
         "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+          "value": "{'config.factor':factor}"
         }
       },
       "inputs": {
-        "prompt": {
-          "from": {
-            "node": "params",
-            "port": "prompt"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "params",
-            "port": "history"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "params",
-            "port": "system"
-          }
-        }
-      }
-    },
-    {
-      "id": "empty_usages",
-      "kind": "builtin.constant",
-      "config": {
-        "value": []
-      }
-    },
-    {
-      "id": "initial_status",
-      "kind": "builtin.constant",
-      "config": {
-        "value": "succeeded"
-      }
-    },
-    {
-      "id": "initial_outcome",
-      "kind": "builtin.constant",
-      "config": {
-        "value": "tool_calls"
-      }
-    },
-    {
-      "id": "empty_text",
-      "kind": "builtin.constant",
-      "config": {
-        "value": ""
-      }
-    },
-    {
-      "id": "repeat",
-      "kind": "workflow.loop",
-      "loop": {
-        "max_iterations": 4,
-        "variables": [
-          {
-            "name": "messages",
-            "type": {
-              "list": "object"
-            }
-          },
-          {
-            "name": "usages",
-            "type": {
-              "list": "object"
-            }
-          },
-          {
-            "name": "status",
-            "type": "string"
-          },
-          {
-            "name": "outcome",
-            "type": "string"
-          },
-          {
-            "name": "text",
-            "type": "string"
-          },
-          {
-            "name": "error",
-            "type": "string"
-          },
-          {
-            "name": "model",
-            "type": "string"
-          },
-          {
-            "name": "base_url",
-            "type": "string"
-          },
-          {
-            "name": "api_key",
-            "type": "string"
-          },
-          {
-            "name": "factor",
-            "type": "int"
-          }
-        ],
-        "until": {
-          "variable": "outcome",
-          "operator": "ne",
-          "value": "tool_calls"
-        },
-        "body": {
-          "nodes": [
-            {
-              "id": "chat",
-              "kind": "builtin.llm",
-              "config": {
-                "model": {
-                  "$ref": "%loop.model"
-                },
-                "base_url": {
-                  "$ref": "%loop.base_url"
-                },
-                "api_key": {
-                  "$ref": "%loop.api_key"
-                },
-                "capture_errors": true,
-                "outputs": [
-                  "multiply"
-                ],
-                "descriptions": {
-                  "multiply": "Multiply an integer by the configured factor."
-                },
-                "max_tool_calls": 8
-              },
-              "inputs": {
-                "messages": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "messages"
-                  }
-                }
-              }
-            },
-            {
-              "id": "multiply_batch",
-              "kind": "builtin.iteration",
-              "config": {
-                "input_mode": "arguments",
-                "body": {
-                  "nodes": [
-                    {
-                      "id": "multiply_flow",
-                      "kind": "workflow.call",
-                      "config": {
-                        "flow": "multiply",
-                        "definition": {
-                          "version": "2026-10-28",
-                          "dependencies": {},
-                          "nodes": [
-                            {
-                              "id": "multiply",
-                              "kind": "builtin.code",
-                              "config": {
-                                "language": "cel",
-                                "inputs": {
-                                  "amount": "int",
-                                  "factor": "int"
-                                },
-                                "code": {
-                                  "result": "amount * factor"
-                                }
-                              }
-                            }
-                          ],
-                          "outputs": [
-                            {
-                              "name": "product",
-                              "node": "multiply",
-                              "port": "result"
-                            }
-                          ]
-                        }
-                      }
-                    },
-                    {
-                      "id": "format_result",
-                      "kind": "builtin.code",
-                      "config": {
-                        "language": "cel",
-                        "inputs": {
-                          "product": "int"
-                        },
-                        "code": {
-                          "value": "{'content': 'The product is ' + string(product)}"
-                        }
-                      },
-                      "inputs": {
-                        "product": {
-                          "from": {
-                            "node": "multiply_flow",
-                            "port": "product"
-                          }
-                        }
-                      }
-                    }
-                  ],
-                  "result": {
-                    "node": "format_result",
-                    "port": "value"
-                  }
-                }
-              },
-              "inputs": {
-                "items": {
-                  "from": {
-                    "node": "chat",
-                    "port": "multiply"
-                  }
-                },
-                "multiply_flow.multiply.factor": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "factor"
-                  }
-                }
-              }
-            },
-            {
-              "id": "tool_results",
-              "kind": "builtin.tool_results",
-              "config": {
-                "inputs": [
-                  "multiply"
-                ]
-              },
-              "inputs": {
-                "outcome": {
-                  "from": {
-                    "node": "chat",
-                    "port": "outcome"
-                  }
-                },
-                "tool_calls": {
-                  "from": {
-                    "node": "chat",
-                    "port": "tool_calls"
-                  }
-                },
-                "multiply": {
-                  "from": {
-                    "node": "multiply_batch",
-                    "port": "results"
-                  }
-                }
-              }
-            },
-            {
-              "id": "collect_usages",
-              "kind": "builtin.code",
-              "config": {
-                "language": "cel",
-                "inputs": {
-                  "left": {
-                    "list": "object"
-                  },
-                  "right": {
-                    "list": "object"
-                  }
-                },
-                "code": {
-                  "value": "left + right"
-                }
-              },
-              "inputs": {
-                "left": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "usages"
-                  }
-                },
-                "right": {
-                  "from": {
-                    "node": "chat",
-                    "port": "usages"
-                  }
-                }
-              }
-            },
-            {
-              "id": "collect_messages",
-              "kind": "builtin.code",
-              "config": {
-                "language": "cel",
-                "inputs": {
-                  "left": {
-                    "list": "object"
-                  },
-                  "message": "object",
-                  "results": {
-                    "list": "object"
-                  }
-                },
-                "code": {
-                  "value": "left + [message] + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
-                }
-              },
-              "inputs": {
-                "left": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "messages"
-                  }
-                },
-                "message": {
-                  "from": {
-                    "node": "chat",
-                    "port": "message"
-                  }
-                },
-                "results": {
-                  "from": {
-                    "node": "tool_results",
-                    "port": "tool_results"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_messages",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "messages"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "collect_messages",
-                    "port": "value"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_usages",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "usages"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "collect_usages",
-                    "port": "value"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_status",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "status"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "chat",
-                    "port": "status"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_outcome",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "outcome"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "chat",
-                    "port": "outcome"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_text",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "text"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "chat",
-                    "port": "text"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_error",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "error"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "chat",
-                    "port": "error"
-                  }
-                }
-              }
-            }
-          ]
-        }
-      },
-      "inputs": {
-        "messages": {
-          "from": {
-            "node": "chat_messages",
-            "port": "messages"
-          }
-        },
-        "model": {
-          "from": {
-            "node": "params",
-            "port": "model"
-          }
-        },
-        "base_url": {
-          "from": {
-            "node": "params",
-            "port": "base_url"
-          }
-        },
-        "api_key": {
-          "from": {
-            "node": "params",
-            "port": "api_key"
-          }
-        },
         "factor": {
           "from": {
             "node": "params",
             "port": "factor"
           }
-        },
-        "usages": {
-          "from": {
-            "node": "empty_usages",
-            "port": "value"
-          }
-        },
-        "status": {
-          "from": {
-            "node": "initial_status",
-            "port": "value"
-          }
-        },
-        "outcome": {
-          "from": {
-            "node": "initial_outcome",
-            "port": "value"
-          }
-        },
-        "text": {
-          "from": {
-            "node": "empty_text",
-            "port": "value"
-          }
-        },
-        "error": {
-          "from": {
-            "node": "empty_text",
-            "port": "value"
-          }
         }
       }
     },
     {
-      "id": "settle",
-      "kind": "builtin.code",
+      "id": "agent",
+      "kind": "workflow.call",
       "config": {
-        "language": "cel",
-        "inputs": {
-          "status": "string",
-          "outcome": "string",
-          "text": "string",
-          "error": "string"
-        },
-        "code": {
-          "status": "status == 'succeeded' && outcome == 'completed' ? 'succeeded' : 'failed'",
-          "text": "outcome == 'completed' ? text : ''",
-          "error": "status == 'failed' ? error : outcome == 'tool_calls' ? 'Tool round limit reached' : outcome == 'completed' ? '' : 'Model response did not complete'"
+        "flow": "agent",
+        "flows": {
+          "tools": {
+            "path": "flows/chat-tools.json"
+          }
         }
       },
       "inputs": {
-        "status": {
+        "params.model": {
           "from": {
-            "node": "repeat",
-            "port": "status"
+            "node": "params",
+            "port": "model"
           }
         },
-        "outcome": {
+        "params.base_url": {
           "from": {
-            "node": "repeat",
-            "port": "outcome"
+            "node": "params",
+            "port": "base_url"
           }
         },
-        "text": {
+        "params.api_key": {
           "from": {
-            "node": "repeat",
-            "port": "text"
+            "node": "params",
+            "port": "api_key"
           }
         },
-        "error": {
+        "params.prompt": {
           "from": {
-            "node": "repeat",
-            "port": "error"
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "params.system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        },
+        "params.history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "params.descriptions": {
+          "from": {
+            "node": "params",
+            "port": "descriptions"
+          }
+        },
+        "params.max_rounds": {
+          "from": {
+            "node": "params",
+            "port": "max_rounds"
+          }
+        },
+        "params.max_tool_calls": {
+          "from": {
+            "node": "params",
+            "port": "max_tool_calls"
+          }
+        },
+        "params.tool_inputs": {
+          "from": {
+            "node": "tool_inputs",
+            "port": "value"
           }
         }
       }
@@ -596,46 +178,30 @@
   ],
   "outputs": [
     {
+      "name": "answer",
+      "node": "agent",
+      "port": "answer",
+      "optional": true
+    },
+    {
       "name": "status",
-      "node": "settle",
+      "node": "agent",
       "port": "status"
     },
     {
       "name": "text",
-      "node": "settle",
+      "node": "agent",
       "port": "text"
     },
     {
       "name": "usages",
-      "node": "repeat",
+      "node": "agent",
       "port": "usages"
     },
     {
       "name": "error",
-      "node": "settle",
+      "node": "agent",
       "port": "error"
-    }
-  ],
-  "clusters": [
-    {
-      "label": "Conversation setup",
-      "annotation": "Assemble explicit messages once and initialize workflow-owned iteration state.",
-      "nodes": [
-        "params",
-        "chat_messages",
-        "empty_usages",
-        "initial_status",
-        "initial_outcome",
-        "empty_text"
-      ]
-    },
-    {
-      "label": "Tool conversation",
-      "annotation": "Use ordinary loop assignments and message composition to continue after each model request.",
-      "nodes": [
-        "repeat",
-        "settle"
-      ]
     }
   ]
 }

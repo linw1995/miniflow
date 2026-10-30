@@ -24,6 +24,20 @@ pub struct Reply {
 }
 
 impl Reply {
+    pub fn stream_tool_calls(calls: Vec<(&str, &str, Value)>) -> Self {
+        let calls: Vec<_> = calls.into_iter().enumerate().map(|(index,(id,name,arguments))| {
+            json!({"index":index,"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}})
+        }).collect();
+        let start = json!({"id":"mock-tools","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":calls},"finish_reason":null}]});
+        let end = json!({"id":"mock-tools","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+        let mut reply = Self::json(Value::Null);
+        reply.body = format!("data: {start}\n\ndata: {end}\n\ndata: [DONE]\n\n");
+        reply
+            .headers
+            .push(("Content-Type".into(), "text/event-stream".into()));
+        reply
+    }
+
     pub fn json(body: Value) -> Self {
         Self {
             status: 200,

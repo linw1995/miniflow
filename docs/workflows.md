@@ -129,6 +129,11 @@ call arguments through `ExecutionContext::workflow_arguments` and implement thei
 startup binding. `mf run runner --chat` uses this mechanism to invoke a precompiled runner, including
 its native stream coordinator, without rebuilding it or linking its custom nodes into the CLI.
 
+A Call may bind a reusable Flow's named imports through `config.flows`. Each value uses the same
+Path or Builtin source form as the definition-level `flows` map. Bindings override that child's
+sources, are anchored to the caller's source directory, and are resolved before the body is frozen.
+They do not introduce runtime lookup or a separate execution relationship.
+
 ## Node clusters
 
 Version `2026-10-23` accepts an optional `clusters` array in the root graph and in Loop and Iteration bodies. Clusters
@@ -230,7 +235,10 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
 | `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
 | `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
-| `mfn-llm` | [`builtin.tool_results`](#node-backed-tools) | Ordinary result-list input port names | `outcome`, `tool_calls`, and connected result lists | Correlated `tool_results` |
+| `mfn-core` | [`builtin.dispatch`](#node-backed-tools) | Branch IDs and parameter names | `selector`, `arguments` | Selected gate and parameter ports |
+| `mfn-llm` | [`builtin.tool_catalog`](#node-backed-tools) | Prepared tool workflow path | Optional descriptions | Tool definitions and entry bindings |
+| `mfn-llm` | [`builtin.agent_calls`](#node-backed-tools) | Invocation node prefix | Calls, outcome, bindings, shared inputs, call budget | Workflow argument records |
+| `mfn-llm` | [`builtin.tool_results`](#node-backed-tools) | None | `outcome`, `tool_calls`, one ordered `results` list | Correlated `tool_results` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -665,7 +673,7 @@ The public Rust contracts are exported by `mfn_llm`:
 | --- | --- | --- |
 | `ToolDefinition` | `name: String`, `description: String`, `input_schema: ValueRef` | `tools` input |
 | `ToolCall` | `id: String`, `name: String`, `arguments: ValueRef` | `tool_calls` output and assistant messages |
-| `ToolResult` | `tool_call_id: String`, `content: String` | LLM `tool_results` input and Tool Dispatch output |
+| `ToolResult` | `tool_call_id: String`, `content: String` | LLM `tool_results` input and protocol result encoding |
 | `ToolCallEvent` | `model_call_id: String`, `call: ToolCall` | `tool_call` stream output |
 
 Each tool definition contains `name`, `description`, and `input_schema`. Names must be unique and
@@ -847,52 +855,74 @@ This interface supports text and function tools, not media inputs.
 
 #### Node-backed tools
 
-The [chat workflow with tools](../examples/chat-tools-flow.json) uses the existing chat contract and
-explicit message protocol. The LLM declares ordinary output ports and reads their connected workflow
-input contracts. It performs one model request and publishes data. Standard workflow nodes execute
-the tools and pass their results downstream.
+The [chat workflow with tools](../examples/chat-tools-flow.json) calls the provider-owned
+`mfn-llm.agent` built-in Flow. The [tool workflow](../examples/flows/chat-tools.json) contains one
+ordinary `builtin.dispatch`, the actual tools, downstream formatting, and an exclusive result merge.
 
 ```mermaid
 flowchart LR
-    Model[LLM] -->|multiply argument batch| Batch[Iteration]
-    Batch -->|normal result list| Encode[Tool results]
-    Model -->|tool calls and outcome| Encode
-    Encode -->|tool results| History[Message assembly]
-    Model -->|assistant message| History
-    subgraph Body[Iteration body]
-        MultiplyFlow[Multiply Flow] -->|product| Format[Format result]
-        Format -->|selected item result| BatchResult[Iteration result]
+    Catalog[Tool metadata] -->|definitions| Model[Single LLM request]
+    Model -->|tool calls| Calls[Workflow argument records]
+    Calls --> Iterate[One Iteration]
+    Iterate --> Results[Protocol results]
+    Results --> History[Message assembly]
+    Model --> History
+    subgraph Tools[Caller tool workflow per call]
+        Dispatch[Dispatch] -->|multiply.amount| Multiply[Multiply Flow]
+        Multiply -->|product| Format[Format result]
+        Dispatch -->|add.a and add.b| Add[Add node]
+        Format --> Result[Exclusive result merge]
+        Add --> Result
     end
 ```
 
-The LLM configuration declares `outputs: ["multiply"]`, an optional description for that name, and a
-`max_tool_calls` batch limit. The `multiply` port connects to `multiply_batch.items`. That standard
-Iteration uses `input_mode: arguments`; its body exposes ordinary workflow inputs such as
-`multiply_flow.multiply.amount` and `multiply_flow.multiply.factor`. The factor input is connected
-from `%loop.factor` as a shared value, so only amount appears in the model's tool schema.
+The LLM performs one model request per execution and receives definitions through its existing
+`tools` input. `builtin.tool_catalog` derives those definitions from dispatch-linked receiver ports
+before that request. A separate `builtin.dispatch` consumes the already chosen tool name and argument
+object. It publishes the matching Boolean gate and `<branch>.<parameter>` ports, marking every other
+branch output skipped. Ordinary workflow scheduling executes the selected nodes. Dispatch itself
+performs no model request or child execution.
 
-Every selected call becomes a workflow argument object in the corresponding output list. The LLM
-uses unambiguous leaf input names in the model schema and publishes qualified workflow input names
-in the data records. Two calls to multiply produce two Iteration items. An unused tool produces an
-empty list, so its body executes no nodes. Optional input omission, defaults, types, and sensitivity
-are resolved through the normal workflow input interface.
+The tool workflow exposes one Dispatch node's unconnected `selector` and `arguments` inputs. The
+catalog discovers their qualified names from prepared input schemas, so the node ID is not fixed.
+Declare routed fields as `{"branches":{"multiply":["amount"],"add":["a","b"]}}`. A field is required
+within its selected route because it supplies a connected data port. Target defaults and other
+upstreams remain separate bindings. In the example, `dispatch.multiply.amount` connects to
+`multiply_flow.multiply.amount`, while `config.factor` supplies `multiply_flow.multiply.factor`.
+Only amount appears in the model's multiply schema. `multiply_flow.product` connects explicitly to
+`format_multiply.product`.
 
-Inside the body, `multiply_flow.product` explicitly connects to `format_result.product`. The formatter
-produces an object containing the public result text. The Iteration's existing `result` declaration
-selects that ordinary node output. `multiply_batch.results` then connects to `tool_results.multiply`,
-and `tool_results.tool_results` connects to message assembly. Values never return through a hidden
-callback to a dispatcher.
+The built-in agent uses one `iteration_dispatch` Iteration for the complete call list, rather than
+one Iteration per tool. Each item invokes the supplied tool workflow using standard WorkflowArguments.
+Shared tool inputs use the callee's qualified names, such as `config.factor`; per-call selector and
+arguments take precedence. The result list preserves model call order even when names repeat.
+`builtin.tool_results` checks IDs and counts, redacts secret values, and produces bounded JSON content.
 
-`builtin.tool_results` takes `outcome`, the original `tool_calls`, and one result-list input per declared
-tool name. It preserves model response order and matches repeated calls by their positions within each
-tool's list. It rejects mismatched result counts and duplicate call IDs, redacts sensitive result
-subtrees, and serializes bounded protocol content. Non-tool outcomes yield an empty result list.
-This node performs protocol encoding only; all tool execution has already happened upstream.
+Bind the tool workflow when calling the built-in agent:
 
-`workflow.loop` owns history, repeated model requests, stop conditions, and usage accumulation. Model
-deadlines apply to model requests; tool nodes retain their ordinary workflow limits and provider-specific
-timeouts. The existing manual [LLM tool example](../examples/llm-tools.json) remains available for flows
-that supply their own definitions and handlers. Manual and connected names must be distinct.
+```json
+{
+  "id": "agent",
+  "kind": "workflow.call",
+  "config": {
+    "flow": "agent",
+    "flows": {"tools": {"path": "flows/chat-tools.json"}}
+  }
+}
+```
+
+The caller declares `"agent": {"builtin":"mfn-llm.agent"}` in its `flows` map. Binding paths are relative
+to the caller file; all bodies are frozen before execution. The reusable Flow accepts prompt, history,
+system message, model/credential parameters, descriptions, shared tool inputs, `max_rounds`, and
+`max_tool_calls`. Its normal Loop owns round limits, usage accumulation, and stop conditions. Existing
+workflow limits and tool-specific errors still apply. Tools inherit the framework's existing Call
+and Iteration restrictions, including the prohibition on nested iteration containers inside a call
+that runs within Iteration.
+
+The optional `answer` child stream forwards LLM text deltas through ordinary Call and Loop stream
+exports. Omitting that stream from the caller keeps normal unary execution. Tool-only emissions do
+not require an answer value. The manual [LLM tool example](../examples/llm-tools.json) remains available
+for callers that own their definitions, execution, and orchestration.
 
 ```sh
 mf compile examples/chat-tools-flow.json --output ./chat-tools-flow
@@ -900,8 +930,6 @@ mf run ./chat-tools-flow --chat --chat-db state/chat.sqlite --model your-model -
 ```
 
 Set `OPENAI_API_KEY`. The chat application retains persistence, title composition, and accounting.
-The example can use existing Loop, Call, and Iteration child-stream forwarding without another tool
-execution mechanism.
 
 ## Structured Loop
 

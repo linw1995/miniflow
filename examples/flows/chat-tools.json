@@ -1,0 +1,168 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {},
+  "nodes": [
+    {
+      "id": "config",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "factor": {
+            "type": "int",
+            "default": 2,
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "dispatch",
+      "kind": "builtin.dispatch",
+      "config": {
+        "branches": {
+          "multiply": [
+            "amount"
+          ],
+          "add": [
+            "a",
+            "b"
+          ]
+        }
+      }
+    },
+    {
+      "id": "multiply_flow",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "multiply",
+        "definition": {
+          "version": "2026-10-28",
+          "dependencies": {},
+          "nodes": [
+            {
+              "id": "multiply",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "amount": "int",
+                  "factor": "int"
+                },
+                "code": {
+                  "result": "amount * factor"
+                }
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "product",
+              "node": "multiply",
+              "port": "result"
+            }
+          ]
+        }
+      },
+      "inputs": {
+        "multiply.amount": {
+          "from": {
+            "node": "dispatch",
+            "port": "multiply.amount"
+          }
+        },
+        "multiply.factor": {
+          "from": {
+            "node": "config",
+            "port": "factor"
+          }
+        }
+      }
+    },
+    {
+      "id": "format_multiply",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "product": "int"
+        },
+        "code": {
+          "value": "{'content':'The product is ' + string(product)}"
+        }
+      },
+      "inputs": {
+        "product": {
+          "from": {
+            "node": "multiply_flow",
+            "port": "product"
+          }
+        }
+      }
+    },
+    {
+      "id": "add",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "a": "int",
+          "b": "int"
+        },
+        "code": {
+          "value": "{'content':'The sum is ' + string(a + b)}"
+        }
+      },
+      "inputs": {
+        "a": {
+          "from": {
+            "node": "dispatch",
+            "port": "add.a"
+          }
+        },
+        "b": {
+          "from": {
+            "node": "dispatch",
+            "port": "add.b"
+          }
+        }
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "format_multiply",
+              "port": "value"
+            },
+            {
+              "node": "add",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "dispatch",
+      "from_output": "multiply",
+      "to_node": "multiply_flow"
+    },
+    {
+      "from_node": "dispatch",
+      "from_output": "add",
+      "to_node": "add"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "result",
+      "node": "result",
+      "port": "value"
+    }
+  ]
+}

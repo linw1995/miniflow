@@ -2,6 +2,7 @@ mod assert;
 mod batch;
 mod condition;
 mod constant;
+mod dispatch;
 mod identity;
 mod if_else;
 mod iteration;
@@ -12,6 +13,7 @@ mod readline;
 pub use assert::KIND as ASSERT_KIND;
 pub use batch::KIND as BATCH_KIND;
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
+pub use dispatch::{DispatchBuildError, DispatchExecutionError, KIND as DISPATCH_KIND};
 pub use identity::{
     IdentityInputs, IdentityOutputs, KIND as IDENTITY_KIND, kind as identity_kind, prepare_identity,
 };

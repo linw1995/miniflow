@@ -75,7 +75,7 @@ pub fn resolve_embedded_flows(
 
 pub fn load_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResolutionError> {
     let mut resolver = Resolver::default();
-    let mut definition = resolver.file(path, &BTreeMap::new(), 0)?;
+    let mut definition = resolver.file(path, &BTreeMap::new(), &BTreeMap::new(), 0)?;
     resolver.finish(&mut definition);
     Ok(ResolvedWorkflow {
         definition,
@@ -89,7 +89,7 @@ pub fn load_embedded_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResol
         host_dependencies: true,
         ..Default::default()
     };
-    let definition = resolver.file(path, &BTreeMap::new(), 0)?;
+    let definition = resolver.file(path, &BTreeMap::new(), &BTreeMap::new(), 0)?;
     Ok(ResolvedWorkflow {
         definition,
         sources: resolver.sources,
@@ -174,6 +174,7 @@ impl Resolver {
         &mut self,
         path: &Path,
         inherited: &BTreeMap<String, NodeDependency>,
+        bindings: &BTreeMap<String, FlowSource>,
         depth: usize,
     ) -> Result<WorkflowDefinition, FlowResolutionError> {
         let path = fs::canonicalize(path).context(ReadSnafu { path })?;
@@ -187,6 +188,7 @@ impl Resolver {
         let source = fs::read_to_string(&path).context(ReadSnafu { path: &path })?;
         let mut definition =
             WorkflowDefinition::from_json(&source).context(ParseSnafu { path: &path })?;
+        definition.flows.extend(bindings.clone());
         self.sources.insert(path.clone());
         self.stack.push(path.clone());
         let result = self.definition(
@@ -325,7 +327,22 @@ impl Resolver {
                         message: "Flow alias must not be blank"
                     }
                 );
+                let mut bindings = std::mem::take(&mut config.flows);
+                for (alias, source) in &mut bindings {
+                    if let FlowSource::Path { path } = source
+                        && !path.is_absolute()
+                    {
+                        let directory = directory.with_context(|| InvalidSnafu {
+                            reference: alias,
+                            message: "relative Flow bindings require a source directory",
+                        })?;
+                        let absolute = directory.join(&*path);
+                        *path =
+                            fs::canonicalize(&absolute).context(ReadSnafu { path: &absolute })?;
+                    }
+                }
                 let mut child = if let Some(mut definition) = config.definition.take() {
+                    definition.flows.extend(bindings);
                     self.definition(
                         &mut definition,
                         directory,
@@ -344,8 +361,12 @@ impl Resolver {
                     })?;
                     Box::new(match source {
                         FlowSource::Path { path } => {
-                            let directory = directory.with_context(|| InvalidSnafu { reference: &config.flow, message: "local Flow references require load_workflow or a source directory" })?;
-                            self.file(&directory.join(path), available, depth + 1)?
+                            let source = if path.is_absolute() {
+                                path.clone()
+                            } else {
+                                directory.with_context(|| InvalidSnafu { reference: &config.flow, message: "local Flow references require load_workflow or a source directory" })?.join(path)
+                            };
+                            self.file(&source, available, &bindings, depth + 1)?
                         }
                         FlowSource::Builtin { builtin } => {
                             let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
@@ -356,6 +377,7 @@ impl Resolver {
                                 (registration.definition)().context(ParseSnafu {
                                     path: PathBuf::from(format!("builtin:{builtin}")),
                                 })?;
+                            definition.flows.extend(bindings);
                             for dependency in definition.dependencies.values_mut() {
                                 if let Some(selected) = available
                                     .values()

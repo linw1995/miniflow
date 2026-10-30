@@ -244,10 +244,11 @@ executing graph, including in generated domains and native message frames. Subgr
 their prepared body descriptor through `PreparedSubgraph`, and isolated target execution uses the
 corresponding enclosing graph. Descriptors contain no executors or runtime values.
 
-Connected LLM tools use ordinary output ports carrying batches of workflow argument objects. Standard
-Iteration nodes bind and execute those objects through the normal workflow input interface. Their
-ordinary outputs connect to subsequent processing and protocol-encoding nodes. There is no synchronous
-tool result return channel hidden inside the LLM or another dispatcher.
+The provider-owned `mfn-llm.agent` built-in Flow composes the ordinary LLM node with metadata
+preparation, one Iteration, a caller-supplied tool workflow, and protocol result encoding. The tool
+workflow uses `builtin.dispatch` and ordinary data/control connections to actual nodes and their
+downstream processing. The LLM does not inspect or execute that graph. Built-in Flow imports can be
+bound through `workflow.call.config.flows`; the resolver freezes all definitions before execution.
 
 Ordinary workflow interface checks validate port contracts. Generated schema checks compare decoded
 refinements and sensitivity against frozen graph metadata before execution. Schema-only provider drift is rejected even when coarse port types

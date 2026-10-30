@@ -185,19 +185,30 @@ per item, and parallel execution preserves input order. Missing, unknown, or inv
 the normal typed workflow error chain. Empty batches execute no body nodes. Argument scopes restore
 parent inputs when they finish, including on errors or unwinding.
 
-### Connected LLM outputs
+### Dispatch and built-in agent orchestration
 
-An LLM configuration can declare `outputs: ["multiply"]`. Each name is an ordinary terminal batch
-output port connected to the `items` input of an argument-mode Iteration. The LLM inspects that
-Iteration's prepared workflow interface before requesting the model. Ordinary connections to the
-Iteration's shared input ports keep those parameters externally owned and out of the model's schema.
-Unambiguous leaf port names are used as public argument names; colliding names stay qualified.
+`builtin.llm` performs one model request using its explicit `tools` input. Its ports do not depend on
+the workflow's tool set. `builtin.dispatch`, supplied by `mfn-core`, consumes a `selector` and an
+`arguments` object. Configure branch IDs and parameter names, for example
+`{"branches":{"multiply":["amount"],"add":["a","b"]}}`. A selected branch publishes a Boolean gate
+and its parameter ports (`multiply` and `multiply.amount`); the remaining branch ports are skipped.
+Connect the gate through an execution edge and the parameter ports through normal input bindings.
+Every configured parameter is required when that route is selected. Leave externally owned or
+defaulted target inputs out of the route and wire them independently.
 
-The LLM publishes a list of workflow argument records on each tool port. It performs no downstream
-node execution. Repeated calls to one tool become separate items, and unused tools produce empty
-lists. Normal workflow nodes perform calculations, formatting, validation, and exported output
-selection. `builtin.tool_results` only correlates connected result lists with the original call IDs,
-redacts sensitive subtrees, and encodes bounded protocol content. It neither routes nor executes work.
+`builtin.tool_catalog` reads the prepared graph of a tool workflow. Its public entry is one unbound
+Dispatch `selector`/`arguments` pair. The catalog discovers their qualified workflow input names,
+reflects decoded schemas and sensitivity from the dispatch-linked receiver ports, and publishes the
+LLM tool definitions plus an ordinary binding value. It executes before the model request and never
+executes tool nodes. Opaque codecs remain unavailable for automatic projection.
+
+The provider-owned `mfn-llm.agent` Flow is registered through the existing built-in Flow registry.
+Its ordinary Loop owns model rounds and conversation state. One argument-mode Iteration processes
+all calls in model order, including repeated calls to the same tool, and invokes the caller's tool
+workflow through `workflow.call`. `builtin.agent_calls` adapts the model protocol into standard
+WorkflowArguments while preserving secret markers. Explicit per-call routing fields override shared
+tool inputs. `builtin.tool_results` pairs the single ordered results list with call IDs, redacts
+sensitive subtrees, and encodes bounded protocol content. Neither protocol adapter executes tools.
 
 ## Context-aware execution
 
