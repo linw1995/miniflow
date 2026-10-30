@@ -568,7 +568,10 @@ fn encode(value: Value, depth: usize) -> Result<AnyValue, SnapshotError> {
         });
     }
     let value = match value {
-        Value::Null => None,
+        // The SDK has no null variant; use the existing lossless JSON byte representation.
+        Value::Null => Some(any_value::Value::BytesValue(
+            [JSON_SUBTREE_PREFIX, b"null"].concat(),
+        )),
         Value::Bool(value) => Some(any_value::Value::BoolValue(value)),
         Value::String(value) => Some(any_value::Value::StringValue(value)),
         Value::Number(value) => Some(if value.is_f64() {
@@ -803,6 +806,20 @@ mod tests {
                 serde_json::to_string(&original).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn existing_empty_otlp_values_remain_readable_as_json_null() {
+        let mut record = packets(0, Value::Null)
+            .unwrap()
+            .next()
+            .unwrap()
+            .into_log_record("workflow", "run");
+        record.body = Some(AnyValue { value: None });
+        assert_eq!(
+            Assembler::default().push(record).unwrap(),
+            vec![Value::Null]
+        );
     }
 
     #[test]
