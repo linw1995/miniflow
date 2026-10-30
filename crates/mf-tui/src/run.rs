@@ -7,8 +7,7 @@ use crate::{
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
     state::{
-        IterationItemObservation, IterationSnapshot, LoopPassObservation, NodeObservation,
-        NodeStatus, StateSnapshot,
+        IterationItemObservation, LoopPassObservation, NodeObservation, NodeStatus, StateSnapshot,
     },
     traces::{TraceSnapshot, TraceView, TraceViewSnapshot},
 };
@@ -35,7 +34,6 @@ use ratatui::{
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
 use snafu::{IntoError, ResultExt, Snafu, ensure};
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, BTreeSet, VecDeque},
     env,
     fs::File,
@@ -1010,10 +1008,8 @@ fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
 struct ViewState {
     graph_notice: Option<String>,
     latest_node_sequence: Option<mf_telemetry::Count>,
-    latest_iteration_revision: Option<u64>,
-    iteration_item: Option<ItemIdentity>,
-    iteration_parent: Option<Vec<mf_telemetry::event::LoopPathEntry>>,
-    iteration_parent_stream: Option<u64>,
+    latest_iteration_revision: u64,
+    iteration_items: BTreeMap<Vec<String>, ItemIdentity>,
     reveal_selected: bool,
     graph_size: Option<(u16, u16)>,
     details_visible: bool,
@@ -1023,6 +1019,7 @@ struct ViewState {
     offset: (u32, u32),
     selected: usize,
     pass_offset: usize,
+    pass_offsets: BTreeMap<Vec<String>, usize>,
     details_offset: usize,
     details_height: usize,
 }
@@ -1032,36 +1029,32 @@ impl ViewState {
         if let Some(latest) = &snapshot.iterations.latest_node_event
             && latest.revision > snapshot.latest_node_revision
         {
-            if self.latest_iteration_revision == Some(latest.revision) {
+            if latest.revision <= self.latest_iteration_revision {
                 return;
             }
-            self.latest_iteration_revision = Some(latest.revision);
+            self.latest_iteration_revision = latest.revision;
+            let offsets = self.history_offsets();
             if self.pass_offset != 0
                 || self.traces.visible
-                || !latest.context.body_path.starts_with(&self.path)
-                || self
-                    .iteration_parent
-                    .as_ref()
-                    .is_some_and(|parent| latest.context.parent_path != *parent)
-                || self
-                    .iteration_parent_stream
-                    .is_some_and(|parent| latest.context.parent_stream_invocation != Some(parent))
+                || (1..=latest.context.body_path.len()).any(|depth| {
+                    offsets
+                        .get(&latest.context.body_path[..depth])
+                        .is_some_and(|offset| *offset != 0)
+                })
             {
                 return;
             }
-            let id = latest
-                .context
-                .body_path
-                .get(self.path.len())
-                .unwrap_or(&latest.node.id);
-            if let Some(selected) = layout.display_index_for_node_id(id) {
-                if self.selected != selected {
+            let mut path = latest.context.body_path.clone();
+            path.push(latest.node.id.clone());
+            while let Some(id) = path.pop() {
+                if let Some(selected) = layout.display_index_for_scoped_node(&path, &id) {
+                    self.iteration_items
+                        .insert(latest.context.iteration_path.clone(), latest.context.item());
+                    self.selected = selected;
+                    self.sync_scope(layout);
                     self.details_offset = 0;
-                }
-                self.selected = selected;
-                self.reveal_selected = true;
-                if self.path.starts_with(&latest.context.iteration_path) {
-                    self.iteration_item = Some(latest.context.item());
+                    self.reveal_selected = true;
+                    break;
                 }
             }
             return;
@@ -1079,26 +1072,47 @@ impl ViewState {
         if self.pass_offset != 0 || self.traces.visible {
             return;
         }
-        let path = &latest.node.path;
-        if !self
+        let mut path: Vec<_> = latest
+            .node
             .path
             .iter()
-            .zip(path)
-            .all(|(id, entry)| *id == entry.node_id())
-            || self.path.len() > path.len()
-        {
+            .map(|entry| entry.node_id().to_owned())
+            .collect();
+        let offsets = self.history_offsets();
+        if (1..=path.len()).any(|depth| {
+            offsets
+                .get(&path[..depth])
+                .is_some_and(|offset| *offset != 0)
+        }) {
             return;
         }
-        // Keep the inspected scope; descendants focus their visible enclosing Loop.
-        let id = path
-            .get(self.path.len())
-            .map_or(latest.node.id.as_str(), |entry| entry.node_id());
-        if let Some(selected) = layout.display_index_for_node_id(id) {
+        path.push(latest.node.id.clone());
+        let selected = loop {
+            let Some(id) = path.pop() else {
+                break None;
+            };
+            if let Some(selected) = layout.display_index_for_scoped_node(&path, &id) {
+                break Some(selected);
+            }
+        };
+        if let Some(selected) = selected {
             if self.selected != selected {
                 self.details_offset = 0;
             }
             self.selected = selected;
+            self.sync_scope(layout);
             self.reveal_selected = true;
+        }
+    }
+
+    fn sync_scope(&mut self, layout: &GraphLayout) {
+        let path = layout.node_path(self.selected);
+        if self.path != path {
+            self.pass_offsets
+                .insert(self.path.clone(), self.pass_offset);
+            self.path = path.to_vec();
+            self.pass_offset = self.pass_offsets.get(path).copied().unwrap_or_default();
+            self.details_offset = 0;
         }
     }
 
@@ -1130,72 +1144,14 @@ impl ViewState {
         false
     }
 
-    fn layout<'a>(
-        &self,
-        root: &'a GraphLayout,
-        bodies: &'a BTreeMap<Vec<String>, GraphLayout>,
-    ) -> &'a GraphLayout {
-        if self.path.is_empty() {
-            root
-        } else {
-            &bodies[&self.path]
-        }
-    }
-
-    fn iteration_items<'a>(
-        &self,
-        snapshot: &'a StateSnapshot,
-    ) -> Vec<&'a IterationItemObservation> {
-        let matching: Vec<_> = snapshot
-            .iterations
-            .items
-            .iter()
-            .filter(|item| {
-                self.path.starts_with(&item.iteration_path)
-                    && self
-                        .iteration_parent
-                        .as_ref()
-                        .is_none_or(|parent| item.parent_path == *parent)
-                    && self
-                        .iteration_parent_stream
-                        .is_none_or(|parent| item.parent_stream_invocation == Some(parent))
-            })
-            .collect();
-        let depth = matching
-            .iter()
-            .map(|item| item.iteration_path.len())
-            .max()
-            .unwrap_or_default();
-        matching
-            .into_iter()
-            .filter(|item| item.iteration_path.len() == depth)
-            .collect()
-    }
-
-    fn iteration<'a>(&self, snapshot: &'a StateSnapshot) -> Option<&'a IterationItemObservation> {
-        let matching = self.iteration_items(snapshot);
-        if let Some(selected) = &self.iteration_item
-            && let Some(item) = matching.iter().find(|item| item.identity == *selected)
-        {
-            return Some(*item);
-        }
-        let offset = self.pass_offset.min(matching.len().checked_sub(1)?);
-        matching.get(matching.len() - offset - 1).copied()
-    }
-
     fn pass<'a>(&self, snapshot: &'a StateSnapshot) -> Option<&'a LoopPassObservation> {
-        let matching: Vec<_> = snapshot
-            .loop_passes
-            .iter()
-            .filter(|pass| {
-                pass.path
-                    .iter()
-                    .map(|entry| entry.node_id())
-                    .eq(self.path.iter())
-            })
-            .collect();
-        let offset = self.pass_offset.min(matching.len().checked_sub(1)?);
-        matching.get(matching.len() - offset - 1).copied()
+        scope_pass(snapshot, &self.path, &self.history_offsets())
+    }
+
+    fn history_offsets(&self) -> BTreeMap<Vec<String>, usize> {
+        let mut offsets = self.pass_offsets.clone();
+        offsets.insert(self.path.clone(), self.pass_offset);
+        offsets
     }
 
     pub fn handle_key(
@@ -1203,7 +1159,6 @@ impl ViewState {
         key: KeyCode,
         snapshot: &StateSnapshot,
         root: &GraphLayout,
-        bodies: &BTreeMap<Vec<String>, GraphLayout>,
         traces: &TraceSnapshot,
         logs: &LogSnapshot,
     ) {
@@ -1223,88 +1178,41 @@ impl ViewState {
                     .details_offset
                     .saturating_sub(self.details_height.max(1))
             }
-            KeyCode::Char('l') => {
-                if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
-                    && matches!(
-                        node.kind.as_str(),
-                        "workflow.loop" | "builtin.iteration" | "workflow.call"
-                    )
-                {
-                    let mut child = self.path.clone();
-                    child.push(node.id.clone());
-                    if bodies.contains_key(&child) {
-                        let item_offset = self.iteration(snapshot).map_or(0, |_| self.pass_offset);
-                        if node.kind == "builtin.iteration" {
-                            self.iteration_parent_stream = self
-                                .pass(snapshot)
-                                .and_then(|pass| pass.stream_invocation)
-                                .or(self.iteration_parent_stream);
-                            self.iteration_parent = self
-                                .pass(snapshot)
-                                .map(|pass| pass.path.clone())
-                                .or_else(|| self.iteration_parent.clone());
-                            self.iteration_item = None;
-                        } else if let Some(item) = self.iteration(snapshot) {
-                            self.iteration_item = Some(item.identity.clone());
-                        }
-                        self.path = child;
-                        self.latest_iteration_revision = None;
-                        self.offset = (0, 0);
-                        self.selected = 0;
-                        self.pass_offset = item_offset;
-                        self.details_offset = 0;
-                    }
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Esc => {
-                if !self.path.is_empty() {
-                    self.path.pop();
-                    self.iteration_item = None;
-                    self.iteration_parent = None;
-                    self.iteration_parent_stream = None;
-                    self.offset = (0, 0);
-                    self.selected = 0;
-                    self.pass_offset = 0;
-                    self.details_offset = 0;
-                }
-            }
             KeyCode::Char('[' | ']') => {
-                let items = self.iteration_items(snapshot);
-                if !items.is_empty() {
-                    let current = self
-                        .iteration(snapshot)
-                        .and_then(|selected| {
-                            items
-                                .iter()
-                                .position(|item| item.identity == selected.identity)
-                        })
+                let items = iteration_scope_items(snapshot, &self.path, &self.history_offsets());
+                if let Some(first) = items.first() {
+                    let owner = first.iteration_path.clone();
+                    let selected = self.iteration_items.get(&owner);
+                    let current = selected
+                        .and_then(|id| items.iter().position(|item| &item.identity == id))
                         .unwrap_or(items.len() - 1);
                     let next = if key == KeyCode::Char('[') {
                         current.saturating_sub(1)
                     } else {
                         (current + 1).min(items.len() - 1)
                     };
-                    let selected = items[next].identity.clone();
-                    self.pass_offset = items.len() - next - 1;
-                    self.iteration_item = Some(selected);
+                    self.iteration_items
+                        .insert(owner.clone(), items[next].identity.clone());
+                    let offset = items.len() - next - 1;
+                    self.pass_offsets.insert(owner, offset);
+                    self.pass_offset = offset;
                 } else if key == KeyCode::Char('[') {
-                    let count = snapshot
-                        .loop_passes
-                        .iter()
-                        .filter(|pass| {
-                            pass.path
-                                .iter()
-                                .map(|entry| entry.node_id())
-                                .eq(self.path.iter())
-                        })
-                        .count();
+                    let count = scope_passes(snapshot, &self.path, &self.history_offsets()).len();
+                    let previous = self.pass_offset;
                     self.pass_offset = (self.pass_offset + 1).min(count.saturating_sub(1));
+                    if self.pass_offset != previous {
+                        self.clear_iteration_history(snapshot);
+                    }
                 } else {
+                    let previous = self.pass_offset;
                     self.pass_offset = self.pass_offset.saturating_sub(1);
+                    if self.pass_offset != previous {
+                        self.clear_iteration_history(snapshot);
+                    }
                 }
             }
             _ => {
-                let nodes = self.layout(root, bodies).nodes().len();
+                let nodes = root.nodes().len();
                 let previous = self.selected;
                 navigate(key, &mut self.offset, &mut self.selected, nodes);
                 if matches!(
@@ -1315,7 +1223,18 @@ impl ViewState {
                 }
                 if previous != self.selected {
                     self.details_offset = 0;
+                    self.sync_scope(root);
                 }
+            }
+        }
+    }
+
+    fn clear_iteration_history(&mut self, snapshot: &StateSnapshot) {
+        for item in &snapshot.iterations.items {
+            let owner = &item.iteration_path;
+            if owner.starts_with(&self.path) && owner.len() > self.path.len() {
+                self.iteration_items.remove(owner);
+                self.pass_offsets.retain(|path, _| !path.starts_with(owner));
             }
         }
     }
@@ -1348,7 +1267,7 @@ fn supervise(
                     let quit = (!view.state.help_visible
                         && (matches!(key.code, KeyCode::Char('q') | KeyCode::Enter)
                             || (key.code == KeyCode::Esc
-                                && view.state.path.is_empty()
+                                && !view.can_collapse_body()
                                 && !view.state.traces.visible
                                 && !view.state.details_visible)))
                         || (key.code == KeyCode::Char('c')
@@ -1411,7 +1330,7 @@ const PIP_MIN_WIDTH: u16 = 32;
 const PIP_MIN_HEIGHT: u16 = 8;
 
 fn running_display_nodes(layout: &GraphLayout, observations: &[NodeObservation]) -> Vec<usize> {
-    (0..layout.nodes().len())
+    let running: Vec<_> = (0..layout.nodes().len())
         .filter(|display| {
             layout.sources(*display).iter().any(|source| {
                 let expected = layout.all_nodes().get(*source);
@@ -1422,6 +1341,26 @@ fn running_display_nodes(layout: &GraphLayout, observations: &[NodeObservation])
                     })
                     .is_some_and(|observation| observation.status == NodeStatus::Running)
             })
+        })
+        .collect();
+    // A running body and its active descendants represent the same branch of execution.
+    let active_bodies: BTreeSet<_> = running
+        .iter()
+        .flat_map(|display| {
+            let path = layout.node_path(*display);
+            (1..=path.len()).map(|depth| &path[..depth])
+        })
+        .collect();
+    running
+        .iter()
+        .copied()
+        .filter(|display| {
+            if !layout.is_expanded_body(*display) {
+                return true;
+            }
+            let mut path = layout.node_path(*display).to_vec();
+            path.push(layout.nodes()[*display].id.clone());
+            !active_bodies.contains(path.as_slice())
         })
         .collect()
 }
@@ -1477,56 +1416,6 @@ fn parallel_pip_areas(count: usize, area: Rect) -> (Vec<Rect>, usize) {
     (areas, count - visible)
 }
 
-struct IterationPipContext<'a> {
-    snapshot: &'a IterationSnapshot,
-    layouts: &'a BTreeMap<Vec<String>, GraphLayout>,
-    path: &'a [String],
-}
-
-struct PipView<'a> {
-    layout: &'a GraphLayout,
-    nodes: Cow<'a, [NodeObservation]>,
-    selected: usize,
-    title: String,
-}
-
-fn active_iteration_nodes<'a>(
-    snapshot: &'a IterationSnapshot,
-    path: &[String],
-) -> Vec<(
-    &'a IterationItemObservation,
-    &'a crate::state::IterationNodeObservation,
-)> {
-    let active: Vec<_> = snapshot
-        .items
-        .iter()
-        .filter(|item| !item.closed && !item.interrupted)
-        .flat_map(|item| {
-            item.nodes
-                .iter()
-                .filter(move |node| {
-                    node.node.status == NodeStatus::Running && node.path.starts_with(path)
-                })
-                .map(move |node| (item, node))
-        })
-        .collect();
-    let hidden: BTreeSet<_> = active
-        .iter()
-        .flat_map(|(item, node)| {
-            (1..=node.path.len())
-                .map(move |depth| (item.identity.clone(), node.path[..depth].to_vec()))
-        })
-        .collect();
-    active
-        .into_iter()
-        .filter(|(item, node)| {
-            let mut full = node.path.clone();
-            full.push(node.node.id.clone());
-            !hidden.contains(&(item.identity.clone(), full))
-        })
-        .collect()
-}
-
 fn draw_parallel_pips(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1534,80 +1423,86 @@ fn draw_parallel_pips(
     observations: &[NodeObservation],
     receiver: &ObservationReader,
     elapsed_ns: u64,
-    iteration: Option<IterationPipContext<'_>>,
+    iterations: Option<&crate::state::IterationSnapshot>,
 ) {
-    let active = iteration.as_ref().map_or_else(Vec::new, |context| {
-        active_iteration_nodes(context.snapshot, context.path)
-    });
-    let covered: BTreeSet<_> = iteration.as_ref().map_or_else(BTreeSet::new, |context| {
-        active
-            .iter()
-            .filter_map(|(_, node)| {
-                let id = if node.path == context.path {
-                    Some(&node.node.id)
-                } else {
-                    node.path.get(context.path.len())
-                }?;
-                layout.display_index_for_node_id(id)
-            })
-            .collect()
-    });
-    let current_item_scope = iteration.as_ref().is_some_and(|context| {
-        context
-            .snapshot
-            .items
-            .iter()
-            .any(|item| context.path.starts_with(&item.iteration_path))
-    });
-    let mut views: Vec<_> = running_display_nodes(layout, observations)
+    let active: Vec<_> = iterations
         .into_iter()
-        .filter(|display| !current_item_scope && !covered.contains(display))
-        .map(|display| PipView {
-            layout,
-            nodes: Cow::Borrowed(observations),
-            selected: display,
-            title: display_text(&layout.nodes()[display].id).replace('\n', " "),
+        .flat_map(|snapshot| &snapshot.items)
+        .filter(|item| !item.closed && !item.interrupted)
+        .flat_map(|item| {
+            item.nodes
+                .iter()
+                .filter(|node| node.node.status == NodeStatus::Running)
+                .map(move |node| (item, node))
         })
         .collect();
-    if let Some(context) = iteration {
-        let mut seen = BTreeSet::new();
-        for (item, node) in active {
-            let Some(layout) = context.layouts.get(&node.path) else {
-                continue;
-            };
-            let Some(selected) = layout.display_index_for_node_id(&node.node.id) else {
-                continue;
-            };
-            if !seen.insert((item.identity.clone(), node.path.clone(), selected)) {
-                continue;
-            }
-            let nodes = item.display_nodes(
-                &node.path,
-                layout
-                    .all_nodes()
-                    .iter()
-                    .map(|node| (node.id.as_str(), node.kind.as_str())),
-            );
-            let title = format!(
-                "{} · item {} · call {}",
-                display_text(&node.node.id).replace('\n', " "),
-                item.identity.index.get(),
-                item.identity.invocation.get()
-            );
-            views.push(PipView {
-                layout,
-                nodes: Cow::Owned(nodes),
-                selected,
-                title,
-            });
+    let ancestors: BTreeSet<_> = active
+        .iter()
+        .flat_map(|(item, node)| {
+            (1..=node.path.len())
+                .map(move |depth| (item.identity.clone(), node.path[..depth].to_vec()))
+        })
+        .collect();
+    let mut covered = BTreeSet::new();
+    let mut views = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (item, observed) in active {
+        let mut full = observed.path.clone();
+        full.push(observed.node.id.clone());
+        if ancestors.contains(&(item.identity.clone(), full.clone())) {
+            continue;
         }
+        for depth in 0..full.len() {
+            if let Some(display) =
+                layout.display_index_for_scoped_node(&full[..depth], &full[depth])
+            {
+                covered.insert(display);
+            }
+        }
+        let mut visible = full;
+        let display = loop {
+            let Some(id) = visible.pop() else {
+                break None;
+            };
+            if let Some(display) = layout.display_index_for_scoped_node(&visible, &id) {
+                break Some(display);
+            }
+        };
+        if let Some(display) = display
+            && seen.insert((item.identity.clone(), display))
+        {
+            views.push((
+                display,
+                Some(item),
+                format!(
+                    "{} · item {} · call {}",
+                    display_text(&observed.node.id).replace('\n', " "),
+                    item.identity.index.get(),
+                    item.identity.invocation.get()
+                ),
+            ));
+        }
+    }
+    for display in running_display_nodes(layout, observations) {
+        if covered.contains(&display) {
+            continue;
+        }
+        let node = &layout.nodes()[display];
+        let title = layout
+            .node_path(display)
+            .iter()
+            .chain(std::iter::once(&node.id))
+            .map(|id| display_text(id).replace('\n', " "))
+            .collect::<Vec<_>>()
+            .join(" / ");
+        views.push((display, None, title));
     }
     let (areas, overflow) = parallel_pip_areas(views.len(), area);
     let visible = areas.len();
-    for (position, (view, rect)) in views.into_iter().zip(areas).enumerate() {
-        let node = &view.layout.nodes()[view.selected];
+    for (position, ((display, item, title), rect)) in views.into_iter().zip(areas).enumerate() {
+        let node = &layout.nodes()[display];
         let mut block = Block::default()
-            .title(format!(" Running: {} ", view.title))
+            .title(format!(" Running: {title} "))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow));
         if overflow > 0 && position + 1 == visible {
@@ -1617,11 +1512,27 @@ fn draw_parallel_pips(
         frame.render_widget(Clear, rect);
         frame.render_widget(block, rect);
         let offset = centered_offset(node.rect, (inner.width, inner.height));
+        let mut item_nodes;
+        let nodes = if let Some(item) = item {
+            item_nodes = observations.to_vec();
+            for (source, target) in item_nodes.iter_mut().enumerate() {
+                let path = layout.source_path(source);
+                if path.starts_with(&item.iteration_path) {
+                    let described = &layout.all_nodes()[source];
+                    *target = item
+                        .display_nodes(path, [(described.id.as_str(), described.kind.as_str())])
+                        .remove(0);
+                }
+            }
+            item_nodes.as_slice()
+        } else {
+            observations
+        };
         frame.render_widget(
-            GraphView::new(view.layout)
+            GraphView::new(layout)
                 .reader(receiver)
-                .nodes(&view.nodes)
-                .selected(view.selected)
+                .nodes(nodes)
+                .selected(display)
                 .offset(offset.0, offset.1)
                 .elapsed_ns(elapsed_ns),
             inner,
@@ -1633,8 +1544,6 @@ fn draw_parallel_pips(
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     root_layout: &GraphLayout,
-    body_layouts: &BTreeMap<Vec<String>, GraphLayout>,
-    iteration_layouts: &BTreeMap<Vec<String>, GraphLayout>,
     description: &WorkflowDescription,
     snapshot: &StateSnapshot,
     capture: &CaptureView,
@@ -1663,33 +1572,23 @@ fn draw(
             .context(TerminalSnafu)?;
         return Ok(());
     }
-    let layout = view_state.layout(root_layout, body_layouts);
+    let layout = root_layout;
     view_state.follow_latest(snapshot, layout);
     let pass = view_state.pass(snapshot);
-    let iteration = view_state.iteration(snapshot);
-    let static_body = (1..=view_state.path.len()).any(|depth| {
-        description
-            .body(&view_state.path[..depth])
-            .is_some_and(|body| {
-                body.nodes
-                    .iter()
-                    .any(|node| node.kind == mf_runtime::ITERATION_INPUT_KIND)
-            })
-    });
-    let display_nodes = (!view_state.path.is_empty()).then(|| {
-        iteration.map_or_else(
-            || body_observations(layout, pass, static_body),
-            |item| {
-                item.display_nodes(
-                    &view_state.path,
-                    layout
-                        .all_nodes()
-                        .iter()
-                        .map(|node| (node.id.as_str(), node.kind.as_str())),
-                )
-            },
-        )
-    });
+    let static_body = is_static_body(description, &view_state.path);
+    let iteration = iteration_for_scope(
+        snapshot,
+        &view_state.path,
+        &view_state.history_offsets(),
+        &view_state.iteration_items,
+    );
+    let display_nodes = inline_observations_with_items(
+        layout,
+        description,
+        snapshot,
+        &view_state.history_offsets(),
+        &view_state.iteration_items,
+    );
     terminal.draw(|frame| {
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(1), Constraint::Min(1), Constraint::Length(2),
@@ -1733,13 +1632,9 @@ fn draw(
             .selected(view_state.selected)
             .offset(view_state.offset.0, view_state.offset.1)
             .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64);
-        if view_state.path.is_empty() {
-            graph_view = graph_view.snapshot(snapshot);
-        } else if let Some(nodes) = &display_nodes {
-            graph_view = graph_view.nodes(nodes);
-        }
+        graph_view = graph_view.nodes(&display_nodes);
         frame.render_widget(graph_view, graph);
-        let observations = display_nodes.as_deref().unwrap_or(&snapshot.nodes);
+        let observations = display_nodes.as_slice();
         draw_parallel_pips(
             frame,
             graph,
@@ -1747,7 +1642,7 @@ fn draw(
             observations,
             receiver,
             elapsed.as_nanos().min(u64::MAX as u128) as u64,
-            Some(IterationPipContext { snapshot: &snapshot.iterations, layouts: iteration_layouts, path: &view_state.path }),
+            Some(&snapshot.iterations),
         );
         if let Some(details) = details {
             view_state.details_height = usize::from(details.height.saturating_sub(2));
@@ -1815,9 +1710,9 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
     } else {
         "Arrows         Pan graph\nTab / Shift-Tab, j/k   Select node\n\
          d              Show / hide details\nPgUp/PgDn      Scroll visible details\n\
-         e              Cycle connection view\nc              Collapse / expand cluster\nv              Open OTEL tracing\n\
-         l              Enter selected body\nh              Return to parent scope\n\
-         Esc            Close details / return to parent\n\
+         e              Cycle connection view\nc              Fold selected body / cluster\nv              Open OTEL tracing\n\
+         l              Expand selected body inline\nh              Collapse body / enclosing body\n\
+         Esc            Close details / collapse body\n\
          [ / ]          Older / newer pass or item\nf              Reset viewport\n\
          Ctrl-C         Interrupt / close\nq, Enter       Close after completion"
     };
@@ -1845,29 +1740,195 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
     );
 }
 
-fn body_observations(
-    layout: &GraphLayout,
-    pass: Option<&LoopPassObservation>,
-    static_body: bool,
-) -> Vec<NodeObservation> {
-    let order = || {
-        layout
-            .all_nodes()
-            .iter()
-            .map(|node| (node.id.as_str(), node.kind.as_str()))
-    };
-    if !static_body && let Some(pass) = pass {
-        return pass.display_nodes(order());
+fn scope_pass<'a>(
+    snapshot: &'a StateSnapshot,
+    path: &[String],
+    offsets: &BTreeMap<Vec<String>, usize>,
+) -> Option<&'a LoopPassObservation> {
+    let matching = scope_passes(snapshot, path, offsets);
+    let offset = offsets
+        .get(path)
+        .copied()
+        .unwrap_or_default()
+        .min(matching.len().checked_sub(1)?);
+    matching.get(matching.len() - offset - 1).copied()
+}
+
+fn scope_passes<'a>(
+    snapshot: &'a StateSnapshot,
+    path: &[String],
+    offsets: &BTreeMap<Vec<String>, usize>,
+) -> Vec<&'a LoopPassObservation> {
+    if path.is_empty() {
+        return Vec::new();
     }
-    order()
-        .map(|(id, kind)| {
-            let mut node = NodeObservation::pending(id, kind);
-            if static_body {
-                node.status = crate::state::NodeStatus::Unknown;
-            }
-            node
+    let parent = if path.len() > 1 {
+        let Some(parent) = scope_pass(snapshot, &path[..path.len() - 1], offsets) else {
+            return Vec::new();
+        };
+        Some(parent)
+    } else {
+        None
+    };
+    snapshot
+        .loop_passes
+        .iter()
+        .filter(|pass| {
+            pass.path
+                .iter()
+                .map(|entry| entry.node_id())
+                .eq(path.iter())
+                && parent.is_none_or(|parent| {
+                    pass.path.starts_with(&parent.path)
+                        && (pass.stream_invocation == parent.stream_invocation
+                            || snapshot.stream.as_ref().is_some_and(|stream| {
+                                stream.invocations.iter().any(|invocation| {
+                                    Some(invocation.identity.invocation) == pass.stream_invocation
+                                        && invocation.identity.parent == parent.stream_invocation
+                                })
+                            }))
+                })
         })
         .collect()
+}
+
+fn is_static_body(description: &WorkflowDescription, path: &[String]) -> bool {
+    (1..=path.len()).any(|depth| {
+        description.body(&path[..depth]).is_some_and(|body| {
+            body.nodes
+                .iter()
+                .any(|node| node.kind == mf_runtime::ITERATION_INPUT_KIND)
+        })
+    })
+}
+
+fn iteration_scope_items<'a>(
+    snapshot: &'a StateSnapshot,
+    path: &[String],
+    offsets: &BTreeMap<Vec<String>, usize>,
+) -> Vec<&'a IterationItemObservation> {
+    let depth = snapshot
+        .iterations
+        .items
+        .iter()
+        .filter(|item| path.starts_with(&item.iteration_path))
+        .map(|item| item.iteration_path.len())
+        .max()
+        .unwrap_or(0);
+    snapshot
+        .iterations
+        .items
+        .iter()
+        .filter(|item| {
+            if item.iteration_path.len() != depth || !path.starts_with(&item.iteration_path) {
+                return false;
+            }
+            let parent = &item.iteration_path[..item.iteration_path.len() - 1];
+            parent.is_empty()
+                || scope_pass(snapshot, parent, offsets).is_none_or(|pass| {
+                    item.parent_path == pass.path
+                        && item.parent_stream_invocation == pass.stream_invocation
+                })
+        })
+        .collect()
+}
+
+fn iteration_for_scope<'a>(
+    snapshot: &'a StateSnapshot,
+    path: &[String],
+    offsets: &BTreeMap<Vec<String>, usize>,
+    selected: &BTreeMap<Vec<String>, ItemIdentity>,
+) -> Option<&'a IterationItemObservation> {
+    let items = iteration_scope_items(snapshot, path, offsets);
+    let owner = &items.first()?.iteration_path;
+    selected
+        .get(owner)
+        .and_then(|id| items.iter().find(|item| &item.identity == id).copied())
+        .or_else(|| {
+            let offset = offsets
+                .get(owner)
+                .copied()
+                .unwrap_or(0)
+                .min(items.len() - 1);
+            items.get(items.len() - offset - 1).copied()
+        })
+}
+
+fn inline_observations(
+    layout: &GraphLayout,
+    description: &WorkflowDescription,
+    snapshot: &StateSnapshot,
+    offsets: &BTreeMap<Vec<String>, usize>,
+) -> Vec<NodeObservation> {
+    inline_observations_with_items(layout, description, snapshot, offsets, &BTreeMap::new())
+}
+
+fn inline_observations_with_items(
+    layout: &GraphLayout,
+    description: &WorkflowDescription,
+    snapshot: &StateSnapshot,
+    offsets: &BTreeMap<Vec<String>, usize>,
+    selected: &BTreeMap<Vec<String>, ItemIdentity>,
+) -> Vec<NodeObservation> {
+    let mut scopes: BTreeMap<&[String], Vec<usize>> = BTreeMap::new();
+    for source in 0..layout.all_nodes().len() {
+        scopes
+            .entry(layout.source_path(source))
+            .or_default()
+            .push(source);
+    }
+    let mut nodes: Vec<_> = layout
+        .all_nodes()
+        .iter()
+        .map(|node| NodeObservation::pending(&node.id, &node.kind))
+        .collect();
+    for (path, sources) in scopes {
+        let source_by_id: BTreeMap<_, _> = sources
+            .iter()
+            .map(|source| (layout.all_nodes()[*source].id.as_str(), *source))
+            .collect();
+        if path.is_empty() {
+            for observed in &snapshot.nodes {
+                if let Some(source) = source_by_id.get(observed.id.as_str()) {
+                    nodes[*source] = observed.clone();
+                }
+            }
+            continue;
+        }
+        let body = description
+            .body(path)
+            .expect("visible scope has a described body");
+        let order = || {
+            body.execution_order.iter().map(|id| {
+                let source = source_by_id[id.as_str()];
+                let node = &layout.all_nodes()[source];
+                (node.id.as_str(), node.kind.as_str())
+            })
+        };
+        let static_body = is_static_body(description, path);
+        let observed = if static_body
+            && let Some(item) = iteration_for_scope(snapshot, path, offsets, selected)
+        {
+            item.display_nodes(path, order())
+        } else if !static_body && let Some(pass) = scope_pass(snapshot, path, offsets) {
+            pass.display_nodes(order())
+        } else {
+            order()
+                .map(|(id, kind)| {
+                    let mut node = NodeObservation::pending(id, kind);
+                    if static_body {
+                        node.status = NodeStatus::Unknown;
+                    }
+                    node
+                })
+                .collect()
+        };
+        for observed in observed {
+            let source = source_by_id[observed.id.as_str()];
+            nodes[source] = observed;
+        }
+    }
+    nodes
 }
 
 fn connection_summary(layout: &GraphLayout) -> String {
@@ -2123,13 +2184,8 @@ fn details_text(
     capture: &CaptureView,
     bindings: &str,
 ) -> String {
-    let mut details = format!(
-        "Iteration details: {} retained items | {} missing records | {} conflicts | {} retention overflows\n",
-        snapshot.iterations.items.len(),
-        snapshot.iterations.known_missing_count,
-        snapshot.iterations.protocol_conflicts,
-        snapshot.iterations.retention_overflows
-    );
+    let mut details = String::new();
+    details.push_str(&format!("Iteration details: {} retained items | {} missing records | {} conflicts | {} retention overflows\n", snapshot.iterations.items.len(), snapshot.iterations.known_missing_count, snapshot.iterations.protocol_conflicts, snapshot.iterations.retention_overflows));
     let parent_path = pass.map_or(&[][..], |pass| pass.path.as_slice());
     if let Some(node) = node {
         details.push_str(&format!(
@@ -2335,28 +2391,39 @@ fn details_text(
 
 #[derive(Clone, Debug)]
 enum SelectionAnchor {
-    Node(String),
-    Cluster(usize),
+    Node(Vec<String>, String),
+    Cluster(Vec<String>, usize),
 }
 
 fn selection_anchor(layout: &GraphLayout, selected: usize) -> Option<SelectionAnchor> {
     if layout.is_collapsed_cluster(selected) {
-        return layout.cluster_of(selected).map(SelectionAnchor::Cluster);
+        return layout.cluster_of(selected).map(|cluster| {
+            let (path, index) = layout.cluster_key(cluster);
+            SelectionAnchor::Cluster(path.clone(), *index)
+        });
     }
     let source = *layout.sources(selected).first()?;
     Some(SelectionAnchor::Node(
+        layout.source_path(source).to_vec(),
         layout.all_nodes().get(source)?.id.clone(),
     ))
 }
 
 fn anchor_display(layout: &GraphLayout, anchor: &SelectionAnchor) -> Option<usize> {
     match anchor {
-        SelectionAnchor::Node(id) => layout.display_index_for_node_id(id),
-        SelectionAnchor::Cluster(cluster) => {
-            layout.display_index_for_cluster(*cluster).or_else(|| {
-                layout
-                    .clusters()
-                    .get(*cluster)?
+        SelectionAnchor::Node(path, id) => layout.display_index_for_scoped_node(path, id),
+        SelectionAnchor::Cluster(path, index) => {
+            let cluster = layout
+                .clusters()
+                .iter()
+                .enumerate()
+                .find_map(|(cluster, _)| {
+                    (layout.cluster_key(cluster).0 == *path
+                        && layout.cluster_key(cluster).1 == *index)
+                        .then_some(cluster)
+                })?;
+            layout.display_index_for_cluster(cluster).or_else(|| {
+                layout.clusters()[cluster]
                     .members
                     .first()
                     .and_then(|source| layout.display_index_for_source(*source))
@@ -2367,104 +2434,152 @@ fn anchor_display(layout: &GraphLayout, anchor: &SelectionAnchor) -> Option<usiz
 
 #[derive(Clone, Default)]
 struct GraphViewport {
-    iteration_item: Option<ItemIdentity>,
-    iteration_parent: Option<Vec<mf_telemetry::event::LoopPathEntry>>,
-    iteration_parent_stream: Option<u64>,
     offset: (u32, u32),
     selected: usize,
-    pass_offset: usize,
     details_offset: usize,
 }
 
 pub struct ObservationView {
     description: WorkflowDescription,
     root: GraphLayout,
-    // Retain only the currently inspected body, regardless of the number of scopes or views.
-    bodies: BTreeMap<Vec<String>, GraphLayout>,
-    iteration_layouts: BTreeMap<Vec<String>, GraphLayout>,
-    viewports: BTreeMap<(Vec<String>, ConnectionView), GraphViewport>,
+    execution: GraphLayout,
+    expanded: BTreeSet<Vec<String>>,
+    viewports: BTreeMap<ConnectionView, GraphViewport>,
     collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
-    cluster_focus: BTreeMap<(Vec<String>, usize), usize>,
+    cluster_focus: BTreeMap<(Vec<String>, usize), String>,
     state: ViewState,
 }
 impl ObservationView {
     pub fn new(description: &WorkflowDescription) -> Result<Self, RunError> {
-        let root =
+        let expanded = description
+            .loop_bodies
+            .iter()
+            .map(|body| body.path.clone())
+            .collect();
+        let execution =
             GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
+        let root = GraphLayout::with_expanded_bodies(
+            description,
+            ConnectionView::Execution,
+            &expanded,
+            &BTreeMap::new(),
+        )
+        .context(GraphSnafu)?;
         Ok(Self {
             description: description.clone(),
+            execution,
             root,
-            bodies: BTreeMap::new(),
-            iteration_layouts: BTreeMap::new(),
+            expanded,
             viewports: BTreeMap::new(),
             collapsed: BTreeMap::new(),
             cluster_focus: BTreeMap::new(),
             state: ViewState::default(),
         })
     }
-    fn collapsed_at(&self, path: &[String]) -> BTreeSet<usize> {
-        self.collapsed.get(path).cloned().unwrap_or_default()
+    fn collapse_body_path(&self) -> Option<Vec<String>> {
+        self.selected_body()
+            .filter(|path| self.expanded.contains(path))
+            .or_else(|| {
+                let path = self.root.node_path(self.state.selected);
+                (!path.is_empty()).then(|| path.to_vec())
+            })
     }
-    fn rebuild_layouts(&mut self) -> Result<(), RunError> {
-        let view = self.root.connection_view();
-        let root_collapsed = self.collapsed_at(&[]);
-        self.root = GraphLayout::with_view_and_collapsed(&self.description, view, &root_collapsed)
-            .context(GraphSnafu)?;
-        self.bodies.clear();
-        self.iteration_layouts.clear();
-        if !self.state.path.is_empty() {
-            let path = self.state.path.clone();
-            let collapsed = self.collapsed_at(&path);
-            let body = GraphLayout::from_body_with_view_and_collapsed(
-                &self.description,
-                &path,
-                view,
-                &collapsed,
-            )
-            .context(GraphSnafu)?;
-            self.bodies.insert(path, body);
+
+    fn can_collapse_body(&self) -> bool {
+        self.collapse_body_path().is_some()
+    }
+
+    fn selected_body(&self) -> Option<Vec<String>> {
+        if self.root.is_collapsed_cluster(self.state.selected) {
+            return None;
         }
+        let node = self.root.nodes().get(self.state.selected)?;
+        let mut path = self.root.node_path(self.state.selected).to_vec();
+        path.push(node.id.clone());
+        self.description.body(&path).map(|_| path)
+    }
+
+    fn fold_body(&mut self, path: Vec<String>, expand: bool) -> Result<(), RunError> {
+        let mut expanded = self.expanded.clone();
+        if expand {
+            expanded.insert(path.clone());
+        } else {
+            expanded.remove(&path);
+        }
+        let root = GraphLayout::with_expanded_bodies(
+            &self.description,
+            self.root.connection_view(),
+            &expanded,
+            &self.collapsed,
+        )
+        .context(GraphSnafu)?;
+        let (id, parent) = path.split_last().expect("body path is nonempty");
+        self.state.selected = root
+            .display_index_for_scoped_node(parent, id)
+            .unwrap_or_default();
+        self.root = root;
+        self.expanded = expanded;
+        self.state.sync_scope(&self.root);
+        self.state.reveal_selected = true;
+        self.state.details_offset = 0;
         Ok(())
     }
+
     fn toggle_cluster(&mut self) -> Result<(), RunError> {
-        let (cluster, collapsed, anchor, focus) = {
-            let layout = self.state.layout(&self.root, &self.bodies);
-            let selected = self.state.selected;
-            let Some(cluster) = layout.cluster_of(selected) else {
-                return Ok(());
-            };
-            let collapsed = layout.clusters()[cluster].collapsed;
-            let focus = (!collapsed && !layout.is_collapsed_cluster(selected))
-                .then(|| layout.sources(selected).first().copied())
-                .flatten();
-            let anchor =
-                selection_anchor(layout, selected).unwrap_or(SelectionAnchor::Cluster(cluster));
-            (cluster, collapsed, anchor, focus)
+        let selected = self.state.selected;
+        let Some(cluster) = self.root.cluster_of(selected) else {
+            return Ok(());
         };
-        let path = self.state.path.clone();
-        if let Some(focus) = focus {
-            self.cluster_focus.insert((path.clone(), cluster), focus);
+        let (path, index) = self.root.cluster_key(cluster).clone();
+        let collapsed = self.root.clusters()[cluster].collapsed;
+        let anchor = selection_anchor(&self.root, selected).expect("cluster has a selection");
+        if !collapsed && let Some(source) = self.root.sources(selected).first() {
+            self.cluster_focus.insert(
+                (path.clone(), index),
+                self.root.all_nodes()[*source].id.clone(),
+            );
         }
-        let set = self.collapsed.entry(path.clone()).or_default();
+        let mut folded = self.collapsed.clone();
+        let set = folded.entry(path.clone()).or_default();
         if collapsed {
-            set.remove(&cluster);
+            set.remove(&index);
         } else {
-            set.insert(cluster);
+            set.insert(index);
         }
-        self.rebuild_layouts()?;
-        let layout = self.state.layout(&self.root, &self.bodies);
-        let selected = match &anchor {
-            SelectionAnchor::Cluster(cluster) => self
-                .cluster_focus
-                .get(&(path, *cluster))
-                .copied()
-                .and_then(|source| layout.display_index_for_source(source))
-                .or_else(|| anchor_display(layout, &anchor)),
-            _ => anchor_display(layout, &anchor),
+        let root = GraphLayout::with_expanded_bodies(
+            &self.description,
+            self.root.connection_view(),
+            &self.expanded,
+            &folded,
+        )
+        .context(GraphSnafu)?;
+        let execution = if path.is_empty() {
+            Some(
+                GraphLayout::with_view_and_collapsed(
+                    &self.description,
+                    self.root.connection_view(),
+                    folded.get(&path).expect("updated cluster scope exists"),
+                )
+                .context(GraphSnafu)?,
+            )
+        } else {
+            None
         };
-        if let Some(selected) = selected {
-            self.state.selected = selected;
+        self.state.selected = if collapsed {
+            self.cluster_focus
+                .get(&(path.clone(), index))
+                .and_then(|id| root.display_index_for_scoped_node(&path, id))
+                .or_else(|| anchor_display(&root, &anchor))
+        } else {
+            anchor_display(&root, &anchor)
         }
+        .unwrap_or_default();
+        self.root = root;
+        self.collapsed = folded;
+        if let Some(execution) = execution {
+            self.execution = execution;
+        }
+        self.state.sync_scope(&self.root);
         self.state.reveal_selected = true;
         self.state.details_offset = 0;
         self.save_viewport();
@@ -2472,14 +2587,10 @@ impl ObservationView {
     }
     fn save_viewport(&mut self) {
         self.viewports.insert(
-            (self.state.path.clone(), self.root.connection_view()),
+            self.root.connection_view(),
             GraphViewport {
-                iteration_item: self.state.iteration_item.clone(),
-                iteration_parent: self.state.iteration_parent.clone(),
-                iteration_parent_stream: self.state.iteration_parent_stream,
                 offset: self.state.offset,
                 selected: self.state.selected,
-                pass_offset: self.state.pass_offset,
                 details_offset: self.state.details_offset,
             },
         );
@@ -2487,97 +2598,42 @@ impl ObservationView {
     fn restore_viewport(&mut self) {
         let viewport = self
             .viewports
-            .get(&(self.state.path.clone(), self.root.connection_view()))
+            .get(&self.root.connection_view())
             .cloned()
             .unwrap_or_default();
-        self.state.iteration_item = viewport.iteration_item;
-        self.state.iteration_parent = viewport.iteration_parent;
-        self.state.iteration_parent_stream = viewport.iteration_parent_stream;
         self.state.offset = viewport.offset;
-        let node_count = self.state.layout(&self.root, &self.bodies).nodes().len();
-        self.state.selected = viewport.selected.min(node_count.saturating_sub(1));
-        self.state.pass_offset = viewport.pass_offset;
+        self.state.selected = viewport
+            .selected
+            .min(self.root.nodes().len().saturating_sub(1));
         self.state.details_offset = viewport.details_offset;
         self.state.reveal_selected = true;
     }
-    fn load_body(&mut self, path: &[String]) -> Result<(), RunError> {
-        if !path.is_empty() && !self.bodies.contains_key(path) {
-            let collapsed = self.collapsed_at(path);
-            let layout = GraphLayout::from_body_with_view_and_collapsed(
-                &self.description,
-                path,
-                self.root.connection_view(),
-                &collapsed,
-            )
-            .context(GraphSnafu)?;
-            self.bodies.insert(path.to_vec(), layout);
-        }
-        Ok(())
-    }
     fn switch_connections(&mut self) -> Result<(), RunError> {
-        let anchor = selection_anchor(
-            self.state.layout(&self.root, &self.bodies),
-            self.state.selected,
-        );
-        let view = self.root.connection_view().next();
-        let root_collapsed = self.collapsed_at(&[]);
-        let root = GraphLayout::with_view_and_collapsed(&self.description, view, &root_collapsed)
-            .context(GraphSnafu)?;
-        let body = if self.state.path.is_empty() {
-            None
-        } else {
-            let collapsed = self.collapsed_at(&self.state.path);
-            Some(
-                GraphLayout::from_body_with_view_and_collapsed(
-                    &self.description,
-                    &self.state.path,
-                    view,
-                    &collapsed,
-                )
-                .context(GraphSnafu)?,
-            )
-        };
+        let anchor = selection_anchor(&self.root, self.state.selected);
+        let root = GraphLayout::with_expanded_bodies(
+            &self.description,
+            self.root.connection_view().next(),
+            &self.expanded,
+            &self.collapsed,
+        )
+        .context(GraphSnafu)?;
+        let execution = GraphLayout::with_view_and_collapsed(
+            &self.description,
+            root.connection_view(),
+            &self.collapsed.get(&Vec::new()).cloned().unwrap_or_default(),
+        )
+        .context(GraphSnafu)?;
         self.save_viewport();
         self.root = root;
-        self.bodies.clear();
-        self.iteration_layouts.clear();
-        if let Some(body) = body {
-            self.bodies.insert(self.state.path.clone(), body);
-        }
+        self.execution = execution;
         self.restore_viewport();
         if let Some(anchor) = anchor
-            && let Some(selected) =
-                anchor_display(self.state.layout(&self.root, &self.bodies), &anchor)
+            && let Some(selected) = anchor_display(&self.root, &anchor)
         {
             self.state.selected = selected;
         }
+        self.state.sync_scope(&self.root);
         Ok(())
-    }
-    fn prepare_navigation(&mut self, key: KeyCode) -> Result<(), RunError> {
-        if key == KeyCode::Esc && self.state.details_visible {
-            return Ok(());
-        }
-        let mut path = self.state.path.clone();
-        match key {
-            KeyCode::Char('l') => {
-                if let Some(node) = self
-                    .state
-                    .layout(&self.root, &self.bodies)
-                    .nodes()
-                    .get(self.state.selected)
-                {
-                    path.push(node.id.clone());
-                }
-                if self.description.body(&path).is_none() {
-                    return Ok(());
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Esc => {
-                path.pop();
-            }
-            _ => return Ok(()),
-        }
-        self.load_body(&path)
     }
     fn handle_navigation(
         &mut self,
@@ -2587,51 +2643,39 @@ impl ObservationView {
         logs: &LogSnapshot,
     ) {
         if !self.state.traces.visible {
-            if key == KeyCode::Char('c') {
-                self.state.graph_notice = self
-                    .toggle_cluster()
+            let result = match key {
+                KeyCode::Char('c') => Some(if let Some(path) = self.selected_body() {
+                    let expand = !self.expanded.contains(&path);
+                    self.fold_body(path, expand)
+                } else {
+                    self.toggle_cluster()
+                }),
+                KeyCode::Char('l') => Some(if let Some(path) = self.selected_body() {
+                    self.fold_body(path, true)
+                } else {
+                    Ok(())
+                }),
+                KeyCode::Char('h') | KeyCode::Esc
+                    if !(key == KeyCode::Esc && self.state.details_visible) =>
+                {
+                    Some(if let Some(path) = self.collapse_body_path() {
+                        self.fold_body(path, false)
+                    } else {
+                        Ok(())
+                    })
+                }
+                KeyCode::Char('e') => Some(self.switch_connections()),
+                _ => None,
+            };
+            if let Some(result) = result {
+                self.state.graph_notice = result
                     .err()
-                    .map(|error| format!("Cluster fold unavailable: {error}"));
+                    .map(|error| format!("Graph update unavailable: {error}"));
                 return;
             }
-            if key == KeyCode::Char('e') {
-                self.state.graph_notice = self
-                    .switch_connections()
-                    .err()
-                    .map(|error| format!("Connection view unavailable: {error}"));
-                return;
-            }
-            if let Err(error) = self.prepare_navigation(key) {
-                self.state.graph_notice = Some(format!("Body view unavailable: {error}"));
-                return;
-            }
-            self.save_viewport();
         }
-        let previous = self.state.path.clone();
         self.state
-            .handle_key(key, snapshot, &self.root, &self.bodies, traces, logs);
-        if self.state.path != previous {
-            let entering_item = self.state.path.starts_with(&previous)
-                && self.description.loop_bodies.iter().any(|body| {
-                    self.state.path.starts_with(&body.path)
-                        && body
-                            .nodes
-                            .iter()
-                            .any(|node| node.kind == mf_runtime::ITERATION_INPUT_KIND)
-                });
-            let item = self.state.iteration_item.clone();
-            let parent = self.state.iteration_parent.clone();
-            let parent_stream = self.state.iteration_parent_stream;
-            let item_offset = self.state.pass_offset;
-            self.restore_viewport();
-            if entering_item {
-                self.state.iteration_item = item;
-                self.state.iteration_parent = parent;
-                self.state.iteration_parent_stream = parent_stream;
-                self.state.pass_offset = item_offset;
-            }
-        }
-        self.bodies.retain(|path, _| *path == self.state.path);
+            .handle_key(key, snapshot, &self.root, traces, logs);
     }
     pub fn handle_key(&mut self, key: KeyCode, observation: &LocalObservation) {
         if self.state.handle_help(key) {
@@ -2658,6 +2702,14 @@ impl ObservationView {
             true
         } else if !self.state.traces.visible && self.state.details_visible {
             self.state.details_visible = false;
+            true
+        } else if !self.state.traces.visible
+            && let Some(path) = self.collapse_body_path()
+        {
+            self.state.graph_notice = self
+                .fold_body(path, false)
+                .err()
+                .map(|error| format!("Graph update unavailable: {error}"));
             true
         } else {
             false
@@ -2691,9 +2743,9 @@ impl ObservationView {
             .count();
         // Follow root execution independently of the full inspector's navigation state.
         let mut state = ViewState::default();
-        state.follow_latest(&snapshot, &self.root);
+        state.follow_latest(&snapshot, &self.execution);
         let current = self
-            .root
+            .execution
             .nodes()
             .get(state.selected)
             .map_or("", |node| node.id.as_str());
@@ -2711,11 +2763,17 @@ impl ObservationView {
             )),
             header,
         );
-        state.reveal(&self.root, graph);
+        state.reveal(&self.execution, graph);
+        let nodes = inline_observations(
+            &self.execution,
+            &self.description,
+            &snapshot,
+            &BTreeMap::new(),
+        );
         frame.render_widget(
-            GraphView::new(&self.root)
+            GraphView::new(&self.execution)
                 .reader(&observation.reader)
-                .snapshot(&snapshot)
+                .nodes(&nodes)
                 .selected(state.selected)
                 .offset(state.offset.0, state.offset.1)
                 .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64),
@@ -2727,42 +2785,14 @@ impl ObservationView {
             footer,
         );
     }
-    fn prepare_iteration_layouts(&mut self, snapshot: &StateSnapshot) -> Result<(), RunError> {
-        let paths: BTreeSet<_> = active_iteration_nodes(&snapshot.iterations, &self.state.path)
-            .into_iter()
-            .map(|(_, node)| node.path.clone())
-            .collect();
-        self.iteration_layouts
-            .retain(|path, _| paths.contains(path));
-        for path in paths {
-            if !self.iteration_layouts.contains_key(&path) {
-                let layout = GraphLayout::from_body_with_view_and_collapsed(
-                    &self.description,
-                    &path,
-                    self.root.connection_view(),
-                    &self.collapsed_at(&path),
-                )
-                .context(GraphSnafu)?;
-                self.iteration_layouts.insert(path, layout);
-            }
-        }
-        Ok(())
-    }
-
     pub fn draw(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
         observation: &LocalObservation,
     ) -> Result<(), RunError> {
-        let snapshot = observation.reader.snapshot_shared();
-        if let Err(error) = self.prepare_iteration_layouts(&snapshot) {
-            self.state.graph_notice = Some(format!("Iteration previews unavailable: {error}"));
-        }
         draw(
             terminal,
             &self.root,
-            &self.bodies,
-            &self.iteration_layouts,
             &self.description,
             &observation.reader.snapshot_shared(),
             &observation.capture_view(),
@@ -3014,6 +3044,335 @@ mod tests {
     }
 
     #[test]
+    fn iteration_inside_loop_keeps_the_selected_pass_and_stream_invocation() {
+        use crate::state::{IterationEvent, IterationRecord, LoopPassObservation, SessionState};
+        use mf_telemetry::{event::NodeIdentity, iteration::IterationContext};
+
+        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "9".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"repeat","kind":"workflow.loop"}],
+            "execution_order":["repeat"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[
+                {"path":["repeat"], "nodes":[{"id":"%loop","kind":"%loop"},{"id":"each","kind":"builtin.iteration"}],
+                 "execution_order":["%loop","each"], "data_edges":[], "control_edges":[]},
+                {"path":["repeat","each"], "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
+                 "execution_order":["%iteration","work"], "data_edges":[], "control_edges":[]}
+            ]
+        })).unwrap();
+        let mut state = SessionState::new(description.clone(), RunId::new()).unwrap();
+        for index in 0..2 {
+            let parent = vec![LoopPathEntry::Loop {
+                loop_id: "repeat".into(),
+                index: Count::try_from(index).unwrap(),
+            }];
+            state
+                .apply_iteration(IterationRecord {
+                    context: IterationContext {
+                        invocation: Count::try_from(index + 1).unwrap(),
+                        iteration_path: vec!["repeat".into(), "each".into()],
+                        body_path: vec!["repeat".into(), "each".into()],
+                        parent_path: parent,
+                        parent_stream_invocation: Some(index as u64 + 11),
+                        index: Count::ZERO,
+                        sequence: Count::try_from(1).unwrap(),
+                        elapsed_ns: Count::try_from(index + 1).unwrap(),
+                    },
+                    event: IterationEvent::NodeStarted {
+                        node: NodeIdentity {
+                            id: "work".into(),
+                            kind: "fixture.work".into(),
+                            path: Vec::new(),
+                        },
+                        selected_inputs: Vec::new(),
+                    },
+                    correlation: None,
+                })
+                .unwrap();
+        }
+        let mut snapshot = state.snapshot();
+        snapshot.loop_passes = (0..2)
+            .map(|index| LoopPassObservation {
+                path: vec![LoopPathEntry::Loop {
+                    loop_id: "repeat".into(),
+                    index: Count::try_from(index).unwrap(),
+                }],
+                nodes: Vec::new(),
+                started: true,
+                outcome: None,
+                interrupted: false,
+                stream_invocation: Some(index as u64 + 11),
+                compact_statuses: Vec::new(),
+            })
+            .collect();
+        let body = vec!["repeat".into(), "each".into()];
+        let parent = vec!["repeat".into()];
+        for (offset, invocation, stream) in [(1, 1, 11), (0, 2, 12)] {
+            let offsets = BTreeMap::from([(parent.clone(), offset)]);
+            let item = iteration_for_scope(&snapshot, &body, &offsets, &BTreeMap::new()).unwrap();
+            assert_eq!(
+                item.identity.invocation,
+                Count::try_from(invocation).unwrap()
+            );
+            assert_eq!(item.parent_stream_invocation, Some(stream));
+        }
+        let mut view = ObservationView::new(&description).unwrap();
+        view.state.selected = view
+            .root
+            .display_index_for_scoped_node(&parent, "each")
+            .unwrap();
+        view.state.sync_scope(&view.root);
+        view.state
+            .iteration_items
+            .insert(body.clone(), snapshot.iterations.items[1].identity.clone());
+        view.state.pass_offsets.insert(body.clone(), 1);
+        view.handle_navigation(
+            KeyCode::Char('['),
+            &snapshot,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(view.state.pass_offset, 1);
+        assert!(!view.state.iteration_items.contains_key(&body));
+        assert!(!view.state.pass_offsets.contains_key(&body));
+        let selected = iteration_for_scope(
+            &snapshot,
+            &body,
+            &view.state.history_offsets(),
+            &view.state.iteration_items,
+        )
+        .unwrap();
+        assert_eq!(selected.identity.invocation, Count::try_from(1).unwrap());
+    }
+
+    #[test]
+    fn inline_iteration_tracks_parallel_items_and_focuses_folded_owners() {
+        use crate::state::{IterationEvent, IterationRecord, SessionState};
+        use mf_telemetry::{event::NodeIdentity, iteration::IterationContext};
+        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "9".repeat(64)),
+            "execution":{"mode":"single"}, "nodes":[{"id":"each","kind":"builtin.iteration"},{"id":"other","kind":"builtin.iteration"}],
+            "execution_order":["each","other"], "data_edges":[], "control_edges":[],
+            "loop_bodies":(["each", "other"].map(|id| serde_json::json!({"path":[id], "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
+            "execution_order":["%iteration","work"], "data_edges":[], "control_edges":[]})))
+        })).unwrap();
+        let run = RunId::new();
+        let mut state = SessionState::new(description.clone(), run).unwrap();
+        let started = || IterationEvent::NodeStarted {
+            node: NodeIdentity {
+                id: "work".into(),
+                kind: "fixture.work".into(),
+                path: Vec::new(),
+            },
+            selected_inputs: Vec::new(),
+        };
+        let mut apply = |index: i64, sequence: i64, event| {
+            state
+                .apply_iteration(IterationRecord {
+                    context: IterationContext {
+                        invocation: Count::try_from(1).unwrap(),
+                        iteration_path: vec!["each".into()],
+                        body_path: vec!["each".into()],
+                        parent_path: Vec::new(),
+                        parent_stream_invocation: None,
+                        index: Count::try_from(index).unwrap(),
+                        sequence: Count::try_from(sequence).unwrap(),
+                        elapsed_ns: Count::try_from(sequence).unwrap(),
+                    },
+                    event,
+                    correlation: None,
+                })
+                .unwrap();
+        };
+        apply(0, 1, IterationEvent::ItemStarted);
+        apply(0, 2, started());
+        apply(1, 3, IterationEvent::ItemStarted);
+        apply(1, 4, started());
+        let snapshot = state.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let body = vec!["each".to_owned()];
+        let work = view
+            .root
+            .display_index_for_scoped_node(&body, "work")
+            .unwrap();
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.selected, work);
+        assert_eq!(view.state.iteration_items[&body].index.get(), 1);
+        let nodes = inline_observations_with_items(
+            &view.root,
+            &description,
+            &snapshot,
+            &view.state.history_offsets(),
+            &view.state.iteration_items,
+        );
+        let source = view.root.sources(work)[0];
+        assert_eq!(nodes[source].status, NodeStatus::Running);
+        let receiver = LoopbackReceiver::bind(description.clone(), run).unwrap();
+        let reader = receiver.reader();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(128, 64)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_parallel_pips(
+                    frame,
+                    frame.area(),
+                    &view.root,
+                    &nodes,
+                    &reader,
+                    1_000_000,
+                    Some(&snapshot.iterations),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..64)
+            .map(|y| {
+                (0..128)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+        assert!(
+            text.contains("item 0 · call 1") && text.contains("item 1 · call 1"),
+            "{text}"
+        );
+        view.handle_navigation(
+            KeyCode::Char('['),
+            &snapshot,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(view.state.iteration_items[&body].index.get(), 0);
+        let selected = view.state.selected;
+        state
+            .apply_iteration(IterationRecord {
+                context: IterationContext {
+                    invocation: Count::try_from(2).unwrap(),
+                    iteration_path: vec!["other".into()],
+                    body_path: vec!["other".into()],
+                    parent_path: Vec::new(),
+                    parent_stream_invocation: None,
+                    index: Count::ZERO,
+                    sequence: Count::try_from(1).unwrap(),
+                    elapsed_ns: Count::try_from(5).unwrap(),
+                },
+                event: started(),
+                correlation: None,
+            })
+            .unwrap();
+        view.state.follow_latest(&state.snapshot(), &view.root);
+        assert_eq!(view.state.selected, selected);
+        assert_eq!(view.state.iteration_items[&body].index.get(), 0);
+        view.fold_body(body.clone(), false).unwrap();
+        let owner = view
+            .root
+            .display_index_for_scoped_node(&[], "each")
+            .unwrap();
+        let mut folded = ViewState::default();
+        folded.follow_latest(&snapshot, &view.root);
+        assert_eq!(folded.selected, owner);
+        let nodes = inline_observations_with_items(
+            &view.root,
+            &description,
+            &snapshot,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        terminal
+            .draw(|frame| {
+                draw_parallel_pips(
+                    frame,
+                    frame.area(),
+                    &view.root,
+                    &nodes,
+                    &reader,
+                    1_000_000,
+                    Some(&snapshot.iterations),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..64)
+            .map(|y| {
+                (0..128)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn nested_call_in_iteration_focuses_the_visible_child_or_folded_call() {
+        use crate::state::{IterationEvent, IterationRecord, SessionState};
+        use mf_telemetry::{event::NodeIdentity, iteration::IterationContext};
+        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "9".repeat(64)),
+            "execution":{"mode":"single"}, "nodes":[{"id":"each","kind":"builtin.iteration"}],
+            "execution_order":["each"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[
+                {"path":["each"], "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"call","kind":"workflow.call"}],
+                 "execution_order":["%iteration","call"], "data_edges":[], "control_edges":[]},
+                {"path":["each","call"], "nodes":[{"id":"work","kind":"fixture.work"}],
+                 "execution_order":["work"], "data_edges":[], "control_edges":[]}
+            ]
+        })).unwrap();
+        let mut state = SessionState::new(description.clone(), RunId::new()).unwrap();
+        let node = NodeIdentity {
+            id: "work".into(),
+            kind: "fixture.work".into(),
+            path: Vec::new(),
+        };
+        let record = |sequence: i64, event| IterationRecord {
+            context: IterationContext {
+                invocation: Count::try_from(1).unwrap(),
+                iteration_path: vec!["each".into()],
+                body_path: vec!["each".into(), "call".into()],
+                parent_path: Vec::new(),
+                parent_stream_invocation: None,
+                index: Count::ZERO,
+                sequence: Count::try_from(sequence).unwrap(),
+                elapsed_ns: Count::try_from(sequence).unwrap(),
+            },
+            event,
+            correlation: None,
+        };
+        state
+            .apply_iteration(record(
+                1,
+                IterationEvent::NodeStarted {
+                    node: node.clone(),
+                    selected_inputs: Vec::new(),
+                },
+            ))
+            .unwrap();
+        let mut view = ObservationView::new(&description).unwrap();
+        view.state.follow_latest(&state.snapshot(), &view.root);
+        assert_eq!(view.root.node_path(view.state.selected), ["each", "call"]);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "work");
+        view.fold_body(vec!["each".into(), "call".into()], false)
+            .unwrap();
+        state
+            .apply_iteration(record(
+                2,
+                IterationEvent::NodeFinished {
+                    node,
+                    outcome: mf_telemetry::event::Outcome::Succeeded,
+                    duration_ns: None,
+                    produced_ports: Vec::new(),
+                    skipped_ports: Vec::new(),
+                    failure: None,
+                },
+            ))
+            .unwrap();
+        view.state.follow_latest(&state.snapshot(), &view.root);
+        assert_eq!(view.root.node_path(view.state.selected), ["each"]);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "call");
+    }
+
+    #[test]
     fn parallel_pip_grid_adapts_to_running_count_and_window_size() {
         let area = Rect::new(5, 7, 128, 64);
         for count in [2, 4, 10, 16] {
@@ -3251,8 +3610,14 @@ mod tests {
             let rect = view.root.nodes()[view.state.selected].rect;
             assert!(view.state.offset.0 <= rect.x);
             assert!(view.state.offset.1 <= rect.y);
-            assert!(view.state.offset.0 + u32::from(area.width) >= rect.x + rect.width);
-            assert!(view.state.offset.1 + u32::from(area.height) >= rect.y + rect.height);
+            assert!(
+                view.state.offset.0 + u32::from(area.width)
+                    >= rect.x + rect.width.min(u32::from(area.width))
+            );
+            assert!(
+                view.state.offset.1 + u32::from(area.height)
+                    >= rect.y + rect.height.min(u32::from(area.height))
+            );
         }
         view.handle_navigation(KeyCode::Right, &snapshot, &traces, &logs);
         let panned = view.state.offset;
@@ -3270,6 +3635,7 @@ mod tests {
             .unwrap()
             .snapshot();
         let mut view = ObservationView::new(&description).unwrap();
+        view.fold_body(vec!["second".into()], false).unwrap();
         snapshot.latest_node_event = Some(crate::state::NodeEventFocus {
             sequence: Count::try_from(2).unwrap(),
             node: mf_telemetry::event::NodeIdentity {
@@ -3290,25 +3656,416 @@ mod tests {
         assert_eq!(view.state.selected, 0);
         assert!(!view.state.reveal_selected);
 
-        view.state.path = vec!["second".into()];
-        view.load_body(&["second".into()]).unwrap();
-        let layout = view.state.layout(&view.root, &view.bodies);
+        view.fold_body(vec!["second".into()], true).unwrap();
         snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(3).unwrap();
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(layout.nodes()[view.state.selected].id, "target");
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "target");
+        assert_eq!(view.state.path, ["second"]);
         view.state.pass_offset = 1;
-        view.state.selected = 0;
+        let selected = view.state.selected;
         snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(4).unwrap();
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(view.state.selected, 0);
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.selected, selected);
         view.state.pass_offset = 0;
         snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(5).unwrap();
         snapshot.latest_node_event.as_mut().unwrap().node.path[0] = LoopPathEntry::Loop {
             loop_id: "first".into(),
-            index: mf_telemetry::Count::ZERO,
+            index: Count::ZERO,
         };
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(view.state.selected, 0);
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "target");
+        assert_eq!(view.state.path, ["first"]);
+    }
+
+    #[test]
+    fn default_expansion_follows_live_children_and_renders_scoped_pips() {
+        use mf_telemetry::event::{NodeIdentity, Outcome};
+        let mut description = scope_fixture();
+        description.nodes.push(NodeDescription {
+            id: "completed".into(),
+            kind: "fixture.task".into(),
+        });
+        description.execution_order.insert(0, "completed".into());
+        description.nodes.reverse();
+        for body in &mut description.loop_bodies {
+            body.nodes.reverse();
+        }
+        let run = RunId::new();
+        let mut session = crate::state::SessionState::new(description.clone(), run).unwrap();
+        let mut sequence = 0;
+        let mut apply = |event| {
+            sequence += 1;
+            session
+                .apply(LifecycleEvent {
+                    workflow_id: description.workflow_id.clone(),
+                    run_id: run,
+                    sequence: Count::try_from(sequence).unwrap(),
+                    event,
+                })
+                .unwrap();
+        };
+        let completed = NodeIdentity {
+            id: "completed".into(),
+            kind: "fixture.task".into(),
+            path: Vec::new(),
+        };
+        apply(LifecycleKind::WorkflowStarted {
+            elapsed_ns: Count::ZERO,
+        });
+        apply(LifecycleKind::NodeStarted {
+            node: completed.clone(),
+            position: Count::ZERO,
+            elapsed_ns: Count::ZERO,
+            selected_inputs: Vec::new(),
+        });
+        apply(LifecycleKind::NodeFinished {
+            node: completed,
+            position: Count::ZERO,
+            elapsed_ns: Count::ZERO,
+            duration_ns: Some(Count::ZERO),
+            outcome: Outcome::Succeeded,
+            produced_ports: Vec::new(),
+            skipped_ports: Vec::new(),
+            failure: None,
+            loop_summary: None,
+        });
+        for (position, id) in ["first", "second"].into_iter().enumerate() {
+            apply(LifecycleKind::NodeStarted {
+                node: NodeIdentity {
+                    id: id.into(),
+                    kind: "workflow.loop".into(),
+                    path: Vec::new(),
+                },
+                position: Count::try_from(position as i64 + 1).unwrap(),
+                elapsed_ns: Count::ZERO,
+                selected_inputs: Vec::new(),
+            });
+            let path = vec![LoopPathEntry::Loop {
+                loop_id: id.into(),
+                index: Count::ZERO,
+            }];
+            apply(LifecycleKind::LoopPassStarted {
+                path: path.clone(),
+                elapsed_ns: Count::ZERO,
+            });
+            apply(LifecycleKind::NodeStarted {
+                node: NodeIdentity {
+                    id: "source".into(),
+                    kind: "fixture.task".into(),
+                    path,
+                },
+                position: Count::try_from(1).unwrap(),
+                elapsed_ns: Count::ZERO,
+                selected_inputs: Vec::new(),
+            });
+        }
+        let snapshot = session.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        assert_eq!(view.root.nodes().len(), 9);
+        let first = view
+            .root
+            .display_index_for_scoped_node(&["first".into()], "source")
+            .unwrap();
+        let second = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "source")
+            .unwrap();
+        view.state.offset = (1000, 1000);
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.selected, second);
+        assert_eq!(view.state.path, ["second"]);
+        view.state.reveal(&view.root, Rect::new(0, 0, 48, 12));
+        let rect = view.root.nodes()[second].rect;
+        assert!(view.state.offset.0 <= rect.x && view.state.offset.0 + 48 >= rect.x + rect.width);
+        assert!(view.state.offset.1 <= rect.y && view.state.offset.1 + 12 >= rect.y + rect.height);
+        let observations =
+            inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
+        let completed = view
+            .root
+            .display_index_for_scoped_node(&[], "completed")
+            .unwrap();
+        assert_eq!(
+            observations[view.root.sources(completed)[0]].status,
+            NodeStatus::Succeeded
+        );
+        for id in ["first", "second"] {
+            let owner = view.root.display_index_for_scoped_node(&[], id).unwrap();
+            assert!(view.root.is_expanded_body(owner));
+            assert_eq!(
+                observations[view.root.sources(owner)[0]].status,
+                NodeStatus::Running
+            );
+        }
+        assert_eq!(
+            running_display_nodes(&view.root, &observations),
+            vec![first, second]
+        );
+        let receiver = LoopbackReceiver::bind(description.clone(), run).unwrap();
+        let reader = receiver.reader();
+        let selected = view.state.selected;
+        let offset = view.state.offset;
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(128, 64)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_parallel_pips(
+                    frame,
+                    frame.area(),
+                    &view.root,
+                    &observations,
+                    &reader,
+                    1_000_000_000,
+                    None,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..64)
+            .map(|y| {
+                (0..128)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+        assert!(text.contains(" Running: first / source "), "{text}");
+        assert!(text.contains(" Running: second / source "), "{text}");
+        for (display, area) in [first, second]
+            .into_iter()
+            .zip(parallel_pip_areas(2, Rect::new(0, 0, 128, 64)).0)
+        {
+            let inner = Block::default().borders(Borders::ALL).inner(area);
+            let rect = view.root.nodes()[display].rect;
+            let offset = centered_offset(rect, (inner.width, inner.height));
+            let x = inner.x + (rect.x + 1 - offset.0) as u16;
+            let y = inner.y + (rect.y + 1 - offset.1) as u16;
+            assert!(
+                buffer[(x, y)]
+                    .modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            );
+        }
+        assert_eq!(view.state.selected, selected);
+        assert_eq!(view.state.offset, offset);
+        let mut compact = snapshot.clone();
+        for pass in &mut compact.loop_passes {
+            pass.nodes.clear();
+            pass.compact_statuses = vec![
+                Some(NodeStatus::Succeeded),
+                Some(NodeStatus::Running),
+                Some(NodeStatus::Pending),
+            ];
+        }
+        let compact_observations =
+            inline_observations(&view.root, &description, &compact, &BTreeMap::new());
+        assert_eq!(
+            running_display_nodes(&view.root, &compact_observations),
+            vec![first, second]
+        );
+        view.fold_body(vec!["second".into()], false).unwrap();
+        let observations =
+            inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
+        let owner = view
+            .root
+            .display_index_for_scoped_node(&[], "second")
+            .unwrap();
+        assert_eq!(
+            running_display_nodes(&view.root, &observations),
+            vec![owner, first]
+        );
+    }
+
+    #[test]
+    fn nested_inline_history_matches_parent_pass_and_stream_invocation() {
+        use crate::state::{StreamInvocationObservation, StreamSnapshot};
+        use mf_telemetry::stream::{StreamIdentity, StreamTrigger};
+        let mut description = scope_fixture();
+        description.version = WorkflowDescriptionVersion::V2026_10_23;
+        description.execution = Some(ExecutionDescription {
+            mode: ExecutionMode::Single,
+        });
+        description.loop_bodies[0].nodes.push(NodeDescription {
+            id: "nested".into(),
+            kind: "workflow.call".into(),
+        });
+        description.loop_bodies[0]
+            .execution_order
+            .push("nested".into());
+        let mut nested = description.loop_bodies[1].clone();
+        nested.path = vec!["first".into(), "nested".into()];
+        nested.nodes.remove(0);
+        nested.execution_order.remove(0);
+        description.loop_bodies.push(nested);
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let outer = |index| {
+            vec![LoopPathEntry::Loop {
+                loop_id: "first".into(),
+                index: Count::try_from(index).unwrap(),
+            }]
+        };
+        let inner = |index| {
+            let mut path = outer(index);
+            path.push(LoopPathEntry::Call {
+                call_id: "nested".into(),
+            });
+            path
+        };
+        let pass = |path, owner, status| {
+            let mut source = NodeObservation::pending("source", "fixture.task");
+            source.status = status;
+            LoopPassObservation {
+                path,
+                nodes: vec![source],
+                started: true,
+                outcome: None,
+                interrupted: false,
+                stream_invocation: Some(owner),
+                compact_statuses: Vec::new(),
+            }
+        };
+        snapshot.loop_passes = vec![
+            pass(outer(0), 10, NodeStatus::Succeeded),
+            pass(inner(0), 11, NodeStatus::Failed),
+            pass(outer(1), 20, NodeStatus::Running),
+            pass(inner(1), 21, NodeStatus::Succeeded),
+        ];
+        snapshot.stream = Some(StreamSnapshot {
+            invocations: [(11, 10, 0), (21, 20, 1)]
+                .map(|(owner, parent, index)| StreamInvocationObservation {
+                    identity: StreamIdentity {
+                        invocation: owner,
+                        parent: Some(parent),
+                        trigger: StreamTrigger::Startup,
+                        message: None,
+                    },
+                    path: outer(index),
+                    node: NodeObservation::pending("nested", "workflow.call"),
+                    loop_summary: None,
+                    completed_passes: 0,
+                    active_pass: None,
+                })
+                .to_vec(),
+            ..Default::default()
+        });
+        let mut view = ObservationView::new(&description).unwrap();
+        let selected = view
+            .root
+            .display_index_for_scoped_node(&["first".into()], "source")
+            .unwrap();
+        view.state.selected = selected;
+        view.state.sync_scope(&view.root);
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
+        let nested = view
+            .root
+            .display_index_for_scoped_node(&["first".into(), "nested".into()], "source")
+            .unwrap();
+        view.state.selected = nested;
+        view.state.sync_scope(&view.root);
+        assert_eq!(
+            view.state.pass(&snapshot).unwrap().stream_invocation,
+            Some(11)
+        );
+        let nodes = inline_observations(
+            &view.root,
+            &description,
+            &snapshot,
+            &view.state.history_offsets(),
+        );
+        assert_eq!(
+            nodes[view.root.sources(selected)[0]].status,
+            NodeStatus::Succeeded
+        );
+        assert_eq!(
+            nodes[view.root.sources(nested)[0]].status,
+            NodeStatus::Failed
+        );
+        let sibling = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "source")
+            .unwrap();
+        assert_eq!(
+            nodes[view.root.sources(sibling)[0]].status,
+            NodeStatus::Pending
+        );
+        let mut running = nodes.clone();
+        let first = view
+            .root
+            .display_index_for_scoped_node(&[], "first")
+            .unwrap();
+        let second = view
+            .root
+            .display_index_for_scoped_node(&[], "second")
+            .unwrap();
+        let call = view
+            .root
+            .display_index_for_scoped_node(&["first".into()], "nested")
+            .unwrap();
+        for display in [first, second, call, nested] {
+            running[view.root.sources(display)[0]].status = NodeStatus::Running;
+        }
+        assert_eq!(
+            running_display_nodes(&view.root, &running),
+            vec![second, nested]
+        );
+        snapshot.latest_node_event = Some(crate::state::NodeEventFocus {
+            sequence: Count::try_from(10).unwrap(),
+            node: mf_telemetry::event::NodeIdentity {
+                id: "target".into(),
+                kind: "fixture.task".into(),
+                path: inner(1),
+            },
+        });
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.selected, nested);
+        view.state.selected = selected;
+        view.state.sync_scope(&view.root);
+        view.handle_navigation(KeyCode::Char(']'), &snapshot, &traces, &logs);
+        let nodes = inline_observations(
+            &view.root,
+            &description,
+            &snapshot,
+            &view.state.history_offsets(),
+        );
+        assert_eq!(
+            nodes[view.root.sources(selected)[0]].status,
+            NodeStatus::Running
+        );
+        assert_eq!(
+            nodes[view.root.sources(nested)[0]].status,
+            NodeStatus::Succeeded
+        );
+        view.state.selected = nested;
+        view.state.sync_scope(&view.root);
+        view.state.details_visible = true;
+        view.handle_navigation(KeyCode::Esc, &snapshot, &traces, &logs);
+        assert!(!view.state.details_visible);
+        assert!(
+            view.root.is_expanded_body(
+                view.root
+                    .display_index_for_scoped_node(&["first".into()], "nested")
+                    .unwrap()
+            )
+        );
+        view.handle_navigation(KeyCode::Esc, &snapshot, &traces, &logs);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "nested");
+        assert_eq!(view.state.path, ["first"]);
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&["first".into(), "nested".into()], "source")
+                .is_none()
+        );
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&["second".into()], "source")
+                .is_some()
+        );
+        assert_eq!(view.execution.nodes().len(), description.nodes.len());
+        assert!(view.dismiss_overlay());
+        assert!(!view.dismiss_overlay());
     }
 
     #[test]
@@ -3383,7 +4140,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_navigation_restores_viewports_and_bounds_retained_layouts() {
+    fn inline_bodies_preserve_parent_nodes_folding_and_connection_viewports() {
         let description = scope_fixture();
         let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
             .unwrap()
@@ -3391,40 +4148,34 @@ mod tests {
         let mut view = ObservationView::new(&description).unwrap();
         let traces = TraceSnapshot::default();
         let logs = LogSnapshot::default();
-        assert_eq!(view.root.connection_view(), ConnectionView::Execution);
-        assert!(view.bodies.is_empty());
-        let geometry = view.root.nodes().to_vec();
         view.state.selected = 1;
         view.state.offset = (12, 8);
-        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
-        assert_eq!(view.state.selected, 1);
-        view.state.offset = (30, 16);
-        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
-        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
-        assert_eq!(view.state.offset, (12, 8));
-        assert_eq!(view.state.selected, 1);
-        assert_eq!(view.root.nodes(), geometry);
-        for _ in 0..4 {
-            for selected in [0, 1] {
-                view.state.selected = selected;
-                view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
-                assert_eq!(view.bodies.len(), 1);
-                assert_eq!(view.state.path.len(), 1);
-                view.state.selected = 2;
-                view.state.offset = (7, 9);
-                for _ in 0..3 {
-                    view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
-                    assert_eq!(view.bodies.len(), 1);
-                    assert_eq!(view.state.selected, 2);
-                }
-                assert_eq!(view.state.offset, (7, 9));
-                view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
-                assert!(view.state.path.is_empty());
-                assert!(view.bodies.is_empty());
-                assert_eq!(view.state.selected, selected);
-            }
+        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
+        assert_eq!(view.root.nodes().len(), 8);
+        assert!(view.root.is_expanded_body(1));
+        let child = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "target")
+            .unwrap();
+        view.state.selected = child;
+        view.state.sync_scope(&view.root);
+        view.state.offset = (7, 9);
+        for _ in 0..3 {
+            view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+            assert_eq!(view.root.nodes().len(), 8);
+            assert_eq!(view.state.selected, child);
         }
-        assert!(view.viewports.len() <= 9);
+        assert_eq!(view.state.offset, (7, 9));
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
+        assert_eq!(view.root.nodes().len(), 5);
+        assert_eq!(view.state.selected, 1);
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert_eq!(view.root.nodes().len(), 8);
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert_eq!(view.root.nodes().len(), 5);
+        assert_eq!(view.viewports.len(), 3);
         view.state.traces.visible = true;
         let mode = view.root.connection_view();
         view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
@@ -3553,12 +4304,14 @@ mod tests {
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
-        assert_eq!(view.state.path, path);
-        let nodes = body_observations(view.state.layout(&view.root, &view.bodies), None, true);
+        assert!(view.state.path.is_empty());
+        let nodes = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
         assert!(
             nodes
                 .iter()
-                .all(|node| node.status == crate::state::NodeStatus::Unknown)
+                .enumerate()
+                .filter(|(source, _)| view.root.source_path(*source) == path)
+                .all(|(_, node)| node.status == NodeStatus::Unknown)
         );
         let event = LifecycleEvent {
             workflow_id: description.workflow_id.clone(),
@@ -3662,7 +4415,6 @@ mod tests {
                 KeyCode::PageDown,
                 &session.snapshot(),
                 &layout,
-                &BTreeMap::new(),
                 &TraceSnapshot::default(),
                 &LogSnapshot::default(),
             );
@@ -3676,382 +4428,10 @@ mod tests {
             KeyCode::PageUp,
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
         assert_eq!(state.details_offset, previous_offset - state.details_height);
-    }
-
-    #[test]
-    fn iteration_items_focus_live_children_and_keep_parallel_instances_in_pips() {
-        use crate::state::{IterationEvent, IterationRecord, SessionState};
-        use mf_telemetry::{event::NodeIdentity, iteration::IterationContext};
-        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
-            "version":"2026-10-23","workflow_id":format!("sha256:{}","9".repeat(64)),"execution":{"mode":"single"},
-            "nodes":[{"id":"each","kind":"builtin.iteration"}],"execution_order":["each"],"data_edges":[],"control_edges":[],
-            "loop_bodies":[{"path":["each"],"nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"},{"id":"other","kind":"fixture.work"}],
-                "execution_order":["%iteration","work","other"],"data_edges":[{"from_node":"%iteration","from_output":"item","to_node":"work","to_input":"input"}],"control_edges":[],
-                "clusters":[{"label":"Workers","annotation":"Parallel body work.","nodes":["work","other"]}]}]
-        })).unwrap();
-        fn apply(state: &mut SessionState, index: i64, sequence: i64, event: IterationEvent) {
-            state
-                .apply_iteration(IterationRecord {
-                    context: IterationContext {
-                        invocation: Count::try_from(1).unwrap(),
-                        iteration_path: vec!["each".into()],
-                        body_path: vec!["each".into()],
-                        parent_path: Vec::new(),
-                        parent_stream_invocation: None,
-                        index: Count::try_from(index).unwrap(),
-                        sequence: Count::try_from(sequence).unwrap(),
-                        elapsed_ns: Count::try_from(sequence).unwrap(),
-                    },
-                    event,
-                    correlation: None,
-                })
-                .unwrap();
-        }
-        let started = |id: &str| IterationEvent::NodeStarted {
-            node: NodeIdentity {
-                id: id.into(),
-                kind: "fixture.work".into(),
-                path: Vec::new(),
-            },
-            selected_inputs: Vec::new(),
-        };
-        let run = RunId::new();
-        let mut state = SessionState::new(description.clone(), run).unwrap();
-        apply(&mut state, 0, 1, IterationEvent::InvocationStarted);
-        apply(&mut state, 0, 2, IterationEvent::ItemStarted);
-        apply(&mut state, 0, 3, started("work"));
-        apply(&mut state, 0, 4, started("other"));
-        apply(&mut state, 1, 5, IterationEvent::ItemStarted);
-        apply(&mut state, 1, 6, started("work"));
-        let snapshot = state.snapshot();
-        let mut view = ObservationView::new(&description).unwrap();
-        view.state.follow_latest(&snapshot, &view.root);
-        assert_eq!(view.root.nodes()[view.state.selected].id, "each");
-        let traces = TraceSnapshot::default();
-        let logs = LogSnapshot::default();
-        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
-        let layout = view.state.layout(&view.root, &view.bodies);
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(layout.nodes()[view.state.selected].id, "work");
-        assert_eq!(
-            view.state.iteration(&snapshot).unwrap().identity.index,
-            Count::try_from(1).unwrap()
-        );
-        view.state.offset = (1000, 1000);
-        view.state.reveal(layout, Rect::new(0, 0, 48, 12));
-        let node = layout.nodes()[view.state.selected].rect;
-        assert!(view.state.offset.0 <= node.x && view.state.offset.0 + 48 >= node.x + node.width);
-        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
-        view.prepare_iteration_layouts(&snapshot).unwrap();
-        assert_eq!(view.iteration_layouts.len(), 1);
-        let layout = view.state.layout(&view.root, &view.bodies);
-        assert!(layout.is_collapsed_cluster(view.state.selected));
-        let observations = view.state.iteration(&snapshot).unwrap().display_nodes(
-            &view.state.path,
-            layout
-                .all_nodes()
-                .iter()
-                .map(|node| (node.id.as_str(), node.kind.as_str())),
-        );
-        assert_eq!(
-            observations
-                .iter()
-                .find(|node| node.id == "%iteration")
-                .unwrap()
-                .status,
-            NodeStatus::Succeeded
-        );
-        let selected = view.state.selected;
-        let offset = view.state.offset;
-        let receiver = LoopbackReceiver::bind(description.clone(), run).unwrap();
-        let reader = receiver.reader();
-        fn render(
-            view: &mut ObservationView,
-            snapshot: &StateSnapshot,
-            reader: &ObservationReader,
-        ) -> String {
-            let mut output = tempfile::tempfile().unwrap();
-            let mut terminal = Terminal::with_options(
-                CrosstermBackend::new(Box::new(output.try_clone().unwrap()) as Box<dyn Write>),
-                TerminalOptions {
-                    viewport: Viewport::Fixed(Rect::new(0, 0, 180, 64)),
-                },
-            )
-            .unwrap();
-            let capture = CaptureView {
-                stdout_open: false,
-                stderr_open: false,
-                stderr_tail: String::new(),
-                stderr_dropped: 0,
-                error: None,
-            };
-            draw(
-                &mut terminal,
-                &view.root,
-                &view.bodies,
-                &view.iteration_layouts,
-                &view.description,
-                snapshot,
-                &capture,
-                Duration::from_secs(1),
-                &mut view.state,
-                reader,
-                None,
-            )
-            .unwrap();
-            output.seek(SeekFrom::Start(0)).unwrap();
-            let mut text = String::new();
-            output.read_to_string(&mut text).unwrap();
-            text
-        }
-        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(128, 64)).unwrap();
-        terminal
-            .draw(|frame| {
-                draw_parallel_pips(
-                    frame,
-                    frame.area(),
-                    layout,
-                    &observations,
-                    &reader,
-                    1_000_000,
-                    Some(IterationPipContext {
-                        snapshot: &snapshot.iterations,
-                        layouts: &view.iteration_layouts,
-                        path: &view.state.path,
-                    }),
-                )
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let text = (0..64)
-            .map(|y| {
-                (0..128)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
-        assert!(text.contains("item 0 · call 1"), "{text}");
-        assert!(text.contains("item 1 · call 1"), "{text}");
-        assert!(
-            buffer
-                .content
-                .iter()
-                .any(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
-        );
-        assert_eq!((view.state.selected, view.state.offset), (selected, offset));
-        view.state.details_visible = true;
-        let empty = SessionState::new(description.clone(), run)
-            .unwrap()
-            .snapshot();
-        let missing = render(&mut view, &empty, &reader);
-        assert!(
-            missing.contains("retained")
-                && missing.contains("records")
-                && !missing.contains("Item:"),
-            "{missing:?}"
-        );
-        let live = render(&mut view, &snapshot, &reader);
-        assert!(live.contains("Item:"), "{live:?}");
-        assert!(live.contains("invocation:"), "{live:?}");
-        view.state.help_visible = true;
-        render(&mut view, &snapshot, &reader);
-        view.state.help_visible = false;
-        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
-        assert_eq!(
-            view.state.iteration(&snapshot).unwrap().identity.index,
-            Count::ZERO
-        );
-        apply(&mut state, 2, 7, IterationEvent::ItemStarted);
-        apply(&mut state, 2, 8, started("other"));
-        let snapshot = state.snapshot();
-        let layout = view.state.layout(&view.root, &view.bodies);
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(
-            view.state.iteration(&snapshot).unwrap().identity.index,
-            Count::ZERO
-        );
-        view.handle_navigation(KeyCode::Char(']'), &snapshot, &traces, &logs);
-        assert_eq!(
-            view.state.iteration(&snapshot).unwrap().identity.index,
-            Count::try_from(1).unwrap()
-        );
-        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
-        apply(&mut state, 0, 9, IterationEvent::InvocationFinished);
-        let snapshot = state.snapshot();
-        let layout = view.state.layout(&view.root, &view.bodies);
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(
-            view.state.iteration(&snapshot).unwrap().identity.index,
-            Count::ZERO
-        );
-        assert!(active_iteration_nodes(&snapshot.iterations, &view.state.path).is_empty());
-        view.prepare_iteration_layouts(&snapshot).unwrap();
-        assert!(view.iteration_layouts.is_empty());
-    }
-
-    #[test]
-    fn nested_iteration_call_focus_selects_its_item_and_visible_container() {
-        use crate::state::{IterationEvent, IterationRecord, SessionState};
-        use mf_telemetry::{event::NodeIdentity, iteration::IterationContext};
-        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
-            "version":"2026-10-23","workflow_id":format!("sha256:{}","9".repeat(64)),"execution":{"mode":"single"},
-            "nodes":[{"id":"each","kind":"builtin.iteration"}],"execution_order":["each"],"data_edges":[],"control_edges":[],
-            "loop_bodies":[
-                {"path":["each"],"nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"call","kind":"workflow.call"}],
-                 "execution_order":["%iteration","call"],"data_edges":[],"control_edges":[]},
-                {"path":["each","call"],"nodes":[{"id":"work","kind":"fixture.work"}],
-                 "execution_order":["work"],"data_edges":[],"control_edges":[]}
-            ]
-        })).unwrap();
-        let mut state = SessionState::new(description.clone(), RunId::new()).unwrap();
-        let mut view = ObservationView::new(&description).unwrap();
-        let traces = TraceSnapshot::default();
-        let logs = LogSnapshot::default();
-        view.handle_navigation(KeyCode::Char('l'), &state.snapshot(), &traces, &logs);
-        for index in 0..2 {
-            state
-                .apply_iteration(IterationRecord {
-                    context: IterationContext {
-                        invocation: Count::try_from(1).unwrap(),
-                        iteration_path: vec!["each".into()],
-                        body_path: vec!["each".into(), "call".into()],
-                        parent_path: Vec::new(),
-                        parent_stream_invocation: None,
-                        index: Count::try_from(index).unwrap(),
-                        sequence: Count::try_from(index + 1).unwrap(),
-                        elapsed_ns: Count::try_from(index + 1).unwrap(),
-                    },
-                    event: IterationEvent::NodeStarted {
-                        node: NodeIdentity {
-                            id: "work".into(),
-                            kind: "fixture.work".into(),
-                            path: Vec::new(),
-                        },
-                        selected_inputs: Vec::new(),
-                    },
-                    correlation: None,
-                })
-                .unwrap();
-            let snapshot = state.snapshot();
-            let layout = view.state.layout(&view.root, &view.bodies);
-            view.state.follow_latest(&snapshot, layout);
-            assert_eq!(layout.nodes()[view.state.selected].id, "call");
-            assert_eq!(
-                view.state.iteration(&snapshot).unwrap().identity.index,
-                Count::try_from(index).unwrap()
-            );
-        }
-        let snapshot = state.snapshot();
-        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
-        let layout = view.state.layout(&view.root, &view.bodies);
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(layout.nodes()[view.state.selected].id, "work");
-        assert_eq!(
-            view.state.iteration(&snapshot).unwrap().identity.index,
-            Count::try_from(1).unwrap()
-        );
-        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
-        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
-        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
-        let layout = view.state.layout(&view.root, &view.bodies);
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(
-            view.state.iteration(&snapshot).unwrap().identity.index,
-            Count::ZERO
-        );
-    }
-
-    #[test]
-    fn iteration_inside_loop_keeps_the_selected_pass_and_stream_invocation() {
-        use crate::state::{IterationEvent, IterationRecord, LoopPassObservation, SessionState};
-        use mf_telemetry::{event::NodeIdentity, iteration::IterationContext};
-
-        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
-            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "9".repeat(64)),
-            "execution":{"mode":"single"},
-            "nodes":[{"id":"repeat","kind":"workflow.loop"}],
-            "execution_order":["repeat"], "data_edges":[], "control_edges":[],
-            "loop_bodies":[
-                {"path":["repeat"], "nodes":[{"id":"%loop","kind":"%loop"},{"id":"each","kind":"builtin.iteration"}],
-                 "execution_order":["%loop","each"], "data_edges":[], "control_edges":[]},
-                {"path":["repeat","each"], "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
-                 "execution_order":["%iteration","work"], "data_edges":[], "control_edges":[]}
-            ]
-        })).unwrap();
-        let mut state = SessionState::new(description.clone(), RunId::new()).unwrap();
-        for index in 0..2 {
-            let parent = vec![LoopPathEntry::Loop {
-                loop_id: "repeat".into(),
-                index: Count::try_from(index).unwrap(),
-            }];
-            state
-                .apply_iteration(IterationRecord {
-                    context: IterationContext {
-                        invocation: Count::try_from(index + 1).unwrap(),
-                        iteration_path: vec!["repeat".into(), "each".into()],
-                        body_path: vec!["repeat".into(), "each".into()],
-                        parent_path: parent,
-                        parent_stream_invocation: Some(index as u64 + 11),
-                        index: Count::ZERO,
-                        sequence: Count::try_from(1).unwrap(),
-                        elapsed_ns: Count::try_from(index + 1).unwrap(),
-                    },
-                    event: IterationEvent::NodeStarted {
-                        node: NodeIdentity {
-                            id: "work".into(),
-                            kind: "fixture.work".into(),
-                            path: Vec::new(),
-                        },
-                        selected_inputs: Vec::new(),
-                    },
-                    correlation: None,
-                })
-                .unwrap();
-        }
-        let mut snapshot = state.snapshot();
-        snapshot.loop_passes = (0..2)
-            .map(|index| LoopPassObservation {
-                path: vec![LoopPathEntry::Loop {
-                    loop_id: "repeat".into(),
-                    index: Count::try_from(index).unwrap(),
-                }],
-                nodes: Vec::new(),
-                started: true,
-                outcome: None,
-                interrupted: false,
-                stream_invocation: Some(index as u64 + 11),
-                compact_statuses: Vec::new(),
-            })
-            .collect();
-        let mut view = ObservationView::new(&description).unwrap();
-        let traces = TraceSnapshot::default();
-        let logs = LogSnapshot::default();
-        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
-        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
-        let body = view.state.layout(&view.root, &view.bodies);
-        view.state.selected = body.display_index_for_node_id("each").unwrap();
-        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
-        let body = view.state.layout(&view.root, &view.bodies);
-        view.state.follow_latest(&snapshot, body);
-        let item = view.state.iteration(&snapshot).unwrap();
-        assert_eq!(item.identity.invocation, Count::try_from(1).unwrap());
-        assert_eq!(item.parent_stream_invocation, Some(11));
-
-        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
-        view.handle_navigation(KeyCode::Char(']'), &snapshot, &traces, &logs);
-        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
-        let body = view.state.layout(&view.root, &view.bodies);
-        view.state.follow_latest(&snapshot, body);
-        let item = view.state.iteration(&snapshot).unwrap();
-        assert_eq!(item.identity.invocation, Count::try_from(2).unwrap());
-        assert_eq!(item.parent_stream_invocation, Some(12));
     }
 
     #[test]
@@ -4121,7 +4501,6 @@ mod tests {
             KeyCode::PageDown,
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
@@ -4130,7 +4509,6 @@ mod tests {
             KeyCode::Char('d'),
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
@@ -4140,7 +4518,6 @@ mod tests {
             KeyCode::PageDown,
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
@@ -4149,7 +4526,6 @@ mod tests {
             KeyCode::Tab,
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
@@ -4299,12 +4675,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let root = GraphLayout::new(&description).unwrap();
         let path = vec!["call".to_owned()];
-        let bodies = BTreeMap::from([(
-            path.clone(),
-            GraphLayout::from_loop_body(&description, &path).unwrap(),
-        )]);
         let run = RunId::new();
         let mut session = crate::state::SessionState::new(description.clone(), run).unwrap();
         let scope = vec![LoopPathEntry::Call {
@@ -4348,31 +4719,27 @@ mod tests {
                 .unwrap();
         }
         let snapshot = session.snapshot();
-        let mut view = ViewState::default();
-        view.handle_key(
-            KeyCode::Char('l'),
+        let mut view = ObservationView::new(&description).unwrap();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
+        assert_eq!(view.root.nodes().len(), 2);
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.path, path);
+        assert!(view.state.pass(&snapshot).unwrap().path[0].is_call());
+        assert_eq!(view.root.nodes()[view.state.selected].id, "leaf");
+        let nodes = inline_observations(
+            &view.root,
+            &description,
             &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
+            &view.state.history_offsets(),
         );
-        assert_eq!(view.path, path);
-        assert!(view.pass(&snapshot).unwrap().path[0].is_call());
-        view.follow_latest(&snapshot, view.layout(&root, &bodies));
-        assert_eq!(
-            view.layout(&root, &bodies).nodes()[view.selected].id,
-            "leaf"
-        );
-        view.handle_key(
-            KeyCode::Char('h'),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
-        );
-        assert!(view.path.is_empty());
+        let source = view.root.sources(view.state.selected)[0];
+        assert_eq!(nodes[source].status, NodeStatus::Running);
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
+        assert_eq!(view.root.nodes().len(), 1);
     }
 
     #[test]
@@ -4415,14 +4782,16 @@ mod tests {
             }],
             clusters: Vec::new(),
         };
-        let root = GraphLayout::new(&description).unwrap();
-        let bodies = BTreeMap::from([(
-            vec!["repeat".into()],
-            GraphLayout::from_loop_body(&description, &["repeat".into()]).unwrap(),
-        )]);
-        let before_nodes = bodies[&vec!["repeat".to_owned()]].nodes().to_vec();
-        let before_routes = bodies[&vec!["repeat".to_owned()]].routes().to_vec();
-        let before_crossings = bodies[&vec!["repeat".to_owned()]].crossings().to_vec();
+        let mut view = ObservationView::new(&description).unwrap();
+        let child = view
+            .root
+            .display_index_for_scoped_node(&["repeat".into()], "child")
+            .unwrap();
+        view.state.selected = child;
+        view.state.sync_scope(&view.root);
+        let before_nodes = view.root.nodes().to_vec();
+        let before_routes = view.root.routes().to_vec();
+        let before_crossings = view.root.crossings().to_vec();
         let run_id = RunId::new();
         let mut session = crate::state::SessionState::new(description.clone(), run_id).unwrap();
         let count = |value| Count::try_from(value).unwrap();
@@ -4467,51 +4836,27 @@ mod tests {
         for (index, pass) in snapshot.loop_passes.iter_mut().enumerate() {
             pass.stream_invocation = Some(index as u64 + 10);
         }
-        let mut view = ViewState::default();
-        view.handle_key(
-            KeyCode::Char('l'),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
+        assert_eq!(view.state.pass(&snapshot).unwrap().path[0].index().get(), 1);
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
+        assert_eq!(view.state.pass(&snapshot).unwrap().path[0].index().get(), 0);
+        assert_eq!(
+            view.state.pass(&snapshot).unwrap().stream_invocation,
+            Some(10)
         );
-        assert_eq!(view.path, ["repeat"]);
-        assert_eq!(view.layout(&root, &bodies).nodes()[0].id, "%loop");
-        assert_eq!(view.pass(&snapshot).unwrap().path[0].index().get(), 1);
-        view.handle_key(
-            KeyCode::Char('['),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
+        assert_eq!(view.root.nodes(), before_nodes);
+        assert_eq!(view.root.routes(), before_routes);
+        assert_eq!(view.root.crossings(), before_crossings);
+        view.handle_navigation(KeyCode::Char(']'), &snapshot, &traces, &logs);
+        assert_eq!(view.state.pass(&snapshot).unwrap().path[0].index().get(), 1);
+        assert_eq!(
+            view.state.pass(&snapshot).unwrap().stream_invocation,
+            Some(11)
         );
-        assert_eq!(view.pass(&snapshot).unwrap().path[0].index().get(), 0);
-        assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(10));
-        assert_eq!(view.layout(&root, &bodies).nodes(), before_nodes);
-        assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
-        assert_eq!(view.layout(&root, &bodies).crossings(), before_crossings);
-        view.handle_key(
-            KeyCode::Char(']'),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
-        );
-        assert_eq!(view.pass(&snapshot).unwrap().path[0].index().get(), 1);
-        assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(11));
-        assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
-        view.handle_key(
-            KeyCode::Char('h'),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
-        );
-        assert!(view.path.is_empty());
+        assert_eq!(view.root.routes(), before_routes);
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
         snapshot.stream = Some(crate::state::StreamSnapshot {
             hidden_invocations: 1000,
             ..Default::default()
