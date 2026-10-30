@@ -1119,6 +1119,8 @@ impl StreamState {
             }
         }
         StateSnapshot {
+            latest_node_revision: session.latest_node_revision,
+            iterations: session.iterations.snapshot(session.closed),
             latest_node_event: session.latest_node_event.clone(),
             nodes,
             workflow_outcome: self

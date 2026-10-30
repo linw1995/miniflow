@@ -598,6 +598,15 @@ struct ExternalBackend {
 }
 
 impl mf_chat::ConversationBackend for ExternalBackend {
+    fn registered_workflow(
+        &self,
+    ) -> Option<(
+        &mf_runtime::WorkflowManifest,
+        &mf_runtime::WorkflowArguments,
+    )> {
+        Some((&self.launch.manifest, &self.launch.parameters))
+    }
+
     fn builtin_title_parameters(&self) -> Option<mf_runtime::WorkflowArguments> {
         self.launch
             .contract

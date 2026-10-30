@@ -520,6 +520,7 @@ pub fn validate_definition(
     compile_definition(definition, registry).map(|_| ())
 }
 
+/// Prepares an already resolved graph using host-linked providers and returns its canonical order.
 pub fn prepare_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
@@ -1921,7 +1922,28 @@ fn resolve_nodes_in_scope(
                     definition_id: node.id.clone(), message: "calls inside Iteration cannot contain Loop or Iteration constructs"
                 });
                 crate::loops::validate_structure(&body)?;
-                let prepared = bind_subgraph_node(node, preparation, &body, None, false, Value::Null)?;
+                let config: mf_runtime::CallConfig = serde_json::from_value(node.config.clone())
+                    .context(CallConfigurationSnafu { definition_id: node.id.clone() })?;
+                let prepared = if let Some(registered) = preparation.registry.flow(&config.flow) {
+                    ensure!(
+                        plan_resolved_definition(&body)?.definition
+                            == plan_resolved_definition(&registered.definition)?.definition,
+                        InvalidCallSnafu {
+                            definition_id: node.id.clone(),
+                            message: "host Flow binding differs from the frozen call definition"
+                        }
+                    );
+                    let instance = registration_for(node, preparation.registry)?
+                        .instantiate_subgraph(
+                            node.id.as_str(), node.config.clone(), Value::Null, registered.body.clone(),
+                        )
+                        .context(NodeConstructionSnafu {
+                            definition_id: node.id.clone(), kind: node.kind.clone(),
+                        })?;
+                    FlowNode::new(node.id.clone(), instance)
+                } else {
+                    bind_subgraph_node(node, preparation, &body, None, false, Value::Null)?
+                };
                 ensure!(prepared.metadata.stream_outputs.is_empty() || definition.version.supports_child_streams(), InvalidCallSnafu {
                     definition_id: node.id.clone(), message: "Flow call streams require version 2026-10-28"
                 });

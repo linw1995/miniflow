@@ -54,8 +54,8 @@ pub use compiler::{
     CyclePath, DescriptionError, TypeInferenceState, WorkflowCompileError, WorkflowExecutionError,
     compile_definition, compile_resolved_definition, describe_compiled, describe_interface,
     describe_workflow_inputs, execute_compiled, execute_compiled_with_inputs, instantiate_compiled,
-    instantiate_compiled_with_observation, plan_definition, resolve_execution, resolve_nodes,
-    structural_order, topological_order, validate_definition,
+    instantiate_compiled_with_observation, plan_definition, prepare_definition, resolve_execution,
+    resolve_nodes, structural_order, topological_order, validate_definition,
 };
 #[cfg(feature = "codegen")]
 pub use dependency_project::{

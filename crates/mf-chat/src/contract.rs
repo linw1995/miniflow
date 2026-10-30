@@ -177,6 +177,29 @@ pub struct ChatContract {
 }
 
 impl ChatContract {
+    /// Returns the qualified workflow ports bound to conversation inputs.
+    pub fn input_targets(&self) -> impl Iterator<Item = &str> {
+        self.inputs.values().map(String::as_str)
+    }
+
+    /// Recovers conversation inputs from the qualified arguments of a registered Flow.
+    pub fn conversation_inputs(
+        &self,
+        arguments: &WorkflowArguments,
+    ) -> Result<ConversationInputs, ChatError> {
+        let values = self
+            .inputs
+            .iter()
+            .filter_map(|(name, target)| {
+                arguments
+                    .0
+                    .get(target)
+                    .map(|value| (name.clone(), value.clone()))
+            })
+            .collect();
+        Ok(ConversationInputs::from_values(values)?)
+    }
+
     pub fn from_manifest(manifest: &WorkflowManifest) -> Result<Self, ChatError> {
         manifest.validate()?;
         ensure!(

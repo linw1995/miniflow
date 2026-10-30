@@ -57,15 +57,36 @@ submission executes the embedded application `conversation` flow:
 
 ```mermaid
 flowchart LR
-    Begin["mf_chat.turn.begin: load history and context"] --> Invoke["mf_chat.workflow.invoke: user workflow"]
-    Invoke --> Prepare["mf_chat.title.prepare"]
+    Begin["mf_chat.turn.begin: load history and context"] --> PrepareCall["mf_chat.workflow.prepare: bind conversation inputs"]
+    PrepareCall --> Invoke["workflow.call: user workflow"]
+    Invoke --> CompleteCall["mf_chat.workflow.complete: decode result"]
+    CompleteCall --> Prepare["mf_chat.title.prepare"]
     Prepare --> Title["Optional workflow.call: mf-chat.chat-title"]
     Title --> Finish["mf_chat.conversation.finish: persist result"]
 ```
 
-The invocation node binds a `ConversationBackend` supplied by the host. Both the embedded Rust backend
-and the executable backend use the same `ConversationInputs` / `ConversationResult` protocol. The
-application flow owns durable turn admission and settlement; the user workflow owns answer generation
+For finite embedded workflows, the host composes the user graph into the application Flow through
+`workflow.call`. The preparation node binds resolved parameters and conversation inputs without JSON
+conversion; the completion node decodes selected terminal outputs after the call succeeds. The public
+`answer` TaskStream output becomes chat previews. Calls share the application's cancellation, step
+budget, and observation, with user node identities nested under the `workflow` call scope.
+The host drains declared streams even without a preview subscriber, preserving streaming requests.
+
+`mf run runner --chat` registers the executable as the host Flow `mf-chat.runner` and invokes it through
+the same `workflow.call` application graph. Its manifest supplies the frozen definition and startup
+interface; its executor launches the existing runner with a private inputs file. Custom node providers,
+Loop bodies, and native stream coordinators execute in that process. Opening chat and submitting turns
+do not rebuild `mf-chat` or the runner. Cancellation and previews cross the process boundary through the
+existing supervisor; the child retains its own runtime budget and observation.
+
+Custom `ConversationBackend` implementations can expose `registered_workflow` to use this path with the
+same `ConversationInputs` / `ConversationResult` protocol. Other custom backends use
+`mf_chat.workflow.invoke`. Embedded graphs containing Event/Stream
+nodes or internal stream dataflow retain this adapter and their native coordinator, because these
+constructs cannot execute inside a finite call. Direct embedded `ConversationBackend::invoke` calls
+also reuse `workflow.call` when the graph supports it.
+
+The application flow owns durable turn admission and settlement; the user workflow owns answer generation
 and explicit usage collection. When its public inputs support it, the host appends the built-in title
 Flow; user workflows can also own title generation explicitly. User workflows need only generic nodes and
 have no `mf-chat` dependency. The application never identifies or reconfigures their internal model nodes.
@@ -91,7 +112,7 @@ Profiles contain a validated user workflow and its resolved configuration parame
 model-specific environment references remain owned by the user workflow. Sessions keep their profile
 and system instructions. Actual model identities and per-call purpose/profile labels arrive through
 `usages`; the host does not select a separate title model. An optional observer receives the application
-flow and the supplied embedded workflow's preparation and execution lifecycle.
+Flow, including the embedded call's preparation and execution lifecycle.
 
 The flow owns failure policy. The title example uses `capture_errors` to report provider failures as data; the host persists the returned status and usages. An execution error or cancellation with no final result finalizes begun work through storage handlers independently of the cancelled execution context. The host does not inspect internal node outputs, recover intermediate replies, or retry a failed stage.
 If cleanup also fails, `ChatError::Execution` retains both typed errors and invocation identities. A reply whose storage write fails returns `ChatError::Uncommitted`; pass its retained value to `retry_completion` or explicitly abandon it. Repeated persistence failures return the retained reply again and never resend a model request. `retry` starts a fresh model call for an unsuccessful original turn.
@@ -303,11 +324,12 @@ Finite executables keep their existing final JSON transport. Native streaming ex
 ordinary output named `answer` containing `text` and `model_call_id`. The backend drains standard JSONL
 records, validates deltas, and retains the final conversation result until execution completes.
 
-`workflows/conversation.json` owns incremental processing: `begin` admits the turn, `workflow.invoke`
-emits application invocation events, and `route` publishes previews while retaining the final response.
-The route releases the completed-conversation event only after the backend producer closes successfully. Preview and
-settlement deliveries share one ordered message domain, so unread previews cannot be overtaken by a save.
-The host consumes these Flow outputs; it does not forward raw model events around the application graph.
+`workflows/conversation.json` remains the embedded application graph. For executable chat, the host
+composes its invocation stage into input preparation, `workflow.call`, and result completion. The call
+publishes validated `answer` deltas through the preview node; completion requires successful call closure
+before the result can enter settlement. Unread previews retain their delivery receipts and cannot be
+overtaken by a save. The host consumes these Flow outputs; it does not forward raw model events around
+the application graph.
 
 Preview delivery is independent of terminal rendering. Application events carry the chat invocation and
 actual model-call identity; they do not need runtime open/close envelopes. A complete result retained before
@@ -471,8 +493,8 @@ through its chosen branches and accumulators. Successful status permits absent o
 
 ## Persistence and recovery
 
-The embedded application flow uses `mf_chat.turn.begin`, a host-bound `mf_chat.workflow.invoke`, and
-`mf_chat.conversation.finish` for both backends. The finishing node combines the chat and title results
+The embedded application flow uses `mf_chat.turn.begin`, a composed `workflow.call` or host-bound
+`mf_chat.workflow.invoke`, and `mf_chat.conversation.finish`. The finishing node combines the chat and title results
 and uses the existing storage handlers; it does not implement model failure policy. Save-only retry and cleanup after an aborted graph
 remain direct storage operations so cancellation cannot prevent finalization.
 

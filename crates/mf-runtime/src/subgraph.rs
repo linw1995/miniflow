@@ -1,18 +1,20 @@
 use crate::{ExecutionContext, FlowOutputs, NodeIdentity, PortSpec, WorkflowRunError};
 use snafu::ResultExt;
+use std::sync::Arc;
 
 type SubgraphBody = dyn Fn(&mut ExecutionContext, &mut dyn crate::EmissionSink) -> Result<FlowOutputs, WorkflowRunError>
     + Send
     + Sync
     + 'static;
 
+#[derive(Clone)]
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,
     pub inputs: crate::WorkflowInputSchema,
     pub outputs: Vec<PortSpec>,
     pub stream_outputs: Vec<PortSpec>,
-    pub graph: Option<std::sync::Arc<crate::WorkflowGraph>>,
-    body: Box<SubgraphBody>,
+    pub graph: Option<Arc<crate::WorkflowGraph>>,
+    body: Arc<SubgraphBody>,
 }
 
 impl PreparedSubgraph {
@@ -45,7 +47,7 @@ impl PreparedSubgraph {
             outputs,
             stream_outputs,
             graph: None,
-            body: Box::new(body),
+            body: Arc::new(body),
         }
     }
 

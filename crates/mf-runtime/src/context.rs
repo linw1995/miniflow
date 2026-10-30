@@ -381,6 +381,11 @@ impl ExecutionContext {
         self.inputs.set_arguments(arguments);
     }
 
+    /// Borrows the explicit startup arguments of the current Flow call.
+    pub fn workflow_arguments(&self) -> &crate::WorkflowArguments {
+        self.inputs.arguments()
+    }
+
     pub(super) fn initialize_target(
         &mut self,
         target: &crate::NodeTarget,
@@ -745,7 +750,7 @@ impl ExecutionContext {
         let body_observation = self
             .body_observation
             .as_ref()
-            .map(|observation| observation.for_call(nodes));
+            .map(|observation| observation.for_call_node(id, nodes));
         let mut child = self.fork_body(body_observation);
         child.remaining_steps = self.remaining_steps.clone();
         child.observation = self.observation.clone();

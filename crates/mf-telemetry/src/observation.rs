@@ -8,6 +8,7 @@ use crate::{
         LoopPathEntry, LoopSummary, NodeIdentity, Outcome, SkipCause,
     },
     identity::{RunId, WorkflowId},
+    iteration::IterationContext,
     transport::EventSequence,
     wire::{TraceContext, WireRecord},
 };
@@ -49,6 +50,7 @@ struct NestedLog {
 }
 
 struct Backend {
+    iteration_invocations: Mutex<EventSequence>,
     tracer: BoxedTracer,
     diagnostics: Option<Diagnostics>,
     emit: Box<EmitLog>,
@@ -98,9 +100,10 @@ impl Observer {
         L::Logger: Send + Sync + 'static,
     {
         let logger = logs.logger(INSTRUMENTATION_SCOPE);
-        let nested_logger = logs.logger("mf.iteration");
+        let nested_logger = logs.logger(crate::iteration::SCOPE);
         let event_logger = logs.logger(crate::events::SCOPE);
         Self(Arc::new(Backend {
+            iteration_invocations: Mutex::new(EventSequence::new()),
             tracer: BoxedTracer::new(Box::new(traces.tracer(INSTRUMENTATION_SCOPE))),
             diagnostics: (verbose > 0)
                 .then(|| Diagnostics::new(Duration::from_secs(60), verbose.min(3))),
@@ -350,19 +353,23 @@ impl RunObservation {
                 .iter()
                 .find(|node| node.id == id)?;
         }
-        Some(IterationObservation {
-            backend: Arc::clone(&self.backend),
-            workflow_id: self.workflow_id.clone(),
-            run_id: self.run_id,
-            iteration_id: id.into(),
-            parent: Context::current(),
-            body_nodes: Arc::new(
-                body_nodes
-                    .into_iter()
-                    .map(|node| (node.id.clone(), node))
-                    .collect(),
-            ),
-        })
+        let mut body_path: Vec<_> = path
+            .iter()
+            .map(|entry| entry.node_id().to_owned())
+            .collect();
+        body_path.push(id.to_owned());
+        IterationObservation::new(
+            Arc::clone(&self.backend),
+            self.workflow_id.clone(),
+            self.run_id,
+            body_path,
+            path.to_vec(),
+            Context::current()
+                .get::<StreamInvocation>()
+                .and_then(|invocation| invocation.parent_invocation()),
+            self.started,
+            body_nodes,
+        )
     }
 
     fn elapsed(&self) -> Count {
@@ -868,7 +875,58 @@ impl Drop for NodeObservation {
     }
 }
 
+struct IterationScope {
+    invocation: Count,
+    path: Vec<String>,
+    parent_path: Vec<LoopPathEntry>,
+    parent_stream_invocation: Option<u64>,
+    started: Instant,
+    sequence: Mutex<EventSequence>,
+}
+
+impl IterationScope {
+    fn attach(
+        &self,
+        path: &[String],
+        index: i64,
+        terminal: bool,
+        attributes: &mut Vec<(String, AnyValue)>,
+    ) {
+        let mut counter = self
+            .sequence
+            .lock()
+            .expect("iteration counter was not poisoned");
+        let sequence = if terminal {
+            counter.finish()
+        } else {
+            counter.reserve()
+        };
+        let Ok(sequence) = sequence else {
+            return;
+        };
+        let elapsed_ns = nanos(self.started.elapsed());
+        drop(counter);
+        let context = IterationContext {
+            invocation: self.invocation,
+            iteration_path: self.path.clone(),
+            body_path: path.to_vec(),
+            parent_path: self.parent_path.clone(),
+            parent_stream_invocation: self.parent_stream_invocation,
+            index: Count::try_from(index).expect("item index is nonnegative"),
+            sequence,
+            elapsed_ns,
+        };
+        if let Ok(json) = serde_json::to_string(&context) {
+            attributes.push((
+                crate::iteration::CONTEXT_ATTRIBUTE.into(),
+                AnyValue::String(json.into()),
+            ));
+        }
+    }
+}
+
 pub struct IterationObservation {
+    scope: Arc<IterationScope>,
     backend: Arc<Backend>,
     workflow_id: WorkflowId,
     run_id: RunId,
@@ -878,6 +936,60 @@ pub struct IterationObservation {
 }
 
 impl IterationObservation {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        backend: Arc<Backend>,
+        workflow_id: WorkflowId,
+        run_id: RunId,
+        path: Vec<String>,
+        parent_path: Vec<LoopPathEntry>,
+        parent_stream_invocation: Option<u64>,
+        started: Instant,
+        body_nodes: Vec<NodeIdentity>,
+    ) -> Option<Self> {
+        let invocation = backend
+            .iteration_invocations
+            .lock()
+            .expect("iteration allocator was not poisoned")
+            .reserve()
+            .ok()?;
+        let iteration_id = path.last()?.clone();
+        let observation = Self {
+            scope: Arc::new(IterationScope {
+                invocation,
+                path,
+                parent_path,
+                parent_stream_invocation,
+                started,
+                sequence: Mutex::new(EventSequence::new()),
+            }),
+            backend,
+            workflow_id,
+            run_id,
+            iteration_id,
+            parent: Context::current(),
+            body_nodes: Arc::new(
+                body_nodes
+                    .into_iter()
+                    .map(|node| (node.id.clone(), node))
+                    .collect(),
+            ),
+        };
+        Some(observation)
+    }
+
+    fn emit_boundary(&self) {
+        let mut attributes =
+            nested_attributes(&self.workflow_id, self.run_id, &self.iteration_id, 0);
+        self.scope
+            .attach(&self.scope.path, 0, true, &mut attributes);
+        (self.backend.emit_nested)(NestedLog {
+            name: "mf.iteration.finished",
+            attributes,
+            context: self.parent.clone(),
+        });
+    }
+
     pub fn begin_item(&self, index: usize) -> Option<ItemObservation> {
         let index = i64::try_from(index).ok()?;
         let span = self
@@ -892,6 +1004,7 @@ impl IterationObservation {
             ])
             .start_with_context(&self.backend.tracer, &self.parent);
         let item = ItemObservation {
+            scope: Arc::clone(&self.scope),
             backend: Arc::clone(&self.backend),
             workflow_id: self.workflow_id.clone(),
             run_id: self.run_id,
@@ -910,7 +1023,14 @@ impl IterationObservation {
     }
 }
 
+impl Drop for IterationObservation {
+    fn drop(&mut self) {
+        self.emit_boundary();
+    }
+}
+
 pub struct ItemObservation {
+    scope: Arc<IterationScope>,
     backend: Arc<Backend>,
     workflow_id: WorkflowId,
     run_id: RunId,
@@ -929,6 +1049,9 @@ impl ItemObservation {
 
     pub fn body_observation(&self) -> BodyObservation {
         BodyObservation {
+            scope: Arc::clone(&self.scope),
+            path: self.scope.path.clone(),
+            scoped: true,
             backend: Arc::clone(&self.backend),
             workflow_id: self.workflow_id.clone(),
             run_id: self.run_id,
@@ -979,6 +1102,8 @@ impl ItemObservation {
             &self.iteration_id,
             self.index,
         );
+        self.scope
+            .attach(&self.scope.path, self.index, false, &mut common);
         common.extend(attributes);
         (self.backend.emit_nested)(NestedLog {
             name,
@@ -1001,6 +1126,9 @@ impl Drop for ItemObservation {
 
 #[derive(Clone)]
 pub struct BodyObservation {
+    scope: Arc<IterationScope>,
+    path: Vec<String>,
+    scoped: bool,
     backend: Arc<Backend>,
     workflow_id: WorkflowId,
     run_id: RunId,
@@ -1022,8 +1150,20 @@ impl fmt::Debug for BodyObservation {
 }
 
 impl BodyObservation {
+    /// Preserves legacy detail logging when the call's definition ID is unavailable.
     pub fn for_call(&self, nodes: &[NodeIdentity]) -> Self {
+        let mut observation = self.for_call_node("", nodes);
+        observation.scoped = false;
+        observation
+    }
+
+    /// Retains the call path so nested body nodes can be observed independently.
+    pub fn for_call_node(&self, id: &str, nodes: &[NodeIdentity]) -> Self {
+        let mut path = self.path.clone();
+        path.push(id.to_owned());
         Self {
+            scoped: self.scoped && !id.trim().is_empty(),
+            path,
             context: Context::current(),
             body_nodes: Arc::new(
                 nodes
@@ -1056,6 +1196,9 @@ impl BodyObservation {
             context = parent.child_context(context);
         }
         Some(BodyNodeObservation {
+            scope: Arc::clone(&self.scope),
+            path: self.path.clone(),
+            scoped: self.scoped,
             selected_inputs: Vec::new(),
             backend: Arc::clone(&self.backend),
             workflow_id: self.workflow_id.clone(),
@@ -1071,6 +1214,9 @@ impl BodyObservation {
 }
 
 pub struct BodyNodeObservation {
+    scope: Arc<IterationScope>,
+    path: Vec<String>,
+    scoped: bool,
     selected_inputs: Vec<InputSelection>,
     backend: Arc<Backend>,
     workflow_id: WorkflowId,
@@ -1228,6 +1374,10 @@ impl BodyNodeObservation {
                         .collect(),
                 )),
             ));
+        }
+        if self.scoped {
+            self.scope
+                .attach(&self.path, self.index, false, &mut common);
         }
         common.extend(attributes);
         (self.backend.emit_nested)(NestedLog {
