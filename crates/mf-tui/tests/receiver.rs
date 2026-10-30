@@ -517,6 +517,148 @@ fn iteration_request(records: Vec<LogRecord>) -> Vec<u8> {
     .encode_to_vec()
 }
 
+fn iteration_array(values: Vec<AnyValue>) -> AnyValue {
+    AnyValue {
+        value: Some(any_value::Value::ArrayValue(
+            opentelemetry_proto::tonic::common::v1::ArrayValue { values },
+        )),
+    }
+}
+
+#[test]
+fn iteration_failure_and_skip_logs_keep_structured_node_evidence() {
+    use mf_tui::state::NodeStatus;
+    if !loopback_available() {
+        return;
+    }
+    for skipped in [false, true] {
+        let receiver = LoopbackReceiver::bind(observed_iteration_graph(), run_id()).unwrap();
+        let mut records = vec![iteration_log(1, "mf.iteration.item.started", Vec::new())];
+        if skipped {
+            records.push(iteration_log(
+                2,
+                "mf.iteration.node.skipped",
+                vec![
+                    attribute(
+                        "mf.skip.causes",
+                        iteration_array(vec![AnyValue {
+                            value: Some(any_value::Value::KvlistValue(KeyValueList {
+                                values: vec![
+                                    attribute("source_node", string("%iteration")),
+                                    attribute("source_output", string("item")),
+                                ],
+                            })),
+                        }]),
+                    ),
+                    attribute("mf.skipped.ports", iteration_array(vec![string("value")])),
+                ],
+            ));
+        } else {
+            records.push(iteration_log(
+                2,
+                "mf.iteration.node.started",
+                vec![attribute(
+                    "mf.input.selections",
+                    iteration_array(vec![AnyValue {
+                        value: Some(any_value::Value::KvlistValue(KeyValueList {
+                            values: vec![
+                                attribute("input", string("input")),
+                                attribute("source_node", string("%iteration")),
+                                attribute("source_output", string("item")),
+                            ],
+                        })),
+                    }]),
+                )],
+            ));
+            records.push(iteration_log(
+                3,
+                "mf.iteration.node.finished",
+                vec![
+                    attribute("mf.outcome", string("failed")),
+                    attribute("mf.failure.phase", string("execution")),
+                    attribute("mf.failure.message", string("fixture failure")),
+                    attribute("mf.duration.ns", integer(9)),
+                ],
+            ));
+        }
+        let payload = iteration_request(records);
+        assert_eq!(
+            send(
+                receiver.endpoint(),
+                "/v1/logs",
+                "application/x-protobuf",
+                &payload
+            ),
+            200
+        );
+        let snapshot = receiver.snapshot();
+        let node = &snapshot.iterations.items[0].nodes[0].node;
+        assert_eq!(
+            node.status,
+            if skipped {
+                NodeStatus::Skipped
+            } else {
+                NodeStatus::Failed
+            }
+        );
+        if skipped {
+            assert_eq!(node.skip_causes.len(), 1);
+            assert_eq!(node.skipped_ports, ["value"]);
+        } else {
+            assert_eq!(node.failure.as_ref().unwrap().message, "fixture failure");
+            assert_eq!(node.input_selections[0].source_node, "%iteration");
+            assert_eq!(node.duration_ns.unwrap().get(), 9);
+        }
+        assert_eq!(snapshot.observation.errors, 0);
+        assert_eq!(snapshot.lifecycle.known_missing_count, 0);
+    }
+}
+
+#[test]
+fn malformed_iteration_details_are_rejected_without_lifecycle_loss() {
+    if !loopback_available() {
+        return;
+    }
+    let receiver = LoopbackReceiver::bind(observed_iteration_graph(), run_id()).unwrap();
+    let valid = iteration_log(1, "mf.iteration.node.started", Vec::new());
+    for scenario in 0..7 {
+        let mut record = valid.clone();
+        match scenario {
+            0 => record.attributes[1].value = Some(string(RunId::new().to_string())),
+            1 => record.attributes[2].value = None,
+            2 => record.attributes[3].value = Some(integer(9)),
+            3 => record
+                .attributes
+                .retain(|attribute| attribute.key != "mf.node.id"),
+            4 => record.trace_id = vec![1],
+            5 => {
+                record.event_name = "mf.iteration.node.finished".into();
+                record
+                    .attributes
+                    .push(attribute("mf.outcome", string("failed")));
+            }
+            _ => record.event_name = "fixture.unknown".into(),
+        }
+        let expected = if scenario == 0 || scenario == 6 {
+            200
+        } else {
+            400
+        };
+        assert_eq!(
+            send(
+                receiver.endpoint(),
+                "/v1/logs",
+                "application/x-protobuf",
+                &iteration_request(vec![record])
+            ),
+            expected,
+            "scenario {scenario}"
+        );
+    }
+    assert!(receiver.snapshot().iterations.items.is_empty());
+    assert_eq!(receiver.snapshot().lifecycle.local_drops, 0);
+}
+
 #[test]
 fn iteration_nodes_update_live_without_spans_or_outer_lifecycle_records() {
     use mf_tui::state::NodeStatus;

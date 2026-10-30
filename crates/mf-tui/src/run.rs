@@ -3751,6 +3751,45 @@ mod tests {
         let offset = view.state.offset;
         let receiver = LoopbackReceiver::bind(description.clone(), run).unwrap();
         let reader = receiver.reader();
+        fn render(
+            view: &mut ObservationView,
+            snapshot: &StateSnapshot,
+            reader: &ObservationReader,
+        ) -> String {
+            let mut output = tempfile::tempfile().unwrap();
+            let mut terminal = Terminal::with_options(
+                CrosstermBackend::new(Box::new(output.try_clone().unwrap()) as Box<dyn Write>),
+                TerminalOptions {
+                    viewport: Viewport::Fixed(Rect::new(0, 0, 180, 64)),
+                },
+            )
+            .unwrap();
+            let capture = CaptureView {
+                stdout_open: false,
+                stderr_open: false,
+                stderr_tail: String::new(),
+                stderr_dropped: 0,
+                error: None,
+            };
+            draw(
+                &mut terminal,
+                &view.root,
+                &view.bodies,
+                &view.iteration_layouts,
+                &view.description,
+                snapshot,
+                &capture,
+                Duration::from_secs(1),
+                &mut view.state,
+                reader,
+                None,
+            )
+            .unwrap();
+            output.seek(SeekFrom::Start(0)).unwrap();
+            let mut text = String::new();
+            output.read_to_string(&mut text).unwrap();
+            text
+        }
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(128, 64)).unwrap();
         terminal
             .draw(|frame| {
@@ -3788,6 +3827,23 @@ mod tests {
                 .any(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
         );
         assert_eq!((view.state.selected, view.state.offset), (selected, offset));
+        view.state.details_visible = true;
+        let empty = SessionState::new(description.clone(), run)
+            .unwrap()
+            .snapshot();
+        let missing = render(&mut view, &empty, &reader);
+        assert!(
+            missing.contains("retained")
+                && missing.contains("records")
+                && !missing.contains("Item:"),
+            "{missing:?}"
+        );
+        let live = render(&mut view, &snapshot, &reader);
+        assert!(live.contains("Item:"), "{live:?}");
+        assert!(live.contains("invocation:"), "{live:?}");
+        view.state.help_visible = true;
+        render(&mut view, &snapshot, &reader);
+        view.state.help_visible = false;
         view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
         assert_eq!(
             view.state.iteration(&snapshot).unwrap().identity.index,

@@ -331,3 +331,151 @@ fn delayed_detail_events_do_not_take_focus_from_newer_outer_nodes() {
             > revision
     );
 }
+
+#[test]
+fn skipped_nodes_and_conflicting_transitions_preserve_the_observed_outcome() {
+    use mf_telemetry::event::SkipCause;
+    let mut state = SessionState::new(graph(), RunId::new()).unwrap();
+    let mut skipped = record(1, 0, 2, started());
+    skipped.event = IterationEvent::NodeSkipped {
+        node: NodeIdentity {
+            id: "work".into(),
+            kind: "fixture.work".into(),
+            path: Vec::new(),
+        },
+        causes: vec![SkipCause::Output {
+            source_node: "%iteration".into(),
+            source_output: "item".into(),
+        }],
+        skipped_ports: vec!["value".into()],
+    };
+    state.apply_iteration(skipped).unwrap();
+    assert_eq!(
+        state.apply_iteration(record(1, 0, 3, started())).unwrap(),
+        Admission::Conflict
+    );
+    let snapshot = state.snapshot();
+    let node = &snapshot.iterations.items[0].nodes[0].node;
+    assert_eq!(node.status, NodeStatus::Skipped);
+    assert!(node.conflicted);
+    assert_eq!(node.skip_causes.len(), 1);
+    assert_eq!(node.skipped_ports, ["value"]);
+    assert_eq!(
+        snapshot.iterations.items[0].display_nodes(&["each".into()], [("unseen", "fixture.work")])
+            [0]
+        .status,
+        NodeStatus::Unknown
+    );
+    state
+        .apply_iteration(record(1, 0, 1, IterationEvent::ItemStarted))
+        .unwrap();
+    assert_eq!(
+        state
+            .apply_iteration(record(1, 0, 4, IterationEvent::ItemStarted))
+            .unwrap(),
+        Admission::Conflict
+    );
+    state
+        .apply_iteration(record(
+            1,
+            0,
+            5,
+            IterationEvent::ItemFinished {
+                outcome: Outcome::Succeeded,
+                duration_ns: None,
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        state
+            .apply_iteration(record(1, 0, 6, finished(Outcome::Failed)))
+            .unwrap(),
+        Admission::Conflict
+    );
+    assert_eq!(
+        state.snapshot().iterations.items[0]
+            .display_nodes(&["each".into()], [("unseen", "fixture.work")])[0]
+            .status,
+        NodeStatus::Unknown
+    );
+}
+
+#[test]
+fn invocation_limits_retire_completed_history_and_protect_active_work() {
+    for finish in [false, true] {
+        let mut state = SessionState::new(graph(), RunId::new()).unwrap();
+        for invocation in 1..=64 {
+            state
+                .apply_iteration(record(invocation, 0, 1, IterationEvent::ItemStarted))
+                .unwrap();
+            if finish {
+                state
+                    .apply_iteration(record(invocation, 0, 2, IterationEvent::InvocationFinished))
+                    .unwrap();
+            }
+        }
+        let admission = state
+            .apply_iteration(record(65, 0, 1, IterationEvent::ItemStarted))
+            .unwrap();
+        assert_eq!(
+            admission,
+            if finish {
+                Admission::Applied
+            } else {
+                Admission::Conflict
+            }
+        );
+        assert_eq!(state.snapshot().iterations.items.len(), 64);
+        assert!(state.snapshot().iterations.retention_overflows > 0);
+        if finish {
+            assert_eq!(
+                state
+                    .apply_iteration(record(1, 0, 1, IterationEvent::ItemStarted))
+                    .unwrap(),
+                Admission::Duplicate
+            );
+            let mut conflict = record(65, 0, 2, started());
+            conflict.context.parent_stream_invocation = Some(9);
+            assert_eq!(
+                state.apply_iteration(conflict).unwrap(),
+                Admission::Conflict
+            );
+        }
+    }
+    let mut state = SessionState::new(graph(), RunId::new()).unwrap();
+    for index in 0..64 {
+        state
+            .apply_iteration(record(1, index, index + 1, IterationEvent::ItemStarted))
+            .unwrap();
+    }
+    assert_eq!(
+        state
+            .apply_iteration(record(1, 64, 65, IterationEvent::ItemStarted))
+            .unwrap(),
+        Admission::Conflict
+    );
+    assert_eq!(state.snapshot().iterations.items.len(), 64);
+}
+
+#[test]
+fn invalid_detail_correlations_and_oversized_payloads_are_rejected_before_admission() {
+    let mut state = SessionState::new(graph(), RunId::new()).unwrap();
+    let mut invalid = record(1, 0, 1, started());
+    invalid.correlation = Some((vec![1], vec![2]));
+    assert!(state.apply_iteration(invalid).is_err());
+    let mut invalid = record(1, 0, 1, started());
+    invalid.context.iteration_path = vec!["missing".into()];
+    invalid.context.body_path = invalid.context.iteration_path.clone();
+    assert!(state.apply_iteration(invalid).is_err());
+    let mut invalid = record(1, 0, 1, finished(Outcome::Failed));
+    if let IterationEvent::NodeFinished {
+        failure: Some(failure),
+        ..
+    } = &mut invalid.event
+    {
+        failure.message = "x".repeat(1024 * 1024);
+    }
+    assert!(state.apply_iteration(invalid).is_err());
+    assert!(state.snapshot().iterations.items.is_empty());
+    assert_eq!(state.snapshot().lifecycle.known_missing_count, 0);
+}
