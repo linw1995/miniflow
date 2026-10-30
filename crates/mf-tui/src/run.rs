@@ -1015,6 +1015,7 @@ struct ViewState {
     offset: (u32, u32),
     selected: usize,
     pass_offset: usize,
+    pass_offsets: BTreeMap<Vec<String>, usize>,
     details_offset: usize,
     details_height: usize,
 }
@@ -1034,26 +1035,47 @@ impl ViewState {
         if self.pass_offset != 0 || self.traces.visible {
             return;
         }
-        let path = &latest.node.path;
-        if !self
+        let mut path: Vec<_> = latest
+            .node
             .path
             .iter()
-            .zip(path)
-            .all(|(id, entry)| *id == entry.node_id())
-            || self.path.len() > path.len()
-        {
+            .map(|entry| entry.node_id().to_owned())
+            .collect();
+        let offsets = self.history_offsets();
+        if (1..=path.len()).any(|depth| {
+            offsets
+                .get(&path[..depth])
+                .is_some_and(|offset| *offset != 0)
+        }) {
             return;
         }
-        // Keep the inspected scope; descendants focus their visible enclosing Loop.
-        let id = path
-            .get(self.path.len())
-            .map_or(latest.node.id.as_str(), |entry| entry.node_id());
-        if let Some(selected) = layout.display_index_for_node_id(id) {
+        path.push(latest.node.id.clone());
+        let selected = loop {
+            let Some(id) = path.pop() else {
+                break None;
+            };
+            if let Some(selected) = layout.display_index_for_scoped_node(&path, &id) {
+                break Some(selected);
+            }
+        };
+        if let Some(selected) = selected {
             if self.selected != selected {
                 self.details_offset = 0;
             }
             self.selected = selected;
+            self.sync_scope(layout);
             self.reveal_selected = true;
+        }
+    }
+
+    fn sync_scope(&mut self, layout: &GraphLayout) {
+        let path = layout.node_path(self.selected);
+        if self.path != path {
+            self.pass_offsets
+                .insert(self.path.clone(), self.pass_offset);
+            self.path = path.to_vec();
+            self.pass_offset = self.pass_offsets.get(path).copied().unwrap_or_default();
+            self.details_offset = 0;
         }
     }
 
@@ -1085,31 +1107,14 @@ impl ViewState {
         false
     }
 
-    fn layout<'a>(
-        &self,
-        root: &'a GraphLayout,
-        bodies: &'a BTreeMap<Vec<String>, GraphLayout>,
-    ) -> &'a GraphLayout {
-        if self.path.is_empty() {
-            root
-        } else {
-            &bodies[&self.path]
-        }
+    fn pass<'a>(&self, snapshot: &'a StateSnapshot) -> Option<&'a LoopPassObservation> {
+        scope_pass(snapshot, &self.path, &self.history_offsets())
     }
 
-    fn pass<'a>(&self, snapshot: &'a StateSnapshot) -> Option<&'a LoopPassObservation> {
-        let matching: Vec<_> = snapshot
-            .loop_passes
-            .iter()
-            .filter(|pass| {
-                pass.path
-                    .iter()
-                    .map(|entry| entry.node_id())
-                    .eq(self.path.iter())
-            })
-            .collect();
-        let offset = self.pass_offset.min(matching.len().checked_sub(1)?);
-        matching.get(matching.len() - offset - 1).copied()
+    fn history_offsets(&self) -> BTreeMap<Vec<String>, usize> {
+        let mut offsets = self.pass_offsets.clone();
+        offsets.insert(self.path.clone(), self.pass_offset);
+        offsets
     }
 
     pub fn handle_key(
@@ -1117,7 +1122,6 @@ impl ViewState {
         key: KeyCode,
         snapshot: &StateSnapshot,
         root: &GraphLayout,
-        bodies: &BTreeMap<Vec<String>, GraphLayout>,
         traces: &TraceSnapshot,
         logs: &LogSnapshot,
     ) {
@@ -1137,49 +1141,13 @@ impl ViewState {
                     .details_offset
                     .saturating_sub(self.details_height.max(1))
             }
-            KeyCode::Char('l') => {
-                if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
-                    && matches!(
-                        node.kind.as_str(),
-                        "workflow.loop" | "builtin.iteration" | "workflow.call"
-                    )
-                {
-                    let mut child = self.path.clone();
-                    child.push(node.id.clone());
-                    if bodies.contains_key(&child) {
-                        self.path = child;
-                        self.offset = (0, 0);
-                        self.selected = 0;
-                        self.pass_offset = 0;
-                        self.details_offset = 0;
-                    }
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Esc => {
-                if !self.path.is_empty() {
-                    self.path.pop();
-                    self.offset = (0, 0);
-                    self.selected = 0;
-                    self.pass_offset = 0;
-                    self.details_offset = 0;
-                }
-            }
             KeyCode::Char('[') => {
-                let count = snapshot
-                    .loop_passes
-                    .iter()
-                    .filter(|pass| {
-                        pass.path
-                            .iter()
-                            .map(|entry| entry.node_id())
-                            .eq(self.path.iter())
-                    })
-                    .count();
+                let count = scope_passes(snapshot, &self.path, &self.history_offsets()).len();
                 self.pass_offset = (self.pass_offset + 1).min(count.saturating_sub(1));
             }
             KeyCode::Char(']') => self.pass_offset = self.pass_offset.saturating_sub(1),
             _ => {
-                let nodes = self.layout(root, bodies).nodes().len();
+                let nodes = root.nodes().len();
                 let previous = self.selected;
                 navigate(key, &mut self.offset, &mut self.selected, nodes);
                 if matches!(
@@ -1190,6 +1158,7 @@ impl ViewState {
                 }
                 if previous != self.selected {
                     self.details_offset = 0;
+                    self.sync_scope(root);
                 }
             }
         }
@@ -1223,7 +1192,7 @@ fn supervise(
                     let quit = (!view.state.help_visible
                         && (matches!(key.code, KeyCode::Char('q') | KeyCode::Enter)
                             || (key.code == KeyCode::Esc
-                                && view.state.path.is_empty()
+                                && !view.can_collapse_body()
                                 && !view.state.traces.visible
                                 && !view.state.details_visible)))
                         || (key.code == KeyCode::Char('c')
@@ -1286,7 +1255,7 @@ const PIP_MIN_WIDTH: u16 = 32;
 const PIP_MIN_HEIGHT: u16 = 8;
 
 fn running_display_nodes(layout: &GraphLayout, observations: &[NodeObservation]) -> Vec<usize> {
-    (0..layout.nodes().len())
+    let running: Vec<_> = (0..layout.nodes().len())
         .filter(|display| {
             layout.sources(*display).iter().any(|source| {
                 let expected = layout.all_nodes().get(*source);
@@ -1297,6 +1266,26 @@ fn running_display_nodes(layout: &GraphLayout, observations: &[NodeObservation])
                     })
                     .is_some_and(|observation| observation.status == NodeStatus::Running)
             })
+        })
+        .collect();
+    // A running body and its active descendants represent the same branch of execution.
+    let active_bodies: BTreeSet<_> = running
+        .iter()
+        .flat_map(|display| {
+            let path = layout.node_path(*display);
+            (1..=path.len()).map(|depth| &path[..depth])
+        })
+        .collect();
+    running
+        .iter()
+        .copied()
+        .filter(|display| {
+            if !layout.is_expanded_body(*display) {
+                return true;
+            }
+            let mut path = layout.node_path(*display).to_vec();
+            path.push(layout.nodes()[*display].id.clone());
+            !active_bodies.contains(path.as_slice())
         })
         .collect()
 }
@@ -1393,7 +1382,6 @@ fn draw_parallel_pips(
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     root_layout: &GraphLayout,
-    body_layouts: &BTreeMap<Vec<String>, GraphLayout>,
     description: &WorkflowDescription,
     snapshot: &StateSnapshot,
     capture: &CaptureView,
@@ -1422,16 +1410,12 @@ fn draw(
             .context(TerminalSnafu)?;
         return Ok(());
     }
-    let layout = view_state.layout(root_layout, body_layouts);
+    let layout = root_layout;
     view_state.follow_latest(snapshot, layout);
     let pass = view_state.pass(snapshot);
-    let static_body = description.body(&view_state.path).is_some_and(|body| {
-        body.nodes
-            .iter()
-            .any(|node| node.kind == mf_runtime::ITERATION_INPUT_KIND)
-    });
+    let static_body = is_static_body(description, &view_state.path);
     let display_nodes =
-        (!view_state.path.is_empty()).then(|| body_observations(layout, pass, static_body));
+        inline_observations(layout, description, snapshot, &view_state.history_offsets());
     terminal.draw(|frame| {
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(1), Constraint::Min(1), Constraint::Length(2),
@@ -1475,13 +1459,9 @@ fn draw(
             .selected(view_state.selected)
             .offset(view_state.offset.0, view_state.offset.1)
             .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64);
-        if view_state.path.is_empty() {
-            graph_view = graph_view.snapshot(snapshot);
-        } else if let Some(nodes) = &display_nodes {
-            graph_view = graph_view.nodes(nodes);
-        }
+        graph_view = graph_view.nodes(&display_nodes);
         frame.render_widget(graph_view, graph);
-        let observations = display_nodes.as_deref().unwrap_or(&snapshot.nodes);
+        let observations = display_nodes.as_slice();
         draw_parallel_pips(
             frame,
             graph,
@@ -1556,9 +1536,9 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
     } else {
         "Arrows         Pan graph\nTab / Shift-Tab, j/k   Select node\n\
          d              Show / hide details\nPgUp/PgDn      Scroll visible details\n\
-         e              Cycle connection view\nc              Collapse / expand cluster\nv              Open OTEL tracing\n\
-         l              Enter selected body\nh              Return to parent scope\n\
-         Esc            Close details / return to parent\n\
+         e              Cycle connection view\nc              Fold selected body / cluster\nv              Open OTEL tracing\n\
+         l              Expand selected body inline\nh              Collapse body / enclosing body\n\
+         Esc            Close details / collapse body\n\
          [ / ]          Older / newer pass\nf              Reset viewport\n\
          Ctrl-C         Interrupt / close\nq, Enter       Close after completion"
     };
@@ -1586,29 +1566,114 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
     );
 }
 
-fn body_observations(
-    layout: &GraphLayout,
-    pass: Option<&LoopPassObservation>,
-    static_body: bool,
-) -> Vec<NodeObservation> {
-    let order = || {
-        layout
-            .all_nodes()
-            .iter()
-            .map(|node| (node.id.as_str(), node.kind.as_str()))
-    };
-    if !static_body && let Some(pass) = pass {
-        return pass.display_nodes(order());
+fn scope_pass<'a>(
+    snapshot: &'a StateSnapshot,
+    path: &[String],
+    offsets: &BTreeMap<Vec<String>, usize>,
+) -> Option<&'a LoopPassObservation> {
+    let matching = scope_passes(snapshot, path, offsets);
+    let offset = offsets
+        .get(path)
+        .copied()
+        .unwrap_or_default()
+        .min(matching.len().checked_sub(1)?);
+    matching.get(matching.len() - offset - 1).copied()
+}
+
+fn scope_passes<'a>(
+    snapshot: &'a StateSnapshot,
+    path: &[String],
+    offsets: &BTreeMap<Vec<String>, usize>,
+) -> Vec<&'a LoopPassObservation> {
+    if path.is_empty() {
+        return Vec::new();
     }
-    order()
-        .map(|(id, kind)| {
-            let mut node = NodeObservation::pending(id, kind);
-            if static_body {
-                node.status = crate::state::NodeStatus::Unknown;
-            }
-            node
+    let parent = if path.len() > 1 {
+        let Some(parent) = scope_pass(snapshot, &path[..path.len() - 1], offsets) else {
+            return Vec::new();
+        };
+        Some(parent)
+    } else {
+        None
+    };
+    snapshot
+        .loop_passes
+        .iter()
+        .filter(|pass| {
+            pass.path
+                .iter()
+                .map(|entry| entry.node_id())
+                .eq(path.iter())
+                && parent.is_none_or(|parent| {
+                    pass.path.starts_with(&parent.path)
+                        && (pass.stream_invocation == parent.stream_invocation
+                            || snapshot.stream.as_ref().is_some_and(|stream| {
+                                stream.invocations.iter().any(|invocation| {
+                                    Some(invocation.identity.invocation) == pass.stream_invocation
+                                        && invocation.identity.parent == parent.stream_invocation
+                                })
+                            }))
+                })
         })
         .collect()
+}
+
+fn is_static_body(description: &WorkflowDescription, path: &[String]) -> bool {
+    (1..=path.len()).any(|depth| {
+        description.body(&path[..depth]).is_some_and(|body| {
+            body.nodes
+                .iter()
+                .any(|node| node.kind == mf_runtime::ITERATION_INPUT_KIND)
+        })
+    })
+}
+
+fn inline_observations(
+    layout: &GraphLayout,
+    description: &WorkflowDescription,
+    snapshot: &StateSnapshot,
+    offsets: &BTreeMap<Vec<String>, usize>,
+) -> Vec<NodeObservation> {
+    let mut scopes: BTreeMap<&[String], Vec<usize>> = BTreeMap::new();
+    for source in 0..layout.all_nodes().len() {
+        scopes
+            .entry(layout.source_path(source))
+            .or_default()
+            .push(source);
+    }
+    let mut nodes: Vec<_> = layout
+        .all_nodes()
+        .iter()
+        .map(|node| NodeObservation::pending(&node.id, &node.kind))
+        .collect();
+    for (path, sources) in scopes {
+        let order = || {
+            sources.iter().map(|source| {
+                let node = &layout.all_nodes()[*source];
+                (node.id.as_str(), node.kind.as_str())
+            })
+        };
+        let static_body = is_static_body(description, path);
+        let observed = if path.is_empty() {
+            snapshot.nodes.clone()
+        } else if !static_body && let Some(pass) = scope_pass(snapshot, path, offsets) {
+            pass.display_nodes(order())
+        } else {
+            order()
+                .map(|(id, kind)| {
+                    let mut node = NodeObservation::pending(id, kind);
+                    if static_body {
+                        node.status = NodeStatus::Unknown;
+                    }
+                    node
+                })
+                .collect()
+        };
+        for (source, observed) in sources.into_iter().zip(observed) {
+            nodes[source] = observed;
+        }
+    }
+    nodes
 }
 
 fn connection_summary(layout: &GraphLayout) -> String {
@@ -2070,28 +2135,39 @@ fn details_text(
 
 #[derive(Clone, Debug)]
 enum SelectionAnchor {
-    Node(String),
-    Cluster(usize),
+    Node(Vec<String>, String),
+    Cluster(Vec<String>, usize),
 }
 
 fn selection_anchor(layout: &GraphLayout, selected: usize) -> Option<SelectionAnchor> {
     if layout.is_collapsed_cluster(selected) {
-        return layout.cluster_of(selected).map(SelectionAnchor::Cluster);
+        return layout.cluster_of(selected).map(|cluster| {
+            let (path, index) = layout.cluster_key(cluster);
+            SelectionAnchor::Cluster(path.clone(), *index)
+        });
     }
     let source = *layout.sources(selected).first()?;
     Some(SelectionAnchor::Node(
+        layout.source_path(source).to_vec(),
         layout.all_nodes().get(source)?.id.clone(),
     ))
 }
 
 fn anchor_display(layout: &GraphLayout, anchor: &SelectionAnchor) -> Option<usize> {
     match anchor {
-        SelectionAnchor::Node(id) => layout.display_index_for_node_id(id),
-        SelectionAnchor::Cluster(cluster) => {
-            layout.display_index_for_cluster(*cluster).or_else(|| {
-                layout
-                    .clusters()
-                    .get(*cluster)?
+        SelectionAnchor::Node(path, id) => layout.display_index_for_scoped_node(path, id),
+        SelectionAnchor::Cluster(path, index) => {
+            let cluster = layout
+                .clusters()
+                .iter()
+                .enumerate()
+                .find_map(|(cluster, _)| {
+                    (layout.cluster_key(cluster).0 == *path
+                        && layout.cluster_key(cluster).1 == *index)
+                        .then_some(cluster)
+                })?;
+            layout.display_index_for_cluster(cluster).or_else(|| {
+                layout.clusters()[cluster]
                     .members
                     .first()
                     .and_then(|source| layout.display_index_for_source(*source))
@@ -2104,18 +2180,17 @@ fn anchor_display(layout: &GraphLayout, anchor: &SelectionAnchor) -> Option<usiz
 struct GraphViewport {
     offset: (u32, u32),
     selected: usize,
-    pass_offset: usize,
     details_offset: usize,
 }
 
 pub struct ObservationView {
     description: WorkflowDescription,
     root: GraphLayout,
-    // Retain only the currently inspected body, regardless of the number of scopes or views.
-    bodies: BTreeMap<Vec<String>, GraphLayout>,
-    viewports: BTreeMap<(Vec<String>, ConnectionView), GraphViewport>,
+    execution: GraphLayout,
+    expanded: BTreeSet<Vec<String>>,
+    viewports: BTreeMap<ConnectionView, GraphViewport>,
     collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
-    cluster_focus: BTreeMap<(Vec<String>, usize), usize>,
+    cluster_focus: BTreeMap<(Vec<String>, usize), String>,
     state: ViewState,
 }
 impl ObservationView {
@@ -2124,76 +2199,119 @@ impl ObservationView {
             GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
         Ok(Self {
             description: description.clone(),
+            execution: root.clone(),
             root,
-            bodies: BTreeMap::new(),
+            expanded: BTreeSet::new(),
             viewports: BTreeMap::new(),
             collapsed: BTreeMap::new(),
             cluster_focus: BTreeMap::new(),
             state: ViewState::default(),
         })
     }
-    fn collapsed_at(&self, path: &[String]) -> BTreeSet<usize> {
-        self.collapsed.get(path).cloned().unwrap_or_default()
+    fn collapse_body_path(&self) -> Option<Vec<String>> {
+        self.selected_body()
+            .filter(|path| self.expanded.contains(path))
+            .or_else(|| {
+                let path = self.root.node_path(self.state.selected);
+                (!path.is_empty()).then(|| path.to_vec())
+            })
     }
-    fn rebuild_layouts(&mut self) -> Result<(), RunError> {
-        let view = self.root.connection_view();
-        let root_collapsed = self.collapsed_at(&[]);
-        self.root = GraphLayout::with_view_and_collapsed(&self.description, view, &root_collapsed)
-            .context(GraphSnafu)?;
-        self.bodies.clear();
-        if !self.state.path.is_empty() {
-            let path = self.state.path.clone();
-            let collapsed = self.collapsed_at(&path);
-            let body = GraphLayout::from_body_with_view_and_collapsed(
-                &self.description,
-                &path,
-                view,
-                &collapsed,
-            )
-            .context(GraphSnafu)?;
-            self.bodies.insert(path, body);
+
+    fn can_collapse_body(&self) -> bool {
+        self.collapse_body_path().is_some()
+    }
+
+    fn selected_body(&self) -> Option<Vec<String>> {
+        if self.root.is_collapsed_cluster(self.state.selected) {
+            return None;
         }
+        let node = self.root.nodes().get(self.state.selected)?;
+        let mut path = self.root.node_path(self.state.selected).to_vec();
+        path.push(node.id.clone());
+        self.description.body(&path).map(|_| path)
+    }
+
+    fn fold_body(&mut self, path: Vec<String>, expand: bool) -> Result<(), RunError> {
+        let mut expanded = self.expanded.clone();
+        if expand {
+            expanded.insert(path.clone());
+        } else {
+            expanded.remove(&path);
+        }
+        let root = GraphLayout::with_expanded_bodies(
+            &self.description,
+            self.root.connection_view(),
+            &expanded,
+            &self.collapsed,
+        )
+        .context(GraphSnafu)?;
+        let (id, parent) = path.split_last().expect("body path is nonempty");
+        self.state.selected = root
+            .display_index_for_scoped_node(parent, id)
+            .unwrap_or_default();
+        self.root = root;
+        self.expanded = expanded;
+        self.state.sync_scope(&self.root);
+        self.state.reveal_selected = true;
+        self.state.details_offset = 0;
         Ok(())
     }
+
     fn toggle_cluster(&mut self) -> Result<(), RunError> {
-        let (cluster, collapsed, anchor, focus) = {
-            let layout = self.state.layout(&self.root, &self.bodies);
-            let selected = self.state.selected;
-            let Some(cluster) = layout.cluster_of(selected) else {
-                return Ok(());
-            };
-            let collapsed = layout.clusters()[cluster].collapsed;
-            let focus = (!collapsed && !layout.is_collapsed_cluster(selected))
-                .then(|| layout.sources(selected).first().copied())
-                .flatten();
-            let anchor =
-                selection_anchor(layout, selected).unwrap_or(SelectionAnchor::Cluster(cluster));
-            (cluster, collapsed, anchor, focus)
+        let selected = self.state.selected;
+        let Some(cluster) = self.root.cluster_of(selected) else {
+            return Ok(());
         };
-        let path = self.state.path.clone();
-        if let Some(focus) = focus {
-            self.cluster_focus.insert((path.clone(), cluster), focus);
+        let (path, index) = self.root.cluster_key(cluster).clone();
+        let collapsed = self.root.clusters()[cluster].collapsed;
+        let anchor = selection_anchor(&self.root, selected).expect("cluster has a selection");
+        if !collapsed && let Some(source) = self.root.sources(selected).first() {
+            self.cluster_focus.insert(
+                (path.clone(), index),
+                self.root.all_nodes()[*source].id.clone(),
+            );
         }
-        let set = self.collapsed.entry(path.clone()).or_default();
+        let mut folded = self.collapsed.clone();
+        let set = folded.entry(path.clone()).or_default();
         if collapsed {
-            set.remove(&cluster);
+            set.remove(&index);
         } else {
-            set.insert(cluster);
+            set.insert(index);
         }
-        self.rebuild_layouts()?;
-        let layout = self.state.layout(&self.root, &self.bodies);
-        let selected = match &anchor {
-            SelectionAnchor::Cluster(cluster) => self
-                .cluster_focus
-                .get(&(path, *cluster))
-                .copied()
-                .and_then(|source| layout.display_index_for_source(source))
-                .or_else(|| anchor_display(layout, &anchor)),
-            _ => anchor_display(layout, &anchor),
+        let root = GraphLayout::with_expanded_bodies(
+            &self.description,
+            self.root.connection_view(),
+            &self.expanded,
+            &folded,
+        )
+        .context(GraphSnafu)?;
+        let execution = if path.is_empty() {
+            Some(
+                GraphLayout::with_view_and_collapsed(
+                    &self.description,
+                    self.root.connection_view(),
+                    folded.get(&path).expect("updated cluster scope exists"),
+                )
+                .context(GraphSnafu)?,
+            )
+        } else {
+            None
         };
-        if let Some(selected) = selected {
-            self.state.selected = selected;
+        self.state.selected = if collapsed {
+            self.cluster_focus
+                .get(&(path.clone(), index))
+                .and_then(|id| root.display_index_for_scoped_node(&path, id))
+                .or_else(|| anchor_display(&root, &anchor))
+        } else {
+            anchor_display(&root, &anchor)
         }
+        .unwrap_or_default();
+        self.root = root;
+        self.collapsed = folded;
+        if let Some(execution) = execution {
+            self.execution = execution;
+        }
+        self.state.sync_scope(&self.root);
         self.state.reveal_selected = true;
         self.state.details_offset = 0;
         self.save_viewport();
@@ -2201,11 +2319,10 @@ impl ObservationView {
     }
     fn save_viewport(&mut self) {
         self.viewports.insert(
-            (self.state.path.clone(), self.root.connection_view()),
+            self.root.connection_view(),
             GraphViewport {
                 offset: self.state.offset,
                 selected: self.state.selected,
-                pass_offset: self.state.pass_offset,
                 details_offset: self.state.details_offset,
             },
         );
@@ -2213,93 +2330,42 @@ impl ObservationView {
     fn restore_viewport(&mut self) {
         let viewport = self
             .viewports
-            .get(&(self.state.path.clone(), self.root.connection_view()))
+            .get(&self.root.connection_view())
             .cloned()
             .unwrap_or_default();
         self.state.offset = viewport.offset;
-        let node_count = self.state.layout(&self.root, &self.bodies).nodes().len();
-        self.state.selected = viewport.selected.min(node_count.saturating_sub(1));
-        self.state.pass_offset = viewport.pass_offset;
+        self.state.selected = viewport
+            .selected
+            .min(self.root.nodes().len().saturating_sub(1));
         self.state.details_offset = viewport.details_offset;
         self.state.reveal_selected = true;
     }
-    fn load_body(&mut self, path: &[String]) -> Result<(), RunError> {
-        if !path.is_empty() && !self.bodies.contains_key(path) {
-            let collapsed = self.collapsed_at(path);
-            let layout = GraphLayout::from_body_with_view_and_collapsed(
-                &self.description,
-                path,
-                self.root.connection_view(),
-                &collapsed,
-            )
-            .context(GraphSnafu)?;
-            self.bodies.insert(path.to_vec(), layout);
-        }
-        Ok(())
-    }
     fn switch_connections(&mut self) -> Result<(), RunError> {
-        let anchor = selection_anchor(
-            self.state.layout(&self.root, &self.bodies),
-            self.state.selected,
-        );
-        let view = self.root.connection_view().next();
-        let root_collapsed = self.collapsed_at(&[]);
-        let root = GraphLayout::with_view_and_collapsed(&self.description, view, &root_collapsed)
-            .context(GraphSnafu)?;
-        let body = if self.state.path.is_empty() {
-            None
-        } else {
-            let collapsed = self.collapsed_at(&self.state.path);
-            Some(
-                GraphLayout::from_body_with_view_and_collapsed(
-                    &self.description,
-                    &self.state.path,
-                    view,
-                    &collapsed,
-                )
-                .context(GraphSnafu)?,
-            )
-        };
+        let anchor = selection_anchor(&self.root, self.state.selected);
+        let root = GraphLayout::with_expanded_bodies(
+            &self.description,
+            self.root.connection_view().next(),
+            &self.expanded,
+            &self.collapsed,
+        )
+        .context(GraphSnafu)?;
+        let execution = GraphLayout::with_view_and_collapsed(
+            &self.description,
+            root.connection_view(),
+            &self.collapsed.get(&Vec::new()).cloned().unwrap_or_default(),
+        )
+        .context(GraphSnafu)?;
         self.save_viewport();
         self.root = root;
-        self.bodies.clear();
-        if let Some(body) = body {
-            self.bodies.insert(self.state.path.clone(), body);
-        }
+        self.execution = execution;
         self.restore_viewport();
         if let Some(anchor) = anchor
-            && let Some(selected) =
-                anchor_display(self.state.layout(&self.root, &self.bodies), &anchor)
+            && let Some(selected) = anchor_display(&self.root, &anchor)
         {
             self.state.selected = selected;
         }
+        self.state.sync_scope(&self.root);
         Ok(())
-    }
-    fn prepare_navigation(&mut self, key: KeyCode) -> Result<(), RunError> {
-        if key == KeyCode::Esc && self.state.details_visible {
-            return Ok(());
-        }
-        let mut path = self.state.path.clone();
-        match key {
-            KeyCode::Char('l') => {
-                if let Some(node) = self
-                    .state
-                    .layout(&self.root, &self.bodies)
-                    .nodes()
-                    .get(self.state.selected)
-                {
-                    path.push(node.id.clone());
-                }
-                if self.description.body(&path).is_none() {
-                    return Ok(());
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Esc => {
-                path.pop();
-            }
-            _ => return Ok(()),
-        }
-        self.load_body(&path)
     }
     fn handle_navigation(
         &mut self,
@@ -2309,33 +2375,39 @@ impl ObservationView {
         logs: &LogSnapshot,
     ) {
         if !self.state.traces.visible {
-            if key == KeyCode::Char('c') {
-                self.state.graph_notice = self
-                    .toggle_cluster()
+            let result = match key {
+                KeyCode::Char('c') => Some(if let Some(path) = self.selected_body() {
+                    let expand = !self.expanded.contains(&path);
+                    self.fold_body(path, expand)
+                } else {
+                    self.toggle_cluster()
+                }),
+                KeyCode::Char('l') => Some(if let Some(path) = self.selected_body() {
+                    self.fold_body(path, true)
+                } else {
+                    Ok(())
+                }),
+                KeyCode::Char('h') | KeyCode::Esc
+                    if !(key == KeyCode::Esc && self.state.details_visible) =>
+                {
+                    Some(if let Some(path) = self.collapse_body_path() {
+                        self.fold_body(path, false)
+                    } else {
+                        Ok(())
+                    })
+                }
+                KeyCode::Char('e') => Some(self.switch_connections()),
+                _ => None,
+            };
+            if let Some(result) = result {
+                self.state.graph_notice = result
                     .err()
-                    .map(|error| format!("Cluster fold unavailable: {error}"));
+                    .map(|error| format!("Graph update unavailable: {error}"));
                 return;
             }
-            if key == KeyCode::Char('e') {
-                self.state.graph_notice = self
-                    .switch_connections()
-                    .err()
-                    .map(|error| format!("Connection view unavailable: {error}"));
-                return;
-            }
-            if let Err(error) = self.prepare_navigation(key) {
-                self.state.graph_notice = Some(format!("Body view unavailable: {error}"));
-                return;
-            }
-            self.save_viewport();
         }
-        let previous = self.state.path.clone();
         self.state
-            .handle_key(key, snapshot, &self.root, &self.bodies, traces, logs);
-        if self.state.path != previous {
-            self.restore_viewport();
-        }
-        self.bodies.retain(|path, _| *path == self.state.path);
+            .handle_key(key, snapshot, &self.root, traces, logs);
     }
     pub fn handle_key(&mut self, key: KeyCode, observation: &LocalObservation) {
         if self.state.handle_help(key) {
@@ -2362,6 +2434,14 @@ impl ObservationView {
             true
         } else if !self.state.traces.visible && self.state.details_visible {
             self.state.details_visible = false;
+            true
+        } else if !self.state.traces.visible
+            && let Some(path) = self.collapse_body_path()
+        {
+            self.state.graph_notice = self
+                .fold_body(path, false)
+                .err()
+                .map(|error| format!("Graph update unavailable: {error}"));
             true
         } else {
             false
@@ -2395,9 +2475,9 @@ impl ObservationView {
             .count();
         // Follow root execution independently of the full inspector's navigation state.
         let mut state = ViewState::default();
-        state.follow_latest(&snapshot, &self.root);
+        state.follow_latest(&snapshot, &self.execution);
         let current = self
-            .root
+            .execution
             .nodes()
             .get(state.selected)
             .map_or("", |node| node.id.as_str());
@@ -2415,9 +2495,9 @@ impl ObservationView {
             )),
             header,
         );
-        state.reveal(&self.root, graph);
+        state.reveal(&self.execution, graph);
         frame.render_widget(
-            GraphView::new(&self.root)
+            GraphView::new(&self.execution)
                 .reader(&observation.reader)
                 .snapshot(&snapshot)
                 .selected(state.selected)
@@ -2439,7 +2519,6 @@ impl ObservationView {
         draw(
             terminal,
             &self.root,
-            &self.bodies,
             &self.description,
             &observation.reader.snapshot_shared(),
             &observation.capture_view(),
@@ -2966,25 +3045,221 @@ mod tests {
         assert_eq!(view.state.selected, 0);
         assert!(!view.state.reveal_selected);
 
-        view.state.path = vec!["second".into()];
-        view.load_body(&["second".into()]).unwrap();
-        let layout = view.state.layout(&view.root, &view.bodies);
+        view.fold_body(vec!["second".into()], true).unwrap();
         snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(3).unwrap();
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(layout.nodes()[view.state.selected].id, "target");
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "target");
+        assert_eq!(view.state.path, ["second"]);
         view.state.pass_offset = 1;
-        view.state.selected = 0;
+        let selected = view.state.selected;
         snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(4).unwrap();
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(view.state.selected, 0);
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.selected, selected);
         view.state.pass_offset = 0;
         snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(5).unwrap();
         snapshot.latest_node_event.as_mut().unwrap().node.path[0] = LoopPathEntry::Loop {
             loop_id: "first".into(),
-            index: mf_telemetry::Count::ZERO,
+            index: Count::ZERO,
         };
-        view.state.follow_latest(&snapshot, layout);
-        assert_eq!(view.state.selected, 0);
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "first");
+    }
+
+    #[test]
+    fn nested_inline_history_matches_parent_pass_and_stream_invocation() {
+        use crate::state::{StreamInvocationObservation, StreamSnapshot};
+        use mf_telemetry::stream::{StreamIdentity, StreamTrigger};
+        let mut description = scope_fixture();
+        description.version = WorkflowDescriptionVersion::V2026_10_23;
+        description.execution = Some(ExecutionDescription {
+            mode: ExecutionMode::Single,
+        });
+        description.loop_bodies[0].nodes.push(NodeDescription {
+            id: "nested".into(),
+            kind: "workflow.call".into(),
+        });
+        description.loop_bodies[0]
+            .execution_order
+            .push("nested".into());
+        let mut nested = description.loop_bodies[1].clone();
+        nested.path = vec!["first".into(), "nested".into()];
+        nested.nodes.remove(0);
+        nested.execution_order.remove(0);
+        description.loop_bodies.push(nested);
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let outer = |index| {
+            vec![LoopPathEntry::Loop {
+                loop_id: "first".into(),
+                index: Count::try_from(index).unwrap(),
+            }]
+        };
+        let inner = |index| {
+            let mut path = outer(index);
+            path.push(LoopPathEntry::Call {
+                call_id: "nested".into(),
+            });
+            path
+        };
+        let pass = |path, owner, status| {
+            let mut source = NodeObservation::pending("source", "fixture.task");
+            source.status = status;
+            LoopPassObservation {
+                path,
+                nodes: vec![source],
+                started: true,
+                outcome: None,
+                interrupted: false,
+                stream_invocation: Some(owner),
+                compact_statuses: Vec::new(),
+            }
+        };
+        snapshot.loop_passes = vec![
+            pass(outer(0), 10, NodeStatus::Succeeded),
+            pass(inner(0), 11, NodeStatus::Failed),
+            pass(outer(1), 20, NodeStatus::Running),
+            pass(inner(1), 21, NodeStatus::Succeeded),
+        ];
+        snapshot.stream = Some(StreamSnapshot {
+            invocations: [(11, 10, 0), (21, 20, 1)]
+                .map(|(owner, parent, index)| StreamInvocationObservation {
+                    identity: StreamIdentity {
+                        invocation: owner,
+                        parent: Some(parent),
+                        trigger: StreamTrigger::Startup,
+                        message: None,
+                    },
+                    path: outer(index),
+                    node: NodeObservation::pending("nested", "workflow.call"),
+                    loop_summary: None,
+                    completed_passes: 0,
+                    active_pass: None,
+                })
+                .to_vec(),
+            ..Default::default()
+        });
+        let mut view = ObservationView::new(&description).unwrap();
+        view.fold_body(vec!["first".into()], true).unwrap();
+        view.fold_body(vec!["first".into(), "nested".into()], true)
+            .unwrap();
+        view.fold_body(vec!["second".into()], true).unwrap();
+        let selected = view
+            .root
+            .display_index_for_scoped_node(&["first".into()], "source")
+            .unwrap();
+        view.state.selected = selected;
+        view.state.sync_scope(&view.root);
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
+        let nested = view
+            .root
+            .display_index_for_scoped_node(&["first".into(), "nested".into()], "source")
+            .unwrap();
+        view.state.selected = nested;
+        view.state.sync_scope(&view.root);
+        assert_eq!(
+            view.state.pass(&snapshot).unwrap().stream_invocation,
+            Some(11)
+        );
+        let nodes = inline_observations(
+            &view.root,
+            &description,
+            &snapshot,
+            &view.state.history_offsets(),
+        );
+        assert_eq!(
+            nodes[view.root.sources(selected)[0]].status,
+            NodeStatus::Succeeded
+        );
+        assert_eq!(
+            nodes[view.root.sources(nested)[0]].status,
+            NodeStatus::Failed
+        );
+        let sibling = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "source")
+            .unwrap();
+        assert_eq!(
+            nodes[view.root.sources(sibling)[0]].status,
+            NodeStatus::Pending
+        );
+        let mut running = nodes.clone();
+        let first = view
+            .root
+            .display_index_for_scoped_node(&[], "first")
+            .unwrap();
+        let second = view
+            .root
+            .display_index_for_scoped_node(&[], "second")
+            .unwrap();
+        let call = view
+            .root
+            .display_index_for_scoped_node(&["first".into()], "nested")
+            .unwrap();
+        for display in [first, second, call, nested] {
+            running[view.root.sources(display)[0]].status = NodeStatus::Running;
+        }
+        assert_eq!(
+            running_display_nodes(&view.root, &running),
+            vec![second, nested]
+        );
+        snapshot.latest_node_event = Some(crate::state::NodeEventFocus {
+            sequence: Count::try_from(10).unwrap(),
+            node: mf_telemetry::event::NodeIdentity {
+                id: "target".into(),
+                kind: "fixture.task".into(),
+                path: inner(1),
+            },
+        });
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.selected, nested);
+        view.state.selected = selected;
+        view.state.sync_scope(&view.root);
+        view.handle_navigation(KeyCode::Char(']'), &snapshot, &traces, &logs);
+        let nodes = inline_observations(
+            &view.root,
+            &description,
+            &snapshot,
+            &view.state.history_offsets(),
+        );
+        assert_eq!(
+            nodes[view.root.sources(selected)[0]].status,
+            NodeStatus::Running
+        );
+        assert_eq!(
+            nodes[view.root.sources(nested)[0]].status,
+            NodeStatus::Succeeded
+        );
+        view.state.selected = nested;
+        view.state.sync_scope(&view.root);
+        view.state.details_visible = true;
+        view.handle_navigation(KeyCode::Esc, &snapshot, &traces, &logs);
+        assert!(!view.state.details_visible);
+        assert!(
+            view.root.is_expanded_body(
+                view.root
+                    .display_index_for_scoped_node(&["first".into()], "nested")
+                    .unwrap()
+            )
+        );
+        view.handle_navigation(KeyCode::Esc, &snapshot, &traces, &logs);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "nested");
+        assert_eq!(view.state.path, ["first"]);
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&["first".into(), "nested".into()], "source")
+                .is_none()
+        );
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&["second".into()], "source")
+                .is_some()
+        );
+        assert_eq!(view.execution.nodes().len(), description.nodes.len());
+        assert!(view.dismiss_overlay());
+        assert!(!view.dismiss_overlay());
     }
 
     #[test]
@@ -3059,7 +3334,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_navigation_restores_viewports_and_bounds_retained_layouts() {
+    fn inline_bodies_preserve_parent_nodes_folding_and_connection_viewports() {
         let description = scope_fixture();
         let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
             .unwrap()
@@ -3067,40 +3342,34 @@ mod tests {
         let mut view = ObservationView::new(&description).unwrap();
         let traces = TraceSnapshot::default();
         let logs = LogSnapshot::default();
-        assert_eq!(view.root.connection_view(), ConnectionView::Execution);
-        assert!(view.bodies.is_empty());
-        let geometry = view.root.nodes().to_vec();
         view.state.selected = 1;
         view.state.offset = (12, 8);
-        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
-        assert_eq!(view.state.selected, 1);
-        view.state.offset = (30, 16);
-        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
-        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
-        assert_eq!(view.state.offset, (12, 8));
-        assert_eq!(view.state.selected, 1);
-        assert_eq!(view.root.nodes(), geometry);
-        for _ in 0..4 {
-            for selected in [0, 1] {
-                view.state.selected = selected;
-                view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
-                assert_eq!(view.bodies.len(), 1);
-                assert_eq!(view.state.path.len(), 1);
-                view.state.selected = 2;
-                view.state.offset = (7, 9);
-                for _ in 0..3 {
-                    view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
-                    assert_eq!(view.bodies.len(), 1);
-                    assert_eq!(view.state.selected, 2);
-                }
-                assert_eq!(view.state.offset, (7, 9));
-                view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
-                assert!(view.state.path.is_empty());
-                assert!(view.bodies.is_empty());
-                assert_eq!(view.state.selected, selected);
-            }
+        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
+        assert_eq!(view.root.nodes().len(), 5);
+        assert!(view.root.is_expanded_body(1));
+        let child = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "target")
+            .unwrap();
+        view.state.selected = child;
+        view.state.sync_scope(&view.root);
+        view.state.offset = (7, 9);
+        for _ in 0..3 {
+            view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+            assert_eq!(view.root.nodes().len(), 5);
+            assert_eq!(view.state.selected, child);
         }
-        assert!(view.viewports.len() <= 9);
+        assert_eq!(view.state.offset, (7, 9));
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
+        assert_eq!(view.root.nodes().len(), 2);
+        assert_eq!(view.state.selected, 1);
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert_eq!(view.root.nodes().len(), 5);
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert_eq!(view.root.nodes().len(), 2);
+        assert_eq!(view.viewports.len(), 3);
         view.state.traces.visible = true;
         let mode = view.root.connection_view();
         view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
@@ -3229,12 +3498,14 @@ mod tests {
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
-        assert_eq!(view.state.path, path);
-        let nodes = body_observations(view.state.layout(&view.root, &view.bodies), None, true);
+        assert!(view.state.path.is_empty());
+        let nodes = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
         assert!(
             nodes
                 .iter()
-                .all(|node| node.status == crate::state::NodeStatus::Unknown)
+                .enumerate()
+                .filter(|(source, _)| view.root.source_path(*source) == path)
+                .all(|(_, node)| node.status == NodeStatus::Unknown)
         );
         let event = LifecycleEvent {
             workflow_id: description.workflow_id.clone(),
@@ -3338,7 +3609,6 @@ mod tests {
                 KeyCode::PageDown,
                 &session.snapshot(),
                 &layout,
-                &BTreeMap::new(),
                 &TraceSnapshot::default(),
                 &LogSnapshot::default(),
             );
@@ -3352,7 +3622,6 @@ mod tests {
             KeyCode::PageUp,
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
@@ -3426,7 +3695,6 @@ mod tests {
             KeyCode::PageDown,
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
@@ -3435,7 +3703,6 @@ mod tests {
             KeyCode::Char('d'),
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
@@ -3445,7 +3712,6 @@ mod tests {
             KeyCode::PageDown,
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
@@ -3454,7 +3720,6 @@ mod tests {
             KeyCode::Tab,
             &session.snapshot(),
             &layout,
-            &BTreeMap::new(),
             &TraceSnapshot::default(),
             &LogSnapshot::default(),
         );
@@ -3604,12 +3869,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let root = GraphLayout::new(&description).unwrap();
         let path = vec!["call".to_owned()];
-        let bodies = BTreeMap::from([(
-            path.clone(),
-            GraphLayout::from_loop_body(&description, &path).unwrap(),
-        )]);
         let run = RunId::new();
         let mut session = crate::state::SessionState::new(description.clone(), run).unwrap();
         let scope = vec![LoopPathEntry::Call {
@@ -3653,31 +3913,27 @@ mod tests {
                 .unwrap();
         }
         let snapshot = session.snapshot();
-        let mut view = ViewState::default();
-        view.handle_key(
-            KeyCode::Char('l'),
+        let mut view = ObservationView::new(&description).unwrap();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
+        assert_eq!(view.root.nodes().len(), 2);
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.path, path);
+        assert!(view.state.pass(&snapshot).unwrap().path[0].is_call());
+        assert_eq!(view.root.nodes()[view.state.selected].id, "leaf");
+        let nodes = inline_observations(
+            &view.root,
+            &description,
             &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
+            &view.state.history_offsets(),
         );
-        assert_eq!(view.path, path);
-        assert!(view.pass(&snapshot).unwrap().path[0].is_call());
-        view.follow_latest(&snapshot, view.layout(&root, &bodies));
-        assert_eq!(
-            view.layout(&root, &bodies).nodes()[view.selected].id,
-            "leaf"
-        );
-        view.handle_key(
-            KeyCode::Char('h'),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
-        );
-        assert!(view.path.is_empty());
+        let source = view.root.sources(view.state.selected)[0];
+        assert_eq!(nodes[source].status, NodeStatus::Running);
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
+        assert_eq!(view.root.nodes().len(), 1);
     }
 
     #[test]
@@ -3720,14 +3976,17 @@ mod tests {
             }],
             clusters: Vec::new(),
         };
-        let root = GraphLayout::new(&description).unwrap();
-        let bodies = BTreeMap::from([(
-            vec!["repeat".into()],
-            GraphLayout::from_loop_body(&description, &["repeat".into()]).unwrap(),
-        )]);
-        let before_nodes = bodies[&vec!["repeat".to_owned()]].nodes().to_vec();
-        let before_routes = bodies[&vec!["repeat".to_owned()]].routes().to_vec();
-        let before_crossings = bodies[&vec!["repeat".to_owned()]].crossings().to_vec();
+        let mut view = ObservationView::new(&description).unwrap();
+        view.fold_body(vec!["repeat".into()], true).unwrap();
+        let child = view
+            .root
+            .display_index_for_scoped_node(&["repeat".into()], "child")
+            .unwrap();
+        view.state.selected = child;
+        view.state.sync_scope(&view.root);
+        let before_nodes = view.root.nodes().to_vec();
+        let before_routes = view.root.routes().to_vec();
+        let before_crossings = view.root.crossings().to_vec();
         let run_id = RunId::new();
         let mut session = crate::state::SessionState::new(description.clone(), run_id).unwrap();
         let count = |value| Count::try_from(value).unwrap();
@@ -3772,51 +4031,27 @@ mod tests {
         for (index, pass) in snapshot.loop_passes.iter_mut().enumerate() {
             pass.stream_invocation = Some(index as u64 + 10);
         }
-        let mut view = ViewState::default();
-        view.handle_key(
-            KeyCode::Char('l'),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
+        assert_eq!(view.state.pass(&snapshot).unwrap().path[0].index().get(), 1);
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
+        assert_eq!(view.state.pass(&snapshot).unwrap().path[0].index().get(), 0);
+        assert_eq!(
+            view.state.pass(&snapshot).unwrap().stream_invocation,
+            Some(10)
         );
-        assert_eq!(view.path, ["repeat"]);
-        assert_eq!(view.layout(&root, &bodies).nodes()[0].id, "%loop");
-        assert_eq!(view.pass(&snapshot).unwrap().path[0].index().get(), 1);
-        view.handle_key(
-            KeyCode::Char('['),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
+        assert_eq!(view.root.nodes(), before_nodes);
+        assert_eq!(view.root.routes(), before_routes);
+        assert_eq!(view.root.crossings(), before_crossings);
+        view.handle_navigation(KeyCode::Char(']'), &snapshot, &traces, &logs);
+        assert_eq!(view.state.pass(&snapshot).unwrap().path[0].index().get(), 1);
+        assert_eq!(
+            view.state.pass(&snapshot).unwrap().stream_invocation,
+            Some(11)
         );
-        assert_eq!(view.pass(&snapshot).unwrap().path[0].index().get(), 0);
-        assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(10));
-        assert_eq!(view.layout(&root, &bodies).nodes(), before_nodes);
-        assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
-        assert_eq!(view.layout(&root, &bodies).crossings(), before_crossings);
-        view.handle_key(
-            KeyCode::Char(']'),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
-        );
-        assert_eq!(view.pass(&snapshot).unwrap().path[0].index().get(), 1);
-        assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(11));
-        assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
-        view.handle_key(
-            KeyCode::Char('h'),
-            &snapshot,
-            &root,
-            &bodies,
-            &TraceSnapshot::default(),
-            &LogSnapshot::default(),
-        );
-        assert!(view.path.is_empty());
+        assert_eq!(view.root.routes(), before_routes);
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert!(view.state.path.is_empty());
         snapshot.stream = Some(crate::state::StreamSnapshot {
             hidden_invocations: 1000,
             ..Default::default()

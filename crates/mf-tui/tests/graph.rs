@@ -17,7 +17,7 @@ use ratatui::{
     style::{Color, Modifier},
     widgets::Widget,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn description() -> WorkflowDescription {
     let nodes = ["source", "router", "left", "right", "join", "orphan"];
@@ -72,6 +72,153 @@ fn description() -> WorkflowDescription {
         loop_bodies: Vec::new(),
         clusters: Vec::new(),
     }
+}
+
+fn inline_description() -> WorkflowDescription {
+    serde_json::from_value(serde_json::json!({
+        "version": "2026-10-23", "workflow_id": format!("sha256:{}", "d".repeat(64)),
+        "execution": {"mode": "single"},
+        "nodes": [{"id":"source", "kind":"fixture.task"}, {"id":"box", "kind":"workflow.call"}, {"id":"sink", "kind":"fixture.task"}],
+        "execution_order": ["source", "box", "sink"],
+        "data_edges": [{"from_node":"source", "from_output":"value", "to_node":"box", "to_input":"input"}, {"from_node":"box", "from_output":"value", "to_node":"sink", "to_input":"input"}],
+        "control_edges": [],
+        "loop_bodies": [{
+            "path": ["box"],
+            "nodes": [{"id":"source", "kind":"fixture.task"}, {"id":"inner", "kind":"workflow.call"}, {"id":"sink", "kind":"fixture.task"}],
+            "execution_order": ["source", "inner", "sink"],
+            "data_edges": [{"from_node":"source", "from_output":"value", "to_node":"inner", "to_input":"input"}, {"from_node":"inner", "from_output":"value", "to_node":"sink", "to_input":"input"}],
+            "control_edges": []
+        }, {
+            "path": ["box", "inner"],
+            "nodes": [{"id":"source", "kind":"fixture.task"}, {"id":"sink", "kind":"fixture.task"}],
+            "execution_order": ["source", "sink"],
+            "data_edges": [{"from_node":"source", "from_output":"value", "to_node":"sink", "to_input":"input"}],
+            "control_edges": []
+        }]
+    })).unwrap()
+}
+
+#[test]
+fn inline_bodies_keep_nested_geometry_and_routes_inside_their_owners() {
+    use mf_tui::graph::{ConnectionView, routing::rects_intersect};
+    let description = inline_description();
+    let outer = vec!["box".into()];
+    let inner = vec!["box".into(), "inner".into()];
+    let expanded = BTreeSet::from([outer.clone(), inner.clone()]);
+    for view in [
+        ConnectionView::Execution,
+        ConnectionView::Dependencies,
+        ConnectionView::Ports,
+    ] {
+        let layout =
+            GraphLayout::with_expanded_bodies(&description, view, &expanded, &BTreeMap::new())
+                .unwrap();
+        assert_eq!(layout.nodes().len(), 8);
+        assert_eq!(layout.edges().len(), 5);
+        assert_eq!(layout.unresolved_count(), 0);
+        let source = layout.display_index_for_scoped_node(&[], "source").unwrap();
+        let nested_source = layout
+            .display_index_for_scoped_node(&inner, "source")
+            .unwrap();
+        assert_ne!(source, nested_source);
+        for path in [&outer, &inner] {
+            let (id, parent) = path.split_last().unwrap();
+            let owner = layout.display_index_for_scoped_node(parent, id).unwrap();
+            assert!(layout.is_expanded_body(owner));
+            let bounds = layout.nodes()[owner].rect;
+            for (display, node) in layout
+                .nodes()
+                .iter()
+                .enumerate()
+                .filter(|(display, _)| layout.node_path(*display) == path.as_slice())
+            {
+                assert!(node.rect.x > bounds.x);
+                assert!(node.rect.y > bounds.y + 3);
+                assert!(node.rect.x + node.rect.width < bounds.x + bounds.width);
+                assert!(node.rect.y + node.rect.height < bounds.y + bounds.height);
+                assert!(!rects_intersect(node.rect, layout.nodes()[source].rect));
+                assert_eq!(layout.node_path(display), path.as_slice());
+            }
+            for (edge, route) in layout
+                .edges()
+                .iter()
+                .zip(layout.routes())
+                .filter(|(edge, _)| layout.node_path(edge.from) == path.as_slice())
+            {
+                assert_eq!(layout.node_path(edge.to), path.as_slice());
+                assert!(route.points.iter().all(|point| point.x > bounds.x
+                    && point.x < bounds.x + bounds.width - 1
+                    && point.y > bounds.y + 3
+                    && point.y < bounds.y + bounds.height - 1));
+            }
+        }
+        let (width, height) = layout.size();
+        let mut full = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
+        GraphView::new(&layout).render(full.area, &mut full);
+        assert_eq!(buffer_text(&full).matches("[-]").count(), 2);
+        let rect = layout.nodes()[nested_source].rect;
+        let offset = (rect.x + 3, rect.y + 1);
+        let mut clipped = Buffer::empty(Rect::new(0, 0, 19, 5));
+        GraphView::new(&layout)
+            .offset(offset.0, offset.1)
+            .render(clipped.area, &mut clipped);
+        for y in 0..clipped.area.height {
+            for x in 0..clipped.area.width {
+                assert_eq!(
+                    clipped[(x, y)],
+                    full[(x + offset.0 as u16, y + offset.1 as u16)]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn inline_cluster_folds_hide_descendants_and_preserve_scope_local_members() {
+    use mf_tui::graph::ConnectionView;
+    let mut description = inline_description();
+    let outer = vec!["box".into()];
+    let expanded = BTreeSet::from([outer.clone(), vec!["box".into(), "inner".into()]]);
+    description.loop_bodies[0]
+        .clusters
+        .push(ClusterDescription {
+            label: "Preparation".into(),
+            annotation: "Prepare the nested input.".into(),
+            nodes: vec!["source".into(), "inner".into()],
+        });
+    let folded = BTreeMap::from([(outer.clone(), BTreeSet::from([0]))]);
+    let layout =
+        GraphLayout::with_expanded_bodies(&description, ConnectionView::Ports, &expanded, &folded)
+            .unwrap();
+    assert_eq!(layout.nodes().len(), 5);
+    let selected = layout
+        .display_index_for_scoped_node(&outer, "inner")
+        .unwrap();
+    assert!(layout.is_collapsed_cluster(selected));
+    let cluster = layout.cluster_of(selected).unwrap();
+    assert_eq!(layout.cluster_key(cluster), &(outer.clone(), 0));
+    assert!(
+        layout
+            .sources(selected)
+            .iter()
+            .all(|source| layout.source_path(*source) == outer)
+    );
+    assert!(
+        layout
+            .display_index_for_scoped_node(&["box".into(), "inner".into()], "source")
+            .is_none()
+    );
+    let collapsed = GraphLayout::with_expanded_bodies(
+        &description,
+        ConnectionView::Ports,
+        &BTreeSet::from([vec!["box".into(), "inner".into()]]),
+        &folded,
+    )
+    .unwrap();
+    assert_eq!(collapsed.nodes().len(), 3);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 30));
+    GraphView::new(&collapsed).render(buffer.area, &mut buffer);
+    assert!(buffer_text(&buffer).contains("box [+]"));
 }
 
 #[test]
