@@ -368,6 +368,10 @@ pub(super) struct StreamInvocation {
     identity: StreamIdentity,
 }
 impl StreamInvocation {
+    pub(super) fn parent_invocation(&self) -> Option<u64> {
+        self.identity.parent
+    }
+
     fn attach(self, context: Context) -> Context {
         self.annotate(&context);
         context.with_value(self)
@@ -559,6 +563,7 @@ mod tests {
 
     fn observation(records: Arc<AtomicUsize>) -> StreamObservation {
         let observer = Observer(Arc::new(Backend {
+            iteration_invocations: Mutex::new(EventSequence::new()),
             emit_event: Box::new(|_, _, _, _| {}),
             tracer: opentelemetry::global::tracer("stream-test"),
             diagnostics: None,

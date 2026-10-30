@@ -453,6 +453,220 @@ fn iteration_detail_logs_leave_outer_lifecycle_complete() {
     assert_eq!(snapshot.observation.errors, 0);
 }
 
+fn observed_iteration_graph() -> WorkflowDescription {
+    serde_json::from_value(serde_json::json!({
+        "version":"2026-10-23", "workflow_id":graph().workflow_id,
+        "execution":{"mode":"single"}, "nodes":[{"id":"each","kind":"builtin.iteration"}],
+        "execution_order":["each"], "data_edges":[],"control_edges":[],
+        "loop_bodies":[{"path":["each"],"nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
+            "execution_order":["%iteration","work"],"data_edges":[],"control_edges":[]}]
+    }))
+    .unwrap()
+}
+
+fn iteration_log(sequence: i64, name: &str, extra: Vec<KeyValue>) -> LogRecord {
+    use mf_telemetry::{
+        Count,
+        iteration::{CONTEXT_ATTRIBUTE, IterationContext},
+    };
+    let context = IterationContext {
+        invocation: Count::try_from(1).unwrap(),
+        iteration_path: vec!["each".into()],
+        body_path: vec!["each".into()],
+        parent_path: Vec::new(),
+        parent_stream_invocation: None,
+        index: Count::ZERO,
+        sequence: Count::try_from(sequence).unwrap(),
+        elapsed_ns: Count::try_from(sequence).unwrap(),
+    };
+    let mut attributes = vec![
+        attribute("mf.workflow.id", string(graph().workflow_id.to_string())),
+        attribute("mf.run.id", string(run_id().to_string())),
+        attribute("mf.iteration.id", string("each")),
+        attribute("mf.iteration.index", integer(0)),
+        attribute(
+            CONTEXT_ATTRIBUTE,
+            string(serde_json::to_string(&context).unwrap()),
+        ),
+        attribute("mf.node.id", string("work")),
+        attribute("mf.node.kind", string("fixture.work")),
+    ];
+    attributes.extend(extra);
+    LogRecord {
+        event_name: name.into(),
+        attributes,
+        body: Some(string(name)),
+        ..Default::default()
+    }
+}
+
+fn iteration_request(records: Vec<LogRecord>) -> Vec<u8> {
+    ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            scope_logs: vec![ScopeLogs {
+                scope: Some(InstrumentationScope {
+                    name: "mf.iteration".into(),
+                    ..Default::default()
+                }),
+                log_records: records,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    }
+    .encode_to_vec()
+}
+
+#[test]
+fn iteration_nodes_update_live_without_spans_or_outer_lifecycle_records() {
+    use mf_tui::state::NodeStatus;
+    if !loopback_available() {
+        return;
+    }
+    let mut receiver = LoopbackReceiver::bind(observed_iteration_graph(), run_id()).unwrap();
+    let initial = receiver.snapshot().lifecycle;
+    let payload = iteration_request(vec![
+        iteration_log(1, "mf.iteration.started", Vec::new()),
+        iteration_log(2, "mf.iteration.item.started", Vec::new()),
+        iteration_log(3, "mf.iteration.node.started", Vec::new()),
+    ]);
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &payload
+        ),
+        200
+    );
+    let snapshot = receiver.snapshot();
+    assert_eq!(
+        snapshot.iterations.items[0].nodes[0].node.status,
+        NodeStatus::Running
+    );
+    assert_eq!(snapshot.traces.observed_spans, 0);
+    assert_eq!(snapshot.lifecycle, initial);
+    let payload = iteration_request(vec![
+        iteration_log(
+            4,
+            "mf.iteration.node.finished",
+            vec![
+                attribute("mf.outcome", string("succeeded")),
+                attribute("mf.duration.ns", integer(9)),
+            ],
+        ),
+        iteration_log(
+            5,
+            "mf.iteration.item.finished",
+            vec![attribute("mf.outcome", string("succeeded"))],
+        ),
+        iteration_log(6, "mf.iteration.finished", Vec::new()),
+    ]);
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &payload
+        ),
+        200
+    );
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &payload
+        ),
+        200
+    );
+    let snapshot = receiver.snapshot();
+    assert!(snapshot.iterations.items[0].closed);
+    assert_eq!(
+        snapshot.iterations.items[0].nodes[0].node.status,
+        NodeStatus::Succeeded
+    );
+    assert_eq!(snapshot.iterations.protocol_conflicts, 0);
+    assert_eq!(snapshot.iterations.known_missing_count, 0);
+    assert_eq!(snapshot.lifecycle, initial);
+    receiver.finish();
+}
+
+#[test]
+fn raw_log_retention_does_not_stop_iteration_state_reduction() {
+    use mf_tui::state::NodeStatus;
+    if !loopback_available() {
+        return;
+    }
+    let receiver = LoopbackReceiver::bind(observed_iteration_graph(), run_id()).unwrap();
+    for batch in 0..4 {
+        let payload = iteration_request(
+            (0..1024)
+                .map(|index| LogRecord {
+                    event_name: "fixture.detail".into(),
+                    attributes: vec![
+                        attribute("mf.workflow.id", string(graph().workflow_id.to_string())),
+                        attribute("mf.run.id", string(run_id().to_string())),
+                        attribute("fixture.index", integer(batch * 1024 + index)),
+                    ],
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        assert_eq!(
+            send(
+                receiver.endpoint(),
+                "/v1/logs",
+                "application/x-protobuf",
+                &payload
+            ),
+            200
+        );
+    }
+    let payload = iteration_request(vec![
+        iteration_log(1, "mf.iteration.started", Vec::new()),
+        iteration_log(2, "mf.iteration.item.started", Vec::new()),
+        iteration_log(3, "mf.iteration.node.started", Vec::new()),
+    ]);
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &payload
+        ),
+        200
+    );
+    assert_eq!(receiver.log_snapshot().records.len(), 4096);
+    assert_eq!(receiver.log_snapshot().local_drops, 3);
+    assert_eq!(
+        receiver.snapshot().iterations.items[0].nodes[0].node.status,
+        NodeStatus::Running
+    );
+    let mut invalid = iteration_log(
+        4,
+        "mf.iteration.node.finished",
+        vec![attribute("mf.outcome", string("succeeded"))],
+    );
+    invalid
+        .attributes
+        .push(attribute("mf.node.id", string("conflicting")));
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &iteration_request(vec![invalid])
+        ),
+        400
+    );
+    assert_eq!(
+        receiver.snapshot().iterations.items[0].nodes[0].node.status,
+        NodeStatus::Running
+    );
+    assert!(receiver.snapshot().observation.errors > 0);
+}
+
 #[test]
 fn unrelated_and_malformed_requests_are_visible_without_fabricating_events() {
     if !loopback_available() {

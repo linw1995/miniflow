@@ -2,7 +2,9 @@
 
 use crate::logs::{LogSnapshot, LogStore};
 use crate::snapshots::{HistorySnapshot, SnapshotCapture, SpanData};
-use crate::state::{Admission, SessionState, StateError, StateSnapshot};
+use crate::state::{
+    Admission, IterationEvent, IterationRecord, SessionState, StateError, StateSnapshot,
+};
 use crate::traces::{TraceSnapshot, TraceSpan, TraceStore};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -67,6 +69,8 @@ enum IngestError {
     Snapshot {
         source: Arc<crate::snapshots::CaptureError>,
     },
+    #[snafu(transparent)]
+    Json { source: serde_json::Error },
     #[snafu(transparent)]
     CallEvent { source: mf_chat::CallEventError },
     #[snafu(display("{message}"))]
@@ -530,11 +534,15 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
                         INSTRUMENTATION_SCOPE
                             | mf_telemetry::snapshot::SCOPE
                             | mf_telemetry::events::SCOPE
+                            | mf_telemetry::iteration::SCOPE
                     )
                 ) {
                     continue;
                 }
-                let result = if scope_name == Some(mf_telemetry::events::SCOPE) {
+                let result = if scope_name == Some(mf_telemetry::iteration::SCOPE) {
+                    receive_iteration(record, context)
+                        .inspect_err(|_| note_error(context, "invalid iteration detail record"))
+                } else if scope_name == Some(mf_telemetry::events::SCOPE) {
                     receive_call_event(record, context)
                 } else if scope_name == Some(mf_telemetry::snapshot::SCOPE) {
                     receive_snapshot(record, context)
@@ -586,6 +594,146 @@ fn receive_snapshot(record: LogRecord, context: &Context) -> Result<(), IngestEr
         .lock()
         .expect("snapshot capture was not poisoned")
         .admit(record)?;
+    Ok(())
+}
+
+fn receive_iteration(record: LogRecord, context: &Context) -> Result<(), IngestError> {
+    use mf_telemetry::{
+        Count,
+        event::{Failure, NodeIdentity, Outcome},
+    };
+    if string_attribute(&record.attributes, "mf.run.id") != Some(context.run_id.as_str())
+        || string_attribute(&record.attributes, "mf.workflow.id")
+            != Some(context.workflow_id.as_str())
+    {
+        return Ok(());
+    }
+    // Older detail records remain available as logs without guessing their invocation identity.
+    let Some(encoded) = string_attribute(
+        &record.attributes,
+        mf_telemetry::iteration::CONTEXT_ATTRIBUTE,
+    ) else {
+        return Ok(());
+    };
+    let iteration = mf_telemetry::iteration::IterationContext::from_json(encoded)?;
+    let mut attributes = Map::new();
+    for attribute in &record.attributes {
+        let item = attribute.value.as_ref().ok_or_else(|| {
+            InvalidSnafu {
+                message: "missing iteration attribute value".to_owned(),
+            }
+            .build()
+        })?;
+        ensure!(
+            attributes
+                .insert(attribute.key.clone(), value(item, 0)?)
+                .is_none(),
+            InvalidSnafu {
+                message: "duplicate iteration attribute key".to_owned()
+            }
+        );
+    }
+    ensure!(
+        attributes.get("mf.iteration.id").and_then(Value::as_str)
+            == iteration.iteration_path.last().map(String::as_str)
+            && attributes.get("mf.iteration.index").and_then(Value::as_i64)
+                == Some(iteration.index.get()),
+        InvalidSnafu {
+            message: "iteration context disagrees with log attributes".to_owned()
+        }
+    );
+    let required = |key: &str| {
+        attributes.get(key).cloned().ok_or_else(|| {
+            InvalidSnafu {
+                message: format!("missing iteration attribute {key}"),
+            }
+            .build()
+        })
+    };
+    let duration = attributes
+        .get("mf.duration.ns")
+        .map(|value| -> Result<Count, IngestError> { Ok(serde_json::from_value(value.clone())?) })
+        .transpose()?;
+    let strings = |key: &str| -> Result<Vec<String>, IngestError> {
+        Ok(serde_json::from_value(
+            attributes
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+        )?)
+    };
+    let node = || -> Result<NodeIdentity, IngestError> {
+        Ok(NodeIdentity {
+            id: serde_json::from_value(required("mf.node.id")?)?,
+            kind: serde_json::from_value(required("mf.node.kind")?)?,
+            path: Vec::new(),
+        })
+    };
+    let outcome =
+        || -> Result<Outcome, IngestError> { Ok(serde_json::from_value(required("mf.outcome")?)?) };
+    let event = match record.event_name.as_str() {
+        "mf.iteration.started" => IterationEvent::InvocationStarted,
+        "mf.iteration.finished" => IterationEvent::InvocationFinished,
+        "mf.iteration.item.started" => IterationEvent::ItemStarted,
+        "mf.iteration.item.finished" => IterationEvent::ItemFinished {
+            outcome: outcome()?,
+            duration_ns: duration,
+        },
+        "mf.iteration.node.started" => IterationEvent::NodeStarted {
+            node: node()?,
+            selected_inputs: serde_json::from_value(
+                attributes
+                    .get("mf.input.selections")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new())),
+            )?,
+        },
+        "mf.iteration.node.finished" => {
+            let outcome = outcome()?;
+            let failure = if outcome == Outcome::Failed {
+                Some(Failure {
+                    phase: serde_json::from_value(required("mf.failure.phase")?)?,
+                    message: serde_json::from_value(required("mf.failure.message")?)?,
+                })
+            } else {
+                None
+            };
+            IterationEvent::NodeFinished {
+                node: node()?,
+                outcome,
+                duration_ns: duration,
+                produced_ports: strings("mf.produced.ports")?,
+                skipped_ports: strings("mf.skipped.ports")?,
+                failure,
+            }
+        }
+        "mf.iteration.node.skipped" => IterationEvent::NodeSkipped {
+            node: node()?,
+            causes: serde_json::from_value(required("mf.skip.causes")?)?,
+            skipped_ports: strings("mf.skipped.ports")?,
+        },
+        _ => return Ok(()),
+    };
+    let correlation = if record.trace_id.is_empty() && record.span_id.is_empty() {
+        None
+    } else {
+        ensure!(
+            record.trace_id.len() == 16 && record.span_id.len() == 8,
+            InvalidSnafu {
+                message: "invalid iteration trace context".to_owned()
+            }
+        );
+        Some((record.trace_id, record.span_id))
+    };
+    context
+        .state
+        .lock()
+        .expect("receiver state was not poisoned")
+        .apply_iteration(IterationRecord {
+            context: iteration,
+            event,
+            correlation,
+        })?;
     Ok(())
 }
 

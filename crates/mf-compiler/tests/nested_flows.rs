@@ -149,6 +149,17 @@ fn iteration_calls_isolate_item_bindings_and_observe_nested_skips() {
                             && record.attributes["mf.iteration.index"] == index
                     })
                     .unwrap();
+                let context = mf_telemetry::iteration::IterationContext::from_json(
+                    record.attributes[mf_telemetry::iteration::CONTEXT_ATTRIBUTE]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap();
+                let description = mf_compiler::describe_compiled(&plan).unwrap();
+                let body = description.body(&context.body_path).unwrap();
+                assert!(body.nodes.iter().any(|node| node.id == id
+                    && node.kind == record.attributes["mf.node.kind"].as_str().unwrap()));
+                assert_eq!(context.index.get(), index);
                 let trace = record.trace_context.as_ref().unwrap();
                 assert_eq!(trace.span_id, leaf.span_context.span_id().to_string());
                 assert_eq!(trace.trace_id, leaf.span_context.trace_id().to_string());

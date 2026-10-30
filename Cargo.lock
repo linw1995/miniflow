@@ -1882,6 +1882,7 @@ dependencies = [
  "rpds",
  "rust-sugiyama",
  "rustix 1.1.5",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "signal-hook 0.4.4",

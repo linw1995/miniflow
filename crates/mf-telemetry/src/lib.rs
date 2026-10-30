@@ -5,6 +5,7 @@ pub mod description;
 pub mod event;
 pub mod events;
 pub mod identity;
+pub mod iteration;
 pub mod observation;
 #[cfg(feature = "otlp")]
 pub mod otlp;

@@ -383,7 +383,7 @@ fn parallel_iteration_reports_correlated_item_and_body_node_activity() {
         .iter()
         .filter(|record| record.scope == "mf.iteration")
         .collect();
-    assert_eq!(nested.len(), 12);
+    assert_eq!(nested.len(), 14);
     for event in [
         "mf.iteration.item.started",
         "mf.iteration.item.finished",
@@ -573,8 +573,30 @@ fn item_and_body_logs_remain_live_when_traces_are_unsampled() {
             .iter()
             .filter(|record| record.scope == "mf.iteration")
             .count(),
-        8
+        10
     );
+    let mut detail: Vec<_> = harness
+        .records()
+        .into_iter()
+        .filter(|record| record.scope == mf_telemetry::iteration::SCOPE)
+        .map(|record| {
+            let context = mf_telemetry::iteration::IterationContext::from_json(
+                record.attributes[mf_telemetry::iteration::CONTEXT_ATTRIBUTE]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            (record.event_name, context)
+        })
+        .collect();
+    detail.sort_by_key(|(_, context)| context.sequence);
+    assert_eq!(detail.first().unwrap().0, "mf.iteration.started");
+    assert_eq!(detail.last().unwrap().0, "mf.iteration.finished");
+    for (position, (_, context)) in detail.iter().enumerate() {
+        assert_eq!(context.sequence.get(), position as i64 + 1);
+        assert_eq!(context.invocation, detail[0].1.invocation);
+        assert_eq!(context.iteration_path, ["iteration"]);
+    }
 }
 
 #[test]
@@ -702,7 +724,7 @@ fn main() {
     );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["result"], json!({"results":[10, null, 5]}));
-    assert_eq!(report["nested_records"], 12);
+    assert_eq!(report["nested_records"], 14);
     assert_eq!(report["failed_nodes"], 1);
     assert_eq!(report["item_spans"], 3);
     assert_eq!(report["node_spans"], 3);
@@ -887,6 +909,24 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
             .iter()
             .any(|record| record.scope == "mf.iteration")
     );
+
+    let records = harness.records();
+    let starts: Vec<_> = records
+        .iter()
+        .filter(|record| record.event_name == "mf.iteration.started")
+        .map(|record| {
+            mf_telemetry::iteration::IterationContext::from_json(
+                record.attributes[mf_telemetry::iteration::CONTEXT_ATTRIBUTE]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_ne!(starts[0].invocation, starts[1].invocation);
+    assert_eq!(starts[0].parent_path.last().unwrap().index().get(), 0);
+    assert_eq!(starts[1].parent_path.last().unwrap().index().get(), 1);
 
     fs::write(&path, nested.to_string()).unwrap();
     compile_project(&CompileRequest {

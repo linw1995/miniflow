@@ -291,14 +291,30 @@ span. Each reached user-defined body node emits `mf.iteration.node.started` and
 `mf.node.id` and `mf.node.kind`. Terminal records include an outcome, duration when available, and failure context.
 They exclude item and result values. Plugin-provided failure messages can contain data supplied by that plugin.
 
+New runners also emit `mf.iteration.started` and `mf.iteration.finished` invocation boundaries. Each detail log includes
+a JSON `mf.iteration.context` attribute with an invocation ID, static Iteration and body paths, the owning Loop/Call
+path and streaming invocation when present, item index, independent detail sequence, and elapsed time from run start.
+The invocation ID separates repeated executions of the same Iteration; body paths distinguish nested Calls with
+same-named nodes. Invocation boundaries use index zero without asserting that an item exists. Detail delivery gaps,
+conflicts, and retention limits are reported separately from outer lifecycle integrity.
+
 When an Iteration runs inside a Loop body, item detail spans inherit that pass's Iteration invocation span. The item
 span is a child of the Iteration node span, and each body-node span is a child of its item span. The
 item context is attached in its worker thread, so spans created by a body plugin during its node invocation inherit
 that body-node context. Parallel completion order can differ from input order; use the item index and trace parentage
 to group records. Under `continue_on_error` or `remove_failed`, failed items and body nodes retain failed detail
-outcomes while the outer Iteration node can succeed. The terminal UI can inspect described static bodies, with unknown
-per-item node states and an explicit span-inspection hint. It does not infer item execution from the outer node or
-render item spans as Loop lifecycle records.
+outcomes while the outer Iteration node can succeed.
+
+The terminal UI reduces correlated detail logs into live per-item body states, including nested Calls, without waiting
+for completed spans or requiring trace sampling. Raw log retention limits do not stop state reduction. Live node events
+focus the corresponding visible node, and parallel item executions have separate picture-in-picture views even when
+they run the same body node. Open a described body with `l`, return with `h`, and use `[` / `]` to browse retained items.
+Manually selected older items stay selected while new records arrive. Item history, invocation history, node state,
+and delivery witnesses are bounded; completed history is retired before active work. Unobserved outcomes remain unknown,
+and unresolved running nodes become unknown when an invocation ends or interrupted when observation closes. Outer
+Iteration success never supplies missing item outcomes. Legacy logs without correlation metadata remain available in
+session logs, while the body graph reports that no item records are retained. Item spans remain independent of Loop
+lifecycle records.
 
 ## Runner export configuration
 
@@ -632,7 +648,9 @@ Press `c` to collapse or
 expand the selected node's cluster; collapsed clusters render as one aggregate node, remap external
 connections, and hide internal connections. On a node with a described body, `l` opens
 its body graph; `h` or Esc returns to the parent graph. `[` and `]` inspect older and newer retained
-pass frames. The detail pane shows active and completed pass counts, stop reason, and any hidden
+pass frames, or Iteration items inside an Iteration body. Iteration item headers include their invocation ID;
+their retained detail gaps, conflicts, and overflow counts appear separately in Details.
+The detail pane shows active and completed pass counts, stop reason, and any hidden
 older detail. Streaming details also show observed invocation/completion/result counts, Batch state,
 message identity, unresolved outcomes, and final workflow totals. Loop pass headers include their owning
 invocation so repeated paths in different messages remain distinct. `q` has no action while the workflow runs. Ctrl-C
