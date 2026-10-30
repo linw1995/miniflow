@@ -677,7 +677,7 @@ impl ExecutionContext {
         let body_observation = self
             .body_observation
             .as_ref()
-            .map(|observation| observation.for_call(nodes));
+            .map(|observation| observation.for_call_node(id, nodes));
         let mut child = self.fork_body(body_observation);
         child.remaining_steps = self.remaining_steps.clone();
         child.observation = self.observation.clone();

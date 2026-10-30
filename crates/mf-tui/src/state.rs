@@ -1,6 +1,11 @@
 //! Bounded, transport-independent state reduction for one workflow run.
 
+mod iteration;
 mod stream;
+pub use iteration::{
+    IterationEvent, IterationItemObservation, IterationNodeFocus, IterationNodeObservation,
+    IterationRecord, IterationSnapshot,
+};
 pub use mf_telemetry::transport::{
     Completeness, DeliverySnapshot as LifecycleIntegrity, MissingRange,
 };
@@ -17,7 +22,7 @@ use mf_telemetry::{
     transport::{DeliveryAdmission, DeliveryError, DeliveryTracker},
 };
 use sha2::{Digest, Sha256};
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
@@ -103,6 +108,8 @@ pub struct NodeEventFocus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateSnapshot {
+    pub latest_node_revision: u64,
+    pub iterations: IterationSnapshot,
     pub latest_node_event: Option<NodeEventFocus>,
     pub nodes: Vec<NodeObservation>,
     pub workflow_outcome: Option<Outcome>,
@@ -213,6 +220,10 @@ pub enum Admission {
 
 #[derive(Debug, Snafu)]
 pub enum StateError {
+    #[snafu(display("invalid iteration record: {source}"))]
+    Iteration { source: ContractError },
+    #[snafu(display("invalid iteration record: {message}"))]
+    InvalidIteration { message: String },
     #[snafu(display("invalid lifecycle event: {message}"))]
     InvalidEvent { message: String },
     #[snafu(display("invalid workflow description: {source}"))]
@@ -244,6 +255,10 @@ pub struct SessionState {
     node_positions: BTreeMap<String, usize>,
     nodes: Vec<NodeObservation>,
     latest_node_event: Option<NodeEventFocus>,
+    latest_node_revision: u64,
+    focus_revision: u64,
+    latest_node_elapsed: Count,
+    iterations: iteration::IterationState,
     delivery: DeliveryTracker<SequenceWitness>,
     final_boundary: Option<FinalBoundary>,
     protocol_conflicts: u64,
@@ -323,6 +338,10 @@ impl SessionState {
             node_positions,
             nodes,
             latest_node_event: None,
+            latest_node_revision: 0,
+            focus_revision: 0,
+            latest_node_elapsed: Count::ZERO,
+            iterations: iteration::IterationState::default(),
             delivery: DeliveryTracker::new(MAX_WITNESSES),
             final_boundary: None,
             protocol_conflicts: 0,
@@ -340,6 +359,25 @@ impl SessionState {
 
     pub fn expected_event_schema_version(&self) -> i64 {
         self.description.event_schema_version()
+    }
+
+    pub fn apply_iteration(&mut self, record: IterationRecord) -> Result<Admission, StateError> {
+        ensure!(!self.closed, ClosedSnafu);
+        self.invalidate_snapshot();
+        let (admission, focused) = self.iterations.apply(&self.description, record)?;
+        if focused
+            && self
+                .iterations
+                .latest_node_event
+                .as_ref()
+                .is_some_and(|focus| focus.context.elapsed_ns >= self.latest_node_elapsed)
+        {
+            self.focus_revision = self.focus_revision.saturating_add(1);
+            if let Some(focus) = &mut self.iterations.latest_node_event {
+                focus.revision = self.focus_revision;
+            }
+        }
+        Ok(admission)
     }
 
     pub fn apply_stream(
@@ -377,10 +415,18 @@ impl SessionState {
             _ => None,
         }
         .cloned();
+        let elapsed = match &record.payload {
+            mf_telemetry::stream::StreamPayload::Execution(event) => node_elapsed(event),
+            mf_telemetry::stream::StreamPayload::Control(
+                mf_telemetry::stream::StreamEvent::Buffered { elapsed_ns, .. }
+                | mf_telemetry::stream::StreamEvent::Flushed { elapsed_ns, .. },
+            ) => *elapsed_ns,
+            _ => Count::ZERO,
+        };
         let sequence = record.sequence;
         let admission = stream.apply(&self.description, record, correlation)?;
         if admission == Admission::Applied {
-            self.record_node_focus(sequence, node.as_ref());
+            self.record_node_focus(sequence, node.as_ref(), elapsed);
         }
         Ok(admission)
     }
@@ -504,18 +550,32 @@ impl SessionState {
                     observed.correlation = correlation;
                 }
             }
-            self.record_node_focus(event.sequence, event.event.node().map(|(node, _)| node));
+            self.record_node_focus(
+                event.sequence,
+                event.event.node().map(|(node, _)| node),
+                node_elapsed(&event.event),
+            );
             Ok(Admission::Applied)
         }
     }
 
-    fn record_node_focus(&mut self, sequence: Count, node: Option<&NodeIdentity>) {
+    fn record_node_focus(&mut self, sequence: Count, node: Option<&NodeIdentity>, elapsed: Count) {
         if let Some(node) = node
             && self
                 .latest_node_event
                 .as_ref()
                 .is_none_or(|latest| sequence > latest.sequence)
         {
+            self.latest_node_elapsed = elapsed;
+            if self
+                .iterations
+                .latest_node_event
+                .as_ref()
+                .is_none_or(|focus| elapsed >= focus.context.elapsed_ns)
+            {
+                self.focus_revision = self.focus_revision.saturating_add(1);
+                self.latest_node_revision = self.focus_revision;
+            }
             self.latest_node_event = Some(NodeEventFocus {
                 sequence,
                 node: node.clone(),
@@ -622,6 +682,8 @@ impl SessionState {
             }
         }
         StateSnapshot {
+            latest_node_revision: self.latest_node_revision,
+            iterations: self.iterations.snapshot(self.closed),
             latest_node_event: self.latest_node_event.clone(),
             stream: None,
             nodes,
@@ -1112,6 +1174,15 @@ impl SessionState {
                 .saturating_add(evicted.len() as u64);
         }
         self.diagnostics.push_back(message);
+    }
+}
+
+fn node_elapsed(event: &Event) -> Count {
+    match event {
+        Event::NodeStarted { elapsed_ns, .. }
+        | Event::NodeFinished { elapsed_ns, .. }
+        | Event::NodeSkipped { elapsed_ns, .. } => *elapsed_ns,
+        _ => Count::ZERO,
     }
 }
 
