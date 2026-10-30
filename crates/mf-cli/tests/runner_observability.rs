@@ -262,6 +262,7 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
     let result = command(&executable)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
         .env("MF_RUN_ID", run_id.to_string())
+        .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
         .output()
         .unwrap();
     assert!(
@@ -275,6 +276,34 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
     assert_eq!(snapshot.total_loop_passes, 3);
     assert_eq!(snapshot.loop_passes.len(), 3);
     assert_eq!(snapshot.loop_overviews[0].completed_passes, 3);
+    let traces = receiver.trace_snapshot();
+    let passes: Vec<_> = traces
+        .rows
+        .iter()
+        .filter(|row| row.observation.span.name == "mf.loop.pass")
+        .collect();
+    assert_eq!(passes.len(), 3);
+    for pass in passes {
+        let pass = &pass.observation.span;
+        let index = pass
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == "mf.loop.index")
+            .and_then(|attribute| attribute.value.as_ref())
+            .and_then(|value| value.value.as_ref())
+            .and_then(|value| match value {
+                any_value::Value::IntValue(index) => Some(*index),
+                _ => None,
+            })
+            .unwrap();
+        let node = traces.rows.iter().map(|row| &row.observation.span).find(|span| {
+            span.parent_span_id == pass.span_id && span.attributes.iter().any(|attribute| attribute.key == "mf.node.id" && matches!(attribute.value.as_ref().and_then(|value| value.value.as_ref()), Some(any_value::Value::StringValue(id)) if id == "increment"))
+        }).unwrap();
+        let data = receiver.span_data(&node.trace_id, &node.span_id);
+        let node_data = data.node.expect("body span has captured data");
+        assert_eq!(node_data.inputs["count"], json!(index));
+        assert_eq!(node_data.outputs["next"], json!(index + 1));
+    }
 }
 
 fn read_request(mut stream: TcpStream) -> Option<(String, Vec<u8>)> {

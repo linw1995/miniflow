@@ -205,9 +205,14 @@ impl LoopNode {
             let (_, updated, exited) = ctx
                 .run_scope(scope, |state| {
                     let path = state.invocation_path();
-                    if let Some(run) = state.observation_mut().filter(|run| run.supports_loops()) {
-                        run.loop_pass_started(path.clone());
-                    }
+                    let mut pass = state.observation_mut().and_then(|run| {
+                        let pass = run.begin_loop_pass(path.clone());
+                        if pass.is_none() && run.supports_loops() {
+                            run.loop_pass_started(path.clone());
+                        }
+                        pass
+                    });
+                    let _guard = pass.as_ref().map(|pass| pass.enter());
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         self.body.execute_with_sink(state, sink)
                     }));
@@ -218,7 +223,11 @@ impl LoopNode {
                     } else {
                         LoopPassOutcome::Completed
                     };
-                    if let Some(run) = state.observation_mut().filter(|run| run.supports_loops()) {
+                    if let Some(pass) = &mut pass {
+                        pass.finish(outcome);
+                    } else if let Some(run) =
+                        state.observation_mut().filter(|run| run.supports_loops())
+                    {
                         run.loop_pass_finished(path, outcome);
                     }
                     match result {

@@ -677,11 +677,68 @@ fn loop_observation_identifies_each_pass_and_body_invocation() {
             })
         })
         .unwrap();
-    assert!(spans.iter().any(|span| {
-        span.attributes.iter().any(|attribute| {
-            attribute.key.as_str() == "mf.node.id" && attribute.value.to_string() == "increment"
-        }) && span.parent_span_id == loop_span.span_context.span_id()
-    }));
+    let passes: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == "mf.loop.pass")
+        .collect();
+    assert_eq!(passes.len(), 3);
+    for pass in passes {
+        assert_eq!(pass.parent_span_id, loop_span.span_context.span_id());
+        let index: i64 = pass
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == "mf.loop.index")
+            .unwrap()
+            .value
+            .to_string()
+            .parse()
+            .unwrap();
+        assert!(
+            pass.attributes
+                .iter()
+                .any(|attribute| attribute.key.as_str() == "mf.loop.id"
+                    && attribute.value.to_string() == "repeat")
+        );
+        assert!(
+            pass.attributes
+                .iter()
+                .any(|attribute| attribute.key.as_str() == "mf.loop.outcome"
+                    && attribute.value.to_string() == "completed")
+        );
+        let child = spans
+            .iter()
+            .find(|span| {
+                span.parent_span_id == pass.span_context.span_id()
+                    && span.attributes.iter().any(|attribute| {
+                        attribute.key.as_str() == "mf.node.id"
+                            && attribute.value.to_string() == "increment"
+                    })
+            })
+            .unwrap();
+        for record in &records {
+            let event = record.decode().unwrap();
+            match event.event {
+                Event::LoopPassStarted { path, .. } | Event::LoopPassFinished { path, .. }
+                    if path.last().unwrap().index().get() == index =>
+                {
+                    assert_eq!(
+                        record.trace_context.as_ref().unwrap().span_id,
+                        pass.span_context.span_id().to_string()
+                    );
+                }
+                Event::NodeStarted { node, .. }
+                    if node.id == "increment"
+                        && node.path.last().unwrap().index().get() == index =>
+                {
+                    assert_eq!(
+                        record.trace_context.as_ref().unwrap().span_id,
+                        child.span_context.span_id().to_string()
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 #[test]
@@ -721,6 +778,43 @@ fn loop_observation_distinguishes_exit_skip_and_nested_paths() {
             assert!(events.iter().any(|event| matches!(event,
                 Event::NodeFinished { node, .. }
                     if node.id == "increment" && node.path.len() == 2)));
+            let spans = harness.spans.get_finished_spans().unwrap();
+            let inner_passes: Vec<_> = spans
+                .iter()
+                .filter(|span| {
+                    span.name == "mf.loop.pass"
+                        && span.attributes.iter().any(|attribute| {
+                            attribute.key.as_str() == "mf.loop.id"
+                                && attribute.value.to_string() == "inner"
+                        })
+                })
+                .collect();
+            assert_eq!(inner_passes.len(), 2);
+            for pass in inner_passes {
+                let inner = spans
+                    .iter()
+                    .find(|span| span.span_context.span_id() == pass.parent_span_id)
+                    .unwrap();
+                assert!(
+                    inner
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.key.as_str() == "mf.node.id"
+                            && attribute.value.to_string() == "inner")
+                );
+                let outer = spans
+                    .iter()
+                    .find(|span| span.span_context.span_id() == inner.parent_span_id)
+                    .unwrap();
+                assert_eq!(outer.name, "mf.loop.pass");
+                assert!(spans.iter().any(|span| {
+                    span.parent_span_id == pass.span_context.span_id()
+                        && span.attributes.iter().any(|attribute| {
+                            attribute.key.as_str() == "mf.node.id"
+                                && attribute.value.to_string() == "increment"
+                        })
+                }));
+            }
         } else {
             let outcomes: Vec<_> = events
                 .iter()
@@ -732,6 +826,19 @@ fn loop_observation_distinguishes_exit_skip_and_nested_paths() {
             assert_eq!(
                 outcomes,
                 [LoopPassOutcome::Completed, LoopPassOutcome::Exit]
+            );
+            assert!(
+                harness
+                    .spans
+                    .get_finished_spans()
+                    .unwrap()
+                    .iter()
+                    .any(|span| span.name == "mf.loop.pass"
+                        && span
+                            .attributes
+                            .iter()
+                            .any(|attribute| attribute.key.as_str() == "mf.loop.outcome"
+                                && attribute.value.to_string() == "exit"))
             );
             assert!(events.iter().any(|event| matches!(event,
                 Event::NodeSkipped { node, causes, .. }
@@ -784,6 +891,203 @@ fn failed_body_emits_a_failed_pass_and_no_loop_success() {
     assert!(!events.iter().any(|event| matches!(event,
         Event::NodeFinished { node, outcome: mf_telemetry::event::Outcome::Succeeded, .. }
             if node.id == "repeat")));
+    let spans = harness.spans.get_finished_spans().unwrap();
+    let pass = spans
+        .iter()
+        .find(|span| span.name == "mf.loop.pass")
+        .unwrap();
+    assert!(matches!(
+        pass.status,
+        opentelemetry::trace::Status::Error { .. }
+    ));
+    assert!(
+        pass.attributes
+            .iter()
+            .any(|attribute| attribute.key.as_str() == "mf.loop.outcome"
+                && attribute.value.to_string() == "failed")
+    );
+}
+
+#[test]
+fn loop_snapshots_keep_each_body_node_span_context() {
+    use opentelemetry::trace::TraceContextExt;
+    use std::sync::{Arc, Mutex};
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(definition()), &registry).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let received = Arc::clone(&captures);
+    ExecutionContext::run(Some(observation), |state| {
+        state.set_snapshot_recorder(mf_runtime::SnapshotRecorder::new(move |event| {
+            if event.node.as_ref() == "increment" {
+                let context = opentelemetry::Context::current();
+                received.lock().unwrap().push((
+                    event.scope.last().unwrap().index(),
+                    context.span().span_context().span_id(),
+                ));
+            }
+        }));
+        flow.execute_in_context(state)
+    })
+    .unwrap();
+    let spans = harness.spans.get_finished_spans().unwrap();
+    let captures = captures.lock().unwrap();
+    assert_eq!(captures.len(), 6);
+    for (index, span_id) in captures.iter() {
+        let node = spans
+            .iter()
+            .find(|span| span.span_context.span_id() == *span_id)
+            .unwrap();
+        let pass = spans
+            .iter()
+            .find(|span| span.span_context.span_id() == node.parent_span_id)
+            .unwrap();
+        assert_eq!(pass.name, "mf.loop.pass");
+        assert!(
+            pass.attributes
+                .iter()
+                .any(|attribute| attribute.key.as_str() == "mf.loop.index"
+                    && attribute.value.to_string() == index.get().to_string())
+        );
+    }
+}
+
+#[test]
+fn unsampled_loop_passes_keep_lifecycle_delivery_complete() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(definition()), &registry).unwrap();
+    let harness = capture::Harness::new(false);
+    let observation = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    assert_eq!(
+        execute_compiled(&plan, &registry, Some(observation)).unwrap()["count"],
+        json!(3)
+    );
+    assert!(harness.spans.get_finished_spans().unwrap().is_empty());
+    let records = harness.records();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.event_name == "mf.loop.pass.started")
+            .count(),
+        3
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.event_name == "mf.loop.pass.finished")
+            .count(),
+        3
+    );
+    assert_eq!(records.last().unwrap().event_name, "mf.workflow.finished");
+}
+
+#[test]
+fn abandoned_loop_pass_ends_its_span_without_fabricating_a_finish() {
+    use mf_telemetry::event::LoopPathEntry;
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(definition()), &registry).unwrap();
+    let harness = capture::Harness::new(true);
+    let mut observation = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let _workflow = observation.enter();
+    let node = observation.begin_node("repeat").unwrap();
+    let _node = node.enter();
+    let pass = observation
+        .begin_loop_pass(vec![LoopPathEntry::Loop {
+            loop_id: "repeat".into(),
+            index: mf_telemetry::Count::ZERO,
+        }])
+        .unwrap();
+    drop(pass);
+    let spans = harness.spans.get_finished_spans().unwrap();
+    let pass = spans
+        .iter()
+        .find(|span| span.name == "mf.loop.pass")
+        .unwrap();
+    assert!(matches!(
+        pass.status,
+        opentelemetry::trace::Status::Error { .. }
+    ));
+    let records = harness.records();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.event_name == "mf.loop.pass.started")
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| record.event_name == "mf.loop.pass.finished")
+    );
+}
+
+#[test]
+fn legacy_observation_keeps_pass_spans_without_loop_lifecycle_records() {
+    use mf_telemetry::event::{LoopPathEntry, NodeIdentity};
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(definition()), &registry).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    let harness = capture::Harness::new(true);
+    let mut observation = harness
+        .observer()
+        .start(
+            description.workflow_id,
+            RunId::new(),
+            vec![NodeIdentity {
+                id: "repeat".into(),
+                kind: "workflow.loop".into(),
+                path: Vec::new(),
+            }],
+        )
+        .unwrap();
+    let _workflow = observation.enter();
+    let node = observation.begin_node("repeat").unwrap();
+    let _node = node.enter();
+    assert!(observation.begin_loop_pass(Vec::new()).is_none());
+    assert!(
+        observation
+            .begin_loop_pass(vec![LoopPathEntry::Call {
+                call_id: "call".into()
+            }])
+            .is_none()
+    );
+    let path = vec![LoopPathEntry::Loop {
+        loop_id: "repeat".into(),
+        index: mf_telemetry::Count::ZERO,
+    }];
+    let mut pass = observation.begin_loop_pass(path.clone()).unwrap();
+    pass.finish(LoopPassOutcome::Completed);
+    pass.finish(LoopPassOutcome::Failed);
+    observation.finish(None);
+    assert!(observation.begin_loop_pass(path).is_none());
+    let spans = harness.spans.get_finished_spans().unwrap();
+    let pass = spans
+        .iter()
+        .find(|span| span.name == "mf.loop.pass")
+        .unwrap();
+    assert!(
+        pass.attributes
+            .iter()
+            .any(|attribute| attribute.key.as_str() == "mf.loop.outcome"
+                && attribute.value.to_string() == "completed")
+    );
+    assert!(!matches!(
+        pass.status,
+        opentelemetry::trace::Status::Error { .. }
+    ));
+    assert!(
+        !harness
+            .records()
+            .iter()
+            .any(|record| record.event_name.starts_with("mf.loop.pass."))
+    );
 }
 
 #[test]
