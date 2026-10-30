@@ -1,6 +1,6 @@
-use mf_runtime::{Flow, RustValueType, output_id};
+use mf_runtime::{Flow, NodeId, RustValueType, output_id};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +44,11 @@ pub struct TypedPlan {
 /// Computes ownership and codec evidence without changing the validated domain graph.
 pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) -> TypedPlan {
     let nodes = flow.nodes();
+    let node_ids: BTreeMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.definition_id.as_str(), NodeId::new(index)))
+        .collect();
     let mut domain_of = vec![usize::MAX; nodes.len()];
     for domain in flow.execution_domains().domains() {
         for node in domain.nodes.iter() {
@@ -57,8 +62,10 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
         .map(|edge| ((edge.to_node.index(), edge.to_input.as_ref()), edge))
         .collect();
     let mut moves = BTreeMap::<(usize, usize, &str), usize>::new();
+    let mut connected_nodes = BTreeSet::new();
     let mut exclusive_targets = vec![false; nodes.len()];
     for edge in flow.connections() {
+        connected_nodes.insert((edge.from_node, edge.to_node));
         exclusive_targets[edge.to_node.index()] |= edge.exclusive;
         *moves
             .entry((
@@ -79,11 +86,8 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
             .filter(|dep| dep.input.as_deref().is_none())
         {
             let output = dependency.source_output.as_ref();
-            if let Some(index) = nodes
-                .iter()
-                .position(|node| node.definition_id.as_str() == dependency.source_node.as_ref())
-            {
-                *uses.entry((index, output.to_string())).or_default() += 1;
+            if let Some(id) = node_ids.get(dependency.source_node.as_ref()) {
+                *uses.entry((id.index(), output.to_string())).or_default() += 1;
             }
         }
     }
@@ -236,13 +240,10 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
         let mut chain: Vec<usize> = Vec::new();
         for &position in domain.positions.iter() {
             if let Some(&previous) = chain.last() {
-                let source = flow.execution_order()[previous].index();
-                let target = flow.execution_order()[position].index();
-                let connected = flow
-                    .connections()
-                    .iter()
-                    .any(|edge| edge.from_node.index() == source && edge.to_node.index() == target);
-                if !connected || classify(source, target).is_some() {
+                let source = flow.execution_order()[previous];
+                let target = flow.execution_order()[position];
+                let connected = connected_nodes.contains(&(source, target));
+                if !connected || classify(source.index(), target.index()).is_some() {
                     if chain.len() >= 2 {
                         plan.segments.push(TypedSegment {
                             domain: domain.id,

@@ -14,6 +14,10 @@ codegen = ["dep:prettyplease", "dep:proc-macro2", "dep:quote", "dep:syn"]
 name = "benchmark_graph"
 required-features = ["codegen"]
 
+[[example]]
+name = "benchmark_typed_plan"
+required-features = ["codegen"]
+
 [dependencies]
 # Runtime contracts and workflow observation.
 mf-runtime.workspace = true
