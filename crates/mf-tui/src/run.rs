@@ -3244,6 +3244,19 @@ mod tests {
             &LogSnapshot::default(),
         );
         assert_eq!(view.state.iteration_items[&body].index.get(), 0);
+        view.handle_navigation(
+            KeyCode::Char(']'),
+            &snapshot,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(view.state.iteration_items[&body].index.get(), 1);
+        view.handle_navigation(
+            KeyCode::Char('['),
+            &snapshot,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
         let selected = view.state.selected;
         state
             .apply_iteration(IterationRecord {
@@ -3339,24 +3352,78 @@ mod tests {
             event,
             correlation: None,
         };
-        state
-            .apply_iteration(record(
-                1,
+        for index in 0..2 {
+            let mut parent = record(
+                index * 2 + 1,
+                IterationEvent::NodeStarted {
+                    node: NodeIdentity {
+                        id: "call".into(),
+                        kind: "workflow.call".into(),
+                        path: Vec::new(),
+                    },
+                    selected_inputs: Vec::new(),
+                },
+            );
+            parent.context.index = Count::try_from(index).unwrap();
+            parent.context.body_path = vec!["each".into()];
+            state.apply_iteration(parent).unwrap();
+            let mut child = record(
+                index * 2 + 2,
                 IterationEvent::NodeStarted {
                     node: node.clone(),
                     selected_inputs: Vec::new(),
                 },
-            ))
-            .unwrap();
+            );
+            child.context.index = Count::try_from(index).unwrap();
+            state.apply_iteration(child).unwrap();
+        }
         let mut view = ObservationView::new(&description).unwrap();
-        view.state.follow_latest(&state.snapshot(), &view.root);
+        let snapshot = state.snapshot();
+        view.state.follow_latest(&snapshot, &view.root);
         assert_eq!(view.root.node_path(view.state.selected), ["each", "call"]);
         assert_eq!(view.root.nodes()[view.state.selected].id, "work");
+        let nodes = inline_observations_with_items(
+            &view.root,
+            &description,
+            &snapshot,
+            &view.state.history_offsets(),
+            &view.state.iteration_items,
+        );
+        let receiver = LoopbackReceiver::bind(description.clone(), RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(128, 64)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_parallel_pips(
+                    frame,
+                    frame.area(),
+                    &view.root,
+                    &nodes,
+                    &reader,
+                    1_000_000,
+                    Some(&snapshot.iterations),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..64)
+            .map(|y| {
+                (0..128)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+        assert!(
+            text.contains("item 0 · call 1") && text.contains("item 1 · call 1"),
+            "{text}"
+        );
         view.fold_body(vec!["each".into(), "call".into()], false)
             .unwrap();
         state
             .apply_iteration(record(
-                2,
+                5,
                 IterationEvent::NodeFinished {
                     node,
                     outcome: mf_telemetry::event::Outcome::Succeeded,
