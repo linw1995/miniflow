@@ -90,6 +90,43 @@ fn loop_forwards_child_emissions_in_order_and_completes_once_with_its_summary() 
         .collect();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].as_ref().unwrap().pass_count.get(), 3);
+    let spans = harness.spans.get_finished_spans().unwrap();
+    let loop_node = spans
+        .iter()
+        .find(|span| {
+            span.name == "mf.node"
+                && span.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "mf.node.id"
+                        && attribute.value.to_string() == "repeat"
+                })
+        })
+        .unwrap();
+    let passes: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == "mf.loop.pass")
+        .collect();
+    assert_eq!(passes.len(), 3);
+    let stream_invocation = &loop_node
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key.as_str() == "mf.stream.invocation")
+        .unwrap()
+        .value;
+    for pass in passes {
+        assert_eq!(pass.parent_span_id, loop_node.span_context.span_id());
+        assert!(
+            pass.attributes
+                .iter()
+                .any(|attribute| attribute.key.as_str() == "mf.stream.invocation"
+                    && &attribute.value == stream_invocation)
+        );
+        assert!(spans.iter().any(|span| {
+            span.parent_span_id == pass.span_context.span_id()
+                && span.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "mf.node.id" && attribute.value.to_string() == "step"
+                })
+        }));
+    }
 }
 
 #[test]

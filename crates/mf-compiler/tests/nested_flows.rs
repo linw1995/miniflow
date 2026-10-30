@@ -922,12 +922,7 @@ fn call_loop_call_execution_preserves_complete_observation_paths() {
         assert_eq!(matching.len(), 1, "node {id}");
         matching[0]
     };
-    for (parent_id, child_id) in [
-        ("outer", "repeat"),
-        ("repeat", "inner"),
-        ("inner", "input"),
-        ("inner", "echo"),
-    ] {
+    for (parent_id, child_id) in [("outer", "repeat"), ("inner", "input"), ("inner", "echo")] {
         let parent = node_span(parent_id);
         let child = node_span(child_id);
         assert_eq!(parent.name, "mf.node");
@@ -938,6 +933,26 @@ fn call_loop_call_execution_preserves_complete_observation_paths() {
             parent.span_context.trace_id()
         );
     }
+    let repeat = node_span("repeat");
+    let inner = node_span("inner");
+    let pass = spans
+        .iter()
+        .find(|span| {
+            span.name == "mf.loop.pass" && span.parent_span_id == repeat.span_context.span_id()
+        })
+        .unwrap();
+    assert_eq!(inner.parent_span_id, pass.span_context.span_id());
+    let path = pass
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key.as_str() == "mf.loop.path")
+        .unwrap()
+        .value
+        .as_str();
+    assert_eq!(
+        serde_json::from_str::<Vec<ScopePathEntry>>(&path).unwrap(),
+        loop_path
+    );
 }
 
 #[test]
