@@ -26,6 +26,21 @@ struct Config {
 enum CodeBuildError {
     #[snafu(display("{message}"))]
     InvalidConfig { message: String },
+    #[snafu(display("input `{input}`: {source}"))]
+    InputDescriptor {
+        input: String,
+        source: mf_runtime::TypeDescriptorError,
+    },
+    #[snafu(display("input `{input}`: {source}"))]
+    InputType {
+        input: String,
+        source: CodeTypeError,
+    },
+    #[snafu(display("output `{output}`: {source}"))]
+    OutputType {
+        output: String,
+        source: CodeTypeError,
+    },
     #[snafu(display("output `{output}`: {source}"))]
     Compile {
         output: String,
@@ -86,13 +101,15 @@ fn execution_error(message: impl Into<String>) -> NodeExecutionError {
     .build()
 }
 
-fn parse_type(value: &Value) -> Result<(ValueType, CelType), String> {
-    let value_type = ValueType::parse_descriptor(value)?;
-    let native_type = cel_type(&value_type)?;
-    Ok((value_type, native_type))
+#[derive(Debug, Snafu)]
+enum CodeTypeError {
+    #[snafu(display("unsupported Code input type"))]
+    UnsupportedInput,
+    #[snafu(display("unsupported inferred CEL result type `{value_type}`"))]
+    UnsupportedResult { value_type: CelType },
 }
 
-fn cel_type(value_type: &ValueType) -> Result<CelType, String> {
+fn cel_type(value_type: &ValueType) -> Result<CelType, CodeTypeError> {
     Ok(match value_type {
         ValueType::Any => CelType::Dyn,
         ValueType::Object => CelType::map(CelType::String, CelType::Dyn),
@@ -105,11 +122,11 @@ fn cel_type(value_type: &ValueType) -> Result<CelType, String> {
         ValueType::String => CelType::String,
         ValueType::List(inner) => CelType::list(cel_type(inner)?),
         ValueType::Map(inner) => CelType::map(CelType::String, cel_type(inner)?),
-        _ => return Err("unsupported Code input type".into()),
+        _ => return UnsupportedInputSnafu.fail(),
     })
 }
 
-fn result_type(cel_type: &CelType) -> Result<ValueType, String> {
+fn result_type(cel_type: &CelType) -> Result<ValueType, CodeTypeError> {
     match cel_type {
         CelType::Dyn => Ok(ValueType::Any),
         CelType::UInt => Ok(ValueType::Uint64),
@@ -122,7 +139,10 @@ fn result_type(cel_type: &CelType) -> Result<ValueType, String> {
         CelType::Map(key, value) if key.as_ref() == &CelType::String => {
             Ok(ValueType::Map(Box::new(result_type(value)?)))
         }
-        _ => Err(format!("unsupported inferred CEL result type `{cel_type}`")),
+        _ => UnsupportedResultSnafu {
+            value_type: cel_type.clone(),
+        }
+        .fail(),
     }
 }
 
@@ -246,8 +266,9 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         if !valid_identifier(name) {
             return Err(invalid(format!("invalid input name `{name}`")));
         }
-        let (value_type, native_type) =
-            parse_type(descriptor).map_err(|error| invalid(format!("input `{name}`: {error}")))?;
+        let value_type = ValueType::parse_descriptor(descriptor)
+            .context(InputDescriptorSnafu { input: name })?;
+        let native_type = cel_type(&value_type).context(InputTypeSnafu { input: name })?;
         env = env.with_variable(name, native_type);
         inputs.insert(name.clone(), value_type);
     }
@@ -276,8 +297,7 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         let inferred = ast
             .result_type()
             .ok_or_else(|| invalid(format!("output `{name}` has no inferred type")))?;
-        let value_type =
-            result_type(inferred).map_err(|error| invalid(format!("output `{name}`: {error}")))?;
+        let value_type = result_type(inferred).context(OutputTypeSnafu { output: name })?;
         value_type
             .check_depth()
             .context(DepthSnafu { output: name })?;
@@ -303,6 +323,29 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_input_types_preserve_descriptor_sources() {
+        let error = factory(serde_json::json!({
+            "language": "cel", "inputs": {"item": {"list": "unknown"}},
+            "code": {"result": "item"}
+        }))
+        .err()
+        .unwrap();
+        let mut source: &(dyn Error + 'static) = &error;
+        loop {
+            if let Some(error) = source.downcast_ref::<mf_runtime::TypeDescriptorError>() {
+                assert!(
+                    matches!(error, mf_runtime::TypeDescriptorError::UnsupportedName { name } if name == "unknown")
+                );
+                break;
+            }
+            source = source
+                .source()
+                .expect("descriptor error must remain in the source chain");
+        }
+    }
+
     use serde_json::json;
 
     fn find_source<'a, T: Error + 'static>(error: &'a (dyn Error + 'static)) -> Option<&'a T> {

@@ -32,6 +32,11 @@ pub enum DependencyProjectError {
     State { source: crate::StateError },
     #[snafu(display("invalid dependency {alias}: {message}"))]
     Dependency { alias: String, message: String },
+    #[snafu(display("invalid dependency {alias}: {source}"))]
+    DependencyValidation {
+        alias: String,
+        source: mf_runtime::NodeDependencyError,
+    },
     #[snafu(display("could not generate runner code: {source}"))]
     Plan { source: crate::PlanError },
     #[snafu(display("could not write generated project at {path:?}: {source}"))]
@@ -481,10 +486,7 @@ pub fn write_dependency_project_with_options(
     for (index, (alias, dependency)) in definition.dependencies.iter().enumerate() {
         dependency
             .validate()
-            .map_err(|message| DependencyProjectError::Dependency {
-                alias: alias.clone(),
-                message,
-            })?;
+            .context(DependencyValidationSnafu { alias })?;
         let name = format!("node_{index}");
         main.push_str(&format!("extern crate {name} as _;\n"));
         build.push_str(&format!("extern crate {name} as _;\n"));

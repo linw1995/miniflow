@@ -196,8 +196,11 @@ fn validate_loop(
     if !(1..=MAX_LOOP_ITERATIONS).contains(&loop_definition.max_iterations) {
         return Err(invalid(path, "max_iterations must be in 1..=1000"));
     }
-    let types = mf_runtime::loop_variable_types(&loop_definition.variables)
-        .map_err(|message| invalid(path, message))?;
+    let types = mf_runtime::loop_variable_types(&loop_definition.variables).context(
+        crate::compiler::LoopVariablesSnafu {
+            path: path_label(path),
+        },
+    )?;
     if let Some(condition) = &loop_definition.until {
         let value_type = types.get(&condition.variable).ok_or_else(|| {
             invalid(

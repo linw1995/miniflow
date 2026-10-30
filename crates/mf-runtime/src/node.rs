@@ -148,16 +148,30 @@ pub struct TypeDepthError {
     pub maximum: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+pub enum TypeDescriptorError {
+    #[snafu(display("type nesting depth exceeds {}", source.maximum))]
+    DescriptorDepth { source: TypeDepthError },
+    #[snafu(display("unsupported type `{name}`"))]
+    UnsupportedName { name: String },
+    #[snafu(display("unsupported type constructor `{kind}`"))]
+    UnsupportedConstructor { kind: String },
+    #[snafu(display("type must be a scalar, list, or map descriptor"))]
+    InvalidDescriptor,
+}
+
 impl ValueType {
     pub const MAX_DEPTH: usize = 16;
 
-    pub fn parse_descriptor(value: &Value) -> Result<Self, String> {
-        fn parse(value: &Value, depth: usize) -> Result<ValueType, String> {
+    pub fn parse_descriptor(value: &Value) -> Result<Self, TypeDescriptorError> {
+        fn parse(value: &Value, depth: usize) -> Result<ValueType, TypeDescriptorError> {
             if depth > ValueType::MAX_DEPTH {
-                return Err(format!(
-                    "type nesting depth exceeds {}",
-                    ValueType::MAX_DEPTH
-                ));
+                return TypeDepthSnafu {
+                    depth,
+                    maximum: ValueType::MAX_DEPTH,
+                }
+                .fail()
+                .context(DescriptorDepthSnafu);
             }
             match value {
                 Value::String(name) => match name.as_str() {
@@ -173,7 +187,7 @@ impl ValueType {
                     "string" => Ok(ValueType::String),
                     "array" => Ok(ValueType::Array),
                     "object" => Ok(ValueType::Object),
-                    _ => Err(format!("unsupported type `{name}`")),
+                    _ => UnsupportedNameSnafu { name }.fail(),
                 },
                 Value::Object(fields) if fields.len() == 1 => {
                     let (kind, inner) = fields.iter().next().unwrap();
@@ -181,10 +195,10 @@ impl ValueType {
                         "list" => Ok(ValueType::List(Box::new(parse(inner, depth + 1)?))),
                         "map" => Ok(ValueType::Map(Box::new(parse(inner, depth + 1)?))),
                         "nullable" => Ok(ValueType::Nullable(Box::new(parse(inner, depth + 1)?))),
-                        _ => Err(format!("unsupported type constructor `{kind}`")),
+                        _ => UnsupportedConstructorSnafu { kind }.fail(),
                     }
                 }
-                _ => Err("type must be a scalar, list, or map descriptor".into()),
+                _ => InvalidDescriptorSnafu.fail(),
             }
         }
         parse(value, 1)

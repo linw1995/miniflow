@@ -19,6 +19,18 @@ pub const KIND: &str = mf_runtime::LOOP_KIND;
 #[serde(deny_unknown_fields)]
 struct Config {}
 
+#[derive(Debug, Snafu)]
+#[snafu(display("invalid prepared subgraph: {source}"))]
+struct LoopBuildError {
+    source: mf_runtime::LoopVariableError,
+}
+
+impl From<LoopBuildError> for NodeBuildError {
+    fn from(source: LoopBuildError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
 fn factory(
     id: &str,
     config: Value,
@@ -33,8 +45,7 @@ fn factory(
             message: "max_iterations must be in 1..=1000",
         }
     );
-    let types = loop_variable_types(&config.variables)
-        .map_err(|message| mf_runtime::NodeInvalidSubgraphSnafu { message }.build())?;
+    let types = loop_variable_types(&config.variables).context(LoopBuildSnafu)?;
     ensure!(
         body.stream_outputs
             .iter()
