@@ -43,6 +43,10 @@ struct BoundInputs {
 }
 
 impl ExecutionInputs {
+    pub fn arguments(&self) -> &WorkflowArguments {
+        &self.arguments
+    }
+
     /// Replaces explicit arguments and invalidates every previously resolved source.
     pub fn set_arguments(&mut self, arguments: WorkflowArguments) {
         self.arguments = Arc::new(arguments);

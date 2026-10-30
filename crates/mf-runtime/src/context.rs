@@ -330,6 +330,11 @@ impl ExecutionContext {
         self.inputs.set_arguments(arguments);
     }
 
+    /// Borrows the explicit startup arguments of the current Flow call.
+    pub fn workflow_arguments(&self) -> &crate::WorkflowArguments {
+        self.inputs.arguments()
+    }
+
     pub(super) fn initialize_target(
         &mut self,
         target: &crate::NodeTarget,

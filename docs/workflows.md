@@ -119,6 +119,16 @@ For host-owned Cargo dependencies, use `load_embedded_workflow` followed by
 `compile_resolved_definition`; provider declarations remain provenance and their paths need not exist.
 `mf_chat::WorkflowProfile::from_path` provides this path-loading behavior for chat profiles.
 
+An application can bind a frozen Flow to a host executor with
+`NodeRegistry::register_flow(name, definition, prepared_subgraph)`. Calls using that name retain the
+frozen definition for identity and observation, while preparation uses the registered input/output
+contract and executor without constructing the child's node providers. A differing call definition or
+duplicate registration fails explicitly. Use the same registry for compilation and instantiation;
+these process-local bindings are not serialized into generated runners. Executors receive isolated
+call arguments through `ExecutionContext::workflow_arguments` and implement their own transport and
+startup binding. `mf run runner --chat` uses this mechanism to invoke a precompiled runner, including
+its native stream coordinator, without rebuilding it or linking its custom nodes into the CLI.
+
 ## Node clusters
 
 Version `2026-10-23` accepts an optional `clusters` array in the root graph and in Loop and Iteration bodies. Clusters

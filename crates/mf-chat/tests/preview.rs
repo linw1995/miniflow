@@ -150,12 +150,21 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
     type Emission = Emission;
     fn execute(
         &self,
-        _: Self::Input,
+        input: Self::Input,
         context: &mut ExecutionContext,
         emitter: &mut mf_runtime::TypedEmitter<'_, '_, Emission>,
     ) -> Result<mf_runtime::TypedNodeResult<ConversationResult>, mf_runtime::NodeExecutionError>
     {
+        assert!(emitter.is_connected());
         assert!(context.output("begin.database_path").is_err());
+        if input.prompt != "legacy" {
+            assert_eq!(
+                context.invocation_path(),
+                vec![mf_telemetry::event::ScopePathEntry::Call {
+                    call_id: "workflow".into(),
+                }]
+            );
+        }
         let call_id = uuid::Uuid::new_v4().to_string();
         let usage = mfn_llm::CallUsage {
             attribution: None,
@@ -180,6 +189,11 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
                 model_call_id: call_id,
             },
         })?;
+        if input.prompt == "wait" {
+            return Err(context
+                .execute_future(context.cancellation().cancelled(), None)?
+                .into());
+        }
         mf_telemetry::events::record(mfn_llm::REQUEST_FINISHED_EVENT, serde_json::json!(&usage));
         Ok(ConversationResult {
             text: "isolated-final".into(),
@@ -221,12 +235,183 @@ fn embedded_exports_preserve_user_identity_and_hide_colliding_application_contex
         model_call = Some(event.delta.model_call_id);
         values += 1;
     }
-    assert_eq!(values, 1);
     let completion = job.join().unwrap();
+    assert_eq!(values, 1);
     assert_eq!(completion.result.text, "isolated-final");
     let usage = &completion.result.usages[0];
     assert_eq!(Some(&usage.call_id), model_call.as_ref());
     assert!(usage.timing.as_ref().unwrap().first_token_us.is_some());
+}
+
+#[test]
+fn embedded_call_without_a_subscription_joins_with_its_terminal_result() {
+    let root = tempfile::tempdir().unwrap();
+    let host = ChatHost::open(
+        root.path().join("chat.sqlite"),
+        HostConfig::new(embedded_profile()),
+    )
+    .unwrap();
+    let session = host
+        .database()
+        .create_session("embedded", None, None)
+        .unwrap();
+    let completion = host.submit(&session.id, "hello").unwrap().join().unwrap();
+    assert_eq!(completion.result.text, "isolated-final");
+    assert_eq!(completion.result.usages.len(), 1);
+    assert_eq!(
+        host.database().history(&session.id).unwrap().history.len(),
+        2
+    );
+    host.close().unwrap();
+}
+
+#[test]
+fn embedded_call_drains_public_streams_without_an_answer_export() {
+    let original = embedded_profile();
+    let backend = original.backend();
+    let mut definition = backend.embedded_workflow().unwrap().0.definition.clone();
+    definition
+        .outputs
+        .iter_mut()
+        .find(|output| output.name == "answer")
+        .unwrap()
+        .name = "diagnostics".into();
+    let profile = WorkflowProfile::new("embedded", definition, Default::default()).unwrap();
+    assert!(profile.backend().embedded_workflow().is_some());
+    let root = tempfile::tempdir().unwrap();
+    let host = ChatHost::open(root.path().join("chat.sqlite"), HostConfig::new(profile)).unwrap();
+    let session = host
+        .database()
+        .create_session("embedded", None, None)
+        .unwrap();
+    let completion = host.submit(&session.id, "hello").unwrap().join().unwrap();
+    assert_eq!(completion.result.text, "isolated-final");
+    assert_eq!(completion.result.usages.len(), 1);
+    host.close().unwrap();
+}
+
+#[test]
+fn direct_embedded_invocation_reuses_the_call_stream_interface() {
+    let profile = embedded_profile();
+    let mut deltas = Vec::new();
+    let result = profile
+        .backend()
+        .invoke(
+            &Invocation::new("session"),
+            ConversationInputs {
+                prompt: "hello".into(),
+                system: None,
+                history: None,
+                context: None,
+            },
+            &mut ExecutionContext::default(),
+            Some(&mut |delta| {
+                deltas.push(delta);
+                Ok(())
+            }),
+            Some(&mf_telemetry::observation::Observer::stderr(0)),
+        )
+        .unwrap();
+    assert_eq!(result.text, "isolated-final");
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].text, "prefix");
+    assert_eq!(deltas[0].model_call_id, result.usages[0].call_id);
+}
+
+#[test]
+fn embedded_call_delivers_a_prefix_before_completion_and_shares_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let host = ChatHost::open(
+        root.path().join("chat.sqlite"),
+        HostConfig::new(embedded_profile()),
+    )
+    .unwrap();
+    let session = host
+        .database()
+        .create_session("embedded", None, None)
+        .unwrap();
+    let (job, receiver) = host.submit_stream(&session.id, "wait").unwrap();
+    let invocation = job.invocation().clone();
+    assert_eq!(receiver.recv().unwrap().delta.text, "prefix");
+    job.cancel();
+    assert!(job.join().is_err());
+    assert_eq!(
+        host.database().turn(&invocation.turn_id).unwrap().state,
+        "cancelled"
+    );
+    assert!(
+        host.database()
+            .history(&session.id)
+            .unwrap()
+            .history
+            .is_empty()
+    );
+    host.close().unwrap();
+}
+
+struct PreviewEventNode;
+
+impl mf_runtime::TypedEventNode for PreviewEventNode {
+    type Input = Emission;
+    type Output = Emission;
+
+    fn on_event(
+        &mut self,
+        event: mf_runtime::NodeEvent<Self::Input>,
+        _: &mf_runtime::EventContext<'_>,
+    ) -> Result<mf_runtime::EventEffects<Self::Output>, mf_runtime::NodeExecutionError> {
+        Ok(mf_runtime::EventEffects {
+            emissions: match event {
+                mf_runtime::NodeEvent::Input(input) => {
+                    vec![mf_runtime::TypedNodeResult::from(input).into()]
+                }
+                _ => vec![],
+            },
+            ..Default::default()
+        })
+    }
+}
+
+inventory::submit! {
+    mf_runtime::NodeRegistration {
+        kind: "test.chat.preview_event",
+        factory: mf_runtime::NodeFactory::Plain(|_| {
+            mf_runtime::PreparedNode::typed_event(PreviewEventNode, mf_runtime::NodeMetadata::default())
+        }),
+    }
+}
+
+#[test]
+fn embedded_native_stream_graphs_keep_their_coordinator() {
+    let definition = serde_json::from_value(serde_json::json!({
+        "version":"2026-10-28", "dependencies":{},
+        "nodes":[
+            {"id":"begin", "kind":"test.chat.streaming"},
+            {"id":"preview", "kind":"test.chat.preview_event", "inputs":{
+                "delta":{"from":{"node":"begin","port":"delta"}}
+            }}
+        ],
+        "outputs":[
+            {"name":"answer","node":"preview","port":"delta","optional":true},
+            {"name":"status","node":"begin","port":"status"},
+            {"name":"text","node":"begin","port":"text"},
+            {"name":"usages","node":"begin","port":"usages"}
+        ]
+    }))
+    .unwrap();
+    let profile = WorkflowProfile::new("embedded", definition, Default::default()).unwrap();
+    assert!(profile.backend().embedded_workflow().is_none());
+    let root = tempfile::tempdir().unwrap();
+    let host = ChatHost::open(root.path().join("chat.sqlite"), HostConfig::new(profile)).unwrap();
+    let session = host
+        .database()
+        .create_session("embedded", None, None)
+        .unwrap();
+    let (job, receiver) = host.submit_stream(&session.id, "legacy").unwrap();
+    assert_eq!(receiver.recv().unwrap().delta.text, "prefix");
+    assert!(receiver.recv().is_err());
+    assert_eq!(job.join().unwrap().result.text, "isolated-final");
+    host.close().unwrap();
 }
 
 #[test]
