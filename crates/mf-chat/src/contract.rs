@@ -177,7 +177,8 @@ pub struct ChatContract {
 }
 
 impl ChatContract {
-    pub(super) fn input_targets(&self) -> impl Iterator<Item = &str> {
+    /// Returns the qualified workflow ports bound to conversation inputs.
+    pub fn input_targets(&self) -> impl Iterator<Item = &str> {
         self.inputs.values().map(String::as_str)
     }
 

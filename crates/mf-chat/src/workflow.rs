@@ -829,12 +829,12 @@ impl mf_runtime::TaskNode for UnboundAdapter {
         _: mf_runtime::Inputs,
         _: &mut ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
-        Err(InvalidSnafu {
+        InvalidSnafu {
             field: "embedded conversation adapter",
             reason: "must be bound by the application host",
         }
-        .build()
-        .into())
+        .fail()
+        .map_err(mf_runtime::NodeExecutionError::from)
     }
 }
 
@@ -1826,10 +1826,52 @@ mod tests {
             },
         };
         let error = UnboundWorkflow
-            .execute(input, &mut ExecutionContext::default(), &mut |_| Ok(()))
+            .execute(input.clone(), &mut ExecutionContext::default(), &mut |_| {
+                Ok(())
+            })
             .err()
             .unwrap();
         assert!(error.to_string().contains("must be bound"));
+
+        let registry = NodeRegistry::from_inventory().unwrap();
+        for (kind, inputs, outputs, values) in [
+            (
+                "mf_chat.workflow.prepare",
+                TurnStarted::ports(),
+                PreparedConversation::ports(),
+                input.clone().into_values().unwrap(),
+            ),
+            (
+                "mf_chat.workflow.complete",
+                PreparedConversation::ports(),
+                InvocationEmission::ports(),
+                PreparedConversation { started: input }
+                    .into_values()
+                    .unwrap(),
+            ),
+        ] {
+            let adapter = registry
+                .get(kind)
+                .unwrap()
+                .instantiate(serde_json::json!({
+                    "inputs": inputs, "outputs": outputs
+                }))
+                .unwrap();
+            let error = adapter
+                .execution
+                .as_task_node()
+                .unwrap()
+                .execute(values, &mut ExecutionContext::default())
+                .unwrap_err();
+            let source = std::error::Error::source(&error).unwrap();
+            assert!(matches!(
+                source.downcast_ref::<ChatError>(),
+                Some(ChatError::Invalid {
+                    field: "embedded conversation adapter",
+                    reason: "must be bound by the application host",
+                })
+            ));
+        }
     }
 
     #[test]
