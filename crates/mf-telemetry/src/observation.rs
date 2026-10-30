@@ -622,6 +622,44 @@ impl RunObservation {
         );
     }
 
+    /// Starts a pass span and, when supported, its correlated lifecycle boundary.
+    pub fn begin_loop_pass(&mut self, path: Vec<LoopPathEntry>) -> Option<LoopPassObservation> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let LoopPathEntry::Loop { loop_id, index } = path.last()? else {
+            return None;
+        };
+        let path_attribute = serde_json::to_string(&path).ok()?;
+        let parent = Context::current();
+        let span = self
+            .backend
+            .tracer
+            .span_builder("mf.loop.pass")
+            .with_attributes([
+                KeyValue::new("mf.workflow.id", self.workflow_id.to_string()),
+                KeyValue::new("mf.run.id", self.run_id.to_string()),
+                KeyValue::new("mf.loop.id", loop_id.clone()),
+                KeyValue::new("mf.loop.index", index.get()),
+                KeyValue::new("mf.loop.path", path_attribute),
+            ])
+            .start_with_context(&self.backend.tracer, &parent);
+        let context = parent.with_span(span);
+        if let Some(invocation) = context.get::<StreamInvocation>() {
+            invocation.annotate(&context);
+        }
+        if self.supports_loops() {
+            let _guard = context.clone().attach();
+            self.loop_pass_started(path.clone());
+        }
+        Some(LoopPassObservation {
+            observation: self.clone(),
+            path,
+            context,
+            finished: false,
+        })
+    }
+
     pub fn loop_pass_finished(&mut self, path: Vec<LoopPathEntry>, outcome: LoopPassOutcome) {
         let current = Context::current();
         self.record(
@@ -736,6 +774,57 @@ impl RunObservation {
         };
         if let Ok(record) = WireRecord::from_event(&event, timestamp, trace_context) {
             let _ = self.backend.emit_lifecycle(&record);
+        }
+    }
+}
+
+/// Owns one Loop pass span until it is finished or abandoned.
+pub struct LoopPassObservation {
+    observation: RunObservation,
+    path: Vec<LoopPathEntry>,
+    context: Context,
+    finished: bool,
+}
+
+impl LoopPassObservation {
+    pub fn enter(&self) -> ContextGuard {
+        self.context.clone().attach()
+    }
+
+    pub fn finish(&mut self, outcome: LoopPassOutcome) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.context.span().set_attribute(KeyValue::new(
+            "mf.loop.outcome",
+            match outcome {
+                LoopPassOutcome::Completed => "completed",
+                LoopPassOutcome::Exit => "exit",
+                LoopPassOutcome::Failed => "failed",
+            },
+        ));
+        if outcome == LoopPassOutcome::Failed {
+            self.context
+                .span()
+                .set_status(Status::error("Loop pass failed"));
+        }
+        if self.observation.supports_loops() {
+            let _guard = self.context.clone().attach();
+            self.observation
+                .loop_pass_finished(self.path.clone(), outcome);
+        }
+        self.context.span().end();
+    }
+}
+
+impl Drop for LoopPassObservation {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.context
+                .span()
+                .set_status(Status::error("Loop pass observation abandoned"));
+            self.context.span().end();
         }
     }
 }

@@ -55,7 +55,7 @@ See `crates/mf-compiler/examples/observe.rs` for provider ownership and cleanup.
 
 ### Spans, events, and failure boundaries
 
-A workflow span covers its run scope. Each reached top-level node gets a child span under that workflow, including dependency failures and conditional skips. In Loop-capable runs, body-node spans are children of their enclosing Loop-node span. `mf.node.started` is emitted immediately before invoking the implementation;
+A workflow span covers its run scope. Each reached top-level node gets a child span under that workflow, including dependency failures and conditional skips. Each Loop pass has an `mf.loop.pass` span under its Loop-node span; body-node spans are children of the pass. Nested Loop passes repeat this hierarchy. `mf.node.started` is emitted immediately before invoking the implementation;
 node success is emitted only after output validation/publication. Construction failure can emit a failed node record
 without a start. Skips have an explicit skipped outcome and do not set error status. Root output-selection failure
 leaves successful node outcomes intact.
@@ -274,6 +274,13 @@ configuration.
 Pass and workflow boundaries preserve their declared outcomes. A known missing body outcome stays
 unknown after later passes complete; its delayed record can close a transport gap. Loop summaries
 retain the actual pass count and stop reason for display, independently of delivery verification.
+
+Each entered pass creates an `mf.loop.pass` span under the corresponding `mf.node` Loop invocation. Its
+`mf.loop.id`, `mf.loop.index`, and JSON `mf.loop.path` attributes identify the pass; `mf.loop.outcome` records
+`completed`, `exit`, or `failed` at the end. A failed pass sets an error span status. The start and finish
+LogRecords carry the pass span's native context, while body-node spans and their captured input/output snapshots
+inherit its context. Nested Loops and Calls therefore preserve their parentage without placing variable values or
+node configuration in span attributes. Sampling or export can omit spans without suppressing lifecycle LogRecords.
 
 ## Iteration observation
 
@@ -760,11 +767,12 @@ that does not imply downstream execution or completion of the accepted input's b
 item count, and `size_exceed`, `timeout_exceed`, or `upstream_closed` reason. Automatic metadata includes
 no collected values, node configuration, or unbounded list of constituent input IDs.
 
-Node spans carry `mf.stream.invocation`, and applicable `mf.stream.domain`, `mf.stream.message`, and
+Node and Loop-pass spans carry `mf.stream.invocation`, and applicable `mf.stream.domain`, `mf.stream.message`, and
 `mf.stream.parent_invocation` attributes. Loop paths remain scoped to their containing message.
 Iteration item/body logs retain their existing `mf.iteration` scope and outer-sequence independence,
 and gain the containing stream identity. Body nodes receive distinct invocation IDs, including when
-item indices or Loop paths repeat in a later message. Native span parentage remains workflow/node/item/body.
+item indices or Loop paths repeat in a later message. Native span parentage follows workflow, node, Loop pass,
+Iteration item, and body scopes.
 
 The final workflow outcome is `succeeded` or `failed`, with aggregate startup-frame,
 emitted-message, completed-frame, and delivered-output counters. Startup traversal counts as one frame;

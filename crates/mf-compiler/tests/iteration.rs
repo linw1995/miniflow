@@ -909,6 +909,37 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
             .iter()
             .any(|record| record.scope == "mf.iteration")
     );
+    let spans = harness.spans.get_finished_spans().unwrap();
+    let iterations: Vec<_> = spans
+        .iter()
+        .filter(|span| {
+            span.name == "mf.node"
+                && span.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "mf.node.id"
+                        && attribute.value.to_string() == "iteration"
+                })
+        })
+        .collect();
+    assert_eq!(iterations.len(), 2);
+    for iteration in iterations {
+        let pass = spans
+            .iter()
+            .find(|span| span.span_context.span_id() == iteration.parent_span_id)
+            .unwrap();
+        assert_eq!(pass.name, "mf.loop.pass");
+        let items: Vec<_> = spans
+            .iter()
+            .filter(|span| {
+                span.name == "mf.iteration.item"
+                    && span.parent_span_id == iteration.span_context.span_id()
+            })
+            .collect();
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(
+            |item| spans.iter().any(|span| span.name == "mf.iteration.node"
+                && span.parent_span_id == item.span_context.span_id())
+        ));
+    }
 
     let records = harness.records();
     let starts: Vec<_> = records
