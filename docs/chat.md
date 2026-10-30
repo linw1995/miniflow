@@ -72,8 +72,16 @@ conversion; the completion node decodes selected terminal outputs after the call
 budget, and observation, with user node identities nested under the `workflow` call scope.
 The host drains declared streams even without a preview subscriber, preserving streaming requests.
 
-Executable and custom `ConversationBackend` implementations use `mf_chat.workflow.invoke` and the
-same `ConversationInputs` / `ConversationResult` protocol. Embedded graphs containing Event/Stream
+`mf run runner --chat` registers the executable as the host Flow `mf-chat.runner` and invokes it through
+the same `workflow.call` application graph. Its manifest supplies the frozen definition and startup
+interface; its executor launches the existing runner with a private inputs file. Custom node providers,
+Loop bodies, and native stream coordinators execute in that process. Opening chat and submitting turns
+do not rebuild `mf-chat` or the runner. Cancellation and previews cross the process boundary through the
+existing supervisor; the child retains its own runtime budget and observation.
+
+Custom `ConversationBackend` implementations can expose `registered_workflow` to use this path with the
+same `ConversationInputs` / `ConversationResult` protocol. Other custom backends use
+`mf_chat.workflow.invoke`. Embedded graphs containing Event/Stream
 nodes or internal stream dataflow retain this adapter and their native coordinator, because these
 constructs cannot execute inside a finite call. Direct embedded `ConversationBackend::invoke` calls
 also reuse `workflow.call` when the graph supports it.
@@ -316,11 +324,12 @@ Finite executables keep their existing final JSON transport. Native streaming ex
 ordinary output named `answer` containing `text` and `model_call_id`. The backend drains standard JSONL
 records, validates deltas, and retains the final conversation result until execution completes.
 
-`workflows/conversation.json` owns incremental processing: `begin` admits the turn, `workflow.invoke`
-emits application invocation events, and `route` publishes previews while retaining the final response.
-The route releases the completed-conversation event only after the backend producer closes successfully. Preview and
-settlement deliveries share one ordered message domain, so unread previews cannot be overtaken by a save.
-The host consumes these Flow outputs; it does not forward raw model events around the application graph.
+`workflows/conversation.json` remains the embedded application graph. For executable chat, the host
+composes its invocation stage into input preparation, `workflow.call`, and result completion. The call
+publishes validated `answer` deltas through the preview node; completion requires successful call closure
+before the result can enter settlement. Unread previews retain their delivery receipts and cannot be
+overtaken by a save. The host consumes these Flow outputs; it does not forward raw model events around
+the application graph.
 
 Preview delivery is independent of terminal rendering. Application events carry the chat invocation and
 actual model-call identity; they do not need runtime open/close envelopes. A complete result retained before

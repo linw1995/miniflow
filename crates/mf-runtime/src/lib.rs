@@ -97,9 +97,9 @@ pub use node_target::{
 pub use number::{compare_json_numbers, number_to_f64, number_to_i64, number_to_u64};
 pub use registry::{
     BuiltinFlowRegistration, BuiltinFlowRegistry, BuiltinFlowRegistryError, NodeRegistry,
-    NodeRegistryError,
+    NodeRegistryError, RegisteredFlow,
 };
-pub use runner::{SuccessDependencySnafu, WorkflowRunError};
+pub use runner::{NodeExecutionSnafu, SuccessDependencySnafu, WorkflowRunError};
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
     StreamExecution, StreamLimits, StreamNode, TimerUpdate, TypedEventNode, TypedStreamNode,

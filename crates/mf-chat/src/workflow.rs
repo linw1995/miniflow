@@ -38,6 +38,12 @@ pub trait ConversationBackend: Send + Sync {
         None
     }
 
+    /// Exposes an executable Flow's interface for host registration through `workflow.call`.
+    /// Its node providers remain in the executable; `invoke` implements the call body.
+    fn registered_workflow(&self) -> Option<(&mf_runtime::WorkflowManifest, &WorkflowArguments)> {
+        None
+    }
+
     /// Resolved inputs for the optional built-in title Flow, with its `params` namespace.
     fn builtin_title_parameters(&self) -> Option<WorkflowArguments> {
         None
@@ -165,6 +171,18 @@ fn compile_call(
     {
         return Ok(None);
     }
+    Ok(Some(compile_call_wrapper(
+        definition,
+        "conversation",
+        registry,
+    )?))
+}
+
+fn compile_call_wrapper(
+    definition: &WorkflowDefinition,
+    name: &str,
+    registry: &NodeRegistry,
+) -> Result<CompiledWorkflow, ChatError> {
     let outputs: Vec<_> = definition.outputs.iter()
         .filter(|output| ConversationResult::ports().iter().any(|port| port.name == output.name))
         .map(|output| serde_json::json!({
@@ -173,15 +191,15 @@ fn compile_call(
     let definition = serde_json::from_value(serde_json::json!({
         "version": "2026-10-28", "dependencies": {},
         "nodes": [{"id": "workflow", "kind": "workflow.call", "config": {
-            "flow": "conversation", "definition": definition
+            "flow": name, "definition": definition
         }}],
         "outputs": outputs
     }))
     .context(JsonSnafu)?;
-    Ok(Some(mf_compiler::compile_resolved_definition(
+    Ok(mf_compiler::compile_resolved_definition(
         &definition,
         registry,
-    )?))
+    )?)
 }
 
 struct ConversationSink<'a> {
@@ -998,8 +1016,73 @@ struct ConversationPlan {
     bindings: Vec<(&'static str, PreparedNode)>,
 }
 
+const RUNNER_FLOW: &str = "mf-chat.runner";
+
+fn register_runner(
+    registry: &mut NodeRegistry,
+    backend: Arc<dyn ConversationBackend>,
+    invocation: Invocation,
+    observer: Observer,
+) -> Result<(), ChatError> {
+    let (manifest, _) = backend
+        .registered_workflow()
+        .expect("executable Flow interface");
+    let contract = ChatContract::from_manifest(manifest)?;
+    let definition = manifest.definition.clone();
+    let inputs = manifest.input_schema.clone();
+    let outputs: Vec<_> = ConversationResult::ports()
+        .into_iter()
+        .filter_map(|mut port| {
+            let output = definition
+                .outputs
+                .iter()
+                .find(|output| output.name == port.name)?;
+            port.required = !output.optional;
+            Some(port)
+        })
+        .collect();
+    let names: std::collections::BTreeSet<_> =
+        outputs.iter().map(|port| port.name.to_string()).collect();
+    let streams = if contract.answer_stream {
+        WorkflowPreviewInputs::ports()
+    } else {
+        vec![]
+    };
+    let body =
+        mf_runtime::PreparedSubgraph::streaming(vec![], outputs, streams, move |context, sink| {
+            let result = (|| -> Result<mf_runtime::FlowOutputs, ChatError> {
+                let request = contract.conversation_inputs(context.workflow_arguments())?;
+                let mut preview = |answer| {
+                    let values = WorkflowPreviewInputs { answer }.into_values()?;
+                    sink.send(values.into())?;
+                    Ok(())
+                };
+                let result = backend.invoke(
+                    &invocation,
+                    request,
+                    context,
+                    contract
+                        .answer_stream
+                        .then_some(&mut preview as &mut dyn FnMut(_) -> _),
+                    Some(&observer),
+                )?;
+                let mut values = result.into_values()?;
+                values.retain(|name, _| names.contains(name));
+                Ok(values)
+            })();
+            result
+                .map_err(mf_runtime::NodeExecutionError::from)
+                .context(mf_runtime::NodeExecutionSnafu {
+                    definition_id: "runner",
+                })
+        })
+        .with_input_schema(inputs);
+    registry.register_flow(RUNNER_FLOW, definition, body)?;
+    Ok(())
+}
+
 fn compose_conversation(
-    plan: &CompiledWorkflow,
+    manifest: &mf_runtime::WorkflowManifest,
     parameters: &WorkflowArguments,
     automatic_titles: bool,
     invocation: &Invocation,
@@ -1007,11 +1090,15 @@ fn compose_conversation(
     capture: CompletionCapture,
     registry: &NodeRegistry,
 ) -> Result<ConversationPlan, ChatError> {
-    let contract = ChatContract::from_manifest(&plan.manifest(registry)?)?;
-    let call = compile_call(&plan.definition, registry)?.context(InvalidSnafu {
-        field: "embedded workflow",
-        reason: "requires a finite Flow without internal stream dataflow",
-    })?;
+    let contract = ChatContract::from_manifest(manifest)?;
+    let call = if registry.flow(RUNNER_FLOW).is_some() {
+        compile_call_wrapper(&manifest.definition, RUNNER_FLOW, registry)?
+    } else {
+        compile_call(&manifest.definition, registry)?.context(InvalidSnafu {
+            field: "embedded workflow",
+            reason: "requires a finite Flow without internal stream dataflow",
+        })?
+    };
     let call_node = mf_compiler::prepare_definition(&call.definition, registry)?
         .0
         .remove(0);
@@ -1211,41 +1298,55 @@ pub fn run_conversation_with_preview(
         .then(|| backend.builtin_title_parameters())
         .flatten();
     let observer = observer.cloned().unwrap_or_else(|| Observer::stderr(0));
-    let registry = NodeRegistry::from_inventory()?;
+    let mut registry = NodeRegistry::from_inventory()?;
     let delivered = Arc::new(Mutex::new(None));
-    let ConversationPlan { mut plan, bindings } =
-        if let Some((embedded, parameters)) = backend.embedded_workflow() {
-            compose_conversation(
-                embedded,
-                parameters,
+    if backend.registered_workflow().is_some() {
+        register_runner(
+            &mut registry,
+            Arc::clone(&backend),
+            invocation.clone(),
+            observer.clone(),
+        )?;
+    }
+    let composed = if let Some((manifest, parameters)) = backend.registered_workflow() {
+        Some((manifest.clone(), parameters))
+    } else if let Some((embedded, parameters)) = backend.embedded_workflow() {
+        Some((embedded.manifest(&registry)?, parameters))
+    } else {
+        None
+    };
+    let ConversationPlan { mut plan, bindings } = if let Some((manifest, parameters)) = composed {
+        compose_conversation(
+            &manifest,
+            parameters,
+            automatic_titles,
+            &invocation,
+            title_parameters,
+            CompletionCapture {
+                calls: Arc::clone(&calls),
+                delivered: Arc::clone(&delivered),
+            },
+            &registry,
+        )?
+    } else {
+        let bound = PreparedNode::typed_stream(
+            InvokeWorkflow {
+                backend,
                 automatic_titles,
-                &invocation,
+                observer: observer.clone(),
+                calls: Arc::clone(&calls),
+                delivered: Arc::clone(&delivered),
+                previews: preview.is_some(),
                 title_parameters,
-                CompletionCapture {
-                    calls: Arc::clone(&calls),
-                    delivered: Arc::clone(&delivered),
-                },
-                &registry,
-            )?
-        } else {
-            let bound = PreparedNode::typed_stream(
-                InvokeWorkflow {
-                    backend,
-                    automatic_titles,
-                    observer: observer.clone(),
-                    calls: Arc::clone(&calls),
-                    delivered: Arc::clone(&delivered),
-                    previews: preview.is_some(),
-                    title_parameters,
-                },
-                NodeMetadata::default(),
-            )
-            .context(BackendBuildSnafu)?;
-            ConversationPlan {
-                plan: flows::conversation::plan()?,
-                bindings: vec![("workflow", bound)],
-            }
-        };
+            },
+            NodeMetadata::default(),
+        )
+        .context(BackendBuildSnafu)?;
+        ConversationPlan {
+            plan: flows::conversation::plan()?,
+            bindings: vec![("workflow", bound)],
+        }
+    };
     let (mut nodes, order) = mf_compiler::prepare_definition(&plan.definition, &registry)?;
     for (id, bound) in bindings {
         let node = nodes
@@ -1360,12 +1461,18 @@ pub fn run_conversation_with_preview(
                 TurnExit::Failed
             };
             let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&source);
+            let mut retained = None;
             while let Some(error) = cause {
-                if let Some(ChatError::Backend { outcome: exit, .. }) =
-                    error.downcast_ref::<ChatError>()
-                    && cancellation.failure().is_none()
+                if let Some(ChatError::Backend {
+                    outcome: exit,
+                    reply,
+                    ..
+                }) = error.downcast_ref::<ChatError>()
                 {
-                    outcome = *exit;
+                    if cancellation.failure().is_none() {
+                        outcome = *exit;
+                    }
+                    retained = reply.as_deref().cloned();
                     break;
                 }
                 cause = error.source();
@@ -1373,7 +1480,8 @@ pub fn run_conversation_with_preview(
             let response = delivered
                 .lock()
                 .expect("delivery state was not poisoned")
-                .take();
+                .take()
+                .or(retained);
             match database.reconcile_result(
                 &invocation,
                 response.map(Ok),
@@ -1446,7 +1554,9 @@ mod tests {
         .unwrap();
         let (plan, parameters) = profile.backend.embedded_workflow().unwrap();
         let composed = compose_conversation(
-            plan,
+            &plan
+                .manifest(&NodeRegistry::from_inventory().unwrap())
+                .unwrap(),
             parameters,
             false,
             &Invocation::new("session"),

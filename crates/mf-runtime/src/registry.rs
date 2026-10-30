@@ -87,6 +87,10 @@ impl BuiltinFlowRegistry {
 
 #[derive(Debug, Snafu)]
 pub enum NodeRegistryError {
+    #[snafu(display("host Flow name must not be blank"))]
+    BlankFlowName,
+    #[snafu(display("host Flow `{name}` is registered more than once"))]
+    DuplicateFlow { name: String },
     #[snafu(display("node kind `{kind}` is registered more than once"))]
     DuplicateKind { kind: String },
     #[snafu(display("node kind `{kind}` is missing from the linked plugin bundle"))]
@@ -97,12 +101,47 @@ pub enum NodeRegistryError {
     ReservedKind { kind: String },
 }
 
+/// A frozen Flow whose execution is supplied by the application host.
+pub struct RegisteredFlow {
+    pub definition: crate::WorkflowDefinition,
+    pub body: crate::PreparedSubgraph,
+}
+
+impl std::fmt::Debug for RegisteredFlow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisteredFlow")
+            .field("definition", &self.definition)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct NodeRegistry {
     registrations: BTreeMap<&'static str, &'static NodeRegistration>,
+    flows: BTreeMap<String, RegisteredFlow>,
 }
 
 impl NodeRegistry {
+    /// Binds a named, frozen Flow to a host executor without requiring its node providers.
+    /// The executor may be shared by multiple call sites and must isolate per-call state.
+    pub fn register_flow(
+        &mut self,
+        name: impl Into<String>,
+        definition: crate::WorkflowDefinition,
+        body: crate::PreparedSubgraph,
+    ) -> Result<(), NodeRegistryError> {
+        let name = name.into();
+        snafu::ensure!(!name.trim().is_empty(), BlankFlowNameSnafu);
+        snafu::ensure!(!self.flows.contains_key(&name), DuplicateFlowSnafu { name });
+        self.flows.insert(name, RegisteredFlow { definition, body });
+        Ok(())
+    }
+
+    pub fn flow(&self, name: &str) -> Option<&RegisteredFlow> {
+        self.flows.get(name)
+    }
+
     pub fn from_inventory() -> Result<Self, NodeRegistryError> {
         Self::from_registrations(inventory::iter::<NodeRegistration>)
     }
