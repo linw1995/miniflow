@@ -52,6 +52,8 @@ fn descriptor_contains_ports_and_sensitivity_without_environment_or_default_valu
         output_keys: Default::default(),
     };
     let graph = WorkflowGraph::from_connections(&[node], &[], vec![]);
+    let debug = format!("{graph:?}");
+    assert!(!debug.contains("token") && !debug.contains("private-default-value"));
     let encoded = serde_json::to_string(&graph).unwrap();
     assert!(encoded.contains("token"));
     assert!(

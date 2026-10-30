@@ -688,4 +688,245 @@ mod tests {
         assert!(validate_wire_arguments(&wire(vec!["{}".into(); MAX_TOOL_CALLS + 1])).is_err());
         assert!(validate_wire_arguments(&wire(vec!["{\"key\":1,\"key\":2}".into()])).is_err());
     }
+    #[test]
+    fn reflected_scalar_and_container_contracts_validate_model_arguments() {
+        use mf_runtime::SchemaField;
+        let text = ValueSchema::Type(ValueType::String);
+        let fields = BTreeMap::from([
+            (
+                "label".into(),
+                SchemaField {
+                    schema: text.clone(),
+                    required: true,
+                },
+            ),
+            (
+                "note".into(),
+                SchemaField {
+                    schema: text.clone(),
+                    required: false,
+                },
+            ),
+        ]);
+        let cases = vec![
+            (
+                ValueSchema::Type(ValueType::Any),
+                json!({"free": [null, true]}),
+                None,
+            ),
+            (
+                ValueSchema::Type(ValueType::Null),
+                Value::Null,
+                Some(json!(false)),
+            ),
+            (
+                ValueSchema::Type(ValueType::Boolean),
+                json!(true),
+                Some(json!(0)),
+            ),
+            (text.clone(), json!("text"), Some(json!(1))),
+            (
+                ValueSchema::Type(ValueType::Number),
+                json!(1.25),
+                Some(json!("1.25")),
+            ),
+            (
+                ValueSchema::Type(ValueType::Int64),
+                json!(i64::MIN),
+                Some(json!(u64::MAX)),
+            ),
+            (
+                ValueSchema::Type(ValueType::Uint64),
+                json!(u64::MAX),
+                Some(json!(-1)),
+            ),
+            (
+                ValueSchema::Type(ValueType::Usize),
+                json!(usize::MAX),
+                Some(json!(-1)),
+            ),
+            (
+                ValueSchema::Type(ValueType::Float64),
+                json!(1.5),
+                Some(json!(9_007_199_254_740_993_u64)),
+            ),
+            (
+                ValueSchema::Type(ValueType::Array),
+                json!([1, "two"]),
+                Some(json!({})),
+            ),
+            (
+                ValueSchema::Type(ValueType::Object),
+                json!({"free": 1}),
+                Some(json!([])),
+            ),
+            (text.clone().list(), json!(["one"]), Some(json!([1]))),
+            (
+                text.clone().map(),
+                json!({"key": "value"}),
+                Some(json!({"key": 1})),
+            ),
+            (text.clone().nullable(), Value::Null, Some(json!(false))),
+            (
+                ValueSchema::Object(fields.clone()),
+                json!({"label": "ok"}),
+                Some(json!({"note": "missing label"})),
+            ),
+            (
+                ValueSchema::List(Box::new(ValueSchema::Object(fields.clone()))),
+                json!([{"label": "ok"}]),
+                Some(json!([{"label": 1}])),
+            ),
+            (
+                ValueSchema::Map(Box::new(ValueSchema::Object(fields.clone()))),
+                json!({"key": {"label": "ok"}}),
+                Some(json!({"key": {}})),
+            ),
+            (
+                ValueSchema::Nullable(Box::new(ValueSchema::Object(fields.clone()))),
+                Value::Null,
+                Some(json!({})),
+            ),
+            (
+                ValueSchema::Enum(vec!["ready".into(), "done".into()]),
+                json!("ready"),
+                Some(json!("unknown")),
+            ),
+            (
+                ValueSchema::Tagged {
+                    tag: "kind".into(),
+                    variants: BTreeMap::from([("named".into(), fields)]),
+                },
+                json!({"kind": "named", "label": "ok"}),
+                Some(json!({"kind": "unknown"})),
+            ),
+            (
+                text.described("A public label"),
+                json!("ok"),
+                Some(json!(false)),
+            ),
+        ];
+        for (schema, valid, invalid) in cases {
+            let mut graph = graph();
+            let body = Arc::make_mut(
+                graph
+                    .nodes
+                    .get_mut(&DefinitionId::from("batch"))
+                    .unwrap()
+                    .subgraph
+                    .as_mut()
+                    .unwrap(),
+            );
+            let input = body.inputs.get_mut("calculate.amount").unwrap();
+            input.value_type = schema.value_type();
+            input.schema = Some(schema.clone());
+            let tools = catalog(&graph);
+            let definition = &tools.definitions()[0];
+            assert_eq!(definition.parameters["additionalProperties"], false);
+            assert_eq!(definition.parameters["required"], json!(["amount"]));
+            assert!(
+                tools
+                    .batches(&[call("valid", json!({"amount": valid}))])
+                    .is_ok(),
+                "{schema:?}"
+            );
+            if let Some(invalid) = invalid {
+                assert!(
+                    tools
+                        .batches(&[call("invalid", json!({"amount": invalid}))])
+                        .is_err(),
+                    "{schema:?}"
+                );
+            }
+            let encoded = serde_json::to_string(&definition.parameters).unwrap();
+            match schema {
+                ValueSchema::Object(_) => {
+                    assert!(encoded.contains("label") && encoded.contains("note"))
+                }
+                ValueSchema::Tagged { .. } => {
+                    assert!(encoded.contains("oneOf") && encoded.contains("named"))
+                }
+                ValueSchema::Described { .. } => assert!(encoded.contains("A public label")),
+                ValueSchema::Type(ValueType::Float64) => assert!(encoded.contains("multipleOf")),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_and_unrepresentable_contracts_report_the_tool_parameter() {
+        for schema in [
+            ValueSchema::Type(ValueType::Float32),
+            ValueSchema::Enum(vec![]),
+            ValueSchema::Tagged {
+                tag: "kind".into(),
+                variants: BTreeMap::new(),
+            },
+            ValueSchema::opaque(ValueType::Object),
+        ] {
+            let mut graph = graph();
+            let body = Arc::make_mut(
+                graph
+                    .nodes
+                    .get_mut(&DefinitionId::from("batch"))
+                    .unwrap()
+                    .subgraph
+                    .as_mut()
+                    .unwrap(),
+            );
+            let input = body.inputs.get_mut("calculate.amount").unwrap();
+            input.value_type = schema.value_type();
+            input.schema = Some(schema);
+            let error =
+                ConnectedTools::new(&graph, "model", &["multiply".into()], &BTreeMap::new())
+                    .err()
+                    .unwrap();
+            assert!(
+                matches!(error, ToolSchemaError::Unsupported { ref tool, ref parameter, .. } if tool == "multiply" && parameter == "amount")
+            );
+        }
+    }
+
+    #[test]
+    fn connected_batches_bound_payloads_and_leave_external_tools_to_the_host() {
+        let mut graph = graph();
+        let body = Arc::make_mut(
+            graph
+                .nodes
+                .get_mut(&DefinitionId::from("batch"))
+                .unwrap()
+                .subgraph
+                .as_mut()
+                .unwrap(),
+        );
+        body.inputs.get_mut("calculate.amount").unwrap().value_type = ValueType::Any;
+        let tools = catalog(&graph);
+        let oversized = call(
+            "large",
+            json!({"amount": "x".repeat(MAX_TOOL_ARGUMENT_BYTES)}),
+        );
+        assert!(matches!(
+            tools.batches(&[oversized]),
+            Err(ToolArgumentsError::Limit)
+        ));
+        assert!(matches!(
+            tools.batches(&[call("scalar", json!(1))]),
+            Err(ToolArgumentsError::Shape)
+        ));
+        let mut external = call("host", json!({}));
+        external.name = "external".into();
+        let batches = tools.batches(&[external]).unwrap();
+        assert!(batches["multiply"].as_array().unwrap().is_empty());
+        for outputs in [
+            vec!["invalid name".into()],
+            vec!["multiply".into(); MAX_TOOL_CALLS + 1],
+        ] {
+            assert!(ConnectedTools::new(&graph, "model", &outputs, &BTreeMap::new()).is_err());
+        }
+        let descriptions = BTreeMap::from([("multiply".into(), "x".repeat(MAX_TOOL_SCHEMA_BYTES))]);
+        assert!(matches!(
+            ConnectedTools::new(&graph, "model", &["multiply".into()], &descriptions),
+            Err(ToolSchemaError::DeclarationsLimit)
+        ));
+    }
 }

@@ -479,4 +479,49 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn nested_private_arguments_are_marked_before_observation_even_on_shape_errors() {
+        let definitions = vec![ToolDefinition {
+            name: "lookup".into(),
+            description: String::new(),
+            input_schema: json!({
+                "properties": {
+                    "account": {"properties": {"token": {"writeOnly": true}}},
+                    "tokens": {"items": {"writeOnly": true}},
+                    "public": {"type": "string"}
+                }
+            })
+            .into(),
+        }];
+        let mut call = ToolCall {
+            id: "one".into(), name: "lookup".into(),
+            arguments: json!({"account": {"token": "private", "label": "visible"}, "tokens": ["first", "second"], "public": "visible"}).into(),
+        };
+        call.mark_arguments(&definitions);
+        assert!(call.arguments["account"]["token"].is_secret());
+        assert!(!call.arguments["account"]["label"].is_secret());
+        assert!(
+            call.arguments["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(ValueRef::is_secret)
+        );
+        assert!(!call.arguments["public"].is_secret());
+        for malformed in [json!({"account": "private"}), json!({"tokens": "private"})] {
+            let key = malformed
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            call.arguments = malformed.into();
+            call.mark_arguments(&definitions);
+            assert!(call.arguments[key.as_str()].is_secret());
+        }
+        call.arguments = ValueRef::from("already private").into_secret();
+        call.mark_arguments(&definitions);
+        assert!(call.arguments.is_secret());
+    }
 }
