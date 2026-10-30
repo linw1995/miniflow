@@ -1,5 +1,5 @@
 use crate::CompiledWorkflow;
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -426,9 +426,9 @@ fn path_string(path: &Path) -> Result<String, DependencyProjectError> {
     })?;
     path.to_str()
         .map(str::to_owned)
-        .ok_or_else(|| DependencyProjectError::Dependency {
-            alias: "path".into(),
-            message: "path is not UTF-8".into(),
+        .with_context(|| DependencySnafu {
+            alias: "path",
+            message: "path is not UTF-8",
         })
 }
 
@@ -526,7 +526,7 @@ pub fn write_dependency_project_with_options(
             }
             Ok(_) => {}
             Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => return Err(DependencyProjectError::Write { path, source }),
+            Err(source) => return Err(source).context(WriteSnafu { path }),
         }
     }
     fs::create_dir_all(project.join("src")).context(WriteSnafu {

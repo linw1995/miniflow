@@ -1824,16 +1824,18 @@ mod tests {
             while *arrived < 2 {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Err(NodeExecutionError::ExecutionFailed {
+                    return mf_runtime::NodeExecutionFailedSnafu {
                         message: "independent domains did not overlap".to_owned(),
-                    });
+                    }
+                    .fail();
                 }
                 let (next, timeout) = changed.wait_timeout(arrived, remaining).unwrap();
                 arrived = next;
                 if timeout.timed_out() && *arrived < 2 {
-                    return Err(NodeExecutionError::ExecutionFailed {
+                    return mf_runtime::NodeExecutionFailedSnafu {
                         message: "independent domains did not overlap".to_owned(),
-                    });
+                    }
+                    .fail();
                 }
             }
             Ok((Outputs::from([("value".into(), json!(self.value).into())])).into())
@@ -1864,9 +1866,10 @@ mod tests {
                     let value = inputs[left].as_i64().unwrap() + inputs[right].as_i64().unwrap();
                     Ok((Outputs::from([(output.to_owned(), json!(value).into())])).into())
                 }
-                Action::Fail => Err(NodeExecutionError::ExecutionFailed {
+                Action::Fail => mf_runtime::NodeExecutionFailedSnafu {
                     message: "deliberate failure".to_owned(),
-                }),
+                }
+                .fail(),
             }
         }
     }

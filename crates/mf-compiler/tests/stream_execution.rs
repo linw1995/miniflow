@@ -435,3 +435,37 @@ fn one_over_budget_frame_fails() {
     );
     assert!(instance.join().is_err());
 }
+
+#[test]
+fn controlled_producers_reject_sends_after_close_and_cancellation() {
+    let mut options = StreamOptions::default();
+    let controller = controlled::prepare_control("feed", &mut options);
+    controller.close();
+    let error = controller.send(1).unwrap_err();
+    assert!(
+        matches!(error, mf_runtime::StreamError::Execution { ref message } if message == "test source is closed")
+    );
+
+    let instance = start(
+        graph(
+            json!([]),
+            vec![],
+            json!([{"name":"item","node":"feed","port":"item"}]),
+        ),
+        Arc::new(ManualClock::default()),
+    );
+    let controller = instance.source.clone();
+    controller.send(1).unwrap();
+    assert!(instance.recv().unwrap().is_some());
+    instance.cancellation().cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "stop producer",
+        }
+        .build(),
+    );
+    assert!(instance.join().is_err());
+    let error = controller.send(2).unwrap_err();
+    assert!(
+        matches!(error, mf_runtime::StreamError::Execution { ref message } if message == "test source stopped")
+    );
+}

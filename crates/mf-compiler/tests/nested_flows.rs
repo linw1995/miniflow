@@ -966,11 +966,12 @@ fn calls_inside_loops_share_the_callers_step_budget_and_cancellation() {
         .unwrap_err();
     assert!(error.to_string().contains("budget"), "{error}");
     let mut context = ExecutionContext::default();
-    context
-        .cancellation()
-        .cancel(mf_runtime::StreamError::Execution {
-            message: "cancelled before nested work".into(),
-        });
+    context.cancellation().cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "cancelled before nested work",
+        }
+        .build(),
+    );
     context.set_workflow_arguments(
         WorkflowArguments::try_from(json!({"repeat.value":"seed"})).unwrap(),
     );

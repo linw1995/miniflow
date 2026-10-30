@@ -3,6 +3,7 @@ use mf_runtime::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use snafu::ResultExt;
 use std::{io::Write, path::PathBuf};
 
 #[derive(Deserialize)]
@@ -28,9 +29,9 @@ impl mf_runtime::TaskNode for Echo {
         mut inputs: Inputs,
         _ctx: &mut mf_runtime::ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-        record(&self.0.trace, "execute").map_err(|source| NodeExecutionError::PluginFailed {
-            source: Box::new(source),
-        })?;
+        record(&self.0.trace, "execute")
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            .context(mf_runtime::NodePluginFailedSnafu)?;
         println!("execution diagnostic");
         Ok((Outputs::from([("value".into(), inputs.remove("input").unwrap())])).into())
     }
@@ -38,9 +39,9 @@ impl mf_runtime::TaskNode for Echo {
 
 fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: Config = mf_runtime::deserialize_config(config)?;
-    record(&config.trace, "prepare").map_err(|source| NodeBuildError::FactoryFailed {
-        source: Box::new(source),
-    })?;
+    record(&config.trace, "prepare")
+        .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+        .context(mf_runtime::NodeFactoryFailedSnafu)?;
     println!("factory diagnostic");
     Ok(mf_runtime::PreparedNode::from_parts(
         mf_runtime::NodeExecution::Task(Box::new(Echo(config))),

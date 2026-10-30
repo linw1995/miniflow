@@ -95,9 +95,10 @@ impl EmissionSink for Collect {
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
         assert!(!self.returned.load(Ordering::SeqCst));
         if self.fail {
-            return Err(StreamError::Execution {
-                message: "receiver disconnected".into(),
-            });
+            return mf_runtime::StreamExecutionSnafu {
+                message: "receiver disconnected",
+            }
+            .fail();
         }
         self.values.push(result);
         Ok(())
@@ -276,9 +277,12 @@ fn handled_send_errors_cannot_hide_cancellation() {
     struct CancelOnSend(StreamCancellation);
     impl EmissionSink for CancelOnSend {
         fn send(&mut self, _: NodeResult) -> Result<(), StreamError> {
-            self.0.cancel(StreamError::Execution {
-                message: "cancelled by sink".into(),
-            });
+            self.0.cancel(
+                mf_runtime::StreamExecutionSnafu {
+                    message: "cancelled by sink",
+                }
+                .build(),
+            );
             Err(self.0.failure().unwrap())
         }
     }
@@ -427,9 +431,12 @@ fn cancellation_is_checked_even_without_emissions() {
     let calls = node.calls.clone();
     let prepared = PreparedNode::typed_task_stream(node, NodeMetadata::default()).unwrap();
     let mut context = ExecutionContext::default();
-    context.cancellation().cancel(StreamError::Execution {
-        message: "cancelled".into(),
-    });
+    context.cancellation().cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "cancelled",
+        }
+        .build(),
+    );
     assert!(
         prepared
             .execution

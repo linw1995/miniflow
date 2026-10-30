@@ -1,5 +1,5 @@
 use crate::WorkflowDefinition;
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -68,14 +68,13 @@ fn canonical_destination(path: &Path) -> Result<PathBuf, InputError> {
             let parent = fs::canonicalize(parent).context(ResolveSnafu {
                 path: parent.to_owned(),
             })?;
-            let name = path.file_name().ok_or_else(|| InputError::Collision {
+            let name = path.file_name().with_context(|| CollisionSnafu {
                 path: path.to_owned(),
             })?;
             Ok(parent.join(name))
         }
-        Err(source) => Err(InputError::Resolve {
+        Err(source) => Err(source).context(ResolveSnafu {
             path: path.to_owned(),
-            source,
         }),
     }
 }

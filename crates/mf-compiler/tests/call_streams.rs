@@ -193,11 +193,12 @@ fn call_prefixes_arrive_before_completion_and_cancellation_remains_fatal() {
     let first = instance.receive().unwrap().unwrap();
     assert_eq!(first.output().outputs["increment"], json!(0));
     first.acknowledge().unwrap();
-    instance
-        .cancellation()
-        .cancel(mf_runtime::StreamError::Execution {
-            message: "cancel call after prefix".into(),
-        });
+    instance.cancellation().cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "cancel call after prefix",
+        }
+        .build(),
+    );
     assert!(
         instance
             .join()

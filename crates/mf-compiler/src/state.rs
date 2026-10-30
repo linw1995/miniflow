@@ -33,9 +33,8 @@ impl BuildGuard {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(source) => {
-                return Err(StateError::Io {
+                return Err(source).context(IoSnafu {
                     path: path.to_owned(),
-                    source,
                 });
             }
         }
@@ -80,15 +79,15 @@ impl StagedFile {
             match options.open(&path) {
                 Ok(file) => return Ok(Self { path, file }),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(source) => return Err(StateError::Io { path, source }),
+                Err(source) => return Err(source).context(IoSnafu { path }),
             }
         }
-        Err(StateError::Io {
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not reserve a staging file",
+        ))
+        .context(IoSnafu {
             path: destination.to_owned(),
-            source: io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "could not reserve a staging file",
-            ),
         })
     }
     fn install(&self, destination: &Path) -> Result<(), StateError> {
@@ -128,9 +127,8 @@ pub fn write_if_changed(destination: &Path, contents: &[u8]) -> Result<(), State
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(source) => {
-            return Err(StateError::Io {
+            return Err(source).context(IoSnafu {
                 path: destination.to_owned(),
-                source,
             });
         }
     }
@@ -139,9 +137,8 @@ pub fn write_if_changed(destination: &Path, contents: &[u8]) -> Result<(), State
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(source) => {
-            return Err(StateError::Io {
+            return Err(source).context(IoSnafu {
                 path: destination.to_owned(),
-                source,
             });
         }
     }

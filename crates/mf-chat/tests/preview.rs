@@ -239,9 +239,12 @@ fn pre_cancelled_requests_do_not_begin_application_or_embedded_flows() {
     let session = database.create_session("embedded", None, None).unwrap();
     let invocation = Invocation::new(&session.id);
     let cancellation = StreamCancellation::default();
-    cancellation.cancel(StreamError::Execution {
-        message: "cancelled before dispatch".into(),
-    });
+    cancellation.cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "cancelled before dispatch",
+        }
+        .build(),
+    );
     let result = mf_chat::workflow::run_conversation(
         database,
         mf_chat::nodes::BeginTurnInputs {

@@ -27,9 +27,10 @@ impl TaskNode for MapItem {
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let item = inputs["item"].as_i64().unwrap();
         if item == 0 {
-            return Err(NodeExecutionError::ExecutionFailed {
-                message: "zero is not accepted".into(),
-            });
+            return mf_runtime::NodeExecutionFailedSnafu {
+                message: "zero is not accepted",
+            }
+            .fail();
         }
         let index = inputs["index"].as_i64().unwrap();
         Ok((Outputs::from([("value".into(), json!(item * 2 + index).into())])).into())

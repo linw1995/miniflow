@@ -476,9 +476,12 @@ impl Controller {
                     return Err(error.into());
                 }
                 if cancel.load(Ordering::Acquire) || closed.load(Ordering::Acquire) {
-                    outer_cancellation.cancel(mf_runtime::StreamError::Execution {
-                        message: "chat request cancelled".into(),
-                    });
+                    outer_cancellation.cancel(
+                        mf_runtime::StreamExecutionSnafu {
+                            message: "chat request cancelled",
+                        }
+                        .build(),
+                    );
                     return Err(outer_cancellation
                         .failure()
                         .expect("cancellation was recorded")
@@ -740,10 +743,12 @@ impl ExternalBackend {
         let mut protocol_failure = None;
         loop {
             if self.cancel.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
-                self.cancellation
-                    .cancel(mf_runtime::StreamError::Execution {
-                        message: "chat request cancelled".into(),
-                    });
+                self.cancellation.cancel(
+                    mf_runtime::StreamExecutionSnafu {
+                        message: "chat request cancelled",
+                    }
+                    .build(),
+                );
                 run.cancel();
             }
             if context.cancellation().failure().is_some() {

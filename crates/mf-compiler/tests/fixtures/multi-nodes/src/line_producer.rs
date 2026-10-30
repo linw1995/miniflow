@@ -2,6 +2,7 @@ use mf_runtime::{
     Emitter, ExecutionContext, Inputs, NodeExecutionError, NodeFactory, NodePorts,
     NodeRegistration, Outputs, PortSpec, PreparedNode, StreamNode, ValueType,
 };
+use snafu::OptionExt;
 use std::{
     fs::File,
     io::{BufRead, BufReader},
@@ -15,9 +16,7 @@ struct ReadLines {
 }
 
 fn io_error(source: std::io::Error) -> NodeExecutionError {
-    NodeExecutionError::PluginFailed {
-        source: Box::new(source),
-    }
+    Box::<dyn std::error::Error + Send + Sync>::from(source).into()
 }
 
 impl StreamNode for ReadLines {
@@ -33,8 +32,8 @@ impl StreamNode for ReadLines {
         let path = inputs
             .get("path")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                message: "input `path` must be a string".into(),
+            .with_context(|| mf_runtime::NodeExecutionFailedSnafu {
+                message: "input `path` must be a string",
             })?;
         let file = File::open(path).map_err(io_error)?;
         for line in BufReader::new(file).lines() {

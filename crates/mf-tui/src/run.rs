@@ -2593,9 +2593,12 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
             }
             if parent {
-                cancellation.cancel(mf_runtime::StreamError::Execution {
-                    message: "host cancelled".into(),
-                });
+                cancellation.cancel(
+                    mf_runtime::StreamExecutionSnafu {
+                        message: "host cancelled",
+                    }
+                    .build(),
+                );
             } else {
                 run.cancel();
             }

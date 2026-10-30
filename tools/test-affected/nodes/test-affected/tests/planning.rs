@@ -1060,11 +1060,12 @@ fn task_boundaries_preserve_error_sources_and_reject_cancelled_work() {
             .downcast_ref::<mfn_test_affected::Error>()
             .is_some()
     );
-    context
-        .cancellation()
-        .cancel(mf_runtime::StreamError::Execution {
-            message: "cancel fixture".into(),
-        });
+    context.cancellation().cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "cancel fixture",
+        }
+        .build(),
+    );
     assert!(node.execute(input(), &mut context).is_err());
     assert!(
         mfn_test_affected::PlanNode

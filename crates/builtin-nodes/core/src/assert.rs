@@ -118,9 +118,12 @@ mod tests {
     fn cancellation_precedes_condition_evaluation() {
         let node: AssertNode = serde_json::from_value(config()).unwrap();
         let mut context = ExecutionContext::default();
-        context.cancellation().cancel(StreamError::Execution {
-            message: "cancel assertion".into(),
-        });
+        context.cancellation().cancel(
+            mf_runtime::StreamExecutionSnafu {
+                message: "cancel assertion",
+            }
+            .build(),
+        );
         let error = node.execute(Inputs::new(), &mut context).unwrap_err();
         assert!(
             error

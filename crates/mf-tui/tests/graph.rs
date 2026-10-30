@@ -2204,3 +2204,21 @@ fn unresolved_bundles_retain_all_members_and_mixed_evidence_is_not_success() {
         Color::Green
     );
 }
+
+#[test]
+fn graph_node_limit_rejects_oversized_descriptions_before_layout() {
+    use mf_tui::{graph::GraphError, state::MAX_SESSION_NODES};
+    let mut graph = description();
+    graph.data_edges.clear();
+    graph.control_edges.clear();
+    graph.nodes = (0..=MAX_SESSION_NODES)
+        .map(|index| NodeDescription {
+            id: format!("node-{index}"),
+            kind: "builtin.constant".into(),
+        })
+        .collect();
+    graph.execution_order = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    assert!(
+        matches!(GraphLayout::new(&graph), Err(GraphError::TooManyNodes { limit }) if limit == MAX_SESSION_NODES)
+    );
+}

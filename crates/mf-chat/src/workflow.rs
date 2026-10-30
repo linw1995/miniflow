@@ -24,9 +24,12 @@ struct CancelWorkflow(StreamCancellation);
 
 impl Wake for CancelWorkflow {
     fn wake(self: Arc<Self>) {
-        self.0.cancel(mf_runtime::StreamError::Execution {
-            message: "conversation cancelled by host".into(),
-        });
+        self.0.cancel(
+            mf_runtime::StreamExecutionSnafu {
+                message: "conversation cancelled by host",
+            }
+            .build(),
+        );
     }
 }
 

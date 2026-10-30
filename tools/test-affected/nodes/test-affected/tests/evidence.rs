@@ -427,9 +427,12 @@ fn cancellation_is_fatal_and_deadlines_are_preserved_across_reads() {
         while !entered.load(Ordering::SeqCst) && Instant::now() < end {
             thread::sleep(Duration::from_millis(2));
         }
-        signal.cancel(mf_runtime::StreamError::Execution {
-            message: "cancel evidence".into(),
-        });
+        signal.cancel(
+            mf_runtime::StreamExecutionSnafu {
+                message: "cancel evidence",
+            }
+            .build(),
+        );
     });
     let started = Instant::now();
     assert!(
@@ -595,9 +598,12 @@ fn blocked_git_fetch_is_bounded_and_reaps_its_process_group() {
                 while !marker.exists() && Instant::now() < end {
                     thread::sleep(Duration::from_millis(2));
                 }
-                signal.cancel(mf_runtime::StreamError::Execution {
-                    message: "cancel Git evidence".into(),
-                });
+                signal.cancel(
+                    mf_runtime::StreamExecutionSnafu {
+                        message: "cancel Git evidence",
+                    }
+                    .build(),
+                );
             })
         });
         let start = Instant::now();

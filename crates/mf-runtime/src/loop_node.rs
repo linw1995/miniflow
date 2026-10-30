@@ -7,9 +7,7 @@ use snafu::{ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
 
 fn structural_error(message: impl Into<String>) -> NodeExecutionError {
-    NodeExecutionError::ExecutionFailed {
-        message: message.into(),
-    }
+    crate::NodeExecutionFailedSnafu { message }.build()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]

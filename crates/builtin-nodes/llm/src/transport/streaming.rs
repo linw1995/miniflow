@@ -105,7 +105,7 @@ pub fn normalize_stream(body: BoxedStream, usage: Arc<Mutex<Option<Usage>>>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{ExecutionContext, FutureExecutionError, StreamCancellation, StreamError};
+    use mf_runtime::{ExecutionContext, FutureExecutionError, StreamCancellation};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -119,9 +119,12 @@ mod tests {
                 .inspect(move |_| {
                     count += 1;
                     if count == 2 {
-                        cancellation.cancel(StreamError::Execution {
-                            message: "stop metadata stream".into(),
-                        });
+                        cancellation.cancel(
+                            mf_runtime::StreamExecutionSnafu {
+                                message: "stop metadata stream",
+                            }
+                            .build(),
+                        );
                     }
                 })
                 .map(Ok),

@@ -42,9 +42,10 @@ impl StreamNode for Source {
                     .wait_timeout_while(ready, Duration::from_secs(5), |ready| !*ready)
                     .unwrap();
                 if timeout.timed_out() && !*state {
-                    return Err(NodeExecutionError::ExecutionFailed {
-                        message: "independent producer did not start".into(),
-                    });
+                    return mf_runtime::NodeExecutionFailedSnafu {
+                        message: "independent producer did not start",
+                    }
+                    .fail();
                 }
             }
         }

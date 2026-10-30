@@ -151,9 +151,7 @@ mod tests {
                 .poll(&mut Context::from_waker(&Waker::from(second.clone())))
                 .is_pending()
         );
-        cancellation.cancel(StreamError::Execution {
-            message: "stopped".into(),
-        });
+        cancellation.cancel(crate::StreamExecutionSnafu { message: "stopped" }.build());
         assert_eq!(first.0.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(second.0.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(cancellation.0.lock().unwrap().waiters.is_empty());
