@@ -411,12 +411,15 @@ fn filesystem_contexts_preserve_the_failing_path_and_io_source() {
 
     let directory = root.path().join("managed");
     fs::create_dir(&directory).unwrap();
-    let marker = directory.join(".mf-owner.json");
+    let marker = fs::canonicalize(&directory).unwrap().join(".mf-owner.json");
     fs::create_dir(&marker).unwrap();
     let error = mf_compiler::BuildDirectory::open(&definition, Some(&directory))
         .err()
         .unwrap();
-    assert!(matches!(&error, mf_compiler::CacheError::Io { path, .. } if path == &marker));
+    assert!(
+        matches!(&error, mf_compiler::CacheError::Io { path, .. } if path == &marker),
+        "{error:?}; expected {marker:?}"
+    );
     assert_eq!(
         find_source::<io::Error>(&error).unwrap().kind(),
         io::ErrorKind::IsADirectory
