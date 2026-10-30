@@ -88,6 +88,25 @@ impl WorkflowGraph {
         Some(input)
     }
 
+    /// Ordinary port/interface validation owns coarse drift and its detailed path diagnostics.
+    pub fn same_schema_contract(&self, expected: &Self) -> bool {
+        self.nodes.iter().all(|(id, node)| {
+            let Some(previous) = expected.nodes.get(id) else {
+                return true;
+            };
+            if node.ports.inputs == previous.ports.inputs
+                && (node.input_schemas != previous.input_schemas
+                    || node.secret_inputs != previous.secret_inputs)
+            {
+                return false;
+            }
+            match (&node.subgraph, &previous.subgraph) {
+                (Some(actual), Some(expected)) => actual.same_schema_contract(expected),
+                _ => true,
+            }
+        })
+    }
+
     pub fn describe_nodes<N>(nodes: &[FlowNode<N>]) -> BTreeMap<DefinitionId, GraphNode> {
         nodes
             .iter()

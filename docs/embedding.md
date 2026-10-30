@@ -249,8 +249,8 @@ Iteration nodes bind and execute those objects through the normal workflow input
 ordinary outputs connect to subsequent processing and protocol-encoding nodes. There is no synchronous
 tool result return channel hidden inside the LLM or another dispatcher.
 
-Generated programs retain the same metadata contract and compare it against freshly prepared port and
-schema descriptors before execution. Schema-only provider drift is rejected even when coarse port types
+Ordinary workflow interface checks validate port contracts. Generated schema checks compare decoded
+refinements and sensitivity against frozen graph metadata before execution. Schema-only provider drift is rejected even when coarse port types
 stay unchanged. Normal workflow cancellation, worker limits, errors, observation, and streaming remain
 owned by the existing execution paths.
 

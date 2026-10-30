@@ -88,7 +88,7 @@ pub use node::{
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
     TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch, TypeMismatchDetails,
     TypedTaskNode, ValueType, decode_node_inputs, deserialize_config, encode_typed_result,
-    execute_typed_task, output_id, port_names_match, verify_generated_graph,
+    execute_typed_task, output_id, port_names_match, verify_generated_graph_schemas,
     verify_generated_metadata,
 };
 pub use node::{

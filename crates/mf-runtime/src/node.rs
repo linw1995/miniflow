@@ -1113,11 +1113,14 @@ pub const fn port_names_match(actual: &[&str], expected: &[&str]) -> bool {
     true
 }
 
-pub fn verify_generated_graph(
+pub fn verify_generated_graph_schemas(
     actual: &crate::WorkflowGraph,
     expected: &crate::WorkflowGraph,
 ) -> Result<(), NodeBuildError> {
-    ensure!(actual == expected, GenerationMetadataMismatchSnafu);
+    ensure!(
+        actual.same_schema_contract(expected),
+        GenerationMetadataMismatchSnafu
+    );
     Ok(())
 }
 

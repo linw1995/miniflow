@@ -584,7 +584,7 @@ fn generate_stream_artifacts(
             let program = stream_program();
             let expected_graph = program.graph.clone();
             let prepared = mf_runtime::PreparedStream::from_plan(execution, nodes, program, input_schema);
-            mf_runtime::verify_generated_graph(prepared.plan().workflow_graph(), &expected_graph)
+            mf_runtime::verify_generated_graph_schemas(prepared.plan().workflow_graph(), &expected_graph)
                 .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: "<workflow>" })?;
             Ok(bind_stream_guards(prepared))
         }
@@ -794,7 +794,7 @@ fn generate_scope(
             let bind = format_ident!("bind_stream_outputs_{scope}");
             preparations.push(quote! { let #flow_ident = #bind(#flow_ident)?; });
         }
-        let bind_graph = format_ident!("verify_graph_{scope}");
+        let bind_graph = format_ident!("verify_graph_schemas_{scope}");
         preparations.push(quote! { let #flow_ident = #bind_graph(#flow_ident)?; });
         statements.push(quote! { runtime.execute_in_context(&#flow_ident, state) });
     }
@@ -1514,7 +1514,7 @@ fn task_layout_tokens(
         &serde_json::to_string(graph).expect("validated graph serializes"),
         Span::call_site(),
     );
-    let bind_graph = format_ident!("verify_graph_{scope}");
+    let bind_graph = format_ident!("verify_graph_schemas_{scope}");
     let ident = format_ident!("FLOW_PLAN_{}", scope.to_uppercase());
     let indices: BTreeMap<_, _> = order
         .iter()
@@ -1555,7 +1555,7 @@ fn task_layout_tokens(
         fn #bind_graph(flow: mf_runtime::Flow) -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
             use snafu::ResultExt as _;
             let expected = serde_json::from_str(#graph_json).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu { definition_id: #scope })?;
-            mf_runtime::verify_generated_graph(flow.workflow_graph(), &expected).context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: #scope })?;
+            mf_runtime::verify_generated_graph_schemas(flow.workflow_graph(), &expected).context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: #scope })?;
             Ok(flow)
         }
         #guards pub static #ident: mf_runtime::FlowPlan = mf_runtime::FlowPlan {

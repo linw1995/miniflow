@@ -165,8 +165,8 @@ Errors and unwinding restore the enclosing graph.
 `Flow::workflow_graph()` and `StreamPlan::workflow_graph()` expose the same descriptor to hosts.
 `PreparedSubgraph::with_graph` carries the prepared body into its normal provider metadata. Compiler
 preparation and generated programs populate it from the same nodes and connections that they execute.
-Generated scopes verify frozen graph contracts, including decoded schema refinements, before business
-execution. There is no independent tool execution graph or runtime node invocation interface.
+Generated scopes verify decoded refinements and sensitivity against frozen metadata before business
+execution. Ordinary port and workflow interface validation retains its existing path diagnostics. There is no independent tool execution graph or runtime node invocation interface.
 
 Workflow input descriptors optionally include a `schema` refinement. The existing Call provider
 propagates these descriptors on its normal input ports. Reflection describes records, enum variants,
