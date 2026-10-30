@@ -1233,6 +1233,7 @@ impl ViewState {
                     let mut child = self.path.clone();
                     child.push(node.id.clone());
                     if bodies.contains_key(&child) {
+                        let item_offset = self.iteration(snapshot).map_or(0, |_| self.pass_offset);
                         if node.kind == "builtin.iteration" {
                             self.iteration_parent_stream = self
                                 .pass(snapshot)
@@ -1250,7 +1251,7 @@ impl ViewState {
                         self.latest_iteration_revision = None;
                         self.offset = (0, 0);
                         self.selected = 0;
-                        self.pass_offset = 0;
+                        self.pass_offset = item_offset;
                         self.details_offset = 0;
                     }
                 }
@@ -2610,7 +2611,25 @@ impl ObservationView {
         self.state
             .handle_key(key, snapshot, &self.root, &self.bodies, traces, logs);
         if self.state.path != previous {
+            let entering_item = self.state.path.starts_with(&previous)
+                && self.description.loop_bodies.iter().any(|body| {
+                    self.state.path.starts_with(&body.path)
+                        && body
+                            .nodes
+                            .iter()
+                            .any(|node| node.kind == mf_runtime::ITERATION_INPUT_KIND)
+                });
+            let item = self.state.iteration_item.clone();
+            let parent = self.state.iteration_parent.clone();
+            let parent_stream = self.state.iteration_parent_stream;
+            let item_offset = self.state.pass_offset;
             self.restore_viewport();
+            if entering_item {
+                self.state.iteration_item = item;
+                self.state.iteration_parent = parent;
+                self.state.iteration_parent_stream = parent_stream;
+                self.state.pass_offset = item_offset;
+            }
         }
         self.bodies.retain(|path, _| *path == self.state.path);
     }
@@ -3937,6 +3956,15 @@ mod tests {
         assert_eq!(
             view.state.iteration(&snapshot).unwrap().identity.index,
             Count::try_from(1).unwrap()
+        );
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
+        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+        let layout = view.state.layout(&view.root, &view.bodies);
+        view.state.follow_latest(&snapshot, layout);
+        assert_eq!(
+            view.state.iteration(&snapshot).unwrap().identity.index,
+            Count::ZERO
         );
     }
 
