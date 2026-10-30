@@ -1354,7 +1354,13 @@ fn draw_parallel_pips(
     let visible = areas.len();
     for (position, (display, rect)) in running.into_iter().zip(areas).enumerate() {
         let node = &layout.nodes()[display];
-        let title = display_text(&node.id).replace('\n', " ");
+        let title = layout
+            .node_path(display)
+            .iter()
+            .chain(std::iter::once(&node.id))
+            .map(|id| display_text(id).replace('\n', " "))
+            .collect::<Vec<_>>()
+            .join(" / ");
         let mut block = Block::default()
             .title(format!(" Running: {title} "))
             .borders(Borders::ALL)
@@ -1647,16 +1653,30 @@ fn inline_observations(
         .map(|node| NodeObservation::pending(&node.id, &node.kind))
         .collect();
     for (path, sources) in scopes {
+        let source_by_id: BTreeMap<_, _> = sources
+            .iter()
+            .map(|source| (layout.all_nodes()[*source].id.as_str(), *source))
+            .collect();
+        if path.is_empty() {
+            for observed in &snapshot.nodes {
+                if let Some(source) = source_by_id.get(observed.id.as_str()) {
+                    nodes[*source] = observed.clone();
+                }
+            }
+            continue;
+        }
+        let body = description
+            .body(path)
+            .expect("visible scope has a described body");
         let order = || {
-            sources.iter().map(|source| {
-                let node = &layout.all_nodes()[*source];
+            body.execution_order.iter().map(|id| {
+                let source = source_by_id[id.as_str()];
+                let node = &layout.all_nodes()[source];
                 (node.id.as_str(), node.kind.as_str())
             })
         };
         let static_body = is_static_body(description, path);
-        let observed = if path.is_empty() {
-            snapshot.nodes.clone()
-        } else if !static_body && let Some(pass) = scope_pass(snapshot, path, offsets) {
+        let observed = if !static_body && let Some(pass) = scope_pass(snapshot, path, offsets) {
             pass.display_nodes(order())
         } else {
             order()
@@ -1669,7 +1689,8 @@ fn inline_observations(
                 })
                 .collect()
         };
-        for (source, observed) in sources.into_iter().zip(observed) {
+        for observed in observed {
+            let source = source_by_id[observed.id.as_str()];
             nodes[source] = observed;
         }
     }
@@ -2195,13 +2216,25 @@ pub struct ObservationView {
 }
 impl ObservationView {
     pub fn new(description: &WorkflowDescription) -> Result<Self, RunError> {
-        let root =
+        let expanded = description
+            .loop_bodies
+            .iter()
+            .map(|body| body.path.clone())
+            .collect();
+        let execution =
             GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
+        let root = GraphLayout::with_expanded_bodies(
+            description,
+            ConnectionView::Execution,
+            &expanded,
+            &BTreeMap::new(),
+        )
+        .context(GraphSnafu)?;
         Ok(Self {
             description: description.clone(),
-            execution: root.clone(),
+            execution,
             root,
-            expanded: BTreeSet::new(),
+            expanded,
             viewports: BTreeMap::new(),
             collapsed: BTreeMap::new(),
             cluster_focus: BTreeMap::new(),
@@ -2496,10 +2529,16 @@ impl ObservationView {
             header,
         );
         state.reveal(&self.execution, graph);
+        let nodes = inline_observations(
+            &self.execution,
+            &self.description,
+            &snapshot,
+            &BTreeMap::new(),
+        );
         frame.render_widget(
             GraphView::new(&self.execution)
                 .reader(&observation.reader)
-                .snapshot(&snapshot)
+                .nodes(&nodes)
                 .selected(state.selected)
                 .offset(state.offset.0, state.offset.1)
                 .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64),
@@ -3006,8 +3045,14 @@ mod tests {
             let rect = view.root.nodes()[view.state.selected].rect;
             assert!(view.state.offset.0 <= rect.x);
             assert!(view.state.offset.1 <= rect.y);
-            assert!(view.state.offset.0 + u32::from(area.width) >= rect.x + rect.width);
-            assert!(view.state.offset.1 + u32::from(area.height) >= rect.y + rect.height);
+            assert!(
+                view.state.offset.0 + u32::from(area.width)
+                    >= rect.x + rect.width.min(u32::from(area.width))
+            );
+            assert!(
+                view.state.offset.1 + u32::from(area.height)
+                    >= rect.y + rect.height.min(u32::from(area.height))
+            );
         }
         view.handle_navigation(KeyCode::Right, &snapshot, &traces, &logs);
         let panned = view.state.offset;
@@ -3025,6 +3070,7 @@ mod tests {
             .unwrap()
             .snapshot();
         let mut view = ObservationView::new(&description).unwrap();
+        view.fold_body(vec!["second".into()], false).unwrap();
         snapshot.latest_node_event = Some(crate::state::NodeEventFocus {
             sequence: Count::try_from(2).unwrap(),
             node: mf_telemetry::event::NodeIdentity {
@@ -3062,7 +3108,205 @@ mod tests {
             index: Count::ZERO,
         };
         view.state.follow_latest(&snapshot, &view.root);
-        assert_eq!(view.root.nodes()[view.state.selected].id, "first");
+        assert_eq!(view.root.nodes()[view.state.selected].id, "target");
+        assert_eq!(view.state.path, ["first"]);
+    }
+
+    #[test]
+    fn default_expansion_follows_live_children_and_renders_scoped_pips() {
+        use mf_telemetry::event::{NodeIdentity, Outcome};
+        let mut description = scope_fixture();
+        description.nodes.push(NodeDescription {
+            id: "completed".into(),
+            kind: "fixture.task".into(),
+        });
+        description.execution_order.insert(0, "completed".into());
+        description.nodes.reverse();
+        for body in &mut description.loop_bodies {
+            body.nodes.reverse();
+        }
+        let run = RunId::new();
+        let mut session = crate::state::SessionState::new(description.clone(), run).unwrap();
+        let mut sequence = 0;
+        let mut apply = |event| {
+            sequence += 1;
+            session
+                .apply(LifecycleEvent {
+                    workflow_id: description.workflow_id.clone(),
+                    run_id: run,
+                    sequence: Count::try_from(sequence).unwrap(),
+                    event,
+                })
+                .unwrap();
+        };
+        let completed = NodeIdentity {
+            id: "completed".into(),
+            kind: "fixture.task".into(),
+            path: Vec::new(),
+        };
+        apply(LifecycleKind::WorkflowStarted {
+            elapsed_ns: Count::ZERO,
+        });
+        apply(LifecycleKind::NodeStarted {
+            node: completed.clone(),
+            position: Count::ZERO,
+            elapsed_ns: Count::ZERO,
+            selected_inputs: Vec::new(),
+        });
+        apply(LifecycleKind::NodeFinished {
+            node: completed,
+            position: Count::ZERO,
+            elapsed_ns: Count::ZERO,
+            duration_ns: Some(Count::ZERO),
+            outcome: Outcome::Succeeded,
+            produced_ports: Vec::new(),
+            skipped_ports: Vec::new(),
+            failure: None,
+            loop_summary: None,
+        });
+        for (position, id) in ["first", "second"].into_iter().enumerate() {
+            apply(LifecycleKind::NodeStarted {
+                node: NodeIdentity {
+                    id: id.into(),
+                    kind: "workflow.loop".into(),
+                    path: Vec::new(),
+                },
+                position: Count::try_from(position as i64 + 1).unwrap(),
+                elapsed_ns: Count::ZERO,
+                selected_inputs: Vec::new(),
+            });
+            let path = vec![LoopPathEntry::Loop {
+                loop_id: id.into(),
+                index: Count::ZERO,
+            }];
+            apply(LifecycleKind::LoopPassStarted {
+                path: path.clone(),
+                elapsed_ns: Count::ZERO,
+            });
+            apply(LifecycleKind::NodeStarted {
+                node: NodeIdentity {
+                    id: "source".into(),
+                    kind: "fixture.task".into(),
+                    path,
+                },
+                position: Count::try_from(1).unwrap(),
+                elapsed_ns: Count::ZERO,
+                selected_inputs: Vec::new(),
+            });
+        }
+        let snapshot = session.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        assert_eq!(view.root.nodes().len(), 9);
+        let first = view
+            .root
+            .display_index_for_scoped_node(&["first".into()], "source")
+            .unwrap();
+        let second = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "source")
+            .unwrap();
+        view.state.offset = (1000, 1000);
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.selected, second);
+        assert_eq!(view.state.path, ["second"]);
+        view.state.reveal(&view.root, Rect::new(0, 0, 48, 12));
+        let rect = view.root.nodes()[second].rect;
+        assert!(view.state.offset.0 <= rect.x && view.state.offset.0 + 48 >= rect.x + rect.width);
+        assert!(view.state.offset.1 <= rect.y && view.state.offset.1 + 12 >= rect.y + rect.height);
+        let observations =
+            inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
+        let completed = view
+            .root
+            .display_index_for_scoped_node(&[], "completed")
+            .unwrap();
+        assert_eq!(
+            observations[view.root.sources(completed)[0]].status,
+            NodeStatus::Succeeded
+        );
+        for id in ["first", "second"] {
+            let owner = view.root.display_index_for_scoped_node(&[], id).unwrap();
+            assert!(view.root.is_expanded_body(owner));
+            assert_eq!(
+                observations[view.root.sources(owner)[0]].status,
+                NodeStatus::Running
+            );
+        }
+        assert_eq!(
+            running_display_nodes(&view.root, &observations),
+            vec![first, second]
+        );
+        let receiver = LoopbackReceiver::bind(description.clone(), run).unwrap();
+        let reader = receiver.reader();
+        let selected = view.state.selected;
+        let offset = view.state.offset;
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(128, 64)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_parallel_pips(
+                    frame,
+                    frame.area(),
+                    &view.root,
+                    &observations,
+                    &reader,
+                    1_000_000_000,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..64)
+            .map(|y| {
+                (0..128)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+        assert!(text.contains(" Running: first / source "), "{text}");
+        assert!(text.contains(" Running: second / source "), "{text}");
+        for (display, area) in [first, second]
+            .into_iter()
+            .zip(parallel_pip_areas(2, Rect::new(0, 0, 128, 64)).0)
+        {
+            let inner = Block::default().borders(Borders::ALL).inner(area);
+            let rect = view.root.nodes()[display].rect;
+            let offset = centered_offset(rect, (inner.width, inner.height));
+            let x = inner.x + (rect.x + 1 - offset.0) as u16;
+            let y = inner.y + (rect.y + 1 - offset.1) as u16;
+            assert!(
+                buffer[(x, y)]
+                    .modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            );
+        }
+        assert_eq!(view.state.selected, selected);
+        assert_eq!(view.state.offset, offset);
+        let mut compact = snapshot.clone();
+        for pass in &mut compact.loop_passes {
+            pass.nodes.clear();
+            pass.compact_statuses = vec![
+                Some(NodeStatus::Succeeded),
+                Some(NodeStatus::Running),
+                Some(NodeStatus::Pending),
+            ];
+        }
+        let compact_observations =
+            inline_observations(&view.root, &description, &compact, &BTreeMap::new());
+        assert_eq!(
+            running_display_nodes(&view.root, &compact_observations),
+            vec![first, second]
+        );
+        view.fold_body(vec!["second".into()], false).unwrap();
+        let observations =
+            inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
+        let owner = view
+            .root
+            .display_index_for_scoped_node(&[], "second")
+            .unwrap();
+        assert_eq!(
+            running_display_nodes(&view.root, &observations),
+            vec![owner, first]
+        );
     }
 
     #[test]
@@ -3140,10 +3384,6 @@ mod tests {
             ..Default::default()
         });
         let mut view = ObservationView::new(&description).unwrap();
-        view.fold_body(vec!["first".into()], true).unwrap();
-        view.fold_body(vec!["first".into(), "nested".into()], true)
-            .unwrap();
-        view.fold_body(vec!["second".into()], true).unwrap();
         let selected = view
             .root
             .display_index_for_scoped_node(&["first".into()], "source")
@@ -3346,7 +3586,7 @@ mod tests {
         view.state.offset = (12, 8);
         view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
         assert!(view.state.path.is_empty());
-        assert_eq!(view.root.nodes().len(), 5);
+        assert_eq!(view.root.nodes().len(), 8);
         assert!(view.root.is_expanded_body(1));
         let child = view
             .root
@@ -3357,18 +3597,18 @@ mod tests {
         view.state.offset = (7, 9);
         for _ in 0..3 {
             view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
-            assert_eq!(view.root.nodes().len(), 5);
+            assert_eq!(view.root.nodes().len(), 8);
             assert_eq!(view.state.selected, child);
         }
         assert_eq!(view.state.offset, (7, 9));
         view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
         assert!(view.state.path.is_empty());
-        assert_eq!(view.root.nodes().len(), 2);
+        assert_eq!(view.root.nodes().len(), 5);
         assert_eq!(view.state.selected, 1);
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
-        assert_eq!(view.root.nodes().len(), 5);
+        assert_eq!(view.root.nodes().len(), 8);
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
-        assert_eq!(view.root.nodes().len(), 2);
+        assert_eq!(view.root.nodes().len(), 5);
         assert_eq!(view.viewports.len(), 3);
         view.state.traces.visible = true;
         let mode = view.root.connection_view();
@@ -3977,7 +4217,6 @@ mod tests {
             clusters: Vec::new(),
         };
         let mut view = ObservationView::new(&description).unwrap();
-        view.fold_body(vec!["repeat".into()], true).unwrap();
         let child = view
             .root
             .display_index_for_scoped_node(&["repeat".into()], "child")

@@ -621,6 +621,7 @@ layout. The PiP grid recomputes its rows, columns, and visible count from the ru
 available terminal area on every frame. It shows every running node when space permits and reports a
 `+N more` overflow otherwise. Completed nodes leave the grid, and fewer than two running nodes removes
 it entirely. Expanded bodies with running descendants do not add duplicate PiPs for the same branch.
+PiP titles include the body path to distinguish nodes with the same ID in different scopes.
 Compact chat execution summaries retain their existing presentation.
 Declared node clusters show a labeled boundary and a wrapped annotation inside the graph and in Details.
 Cluster boundaries, member node borders, and labels share a stable color from a six-color palette.
@@ -632,12 +633,17 @@ Aligned ports use a straight connection when collision checks allow it, includin
 Press `c` to collapse or
 expand the selected node's cluster; collapsed clusters render as one aggregate node, remap external
 connections, and hide internal connections. On a node with a described Loop, Iteration, or Call body,
-`c` toggles that body and `l` expands it inside the parent node. Bodies start collapsed (`[+]`);
-expanded bodies (`[-]`) keep parent nodes and external connections visible and support nested expansion.
+`c` toggles that body and `l` expands it inside the parent node. Bodies start expanded (`[-]`);
+expanded bodies keep parent nodes and external connections visible and support nested expansion.
+Collapsed bodies (`[+]`) can be reopened without leaving the parent graph.
 Tab selects body nodes alongside parent nodes. `h` or Esc collapses the selected expanded body or its
 enclosing body; Esc closes visible Details first. `[` and `]` inspect older and newer retained pass
-frames for the selected node's scope, with nested bodies following their enclosing pass. The detail pane shows active and completed pass counts, stop reason, and any hidden
-older detail. Streaming details also show observed invocation/completion/result counts, Batch state,
+frames for the selected node's scope, with nested bodies following their enclosing pass.
+New lifecycle events focus and reveal the deepest visible node; collapsed bodies focus their owner.
+Retained history and manual panning stay stable until new lifecycle evidence arrives.
+Iteration bodies remain static because item execution is available through completed spans rather than
+node lifecycle events; their enclosing Iteration node retains live status, focus, and PiP support.
+The detail pane shows active and completed pass counts, stop reason, and any hidden older detail. Streaming details also show observed invocation/completion/result counts, Batch state,
 message identity, unresolved outcomes, and final workflow totals. Loop pass headers include their owning
 invocation so repeated paths in different messages remain distinct. `q` has no action while the workflow runs. Ctrl-C
 requests interruption, and a second

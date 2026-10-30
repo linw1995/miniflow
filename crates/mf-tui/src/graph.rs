@@ -127,7 +127,6 @@ impl GraphEdge {
     }
 }
 
-#[derive(Clone)]
 pub struct GraphLayout {
     view: ConnectionView,
     hidden_data_count: usize,
