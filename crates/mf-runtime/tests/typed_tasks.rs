@@ -121,7 +121,7 @@ fn preparation_derives_ports_and_never_decodes_or_executes() {
         input_schemas: Default::default(),
         typed_generation: None,
         ports: NodePorts::default(),
-        call_interface_source: Some("owner".into()),
+        subgraph: None,
         stream_outputs: Vec::new(),
         exclusive_outputs: Vec::new(),
         input_bindings: [(
@@ -148,10 +148,7 @@ fn preparation_derives_ports_and_never_decodes_or_executes() {
         metadata.context_references
     );
     assert_eq!(prepared.metadata.stdin, metadata.stdin);
-    assert_eq!(
-        prepared.metadata.call_interface_source,
-        metadata.call_interface_source
-    );
+    assert_eq!(prepared.metadata.subgraph, metadata.subgraph);
     assert_eq!(prepared.metadata.input_bindings, metadata.input_bindings);
     assert!(prepared.execution.as_task_node().is_some());
     let conflict = NodePorts {

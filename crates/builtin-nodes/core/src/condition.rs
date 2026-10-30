@@ -3,7 +3,7 @@ use mf_runtime::{
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 use std::cmp::Ordering;
 
 #[derive(Deserialize)]
@@ -63,11 +63,20 @@ impl From<ConditionExecutionError> for NodeExecutionError {
     }
 }
 
-fn execution_error(message: impl Into<String>) -> NodeExecutionError {
-    mf_runtime::NodeExecutionFailedSnafu {
-        message: message.into(),
+#[derive(Debug, Snafu)]
+enum ConditionValueError {
+    #[snafu(display("source output is skipped or field is missing"))]
+    MissingSource,
+    #[snafu(display("comparison requires a scalar value"))]
+    NonScalar,
+    #[snafu(display("ordering requires numeric operands"))]
+    NonNumeric,
+}
+
+impl From<ConditionValueError> for NodeExecutionError {
+    fn from(source: ConditionValueError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
     }
-    .build()
 }
 
 fn valid_pointer(path: &str) -> bool {
@@ -97,16 +106,19 @@ impl Condition {
             _ => ConditionValidationSnafu { message: "operator requires a scalar comparison value, a numeric ordering value, or no value for existence checks" }.fail(),
         }
     }
-    fn evaluate_value(&self, source: Option<&mf_runtime::ValueRef>) -> Result<bool, String> {
+    fn evaluate_value(
+        &self,
+        source: Option<&mf_runtime::ValueRef>,
+    ) -> Result<bool, ConditionValueError> {
         let value = source.and_then(|value| value.pointer(&self.source.path));
         match self.operator {
             Operator::Exists => return Ok(value.is_some()),
             Operator::NotExists => return Ok(value.is_none()),
             _ => {}
         }
-        let value = value.ok_or("source output is skipped or field is missing")?;
+        let value = value.context(MissingSourceSnafu)?;
         if value.is_array() || value.is_object() {
-            return Err("comparison requires a scalar value".into());
+            return NonScalarSnafu.fail();
         }
         let literal = self
             .value
@@ -128,7 +140,7 @@ impl Condition {
             }
             operator => {
                 let (Some(left), Some(right)) = (value.as_number(), literal.as_number()) else {
-                    return Err("ordering requires numeric operands".into());
+                    return NonNumericSnafu.fail();
                 };
                 let order = mf_runtime::compare_json_numbers(left, right);
                 Ok(match operator {
@@ -154,7 +166,8 @@ impl Condition {
                 ContextValue::Value(value) => Some(value),
                 ContextValue::Skipped => None,
             };
-            self.evaluate_value(source).map_err(execution_error)
+            self.evaluate_value(source)
+                .map_err(NodeExecutionError::from)
         })();
         result.context(ConditionExecutionSnafu {
             output: &self.source.output,
@@ -167,6 +180,29 @@ impl Condition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comparison_failures_preserve_the_typed_value_error() {
+        use std::error::Error;
+        let condition: Condition = serde_json::from_value(serde_json::json!({
+            "source": {"output": "source.value", "path": ""},
+            "operator": "eq", "value": 1
+        }))
+        .unwrap();
+        condition.validate().unwrap();
+        let error = condition
+            .evaluate_value(Some(&mf_runtime::ValueRef::from(serde_json::json!([]))))
+            .unwrap_err();
+        let error: NodeExecutionError = error.into();
+        assert!(matches!(
+            error
+                .source()
+                .unwrap()
+                .downcast_ref::<ConditionValueError>(),
+            Some(ConditionValueError::NonScalar)
+        ));
+    }
+
     use serde_json::json;
 
     fn condition(operator: &str, value: Value) -> Value {

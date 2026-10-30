@@ -20,8 +20,8 @@ Its factory validates configuration without credentials or I/O; execution uses o
 The node also accepts function `tools` and explicit `tool_results`, both optional list inputs, and returns
 tool calls in its current assistant message and its `tool_calls` output. Explicit results follow `messages`
 in the provider request and must match pending assistant call IDs. Flows own history and persistence.
-`builtin.tool_catalog` and `builtin.tool_dispatch` provide explicit graph-owned tool discovery and execution.
-The model node consumes definitions and returns requests without executing tools.
+The model node can declare ordinary tool batch output ports. It reads connected workflow input metadata
+and publishes argument records; normal Iteration and downstream nodes execute the work.
 `ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;
 `ChatMessage` derives `NodeEnum` with the `role` tag and has `System`, `User`, `Assistant`, and
 `ToolResult` variants. Only the assistant variant carries `tool_calls`; the tool-result variant
@@ -153,103 +153,51 @@ Rebuild plugins against the matching runtime package and correct declarations th
 
 Declare context reads in `NodeMetadata.context_references`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
 
-## Directed workflow calls
+## Workflow metadata and tool ports
 
-Workflow version `2026-10-28` adds scope-local selectable workflow call sites. Each `calls` entry names
-an existing `workflow.call` node, a public alias, an optional description, and a default-input policy:
+`ExecutionContext::workflow_graph()` exposes the current prepared graph's port contracts and ordinary
+connections. The descriptor contains no executors, environment names, default values, or runtime
+payloads. It records decoded input schemas, sensitivity flags, and prepared subgraphs. `locate` resolves
+literal node-ID paths through those subgraphs. Domain forks share immutable descriptors; a new body
+starts without the parent's graph, and its own Flow installs the correct descriptor during execution.
+Errors and unwinding restore the enclosing graph.
 
-```json
-{
-  "calls": {
-    "parent": {
-      "search": {
-        "target": "search_flow",
-        "description": "Search the configured service"
-      }
-    }
-  }
-}
-```
+`Flow::workflow_graph()` and `StreamPlan::workflow_graph()` expose the same descriptor to hosts.
+`PreparedSubgraph::with_graph` carries the prepared body into its normal provider metadata. Compiler
+preparation and generated programs populate it from the same nodes and connections that they execute.
+Generated scopes verify frozen graph contracts, including decoded schema refinements, before business
+execution. There is no independent tool execution graph or runtime node invocation interface.
 
-The target uses the existing Flow interface. Its body contains ordinary nodes and connections, and its
-`outputs` explicitly select the values returned to the caller. Computation, formatting, validation,
-branching, and output selection inside the tool therefore use the same workflow capabilities as an
-ordinary `workflow.call`. A business node can be placed in that body and connected to downstream nodes.
-Calls never discover a business node's outputs and implicitly turn them into a tool result.
+Workflow input descriptors optionally include a `schema` refinement. The existing Call provider
+propagates these descriptors on its normal input ports. Reflection describes records, enum variants,
+collections, optional fields, and descriptions without executing codecs or defaults.
 
-Argument ownership comes from ordinary target `inputs` connections. For example, an existing
-`search_flow` call site can bind one input to a caller output and another to a configuration producer:
+### Workflow argument batches
 
-```json
-{
-  "inputs": {
-    "request.query": {"from": {"node": "parent", "port": "query"}},
-    "request.token": {"from": {"node": "config", "port": "token"}}
-  }
-}
-```
+`builtin.iteration` retains its standard `item` mode. In `input_mode: arguments`, each input item is a
+normal workflow argument object keyed by qualified input names. The body's unconnected initial input
+ports form its ordinary workflow input interface. The Iteration node exposes those names as optional
+shared input ports; per-item values override shared values before the normal workflow input resolver
+validates and binds that item's inputs. This mode accepts arrays and rejects stdin consumers.
 
-Both names are normal Flow input ports, including their literal dots. `parent.query` is declared in
-`NodeMetadata.ports.outputs`; its connection supplies the selected invocation's `request.query` input.
-The configuration connection retains external ownership. The upstream interface exposes only `query`,
-including the destination's requiredness, sensitivity, and decoded schema refinements. Ordinary
-connection validation and type inference check both edges. Caller argument connections must each
-have one non-exclusive source; external exclusive inputs retain ordinary branch proofs.
+Each item runs the ordinary connected body. The body's existing `result` selection supplies one result
+per item, and parallel execution preserves input order. Missing, unknown, or invalid arguments retain
+the normal typed workflow error chain. Empty batches execute no body nodes. Argument scopes restore
+parent inputs when they finish, including on errors or unwinding.
 
-The default policy is `explicit_only`. `remaining_inputs` assigns otherwise unbound target inputs to
-the caller after every explicit connection is resolved. Unbound optional inputs remain omitted;
-unbound required inputs fail preparation. Output and fallback argument names remain distinct in
-`CallArguments`, and both preserve shared values and sensitivity. Null is a supplied value.
+### Connected LLM outputs
 
-`CallBinding` contains only a public name, prepared target `NodeId`, default policy, and optional
-description. `FlowBuilder::resolve_call_bindings` resolves it from that builder's ordinary connections.
-The compiled `ResolvedCallBinding` records the resulting input sources and external prerequisites.
-The caller does not maintain a second port mapping.
+An LLM configuration can declare `outputs: ["multiply"]`. Each name is an ordinary terminal batch
+output port connected to the `items` input of an argument-mode Iteration. The LLM inspects that
+Iteration's prepared workflow interface before requesting the model. Ordinary connections to the
+Iteration's shared input ports keep those parameters externally owned and out of the model's schema.
+Unambiguous leaf port names are used as public argument names; colliding names stay qualified.
 
-```rust
-use mf_runtime::{CallArguments, CallBinding, CallInputDefaults, NodeId, NodeValues};
-
-let binding = CallBinding::new("search", NodeId::new(3), CallInputDefaults::ExplicitOnly)?;
-let arguments = CallArguments {
-    outputs: NodeValues::from([("query".into(), "runtime contracts".into())]),
-    ..Default::default()
-};
-```
-
-The runtime selects a compiled binding through `ExecutionContext::invoke_call`. It composes connected
-caller arguments with a snapshot of external inputs, then invokes the ordinary workflow call site in
-an isolated execution context. The existing Flow executor runs the entire tool body and selects its
-explicit outputs. An omitted optional workflow output stays absent. A failure retains the ordinary
-workflow error chain; cancellation, deadlines, depth limits, and step-budget failures remain terminal.
-Calls are not retried automatically.
-
-The call declaration establishes an invocation boundary. Its caller-owned argument values belong to
-that invocation and are not broadcast as the caller's final outputs. Argument ports may therefore be
-optional in an ordinary caller result even when a selected workflow requires their values. A dynamic
-router should mark unpublished argument outputs skipped in its terminal result. The call site is
-excluded from ordinary activation, and its public outputs return through the selected invocation.
-The body still publishes, routes, and selects its values using normal Flow semantics.
-
-External producers are scheduled before the caller without making the caller inherit their skip
-state. Missing or skipped prerequisites affect the selected invocation. Native frames compose values
-from their own message with selected startup snapshots; cross-message joins and waits on connected
-streaming producers fail preparation. TaskStream callers retain their ordinary streaming behavior.
-
-Compiled calls share the existing execution domains and generated scope layouts. Generated programs
-freeze resolved bindings and provider metadata; startup verifies the current contracts before
-execution. Normal graph checks may reject incompatible port drift before metadata comparison. Flow
-input descriptors carry codec schemas through nested workflow boundaries without executing codecs or
-default providers during reflection.
-
-Prepared scopes derive read-only discovery data from the executable table. A node may declare
-`NodeMetadata.call_interface_source` to inspect one owner in the same scope. `call_targets()` exposes
-that projection, while `can_invoke_calls()` remains false for a read-only viewer. Missing sources,
-chained views, and mixed ownership fail preparation. The reference creates no execution dependency.
-Nested workflows install their own scope and restore the enclosing one on return or unwinding.
-
-Exhaustive `WorkflowDefinition`, `LoopBodyDefinition`, and `IterationBodyDefinition` literals include
-`calls: Default::default()` for ordinary workflows. Exhaustive `WorkflowInput` literals include
-`schema: None` when no decoded refinement is available.
+The LLM publishes a list of workflow argument records on each tool port. It performs no downstream
+node execution. Repeated calls to one tool become separate items, and unused tools produce empty
+lists. Normal workflow nodes perform calculations, formatting, validation, and exported output
+selection. `builtin.tool_results` only correlates connected result lists with the original call IDs,
+redacts sensitive subtrees, and encodes bounded protocol content. It neither routes nor executes work.
 
 ## Context-aware execution
 

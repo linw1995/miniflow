@@ -10,12 +10,12 @@ use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
     observation::{BodyNodeObservation, BodyObservation, NodeObservation, RunObservation},
 };
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 
 #[derive(Clone, Debug)]
@@ -36,9 +36,12 @@ impl ExecutionScope {
         variables: Outputs,
         types: BTreeMap<String, crate::ValueType>,
     ) -> Result<Self, NodeExecutionError> {
-        i64::try_from(index).map_err(|_| NodeExecutionError::ExecutionFailed {
-            message: "scope index exceeds the signed 64-bit range".into(),
-        })?;
+        ensure!(
+            i64::try_from(index).is_ok(),
+            crate::NodeExecutionFailedSnafu {
+                message: "scope index exceeds the signed 64-bit range",
+            }
+        );
         Ok(Self {
             node_id: node_id.into(),
             source_id: source_id.into(),
@@ -65,8 +68,12 @@ impl StepBudget {
                 remaining.checked_sub(1)
             }) {
             Ok(_) => Ok(()),
-            Err(_) => crate::runner::StepBudgetSnafu {
+            Err(_) => ContextSnafu {
                 definition_id: crate::DefinitionId::from(id),
+                message: format!(
+                    "scheduled-step budget of {} exhausted",
+                    crate::MAX_SCHEDULED_STEPS
+                ),
             }
             .fail(),
         }
@@ -89,24 +96,29 @@ impl Drop for ScopeGuard<'_> {
     }
 }
 
+struct WorkflowInputsGuard<'a> {
+    context: &'a mut ExecutionContext,
+    previous: crate::ExecutionInputs,
+}
+impl Drop for WorkflowInputsGuard<'_> {
+    fn drop(&mut self) {
+        self.context.inputs = std::mem::take(&mut self.previous);
+    }
+}
+
+struct WorkflowGraphGuard<'a> {
+    context: &'a mut ExecutionContext,
+    previous: Option<Arc<crate::WorkflowGraph>>,
+}
+impl Drop for WorkflowGraphGuard<'_> {
+    fn drop(&mut self) {
+        self.context.workflow_graph = self.previous.take();
+    }
+}
+
 struct NodeInvocationGuard<'a> {
     context: &'a mut ExecutionContext,
     previous: Option<crate::DefinitionId>,
-}
-
-struct CallInterfaceGuard<'a> {
-    context: &'a mut ExecutionContext,
-    interfaces: crate::CallInterfaces,
-    node: Option<crate::DefinitionId>,
-    dispatcher: Option<Weak<dyn crate::invocation::CallDispatcher>>,
-}
-
-impl Drop for CallInterfaceGuard<'_> {
-    fn drop(&mut self) {
-        self.context.call_interfaces = std::mem::take(&mut self.interfaces);
-        self.context.current_node = self.node.take();
-        self.context.call_dispatcher = self.dispatcher.take();
-    }
 }
 
 impl Drop for NodeInvocationGuard<'_> {
@@ -210,10 +222,7 @@ pub struct ExecutionContext {
     pending_loop_write: Option<(String, Value)>,
     current_position: Option<usize>,
     current_node: Option<crate::DefinitionId>,
-    call_interfaces: crate::CallInterfaces,
-    call_dispatcher: Option<Weak<dyn crate::invocation::CallDispatcher>>,
-    call_sequence: Arc<AtomicU64>,
-    call_deadline: Option<std::time::Instant>,
+    workflow_graph: Option<Arc<crate::WorkflowGraph>>,
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
@@ -238,10 +247,7 @@ impl Default for ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
-            call_interfaces: Default::default(),
-            call_dispatcher: None,
-            call_sequence: Arc::new(AtomicU64::new(0)),
-            call_deadline: None,
+            workflow_graph: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
@@ -259,202 +265,32 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
-    /// Invokes one executable binding of the current caller with an atomic argument group.
-    pub fn invoke_call(
+    pub fn workflow_graph(&self) -> Option<&crate::WorkflowGraph> {
+        self.workflow_graph.as_deref()
+    }
+
+    pub fn with_workflow_graph<T, E>(
         &mut self,
-        binding: crate::CallBindingId,
-        arguments: crate::CallArguments,
-    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
-        self.invoke_call_with_deadline(binding, arguments, None)
-    }
-
-    pub fn invoke_call_with_deadline(
-        &mut self,
-        binding: crate::CallBindingId,
-        arguments: crate::CallArguments,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
-        use crate::invocation::{DepthLimitSnafu, IdentityLimitSnafu, UnavailableSnafu};
-        use snafu::{OptionExt, ensure};
-        let dispatcher = self
-            .call_dispatcher
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .context(UnavailableSnafu)?;
-        let caller = self.current_node.clone().context(UnavailableSnafu)?;
-        ensure!(
-            self.invocation_path().len() < mf_telemetry::MAX_SCOPE_DEPTH,
-            DepthLimitSnafu
-        );
-        let deadline = self.effective_deadline(deadline);
-        self.check_call_limits(deadline)?;
-        let invocation = self
-            .call_sequence
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                value.checked_add(1).filter(|next| *next <= i64::MAX as u64)
-            })
-            .ok()
-            .context(IdentityLimitSnafu)?;
-        dispatcher.dispatch(
-            &caller,
-            crate::CallId {
-                binding,
-                invocation,
-            },
-            arguments,
-            self,
-            deadline,
-        )
-    }
-
-    /// The effective cooperative deadline inherited by nested work.
-    pub fn effective_deadline(
-        &self,
-        deadline: Option<std::time::Instant>,
-    ) -> Option<std::time::Instant> {
-        match (self.call_deadline, deadline) {
-            (Some(inherited), Some(local)) => Some(inherited.min(local)),
-            (inherited, local) => inherited.or(local),
-        }
-    }
-
-    pub(super) fn check_call_limits(
-        &self,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<(), crate::CallDispatchError> {
-        if let Some(source) = self.cancellation.failure() {
-            return Err(source).context(crate::invocation::CancelledSnafu);
-        }
-        snafu::ensure!(
-            deadline.is_none_or(|deadline| std::time::Instant::now() < deadline),
-            crate::invocation::DeadlineExceededSnafu
-        );
-        Ok(())
-    }
-
-    pub(super) fn run_directed_call(
-        &mut self,
-        id: crate::CallId,
-        target: &crate::NodeIdentity,
-        visibility: crate::OutputVisibility,
-        deadline: Option<std::time::Instant>,
-        run: impl FnOnce(&mut Self) -> Result<crate::CallOutcome, crate::CallDispatchError>,
-    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
-        use snafu::OptionExt;
-        let caller = self
-            .current_node
-            .as_ref()
-            .context(crate::invocation::UnavailableSnafu)?;
-        let body = self
-            .body_observation
-            .as_ref()
-            .map(|body| body.for_call(std::slice::from_ref(target)));
-        let mut child = self.fork_body(body);
-        child.observation = self.observation.clone();
-        child.call_dispatcher = self.call_dispatcher.clone();
-        child.call_interfaces = self.call_interfaces.clone();
-        child.outputs = self.outputs.fork_snapshot(Some(visibility));
-        child.call_deadline = deadline;
-        let binding = i64::try_from(id.binding.index())
-            .ok()
-            .and_then(|value| mf_telemetry::Count::try_from(value).ok())
-            .context(crate::invocation::IdentityLimitSnafu)?;
-        let invocation = i64::try_from(id.invocation)
-            .ok()
-            .and_then(|value| mf_telemetry::Count::try_from(value).ok())
-            .context(crate::invocation::IdentityLimitSnafu)?;
-        child.scope_prefix.push(LoopPathEntry::Invocation {
-            call_id: caller.to_string(),
-            binding,
-            target_id: target.id.clone(),
-            invocation,
-        });
-        let path = child.invocation_path();
-        if let Some(observation) = child
-            .observation
-            .as_mut()
-            .filter(|run| run.supports_loops())
-        {
-            observation.call_started(path.clone());
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut child)));
-        if let Some(observation) = child
-            .observation
-            .as_mut()
-            .filter(|run| run.supports_loops())
-        {
-            let failed = !matches!(&result, Ok(Ok(outcome)) if !matches!(outcome, crate::CallOutcome::Failed { .. }));
-            observation.call_finished(path, failed);
-        }
-        match result {
-            Ok(result) => result.map(|outcome| crate::CallResponse { id, outcome }),
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
-    }
-
-    /// Whether the active node has a live executable call scope.
-    pub fn can_invoke_calls(&self) -> bool {
-        self.current_node
-            .as_ref()
-            .is_some_and(|node| !self.call_interfaces.for_caller(node).is_empty())
-            && self
-                .call_dispatcher
-                .as_ref()
-                .and_then(Weak::upgrade)
-                .is_some()
-    }
-
-    /// The current caller's immutable interfaces. Outside a node invocation this is empty.
-    pub fn call_targets(&self) -> &[crate::CallInterface] {
-        self.current_node
-            .as_ref()
-            .map_or(&[], |node| self.call_interfaces.for_node(node))
-    }
-
-    /// Installs discovery data for one scope and restores its enclosing scope on every exit.
-    pub fn with_call_interfaces<T, E>(
-        &mut self,
-        interfaces: &crate::CallInterfaces,
+        graph: &Arc<crate::WorkflowGraph>,
         run: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, E> {
-        self.with_call_dispatcher(interfaces, None, run)
-    }
-
-    pub(super) fn with_call_dispatcher<T, E>(
-        &mut self,
-        interfaces: &crate::CallInterfaces,
-        dispatcher: Option<Weak<dyn crate::invocation::CallDispatcher>>,
-        run: impl FnOnce(&mut Self) -> Result<T, E>,
-    ) -> Result<T, E> {
-        if self.call_interfaces.is_empty()
-            && interfaces.is_empty()
-            && self.current_node.is_none()
-            && self.call_dispatcher.is_none()
-            && dispatcher.is_none()
+        if self
+            .workflow_graph
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, graph))
         {
             return run(self);
         }
-        let previous = std::mem::replace(&mut self.call_interfaces, interfaces.clone());
-        let previous_dispatcher = std::mem::replace(&mut self.call_dispatcher, dispatcher);
-        let node = self.current_node.take();
-        let guard = CallInterfaceGuard {
+        let previous = self.workflow_graph.replace(graph.clone());
+        let guard = WorkflowGraphGuard {
             context: self,
-            interfaces: previous,
-            node,
-            dispatcher: previous_dispatcher,
+            previous,
         };
         run(guard.context)
     }
 
-    pub(super) fn set_call_scope(
-        &mut self,
-        interfaces: crate::CallInterfaces,
-        dispatcher: Option<Weak<dyn crate::invocation::CallDispatcher>>,
-        sequence: Arc<AtomicU64>,
-    ) {
-        self.call_interfaces = interfaces;
-        self.call_dispatcher = dispatcher;
-        self.call_sequence = sequence;
+    pub(super) fn set_workflow_graph(&mut self, graph: Arc<crate::WorkflowGraph>) {
+        self.workflow_graph = Some(graph);
     }
 
     /// Identifies the executing node independently of optional observation.
@@ -468,7 +304,7 @@ impl ExecutionContext {
         &self,
         deadline: Option<std::time::Instant>,
     ) -> Result<(), crate::FutureExecutionError> {
-        crate::future_execution::check_limits(&self.cancellation, self.effective_deadline(deadline))
+        crate::future_execution::check_limits(&self.cancellation, deadline)
     }
 
     /// Drives an owned operation on the calling synchronous thread.
@@ -482,7 +318,7 @@ impl ExecutionContext {
         self.future_executor.execute(
             future,
             &self.cancellation,
-            self.effective_deadline(deadline),
+            deadline,
             self.worker_limit.get(),
         )
     }
@@ -528,10 +364,7 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
-            call_interfaces: self.call_interfaces.clone(),
-            call_dispatcher: self.call_dispatcher.clone(),
-            call_sequence: self.call_sequence.clone(),
-            call_deadline: self.call_deadline,
+            workflow_graph: self.workflow_graph.clone(),
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
             scope_prefix: self.scope_prefix.clone(),
@@ -590,6 +423,22 @@ impl ExecutionContext {
             }
         }
         Ok(outputs)
+    }
+
+    pub fn with_workflow_inputs<T>(
+        &mut self,
+        schema: &crate::WorkflowInputSchema,
+        arguments: crate::WorkflowArguments,
+        run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
+    ) -> Result<T, WorkflowRunError> {
+        let previous = std::mem::take(&mut self.inputs);
+        let guard = WorkflowInputsGuard {
+            context: self,
+            previous,
+        };
+        guard.context.inputs.set_arguments(arguments);
+        guard.context.inputs.bind_scoped(schema)?;
+        run(guard.context)
     }
 
     pub fn bind_workflow_inputs(
@@ -702,23 +551,6 @@ impl ExecutionContext {
         Ok(context)
     }
 
-    pub(super) fn capture_visible_outputs(
-        &self,
-        visibility: &crate::OutputVisibility,
-    ) -> ExecutionOutputs {
-        let mut snapshot = ExecutionOutputs::default();
-        snapshot.merge_visible(&self.outputs, visibility);
-        snapshot
-    }
-
-    pub(super) fn import_visible_outputs(
-        &mut self,
-        snapshot: &ExecutionOutputs,
-        visibility: &crate::OutputVisibility,
-    ) {
-        self.outputs.merge_visible(snapshot, visibility);
-    }
-
     pub fn fork_domain_snapshot(
         &self,
         observation: Option<RunObservation>,
@@ -740,10 +572,7 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
-            call_interfaces: self.call_interfaces.clone(),
-            call_dispatcher: self.call_dispatcher.clone(),
-            call_sequence: self.call_sequence.clone(),
-            call_deadline: self.call_deadline,
+            workflow_graph: self.workflow_graph.clone(),
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
@@ -885,10 +714,7 @@ impl ExecutionContext {
 
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
-        child.remaining_steps = self.remaining_steps.clone();
         child.cancellation = self.cancellation.clone();
-        child.call_sequence = self.call_sequence.clone();
-        child.call_deadline = self.call_deadline;
         child.worker_handle = self.worker_handle.clone();
         child.execution_workers = self.execution_workers.clone();
         child.worker_limit = self.worker_limit;
@@ -921,6 +747,7 @@ impl ExecutionContext {
             .as_ref()
             .map(|observation| observation.for_call(nodes));
         let mut child = self.fork_body(body_observation);
+        child.remaining_steps = self.remaining_steps.clone();
         child.observation = self.observation.clone();
         child
             .scope_prefix
@@ -1080,8 +907,7 @@ impl ExecutionContext {
             WorkflowRunError::NodeExecution { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Execution)
             }
-            WorkflowRunError::Context { definition_id, .. }
-            | WorkflowRunError::StepBudget { definition_id } => {
+            WorkflowRunError::Context { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Execution)
             }
             WorkflowRunError::WorkflowInputs { .. } => (None, FailurePhase::Dependency),
@@ -1163,8 +989,8 @@ impl ExecutionContext {
         let frame = self
             .scopes
             .last()
-            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                message: "scope source is outside an execution scope".into(),
+            .with_context(|| crate::NodeExecutionFailedSnafu {
+                message: "scope source is outside an execution scope",
             })?;
         let mut values = frame.variables.clone();
         values.insert("index".into(), Value::from(frame.index as i64));
@@ -1175,8 +1001,8 @@ impl ExecutionContext {
         let frame = self
             .scopes
             .last_mut()
-            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                message: "scope exit is outside an execution scope".into(),
+            .with_context(|| crate::NodeExecutionFailedSnafu {
+                message: "scope exit is outside an execution scope",
             })?;
         frame.exit_requested = true;
         if let Some(position) = self.current_position {
@@ -1197,14 +1023,14 @@ impl ExecutionContext {
         let frame = self
             .scopes
             .last()
-            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                message: "Loop assignment is outside a Loop frame".into(),
+            .with_context(|| crate::NodeExecutionFailedSnafu {
+                message: "Loop assignment is outside a Loop frame",
             })?;
         let value_type =
             frame
                 .types
                 .get(variable)
-                .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                .with_context(|| crate::NodeExecutionFailedSnafu {
                     message: format!("unknown Loop variable `{variable}`"),
                 })?;
         value_type
@@ -1588,92 +1414,6 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    struct EchoCall;
-    impl crate::invocation::CallDispatcher for EchoCall {
-        fn dispatch(
-            &self,
-            _: &crate::DefinitionId,
-            id: crate::CallId,
-            _: crate::CallArguments,
-            _: &mut ExecutionContext,
-            _: Option<std::time::Instant>,
-        ) -> Result<crate::CallResponse, crate::CallDispatchError> {
-            Ok(crate::CallResponse {
-                id,
-                outcome: crate::CallOutcome::Succeeded(Outputs::new()),
-            })
-        }
-    }
-
-    #[test]
-    fn directed_call_identity_depth_and_budget_limits_remain_typed() {
-        let owner: Arc<dyn crate::invocation::CallDispatcher> = Arc::new(EchoCall);
-        let mut context = ExecutionContext {
-            call_dispatcher: Some(Arc::downgrade(&owner)),
-            current_node: Some("caller".into()),
-            remaining_steps: StepBudget::new(1),
-            ..Default::default()
-        };
-        let binding = crate::CallBindingId::new(0);
-        assert_eq!(
-            context
-                .invoke_call(binding, Default::default())
-                .unwrap()
-                .id
-                .invocation,
-            0
-        );
-        let mut stream = context.fork_stream(None);
-        stream.current_node = Some("caller".into());
-        assert_eq!(
-            stream
-                .invoke_call(binding, Default::default())
-                .unwrap()
-                .id
-                .invocation,
-            1
-        );
-        context.call_sequence.store(u64::MAX, Ordering::Release);
-        assert!(matches!(
-            context.invoke_call(binding, Default::default()),
-            Err(crate::CallDispatchError::IdentityLimit)
-        ));
-        context.call_sequence.store(0, Ordering::Release);
-        context.scope_prefix = vec![
-            LoopPathEntry::Call {
-                call_id: "parent".into()
-            };
-            mf_telemetry::MAX_SCOPE_DEPTH
-        ];
-        assert!(matches!(
-            context.invoke_call(binding, Default::default()),
-            Err(crate::CallDispatchError::DepthLimit)
-        ));
-        context.reserve_step("caller").unwrap();
-        let error = context.reserve_step("target").unwrap_err();
-        assert!(matches!(error, WorkflowRunError::StepBudget { .. }));
-        assert!(error.is_terminal_control());
-        let wrapped = WorkflowRunError::NodeExecution {
-            definition_id: "caller".into(),
-            source: error.into(),
-        };
-        assert!(wrapped.is_terminal_control());
-    }
-
-    #[test]
-    fn nested_bodies_charge_the_parent_step_budget() {
-        let mut context = ExecutionContext {
-            remaining_steps: StepBudget::new(1),
-            ..Default::default()
-        };
-        let child = context.fork_body(None);
-        child.fork_body(None).reserve_step("nested").unwrap();
-        assert!(matches!(
-            context.reserve_step("parent"),
-            Err(WorkflowRunError::StepBudget { .. })
-        ));
-    }
-
     struct EmitNode(Outputs);
 
     #[test]
@@ -1887,11 +1627,12 @@ mod tests {
         contexts[0].remaining_steps.0.store(0, Ordering::Release);
         assert!(contexts[0].reserve_step("task").is_err());
         assert!(contexts[1].reserve_step("task").is_ok());
-        contexts[0]
-            .cancellation()
-            .cancel(crate::StreamError::Execution {
-                message: "first message cancelled".into(),
-            });
+        contexts[0].cancellation().cancel(
+            crate::StreamExecutionSnafu {
+                message: "first message cancelled",
+            }
+            .build(),
+        );
         assert!(contexts[0].execute_future(async {}, None).is_err());
         assert!(contexts[1].execute_future(async {}, None).is_ok());
         for (index, context) in contexts.iter().enumerate() {

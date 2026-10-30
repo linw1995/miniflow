@@ -113,7 +113,6 @@ use std::sync::Arc;
 
 type Clause = BTreeSet<(String, String)>;
 
-#[derive(Clone)]
 pub struct SuccessCondition {
     pub source: String,
     pub clauses: BTreeSet<Clause>,
@@ -187,7 +186,7 @@ fn bind_condition(clauses: BTreeSet<Clause>) -> Predicate {
     conjunction
 }
 
-pub fn bind_guards(id: String, conditions: Vec<SuccessCondition>) -> Guard {
+fn bind_guards(id: String, conditions: Vec<SuccessCondition>) -> Guard {
     let mut guard: Guard = Box::new(|_| Ok(BTreeSet::new()));
     for condition in conditions {
         let predicate = bind_condition(condition.clauses);

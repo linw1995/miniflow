@@ -5,14 +5,6 @@ use snafu::Snafu;
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
     #[snafu(
-        display(
-            "node `{definition_id}`: scheduled-step budget of {} exhausted",
-            crate::MAX_SCHEDULED_STEPS
-        ),
-        visibility(pub)
-    )]
-    StepBudget { definition_id: DefinitionId },
-    #[snafu(
         display("node `{definition_id}` requires successful node `{source_node}`: {source}"),
         visibility(pub)
     )]
@@ -83,40 +75,5 @@ pub enum WorkflowRunError {
 impl WorkflowRunError {
     pub(crate) fn is_output_error(&self) -> bool {
         matches!(self, Self::OutputType { .. } | Self::InvalidOutput { .. })
-    }
-}
-
-impl WorkflowRunError {
-    /// Terminal runtime controls must not become recoverable tool failures.
-    pub fn is_terminal_control(&self) -> bool {
-        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(self);
-        while let Some(error) = source {
-            if matches!(error.downcast_ref::<Self>(), Some(Self::StepBudget { .. })) {
-                return true;
-            }
-            if matches!(
-                error.downcast_ref::<crate::CallDispatchError>(),
-                Some(
-                    crate::CallDispatchError::DepthLimit
-                        | crate::CallDispatchError::IdentityLimit
-                        | crate::CallDispatchError::DeadlineExceeded
-                        | crate::CallDispatchError::Cancelled { .. }
-                )
-            ) {
-                return true;
-            }
-            #[cfg(feature = "async")]
-            if matches!(
-                error.downcast_ref::<crate::FutureExecutionError>(),
-                Some(
-                    crate::FutureExecutionError::DeadlineExceeded
-                        | crate::FutureExecutionError::Cancelled { .. }
-                )
-            ) {
-                return true;
-            }
-            source = error.source();
-        }
-        false
     }
 }

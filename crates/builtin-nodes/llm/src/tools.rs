@@ -1,7 +1,4 @@
-use mf_runtime::{
-    CallArguments, CallBindingId, CallInterface, CallParameter, ExecutionContext, ValueRef,
-    ValueSchema, ValueType,
-};
+use mf_runtime::{GraphInput, ValueRef, ValueSchema, ValueType, WorkflowGraph};
 use rig_core::completion::ToolDefinition;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -31,28 +28,225 @@ pub enum ToolSchemaError {
     },
     #[snafu(display("LLM tool declarations exceed the supported size or count"))]
     DeclarationsLimit,
+    #[snafu(display("tool output `{name}` must connect to one argument-mode Iteration"))]
+    Connection { name: String },
+    #[snafu(
+        display("connected tool metadata is unavailable outside workflow execution"),
+        visibility(pub)
+    )]
+    Unavailable,
+}
+
+impl From<ToolSchemaError> for mf_runtime::NodeExecutionError {
+    fn from(source: ToolSchemaError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
 }
 
 #[derive(Debug, Snafu)]
 pub enum ToolArgumentsError {
-    #[snafu(display("unknown tool name"))]
-    UnknownTool,
     #[snafu(display("tool arguments require the declared object shape"))]
     Shape,
     #[snafu(display("tool arguments exceed the size limit"))]
     Limit,
-    #[snafu(transparent)]
-    Contract {
-        source: mf_runtime::CallContractError,
+    #[snafu(display("tool argument `{parameter}`: {source}"))]
+    Argument {
+        parameter: String,
+        source: mf_runtime::TypeMismatch,
     },
 }
-
 #[derive(Debug, Snafu)]
 pub enum ToolEncodingError {
     #[snafu(display("tool data exceeds the size limit"))]
     Size,
     #[snafu(display("tool data could not be encoded"))]
     Json { source: serde_json::Error },
+}
+
+struct Parameter {
+    name: String,
+    input: String,
+    descriptor: GraphInput,
+}
+impl Parameter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn required(&self) -> bool {
+        self.descriptor.required
+    }
+    fn constraints(&self) -> &[ValueType] {
+        std::slice::from_ref(&self.descriptor.value_type)
+    }
+    fn schema_constraints(&self) -> impl Iterator<Item = &ValueSchema> {
+        self.descriptor.schema.iter()
+    }
+    fn is_secret(&self) -> bool {
+        self.descriptor.secret
+    }
+}
+struct Tool {
+    definition: ToolDefinition,
+    parameters: Vec<Parameter>,
+}
+pub struct ConnectedTools {
+    tools: BTreeMap<String, Tool>,
+}
+
+impl ConnectedTools {
+    pub fn new(
+        graph: &WorkflowGraph,
+        source: &str,
+        outputs: &[String],
+        descriptions: &BTreeMap<String, String>,
+    ) -> Result<Self, ToolSchemaError> {
+        ensure!(outputs.len() <= MAX_TOOL_CALLS, DeclarationsLimitSnafu);
+        let mut tools = BTreeMap::new();
+        for name in outputs {
+            ensure!(crate::call::valid_name(name), AliasSnafu { name });
+            let candidates: Vec<_> = graph
+                .connections
+                .iter()
+                .filter(|edge| {
+                    edge.from_node.as_str() == source
+                        && edge.from_output == *name
+                        && edge.to_input == "items"
+                })
+                .collect();
+            ensure!(candidates.len() == 1, ConnectionSnafu { name });
+            let target = &candidates[0].to_node;
+            let target_node = graph.nodes.get(target).context(ConnectionSnafu { name })?;
+            let body = target_node
+                .subgraph
+                .as_deref()
+                .context(ConnectionSnafu { name })?;
+            ensure!(
+                body.nodes.contains_key(&mf_runtime::DefinitionId::from(
+                    mf_runtime::ITERATION_INPUT_ID
+                )) && matches!(
+                    target_node.input_schemas.get("items"),
+                    Some(ValueSchema::List(_))
+                ),
+                ConnectionSnafu { name }
+            );
+            let external: BTreeSet<_> = graph
+                .connections
+                .iter()
+                .filter(|edge| edge.to_node == *target && edge.to_input != "items")
+                .map(|edge| edge.to_input.as_str())
+                .collect();
+            let inputs: Vec<_> = body
+                .inputs
+                .iter()
+                .filter(|(input, _)| !external.contains(input.as_str()))
+                .collect();
+            ensure!(inputs.len() <= 256, DeclarationsLimitSnafu);
+            let mut counts = BTreeMap::new();
+            for (input, _) in &inputs {
+                let origin = body.input_origin(input).context(ConnectionSnafu { name })?;
+                *counts.entry(origin.port.clone()).or_insert(0usize) += 1;
+            }
+            let mut parameters = Vec::new();
+            for (input, descriptor) in inputs {
+                let origin = body.input_origin(input).context(ConnectionSnafu { name })?;
+                let alias = if counts[&origin.port] == 1 {
+                    origin.port.clone()
+                } else {
+                    input.clone()
+                };
+                parameters.push(Parameter {
+                    name: alias,
+                    input: input.clone(),
+                    descriptor: descriptor.clone(),
+                });
+            }
+            parameters.sort_by(|a, b| a.name.cmp(&b.name));
+            let definition = ToolDefinition {
+                name: name.clone(),
+                description: descriptions.get(name).cloned().unwrap_or_default(),
+                parameters: parameters_schema(name, &parameters)?,
+            };
+            tools.insert(
+                name.clone(),
+                Tool {
+                    definition,
+                    parameters,
+                },
+            );
+        }
+        let definitions: Vec<_> = tools.values().map(|tool| &tool.definition).collect();
+        ensure!(
+            bounded_json(&definitions, MAX_TOOL_SCHEMA_BYTES).is_ok(),
+            DeclarationsLimitSnafu
+        );
+        Ok(Self { tools })
+    }
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .values()
+            .map(|tool| tool.definition.clone())
+            .collect()
+    }
+    pub fn batches(
+        &self,
+        calls: &[crate::ToolCall],
+    ) -> Result<BTreeMap<String, ValueRef>, ToolArgumentsError> {
+        let mut groups: BTreeMap<String, Vec<ValueRef>> = self
+            .tools
+            .keys()
+            .map(|name| (name.clone(), Vec::new()))
+            .collect();
+        for call in calls {
+            let Some(tool) = self.tools.get(&call.name) else {
+                continue;
+            };
+            ensure!(
+                bounded_json(&call.arguments, MAX_TOOL_ARGUMENT_BYTES).is_ok(),
+                LimitSnafu
+            );
+            let object = call.arguments.as_object().context(ShapeSnafu)?;
+            ensure!(
+                object.keys().all(|name| tool
+                    .parameters
+                    .iter()
+                    .any(|parameter| parameter.name == name.as_ref())),
+                ShapeSnafu
+            );
+            let mut arguments = Vec::new();
+            for parameter in &tool.parameters {
+                let Some(value) = object.get(parameter.name.as_str()) else {
+                    ensure!(!parameter.required(), ShapeSnafu);
+                    continue;
+                };
+                parameter
+                    .descriptor
+                    .value_type
+                    .validate_shared(value)
+                    .context(ArgumentSnafu {
+                        parameter: &parameter.name,
+                    })?;
+                if let Some(schema) = &parameter.descriptor.schema {
+                    schema.validate_shared(value).context(ArgumentSnafu {
+                        parameter: &parameter.name,
+                    })?;
+                }
+                let value = if parameter.is_secret() {
+                    value.clone().into_secret()
+                } else {
+                    value.clone()
+                };
+                arguments.push((parameter.input.clone().into(), value));
+            }
+            groups
+                .get_mut(&call.name)
+                .unwrap()
+                .push(ValueRef::object(arguments));
+        }
+        Ok(groups
+            .into_iter()
+            .map(|(name, values)| (name, ValueRef::array(values)))
+            .collect())
+    }
 }
 
 struct LimitedBytes {
@@ -88,172 +282,7 @@ pub fn bounded_json<T: Serialize + ?Sized>(
     Ok(String::from_utf8(output.bytes).expect("JSON serialization produces UTF-8"))
 }
 
-struct Tool {
-    interface: CallInterface,
-    namespaced: bool,
-    definition: ToolDefinition,
-}
-pub struct ToolCatalog {
-    tools: BTreeMap<String, Tool>,
-}
-impl ToolCatalog {
-    pub fn new(context: &ExecutionContext) -> Result<Self, ToolSchemaError> {
-        let interfaces = context.call_targets();
-        ensure!(interfaces.len() <= MAX_TOOL_CALLS, DeclarationsLimitSnafu);
-        let mut tools = BTreeMap::new();
-        let mut schema_bytes = 2usize;
-        for interface in interfaces {
-            let name = interface.name();
-            ensure!(
-                !name.is_empty()
-                    && name.len() <= 64
-                    && name
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')),
-                AliasSnafu { name }
-            );
-            ensure!(
-                interface.outputs().len() + interface.defaults().len() <= 256,
-                DeclarationsLimitSnafu
-            );
-            let output_names: BTreeSet<_> = interface
-                .outputs()
-                .iter()
-                .map(CallParameter::name)
-                .collect();
-            let namespaced = interface
-                .defaults()
-                .iter()
-                .any(|parameter| output_names.contains(parameter.name()));
-            let parameters = if namespaced {
-                let outputs = parameters(name, interface.outputs())?;
-                let defaults = parameters(name, interface.defaults())?;
-                let required: Vec<_> = [
-                    ("outputs", interface.outputs()),
-                    ("defaults", interface.defaults()),
-                ]
-                .into_iter()
-                .filter(|(_, fields)| fields.iter().any(CallParameter::required))
-                .map(|(name, _)| name)
-                .collect();
-                json!({"type":"object","properties":{"outputs":outputs,"defaults":defaults},"required":required,"additionalProperties":false})
-            } else {
-                let all: Vec<_> = interface
-                    .outputs()
-                    .iter()
-                    .chain(interface.defaults())
-                    .cloned()
-                    .collect();
-                parameters(name, &all)?
-            };
-            let definition = ToolDefinition {
-                name: name.into(),
-                description: interface
-                    .description()
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or(name)
-                    .into(),
-                parameters,
-            };
-            let encoded = bounded_json(
-                &definition,
-                MAX_TOOL_SCHEMA_BYTES.saturating_sub(schema_bytes),
-            )
-            .ok()
-            .context(DeclarationsLimitSnafu)?;
-            schema_bytes += encoded.len() + 1;
-            tools.insert(
-                name.into(),
-                Tool {
-                    interface: interface.clone(),
-                    namespaced,
-                    definition,
-                },
-            );
-        }
-        let catalog = Self { tools };
-        ensure!(
-            bounded_json(&catalog.definitions(), MAX_TOOL_SCHEMA_BYTES).is_ok(),
-            DeclarationsLimitSnafu
-        );
-        Ok(catalog)
-    }
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .values()
-            .map(|tool| tool.definition.clone())
-            .collect()
-    }
-    pub fn arguments(
-        &self,
-        name: &str,
-        value: &ValueRef,
-    ) -> Result<(CallBindingId, CallArguments), ToolArgumentsError> {
-        ensure!(
-            bounded_json(value, MAX_TOOL_ARGUMENT_BYTES).is_ok(),
-            LimitSnafu
-        );
-        let tool = self.tools.get(name).context(UnknownToolSnafu)?;
-        let object = value.as_object().context(ShapeSnafu)?;
-        let mut arguments = CallArguments::default();
-        let convert = |name: &str, value: &ValueRef, parameters: &[CallParameter]| {
-            let value = value.clone();
-            if parameters
-                .iter()
-                .any(|parameter| parameter.name() == name && parameter.is_secret())
-            {
-                value.into_secret()
-            } else {
-                value
-            }
-        };
-        if tool.namespaced {
-            ensure!(
-                object
-                    .keys()
-                    .all(|key| matches!(key.as_ref(), "outputs" | "defaults")),
-                ShapeSnafu
-            );
-            for (namespace, parameters, values) in [
-                ("outputs", tool.interface.outputs(), &mut arguments.outputs),
-                (
-                    "defaults",
-                    tool.interface.defaults(),
-                    &mut arguments.defaults,
-                ),
-            ] {
-                if let Some(object) = object.get(namespace) {
-                    for (name, value) in object.as_object().context(ShapeSnafu)? {
-                        values.insert(name.to_string(), convert(name, value, parameters));
-                    }
-                }
-            }
-        } else {
-            for (name, value) in object {
-                if tool
-                    .interface
-                    .outputs()
-                    .iter()
-                    .any(|parameter| parameter.name() == name.as_ref())
-                {
-                    arguments.outputs.insert(
-                        name.to_string(),
-                        convert(name, value, tool.interface.outputs()),
-                    );
-                } else {
-                    arguments.defaults.insert(
-                        name.to_string(),
-                        convert(name, value, tool.interface.defaults()),
-                    );
-                }
-            }
-        }
-        tool.interface.validate_decoded_arguments(&arguments)?;
-        Ok((tool.interface.id(), arguments))
-    }
-}
-
-fn parameters(tool: &str, parameters: &[CallParameter]) -> Result<Value, ToolSchemaError> {
+fn parameters_schema(tool: &str, parameters: &[Parameter]) -> Result<Value, ToolSchemaError> {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for parameter in parameters {
@@ -440,16 +469,6 @@ fn lower_schema(
     })
 }
 
-pub fn tool_result(outputs: mf_runtime::Outputs) -> Result<String, ToolEncodingError> {
-    let value = ValueRef::object(
-        outputs
-            .into_iter()
-            .map(|(name, value)| (name.into(), value)),
-    )
-    .redacted();
-    bounded_json(&value, MAX_TOOL_RESULT_BYTES)
-}
-
 pub fn validate_wire_arguments(reply: &Value) -> Result<(), crate::LlmExecutionError> {
     let mut count = 0usize;
     let mut bytes = 0usize;
@@ -497,256 +516,176 @@ pub fn validate_wire_arguments(reply: &Value) -> Result<(), crate::LlmExecutionE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{SchemaField, SchemaOpacity};
-
-    #[test]
-    fn schemas_preserve_closed_shapes_presence_null_and_descriptions() {
-        let fields = BTreeMap::from([
-            (
-                "required".into(),
-                SchemaField {
-                    schema: ValueSchema::Type(ValueType::String),
-                    required: true,
-                },
-            ),
-            (
-                "optional".into(),
-                SchemaField {
-                    schema: ValueSchema::Nullable(Box::new(ValueSchema::Enum(vec![
-                        "yes".into(),
-                        "no".into(),
-                    ]))),
-                    required: false,
-                },
-            ),
-        ]);
-        let schema = ValueSchema::Described {
-            description: "A structured argument".into(),
-            schema: Box::new(ValueSchema::Tagged {
-                tag: "kind".into(),
-                variants: BTreeMap::from([("record".into(), fields)]),
-            }),
-        };
-        let lowered = lower_schema(&schema, "tool", "arg").unwrap();
-        assert_eq!(lowered["description"], "A structured argument");
-        let record = &lowered["oneOf"][0];
-        assert_eq!(record["additionalProperties"], false);
-        assert_eq!(record["required"], json!(["required", "kind"]));
-        assert_eq!(
-            record["properties"]["kind"],
-            json!({"const":"record","type":"string"})
-        );
-        assert_eq!(
-            record["properties"]["optional"]["anyOf"],
-            json!([{"type":"null"},{"type":"string","enum":["yes","no"]}])
-        );
-    }
-
-    #[test]
-    fn unknown_and_inexact_schemas_fail_closed_and_encoding_never_truncates() {
-        for reason in [
-            SchemaOpacity::Codec,
-            SchemaOpacity::Recursive,
-            SchemaOpacity::Limit,
-        ] {
-            let schema = ValueSchema::Opaque {
-                value_type: ValueType::Object,
-                reason,
-            };
-            assert!(lower_schema(&schema, "tool", "arg").is_err());
+    use mf_runtime::{DefinitionId, EdgeDefinition, GraphNode, NodePorts};
+    use std::sync::Arc;
+    fn node() -> GraphNode {
+        GraphNode {
+            ports: NodePorts::default(),
+            stream_outputs: vec![],
+            input_schemas: BTreeMap::new(),
+            secret_inputs: BTreeSet::new(),
+            exclusive_outputs: vec![],
+            subgraph: None,
         }
-        assert!(lower_type(&ValueType::Float32, "tool", "arg").is_err());
-        assert_eq!(bounded_json(&"abcd", 6).unwrap(), "\"abcd\"");
-        assert!(matches!(
-            bounded_json(&"abcd", 5),
-            Err(ToolEncodingError::Size)
-        ));
-        let result = tool_result(mf_runtime::Outputs::from([(
-            "data".into(),
-            ValueRef::object([(
-                "token".into(),
-                ValueRef::from("private-value").into_secret(),
-            )]),
-        )]))
-        .unwrap();
-        assert!(!result.contains("private-value"));
-        assert!(result.contains("[REDACTED]"));
     }
-    #[test]
-    fn primitive_and_collection_schemas_keep_numeric_bounds_and_nested_constraints() {
-        for (kind, expected) in [
-            (ValueType::Null, "null"),
-            (ValueType::Boolean, "boolean"),
-            (ValueType::Number, "number"),
-            (ValueType::String, "string"),
-            (ValueType::Array, "array"),
-            (ValueType::Object, "object"),
-            (ValueType::Int64, "integer"),
-            (ValueType::Uint64, "integer"),
-            (ValueType::Usize, "integer"),
-        ] {
-            assert_eq!(lower_type(&kind, "tool", "arg").unwrap()["type"], expected);
-        }
-        assert_eq!(
-            lower_type(&ValueType::Int64, "tool", "arg").unwrap()["minimum"],
-            json!(i64::MIN)
-        );
-        assert_eq!(
-            lower_type(&ValueType::Uint64, "tool", "arg").unwrap()["maximum"],
-            json!(u64::MAX)
-        );
-        let exact = lower_type(&ValueType::Float64, "tool", "arg").unwrap();
-        assert_eq!(exact["type"], "number");
-        assert_eq!(exact["anyOf"][1]["maximum"], json!(1_u64 << 53));
-        assert_eq!(exact["anyOf"][4]["multipleOf"], 2);
-        let nested = ValueType::Nullable(Box::new(ValueType::List(Box::new(ValueType::Map(
-            Box::new(ValueType::Boolean),
-        )))));
-        assert_eq!(
-            lower_type(&nested, "tool", "arg").unwrap(),
-            json!({"anyOf":[{"type":"null"},{"type":"array","items":{"type":"object","additionalProperties":{"type":"boolean"}}}]})
-        );
-        assert_eq!(
-            lower_type(&ValueType::Any, "tool", "arg").unwrap(),
-            json!({})
-        );
-        let schema = ValueSchema::List(Box::new(ValueSchema::Map(Box::new(ValueSchema::Enum(
-            vec!["one".into()],
-        )))));
-        assert_eq!(
-            lower_schema(&schema, "tool", "arg").unwrap()["items"]["additionalProperties"]["enum"],
-            json!(["one"])
-        );
-        assert!(lower_schema(&ValueSchema::Enum(vec![]), "tool", "arg").is_err());
-        assert!(
-            lower_schema(
-                &ValueSchema::Tagged {
-                    tag: "kind".into(),
-                    variants: BTreeMap::new()
-                },
-                "tool",
-                "arg"
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn public_secrets_remain_marked_in_both_argument_namespaces_and_history() {
-        use mf_runtime::{
-            CallInputSource, NodeId, PortSpec, ResolvedCallBinding, ResolvedCallInput,
-        };
-        for namespaced in [false, true] {
-            let mut inputs = vec![ResolvedCallInput {
-                port: PortSpec::new("token", ValueType::String, true),
-                source: CallInputSource::Output(PortSpec::new("key", ValueType::String, true)),
-                secret: true,
-                schema: None,
-            }];
-            if namespaced {
-                inputs.push(ResolvedCallInput {
-                    port: PortSpec::new("key", ValueType::String, true),
-                    source: CallInputSource::Default,
-                    secret: true,
-                    schema: None,
-                });
-            }
-            let interface = ResolvedCallBinding {
-                id: CallBindingId::new(0),
-                name: "search".into(),
-                description: None,
-                caller: NodeId::new(0),
-                target: NodeId::new(1),
-                inputs,
-                dependencies: vec![],
-                success_dependencies: vec![],
-                prerequisites: vec![],
-            }
-            .interface();
-            let interfaces =
-                mf_runtime::CallInterfaces::new([("caller".into(), vec![interface])]).unwrap();
-            let mut context = ExecutionContext::default();
-            let catalog = context
-                .with_call_interfaces(&interfaces, |ctx| {
-                    ctx.with_node("caller".into(), |ctx| ToolCatalog::new(ctx))
-                })
-                .unwrap();
-            let definitions: Vec<_> = catalog
-                .definitions()
+    fn graph() -> WorkflowGraph {
+        let body = WorkflowGraph {
+            inputs: ["amount", "factor"]
                 .into_iter()
-                .map(|tool| crate::ToolDefinition {
-                    name: tool.name,
-                    description: tool.description,
-                    input_schema: tool.parameters.into(),
+                .map(|port| {
+                    (
+                        format!("calculate.{port}"),
+                        GraphInput {
+                            node: "calculate".into(),
+                            port: port.into(),
+                            value_type: ValueType::Int64,
+                            required: true,
+                            schema: None,
+                            secret: false,
+                        },
+                    )
                 })
-                .collect();
-            let mark = |value: &Value| {
-                let mut call = crate::ToolCall {
-                    id: "a".into(),
-                    name: "search".into(),
-                    arguments: value.clone().into(),
-                };
-                call.mark_arguments(&definitions);
-                call.arguments
-            };
-            let value = if namespaced {
-                json!({"outputs":{"key":"first-secret"},"defaults":{"key":"second-secret"}})
-            } else {
-                json!({"key":"first-secret"})
-            };
-            let (_, arguments) = catalog.arguments("search", &value.clone().into()).unwrap();
-            assert!(arguments.outputs["key"].is_secret());
-            if namespaced {
-                assert!(arguments.defaults["key"].is_secret());
-            }
-            let supplied = ValueRef::from(value.clone()).into_secret();
-            let (_, shared) = catalog.arguments("search", &supplied).unwrap();
-            let original = if namespaced {
-                &supplied["outputs"]["key"]
-            } else {
-                &supplied["key"]
-            };
-            assert!(shared.outputs["key"].ptr_eq(original));
-            let history = serde_json::to_value(mark(&value).redacted()).unwrap();
-            assert!(!history.to_string().contains("first-secret"));
-            assert!(!history.to_string().contains("second-secret"));
-            let bad = if namespaced {
-                json!({"outputs":"invalid-secret"})
-            } else {
-                json!({"key":false})
-            };
-            assert!(catalog.arguments("search", &bad.clone().into()).is_err());
-            assert!(
-                !serde_json::to_string(&mark(&bad).redacted())
-                    .unwrap()
-                    .contains("invalid-secret")
-            );
-            assert!(catalog.arguments("search", &ValueRef::null()).is_err());
-            assert_eq!(mark(&json!(null)), ValueRef::null());
+                .collect(),
+            nodes: BTreeMap::from([("calculate".into(), node())]),
+            ..Default::default()
+        };
+        let mut batch = node();
+        batch.subgraph = Some(Arc::new(body));
+        Arc::make_mut(batch.subgraph.as_mut().unwrap())
+            .nodes
+            .insert(mf_runtime::ITERATION_INPUT_ID.into(), node());
+        batch
+            .input_schemas
+            .insert("items".into(), ValueSchema::Object(BTreeMap::new()).list());
+        WorkflowGraph {
+            nodes: BTreeMap::from([("batch".into(), batch)]),
+            connections: vec![
+                EdgeDefinition {
+                    exclusive: false,
+                    from_node: "model".into(),
+                    from_output: "multiply".into(),
+                    to_node: "batch".into(),
+                    to_input: "items".into(),
+                },
+                EdgeDefinition {
+                    exclusive: false,
+                    from_node: "config".into(),
+                    from_output: "value".into(),
+                    to_node: "batch".into(),
+                    to_input: "calculate.factor".into(),
+                },
+            ],
+            ..Default::default()
+        }
+    }
+    fn catalog(graph: &WorkflowGraph) -> ConnectedTools {
+        ConnectedTools::new(graph, "model", &["multiply".into()], &BTreeMap::new()).unwrap()
+    }
+    fn call(id: &str, args: Value) -> crate::ToolCall {
+        crate::ToolCall {
+            id: id.into(),
+            name: "multiply".into(),
+            arguments: args.into(),
         }
     }
     #[test]
-    fn wire_arguments_enforce_individual_batch_and_count_limits_before_sdk_decoding() {
-        let wire = |arguments: Vec<String>| json!({"choices":[{"message":{"tool_calls":arguments.into_iter().map(|arguments| json!({"function":{"arguments":arguments}})).collect::<Vec<_>>()}}]});
+    fn real_connections_hide_shared_inputs_and_generate_normal_workflow_argument_records() {
+        let tools = catalog(&graph());
+        let definitions = tools.definitions();
+        let properties = &definitions[0].parameters["properties"];
+        assert!(properties.get("amount").is_some() && properties.get("factor").is_none());
+        let batches = tools
+            .batches(&[
+                call("first", json!({"amount":2})),
+                call("second", json!({"amount":4})),
+            ])
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&batches["multiply"]).unwrap(),
+            json!([{"calculate.amount":2},{"calculate.amount":4}])
+        );
+    }
+    #[test]
+    fn optional_parameters_and_sensitivity_are_preserved_in_the_data_outputs() {
+        let mut graph = graph();
+        let body = Arc::make_mut(
+            graph
+                .nodes
+                .get_mut(&DefinitionId::from("batch"))
+                .unwrap()
+                .subgraph
+                .as_mut()
+                .unwrap(),
+        );
+        let input = body.inputs.get_mut("calculate.amount").unwrap();
+        input.required = false;
+        input.secret = true;
+        let tools = catalog(&graph);
+        assert_eq!(
+            tools.definitions()[0].parameters["properties"]["amount"]["writeOnly"],
+            true
+        );
+        assert!(
+            tools.definitions()[0].parameters["required"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let batches = tools
+            .batches(&[
+                call("first", json!({})),
+                call("second", json!({"amount":2})),
+            ])
+            .unwrap();
+        assert!(
+            batches["multiply"].as_array().unwrap()[1]
+                .as_object()
+                .unwrap()["calculate.amount"]
+                .is_secret()
+        );
+    }
+    #[test]
+    fn unknown_missing_and_invalid_arguments_do_not_publish_partial_batches() {
+        let tools = catalog(&graph());
+        for args in [
+            json!({}),
+            json!({"amount":null}),
+            json!({"amount":"bad"}),
+            json!({"amount":2,"factor":99}),
+        ] {
+            assert!(
+                tools
+                    .batches(&[call("valid", json!({"amount":1})), call("invalid", args)])
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn missing_or_ambiguous_normal_connections_fail_before_requesting_a_model() {
+        let mut graph = graph();
+        graph.connections.clear();
+        assert!(
+            ConnectedTools::new(&graph, "model", &["multiply".into()], &BTreeMap::new()).is_err()
+        );
+        graph.connections = vec![
+            EdgeDefinition {
+                exclusive: false,
+                from_node: "model".into(),
+                from_output: "multiply".into(),
+                to_node: "batch".into(),
+                to_input: "items".into()
+            };
+            2
+        ];
+        assert!(
+            ConnectedTools::new(&graph, "model", &["multiply".into()], &BTreeMap::new()).is_err()
+        );
+    }
+    #[test]
+    fn wire_argument_budgets_and_duplicate_json_keys_remain_checked() {
+        let wire = |arguments: Vec<String>| json!({"choices":[{"message":{"tool_calls":arguments.into_iter().map(|arguments|json!({"function":{"arguments":arguments}})).collect::<Vec<_>>()}}]});
         assert!(validate_wire_arguments(&wire(vec!["{}".into(); MAX_TOOL_CALLS])).is_ok());
-        let excessive_count =
-            validate_wire_arguments(&wire(vec!["{}".into(); MAX_TOOL_CALLS + 1])).unwrap_err();
-        assert!(excessive_count.to_string().contains("batch count"));
-        let oversized = serde_json::to_string(&"x".repeat(MAX_TOOL_ARGUMENT_BYTES)).unwrap();
-        assert!(
-            validate_wire_arguments(&wire(vec![oversized]))
-                .unwrap_err()
-                .to_string()
-                .contains("argument bytes")
-        );
-        let bounded = serde_json::to_string(&"x".repeat(MAX_TOOL_ARGUMENT_BYTES - 2)).unwrap();
-        assert!(validate_wire_arguments(&wire(vec![bounded.clone(); 4])).is_ok());
-        assert!(
-            validate_wire_arguments(&wire(vec![bounded; 5]))
-                .unwrap_err()
-                .to_string()
-                .contains("batch argument bytes")
-        );
+        assert!(validate_wire_arguments(&wire(vec!["{}".into(); MAX_TOOL_CALLS + 1])).is_err());
         assert!(validate_wire_arguments(&wire(vec!["{\"key\":1,\"key\":2}".into()])).is_err());
     }
 }

@@ -1,10 +1,24 @@
-use crate::compiler::{InvalidIterationSnafu, IterationBodySnafu, IterationConfigurationSnafu};
+use crate::compiler::{IterationBodySnafu, IterationConfigurationSnafu, IterationValidationSnafu};
 use crate::{NodeDefinition, WorkflowCompileError, WorkflowDefinition, WorkflowOutputDefinition};
 use mf_runtime::{
     EXIT_LOOP_KIND, ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationConfig,
     LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID,
 };
-use snafu::ResultExt;
+use snafu::{ResultExt, Snafu, ensure};
+
+#[derive(Debug, Snafu)]
+pub enum IterationValidationError {
+    #[snafu(display("Iteration child streams require version 2026-10-28"))]
+    ChildStreamVersion,
+    #[snafu(display("Iteration stream names must be nonblank and distinct from results"))]
+    InvalidStreamName,
+    #[snafu(display("body node ID `{node}` is reserved"))]
+    ReservedNode { node: crate::DefinitionId },
+    #[snafu(display("body node `{node}` uses an unsupported nested or internal kind"))]
+    NestedIteration { node: crate::DefinitionId },
+    #[snafu(display("body node `{node}` uses an unsupported Loop construct"))]
+    LoopConstruct { node: crate::DefinitionId },
+}
 
 pub fn parse_config(node: &NodeDefinition) -> Result<IterationConfig, WorkflowCompileError> {
     serde_json::from_value(node.config.clone()).context(IterationConfigurationSnafu {
@@ -15,43 +29,46 @@ pub fn parse_config(node: &NodeDefinition) -> Result<IterationConfig, WorkflowCo
 pub fn body_definition(
     parent: &WorkflowDefinition,
     config: &IterationConfig,
-) -> Result<WorkflowDefinition, String> {
-    if !config.stream_outputs.is_empty() && !parent.version.supports_child_streams() {
-        return Err("Iteration child streams require version 2026-10-28".into());
-    }
-    if config
-        .stream_outputs
-        .keys()
-        .any(|name| name.trim().is_empty() || name == "results")
-    {
-        return Err("Iteration stream names must be nonblank and distinct from results".into());
-    }
+) -> Result<WorkflowDefinition, IterationValidationError> {
+    ensure!(
+        config.stream_outputs.is_empty() || parent.version.supports_child_streams(),
+        ChildStreamVersionSnafu
+    );
+    ensure!(
+        !config
+            .stream_outputs
+            .keys()
+            .any(|name| name.trim().is_empty() || name == "results"),
+        InvalidStreamNameSnafu
+    );
     for node in &config.body.nodes {
-        if node.id.as_str() == ITERATION_INPUT_ID {
-            return Err(format!("body node ID `{ITERATION_INPUT_ID}` is reserved"));
-        }
-        if node.kind == ITERATION_KIND || node.kind == ITERATION_INPUT_KIND {
-            return Err(format!(
-                "body node `{}` uses an unsupported nested or internal kind",
-                node.id
-            ));
-        }
-        if matches!(
-            node.kind.as_str(),
-            LOOP_KIND | LOOP_ASSIGN_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
-        ) || node.loop_definition.is_some()
-        {
-            return Err(format!(
-                "body node `{}` uses an unsupported Loop construct",
-                node.id
-            ));
-        }
+        ensure!(
+            node.id.as_str() != ITERATION_INPUT_ID,
+            ReservedNodeSnafu {
+                node: node.id.clone()
+            }
+        );
+        ensure!(
+            node.kind != ITERATION_KIND && node.kind != ITERATION_INPUT_KIND,
+            NestedIterationSnafu {
+                node: node.id.clone()
+            }
+        );
+        ensure!(
+            !matches!(
+                node.kind.as_str(),
+                LOOP_KIND | LOOP_ASSIGN_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
+            ) && node.loop_definition.is_none(),
+            LoopConstructSnafu {
+                node: node.id.clone()
+            }
+        );
     }
     let mut nodes = Vec::with_capacity(config.body.nodes.len() + 1);
     nodes.push(NodeDefinition {
         id: ITERATION_INPUT_ID.into(),
         kind: ITERATION_INPUT_KIND.into(),
-        config: serde_json::json!({}),
+        config: serde_json::json!({"input_mode": config.input_mode}),
         loop_definition: None,
     });
     nodes.extend(config.body.nodes.iter().cloned());
@@ -59,7 +76,6 @@ pub fn body_definition(
         version: parent.version,
         execution: None,
         flows: Default::default(),
-        calls: config.body.calls.clone(),
         dependencies: parent.dependencies.clone(),
         nodes,
         edges: config.body.edges.clone(),
@@ -95,12 +111,8 @@ pub fn normalize_config(
             }
         );
     }
-    let body = body_definition(parent, &config).map_err(|message| {
-        InvalidIterationSnafu {
-            definition_id: node.id.clone(),
-            message,
-        }
-        .build()
+    let body = body_definition(parent, &config).context(IterationValidationSnafu {
+        definition_id: node.id.clone(),
     })?;
     let order = crate::structural_order(&body).context(IterationBodySnafu {
         definition_id: node.id.clone(),
@@ -113,7 +125,6 @@ pub fn normalize_config(
     normalized
         .nodes
         .retain(|node| node.id.as_str() != ITERATION_INPUT_ID);
-    config.body.calls = normalized.calls;
     config.body.nodes = normalized.nodes;
     config.body.edges = normalized.edges;
     config.body.control_edges = normalized.control_edges;

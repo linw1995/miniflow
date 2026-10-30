@@ -281,7 +281,6 @@ fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
         mode: mf_telemetry::description::ExecutionMode::Single,
     });
     description.loop_bodies = vec![LoopBodyDescription {
-        call_targets: Vec::new(),
         path: vec!["call".into()],
         nodes: description.nodes.clone(),
         data_edges: description.data_edges.clone(),
@@ -425,7 +424,6 @@ fn loop_graph() -> WorkflowDescription {
         execution_order: vec!["repeat".into()],
         execution: None,
         loop_bodies: vec![LoopBodyDescription {
-            call_targets: Vec::new(),
             order_edges: Vec::new(),
             path: vec!["repeat".into()],
             nodes: vec![

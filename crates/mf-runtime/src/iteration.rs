@@ -25,9 +25,24 @@ pub enum IterationErrorPolicy {
     RemoveFailed,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IterationInputMode {
+    #[default]
+    Item,
+    Arguments,
+}
+impl IterationInputMode {
+    fn is_item(&self) -> bool {
+        matches!(self, Self::Item)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IterationConfig {
+    #[serde(default, skip_serializing_if = "IterationInputMode::is_item")]
+    pub input_mode: IterationInputMode,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stream_outputs: BTreeMap<String, crate::OutputReferenceDefinition>,
     #[serde(default)]
@@ -40,8 +55,6 @@ pub struct IterationConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IterationBodyDefinition {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub calls: crate::CallDefinitions,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,

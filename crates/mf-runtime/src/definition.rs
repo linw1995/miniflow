@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -48,7 +48,6 @@ pub struct WorkflowDefinition {
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub flows: BTreeMap<String, FlowSource>,
-    pub calls: crate::CallDefinitions,
     pub nodes: Vec<NodeDefinition>,
     pub edges: Vec<EdgeDefinition>,
     pub control_edges: Vec<ControlEdgeDefinition>,
@@ -73,8 +72,6 @@ struct DefinitionFields {
     pub dependencies: BTreeMap<String, NodeDependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flows: BTreeMap<String, FlowSource>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub calls: crate::CallDefinitions,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -95,10 +92,6 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 }
 
 impl WorkflowDefinition {
-    pub fn has_directed_calls(&self) -> bool {
-        !self.calls.is_empty() || self.nodes.iter().any(NodeDefinition::has_directed_calls)
-    }
-
     pub fn has_order_edges(&self) -> bool {
         !self.order_edges.is_empty() || self.nodes.iter().any(NodeDefinition::has_order_edges)
     }
@@ -135,10 +128,6 @@ pub enum WorkflowDefinitionVersion {
 
 impl WorkflowDefinitionVersion {
     pub const CURRENT: Self = Self::V2026_10_28;
-
-    pub fn supports_directed_calls(self) -> bool {
-        matches!(self, Self::V2026_10_28)
-    }
 
     pub fn supports_child_streams(self) -> bool {
         matches!(self, Self::V2026_10_28)
@@ -204,18 +193,6 @@ pub struct NodeDefinition {
 }
 
 impl NodeDefinition {
-    fn has_directed_calls(&self) -> bool {
-        self.loop_definition.as_ref().is_some_and(|definition| {
-            !definition.body.calls.is_empty()
-                || definition
-                    .body
-                    .nodes
-                    .iter()
-                    .any(NodeDefinition::has_directed_calls)
-        }) || (self.kind == crate::ITERATION_KIND && json_scope_has_calls(&self.config["body"]))
-            || (self.kind == CALL_KIND && json_scope_has_calls(&self.config["definition"]))
-    }
-
     pub fn has_order_edges(&self) -> bool {
         self.loop_definition
             .as_ref()
@@ -264,8 +241,6 @@ pub struct LoopVariableDefinition {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopBodyDefinition {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub calls: crate::CallDefinitions,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -275,24 +250,6 @@ pub struct LoopBodyDefinition {
     pub order_edges: Vec<OrderEdgeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<ClusterDefinition>,
-}
-
-fn json_scope_has_calls(value: &Value) -> bool {
-    value
-        .get("calls")
-        .is_some_and(|calls| calls.as_object().is_none_or(|calls| !calls.is_empty()))
-        || value
-            .get("nodes")
-            .and_then(Value::as_array)
-            .is_some_and(|nodes| {
-                nodes.iter().any(|node| {
-                    json_scope_has_calls(&node["loop"]["body"])
-                        || (node["kind"] == crate::ITERATION_KIND
-                            && json_scope_has_calls(&node["config"]["body"]))
-                        || (node["kind"] == CALL_KIND
-                            && json_scope_has_calls(&node["config"]["definition"]))
-                })
-            })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,44 +417,61 @@ fn enabled() -> bool {
     true
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+pub enum NodeDependencyError {
+    #[snafu(display("package must be a nonempty Cargo package name"))]
+    InvalidPackage,
+    #[snafu(display("select exactly one source: version, git with rev, or path"))]
+    InvalidSources,
+    #[snafu(display("git must not be empty"))]
+    EmptyGit,
+    #[snafu(display("rev must be a full Git commit hash"))]
+    InvalidRevision,
+    #[snafu(display("rev requires git"))]
+    RevisionWithoutGit,
+    #[snafu(display("version must not be empty"))]
+    EmptyVersion,
+    #[snafu(display("path must not be empty"))]
+    EmptyPath,
+    #[snafu(display("features must not contain empty names"))]
+    EmptyFeature,
+}
+
 impl NodeDependency {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.package.is_empty()
-            || !self
-                .package
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-        {
-            return Err("package must be a nonempty Cargo package name".into());
-        }
+    pub fn validate(&self) -> Result<(), NodeDependencyError> {
+        ensure!(
+            !self.package.is_empty()
+                && self
+                    .package
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
+            InvalidPackageSnafu
+        );
         let sources = usize::from(self.version.is_some())
             + usize::from(self.git.is_some())
             + usize::from(self.path.is_some());
-        if sources != 1 {
-            return Err("select exactly one source: version, git with rev, or path".into());
-        }
+        ensure!(sources == 1, InvalidSourcesSnafu);
         if let Some(git) = &self.git {
-            if git.trim().is_empty() {
-                return Err("git must not be empty".into());
-            }
+            ensure!(!git.trim().is_empty(), EmptyGitSnafu);
             let valid = self.rev.as_ref().is_some_and(|rev| {
                 (rev.len() == 40 || rev.len() == 64) && rev.bytes().all(|c| c.is_ascii_hexdigit())
             });
-            if !valid {
-                return Err("rev must be a full Git commit hash".into());
-            }
-        } else if self.rev.is_some() {
-            return Err("rev requires git".into());
+            ensure!(valid, InvalidRevisionSnafu);
+        } else {
+            ensure!(self.rev.is_none(), RevisionWithoutGitSnafu);
         }
-        if self.version.as_ref().is_some_and(|v| v.trim().is_empty()) {
-            return Err("version must not be empty".into());
-        }
-        if self.path.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
-            return Err("path must not be empty".into());
-        }
-        if self.features.iter().any(|f| f.trim().is_empty()) {
-            return Err("features must not contain empty names".into());
-        }
+        ensure!(
+            !self.version.as_ref().is_some_and(|v| v.trim().is_empty()),
+            EmptyVersionSnafu
+        );
+        ensure!(
+            !self.path.as_ref().is_some_and(|p| p.as_os_str().is_empty()),
+            EmptyPathSnafu
+        );
+        ensure!(
+            !self.features.iter().any(|f| f.trim().is_empty()),
+            EmptyFeatureSnafu
+        );
         Ok(())
     }
 }

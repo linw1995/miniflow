@@ -657,7 +657,7 @@ fn composed_conversation_compiles_without_application_nodes() {
 }
 
 #[test]
-fn directed_llm_tools_match_memory_and_generated_finite_and_native_execution() {
+fn connected_tool_batches_follow_workflow_dataflow_in_memory_and_generated_runners() {
     fn stable(mut values: Vec<Value>) -> Vec<Value> {
         for value in &mut values {
             for usage in value["usages"].as_array_mut().unwrap() {
@@ -671,7 +671,7 @@ fn directed_llm_tools_match_memory_and_generated_finite_and_native_execution() {
     for native in [false, true] {
         for limit in [1, 4] {
             let tool = Reply::json(
-                json!({"id":"first","object":"chat.completion","created":0,"model":"example-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}),
+                json!({"id":"first","object":"chat.completion","created":0,"model":"example-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"multiply","arguments":"{\"amount\":21}"}},{"id":"b","type":"function","function":{"name":"multiply","arguments":"{\"amount\":7}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}),
             );
             let replies = if limit == 1 {
                 vec![tool.clone(), tool]
@@ -707,7 +707,7 @@ fn directed_llm_tools_match_memory_and_generated_finite_and_native_execution() {
             let output = &memory[0];
             let calls = if limit == 1 { 1 } else { 2 };
             assert_eq!(output["usages"].as_array().unwrap().len(), calls);
-            assert_eq!(output["history"].as_array().unwrap().len(), calls + 2);
+            assert_eq!(output["history"].as_array().unwrap().len(), calls + 3);
             if limit == 1 {
                 assert_eq!(output["status"], "failed");
                 assert_eq!(output["error"], "Tool round limit reached");
@@ -736,6 +736,10 @@ fn directed_llm_tools_match_memory_and_generated_finite_and_native_execution() {
                     let result: Value =
                         serde_json::from_str(messages[2]["content"].as_str().unwrap()).unwrap();
                     assert_eq!(result, json!({"content":"The product is 42"}));
+                    assert_eq!(messages[3]["tool_call_id"], "b");
+                    let result: Value =
+                        serde_json::from_str(messages[3]["content"].as_str().unwrap()).unwrap();
+                    assert_eq!(result, json!({"content":"The product is 14"}));
                 }
             }
         }

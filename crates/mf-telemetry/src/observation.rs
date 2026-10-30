@@ -413,12 +413,6 @@ impl RunObservation {
             return None;
         }
         let description = self.description.as_ref()?;
-        description.validate_scope_path(&path).ok()?;
-        if let Some(crate::event::ScopePathEntry::Invocation { target_id, .. }) = path.last()
-            && target_id != id
-        {
-            return None;
-        }
         let static_path: Vec<_> = path
             .iter()
             .map(|entry| entry.node_id().to_owned())

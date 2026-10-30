@@ -1,5 +1,3 @@
-mod call;
-mod call_interface;
 mod cancellation;
 mod config_template;
 mod context;
@@ -10,7 +8,6 @@ mod execution_outputs;
 mod flow;
 #[cfg(feature = "async")]
 mod future_execution;
-mod invocation;
 mod iteration;
 mod loop_node;
 mod node;
@@ -33,15 +30,10 @@ mod typed_outputs;
 mod value;
 mod value_schema;
 mod worker;
+mod workflow_graph;
 mod workflow_inputs;
 mod workflow_manifest;
 
-pub use call::{
-    CallArguments, CallBinding, CallBindingId, CallContractError, CallDefinition, CallDefinitions,
-    CallId, CallInputDefaults, CallInputSource, CallOutcome, CallRequest, CallResponse,
-    ResolvedCallBinding, ResolvedCallInput,
-};
-pub use call_interface::{CallInterface, CallInterfaceError, CallInterfaces, CallParameter};
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
@@ -57,8 +49,9 @@ pub use definition::{
     InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
     LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
     MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
-    NodeDependency, OrderEdgeDefinition, OutputReferenceDefinition, WorkflowDefinition,
-    WorkflowDefinitionVersion, WorkflowOutputDefinition, validate_exclusive_inputs,
+    NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
+    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{
@@ -73,15 +66,14 @@ pub use flow::{
 pub use future_execution::FutureExecutionError;
 #[doc(hidden)]
 pub use inventory::submit as __submit_builtin_flow;
-pub use invocation::{CallDispatchError, CallGuard, PreparedCall};
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
-    IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
-    iteration_input_flow_node,
+    IterationConfig, IterationErrorPolicy, IterationInputMode, IterationMode,
+    IterationResultDefinition, iteration_input_flow_node,
 };
 pub use loop_node::{
-    loop_variable_types, prepared_loop_assign, prepared_loop_exit, prepared_loop_source_types,
-    prepared_scope_source,
+    LoopVariableError, loop_variable_types, prepared_loop_assign, prepared_loop_exit,
+    prepared_loop_source_types, prepared_scope_source,
 };
 pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{NodeIdentity, ScopePathEntry, SkipCause};
@@ -94,8 +86,9 @@ pub use node::{
     NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
     NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
-    TypeCompatibility, TypeDepthError, TypeMismatch, TypeMismatchDetails, TypedTaskNode, ValueType,
-    deserialize_config, encode_typed_result, execute_typed_task, output_id, port_names_match,
+    TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch, TypeMismatchDetails,
+    TypedTaskNode, ValueType, decode_node_inputs, deserialize_config, encode_typed_result,
+    execute_typed_task, output_id, port_names_match, verify_generated_graph,
     verify_generated_metadata,
 };
 pub use node::{
@@ -117,8 +110,9 @@ pub use stream::{
     execute_typed_event,
 };
 pub use stream_instance::{
-    MessageId, MonotonicClock, ProducerSnafu as StreamProducerSnafu, StreamClock, StreamDelivery,
-    StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
+    ExecutionSnafu as StreamExecutionSnafu, MessageId, MonotonicClock,
+    ProducerSnafu as StreamProducerSnafu, StreamClock, StreamDelivery, StreamError, StreamInstance,
+    StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
 pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{
@@ -143,9 +137,6 @@ pub use typed_outputs::{
 };
 
 pub use value::{ValueKind, ValueRef};
-pub use value_schema::{
-    SchemaContractError, SchemaField, SchemaOpacity, ValueSchema, ValueSchemaContext,
-};
 pub use worker::{
     ExecutionWorkers, RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError,
 };
@@ -177,3 +168,8 @@ pub use workflow_manifest::{
     MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES,
     WorkflowManifest, WorkflowManifestError, WorkflowManifestVersion, describe_definition,
 };
+
+pub use value_schema::{
+    SchemaContractError, SchemaField, SchemaOpacity, ValueSchema, ValueSchemaContext,
+};
+pub use workflow_graph::{GraphInput, GraphNode, WorkflowGraph};

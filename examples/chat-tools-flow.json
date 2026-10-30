@@ -179,13 +179,6 @@
         "body": {
           "nodes": [
             {
-              "id": "catalog",
-              "kind": "builtin.tool_catalog",
-              "config": {
-                "source": "dispatch"
-              }
-            },
-            {
               "id": "chat",
               "kind": "builtin.llm",
               "config": {
@@ -198,7 +191,14 @@
                 "api_key": {
                   "$ref": "%loop.api_key"
                 },
-                "capture_errors": true
+                "capture_errors": true,
+                "outputs": [
+                  "multiply"
+                ],
+                "descriptions": {
+                  "multiply": "Multiply an integer by the configured factor."
+                },
+                "max_tool_calls": 8
               },
               "inputs": {
                 "messages": {
@@ -206,23 +206,100 @@
                     "node": "%loop",
                     "port": "messages"
                   }
-                },
-                "tools": {
+                }
+              }
+            },
+            {
+              "id": "multiply_batch",
+              "kind": "builtin.iteration",
+              "config": {
+                "input_mode": "arguments",
+                "body": {
+                  "nodes": [
+                    {
+                      "id": "multiply_flow",
+                      "kind": "workflow.call",
+                      "config": {
+                        "flow": "multiply",
+                        "definition": {
+                          "version": "2026-10-28",
+                          "dependencies": {},
+                          "nodes": [
+                            {
+                              "id": "multiply",
+                              "kind": "builtin.code",
+                              "config": {
+                                "language": "cel",
+                                "inputs": {
+                                  "amount": "int",
+                                  "factor": "int"
+                                },
+                                "code": {
+                                  "result": "amount * factor"
+                                }
+                              }
+                            }
+                          ],
+                          "outputs": [
+                            {
+                              "name": "product",
+                              "node": "multiply",
+                              "port": "result"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "id": "format_result",
+                      "kind": "builtin.code",
+                      "config": {
+                        "language": "cel",
+                        "inputs": {
+                          "product": "int"
+                        },
+                        "code": {
+                          "value": "{'content': 'The product is ' + string(product)}"
+                        }
+                      },
+                      "inputs": {
+                        "product": {
+                          "from": {
+                            "node": "multiply_flow",
+                            "port": "product"
+                          }
+                        }
+                      }
+                    }
+                  ],
+                  "result": {
+                    "node": "format_result",
+                    "port": "value"
+                  }
+                }
+              },
+              "inputs": {
+                "items": {
                   "from": {
-                    "node": "catalog",
-                    "port": "tools"
+                    "node": "chat",
+                    "port": "multiply"
+                  }
+                },
+                "multiply_flow.multiply.factor": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "factor"
                   }
                 }
               }
             },
             {
-              "id": "dispatch",
-              "kind": "builtin.tool_dispatch",
+              "id": "tool_results",
+              "kind": "builtin.tool_results",
               "config": {
-                "max_tool_calls": 8,
-                "outputs": {
-                  "amount": "int"
-                }
+                "inputs": [
+                  "multiply"
+                ]
               },
               "inputs": {
                 "outcome": {
@@ -236,74 +313,11 @@
                     "node": "chat",
                     "port": "tool_calls"
                   }
-                }
-              }
-            },
-            {
-              "id": "multiply_flow",
-              "kind": "workflow.call",
-              "config": {
-                "flow": "multiply",
-                "definition": {
-                  "version": "2026-10-28",
-                  "dependencies": {},
-                  "nodes": [
-                    {
-                      "id": "multiply",
-                      "kind": "builtin.code",
-                      "config": {
-                        "language": "cel",
-                        "inputs": {
-                          "amount": "int",
-                          "factor": "int"
-                        },
-                        "code": {
-                          "result": "amount * factor"
-                        }
-                      }
-                    },
-                    {
-                      "id": "format_result",
-                      "kind": "builtin.code",
-                      "config": {
-                        "language": "cel",
-                        "inputs": {
-                          "product": "int"
-                        },
-                        "code": {
-                          "text": "'The product is ' + string(product)"
-                        }
-                      },
-                      "inputs": {
-                        "product": {
-                          "from": {
-                            "node": "multiply",
-                            "port": "result"
-                          }
-                        }
-                      }
-                    }
-                  ],
-                  "outputs": [
-                    {
-                      "name": "content",
-                      "node": "format_result",
-                      "port": "text"
-                    }
-                  ]
-                }
-              },
-              "inputs": {
-                "multiply.amount": {
-                  "from": {
-                    "node": "dispatch",
-                    "port": "amount"
-                  }
                 },
-                "multiply.factor": {
+                "multiply": {
                   "from": {
-                    "node": "%loop",
-                    "port": "factor"
+                    "node": "multiply_batch",
+                    "port": "results"
                   }
                 }
               }
@@ -373,7 +387,7 @@
                 },
                 "results": {
                   "from": {
-                    "node": "dispatch",
+                    "node": "tool_results",
                     "port": "tool_results"
                   }
                 }
@@ -469,15 +483,7 @@
                 }
               }
             }
-          ],
-          "calls": {
-            "dispatch": {
-              "multiply": {
-                "target": "multiply_flow",
-                "description": "Multiply an integer by the configured factor."
-              }
-            }
-          }
+          ]
         }
       },
       "inputs": {

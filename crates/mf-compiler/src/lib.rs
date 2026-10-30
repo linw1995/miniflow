@@ -1,5 +1,3 @@
-mod call_bindings;
-pub use call_bindings::CallBindingError;
 mod calls;
 mod flow_sources;
 pub use flow_sources::{
@@ -18,6 +16,7 @@ mod embedding;
 #[cfg(feature = "codegen")]
 mod inputs;
 mod iteration;
+pub use iteration::IterationValidationError;
 mod loops;
 #[cfg(feature = "codegen")]
 mod pipeline;

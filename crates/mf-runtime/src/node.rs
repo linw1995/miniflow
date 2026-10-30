@@ -161,16 +161,30 @@ pub struct TypeDepthError {
     pub maximum: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+pub enum TypeDescriptorError {
+    #[snafu(display("type nesting depth exceeds {}", source.maximum))]
+    DescriptorDepth { source: TypeDepthError },
+    #[snafu(display("unsupported type `{name}`"))]
+    UnsupportedName { name: String },
+    #[snafu(display("unsupported type constructor `{kind}`"))]
+    UnsupportedConstructor { kind: String },
+    #[snafu(display("type must be a scalar, list, or map descriptor"))]
+    InvalidDescriptor,
+}
+
 impl ValueType {
     pub const MAX_DEPTH: usize = 16;
 
-    pub fn parse_descriptor(value: &Value) -> Result<Self, String> {
-        fn parse(value: &Value, depth: usize) -> Result<ValueType, String> {
+    pub fn parse_descriptor(value: &Value) -> Result<Self, TypeDescriptorError> {
+        fn parse(value: &Value, depth: usize) -> Result<ValueType, TypeDescriptorError> {
             if depth > ValueType::MAX_DEPTH {
-                return Err(format!(
-                    "type nesting depth exceeds {}",
-                    ValueType::MAX_DEPTH
-                ));
+                return TypeDepthSnafu {
+                    depth,
+                    maximum: ValueType::MAX_DEPTH,
+                }
+                .fail()
+                .context(DescriptorDepthSnafu);
             }
             match value {
                 Value::String(name) => match name.as_str() {
@@ -186,7 +200,7 @@ impl ValueType {
                     "string" => Ok(ValueType::String),
                     "array" => Ok(ValueType::Array),
                     "object" => Ok(ValueType::Object),
-                    _ => Err(format!("unsupported type `{name}`")),
+                    _ => UnsupportedNameSnafu { name }.fail(),
                 },
                 Value::Object(fields) if fields.len() == 1 => {
                     let (kind, inner) = fields.iter().next().unwrap();
@@ -194,10 +208,10 @@ impl ValueType {
                         "list" => Ok(ValueType::List(Box::new(parse(inner, depth + 1)?))),
                         "map" => Ok(ValueType::Map(Box::new(parse(inner, depth + 1)?))),
                         "nullable" => Ok(ValueType::Nullable(Box::new(parse(inner, depth + 1)?))),
-                        _ => Err(format!("unsupported type constructor `{kind}`")),
+                        _ => UnsupportedConstructorSnafu { kind }.fail(),
                     }
                 }
-                _ => Err("type must be a scalar, list, or map descriptor".into()),
+                _ => InvalidDescriptorSnafu.fail(),
             }
         }
         parse(value, 1)
@@ -479,7 +493,7 @@ impl PortSpec {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NodePorts {
     pub inputs: Vec<PortSpec>,
     pub outputs: Vec<PortSpec>,
@@ -663,8 +677,6 @@ pub enum NodeBuildError {
     InputSchemas { source: crate::SchemaContractError },
     #[snafu(display("input schemas must be reflected from the typed input contract"))]
     ConflictingInputSchemas,
-    #[snafu(transparent)]
-    CallContract { source: crate::CallContractError },
     #[snafu(display("could not serialize generated metadata: {source}"))]
     GenerationMetadata { source: serde_json::Error },
     #[snafu(display("prepared metadata differs from the compiled typed generation contract"))]
@@ -690,8 +702,6 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
-    #[snafu(transparent)]
-    CallContract { source: crate::CallContractError },
     #[snafu(display("could not decode typed node inputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
     InputDecode {
         #[snafu(source(from(crate::InputDecodeError, Box::new)))]
@@ -812,12 +822,16 @@ struct TypedTaskAdapter<N>(N);
 /// Like direct `TaskNode::execute`, this does not schedule the task or publish its
 /// outputs. Providers retaining a dynamic task interface can delegate here to
 /// share the runtime adapter's decoding and error context.
+pub fn decode_node_inputs<I: crate::NodeInputs>(inputs: Inputs) -> Result<I, NodeExecutionError> {
+    I::from_inputs(inputs).context(InputDecodeSnafu)
+}
+
 pub fn execute_typed_task<N: TypedTaskNode + ?Sized>(
     task: &N,
     inputs: Inputs,
     ctx: &mut crate::ExecutionContext,
 ) -> Result<crate::NodeResult, NodeExecutionError> {
-    let input = <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)?;
+    let input = decode_node_inputs::<N::Input>(inputs)?;
     let result = task.execute(input, ctx)?;
     encode_typed_result(result)
 }
@@ -851,9 +865,9 @@ pub struct NodeMetadata {
     /// Codec refinements beyond coarse port types; never contains runtime values or defaults.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub input_schemas: std::collections::BTreeMap<String, crate::ValueSchema>,
-    /// Reads another node's prepared call interfaces without acquiring its dispatch capability.
+    /// Static contracts of the node's ordinary prepared workflow body.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub call_interface_source: Option<crate::DefinitionId>,
+    pub subgraph: Option<std::sync::Arc<crate::WorkflowGraph>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stream_outputs: Vec<PortSpec>,
     /// At most one listed output may produce a value per task invocation.
@@ -1060,7 +1074,7 @@ where
     }
 
     pub fn decode_inputs(&self, inputs: Inputs) -> Result<N::Input, NodeExecutionError> {
-        <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)
+        decode_node_inputs::<N::Input>(inputs)
     }
 
     pub fn input_from_fields(&self, fields: <N::Input as TypedNodeValue>::Fields) -> N::Input {
@@ -1097,6 +1111,14 @@ pub const fn port_names_match(actual: &[&str], expected: &[&str]) -> bool {
         index += 1;
     }
     true
+}
+
+pub fn verify_generated_graph(
+    actual: &crate::WorkflowGraph,
+    expected: &crate::WorkflowGraph,
+) -> Result<(), NodeBuildError> {
+    ensure!(actual == expected, GenerationMetadataMismatchSnafu);
+    Ok(())
 }
 
 pub fn verify_generated_metadata(
@@ -1377,9 +1399,10 @@ impl NodeRegistration {
     pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
             NodeFactory::Plain(factory) => factory(config),
-            NodeFactory::Subgraph(_) => Err(NodeBuildError::InvalidSubgraph {
+            NodeFactory::Subgraph(_) => crate::NodeInvalidSubgraphSnafu {
                 message: format!("node `{}` requires a prepared body", self.kind),
-            }),
+            }
+            .fail(),
         }
     }
 
@@ -1391,10 +1414,16 @@ impl NodeRegistration {
         body: crate::PreparedSubgraph,
     ) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
-            NodeFactory::Subgraph(factory) => factory(id, config, options, body),
-            NodeFactory::Plain(_) => Err(NodeBuildError::InvalidSubgraph {
+            NodeFactory::Subgraph(factory) => {
+                let graph = body.graph.clone();
+                let mut prepared = factory(id, config, options, body)?;
+                prepared.metadata.subgraph = graph;
+                Ok(prepared)
+            }
+            NodeFactory::Plain(_) => crate::NodeInvalidSubgraphSnafu {
                 message: format!("node `{}` does not accept a prepared body", self.kind),
-            }),
+            }
+            .fail(),
         }
     }
 }

@@ -116,11 +116,12 @@ fn parallel_streams_arrive_before_earlier_items_and_cancellation_stops_the_scope
         assert_eq!(first.output().outputs["increment"], json!(2));
         first.acknowledge().unwrap();
         if cancel {
-            instance
-                .cancellation()
-                .cancel(mf_runtime::StreamError::Execution {
-                    message: "cancel iteration after prefix".into(),
-                });
+            instance.cancellation().cancel(
+                mf_runtime::StreamExecutionSnafu {
+                    message: "cancel iteration after prefix",
+                }
+                .build(),
+            );
             assert!(
                 instance
                     .join()
@@ -312,9 +313,10 @@ fn delivery_failure_is_fatal_under_every_item_policy_and_borrowed_sinks_stay_loc
             assert_eq!(std::thread::current().id(), self.caller);
             self.count.set(self.count.get() + 1);
             assert!(!self.panic, "sink panic sentinel");
-            Err(mf_runtime::StreamError::Execution {
-                message: "delivery sentinel".into(),
-            })
+            mf_runtime::StreamExecutionSnafu {
+                message: "delivery sentinel",
+            }
+            .fail()
         }
     }
     for mode in ["sequential", "parallel"] {

@@ -43,11 +43,6 @@ pub enum WorkflowCompileError {
         source: mf_runtime::SchemaContractError,
     },
     #[snafu(transparent)]
-    DirectedCalls {
-        #[snafu(source(from(crate::CallBindingError, Box::new)))]
-        source: Box<crate::CallBindingError>,
-    },
-    #[snafu(transparent)]
     FlowResolution { source: crate::FlowResolutionError },
     #[snafu(
         display("invalid Flow call `{definition_id}`: {message}"),
@@ -258,6 +253,11 @@ pub enum WorkflowCompileError {
     #[snafu(display("invalid Loop at {path}: {message}"), visibility(pub))]
     InvalidLoop { path: String, message: String },
     #[snafu(display("invalid Loop at {path}: {source}"), visibility(pub))]
+    LoopVariables {
+        path: String,
+        source: mf_runtime::LoopVariableError,
+    },
+    #[snafu(display("invalid Loop at {path}: {source}"), visibility(pub))]
     LoopAssignmentConfiguration {
         path: String,
         source: serde_json::Error,
@@ -275,6 +275,14 @@ pub enum WorkflowCompileError {
         path: String,
         #[snafu(source(from(WorkflowCompileError, Box::new)))]
         source: Box<WorkflowCompileError>,
+    },
+    #[snafu(
+        display("invalid iteration node `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    IterationValidation {
+        definition_id: DefinitionId,
+        source: crate::iteration::IterationValidationError,
     },
     #[snafu(
         display("invalid iteration node `{definition_id}`: {source}"),
@@ -334,7 +342,7 @@ impl TypeInferenceState {
                 .inputs
                 .iter()
                 .find(|port| port.name == input_name)
-                .ok_or_else(|| WorkflowCompileError::InvalidNodeMetadata {
+                .with_context(|| InvalidNodeMetadataSnafu {
                     definition_id: id.clone(),
                     message: format!("unknown input `{input_name}` in type binding"),
                 })?;
@@ -348,7 +356,7 @@ impl TypeInferenceState {
                         .expect("input output source")
                         .to_owned(),
                 ))
-                .ok_or_else(|| WorkflowCompileError::UnavailableInferredOutput {
+                .with_context(|| UnavailableInferredOutputSnafu {
                     from_node: source_id.clone(),
                     from_output: dependency
                         .source_output()
@@ -371,15 +379,21 @@ impl TypeInferenceState {
                         input_type: Box::new(input.value_type.clone()),
                     }
                 })?;
-            } else {
-                validate_connection_types(
-                    &source_id,
-                    dependency.source_output().expect("input output source"),
-                    &source.value_type,
-                    id,
-                    input_name,
-                    &input.value_type,
-                )?;
+            } else if source.value_type.compatibility_with(&input.value_type)
+                == TypeCompatibility::Incompatible
+            {
+                return IncompatiblePortTypesSnafu {
+                    from_node: source_id,
+                    from_output: dependency
+                        .source_output()
+                        .expect("input output source")
+                        .to_owned(),
+                    output_type: Box::new(source.value_type.clone()),
+                    to_node: id.clone(),
+                    to_input: input_name.to_owned(),
+                    input_type: Box::new(input.value_type.clone()),
+                }
+                .fail();
             }
             let value_type = if source.value_type.is_assignable_to(&input.value_type) {
                 source.value_type.clone()
@@ -479,13 +493,14 @@ impl TypeInferenceState {
             } else if fact.value_type.compatibility_with(&declared)
                 == TypeCompatibility::Incompatible
             {
-                return Err(WorkflowCompileError::InvalidNodeMetadata {
+                return InvalidNodeMetadataSnafu {
                     definition_id: id.clone(),
                     message: format!(
                         "output `{}` forwards {} but declares {declared}",
                         output.name, fact.value_type
                     ),
-                });
+                }
+                .fail();
             }
             if !fact.value_type.is_assignable_to(&declared) {
                 fact.value_type = declared;
@@ -496,28 +511,6 @@ impl TypeInferenceState {
         }
         Ok(())
     }
-}
-
-pub fn validate_connection_types(
-    from_node: &DefinitionId,
-    from_output: &str,
-    output_type: &ValueType,
-    to_node: &DefinitionId,
-    to_input: &str,
-    input_type: &ValueType,
-) -> Result<(), WorkflowCompileError> {
-    ensure!(
-        output_type.compatibility_with(input_type) != TypeCompatibility::Incompatible,
-        IncompatiblePortTypesSnafu {
-            from_node: from_node.clone(),
-            from_output,
-            output_type: Box::new(output_type.clone()),
-            to_node: to_node.clone(),
-            to_input,
-            input_type: Box::new(input_type.clone()),
-        }
-    );
-    Ok(())
 }
 
 pub fn validate_definition(
@@ -556,8 +549,9 @@ pub fn prepare_definition_with_layouts(
 pub type ScopeLayouts = BTreeMap<
     Vec<DefinitionId>,
     (
-        crate::construction::PreparedScopeLayout,
+        mf_runtime::ExecutionDomains,
         Vec<mf_runtime::SubgraphStreamOutput>,
+        std::sync::Arc<mf_runtime::WorkflowGraph>,
     ),
 >;
 
@@ -609,22 +603,16 @@ fn prepare_graph(
     let incoming = incoming_dependencies(definition);
     let startup = definition.version.supports_startup_inputs()
         && enclosing.is_none()
-        && !allow_iteration_input;
-    let call_targets = definition
-        .calls
-        .values()
-        .flat_map(|aliases| aliases.values().map(|call| call.target.clone()))
-        .collect::<BTreeSet<_>>();
-    validate_base_metadata(definition, &nodes, &incoming, startup, &call_targets)?;
+        && (!allow_iteration_input
+            || definition.nodes.iter().any(|node| {
+                node.kind == ITERATION_INPUT_KIND && node.config["input_mode"] == "arguments"
+            }));
+    validate_base_metadata(definition, &nodes, &incoming, startup)?;
     if startup {
         crate::workflow_input_schema(
-            nodes.iter().map(|node| {
-                (
-                    node,
-                    !incoming.contains_key(node.definition_id.as_str())
-                        && !call_targets.contains(&node.definition_id),
-                )
-            }),
+            nodes
+                .iter()
+                .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
             |node, input| {
                 definition
                     .edges
@@ -709,7 +697,6 @@ fn validate_base_metadata(
     nodes: &[FlowNode],
     incoming: &BTreeMap<&str, Vec<ExecutionDependency<'_>>>,
     startup: bool,
-    call_targets: &BTreeSet<DefinitionId>,
 ) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
@@ -903,9 +890,7 @@ fn validate_base_metadata(
 
     for node in &definition.nodes {
         let registration = registrations[&node.id];
-        // Call-owned inputs are validated after explicit external bindings have been resolved.
-        if call_targets.contains(&node.id) || (startup && !incoming.contains_key(node.id.as_str()))
-        {
+        if startup && !incoming.contains_key(node.id.as_str()) {
             continue;
         }
         for port in registration
@@ -950,7 +935,6 @@ pub fn topological_order(
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
-    crate::call_bindings::declarations(definition)?;
     if definition.has_order_edges() && !definition.version.supports_node_success_edges() {
         return InvalidSuccessDependencySnafu {
             message: "node-success edges require version 2026-10-19",
@@ -1113,12 +1097,13 @@ fn validate_clusters(
 }
 
 fn control_error(edge: &crate::ControlEdgeDefinition, message: &str) -> WorkflowCompileError {
-    WorkflowCompileError::InvalidControlEdge {
+    InvalidControlEdgeSnafu {
         from_node: edge.from_node.clone(),
         from_output: edge.from_output.to_string(),
         to_node: edge.to_node.clone(),
-        message: message.into(),
+        message,
     }
+    .build()
 }
 
 fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, DefinitionId)> {
@@ -1138,7 +1123,6 @@ fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, 
                 .iter()
                 .map(|edge| (edge.from_node.clone(), edge.to_node.clone())),
         )
-        .chain(crate::call_bindings::readiness_pairs(definition))
         .collect()
 }
 
@@ -1260,8 +1244,7 @@ pub fn compile_resolved_definition(
     )
     .and_then(|flow| flow.with_control_edges(definition.control_edges.clone()))
     .and_then(|flow| flow.with_order_edges(definition.order_edges.clone()))
-    .context(FlowConstructionSnafu)?
-    .with_declared_calls(&definition)?;
+    .context(FlowConstructionSnafu)?;
 
     if let Some(execution) = &definition.execution {
         flow.into_stream(execution.clone())
@@ -1378,14 +1361,12 @@ pub fn normalize_plan(
     outputs.sort_by(|left, right| {
         (&left.name, &left.node, &left.port).cmp(&(&right.name, &right.node, &right.port))
     });
-    let calls = definition.calls.clone();
 
     Ok(CompiledWorkflow {
         definition: WorkflowDefinition {
             version: definition.version,
             execution: definition.execution.clone(),
             flows: definition.flows.clone(),
-            calls,
             dependencies: definition.dependencies.clone(),
             nodes,
             edges,
@@ -1416,7 +1397,6 @@ fn normalize_loop_node(
         .nodes
         .retain(|node| node.id.as_str() != crate::LOOP_SOURCE_ID);
     loop_definition.body.nodes = normalized.nodes;
-    loop_definition.body.calls = normalized.calls;
     loop_definition.body.edges = normalized.edges;
     loop_definition.body.control_edges = normalized.control_edges;
     loop_definition.body.order_edges = normalized.order_edges;
@@ -1457,8 +1437,7 @@ pub fn prepare_compiled_plan(
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
     .and_then(|flow| flow.with_order_edges(plan.definition.order_edges.clone()))
-    .context(FlowConstructionSnafu)?
-    .with_declared_calls(&resolved.definition)?;
+    .context(FlowConstructionSnafu)?;
     let builder = if plan.definition.version.supports_startup_inputs() {
         builder.with_workflow_inputs()?
     } else {
@@ -1483,6 +1462,7 @@ pub fn instantiate_compiled_with_observation(
             | WorkflowCompileError::PortTypeDepth { definition_id, .. }
             | WorkflowCompileError::KnownOutputValueTypeConflict { definition_id, .. }
             | WorkflowCompileError::InvalidIteration { definition_id, .. }
+            | WorkflowCompileError::IterationValidation { definition_id, .. }
             | WorkflowCompileError::IterationBody { definition_id, .. }
             | WorkflowCompileError::IterationConfiguration { definition_id, .. } = error
         {
@@ -1630,12 +1610,8 @@ fn collect_loop_execution_orders(
             let config = parse_config(node)
                 .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
             body_definition(definition, &config)
-                .map_err(|message| {
-                    InvalidIterationSnafu {
-                        definition_id: node.id.clone(),
-                        message,
-                    }
-                    .build()
+                .context(IterationValidationSnafu {
+                    definition_id: node.id.clone(),
                 })
                 .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?
         } else {
@@ -1869,9 +1845,13 @@ fn bind_subgraph_node(
     let builder = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, terminal_outputs)
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
         .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
-        .context(FlowConstructionSnafu)?
-        .with_declared_calls(body)?;
-    let builder = if node.kind == mf_runtime::CALL_KIND {
+        .context(FlowConstructionSnafu)?;
+    let builder = if node.kind == mf_runtime::CALL_KIND
+        || (node.kind == ITERATION_KIND
+            && matches!(
+                parse_config(node)?.input_mode,
+                mf_runtime::IterationInputMode::Arguments
+            )) {
         builder.with_workflow_inputs()?
     } else {
         builder
@@ -1894,8 +1874,9 @@ fn bind_subgraph_node(
         layouts.insert(
             path.expect("layout collection has a body path"),
             (
-                crate::construction::PreparedScopeLayout::capture(&flow),
+                flow.execution_domains().clone(),
                 streams,
+                flow.workflow_graph().clone(),
             ),
         );
     }
@@ -1906,12 +1887,14 @@ fn bind_subgraph_node(
             kind: node.kind.clone(),
         })?;
     let input_schema = flow.input_schema().clone();
+    let graph = flow.workflow_graph().clone();
     let stream_ports = flow.stream_output_ports();
     let body =
         PreparedSubgraph::streaming(identities, outputs, stream_ports, move |state, sink| {
             flow.execute_with_sink(state, sink)
         })
-        .with_input_schema(input_schema);
+        .with_input_schema(input_schema)
+        .with_graph(graph);
     let instance = registration
         .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
         .context(NodeConstructionSnafu {
@@ -2010,13 +1993,7 @@ fn resolve_nodes_in_scope(
                     .fail();
                 }
                 let config = parse_config(node)?;
-                let body = body_definition(definition, &config).map_err(|message| {
-                    InvalidIterationSnafu {
-                        definition_id: node.id.clone(),
-                        message,
-                    }
-                    .build()
-                })?;
+                let body = body_definition(definition, &config).context(IterationValidationSnafu { definition_id: node.id.clone() })?;
                 return bind_subgraph_node(node, preparation, &body, None, true, Value::Null);
             }
             let instance = registration_for(node, preparation.registry)?

@@ -6,7 +6,7 @@ use mf_runtime::{
     ValueType, deserialize_config, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
@@ -27,11 +27,58 @@ fn factory(
     body: PreparedSubgraph,
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: IterationConfig = deserialize_config(config)?;
-    let node = IterationNode::new(id, config.mode, config.on_error, body)?;
-    let metadata = mf_runtime::NodeMetadata {
+    let mut node = IterationNode::new(id, config.mode, config.on_error, body)?;
+    node.input_mode = config.input_mode;
+    let mut metadata = mf_runtime::NodeMetadata {
         output_derivations: vec![node.result_derivation()],
         ..Default::default()
     };
+    if node.input_mode == mf_runtime::IterationInputMode::Arguments {
+        ensure!(
+            node.body.inputs.stdin.is_empty(),
+            mf_runtime::NodeInvalidSubgraphSnafu {
+                message: "argument-mode Iteration cannot read stdin"
+            }
+        );
+        let inputs = mf_runtime::WorkflowGraph::describe_inputs(&node.body.inputs);
+        let fields = inputs
+            .iter()
+            .map(|(name, input)| {
+                (
+                    name.clone(),
+                    mf_runtime::SchemaField {
+                        schema: input.schema.clone().unwrap_or_else(|| {
+                            mf_runtime::ValueSchema::Type(input.value_type.clone())
+                        }),
+                        required: false,
+                    },
+                )
+            })
+            .collect();
+        metadata.input_schemas.insert(
+            "items".into(),
+            mf_runtime::ValueSchema::Object(fields).list(),
+        );
+        for (name, input) in inputs {
+            if let Some(schema) = input.schema {
+                metadata.input_schemas.insert(name.clone(), schema);
+            }
+            if input.secret {
+                metadata.input_bindings.insert(
+                    name,
+                    mf_runtime::InputBinding {
+                        secret: true,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        return if node.body.stream_outputs.is_empty() {
+            mf_runtime::PreparedNode::new(node, metadata)
+        } else {
+            mf_runtime::PreparedNode::task_stream(node, metadata)
+        };
+    }
     if node.body.stream_outputs.is_empty() {
         mf_runtime::PreparedNode::typed_task(node, metadata)
     } else {
@@ -49,6 +96,7 @@ pub struct IterationNode {
     on_error: IterationErrorPolicy,
     result_type: ValueType,
     body: Arc<PreparedSubgraph>,
+    input_mode: mf_runtime::IterationInputMode,
 }
 
 /// Fixed inputs shared by typed and dynamic Iteration task calls.
@@ -61,6 +109,13 @@ pub struct IterationInputs {
 #[derive(NodeValue)]
 pub struct IterationOutputs {
     pub results: Vec<ValueRef>,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("iteration item {index} arguments: {source}"))]
+struct IterationArguments {
+    index: usize,
+    source: mf_runtime::TypeMismatch,
 }
 
 #[derive(Debug, Snafu)]
@@ -157,8 +212,8 @@ impl IterationNode {
             .outputs
             .iter()
             .find(|port| port.name == "result" && port.required)
-            .ok_or_else(|| NodeBuildError::InvalidSubgraph {
-                message: "iteration body must declare a required result output".into(),
+            .with_context(|| mf_runtime::NodeInvalidSubgraphSnafu {
+                message: "iteration body must declare a required result output",
             })?
             .value_type
             .clone();
@@ -168,11 +223,60 @@ impl IterationNode {
             on_error,
             result_type,
             body: Arc::new(body),
+            input_mode: mf_runtime::IterationInputMode::Item,
         })
     }
 
     pub fn ports(&self) -> NodePorts {
-        NodePorts::from_types::<<Self as TypedTaskNode>::Input, <Self as TypedTaskNode>::Output>()
+        let mut ports = NodePorts::from_types::<
+            <Self as TypedTaskNode>::Input,
+            <Self as TypedTaskNode>::Output,
+        >();
+        if self.input_mode == mf_runtime::IterationInputMode::Arguments {
+            ports
+                .inputs
+                .extend(self.body.inputs.inputs.iter().flat_map(|(node, inputs)| {
+                    inputs.iter().map(move |(name, input)| {
+                        mf_runtime::PortSpec::owned(
+                            mf_runtime::output_id(node, name),
+                            input.value_type.clone(),
+                            false,
+                        )
+                    })
+                }));
+        }
+        ports
+    }
+
+    fn execute_dynamic(
+        &self,
+        mut inputs: Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn EmissionSink,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        let items = mf_runtime::decode_required_input::<ValueRef>("items", inputs.remove("items"))
+            .boxed()?;
+        let bindings = if self.input_mode == mf_runtime::IterationInputMode::Arguments {
+            let unknown = inputs
+                .iter()
+                .filter(|(name, _)| self.body.inputs.parameter(name).is_none())
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            mf_runtime::reject_unknown_inputs(unknown).boxed()?;
+            Some(Arc::new(mf_runtime::WorkflowArguments(inputs)))
+        } else {
+            mf_runtime::reject_unknown_inputs(inputs).boxed()?;
+            None
+        };
+        let observation = context.observation().and_then(|run| {
+            run.iteration_observation(
+                &self.id,
+                &context.invocation_path(),
+                self.body.nodes.clone(),
+            )
+        });
+        let outputs = self.execute_items(items, bindings, observation, context, sink)?;
+        mf_runtime::encode_typed_result(outputs.into())
     }
 
     fn result_derivation(&self) -> OutputDerivation {
@@ -187,9 +291,9 @@ impl IterationNode {
     fn run_item(
         id: &str,
         body: &PreparedSubgraph,
-        (key, item): (ValueRef, ValueRef),
-        index: usize,
+        (index, key, item): (usize, ValueRef, ValueRef),
         observation: Option<&IterationObservation>,
+        bindings: Option<&mf_runtime::WorkflowArguments>,
         parent: &ExecutionContext,
         sink: &mut dyn EmissionSink,
     ) -> Result<mf_runtime::ValueRef, NodeExecutionError> {
@@ -197,24 +301,46 @@ impl IterationNode {
         let _context = step.as_ref().map(ItemObservation::enter);
         let body_observation = step.as_ref().map(ItemObservation::body_observation);
         let mut state = parent.fork_body(body_observation);
-        let result = ExecutionScope::new(
-            id,
-            mf_runtime::ITERATION_INPUT_ID,
-            index,
-            Outputs::from([("item".into(), item), ("key".into(), key)]),
-            BTreeMap::from([
-                ("item".into(), ValueType::Any),
-                ("key".into(), ValueType::Any),
-            ]),
-        )
-        .and_then(|scope| {
-            let (mut outputs, _, _) =
-                state.run_scope(scope, |state| body.execute_with_sink(state, sink))?;
-            outputs
-                .remove("result")
-                .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                    message: "iteration body did not produce `result`".into(),
-                })
+        let arguments = bindings
+            .map(|shared| {
+                let values = mf_runtime::decode_object_value(
+                    item.clone(),
+                    Ok::<_, mf_runtime::InputDecodeError>,
+                )
+                .context(IterationArgumentsSnafu { index })
+                .boxed()?;
+                let mut arguments = shared.clone();
+                arguments.0.extend(values);
+                Ok::<_, NodeExecutionError>(arguments)
+            })
+            .transpose();
+        let result = arguments.and_then(|arguments| {
+            ExecutionScope::new(
+                id,
+                mf_runtime::ITERATION_INPUT_ID,
+                index,
+                Outputs::from([("item".into(), item), ("key".into(), key)]),
+                BTreeMap::from([
+                    ("item".into(), ValueType::Any),
+                    ("key".into(), ValueType::Any),
+                ]),
+            )
+            .and_then(|scope| {
+                let (mut outputs, _, _) = state.run_scope(scope, |state| {
+                    if let Some(arguments) = arguments {
+                        state.with_workflow_inputs(&body.inputs, arguments, |state| {
+                            body.execute_with_sink(state, sink)
+                        })
+                    } else {
+                        body.execute_with_sink(state, sink)
+                    }
+                })?;
+                outputs
+                    .remove("result")
+                    .with_context(|| mf_runtime::NodeExecutionFailedSnafu {
+                        message: "iteration body did not produce `result`",
+                    })
+            })
         });
         let result = result.context(IterationItemFailureSnafu { index });
         if let Some(step) = step.as_mut() {
@@ -227,10 +353,17 @@ impl IterationNode {
     fn execute_items(
         &self,
         items: ValueRef,
+        bindings: Option<Arc<mf_runtime::WorkflowArguments>>,
         observation: Option<IterationObservation>,
         parent: &mut ExecutionContext,
         sink: &mut dyn EmissionSink,
     ) -> Result<IterationOutputs, NodeExecutionError> {
+        ensure!(
+            bindings.is_none() || items.as_array().is_some(),
+            mf_runtime::NodeExecutionFailedSnafu {
+                message: "argument-mode Iteration requires an array of workflow argument objects"
+            }
+        );
         let items: Box<dyn ExactSizeIterator<Item = (ValueRef, ValueRef)>> =
             match items.kind() {
                 ValueKind::Array(items) => {
@@ -240,9 +373,10 @@ impl IterationNode {
                     (ValueRef::new(ValueKind::String(key.clone())), item.clone())
                 })),
                 _ => {
-                    return Err(NodeExecutionError::ExecutionFailed {
-                        message: "iteration requires an array or object input `items`".into(),
-                    });
+                    return mf_runtime::NodeExecutionFailedSnafu {
+                        message: "iteration requires an array or object input `items`",
+                    }
+                    .fail();
                 }
             };
         let mut results = Vec::with_capacity(items.len());
@@ -261,9 +395,9 @@ impl IterationNode {
                     results.push(Self::run_item(
                         &self.id,
                         &self.body,
-                        (key, item),
-                        index,
+                        (index, key, item),
                         observation.as_ref(),
+                        bindings.as_deref(),
                         parent,
                         sink,
                     ));
@@ -292,6 +426,7 @@ impl IterationNode {
                                     let id = self.id.clone();
                                     let on_error = self.on_error;
                                     let body = Arc::clone(&self.body);
+                                    let bindings = bindings.clone();
                                     let parent = parent.fork_body(None);
                                     let sender = sender.clone();
                                     move || loop {
@@ -319,9 +454,9 @@ impl IterationNode {
                                         let result = Self::run_item(
                                             &id,
                                             &body,
-                                            (key, item),
-                                            index,
+                                            (index, key, item),
                                             observation.as_deref(),
+                                            bindings.as_deref(),
                                             &parent,
                                             sink,
                                         );
@@ -398,8 +533,15 @@ impl TypedTaskNode for IterationNode {
         let observation = ctx.observation().and_then(|run| {
             run.iteration_observation(&self.id, &ctx.invocation_path(), self.body.nodes.clone())
         });
-        self.execute_items(inputs.items, observation, ctx, &mut mf_runtime::DiscardSink)
-            .map(Into::into)
+        self.execute_items(
+            inputs.items,
+            (self.input_mode == mf_runtime::IterationInputMode::Arguments)
+                .then(|| Arc::new(Default::default())),
+            observation,
+            ctx,
+            &mut mf_runtime::DiscardSink,
+        )
+        .map(Into::into)
     }
 }
 
@@ -412,7 +554,10 @@ impl TaskNode for IterationNode {
         inputs: Inputs,
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        execute_typed_task(self, inputs, ctx)
+        if self.input_mode == mf_runtime::IterationInputMode::Item {
+            return execute_typed_task(self, inputs, ctx);
+        }
+        self.execute_dynamic(inputs, ctx, &mut mf_runtime::DiscardSink)
     }
 }
 
@@ -437,20 +582,11 @@ impl mf_runtime::TaskStreamNode for IterationNode {
         context: &mut ExecutionContext,
         emitter: &mut mf_runtime::Emitter<'_>,
     ) -> Result<NodeResult, NodeExecutionError> {
-        let inputs = <IterationInputs as mf_runtime::NodeInputs>::from_inputs(inputs).boxed()?;
-        let observation = context.observation().and_then(|run| {
-            run.iteration_observation(
-                &self.id,
-                &context.invocation_path(),
-                self.body.nodes.clone(),
-            )
-        });
         let mut sink = DeliverySink {
             sink: emitter,
             cancellation: context.cancellation(),
         };
-        let outputs = self.execute_items(inputs.items, observation, context, &mut sink)?;
-        mf_runtime::encode_typed_result(outputs.into())
+        self.execute_dynamic(inputs, context, &mut sink)
     }
 }
 

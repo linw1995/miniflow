@@ -236,30 +236,23 @@ retains portable registry requirements rather than checkout paths. Source factor
 metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
 catalog to prepare or execute its nodes.
 
-### Prepared workflow invocations
+### Prepared workflow metadata
 
-`compile_definition` and `instantiate_compiled` bind each scope's selectable `workflow.call` nodes.
-The normal target input connections determine caller-owned and external arguments. The selected
-workflow runs its ordinary body through the existing `PreparedSubgraph` and Flow executor, and only
-its explicit `outputs` return to the caller. Tool result formatting belongs in that connected body.
+Flows and stream plans retain a read-only `WorkflowGraph` describing their actual ports, schemas, data
+connections, and subgraphs. `ExecutionContext::workflow_graph()` selects the descriptor of the currently
+executing graph, including in generated domains and native message frames. Subgraph providers receive
+their prepared body descriptor through `PreparedSubgraph`, and isolated target execution uses the
+corresponding enclosing graph. Descriptors contain no executors or runtime values.
 
-`Flow::with_prepared_calls` is the host-level adapter for a compiler-validated plan. Each
-`PreparedCall` carries a resolved binding, workflow identity, external snapshot visibility, and a
-prepared success guard. The supplied plan excludes call sites from ordinary activation and orders
-external prerequisites before their callers. It does not derive a second workflow graph at runtime.
+Connected LLM tools use ordinary output ports carrying batches of workflow argument objects. Standard
+Iteration nodes bind and execute those objects through the normal workflow input interface. Their
+ordinary outputs connect to subsequent processing and protocol-encoding nodes. There is no synchronous
+tool result return channel hidden inside the LLM or another dispatcher.
 
-`ExecutionContext::invoke_call` accepts a binding ID and one atomic `CallArguments` envelope. Each
-invocation receives its own context, observation identity, and input values. Repeated and nested
-calls share the established execution budget, cancellation signal, and bounded worker pool.
-`invoke_call_with_deadline` supplies a cooperative deadline. Domain errors retain typed workflow
-sources, while cancellation and exhausted execution limits remain terminal. Providers retain their
-normal shared-instance concurrency contract.
-
-Generated programs freeze the same prepared contracts in existing scope layouts and verify provider
-metadata at startup. Flow input interfaces propagate decoded schemas across workflow boundaries.
-Native message frames use the same tables with selected startup values and message-local inputs;
-ordinary cross-message dependencies remain invalid. Catalog nodes read immutable interface views
-and acquire no invocation capability. Nested scopes restore the enclosing view and capability.
+Generated programs retain the same metadata contract and compare it against freshly prepared port and
+schema descriptors before execution. Schema-only provider drift is rejected even when coarse port types
+stay unchanged. Normal workflow cancellation, worker limits, errors, observation, and streaming remain
+owned by the existing execution paths.
 
 ## Forwarding finite child emissions
 

@@ -20,10 +20,6 @@ pub enum FlowBuildError {
         definition_id: DefinitionId,
         source: mf_runtime::SchemaContractError,
     },
-    #[snafu(transparent)]
-    CallDispatch {
-        source: mf_runtime::CallDispatchError,
-    },
     #[snafu(display("invalid node-success dependency `{from_node}` -> `{to_node}`: {message}"))]
     InvalidSuccessDependency {
         from_node: String,
@@ -256,90 +252,6 @@ where
     Ok(())
 }
 
-/// Build-time contracts retained for generated scopes, without retaining executors.
-#[cfg_attr(not(feature = "codegen"), allow(dead_code))]
-pub struct PreparedScopeLayout {
-    pub domains: ExecutionDomains,
-    pub calls: Vec<PreparedCallLayout>,
-    pub metadata: Vec<crate::NodeMetadata>,
-}
-
-#[cfg_attr(not(feature = "codegen"), allow(dead_code))]
-pub struct PreparedCallLayout {
-    pub target: mf_runtime::NodeIdentity,
-    pub binding: mf_runtime::ResolvedCallBinding,
-    pub visibility: Vec<String>,
-}
-
-impl PreparedScopeLayout {
-    #[cfg(feature = "codegen")]
-    pub fn capture_stream(plan: &mf_runtime::StreamPlan) -> Self {
-        let calls: Vec<_> = plan
-            .prepared_calls()
-            .map(|call| PreparedCallLayout {
-                target: call.target.clone(),
-                binding: call.binding.clone(),
-                visibility: call.visibility.keys().map(str::to_owned).collect(),
-            })
-            .collect();
-        let metadata = if calls.is_empty() {
-            vec![]
-        } else {
-            plan.nodes()
-                .iter()
-                .map(|node| node.metadata.clone())
-                .collect()
-        };
-        Self {
-            domains: plan.execution_domains().clone(),
-            calls,
-            metadata,
-        }
-    }
-
-    pub fn capture(flow: &mf_runtime::Flow) -> Self {
-        let positions: BTreeMap<_, _> = flow
-            .execution_order()
-            .iter()
-            .enumerate()
-            .map(|(position, id)| (*id, NodeId::new(position)))
-            .collect();
-        let calls: Vec<_> = flow
-            .prepared_calls()
-            .map(|call| {
-                let mut binding = call.binding.clone();
-                binding.caller = positions[&binding.caller];
-                binding.target = positions[&binding.target];
-                for id in binding
-                    .prerequisites
-                    .iter_mut()
-                    .chain(binding.success_dependencies.iter_mut())
-                {
-                    *id = positions[id];
-                }
-                PreparedCallLayout {
-                    target: call.target.clone(),
-                    binding,
-                    visibility: call.visibility.keys().map(str::to_owned).collect(),
-                }
-            })
-            .collect();
-        let metadata = if calls.is_empty() {
-            vec![]
-        } else {
-            flow.execution_order()
-                .iter()
-                .map(|id| flow.nodes()[id.index()].metadata.clone())
-                .collect()
-        };
-        Self {
-            domains: flow.execution_domains().clone(),
-            calls,
-            metadata,
-        }
-    }
-}
-
 pub struct FlowBuilder {
     nodes: Vec<FlowNode>,
     connections: Vec<FlowConnection>,
@@ -349,150 +261,9 @@ pub struct FlowBuilder {
     controls: Vec<crate::ControlEdgeDefinition>,
     orders: Vec<crate::OrderEdgeDefinition>,
     input_schema: crate::WorkflowInputSchema,
-    calls: Vec<mf_runtime::PreparedCall>,
-    call_readiness: Vec<(NodeId, NodeId)>,
 }
 
 impl FlowBuilder {
-    /// Binds calls in this definition after ordinary data and success dependencies are prepared.
-    pub fn with_declared_calls(
-        mut self,
-        definition: &crate::WorkflowDefinition,
-    ) -> Result<Self, crate::CallBindingError> {
-        let declarations = crate::call_bindings::declarations(definition)?;
-        if declarations.is_empty() {
-            return Ok(self);
-        }
-        let indices: BTreeMap<_, _> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (node.definition_id.clone(), NodeId::new(index)))
-            .collect();
-        ensure!(
-            definition.nodes.len() == self.nodes.len()
-                && definition
-                    .nodes
-                    .iter()
-                    .all(|node| indices.contains_key(&node.id)),
-            crate::call_bindings::DefinitionSnafu {
-                message: "call definition does not match the prepared scope"
-            }
-        );
-        let mut resolved = BTreeMap::new();
-        for (caller, bindings) in declarations {
-            let caller = indices[&definition.nodes[caller.index()].id];
-            let bindings = bindings
-                .iter()
-                .map(|binding| {
-                    let resolved = mf_runtime::CallBinding::new(
-                        binding.name(),
-                        indices[&definition.nodes[binding.target().index()].id],
-                        binding.defaults(),
-                    )?;
-                    Ok::<_, mf_runtime::CallContractError>(
-                        if let Some(description) = binding.description() {
-                            resolved.with_description(description)
-                        } else {
-                            resolved
-                        },
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            resolved.insert(caller, self.resolve_call_bindings(caller, &bindings)?);
-        }
-        let conditions = crate::dependencies::success_conditions(
-            self.execution_order
-                .iter()
-                .zip(&self.dependencies)
-                .map(|(id, dependencies)| {
-                    (
-                        self.nodes[id.index()].definition_id.as_str(),
-                        dependencies
-                            .iter()
-                            .map(crate::FlowDependency::borrowed)
-                            .collect(),
-                    )
-                }),
-        );
-        let node_positions: BTreeMap<_, _> = self
-            .execution_order
-            .iter()
-            .enumerate()
-            .map(|(position, id)| (*id, position))
-            .collect();
-        let mut calls = Vec::new();
-        let mut readiness = BTreeSet::new();
-        for bindings in resolved.values() {
-            for binding in bindings {
-                let mut sources: BTreeSet<_> = binding.prerequisites.iter().copied().collect();
-                for source in &sources {
-                    ensure!(
-                        node_positions[source] < node_positions[&binding.caller],
-                        crate::call_bindings::DefinitionSnafu {
-                            message: "prepared order must place call prerequisites before the caller"
-                        }
-                    );
-                    readiness.insert((*source, binding.caller));
-                }
-                let mut pending: Vec<_> = sources.iter().copied().collect();
-                while let Some(source) = pending.pop() {
-                    for dependency in &self.dependencies[node_positions[&source]] {
-                        let ancestor =
-                            indices[&DefinitionId::from(dependency.borrowed().source_node())];
-                        if sources.insert(ancestor) {
-                            pending.push(ancestor);
-                        }
-                    }
-                }
-                let visibility = sources
-                    .into_iter()
-                    .flat_map(|id| self.nodes[id.index()].output_keys().iter().cloned())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                let target = &self.nodes[binding.target.index()].definition_id;
-                let kind = &definition
-                    .nodes
-                    .iter()
-                    .find(|node| &node.id == target)
-                    .expect("prepared definition node")
-                    .kind;
-                calls.push(mf_runtime::PreparedCall {
-                    target: mf_runtime::NodeIdentity {
-                        id: target.to_string(),
-                        kind: kind.clone(),
-                        path: vec![],
-                    },
-                    binding: binding.clone(),
-                    visibility: mf_runtime::OutputVisibility::from_sorted(visibility),
-                    guard: std::sync::Arc::from(crate::dependencies::bind_guards(
-                        target.to_string(),
-                        conditions[node_positions[&binding.target]].clone(),
-                    )),
-                });
-            }
-        }
-        self.calls = calls;
-        self.call_readiness = readiness.into_iter().collect();
-        Ok(self)
-    }
-
-    /// Resolves directed-call contracts against this prepared scope without changing its schedule.
-    pub fn resolve_call_bindings(
-        &self,
-        caller: NodeId,
-        bindings: &[mf_runtime::CallBinding],
-    ) -> Result<Vec<mf_runtime::ResolvedCallBinding>, crate::CallBindingError> {
-        crate::call_bindings::resolve(
-            &self.nodes,
-            &self.execution_order,
-            &self.dependencies,
-            caller,
-            bindings,
-        )
-    }
-
     pub fn into_tasks(self) -> Result<mf_runtime::Flow, FlowBuildError> {
         for target in &self.nodes {
             for reference in &target.metadata.context_references {
@@ -601,7 +372,6 @@ impl FlowBuilder {
             },
             data.input_schema,
         );
-        let flow = flow.with_prepared_calls(data.calls)?;
         Ok(crate::dependencies::bind_task_guards(flow, guards))
     }
     pub fn into_stream(
@@ -609,34 +379,6 @@ impl FlowBuilder {
         execution: crate::StreamExecution,
     ) -> Result<crate::PreparedStream, StreamBuildError> {
         let data = self;
-        let positions: BTreeMap<_, _> = data
-            .execution_order
-            .iter()
-            .enumerate()
-            .map(|(position, id)| (*id, NodeId::new(position)))
-            .collect();
-        let calls = data
-            .calls
-            .into_iter()
-            .map(|mut call| {
-                call.binding.caller = positions[&call.binding.caller];
-                call.binding.target = positions[&call.binding.target];
-                for id in call
-                    .binding
-                    .prerequisites
-                    .iter_mut()
-                    .chain(call.binding.success_dependencies.iter_mut())
-                {
-                    *id = positions[id];
-                }
-                call
-            })
-            .collect();
-        let readiness = data
-            .call_readiness
-            .into_iter()
-            .map(|(source, target)| (positions[&source], positions[&target]))
-            .collect();
         let outputs = data
             .outputs
             .iter()
@@ -659,7 +401,7 @@ impl FlowBuilder {
             })
             .collect();
         let dependencies = data.dependencies;
-        prepare_stream_with_calls(execution, ordered, dependencies, outputs, calls, readiness)
+        prepare_stream(execution, ordered, dependencies, outputs)
     }
 }
 
@@ -678,14 +420,11 @@ pub fn into_task(node: FlowNode) -> Result<mf_runtime::TaskFlowNode, FlowBuildEr
 }
 impl FlowBuilder {
     pub fn with_workflow_inputs(mut self) -> Result<Self, crate::WorkflowInputError> {
-        let targets: BTreeSet<_> = self.calls.iter().map(|call| call.binding.target).collect();
         let initial: BTreeSet<_> = self
             .execution_order
             .iter()
             .enumerate()
-            .filter(|(position, id)| {
-                self.dependencies[*position].is_empty() && !targets.contains(id)
-            })
+            .filter(|(position, _)| self.dependencies[*position].is_empty())
             .map(|(_, id)| id.index())
             .collect();
         let input_schema = workflow_input_schema(
@@ -905,8 +644,6 @@ impl FlowBuilder {
             controls: Vec::new(),
             orders: Vec::new(),
             input_schema: crate::WorkflowInputSchema::default(),
-            calls: Vec::new(),
-            call_readiness: Vec::new(),
         };
         flow.prepare_execution();
         Ok(flow)
@@ -1049,60 +786,28 @@ impl FlowBuilder {
     }
 
     fn build_execution_domains(&self) -> ExecutionDomains {
-        let targets: BTreeSet<_> = self.calls.iter().map(|call| call.binding.target).collect();
-        let scheduled: Vec<_> = self
+        let positions: BTreeMap<_, _> = self
             .execution_order
             .iter()
             .enumerate()
-            .filter(|(_, id)| !targets.contains(id))
-            .map(|(position, id)| (position, *id))
-            .collect();
-        let positions: BTreeMap<_, _> = scheduled
-            .iter()
-            .enumerate()
-            .map(|(local, (_, id))| (self.nodes[id.index()].definition_id.as_str(), local))
+            .map(|(position, node_id)| {
+                (self.nodes[node_id.index()].definition_id.as_str(), position)
+            })
             .collect();
         let mut edges = Vec::new();
-        for (local, (position, _)) in scheduled.iter().enumerate() {
-            for dependency in &self.dependencies[*position] {
+        for (target, dependencies) in self.dependencies.iter().enumerate() {
+            for dependency in dependencies.iter() {
                 if let Some(&source) = positions.get(dependency.borrowed().source_node()) {
-                    edges.push((source, local));
+                    edges.push((source, target));
                 }
             }
         }
-        for (source, target) in &self.call_readiness {
-            if let (Some(&source), Some(&target)) = (
-                positions.get(self.nodes[source.index()].definition_id.as_str()),
-                positions.get(self.nodes[target.index()].definition_id.as_str()),
-            ) {
-                edges.push((source, target));
-            }
-        }
-        let order: Vec<_> = scheduled.iter().map(|(_, id)| *id).collect();
-        let domains = partition_execution_domains(&order, &edges, &vec![false; order.len()]);
-        let ancestors = (0..domains.len())
-            .map(|id| domains.ancestor_domains(id).to_vec().into())
-            .collect::<Vec<_>>();
-        let remapped = domains
-            .domains()
-            .iter()
-            .cloned()
-            .map(|mut domain| {
-                domain.positions = domain
-                    .positions
-                    .iter()
-                    .map(|position| scheduled[*position].0)
-                    .collect::<Vec<_>>()
-                    .into();
-                domain.first_position = scheduled[domain.first_position].0;
-                domain
-            })
-            .collect::<Vec<_>>();
-        bind_domain_snapshots(
-            ExecutionDomains::from_parts(remapped.into(), ancestors.into()),
-            &self.nodes,
-            |_| None,
-        )
+        let domains = partition_execution_domains(
+            &self.execution_order,
+            &edges,
+            &vec![false; self.execution_order.len()],
+        );
+        bind_domain_snapshots(domains, &self.nodes, |_| None)
     }
 }
 #[derive(Debug, Snafu)]
@@ -1136,6 +841,16 @@ pub enum WorkflowBuildError {
     NodeConstruction {
         source: NodeBuildError,
         definition_id: DefinitionId,
+    },
+    #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
+    LoopVariables {
+        definition_id: DefinitionId,
+        source: mf_runtime::LoopVariableError,
+    },
+    #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
+    LoopVariableDescriptor {
+        definition_id: DefinitionId,
+        source: mf_runtime::TypeDescriptorError,
     },
     #[snafu(
         display("invalid definition for node `{definition_id}`: {message}"),
@@ -1228,12 +943,8 @@ pub fn prepared_loop_source_from_json(
         serde_json::from_str(variables_json).context(InvalidEmbeddedConfigSnafu {
             definition_id: crate::LOOP_SOURCE_ID,
         })?;
-    let types = mf_runtime::loop_variable_types(&variables).or_else(|message| {
-        InvalidDefinitionSnafu {
-            definition_id: crate::LOOP_SOURCE_ID,
-            message,
-        }
-        .fail()
+    let types = mf_runtime::loop_variable_types(&variables).context(LoopVariablesSnafu {
+        definition_id: crate::LOOP_SOURCE_ID,
     })?;
     Ok(mf_runtime::prepared_loop_source_types(&types))
 }
@@ -1245,13 +956,8 @@ pub fn prepared_loop_assign_from_json(
 ) -> Result<FlowNode, WorkflowBuildError> {
     let descriptor: Value = serde_json::from_str(type_json)
         .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    let value_type = ValueType::parse_descriptor(&descriptor).or_else(|message| {
-        InvalidDefinitionSnafu {
-            definition_id: id,
-            message,
-        }
-        .fail()
-    })?;
+    let value_type = ValueType::parse_descriptor(&descriptor)
+        .context(LoopVariableDescriptorSnafu { definition_id: id })?;
     Ok(mf_runtime::prepared_loop_assign(id, variable, value_type))
 }
 #[derive(Debug, Snafu)]
@@ -1406,22 +1112,6 @@ pub fn build_stream_program(
     dependencies: &[Vec<FlowDependency>],
     outputs: &[WorkflowOutputDefinition],
 ) -> Result<mf_runtime::StreamProgram, StreamBuildError> {
-    build_stream_program_with_calls(nodes, dependencies, outputs, &[], &[])
-}
-
-fn build_stream_program_with_calls(
-    nodes: &[FlowNode],
-    dependencies: &[Vec<FlowDependency>],
-    outputs: &[WorkflowOutputDefinition],
-    calls: &[mf_runtime::PreparedCall],
-    readiness: &[(NodeId, NodeId)],
-) -> Result<mf_runtime::StreamProgram, StreamBuildError> {
-    let targets: BTreeSet<_> = calls
-        .iter()
-        .map(|call| call.binding.target.index())
-        .collect();
-    let mut startup_sources = BTreeMap::<usize, BTreeSet<usize>>::new();
-    let mut startup_nodes = BTreeMap::<usize, BTreeSet<usize>>::new();
     let mut indices = BTreeMap::new();
     let mut output_index = BTreeMap::new();
     for (index, node) in nodes.iter().enumerate() {
@@ -1520,7 +1210,7 @@ fn build_stream_program_with_calls(
                 output_domains[source]
             });
         }
-        ensure!(targets.contains(&index) || incoming_domains.len() <= 1, {
+        ensure!(incoming_domains.len() <= 1, {
             let edges = dependencies[index]
                 .iter()
                 .map(|dependency| {
@@ -1545,57 +1235,6 @@ fn build_stream_program_with_calls(
             }
         });
         let domain = incoming_domains.first().copied().unwrap_or(0);
-        if !targets.contains(&index) {
-            for &(source, caller) in readiness
-                .iter()
-                .filter(|(_, caller)| caller.index() == index)
-            {
-                let source = source.index();
-                ensure!(
-                    source < index,
-                    InvalidPlanSnafu {
-                        message: "call readiness must precede its caller"
-                    }
-                );
-                let owner = output_domains[source];
-                ensure!(
-                    owner == domain || (owner == 0 && domain > 0),
-                    InvalidPlanSnafu {
-                        message: format!(
-                            "caller `{}` and call prerequisite `{}` belong to different messages",
-                            nodes[caller.index()].definition_id,
-                            nodes[source].definition_id
-                        )
-                    }
-                );
-                if owner != domain {
-                    let mut pending = vec![source];
-                    let mut seen = BTreeSet::new();
-                    while let Some(ancestor) = pending.pop() {
-                        if !seen.insert(ancestor) {
-                            continue;
-                        }
-                        ensure!(
-                            !matches!(
-                                nodes[ancestor].node,
-                                Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
-                            ) && stream_output_domains[ancestor].is_none(),
-                            InvalidPlanSnafu {
-                                message: "startup call prerequisites cannot wait for a connected streaming producer"
-                            }
-                        );
-                        pending.extend(
-                            dependencies[ancestor]
-                                .iter()
-                                .map(|dependency| indices[dependency.borrowed().source_node()]),
-                        );
-                    }
-                    startup_sources.entry(domain).or_default().insert(source);
-                    startup_nodes.entry(domain).or_default().extend(seen);
-                }
-            }
-        }
-
         ensure!(
             !incoming_domains.is_empty() || !matches!(node.node, Some(NodeExecution::Event(_))),
             InvalidPlanSnafu {
@@ -1697,115 +1336,30 @@ fn build_stream_program_with_calls(
         ));
     }
 
-    let order: Vec<_> = (0..nodes.len())
-        .filter(|index| !targets.contains(index))
-        .map(NodeId::new)
-        .collect();
-    let positions: BTreeMap<_, _> = order
-        .iter()
-        .enumerate()
-        .map(|(position, id)| (id.index(), position))
-        .collect();
     let mut execution_edges = Vec::new();
-    for (target, node_dependencies) in dependencies
-        .iter()
-        .enumerate()
-        .filter(|(target, _)| !targets.contains(target))
-    {
+    for (target, node_dependencies) in dependencies.iter().enumerate() {
         for dependency in node_dependencies {
             let source = indices[dependency.borrowed().source_node()];
             if node_message_domains[source] == node_message_domains[target] {
-                execution_edges.push((positions[&source], positions[&target]));
+                execution_edges.push((source, target));
             }
         }
     }
-    for &(source, target) in readiness {
-        if !targets.contains(&target.index())
-            && node_message_domains[source.index()] == node_message_domains[target.index()]
-        {
-            execution_edges.push((positions[&source.index()], positions[&target.index()]));
-        }
-    }
-    let boundaries: Vec<_> = order
+    let order: Vec<_> = (0..nodes.len()).map(NodeId::new).collect();
+    let boundaries: Vec<_> = nodes
         .iter()
-        .map(|id| {
+        .enumerate()
+        .map(|(index, node)| {
             matches!(
-                nodes[id.index()].node,
+                node.node,
                 Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
-            ) || stream_output_domains[id.index()].is_some()
+            ) || stream_output_domains[index].is_some()
         })
         .collect();
-    let partitioned = partition_execution_domains(&order, &execution_edges, &boundaries);
-    let ancestors = (0..partitioned.len())
-        .map(|id| partitioned.ancestor_domains(id).to_vec().into())
-        .collect::<Vec<_>>();
-    let domains = partitioned
-        .domains()
-        .iter()
-        .cloned()
-        .map(|mut domain| {
-            domain.positions = domain
-                .positions
-                .iter()
-                .map(|position| order[*position].index())
-                .collect::<Vec<_>>()
-                .into();
-            domain.first_position = order[domain.first_position].index();
-            domain
-        })
-        .collect::<Vec<_>>();
-    let execution_domains = bind_domain_snapshots(
-        ExecutionDomains::from_parts(domains.into(), ancestors.into()),
-        nodes,
-        |execution| sources[node_message_domains[execution.nodes[0].index()]],
-    );
-    let mut startup_visibility = vec![BTreeSet::<String>::new(); sources.len()];
-    let mut visibility = Vec::new();
-    for domain in execution_domains.domains() {
-        let message = node_message_domains[domain.nodes[0].index()];
-        let mut keys: BTreeSet<_> = domain
-            .snapshot_visibility
-            .keys()
-            .map(str::to_owned)
-            .collect();
-        if message > 0 {
-            for call in calls
-                .iter()
-                .filter(|call| domain.nodes.contains(&call.binding.caller))
-            {
-                for key in call.visibility.keys() {
-                    if output_index.get(key).is_some_and(|(source, stream)| {
-                        !stream
-                            && output_domains[*source] == 0
-                            && startup_nodes
-                                .get(&message)
-                                .is_some_and(|nodes| nodes.contains(source))
-                    }) {
-                        keys.insert(key.to_owned());
-                        startup_visibility[message].insert(key.to_owned());
-                    }
-                }
-            }
-        }
-        visibility.push(mf_runtime::OutputVisibility::from_sorted(
-            keys.into_iter().collect(),
-        ));
-    }
-    let execution_domains = execution_domains.with_snapshot_visibility(visibility);
-    let startup_capture = mf_runtime::OutputVisibility::from_sorted(
-        startup_visibility
-            .iter()
-            .flatten()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
-    );
-    let node_domains: BTreeMap<_, _> = execution_domains
-        .domains()
-        .iter()
-        .flat_map(|domain| domain.nodes.iter().map(move |id| (id.index(), domain.id)))
-        .collect();
+    let execution_domains = partition_execution_domains(&order, &execution_edges, &boundaries);
+    let execution_domains = bind_domain_snapshots(execution_domains, nodes, |execution| {
+        sources[node_message_domains[execution.nodes[0].index()]]
+    });
     let messages: Vec<_> = selected_outputs
         .into_iter()
         .enumerate()
@@ -1824,18 +1378,6 @@ fn build_stream_program_with_calls(
                 }) as std::sync::Arc<mf_runtime::StreamOutputSelector>
             });
             mf_runtime::StreamMessageProgram {
-                startup_dependencies: startup_sources
-                    .get(&message)
-                    .into_iter()
-                    .flatten()
-                    .map(|source| node_domains[source])
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-                startup_visibility: mf_runtime::OutputVisibility::from_sorted(
-                    startup_visibility[message].iter().cloned().collect(),
-                ),
                 source: sources[message],
                 schedule: build_message_schedule(
                     &execution_domains,
@@ -1893,8 +1435,37 @@ fn build_stream_program_with_calls(
             ) as std::sync::Arc<mf_runtime::StreamInputResolver>
         })
         .collect();
+    let mut graph = mf_runtime::WorkflowGraph {
+        inputs: BTreeMap::new(),
+        nodes: mf_runtime::WorkflowGraph::describe_nodes(nodes),
+        connections: Vec::new(),
+        controls: Vec::new(),
+    };
+    for (target, dependencies) in nodes.iter().zip(dependencies) {
+        for dependency in dependencies {
+            let dependency = dependency.borrowed();
+            let Some(output) = dependency.source_output() else {
+                continue;
+            };
+            if let Some(input) = dependency.input() {
+                graph.connections.push(EdgeDefinition {
+                    exclusive: dependency.exclusive(),
+                    from_node: dependency.source_node().into(),
+                    from_output: output.to_owned(),
+                    to_node: target.definition_id.clone(),
+                    to_input: input.into(),
+                });
+            } else {
+                graph.controls.push(crate::ControlEdgeDefinition {
+                    from_node: dependency.source_node().into(),
+                    from_output: output.to_owned().into(),
+                    to_node: target.definition_id.clone(),
+                });
+            }
+        }
+    }
     Ok(mf_runtime::StreamProgram {
-        startup_visibility: startup_capture,
+        graph: std::sync::Arc::new(graph),
         execution_domains,
         messages,
         emissions,
@@ -2148,17 +1719,6 @@ pub fn prepare_stream(
     dependencies: Vec<Vec<crate::FlowDependency>>,
     outputs: Vec<WorkflowOutputDefinition>,
 ) -> Result<mf_runtime::PreparedStream, StreamBuildError> {
-    prepare_stream_with_calls(execution, nodes, dependencies, outputs, vec![], vec![])
-}
-
-fn prepare_stream_with_calls(
-    execution: crate::StreamExecution,
-    nodes: Vec<FlowNode>,
-    dependencies: Vec<Vec<crate::FlowDependency>>,
-    outputs: Vec<WorkflowOutputDefinition>,
-    calls: Vec<mf_runtime::PreparedCall>,
-    readiness: Vec<(NodeId, NodeId)>,
-) -> Result<mf_runtime::PreparedStream, StreamBuildError> {
     validate_stream_limits(&execution.limits)?;
     ensure!(
         nodes.len() == dependencies.len(),
@@ -2166,8 +1726,7 @@ fn prepare_stream_with_calls(
             message: "stream nodes and dependencies must have equal lengths"
         }
     );
-    let program =
-        build_stream_program_with_calls(&nodes, &dependencies, &outputs, &calls, &readiness)?;
+    let program = build_stream_program(&nodes, &dependencies, &outputs)?;
     validate_exclusive_branches(nodes.iter().zip(&dependencies).map(|(node, dependencies)| {
         (
             node,
@@ -2197,15 +1756,7 @@ fn prepare_stream_with_calls(
             )
         },
     ));
-    let targets: BTreeSet<_> = calls
-        .iter()
-        .map(|call| call.binding.target.index())
-        .collect();
-    let initial: Vec<_> = dependencies
-        .iter()
-        .enumerate()
-        .map(|(index, deps)| deps.is_empty() && !targets.contains(&index))
-        .collect();
+    let initial: Vec<_> = dependencies.iter().map(Vec::is_empty).collect();
     let dependencies: Vec<_> = dependencies
         .into_iter()
         .map(|deps| {
@@ -2219,9 +1770,6 @@ fn prepare_stream_with_calls(
     let schema =
         stream_workflow_inputs(&nodes, &dependencies, &initial).context(WorkflowInputsSnafu)?;
     let prepared = mf_runtime::PreparedStream::from_plan(execution, nodes, program, schema);
-    let prepared = prepared
-        .with_prepared_calls(calls)
-        .map_err(FlowBuildError::from)?;
     Ok(crate::dependencies::bind_stream_guards(prepared, guards))
 }
 #[cfg(test)]
@@ -2321,16 +1869,18 @@ mod tests {
             while *arrived < 2 {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Err(NodeExecutionError::ExecutionFailed {
+                    return mf_runtime::NodeExecutionFailedSnafu {
                         message: "independent domains did not overlap".to_owned(),
-                    });
+                    }
+                    .fail();
                 }
                 let (next, timeout) = changed.wait_timeout(arrived, remaining).unwrap();
                 arrived = next;
                 if timeout.timed_out() && *arrived < 2 {
-                    return Err(NodeExecutionError::ExecutionFailed {
+                    return mf_runtime::NodeExecutionFailedSnafu {
                         message: "independent domains did not overlap".to_owned(),
-                    });
+                    }
+                    .fail();
                 }
             }
             Ok((Outputs::from([("value".into(), json!(self.value).into())])).into())
@@ -2361,9 +1911,10 @@ mod tests {
                     let value = inputs[left].as_i64().unwrap() + inputs[right].as_i64().unwrap();
                     Ok((Outputs::from([(output.to_owned(), json!(value).into())])).into())
                 }
-                Action::Fail => Err(NodeExecutionError::ExecutionFailed {
+                Action::Fail => mf_runtime::NodeExecutionFailedSnafu {
                     message: "deliberate failure".to_owned(),
-                }),
+                }
+                .fail(),
             }
         }
     }

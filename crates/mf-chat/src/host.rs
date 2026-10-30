@@ -3,7 +3,7 @@ use crate::{
     error::*,
     nodes::{BeginTurnInputs, RecoveryInputs, RecoveryOutputs},
 };
-use mf_runtime::{StreamCancellation, StreamError};
+use mf_runtime::StreamCancellation;
 use mf_telemetry::observation::Observer;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
@@ -79,9 +79,12 @@ impl ChatJob {
         if self.completed.load(Ordering::Acquire) {
             return;
         }
-        self.cancellation.cancel(StreamError::Execution {
-            message: "chat request cancelled".into(),
-        });
+        self.cancellation.cancel(
+            mf_runtime::StreamExecutionSnafu {
+                message: "chat request cancelled",
+            }
+            .build(),
+        );
     }
 
     pub fn poll(&mut self) -> bool {
@@ -386,9 +389,12 @@ impl ChatHost {
             }
             workers.closed = true;
             for active in workers.active.values() {
-                active.cancellation.cancel(StreamError::Execution {
-                    message: "chat host closed".into(),
-                });
+                active.cancellation.cancel(
+                    mf_runtime::StreamExecutionSnafu {
+                        message: "chat host closed",
+                    }
+                    .build(),
+                );
             }
             std::mem::take(&mut workers.handles)
         };

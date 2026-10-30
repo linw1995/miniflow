@@ -84,11 +84,12 @@ fn failed_invalid_and_excessive_process_results_never_succeed() {
     ]);
     assert!(run(config.clone(), input, &mut ExecutionContext::default()).is_err());
     let mut context = ExecutionContext::default();
-    context
-        .cancellation()
-        .cancel(mf_runtime::StreamError::Execution {
-            message: "cancelled before start".into(),
-        });
+    context.cancellation().cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "cancelled before start",
+        }
+        .build(),
+    );
     assert!(
         run(
             config.clone(),
@@ -133,9 +134,12 @@ print('done')
                 while !watched.exists() && Instant::now() < deadline {
                     thread::sleep(Duration::from_millis(10));
                 }
-                signal.cancel(mf_runtime::StreamError::Execution {
-                    message: "cancel process fixture".into(),
-                });
+                signal.cancel(
+                    mf_runtime::StreamExecutionSnafu {
+                        message: "cancel process fixture",
+                    }
+                    .build(),
+                );
             }
         });
         let result = run(

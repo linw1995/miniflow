@@ -11,6 +11,7 @@ pub struct PreparedSubgraph {
     pub inputs: crate::WorkflowInputSchema,
     pub outputs: Vec<PortSpec>,
     pub stream_outputs: Vec<PortSpec>,
+    pub graph: Option<std::sync::Arc<crate::WorkflowGraph>>,
     body: Box<SubgraphBody>,
 }
 
@@ -43,8 +44,14 @@ impl PreparedSubgraph {
             inputs: Default::default(),
             outputs,
             stream_outputs,
+            graph: None,
             body: Box::new(body),
         }
+    }
+
+    pub fn with_graph(mut self, graph: std::sync::Arc<crate::WorkflowGraph>) -> Self {
+        self.graph = Some(graph);
+        self
     }
 
     pub fn with_input_schema(mut self, inputs: crate::WorkflowInputSchema) -> Self {

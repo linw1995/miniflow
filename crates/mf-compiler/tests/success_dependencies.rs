@@ -98,11 +98,12 @@ fn compiled_success_conditions_preserve_exclusive_alternatives_and_snapshot_skip
         }
         std::fs::remove_file(&path).unwrap();
         let mut cancelled = mf_runtime::ExecutionContext::default();
-        cancelled
-            .cancellation()
-            .cancel(mf_runtime::StreamError::Execution {
-                message: "cancelled before activation".into(),
-            });
+        cancelled.cancellation().cancel(
+            mf_runtime::StreamExecutionSnafu {
+                message: "cancelled before activation",
+            }
+            .build(),
+        );
         assert!(flow.execute_in_context(&mut cancelled).is_err());
         assert!(trace(&path).is_empty());
     }

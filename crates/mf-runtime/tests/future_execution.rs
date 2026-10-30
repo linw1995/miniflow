@@ -92,9 +92,7 @@ fn cancellation_wakes_a_pending_operation_and_preserves_the_source() {
         )
     });
     receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-    cancellation.cancel(StreamError::Execution {
-        message: "stopped".into(),
-    });
+    cancellation.cancel(mf_runtime::StreamExecutionSnafu { message: "stopped" }.build());
     let error = worker.join().unwrap().unwrap_err();
     assert!(matches!(error, FutureExecutionError::Cancelled { .. }));
     assert!(error.source().unwrap().is::<StreamError>());
@@ -110,9 +108,7 @@ fn expired_or_cancelled_contexts_do_not_poll_business_futures() {
         Err(FutureExecutionError::DeadlineExceeded)
     ));
     let cancellation = StreamCancellation::default();
-    cancellation.cancel(StreamError::Execution {
-        message: "stopped".into(),
-    });
+    cancellation.cancel(mf_runtime::StreamExecutionSnafu { message: "stopped" }.build());
     context.set_cancellation(cancellation);
     let result = context.execute_future(async { panic!("must not poll") }, None);
     assert!(matches!(
@@ -154,9 +150,9 @@ fn forked_contexts_inherit_cancellation_and_drive_independent_values() {
     for (index, worker) in workers.into_iter().enumerate() {
         assert_eq!(worker.join().unwrap(), index);
     }
-    context.cancellation().cancel(StreamError::Execution {
-        message: "stopped".into(),
-    });
+    context
+        .cancellation()
+        .cancel(mf_runtime::StreamExecutionSnafu { message: "stopped" }.build());
     assert!(matches!(
         context.fork_body(None).execute_future(async { 1 }, None),
         Err(FutureExecutionError::Cancelled { .. })

@@ -753,7 +753,6 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
     graph.control_edges.clear();
     graph.execution_order = vec!["repeat".into()];
     graph.loop_bodies = vec![LoopBodyDescription {
-        call_targets: Vec::new(),
         order_edges: Vec::new(),
         path: vec!["repeat".into()],
         nodes: vec![
@@ -1123,7 +1122,6 @@ fn body_clusters_collapse_within_their_scope() {
     graph.control_edges.clear();
     graph.execution_order = vec!["repeat".into()];
     graph.loop_bodies = vec![LoopBodyDescription {
-        call_targets: Vec::new(),
         path: vec!["repeat".into()],
         nodes: vec![
             NodeDescription {
@@ -1731,7 +1729,6 @@ fn root_and_loop_body_share_routing_geometry() {
     description.data_edges.clear();
     description.control_edges.clear();
     description.loop_bodies = vec![LoopBodyDescription {
-        call_targets: Vec::new(),
         order_edges: Vec::new(),
         path: vec!["repeat".into()],
         nodes: body_graph.nodes.clone(),
@@ -2205,5 +2202,23 @@ fn unresolved_bundles_retain_all_members_and_mixed_evidence_is_not_success() {
             .unwrap()
             .fg,
         Color::Green
+    );
+}
+
+#[test]
+fn graph_node_limit_rejects_oversized_descriptions_before_layout() {
+    use mf_tui::{graph::GraphError, state::MAX_SESSION_NODES};
+    let mut graph = description();
+    graph.data_edges.clear();
+    graph.control_edges.clear();
+    graph.nodes = (0..=MAX_SESSION_NODES)
+        .map(|index| NodeDescription {
+            id: format!("node-{index}"),
+            kind: "builtin.constant".into(),
+        })
+        .collect();
+    graph.execution_order = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    assert!(
+        matches!(GraphLayout::new(&graph), Err(GraphError::TooManyNodes { limit }) if limit == MAX_SESSION_NODES)
     );
 }

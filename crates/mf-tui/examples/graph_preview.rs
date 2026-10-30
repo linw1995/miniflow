@@ -244,7 +244,6 @@ pub fn body_description(
     fixture: &WorkflowDescription,
 ) -> mf_telemetry::description::LoopBodyDescription {
     mf_telemetry::description::LoopBodyDescription {
-        call_targets: Vec::new(),
         order_edges: Vec::new(),
         path: vec!["repeat".into()],
         nodes: fixture.nodes.clone(),

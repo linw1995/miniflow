@@ -4,12 +4,11 @@ use crate::{FlowNode, NodeExecution, StreamExecution, TaskNode};
 use snafu::OptionExt;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock, Weak, atomic::AtomicU64};
+use std::sync::Arc;
 
 type OperatorStates = Vec<Option<NodeExecution>>;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FlowDependency {
     /// Candidates with the same target input form one exclusive group.
     pub exclusive: bool,
@@ -62,10 +61,6 @@ pub struct StreamEmissionBinding {
 
 /// Executable entry point and output selector for one message channel.
 pub struct StreamMessageProgram {
-    /// Initial execution domains that must commit before admitting this message.
-    pub startup_dependencies: Box<[usize]>,
-    /// Startup evidence imported once into each admitted frame, without skip propagation.
-    pub startup_visibility: crate::OutputVisibility,
     pub source: Option<usize>,
     pub schedule: MessageSchedule,
     pub select_outputs: Option<Arc<StreamOutputSelector>>,
@@ -73,8 +68,7 @@ pub struct StreamMessageProgram {
 
 /// Executable wiring and scheduling layout lowered before business execution.
 pub struct StreamProgram {
-    /// Union of initial evidence retained for future frames.
-    pub startup_visibility: crate::OutputVisibility,
+    pub graph: Arc<crate::WorkflowGraph>,
     pub execution_domains: ExecutionDomains,
     pub messages: Vec<StreamMessageProgram>,
     pub emissions: Vec<Option<StreamEmissionBinding>>,
@@ -98,13 +92,9 @@ pub struct StreamPlan {
     execution: StreamExecution,
     nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>>,
     program: StreamProgram,
-    has_startup_dependencies: bool,
     input_schema: crate::WorkflowInputSchema,
+    graph: Arc<crate::WorkflowGraph>,
     generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
-    call_interfaces: crate::CallInterfaces,
-    calls: Option<crate::invocation::CallTable>,
-    dispatcher: OnceLock<Weak<dyn crate::invocation::CallDispatcher>>,
-    call_sequence: Arc<AtomicU64>,
     emission_nodes: Vec<Option<FlowNode<()>>>,
 }
 
@@ -130,40 +120,6 @@ impl std::fmt::Debug for PreparedStream {
 }
 
 impl PreparedStream {
-    pub fn with_prepared_calls(
-        mut self,
-        calls: Vec<crate::PreparedCall>,
-    ) -> Result<Self, crate::CallDispatchError> {
-        for call in &calls {
-            snafu::ensure!(
-                self.task_node(call.binding.caller.index()).is_some(),
-                crate::invocation::InvalidPlanSnafu {
-                    message: "stream caller must have a task executor"
-                }
-            );
-            snafu::ensure!(
-                self.plan
-                    .nodes
-                    .get(call.binding.target.index())
-                    .is_some_and(|node| node.node.is_some()),
-                crate::invocation::InvalidPlanSnafu {
-                    message: "stream call target must be a terminal task"
-                }
-            );
-        }
-        let table = crate::invocation::CallTable::new(
-            &self.plan.nodes,
-            &self.plan.program.execution_domains,
-            calls,
-        )?;
-        self.plan.call_interfaces = table
-            .as_ref()
-            .map(|table| table.interfaces().clone())
-            .unwrap_or_default();
-        self.plan.calls = table;
-        Ok(self)
-    }
-
     pub fn task_node(&self, node: usize) -> Option<&dyn TaskNode> {
         self.plan
             .nodes
@@ -179,6 +135,12 @@ impl PreparedStream {
         program: StreamProgram,
         input_schema: crate::WorkflowInputSchema,
     ) -> Self {
+        let graph = Arc::new(crate::WorkflowGraph {
+            inputs: crate::WorkflowGraph::describe_inputs(&input_schema),
+            nodes: crate::WorkflowGraph::describe_nodes(&nodes),
+            connections: program.graph.connections.clone(),
+            controls: program.graph.controls.clone(),
+        });
         let mut operator_states = Vec::with_capacity(nodes.len());
         let emission_nodes = nodes
             .iter()
@@ -240,21 +202,13 @@ impl PreparedStream {
                 }
             })
             .collect();
-        let has_startup_dependencies = program
-            .messages
-            .iter()
-            .any(|message| !message.startup_dependencies.is_empty());
         let plan = StreamPlan {
             execution,
-            has_startup_dependencies,
             nodes,
             program,
             input_schema,
+            graph,
             generated_domains: BTreeMap::new(),
-            call_interfaces: Default::default(),
-            calls: None,
-            dispatcher: OnceLock::new(),
-            call_sequence: Arc::new(AtomicU64::new(0)),
             emission_nodes,
         };
         Self {
@@ -281,8 +235,8 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
-    pub fn call_interfaces(&self) -> &crate::CallInterfaces {
-        &self.call_interfaces
+    pub fn workflow_graph(&self) -> &Arc<crate::WorkflowGraph> {
+        &self.graph
     }
 
     pub fn emission_node(&self, node: usize) -> &FlowNode<()> {
@@ -301,10 +255,6 @@ impl StreamPlan {
         self.program.emissions[node]
             .as_ref()
             .is_some_and(|route| route.connected)
-    }
-
-    pub(super) fn has_startup_dependencies(&self) -> bool {
-        self.has_startup_dependencies
     }
 
     pub fn program(&self) -> &StreamProgram {
@@ -398,7 +348,7 @@ impl StreamPlan {
             definition_id: node.definition_id.clone(),
             message: "stream execution domain contains a non-task node",
         })?;
-        self.with_call_scope(context, |context| {
+        context.with_workflow_graph(&self.graph, |context| {
             crate::execute_resolved_node_in_context(
                 node,
                 context,
@@ -416,81 +366,32 @@ impl StreamPlan {
         id: usize,
         context: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
-        self.with_call_scope(context, |context| {
-            if let Some(executor) = self.generated_domains.get(&id) {
-                return executor(self, context);
-            }
-            let domain = self.execution_domain(id);
-            for &position in domain.positions.iter() {
-                if context.cancellation().failure().is_some() {
-                    break;
-                }
-                self.execute_resolved_position(position, context, |node, ctx, inputs| {
-                    let _ = node;
-                    self.resolve_inputs(position, ctx, inputs, Default::default())
-                })?;
-                if context.scope_exit_requested() {
-                    break;
-                }
-            }
-            Ok(())
+        context.with_workflow_graph(&self.graph, |context| {
+            self.execute_domain_with_graph(id, context)
         })
     }
-}
 
-impl StreamPlan {
-    pub fn prepared_calls(&self) -> impl Iterator<Item = &crate::PreparedCall> {
-        self.calls.iter().flat_map(|calls| calls.prepared_calls())
-    }
-
-    pub(super) fn initialize_calls(self: &Arc<Self>) {
-        if self.calls.is_some() {
-            let dispatcher: Arc<dyn crate::invocation::CallDispatcher> = self.clone();
-            let _ = self.dispatcher.set(Arc::downgrade(&dispatcher));
+    fn execute_domain_with_graph(
+        &self,
+        id: usize,
+        context: &mut crate::ExecutionContext,
+    ) -> Result<(), crate::WorkflowRunError> {
+        if let Some(executor) = self.generated_domains.get(&id) {
+            return executor(self, context);
         }
-    }
-
-    pub(super) fn install_call_scope(&self, context: &mut crate::ExecutionContext) {
-        context.set_call_scope(
-            self.call_interfaces.clone(),
-            self.dispatcher.get().cloned(),
-            self.call_sequence.clone(),
-        );
-    }
-
-    fn with_call_scope<T, E>(
-        &self,
-        context: &mut crate::ExecutionContext,
-        run: impl FnOnce(&mut crate::ExecutionContext) -> Result<T, E>,
-    ) -> Result<T, E> {
-        context.with_call_dispatcher(&self.call_interfaces, self.dispatcher.get().cloned(), run)
-    }
-}
-
-impl crate::invocation::CallDispatcher for StreamPlan {
-    fn dispatch(
-        &self,
-        caller: &crate::DefinitionId,
-        id: crate::CallId,
-        arguments: crate::CallArguments,
-        context: &mut crate::ExecutionContext,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
-        self.calls
-            .as_ref()
-            .context(crate::invocation::UnavailableSnafu)?
-            .dispatch(
-                caller,
-                crate::CallRequest { id, arguments },
-                context,
-                deadline,
-                &self.nodes,
-                |node, inputs, context| {
-                    node.node
-                        .as_deref()
-                        .expect("validated call target")
-                        .execute(inputs, context)
-                },
-            )
+        let domain = self.execution_domain(id);
+        for &position in domain.positions.iter() {
+            if context.cancellation().failure().is_some() {
+                break;
+            }
+            self.execute_resolved_position(position, context, |node, ctx, inputs| {
+                let _ = node;
+                self.resolve_inputs(position, ctx, inputs, Default::default())
+            })?;
+            if context.scope_exit_requested() {
+                break;
+            }
+        }
+        Ok(())
     }
 }

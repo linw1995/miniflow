@@ -3,33 +3,50 @@ use crate::{
     NodePortContract, NodePorts, NodeResult, NodeValue, PortSpec, TaskNode, TypedNodeResult,
     TypedTaskNode, ValueType, encode_typed_result,
 };
+use snafu::{ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
 
 fn structural_error(message: impl Into<String>) -> NodeExecutionError {
-    NodeExecutionError::ExecutionFailed {
-        message: message.into(),
-    }
+    crate::NodeExecutionFailedSnafu { message }.build()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+pub enum LoopVariableError {
+    #[snafu(display("variables must not be empty"))]
+    EmptyVariables,
+    #[snafu(display("invalid or reserved variable name `{variable}`"))]
+    InvalidVariableName { variable: String },
+    #[snafu(display("variable `{variable}`: {source}"))]
+    VariableType {
+        variable: String,
+        source: crate::TypeDescriptorError,
+    },
+    #[snafu(display("duplicate variable `{variable}`"))]
+    DuplicateVariable { variable: String },
 }
 
 pub fn loop_variable_types(
     variables: &[LoopVariableDefinition],
-) -> Result<BTreeMap<String, ValueType>, String> {
-    if variables.is_empty() {
-        return Err("variables must not be empty".into());
-    }
+) -> Result<BTreeMap<String, ValueType>, LoopVariableError> {
+    ensure!(!variables.is_empty(), EmptyVariablesSnafu);
     let mut types = BTreeMap::new();
     for variable in variables {
-        if variable.name.trim().is_empty() || variable.name == "index" {
-            return Err(format!(
-                "invalid or reserved variable name `{}`",
-                variable.name
-            ));
-        }
-        let value_type = ValueType::parse_descriptor(&variable.value_type)
-            .map_err(|error| format!("variable `{}`: {error}", variable.name))?;
-        if types.insert(variable.name.clone(), value_type).is_some() {
-            return Err(format!("duplicate variable `{}`", variable.name));
-        }
+        ensure!(
+            !variable.name.trim().is_empty() && variable.name != "index",
+            InvalidVariableNameSnafu {
+                variable: &variable.name
+            }
+        );
+        let value_type =
+            ValueType::parse_descriptor(&variable.value_type).context(VariableTypeSnafu {
+                variable: &variable.name,
+            })?;
+        ensure!(
+            types.insert(variable.name.clone(), value_type).is_none(),
+            DuplicateVariableSnafu {
+                variable: &variable.name
+            }
+        );
     }
     Ok(types)
 }

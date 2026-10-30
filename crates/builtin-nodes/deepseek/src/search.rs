@@ -5,7 +5,7 @@ use mf_runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::ensure;
+use snafu::{OptionExt, ensure};
 use std::time::{Duration, Instant};
 
 pub const SEARCH_KIND: &str = "builtin.deepseek.search";
@@ -143,7 +143,7 @@ impl TypedTaskNode for SearchNode {
             .map_err(DeepSeekExecutionError::from)?;
         let deadline = origin
             .checked_add(Duration::from_millis(config.timeout_ms))
-            .ok_or(DeepSeekExecutionError::DeadlineRange)?;
+            .context(crate::DeadlineRangeSnafu)?;
         context.check_future_limits(Some(deadline))?;
         let request = SearchRequest {
             query: &inputs.query,
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn input_validation_enforces_unicode_and_count_limits() {
         for (query, valid) in [
-            ("搜索".to_owned(), true),
+            ("\u{641c}\u{7d22}".to_owned(), true),
             (String::new(), false),
             (" ".into(), false),
             ("é".repeat(128), true),

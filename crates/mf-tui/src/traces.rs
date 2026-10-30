@@ -691,21 +691,7 @@ fn data_preview(
         let metadata = &snapshot.metadata[index];
         text.push_str(&format!("{}\n", data_row(entry, metadata)));
         for scope in &entry.scope {
-            if let mf_telemetry::event::ScopePathEntry::Invocation {
-                call_id,
-                binding,
-                target_id,
-                invocation,
-            } = scope
-            {
-                text.push_str(&format!(
-                    "Invocation {}: {} -> {} (binding {})\n",
-                    invocation.get(),
-                    label(call_id),
-                    label(target_id),
-                    binding.get()
-                ));
-            } else if scope.is_call() {
+            if scope.is_call() {
                 text.push_str(&format!("Call: {}\n", label(scope.node_id())));
             } else {
                 text.push_str(&format!(

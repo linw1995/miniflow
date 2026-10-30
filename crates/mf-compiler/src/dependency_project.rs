@@ -1,5 +1,5 @@
 use crate::CompiledWorkflow;
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -32,6 +32,11 @@ pub enum DependencyProjectError {
     State { source: crate::StateError },
     #[snafu(display("invalid dependency {alias}: {message}"))]
     Dependency { alias: String, message: String },
+    #[snafu(display("invalid dependency {alias}: {source}"))]
+    DependencyValidation {
+        alias: String,
+        source: mf_runtime::NodeDependencyError,
+    },
     #[snafu(display("could not generate runner code: {source}"))]
     Plan { source: crate::PlanError },
     #[snafu(display("could not write generated project at {path:?}: {source}"))]
@@ -421,9 +426,9 @@ fn path_string(path: &Path) -> Result<String, DependencyProjectError> {
     })?;
     path.to_str()
         .map(str::to_owned)
-        .ok_or_else(|| DependencyProjectError::Dependency {
-            alias: "path".into(),
-            message: "path is not UTF-8".into(),
+        .with_context(|| DependencySnafu {
+            alias: "path",
+            message: "path is not UTF-8",
         })
 }
 
@@ -481,10 +486,7 @@ pub fn write_dependency_project_with_options(
     for (index, (alias, dependency)) in definition.dependencies.iter().enumerate() {
         dependency
             .validate()
-            .map_err(|message| DependencyProjectError::Dependency {
-                alias: alias.clone(),
-                message,
-            })?;
+            .context(DependencyValidationSnafu { alias })?;
         let name = format!("node_{index}");
         main.push_str(&format!("extern crate {name} as _;\n"));
         build.push_str(&format!("extern crate {name} as _;\n"));
@@ -524,7 +526,7 @@ pub fn write_dependency_project_with_options(
             }
             Ok(_) => {}
             Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => return Err(DependencyProjectError::Write { path, source }),
+            Err(source) => return Err(source).context(WriteSnafu { path }),
         }
     }
     fs::create_dir_all(project.join("src")).context(WriteSnafu {

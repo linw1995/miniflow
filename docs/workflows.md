@@ -220,8 +220,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
 | `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
 | `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
-| `mfn-llm` | [`builtin.tool_catalog`](#node-backed-tools) | Static Dispatch `source` in the same scope | None | Read-only `tools` definitions |
-| `mfn-llm` | [`builtin.tool_dispatch`](#node-backed-tools) | `outputs`, batch limit, and independent deadline | `outcome`, `tool_calls` | Correlated `tool_results` |
+| `mfn-llm` | [`builtin.tool_results`](#node-backed-tools) | Ordinary result-list input port names | `outcome`, `tool_calls`, and connected result lists | Correlated `tool_results` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -839,86 +838,60 @@ This interface supports text and function tools, not media inputs.
 #### Node-backed tools
 
 The [chat workflow with tools](../examples/chat-tools-flow.json) uses the existing chat contract and
-explicit `messages` protocol. A normal CEL node assembles the initial system/history/user messages once.
-`workflow.loop` owns repeated requests, stopping, and usage accumulation. There is no internal model loop,
-node-owned history, or opaque continuation channel.
-
-The workflow explicitly separates three nodes supplied by `mfn-llm`:
-
-| Node | Configuration | Inputs | Outputs |
-| --- | --- | --- | --- |
-| `builtin.tool_catalog` | Static `source`: the Dispatch node ID in the same scope | None | `tools`, using the existing `ToolDefinition` type |
-| `builtin.llm` | Model request configuration | `messages`, `tools`, optional explicit `tool_results` | Current assistant `message`, `tool_calls`, `outcome`, usage, and normal streams |
-| `builtin.tool_dispatch` | Ordinary argument `outputs`, `max_tool_calls`, independent `timeout_ms` | `outcome`, `tool_calls` | `tool_results`, using the existing `ToolResult` type |
-
-Declare the scope's `calls` on the Dispatch node. Catalog reads a preparation-time, read-only projection
-of that same binding table; it never invokes Dispatch or a tool. This metadata reference is not an
-execution dependency, so `catalog -> chat -> dispatch` remains acyclic. The example connects Dispatch's
-ordinary `amount` output to `multiply_flow`'s `multiply.amount` input; another ordinary connection
-supplies `multiply.factor` from `%loop.factor`. Only `amount` appears in the model's schema.
-`calls` declares the selectable workflow and its description; actual port connections determine
-argument ownership. `remaining_inputs` opts into otherwise unbound Flow inputs.
-
-`multiply_flow` is an existing `workflow.call` boundary. Inside it, `multiply.result` feeds
-`format_result.product` through a normal data connection. The child Flow explicitly exports
-`format_result.text` as `content`. Dispatch encodes those selected workflow outputs as the tool result;
-internal business outputs are not collected automatically.
+explicit message protocol. The LLM declares ordinary output ports and reads their connected workflow
+input contracts. It performs one model request and publishes data. Standard workflow nodes execute
+the tools and pass their results downstream.
 
 ```mermaid
 flowchart LR
-    Catalog[Tool Catalog] -->|tools| Model[LLM]
-    Model -->|outcome and tool_calls| Dispatch[Tool Dispatch]
-    Dispatch -.->|selected workflow with amount| Multiply
-    subgraph ToolBody[Multiply workflow.call body]
-        Multiply -->|result to product| FormatResult
-        FormatResult -->|content| FlowOutput[Workflow output]
+    Model[LLM] -->|multiply argument batch| Batch[Iteration]
+    Batch -->|normal result list| Encode[Tool results]
+    Model -->|tool calls and outcome| Encode
+    Encode -->|tool results| History[Message assembly]
+    Model -->|assistant message| History
+    subgraph Body[Iteration body]
+        MultiplyFlow[Multiply Flow] -->|product| Format[Format result]
+        Format -->|selected item result| BatchResult[Iteration result]
     end
-    FlowOutput -.->|selected Flow outputs| Dispatch
-    Dispatch -->|tool_results| Collect[Message assembly]
-    Model -->|message and usage| Collect
 ```
 
-The LLM node makes one model request and finishes before tool execution. It neither discovers runtime
-bindings nor calls the runtime dispatcher. Dispatch processes accepted `tool_calls` outcomes in response
-order, checks batch identities and size/count limits before side effects, validates each decoded argument before its invocation, and invokes
-only its bound targets through `ExecutionContext`. Other outcomes return an empty result list. Domain
-failures become generic per-call feedback; cancellation, deadlines, and step-budget failures propagate.
-The Flow appends the assistant message and results before deciding whether to request another model turn.
+The LLM configuration declares `outputs: ["multiply"]`, an optional description for that name, and a
+`max_tool_calls` batch limit. The `multiply` port connects to `multiply_batch.items`. That standard
+Iteration uses `input_mode: arguments`; its body exposes ordinary workflow inputs such as
+`multiply_flow.multiply.amount` and `multiply_flow.multiply.factor`. The factor input is connected
+from `%loop.factor` as a shared value, so only amount appears in the model's tool schema.
 
-Catalog retains requiredness, closed records, enum variants, collections, nullability, and conjunctive
-constraints. Unsupported opaque, recursive, or binary32 projections fail in Catalog before a model request.
-Secret caller parameters carry JSON Schema `writeOnly` annotations, which the LLM uses to mark arguments
-before publishing terminal messages or stream events. Dispatch preserves value sensitivity and redacts
-secret result subtrees before exporting them as tool-result content.
+Every selected call becomes a workflow argument object in the corresponding output list. The LLM
+uses unambiguous leaf input names in the model schema and publishes qualified workflow input names
+in the data records. Two calls to multiply produce two Iteration items. An unused tool produces an
+empty list, so its body executes no nodes. Optional input omission, defaults, types, and sensitivity
+are resolved through the normal workflow input interface.
 
-Every accepted tool call remains available on the LLM's normal `tool_call` stream. Choose either the
-terminal batch or stream events as an execution path; wiring both to executors would explicitly execute
-both paths. Manually supplied tools use the same protocol. Route those calls to their handlers with
-ordinary Flow filters and combine the correlated results before the next request. Dispatch returns
-an unknown-tool error for names outside its own binding table.
+Inside the body, `multiply_flow.product` explicitly connects to `format_result.product`. The formatter
+produces an object containing the public result text. The Iteration's existing `result` declaration
+selects that ordinary node output. `multiply_batch.results` then connects to `tool_results.multiply`,
+and `tool_results.tool_results` connects to message assembly. Values never return through a hidden
+callback to a dispatcher.
 
-Dispatch's `max_tool_calls` defaults to 32 (range 1-128), and `timeout_ms` defaults to 60000. Both support
-normal configuration templates. Its deadline starts at Dispatch execution and inherits any enclosing
-runtime deadline; it does not inherit the completed model request's local timeout. The model's
-`timeout_ms` covers only that model request. `outputs` and `max_tool_calls` are Dispatch
-configuration fields. Neither node owns a multi-round loop.
+`builtin.tool_results` takes `outcome`, the original `tool_calls`, and one result-list input per declared
+tool name. It preserves model response order and matches repeated calls by their positions within each
+tool's list. It rejects mismatched result counts and duplicate call IDs, redacts sensitive result
+subtrees, and serializes bounded protocol content. Non-tool outcomes yield an empty result list.
+This node performs protocol encoding only; all tool execution has already happened upstream.
 
-Tool arguments/results are limited to 64 KiB each, argument batches and generated declarations to
-256 KiB. Catalog admits at most 128 tools and 256 public parameters per tool. Oversized results use generic
-feedback instead of truncated JSON. There are no automatic request or tool retries. The example's Loop
-runs at most four requests and preserves model usage even when the conversation does not complete.
-For message-driven native graphs, place Catalog in the same message scope as the model using the normal
-input/control wiring; the metadata reference itself never introduces a cross-message value join.
+`workflow.loop` owns history, repeated model requests, stop conditions, and usage accumulation. Model
+deadlines apply to model requests; tool nodes retain their ordinary workflow limits and provider-specific
+timeouts. The existing manual [LLM tool example](../examples/llm-tools.json) remains available for flows
+that supply their own definitions and handlers. Manual and connected names must be distinct.
 
 ```sh
 mf compile examples/chat-tools-flow.json --output ./chat-tools-flow
 mf run ./chat-tools-flow --chat --chat-db state/chat.sqlite --model your-model --factor 2
 ```
 
-Set `OPENAI_API_KEY`. The chat application owns persistence, title
-composition, and accounting. This example uses terminal delivery; Loop child-stream forwarding is an
-independent runtime change. The main branch's manual [LLM tool example](../examples/llm-tools.json) remains
-available for caller-managed tool execution.
+Set `OPENAI_API_KEY`. The chat application retains persistence, title composition, and accounting.
+The example can use existing Loop, Call, and Iteration child-stream forwarding without another tool
+execution mechanism.
 
 ## Structured Loop
 

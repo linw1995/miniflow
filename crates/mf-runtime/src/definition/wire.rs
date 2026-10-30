@@ -96,13 +96,6 @@ fn decode_scope(
         }
     );
     ensure!(
-        !scope.contains_key("calls") || version.supports_directed_calls(),
-        InvalidSnafu {
-            path,
-            message: "directed calls require version 2026-10-28"
-        }
-    );
-    ensure!(
         scope
             .get("clusters")
             .and_then(Value::as_array)
@@ -262,13 +255,6 @@ fn encode_scope(
         InvalidSnafu {
             path,
             message: "nested flows require version 2026-10-25"
-        }
-    );
-    ensure!(
-        !scope.contains_key("calls") || version.supports_directed_calls(),
-        InvalidSnafu {
-            path,
-            message: "directed calls require version 2026-10-28"
         }
     );
     ensure!(

@@ -40,5 +40,4 @@ libc.workspace = true
 signal-hook.workspace = true
 
 [dev-dependencies]
-opentelemetry_sdk = { workspace = true, features = ["logs", "trace", "testing"] }
 tempfile.workspace = true

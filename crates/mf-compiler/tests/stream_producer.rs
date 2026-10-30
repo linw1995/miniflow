@@ -82,9 +82,7 @@ struct Producer {
 }
 
 fn failure(message: &str) -> NodeExecutionError {
-    NodeExecutionError::ExecutionFailed {
-        message: message.into(),
-    }
+    mf_runtime::NodeExecutionFailedSnafu { message }.build()
 }
 
 impl StreamNode for Producer {

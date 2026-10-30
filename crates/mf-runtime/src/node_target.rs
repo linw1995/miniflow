@@ -57,7 +57,7 @@ pub enum NodeTargetError {
 pub struct PreparedTaskTarget<'a> {
     contract: &'a NodeTarget,
     node: FlowNode<&'a dyn TaskNode>,
-    call_interfaces: &'a crate::CallInterfaces,
+    graph: std::sync::Arc<crate::WorkflowGraph>,
 }
 
 impl crate::FlowRuntime {
@@ -89,33 +89,43 @@ impl crate::FlowRuntime {
         inputs: crate::WorkflowArguments,
         context: crate::WorkflowArguments,
     ) -> Result<crate::FlowOutputs, crate::WorkflowRunError> {
-        state.with_call_interfaces(target.call_interfaces, |state| {
-            let limit = target
-                .contract
-                .worker_limit
-                .unwrap_or(self.options().max_parallel_domains);
-            state.configure_worker_limit(self.options().max_parallel_domains.min(limit));
-            state
-                .initialize_target(target.contract, inputs, context)
-                .inspect_err(|error| {
-                    if let Some(observation) = state.observation_mut() {
-                        observation.preparation_failed_unattributed(error.to_string());
-                    }
-                })?;
-            let result = (|| {
-                crate::context::execute_ordered_task_in_context(
-                    &target.node,
-                    target.node.node,
-                    [],
-                    state,
-                )?;
-                state.target_outputs(&target.node)
-            })();
-            if let Err(error) = &result {
-                state.select_observation_failure(error);
-            }
-            result
+        state.with_workflow_graph(&target.graph, |state| {
+            self.execute_target_in_graph(target, state, inputs, context)
         })
+    }
+
+    fn execute_target_in_graph(
+        &self,
+        target: &PreparedTaskTarget<'_>,
+        state: &mut crate::ExecutionContext,
+        inputs: crate::WorkflowArguments,
+        context: crate::WorkflowArguments,
+    ) -> Result<crate::FlowOutputs, crate::WorkflowRunError> {
+        let limit = target
+            .contract
+            .worker_limit
+            .unwrap_or(self.options().max_parallel_domains);
+        state.configure_worker_limit(self.options().max_parallel_domains.min(limit));
+        state
+            .initialize_target(target.contract, inputs, context)
+            .inspect_err(|error| {
+                if let Some(observation) = state.observation_mut() {
+                    observation.preparation_failed_unattributed(error.to_string());
+                }
+            })?;
+        let result = (|| {
+            crate::context::execute_ordered_task_in_context(
+                &target.node,
+                target.node.node,
+                [],
+                state,
+            )?;
+            state.target_outputs(&target.node)
+        })();
+        if let Err(error) = &result {
+            state.select_observation_failure(error);
+        }
+        result
     }
 }
 
@@ -270,7 +280,6 @@ impl NodeTarget {
         node: &'a FlowNode<N>,
         task: Option<&'a dyn TaskNode>,
         nodes: impl IntoIterator<Item = (&'a str, &'a NodeMetadata)>,
-        call_interfaces: &'a crate::CallInterfaces,
     ) -> Result<PreparedTaskTarget<'a>, NodeTargetError> {
         self.require_task()?;
         self.validate_metadata(node.definition_id.as_str(), &node.metadata)?;
@@ -296,8 +305,8 @@ impl NodeTarget {
             );
         }
         Ok(PreparedTaskTarget {
+            graph: Default::default(),
             contract: self,
-            call_interfaces,
             node: FlowNode {
                 definition_id: node.definition_id.clone(),
                 metadata: node.metadata.clone(),
@@ -321,8 +330,11 @@ impl NodeTarget {
             flow.nodes()
                 .iter()
                 .map(|node| (node.definition_id.as_str(), &node.metadata)),
-            flow.call_interfaces(),
         )
+        .map(|mut target| {
+            target.graph = flow.workflow_graph().clone();
+            target
+        })
     }
 
     pub fn bind_stream<'a>(
@@ -348,7 +360,10 @@ impl NodeTarget {
             nodes
                 .iter()
                 .map(|node| (node.definition_id.as_str(), &node.metadata)),
-            stream.plan().call_interfaces(),
         )
+        .map(|mut target| {
+            target.graph = stream.plan().workflow_graph().clone();
+            target
+        })
     }
 }

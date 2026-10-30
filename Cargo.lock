@@ -1821,7 +1821,6 @@ dependencies = [
  "mf-runtime-derive",
  "mf-telemetry",
  "opentelemetry",
- "opentelemetry_sdk",
  "rpds",
  "serde",
  "serde_json",

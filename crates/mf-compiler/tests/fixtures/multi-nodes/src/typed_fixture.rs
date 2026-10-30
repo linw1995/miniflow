@@ -4,6 +4,7 @@ use mf_runtime::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use snafu::OptionExt;
 
 struct IntegerSource;
 
@@ -136,8 +137,8 @@ impl TaskNode for TypedEcho {
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let value = inputs
             .get("input")
-            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                message: "missing typed fixture input".into(),
+            .with_context(|| mf_runtime::NodeExecutionFailedSnafu {
+                message: "missing typed fixture input",
             })?;
         Ok((Outputs::from([("value".into(), value.clone())])).into())
     }

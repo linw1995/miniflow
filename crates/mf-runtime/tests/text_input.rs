@@ -1,4 +1,4 @@
-use mf_runtime::{StreamCancellation, StreamError, TextInput};
+use mf_runtime::{StreamCancellation, TextInput};
 use std::{fs::File, sync::mpsc, thread, time::Duration};
 
 #[test]
@@ -39,9 +39,12 @@ fn cancellation_interrupts_idle_text_input() {
         done.send(TextInput::new(input).next_line(&worker_cancellation))
             .unwrap()
     });
-    cancellation.cancel(StreamError::Execution {
-        message: "cancelled input".into(),
-    });
+    cancellation.cancel(
+        mf_runtime::StreamExecutionSnafu {
+            message: "cancelled input",
+        }
+        .build(),
+    );
     assert!(
         result
             .recv_timeout(Duration::from_secs(2))

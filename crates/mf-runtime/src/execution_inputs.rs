@@ -40,6 +40,7 @@ struct BoundInputs {
     arguments: WorkflowArguments,
     nodes: BTreeSet<String>,
     stdin_owner: Option<String>,
+    scoped: bool,
 }
 
 impl ExecutionInputs {
@@ -65,7 +66,16 @@ impl ExecutionInputs {
             arguments,
             nodes: schema.inputs.keys().cloned().collect(),
             stdin_owner,
+            scoped: false,
         }));
+        Ok(())
+    }
+
+    pub fn bind_scoped(&mut self, schema: &WorkflowInputSchema) -> Result<(), WorkflowInputError> {
+        self.bind(schema, |name| std::env::var_os(name), false)?;
+        if let Some(binding) = self.binding.as_mut() {
+            Arc::make_mut(binding).scoped = true;
+        }
         Ok(())
     }
 
@@ -79,7 +89,7 @@ impl ExecutionInputs {
             return Inputs::new();
         };
         let id = node.definition_id.as_str();
-        if in_scope || !binding.nodes.contains(id) {
+        if (in_scope && !binding.scoped) || !binding.nodes.contains(id) {
             return Inputs::new();
         }
         node.metadata
@@ -139,26 +149,13 @@ impl ExecutionInputs {
         node: &FlowNode<N>,
         in_scope: bool,
         dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
-        lookup: impl FnMut(
-            ExecutionDependency<'a>,
-        ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
-        inputs: &mut Inputs,
-        causes: BTreeSet<SkipCause>,
-    ) -> Result<InputResolution, WorkflowRunError> {
-        *inputs = self.initial(node, in_scope);
-        Self::resolve_composed_inputs(node, dependencies, lookup, inputs, causes)
-    }
-
-    /// Resolves external values into an explicit initial input map through the shared validator.
-    pub fn resolve_composed_inputs<'a, 'value, N>(
-        node: &FlowNode<N>,
-        dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
         mut lookup: impl FnMut(
             ExecutionDependency<'a>,
         ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
         inputs: &mut Inputs,
         mut causes: BTreeSet<SkipCause>,
     ) -> Result<InputResolution, WorkflowRunError> {
+        *inputs = self.initial(node, in_scope);
         for (name, value) in inputs.iter_mut() {
             if node
                 .metadata

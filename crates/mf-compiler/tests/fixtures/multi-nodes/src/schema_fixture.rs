@@ -1,5 +1,5 @@
 use mf_runtime::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[derive(NodeEnum)]
 enum Mode {
@@ -86,34 +86,6 @@ impl TypedTaskNode for ChangedTool {
         .into())
     }
 }
-struct Caller;
-impl TaskNode for Caller {
-    fn execute(
-        &self,
-        _: Inputs,
-        context: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        let interface = context
-            .call_targets()
-            .iter()
-            .find(|call| call.name() == "lookup")
-            .unwrap()
-            .clone();
-        let arguments = CallArguments {
-            outputs: Outputs::from([(
-                "request".into(),
-                json!({"query":"find","mode":"fast"}).into(),
-            )]),
-            ..Default::default()
-        };
-        interface.validate_decoded_arguments(&arguments)?;
-        match context.invoke_call(interface.id(), arguments)?.outcome {
-            CallOutcome::Succeeded(outputs) => Ok(outputs.into()),
-            CallOutcome::Failed { source } => Err(source.into()),
-            CallOutcome::Skipped { .. } => panic!("unexpected skip"),
-        }
-    }
-}
 fn tool(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let metadata = NodeMetadata {
         input_bindings: [(
@@ -134,23 +106,7 @@ fn tool(config: Value) -> Result<PreparedNode, NodeBuildError> {
         PreparedNode::typed_task(Tool, metadata)
     }
 }
-fn caller(_: Value) -> Result<PreparedNode, NodeBuildError> {
-    Ok(PreparedNode::from_parts(
-        NodeExecution::Task(Box::new(Caller)),
-        NodeMetadata {
-            ports: NodePorts {
-                inputs: vec![],
-                outputs: vec![
-                    PortSpec::new("value", ValueType::String, true),
-                    PortSpec::new("request", ValueType::Any, false),
-                ],
-            },
-            ..Default::default()
-        },
-    ))
-}
 inventory::submit! { NodeRegistration { kind:"fixture.schema_tool", factory:NodeFactory::Plain(tool) } }
-inventory::submit! { NodeRegistration { kind:"fixture.schema_caller", factory:NodeFactory::Plain(caller) } }
 
 #[cfg(test)]
 mod tests {

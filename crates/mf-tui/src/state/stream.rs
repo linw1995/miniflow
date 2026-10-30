@@ -571,14 +571,6 @@ fn validate_graph(
                 description
                     .validate_scope_path(&node.path)
                     .context(EventSnafu)?;
-                if let Some(mf_telemetry::event::ScopePathEntry::Invocation { target_id, .. }) =
-                    node.path.last()
-                    && node.id != *target_id
-                {
-                    return Err(invalid(
-                        "stream node disagrees with selected invocation target",
-                    ));
-                }
                 let path: Vec<_> = node
                     .path
                     .iter()
@@ -692,11 +684,12 @@ impl StreamState {
         let (last, parent) = path.split_last().expect("validated path");
         let node = mf_telemetry::event::NodeIdentity {
             id: last.node_id().to_owned(),
-            kind: description
-                .node_in_scope(parent, last.node_id())
-                .expect("validated scope caller")
-                .kind
-                .clone(),
+            kind: if last.is_call() {
+                "workflow.call"
+            } else {
+                "workflow.loop"
+            }
+            .into(),
             path: parent.to_vec(),
         };
         let admission = self.ensure_invocation(record, &node)?;
@@ -1543,7 +1536,6 @@ mod tests {
         graph.execution_order[1] = "repeat".into();
         graph.data_edges[0].to_node = "repeat".into();
         graph.loop_bodies = vec![LoopBodyDescription {
-            call_targets: Vec::new(),
             order_edges: Vec::new(),
             path: vec!["repeat".into()],
             nodes: vec![NodeDescription {
@@ -1821,126 +1813,6 @@ mod tests {
                 loop_id: "repeat".into(),
                 index: Count::ZERO,
             }];
-        }
-        assert!(
-            SessionState::new(graph, run)
-                .unwrap()
-                .apply_stream(forged)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn directed_invocations_keep_parent_kinds_and_isolate_repeated_targets() {
-        use mf_telemetry::description::{CallTargetDescription, LoopBodyDescription};
-        let run = RunId::new();
-        let (mut graph, mut records) = loop_records(run, 2, 1);
-        graph.version = WorkflowDescriptionVersion::V2026_10_28;
-        graph.nodes[1].kind = "builtin.llm".into();
-        graph.nodes.push(NodeDescription {
-            id: "tool".into(),
-            kind: "fixture.tool".into(),
-        });
-        graph.execution_order.push("tool".into());
-        let target_position = count((graph.execution_order.len() - 1) as i64);
-        graph.loop_bodies[0] = LoopBodyDescription {
-            path: vec!["repeat".into()],
-            nodes: graph.nodes.clone(),
-            execution_order: graph.execution_order.clone(),
-            data_edges: graph.data_edges.clone(),
-            control_edges: graph.control_edges.clone(),
-            order_edges: graph.order_edges.clone(),
-            clusters: vec![],
-            call_targets: vec![CallTargetDescription {
-                binding: Count::ZERO,
-                name: "tool".into(),
-                target: "tool".into(),
-            }],
-        };
-        for record in &mut records {
-            let StreamPayload::Execution(event) = &mut record.payload else {
-                continue;
-            };
-            let path_for = |path: &[LoopPathEntry]| {
-                vec![LoopPathEntry::Invocation {
-                    call_id: "repeat".into(),
-                    binding: Count::ZERO,
-                    target_id: "tool".into(),
-                    invocation: count(17 + path.last().unwrap().index().get()),
-                }]
-            };
-            match event {
-                Event::NodeStarted { node, position, .. }
-                | Event::NodeFinished { node, position, .. } => {
-                    if node.id == "repeat" {
-                        node.kind = "builtin.llm".into();
-                    }
-                    if !node.path.is_empty() {
-                        node.path = path_for(&node.path);
-                        node.id = "tool".into();
-                        node.kind = "fixture.tool".into();
-                        *position = target_position;
-                    }
-                    if let Event::NodeFinished { loop_summary, .. } = event {
-                        *loop_summary = None;
-                    }
-                }
-                Event::LoopPassStarted { path, elapsed_ns } => {
-                    *event = Event::CallStarted {
-                        path: path_for(path),
-                        elapsed_ns: *elapsed_ns,
-                    }
-                }
-                Event::LoopPassFinished {
-                    path,
-                    elapsed_ns,
-                    outcome,
-                } => {
-                    *event = Event::CallFinished {
-                        path: path_for(path),
-                        elapsed_ns: *elapsed_ns,
-                        outcome: *outcome,
-                    }
-                }
-                _ => {}
-            }
-        }
-        graph.validate().unwrap();
-        for reverse in [false, true] {
-            let mut state = SessionState::new(graph.clone(), run).unwrap();
-            let mut events = records.clone();
-            if reverse {
-                events.reverse();
-            }
-            for record in events {
-                assert_eq!(
-                    state.apply_stream(record.clone()).unwrap(),
-                    Admission::Applied
-                );
-                assert_eq!(state.apply_stream(record).unwrap(), Admission::Duplicate);
-            }
-            let snapshot = state.snapshot();
-            assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
-            assert_eq!(snapshot.loop_passes.len(), 2);
-            assert_ne!(snapshot.loop_passes[0].path, snapshot.loop_passes[1].path);
-            for pass in snapshot.loop_passes {
-                assert_eq!(
-                    pass.nodes
-                        .iter()
-                        .find(|node| node.id == "tool")
-                        .unwrap()
-                        .status,
-                    NodeStatus::Succeeded
-                );
-            }
-        }
-        let mut forged=records.iter().find(|record| matches!(&record.payload, StreamPayload::Execution(Event::NodeStarted { node, .. }) if !node.path.is_empty())).unwrap().clone();
-        if let StreamPayload::Execution(Event::NodeStarted { node, position, .. }) =
-            &mut forged.payload
-        {
-            node.id = "repeat".into();
-            node.kind = "builtin.llm".into();
-            *position = count(1);
         }
         assert!(
             SessionState::new(graph, run)

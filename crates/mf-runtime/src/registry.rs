@@ -121,23 +121,24 @@ impl NodeRegistry {
         let mut registry = Self::default();
 
         for registration in registrations {
-            if matches!(
-                registration.kind,
-                crate::LOOP_ASSIGN_KIND | crate::EXIT_LOOP_KIND | crate::LOOP_SOURCE_ID
-            ) {
-                return Err(NodeRegistryError::ReservedKind {
-                    kind: registration.kind.to_owned(),
-                });
-            }
-            if registry
-                .registrations
-                .insert(registration.kind, registration)
-                .is_some()
-            {
-                return Err(NodeRegistryError::DuplicateKind {
-                    kind: registration.kind.to_owned(),
-                });
-            }
+            snafu::ensure!(
+                !matches!(
+                    registration.kind,
+                    crate::LOOP_ASSIGN_KIND | crate::EXIT_LOOP_KIND | crate::LOOP_SOURCE_ID
+                ),
+                ReservedKindSnafu {
+                    kind: registration.kind
+                }
+            );
+            snafu::ensure!(
+                registry
+                    .registrations
+                    .insert(registration.kind, registration)
+                    .is_none(),
+                DuplicateKindSnafu {
+                    kind: registration.kind
+                }
+            );
         }
 
         Ok(registry)

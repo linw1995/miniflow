@@ -201,10 +201,9 @@ struct FlowData {
     plan: FlowPlan,
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedDomainExecutor>>,
-    call_interfaces: crate::CallInterfaces,
-    calls: Option<crate::invocation::CallTable>,
     input_guards: BTreeMap<NodeId, Arc<crate::ExecutionGuard>>,
     stream_outputs: Vec<crate::SubgraphStreamOutput>,
+    graph: Arc<crate::WorkflowGraph>,
 }
 
 impl Flow {
@@ -262,29 +261,38 @@ impl Flow {
         plan: FlowPlan,
         input_schema: crate::WorkflowInputSchema,
     ) -> Self {
+        let controls = plan
+            .execution_order
+            .iter()
+            .zip(plan.dependencies.iter())
+            .flat_map(|(target, dependencies)| {
+                dependencies
+                    .iter()
+                    .filter(|dependency| dependency.input.is_none())
+                    .map(|dependency| crate::ControlEdgeDefinition {
+                        from_node: dependency.source_node.to_string().into(),
+                        from_output: dependency.source_output.to_string().into(),
+                        to_node: nodes[target.index()].definition_id.clone(),
+                    })
+            })
+            .collect();
+        let mut graph = crate::WorkflowGraph::from_connections(&nodes, &plan.connections, controls);
+        graph.inputs = crate::WorkflowGraph::describe_inputs(&input_schema);
+        let graph = Arc::new(graph);
         Self {
             inner: Arc::new(FlowData {
                 nodes,
                 plan,
                 input_schema,
                 generated_domains: BTreeMap::new(),
-                call_interfaces: Default::default(),
-                calls: None,
                 input_guards: BTreeMap::new(),
                 stream_outputs: Vec::new(),
+                graph,
             }),
         }
     }
-    /// Host-side compiler contracts; node discovery remains limited to `call_targets`.
-    pub fn prepared_calls(&self) -> impl Iterator<Item = &crate::PreparedCall> {
-        self.inner
-            .calls
-            .iter()
-            .flat_map(|calls| calls.prepared_calls())
-    }
-
-    pub fn call_interfaces(&self) -> &crate::CallInterfaces {
-        &self.inner.call_interfaces
+    pub fn workflow_graph(&self) -> &Arc<crate::WorkflowGraph> {
+        &self.inner.graph
     }
 
     /// Binds compiler-validated typed bodies without changing the domain graph.
@@ -441,7 +449,7 @@ impl Flow {
     ) -> Result<(), crate::WorkflowRunError> {
         let node = &self.inner.nodes[self.inner.plan.execution_order[position].index()];
         let previous = state.replace_execution_position(Some(position));
-        let result = self.with_call_scope(state, |state| {
+        let result = state.with_workflow_graph(&self.inner.graph, |state| {
             crate::execute_resolved_node_in_context(
                 node,
                 state,
@@ -463,7 +471,11 @@ impl Flow {
         &self.inner.input_schema
     }
     pub fn with_input_schema(mut self, schema: crate::WorkflowInputSchema) -> Self {
-        self.data_mut().input_schema = schema;
+        let data = self.data_mut();
+        let mut graph = (*data.graph).clone();
+        graph.inputs = crate::WorkflowGraph::describe_inputs(&schema);
+        data.graph = Arc::new(graph);
+        data.input_schema = schema;
         self
     }
 
@@ -579,6 +591,17 @@ impl Flow {
     }
 
     fn execute_in_context_using(
+        &self,
+        state: &mut crate::ExecutionContext,
+        options: RuntimeOptions,
+        execute: impl FnOnce(&mut crate::ExecutionContext, usize) -> Result<(), crate::WorkflowRunError>,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        state.with_workflow_graph(&self.inner.graph, |state| {
+            self.execute_in_graph(state, options, execute)
+        })
+    }
+
+    fn execute_in_graph(
         &self,
         state: &mut crate::ExecutionContext,
         options: RuntimeOptions,
@@ -812,12 +835,10 @@ impl Flow {
         domain: &ExecutionDomain,
         state: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
-        self.with_call_scope(state, |state| {
-            if let Some(executor) = self.inner.generated_domains.get(&domain.id) {
-                return executor(self, state);
-            }
-            self.execute_domain_positions(domain, state)
-        })
+        if let Some(executor) = self.inner.generated_domains.get(&domain.id) {
+            return executor(self, state);
+        }
+        self.execute_domain_positions(domain, state)
     }
 
     fn execute_domain_positions(
@@ -850,59 +871,5 @@ fn release_domain_successors(
         if remaining[successor.id] == 0 {
             ready.insert((successor.first_position, successor.id));
         }
-    }
-}
-
-impl Flow {
-    /// Binds executable calls to a plan whose ordinary domains already exclude all targets.
-    pub fn with_prepared_calls(
-        mut self,
-        calls: Vec<crate::PreparedCall>,
-    ) -> Result<Self, crate::CallDispatchError> {
-        let table =
-            crate::invocation::CallTable::new(&self.inner.nodes, self.execution_domains(), calls)?;
-        let data = self.data_mut();
-        data.call_interfaces = table
-            .as_ref()
-            .map(|table| table.interfaces().clone())
-            .unwrap_or_default();
-        data.calls = table;
-        Ok(self)
-    }
-
-    fn with_call_scope<T, E>(
-        &self,
-        state: &mut crate::ExecutionContext,
-        run: impl FnOnce(&mut crate::ExecutionContext) -> Result<T, E>,
-    ) -> Result<T, E> {
-        let dispatcher = self.inner.calls.as_ref().map(|_| {
-            let dispatcher: Arc<dyn crate::invocation::CallDispatcher> = self.inner.clone();
-            Arc::downgrade(&dispatcher)
-        });
-        state.with_call_dispatcher(&self.inner.call_interfaces, dispatcher, run)
-    }
-}
-
-impl crate::invocation::CallDispatcher for FlowData {
-    fn dispatch(
-        &self,
-        caller: &crate::DefinitionId,
-        id: crate::CallId,
-        arguments: crate::CallArguments,
-        context: &mut crate::ExecutionContext,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<crate::CallResponse, crate::CallDispatchError> {
-        use snafu::OptionExt;
-        self.calls
-            .as_ref()
-            .context(crate::invocation::UnavailableSnafu)?
-            .dispatch(
-                caller,
-                crate::CallRequest { id, arguments },
-                context,
-                deadline,
-                &self.nodes,
-                |node, inputs, context| node.node.execute(inputs, context),
-            )
     }
 }
