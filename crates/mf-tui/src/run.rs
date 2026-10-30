@@ -3969,6 +3969,92 @@ mod tests {
     }
 
     #[test]
+    fn iteration_inside_loop_keeps_the_selected_pass_and_stream_invocation() {
+        use crate::state::{IterationEvent, IterationRecord, LoopPassObservation, SessionState};
+        use mf_telemetry::{event::NodeIdentity, iteration::IterationContext};
+
+        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "9".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"repeat","kind":"workflow.loop"}],
+            "execution_order":["repeat"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[
+                {"path":["repeat"], "nodes":[{"id":"%loop","kind":"%loop"},{"id":"each","kind":"builtin.iteration"}],
+                 "execution_order":["%loop","each"], "data_edges":[], "control_edges":[]},
+                {"path":["repeat","each"], "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
+                 "execution_order":["%iteration","work"], "data_edges":[], "control_edges":[]}
+            ]
+        })).unwrap();
+        let mut state = SessionState::new(description.clone(), RunId::new()).unwrap();
+        for index in 0..2 {
+            let parent = vec![LoopPathEntry::Loop {
+                loop_id: "repeat".into(),
+                index: Count::try_from(index).unwrap(),
+            }];
+            state
+                .apply_iteration(IterationRecord {
+                    context: IterationContext {
+                        invocation: Count::try_from(index + 1).unwrap(),
+                        iteration_path: vec!["repeat".into(), "each".into()],
+                        body_path: vec!["repeat".into(), "each".into()],
+                        parent_path: parent,
+                        parent_stream_invocation: Some(index as u64 + 11),
+                        index: Count::ZERO,
+                        sequence: Count::try_from(1).unwrap(),
+                        elapsed_ns: Count::try_from(index + 1).unwrap(),
+                    },
+                    event: IterationEvent::NodeStarted {
+                        node: NodeIdentity {
+                            id: "work".into(),
+                            kind: "fixture.work".into(),
+                            path: Vec::new(),
+                        },
+                        selected_inputs: Vec::new(),
+                    },
+                    correlation: None,
+                })
+                .unwrap();
+        }
+        let mut snapshot = state.snapshot();
+        snapshot.loop_passes = (0..2)
+            .map(|index| LoopPassObservation {
+                path: vec![LoopPathEntry::Loop {
+                    loop_id: "repeat".into(),
+                    index: Count::try_from(index).unwrap(),
+                }],
+                nodes: Vec::new(),
+                started: true,
+                outcome: None,
+                interrupted: false,
+                stream_invocation: Some(index as u64 + 11),
+                compact_statuses: Vec::new(),
+            })
+            .collect();
+        let mut view = ObservationView::new(&description).unwrap();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+        view.handle_navigation(KeyCode::Char('['), &snapshot, &traces, &logs);
+        let body = view.state.layout(&view.root, &view.bodies);
+        view.state.selected = body.display_index_for_node_id("each").unwrap();
+        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+        let body = view.state.layout(&view.root, &view.bodies);
+        view.state.follow_latest(&snapshot, body);
+        let item = view.state.iteration(&snapshot).unwrap();
+        assert_eq!(item.identity.invocation, Count::try_from(1).unwrap());
+        assert_eq!(item.parent_stream_invocation, Some(11));
+
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        view.handle_navigation(KeyCode::Char(']'), &snapshot, &traces, &logs);
+        view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+        let body = view.state.layout(&view.root, &view.bodies);
+        view.state.follow_latest(&snapshot, body);
+        let item = view.state.iteration(&snapshot).unwrap();
+        assert_eq!(item.identity.invocation, Count::try_from(2).unwrap());
+        assert_eq!(item.parent_stream_invocation, Some(12));
+    }
+
+    #[test]
     fn shortcut_help_consumes_navigation_until_dismissed() {
         let mut state = ViewState::default();
         assert!(!state.help_visible);
