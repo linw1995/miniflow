@@ -896,7 +896,7 @@ pub fn instantiate_node_with_metadata(
         definition_id: DefinitionId::from(definition_id),
     })?;
     let node = registration
-        .instantiate(config)
+        .instantiate_subgraphs(definition_id, config, Value::Null, Default::default())
         .context(NodeConstructionSnafu {
             definition_id: DefinitionId::from(definition_id),
         })?;
@@ -911,6 +911,28 @@ pub fn instantiate_subgraph_with_metadata(
     options_json: &str,
     body: mf_runtime::PreparedSubgraph,
 ) -> Result<crate::FlowNode, WorkflowBuildError> {
+    let parameters = std::collections::BTreeMap::from([(
+        "body".into(),
+        mf_runtime::PreparedSubgraphParameter::Single(body),
+    )]);
+    instantiate_subgraphs_with_metadata(
+        registry,
+        definition_id,
+        kind,
+        config_json,
+        options_json,
+        parameters,
+    )
+}
+
+pub fn instantiate_subgraphs_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+    options_json: &str,
+    parameters: mf_runtime::PreparedSubgraphs,
+) -> Result<crate::FlowNode, WorkflowBuildError> {
     let Some(registration) = registry.get(kind) else {
         return UnknownKindSnafu {
             definition_id: DefinitionId::from(definition_id),
@@ -924,11 +946,11 @@ pub fn instantiate_subgraph_with_metadata(
         })
     };
     let prepared = registration
-        .instantiate_subgraph(
+        .instantiate_subgraphs(
             definition_id,
             parse(config_json)?,
             parse(options_json)?,
-            body,
+            parameters,
         )
         .context(NodeConstructionSnafu {
             definition_id: DefinitionId::from(definition_id),

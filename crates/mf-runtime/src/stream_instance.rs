@@ -488,8 +488,6 @@ fn run_producer(
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
 ) {
-    job.context
-        .set_workflow_graph(plan.workflow_graph().clone());
     let index = plan.execution_domain(job.execution_domain).nodes[0].index();
     let _span = job.callback.as_ref().map(StreamCallback::enter);
     let mut sink = ProducerEmitter {

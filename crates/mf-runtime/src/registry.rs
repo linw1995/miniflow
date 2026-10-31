@@ -310,7 +310,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not accept a prepared body")
+                .contains("does not accept subgraph parameters")
         );
     }
 

@@ -1,30 +1,35 @@
 # Design
 
-The LLM accepts explicit tool definitions and produces protocol calls without reading tool topology.
-A metadata catalog executes before each model request and inspects the actual prepared tool workflow.
-It discovers its public Dispatch selector/arguments entry, including through reusable Calls, then
-reflects decoded receiver schemas, sensitivity, and explicit field connections. No executor, default
-value, or environment name is exposed by graph metadata.
+Workflow version `2026-10-31` introduces `subgraphs` for source aliases and named parameter declarations.
+A Flow declares single or collection parameters with optional defaults. Calling Nodes supply actual
+arguments through node-level `subgraphs`; references forward lexical bindings through nested Flows
+and container bodies. Node sources adapt to single-node Flows; existing file and built-in sources
+retain their ordinary resolution and dependency ownership. Earlier definitions keep their `flows`
+wire representation.
 
-`builtin.dispatch` is a core dataflow node. A selected branch publishes one gate and its declared
-parameter values. Other branch outputs are skipped. Gates use ordinary execution edges; values use
-ordinary input bindings. Explicitly routed fields are required on selection. Other upstreams and
-node defaults remain separate bindings. Tool execution and output processing belong to the existing
-scheduler, with the existing typed failures, cancellation, and limits.
+`NodeFactory::Subgraphs` receives one named map. Native Call, Loop, and Iteration bodies use `body`
+in this same map. `PreparedSubgraph` remains the executable carrier. Public input aliases preserve
+original decoded types, defaults, optionality, and sensitivity. Preparation validates aliases and
+cardinality, rejects missing/unknown arguments, and freezes Node output selection and interfaces.
+Generated parameter scopes use the same immutable layouts and contract checks as ordinary bodies.
 
-The built-in agent uses a normal Loop for model rounds. A protocol adapter merges shared tool inputs
-with per-call selector/arguments and creates WorkflowArguments for one argument-mode Iteration. Each
-item calls the supplied tool workflow. A single result list is correlated with original call IDs in
-model order, including repeated and mixed tool names. Results are redacted before bounded protocol
-encoding. The agent exposes optional text deltas using ordinary Loop and Call child-stream exports.
-Unobserved exports preserve unary execution.
+Interface projections contain only public input/output contracts and stream capabilities. They
+carry neither executors nor environment/default/runtime values. Metadata consumers have no call
+capability. Execution contexts no longer install or expose a global workflow graph. Prepared Flow
+and stream-plan graph descriptors remain useful for compilation, hosts, and generated schema checks.
 
-`workflow.call.config.flows` binds a reusable Flow's named sources. Relative binding paths belong to
-the caller, not the child. The existing resolver expands and freezes every body before runtime; no
-new executor, invocation table, or runtime Flow lookup is introduced. Caller-selected provider sources
-retain authority over built-in dependencies.
+The agent accepts a caller-owned `tools` collection. Its catalog reads an interface projection once
+before the model-round Loop and excludes explicit caller-bound fields from model schemas. One
+argument-mode Iteration processes terminal model calls in order. Dispatch selects a named callable
+subgraph and enters existing Call scopes; its children run through normal workflow scheduling.
+Caller bindings cannot be overwritten by model arguments. The selected child's public output object
+is correlated with its call ID and redacted before bounded protocol encoding.
 
-Generic argument-mode Iteration, structural input schemas, and prepared graph metadata remain shared
-foundation APIs. The LLM-specific grouped batch outputs and Iteration-only tool-discovery restriction
-are removed. The example imports a normal tool router containing Dispatch, Multiply Flow, formatting,
-and another ordinary tool, with one exclusive result merge.
+The example supplies multiply as a Flow and add as a Node. An outer factor input binds multiply's
+public factor port. Its amount remains model-supplied. Inside the Flow, `multiply_flow.product`
+connects directly to `format_multiply.product`. Model rounds retain ordinary Loop state and limits;
+`%loop.index` replaces redundant counting and pure initialization values share one node.
+
+Description version `2026-10-31` recognizes explicit callable parameter bodies independently of a
+provider's node kind. Existing Call lifecycle records, cancellation, worker/step budgets, typed error
+chains, optional streams, and finite-body restrictions continue to apply.

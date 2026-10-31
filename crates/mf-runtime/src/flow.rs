@@ -449,14 +449,12 @@ impl Flow {
     ) -> Result<(), crate::WorkflowRunError> {
         let node = &self.inner.nodes[self.inner.plan.execution_order[position].index()];
         let previous = state.replace_execution_position(Some(position));
-        let result = state.with_workflow_graph(&self.inner.graph, |state| {
-            crate::execute_resolved_node_in_context(
-                node,
-                state,
-                |ctx, inputs| resolve(node, ctx, inputs),
-                invoke,
-            )
-        });
+        let result = crate::execute_resolved_node_in_context(
+            node,
+            state,
+            |ctx, inputs| resolve(node, ctx, inputs),
+            invoke,
+        );
         state.replace_execution_position(previous);
         result
     }
@@ -591,17 +589,6 @@ impl Flow {
     }
 
     fn execute_in_context_using(
-        &self,
-        state: &mut crate::ExecutionContext,
-        options: RuntimeOptions,
-        execute: impl FnOnce(&mut crate::ExecutionContext, usize) -> Result<(), crate::WorkflowRunError>,
-    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
-        state.with_workflow_graph(&self.inner.graph, |state| {
-            self.execute_in_graph(state, options, execute)
-        })
-    }
-
-    fn execute_in_graph(
         &self,
         state: &mut crate::ExecutionContext,
         options: RuntimeOptions,

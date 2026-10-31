@@ -47,7 +47,7 @@ pub struct WorkflowDefinition {
     pub version: WorkflowDefinitionVersion,
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
-    pub flows: BTreeMap<String, FlowSource>,
+    pub subgraphs: BTreeMap<String, SubgraphSource>,
     pub nodes: Vec<NodeDefinition>,
     pub edges: Vec<EdgeDefinition>,
     pub control_edges: Vec<ControlEdgeDefinition>,
@@ -70,8 +70,8 @@ struct DefinitionFields {
     pub execution: Option<crate::StreamExecution>,
     #[serde(deserialize_with = "deserialize_dependencies")]
     pub dependencies: BTreeMap<String, NodeDependency>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub flows: BTreeMap<String, FlowSource>,
+    #[serde(default, alias = "flows", skip_serializing_if = "BTreeMap::is_empty")]
+    pub subgraphs: BTreeMap<String, SubgraphSource>,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -92,6 +92,14 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 }
 
 impl WorkflowDefinition {
+    pub fn contains_subgraph_parameters(&self) -> bool {
+        self.version.supports_subgraph_parameters()
+            || self
+                .nodes
+                .iter()
+                .any(NodeDefinition::contains_subgraph_parameters)
+    }
+
     pub fn has_order_edges(&self) -> bool {
         !self.order_edges.is_empty() || self.nodes.iter().any(NodeDefinition::has_order_edges)
     }
@@ -124,17 +132,26 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_25,
     #[serde(rename = "2026-10-28")]
     V2026_10_28,
+    #[serde(rename = "2026-10-31")]
+    V2026_10_31,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_28;
+    pub const CURRENT: Self = Self::V2026_10_31;
+
+    pub fn supports_subgraph_parameters(self) -> bool {
+        matches!(self, Self::V2026_10_31)
+    }
 
     pub fn supports_child_streams(self) -> bool {
-        matches!(self, Self::V2026_10_28)
+        matches!(self, Self::V2026_10_28 | Self::V2026_10_31)
     }
 
     pub fn supports_nested_flows(self) -> bool {
-        matches!(self, Self::V2026_10_25 | Self::V2026_10_28)
+        matches!(
+            self,
+            Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_10_31
+        )
     }
 
     pub fn supports_startup_inputs(self) -> bool {
@@ -145,20 +162,25 @@ impl WorkflowDefinitionVersion {
                 | Self::V2026_10_23
                 | Self::V2026_10_25
                 | Self::V2026_10_28
+                | Self::V2026_10_31
         )
     }
 
     pub fn supports_node_success_edges(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+            Self::V2026_10_19
+                | Self::V2026_10_23
+                | Self::V2026_10_25
+                | Self::V2026_10_28
+                | Self::V2026_10_31
         )
     }
 
     pub fn supports_clusters(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_10_31
         )
     }
 }
@@ -168,17 +190,135 @@ pub const MAX_CALL_DEPTH: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
-pub enum FlowSource {
-    Path { path: PathBuf },
-    Builtin { builtin: String },
+pub enum SubgraphSource {
+    Path {
+        path: PathBuf,
+    },
+    Builtin {
+        builtin: String,
+    },
+    Node {
+        node: Box<NodeDefinition>,
+    },
+    Reference {
+        reference: String,
+    },
+    Interfaces {
+        interfaces: Box<SubgraphSource>,
+    },
+    Parameter {
+        parameter: SubgraphParameterKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<Box<SubgraphSource>>,
+    },
+    Collection {
+        collection: BTreeMap<String, SubgraphSource>,
+    },
+    Interface {
+        source: Box<SubgraphSource>,
+        inputs: BTreeMap<String, String>,
+    },
+    Definition {
+        definition: Box<WorkflowDefinition>,
+    },
+}
+
+impl SubgraphSource {
+    pub fn frozen_definition(
+        &self,
+        parent: &WorkflowDefinition,
+    ) -> Option<(WorkflowDefinition, bool)> {
+        match self {
+            Self::Node { node } => Some((
+                WorkflowDefinition {
+                    version: parent.version,
+                    execution: None,
+                    dependencies: parent.dependencies.clone(),
+                    subgraphs: Default::default(),
+                    nodes: vec![*node.clone()],
+                    edges: vec![],
+                    control_edges: vec![],
+                    outputs: vec![],
+                    order_edges: vec![],
+                    clusters: vec![],
+                },
+                true,
+            )),
+            Self::Definition { definition } => Some((*definition.clone(), false)),
+            Self::Interface { source, .. } => source.frozen_definition(parent),
+            _ => None,
+        }
+    }
+}
+
+pub struct SubgraphMember<'a> {
+    pub parameter: &'a str,
+    pub entry: Option<&'a str>,
+    pub id: DefinitionId,
+    pub source: &'a SubgraphSource,
+    pub interface_only: bool,
+}
+
+impl SubgraphMember<'_> {
+    pub fn call_id(&self) -> String {
+        match self.entry {
+            Some(entry) => format!("{}:{entry}", self.parameter),
+            None => self.parameter.to_owned(),
+        }
+    }
+
+    pub fn wrapper(
+        &self,
+        parent: &WorkflowDefinition,
+        body: WorkflowDefinition,
+    ) -> WorkflowDefinition {
+        let name = self.call_id();
+        let outputs = body
+            .outputs
+            .iter()
+            .map(|output| WorkflowOutputDefinition {
+                name: output.name.clone(),
+                node: name.clone().into(),
+                port: output.name.clone(),
+                optional: output.optional,
+            })
+            .collect();
+        WorkflowDefinition {
+            version: parent.version,
+            execution: None,
+            dependencies: parent.dependencies.clone(),
+            subgraphs: Default::default(),
+            nodes: vec![NodeDefinition {
+                id: name.clone().into(),
+                kind: CALL_KIND.into(),
+                config: serde_json::json!({"flow":self.entry.unwrap_or(self.parameter),"definition":body}),
+                subgraphs: Default::default(),
+                loop_definition: None,
+            }],
+            edges: vec![],
+            control_edges: vec![],
+            outputs,
+            order_edges: vec![],
+            clusters: vec![],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubgraphParameterKind {
+    Single,
+    Collection,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CallConfig {
     pub flow: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub flows: BTreeMap<String, FlowSource>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub node_source: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_projections: Vec<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<Box<WorkflowDefinition>>,
 }
@@ -190,11 +330,92 @@ pub struct NodeDefinition {
     pub kind: String,
     #[serde(default = "empty_object")]
     pub config: Value,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subgraphs: BTreeMap<String, SubgraphSource>,
     #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
     pub loop_definition: Option<Box<LoopDefinition>>,
 }
 
 impl NodeDefinition {
+    fn contains_subgraph_parameters(&self) -> bool {
+        fn wire(value: &Value) -> bool {
+            value.get("version").and_then(Value::as_str) == Some("2026-10-31")
+                || value
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|nodes| {
+                        nodes.iter().any(|node| {
+                            node.get("subgraphs")
+                                .and_then(Value::as_object)
+                                .is_some_and(|args| !args.is_empty())
+                                || node.pointer("/loop/body").is_some_and(wire)
+                                || (node["kind"] == CALL_KIND
+                                    && node.pointer("/config/definition").is_some_and(wire))
+                                || (node["kind"] == crate::ITERATION_KIND
+                                    && node.pointer("/config/body").is_some_and(wire))
+                        })
+                    })
+        }
+        !self.subgraphs.is_empty()
+            || self.loop_definition.as_ref().is_some_and(|body| {
+                body.body
+                    .nodes
+                    .iter()
+                    .any(Self::contains_subgraph_parameters)
+            })
+            || (self.kind == CALL_KIND && self.config.get("definition").is_some_and(wire))
+            || (self.kind == crate::ITERATION_KIND && self.config.get("body").is_some_and(wire))
+    }
+
+    pub fn subgraph_members(&self) -> Vec<SubgraphMember<'_>> {
+        let mut members = Vec::new();
+        for (parameter, source) in &self.subgraphs {
+            let (source, interface_only) = match source {
+                SubgraphSource::Interfaces { interfaces } => (interfaces.as_ref(), true),
+                _ => (source, false),
+            };
+            match source {
+                SubgraphSource::Collection { collection } => {
+                    for (entry, source) in collection {
+                        members.push(SubgraphMember {
+                            parameter,
+                            entry: Some(entry),
+                            id: format!("subgraph:{parameter}:{entry}").into(),
+                            source,
+                            interface_only,
+                        });
+                    }
+                }
+                _ => members.push(SubgraphMember {
+                    parameter,
+                    entry: None,
+                    id: format!("subgraph:{parameter}").into(),
+                    source,
+                    interface_only,
+                }),
+            }
+        }
+        members
+    }
+
+    pub fn parameter_body(&self, parent: &WorkflowDefinition) -> Option<WorkflowDefinition> {
+        let mut result: Option<WorkflowDefinition> = None;
+        for member in self
+            .subgraph_members()
+            .into_iter()
+            .filter(|member| !member.interface_only)
+        {
+            let (body, _) = member.source.frozen_definition(parent)?;
+            let wrapper = member.wrapper(parent, body);
+            if let Some(result) = &mut result {
+                result.nodes.extend(wrapper.nodes);
+            } else {
+                result = Some(wrapper);
+            }
+        }
+        result
+    }
+
     pub fn has_order_edges(&self) -> bool {
         self.loop_definition
             .as_ref()

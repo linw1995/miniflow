@@ -414,3 +414,35 @@ fn reports_exact_interface_drift_before_accepting_prepared_schemas() {
         }
     }
 }
+
+#[test]
+fn subgraph_sources_keep_legacy_wire_names_and_gate_named_parameters() {
+    let legacy: mf_runtime::WorkflowDefinition = serde_json::from_value(serde_json::json!({
+        "version":"2026-10-28", "dependencies":{}, "flows":{"child":{"path":"child.json"}}, "nodes":[]
+    })).unwrap();
+    let encoded = serde_json::to_value(&legacy).unwrap();
+    assert!(encoded.get("flows").is_some());
+    assert!(encoded.get("subgraphs").is_none());
+    let mut wrong_spelling = serde_json::to_value(&legacy).unwrap();
+    wrong_spelling["subgraphs"] = wrong_spelling
+        .as_object_mut()
+        .unwrap()
+        .remove("flows")
+        .unwrap();
+    assert!(serde_json::from_value::<mf_runtime::WorkflowDefinition>(wrong_spelling).is_err());
+    let mut modern = legacy.clone();
+    modern.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_31;
+    let encoded = serde_json::to_value(&modern).unwrap();
+    assert!(encoded.get("subgraphs").is_some());
+    assert!(encoded.get("flows").is_none());
+    let mut parameter = encoded.clone();
+    parameter["subgraphs"]["handler"] = serde_json::json!({"parameter":"single"});
+    assert!(serde_json::from_value::<mf_runtime::WorkflowDefinition>(parameter.clone()).is_ok());
+    parameter["version"] = "2026-10-28".into();
+    assert!(serde_json::from_value::<mf_runtime::WorkflowDefinition>(parameter).is_err());
+    let mut duplicate = encoded;
+    duplicate["flows"] = serde_json::json!({});
+    assert!(serde_json::from_value::<mf_runtime::WorkflowDefinition>(duplicate).is_err());
+    let old_node = serde_json::json!({"version":"2026-10-28","dependencies":{},"nodes":[{"id":"consumer","kind":"fixture.parent","subgraphs":{"child":{"node":{"id":"leaf","kind":"fixture.leaf"}}}}]});
+    assert!(serde_json::from_value::<mf_runtime::WorkflowDefinition>(old_node).is_err());
+}

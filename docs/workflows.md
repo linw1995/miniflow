@@ -2,7 +2,7 @@
 
 ## JSON format
 
-Use version `2026-10-25` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+Use version `2026-10-31` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
 `outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
 display-only [node clusters](#node-clusters).
@@ -37,12 +37,12 @@ syntax within their existing scope and message-domain restrictions.
 
 ## Reusable Flows
 
-Version `2026-10-25` adds `workflow.call`, supplied by `mfn-core`. Declare reusable
-sources in `flows`; Cargo node packages remain in `dependencies`:
+`workflow.call`, supplied by `mfn-core`, calls reusable Flows. Version `2026-10-31` uses a
+`subgraphs` source map; earlier definitions retain `flows`. Cargo node packages remain in `dependencies`:
 
 ```json
 {
-  "flows": {
+  "subgraphs": {
     "normalize": { "path": "./flows/normalize.json" },
     "title": { "builtin": "mf-chat.chat-title" }
   },
@@ -59,7 +59,7 @@ sources in `flows`; Cargo node packages remain in `dependencies`:
 }
 ```
 
-The snippet omits the surrounding graph. Each source accepts exactly one `path` or `builtin`.
+The snippet omits the surrounding graph. The examples above use `path` and `builtin` Flow sources.
 Paths resolve relative to their owning canonical definition file. Sources can call other sources;
 recursive references and more than sixteen nested calls fail. The combined Call/Loop/Iteration
 container depth is bounded at twenty. The compiler freezes resolved bodies in the executable; running,
@@ -76,6 +76,66 @@ Calls have isolated input bindings, outputs, and Loop state. They share cancella
 future driving, and the caller's remaining step budget. Provider failures retain their typed error
 chains with call context. Children cannot consume stdin. Calls inside an Iteration body may expose
 finite TaskStream ports, but cannot hide another Loop or Iteration.
+
+### Named subgraph parameters
+
+Version `2026-10-31` generalizes reusable sources to `subgraphs`. A Flow declares named parameters
+with `{"parameter":"single"}` or `{"parameter":"collection"}` and may supply a `default` source.
+The caller binds them in the calling node's `subgraphs`, alongside ordinary value `inputs`:
+
+```json
+{
+  "id": "agent",
+  "kind": "workflow.call",
+  "config": {"flow": "agent"},
+  "subgraphs": {
+    "tools": {
+      "collection": {
+        "multiply": {
+          "source": {"path": "flows/multiply-tool.json"},
+          "inputs": {
+            "amount": "multiply_flow.multiply.amount",
+            "factor": "multiply_flow.multiply.factor"
+          }
+        },
+        "add": {
+          "node": {
+            "id": "add",
+            "kind": "builtin.code",
+            "config": {
+              "language": "cel",
+              "inputs": {"a": "int", "b": "int"},
+              "code": {"content": "string(a + b)"}
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Sources accept `path`, `builtin`, an inline `node`, or an inline `definition`. Node arguments expose
+their own input ports and all declared outputs. Flow arguments retain their public input and output
+contracts. The `source`/`inputs` form projects public input names onto the source interface; required
+inputs cannot be hidden and multiple aliases cannot select the same input. Aliases preserve types,
+optional/default handling, and sensitivity.
+
+A child Node forwards a binding with `{"reference":"tools"}`. These references are lexical and
+resolved before execution, including through nested Flows and Loop/Iteration bodies. Missing or unknown
+parameters, cardinality mismatches, unresolved references, and invalid interfaces fail preparation.
+Argument and collection member names are nonblank and reserve `:` for scope qualification.
+Relative sources belong to their declaring file. The compiler freezes definitions, output selection,
+and input projections into standalone executables. Subgraph parameters are not JSON value ports.
+
+`{"interfaces":{"reference":"tools"}}` projects read-only interfaces from a binding. It contains
+port contracts and sensitivity, without executors, environment names, defaults, or runtime values.
+Metadata consumers cannot invoke this projection. Callable arguments execute through normal Call
+scopes with the existing cancellation, worker, step, error, and finite-body restrictions.
+
+Earlier definitions continue to read and serialize their `flows` source map. The Rust definition API
+uses `subgraphs` and `SubgraphSource`; the obsolete call-specific `config.flows` binding is replaced by
+node-level named arguments.
 
 With parent version `2026-10-28`, a call also exposes the child's selected TaskStream outputs under
 their public names. Ordinary outputs remain terminal ports; incremental outputs remain separate
@@ -128,11 +188,6 @@ these process-local bindings are not serialized into generated runners. Executor
 call arguments through `ExecutionContext::workflow_arguments` and implement their own transport and
 startup binding. `mf run runner --chat` uses this mechanism to invoke a precompiled runner, including
 its native stream coordinator, without rebuilding it or linking its custom nodes into the CLI.
-
-A Call may bind a reusable Flow's named imports through `config.flows`. Each value uses the same
-Path or Builtin source form as the definition-level `flows` map. Bindings override that child's
-sources, are anchored to the caller's source directory, and are resolved before the body is frozen.
-They do not introduce runtime lookup or a separate execution relationship.
 
 ## Node clusters
 
@@ -235,8 +290,8 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
 | `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
 | `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
-| `mfn-core` | [`builtin.dispatch`](#node-backed-tools) | Branch IDs and parameter names | `selector`, `arguments` | Selected gate and parameter ports |
-| `mfn-llm` | [`builtin.tool_catalog`](#node-backed-tools) | Prepared tool workflow path | Optional descriptions | Tool definitions and entry bindings |
+| `mfn-core` | [`builtin.dispatch`](#node-backed-tools) | Named `branches` subgraph collection | `selector`, `arguments`, optional caller `bindings` | Selected child output object |
+| `mfn-llm` | [`builtin.tool_catalog`](#node-backed-tools) | Read-only tool interfaces | Optional descriptions and caller bindings | Tool definitions |
 | `mfn-llm` | [`builtin.agent_calls`](#node-backed-tools) | Invocation node prefix | Calls, outcome, bindings, shared inputs, call budget | Workflow argument records |
 | `mfn-llm` | [`builtin.tool_results`](#node-backed-tools) | None | `outcome`, `tool_calls`, one ordered `results` list | Correlated `tool_results` |
 
@@ -855,74 +910,36 @@ This interface supports text and function tools, not media inputs.
 
 #### Node-backed tools
 
-The [chat workflow with tools](../examples/chat-tools-flow.json) calls the provider-owned
-`mfn-llm.agent` built-in Flow. The [tool workflow](../examples/flows/chat-tools.json) contains one
-ordinary `builtin.dispatch`, the actual tools, downstream formatting, and an exclusive result merge.
+The [chat workflow with tools](../examples/chat-tools-flow.json) imports `mfn-llm.agent` and supplies
+its `tools` subgraph parameter from the caller. The set contains an ordinary add Node and a
+[multiply Flow](../examples/flows/multiply-tool.json). The Flow preserves the real
+`multiply_flow.product` to `format_multiply.product` connection.
 
-```mermaid
-flowchart LR
-    Catalog[Tool metadata] -->|definitions| Model[Single LLM request]
-    Model -->|tool calls| Calls[Workflow argument records]
-    Calls --> Iterate[One Iteration]
-    Iterate --> Results[Protocol results]
-    Results --> History[Message assembly]
-    Model --> History
-    subgraph Tools[Caller tool workflow per call]
-        Dispatch[Dispatch] -->|multiply.amount| Multiply[Multiply Flow]
-        Multiply -->|product| Format[Format result]
-        Dispatch -->|add.a and add.b| Add[Add node]
-        Format --> Result[Exclusive result merge]
-        Add --> Result
-    end
-```
+The agent reads an interface-only projection before entering its model-round Loop. `builtin.tool_catalog`
+converts these public contracts into LLM declarations; it does not inspect internal node IDs or execute
+any tool. Caller-provided `tool_inputs` are keyed by tool name, for example
+`{"multiply":{"factor":2}}`. Bound fields are validated and excluded from the model schema. The
+example therefore advertises only `amount` for multiply. The model cannot overwrite a caller binding.
 
-The LLM performs one model request per execution and receives definitions through its existing
-`tools` input. `builtin.tool_catalog` derives those definitions from dispatch-linked receiver ports
-before that request. A separate `builtin.dispatch` consumes the already chosen tool name and argument
-object. It publishes the matching Boolean gate and `<branch>.<parameter>` ports, marking every other
-branch output skipped. Ordinary workflow scheduling executes the selected nodes. Dispatch itself
-performs no model request or child execution.
+Each `builtin.llm` execution performs one request with explicit `tools`. The agent converts its terminal
+call list to workflow argument records and uses one argument-mode Iteration for all names, including
+mixed and repeated calls. Its `builtin.dispatch` binds the external collection as its `branches`
+subgraph parameter. Selector and arguments choose a prepared child; execution uses ordinary Call
+scopes and the existing workflow scheduler. There is no per-tool batch, handwritten router, or result
+merge in the caller. The result object contains the selected child's public output names and values.
 
-The tool workflow exposes one Dispatch node's unconnected `selector` and `arguments` inputs. The
-catalog discovers their qualified names from prepared input schemas, so the node ID is not fixed.
-Declare routed fields as `{"branches":{"multiply":["amount"],"add":["a","b"]}}`. A field is required
-within its selected route because it supplies a connected data port. Target defaults and other
-upstreams remain separate bindings. In the example, `dispatch.multiply.amount` connects to
-`multiply_flow.multiply.amount`, while `config.factor` supplies `multiply_flow.multiply.factor`.
-Only amount appears in the model's multiply schema. `multiply_flow.product` connects explicitly to
-`format_multiply.product`.
+`builtin.tool_results` checks call IDs and result counts, preserves model order, redacts secret values,
+and produces bounded JSON content. The Loop owns message history, usages, round limits, and termination.
+The built-in `%loop.index` supplies the round number; initialization uses one pure value node.
 
-The built-in agent uses one `iteration_dispatch` Iteration for the complete call list, rather than
-one Iteration per tool. Each item invokes the supplied tool workflow using standard WorkflowArguments.
-Shared tool inputs use the callee's qualified names, such as `config.factor`; per-call selector and
-arguments take precedence. The result list preserves model call order even when names repeat.
-`builtin.tool_results` checks IDs and counts, redacts secret values, and produces bounded JSON content.
+The reusable agent accepts prompt, history, system message, model/credential parameters, descriptions,
+per-tool input bindings, `max_rounds`, and `max_tool_calls`. Tools retain the existing finite Call and
+Iteration restrictions. A call inside Iteration cannot hide another Loop or Iteration.
 
-Bind the tool workflow when calling the built-in agent:
-
-```json
-{
-  "id": "agent",
-  "kind": "workflow.call",
-  "config": {
-    "flow": "agent",
-    "flows": {"tools": {"path": "flows/chat-tools.json"}}
-  }
-}
-```
-
-The caller declares `"agent": {"builtin":"mfn-llm.agent"}` in its `flows` map. Binding paths are relative
-to the caller file; all bodies are frozen before execution. The reusable Flow accepts prompt, history,
-system message, model/credential parameters, descriptions, shared tool inputs, `max_rounds`, and
-`max_tool_calls`. Its normal Loop owns round limits, usage accumulation, and stop conditions. Existing
-workflow limits and tool-specific errors still apply. Tools inherit the framework's existing Call
-and Iteration restrictions, including the prohibition on nested iteration containers inside a call
-that runs within Iteration.
-
-The optional `answer` child stream forwards LLM text deltas through ordinary Call and Loop stream
-exports. Omitting that stream from the caller keeps normal unary execution. Tool-only emissions do
-not require an answer value. The manual [LLM tool example](../examples/llm-tools.json) remains available
-for callers that own their definitions, execution, and orchestration.
+The optional `answer` stream forwards model text deltas through ordinary Call and Loop exports.
+Tool-only emissions do not require an answer value. Omitting the stream keeps normal unary execution.
+The manual [LLM tool example](../examples/llm-tools.json) remains available for callers that own their
+schemas and orchestration.
 
 ```sh
 mf compile examples/chat-tools-flow.json --output ./chat-tools-flow

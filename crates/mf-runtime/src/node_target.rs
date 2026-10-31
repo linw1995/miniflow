@@ -57,7 +57,6 @@ pub enum NodeTargetError {
 pub struct PreparedTaskTarget<'a> {
     contract: &'a NodeTarget,
     node: FlowNode<&'a dyn TaskNode>,
-    graph: std::sync::Arc<crate::WorkflowGraph>,
 }
 
 impl crate::FlowRuntime {
@@ -83,18 +82,6 @@ impl crate::FlowRuntime {
     }
 
     pub fn execute_target_in_context(
-        &self,
-        target: &PreparedTaskTarget<'_>,
-        state: &mut crate::ExecutionContext,
-        inputs: crate::WorkflowArguments,
-        context: crate::WorkflowArguments,
-    ) -> Result<crate::FlowOutputs, crate::WorkflowRunError> {
-        state.with_workflow_graph(&target.graph, |state| {
-            self.execute_target_in_graph(target, state, inputs, context)
-        })
-    }
-
-    fn execute_target_in_graph(
         &self,
         target: &PreparedTaskTarget<'_>,
         state: &mut crate::ExecutionContext,
@@ -305,7 +292,6 @@ impl NodeTarget {
             );
         }
         Ok(PreparedTaskTarget {
-            graph: Default::default(),
             contract: self,
             node: FlowNode {
                 definition_id: node.definition_id.clone(),
@@ -331,10 +317,6 @@ impl NodeTarget {
                 .iter()
                 .map(|node| (node.definition_id.as_str(), &node.metadata)),
         )
-        .map(|mut target| {
-            target.graph = flow.workflow_graph().clone();
-            target
-        })
     }
 
     pub fn bind_stream<'a>(
@@ -361,9 +343,5 @@ impl NodeTarget {
                 .iter()
                 .map(|node| (node.definition_id.as_str(), &node.metadata)),
         )
-        .map(|mut target| {
-            target.graph = stream.plan().workflow_graph().clone();
-            target
-        })
     }
 }

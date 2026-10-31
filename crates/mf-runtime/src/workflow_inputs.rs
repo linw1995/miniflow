@@ -326,7 +326,10 @@ impl TryFrom<Value> for WorkflowArguments {
 
 impl WorkflowInputSchema {
     /// Checks supplied values and declarations without resolving external sources.
-    pub fn validate(&self, arguments: &WorkflowArguments) -> Result<(), WorkflowInputError> {
+    pub fn validate_supplied(
+        &self,
+        arguments: &WorkflowArguments,
+    ) -> Result<(), WorkflowInputError> {
         for (name, value) in &arguments.0 {
             let path = pointer("", name);
             let input = self
@@ -335,8 +338,18 @@ impl WorkflowInputSchema {
             input
                 .value_type
                 .validate_shared(value)
-                .context(TypeMismatchSnafu { path })?;
+                .context(TypeMismatchSnafu { path: &path })?;
+            if let Some(schema) = &input.schema {
+                schema
+                    .validate_shared(value)
+                    .context(TypeMismatchSnafu { path })?;
+            }
         }
+        Ok(())
+    }
+
+    pub fn validate(&self, arguments: &WorkflowArguments) -> Result<(), WorkflowInputError> {
+        self.validate_supplied(arguments)?;
         for (node, ports) in &self.inputs {
             for (port, input) in ports {
                 let name = crate::output_id(node, port);

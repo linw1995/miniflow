@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-10-31",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -48,7 +48,11 @@
             "default": []
           },
           "tool_inputs": {
-            "type": "object",
+            "type": {
+              "map": {
+                "map": "any"
+              }
+            },
             "default": {},
             "secret": false
           },
@@ -73,17 +77,18 @@
       }
     },
     {
-      "id": "zero",
-      "kind": "builtin.constant",
+      "id": "initial",
+      "kind": "builtin.code",
       "config": {
-        "value": 0
-      }
-    },
-    {
-      "id": "not_done",
-      "kind": "builtin.constant",
-      "config": {
-        "value": false
+        "language": "cel",
+        "inputs": {},
+        "code": {
+          "done": "false",
+          "usages": "[]",
+          "status": "'succeeded'",
+          "outcome": "'tool_calls'",
+          "text": "''"
+        }
       }
     },
     {
@@ -167,31 +172,29 @@
       }
     },
     {
-      "id": "empty_usages",
-      "kind": "builtin.constant",
-      "config": {
-        "value": []
-      }
-    },
-    {
-      "id": "initial_status",
-      "kind": "builtin.constant",
-      "config": {
-        "value": "succeeded"
-      }
-    },
-    {
-      "id": "initial_outcome",
-      "kind": "builtin.constant",
-      "config": {
-        "value": "tool_calls"
-      }
-    },
-    {
-      "id": "empty_text",
-      "kind": "builtin.constant",
-      "config": {
-        "value": ""
+      "id": "catalog",
+      "kind": "builtin.tool_catalog",
+      "config": {},
+      "inputs": {
+        "descriptions": {
+          "from": {
+            "node": "params",
+            "port": "descriptions"
+          }
+        },
+        "bindings": {
+          "from": {
+            "node": "params",
+            "port": "tool_inputs"
+          }
+        }
+      },
+      "subgraphs": {
+        "tools": {
+          "interfaces": {
+            "reference": "tools"
+          }
+        }
       }
     },
     {
@@ -245,9 +248,9 @@
             "type": "object"
           },
           {
-            "name": "descriptions",
+            "name": "tools",
             "type": {
-              "map": "string"
+              "list": "object"
             }
           },
           {
@@ -256,10 +259,6 @@
           },
           {
             "name": "max_tool_calls",
-            "type": "int"
-          },
-          {
-            "name": "round",
             "type": "int"
           },
           {
@@ -274,24 +273,6 @@
         },
         "body": {
           "nodes": [
-            {
-              "id": "catalog",
-              "kind": "builtin.tool_catalog",
-              "config": {
-                "source": [
-                  "iteration_dispatch",
-                  "invoke"
-                ]
-              },
-              "inputs": {
-                "descriptions": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "descriptions"
-                  }
-                }
-              }
-            },
             {
               "id": "chat",
               "kind": "builtin.llm",
@@ -316,7 +297,7 @@
                 },
                 "tools": {
                   "from": {
-                    "node": "catalog",
+                    "node": "%loop",
                     "port": "tools"
                   }
                 }
@@ -339,12 +320,6 @@
                   "from": {
                     "node": "chat",
                     "port": "tool_calls"
-                  }
-                },
-                "binding": {
-                  "from": {
-                    "node": "catalog",
-                    "port": "binding"
                   }
                 },
                 "shared": {
@@ -370,9 +345,12 @@
                   "nodes": [
                     {
                       "id": "invoke",
-                      "kind": "workflow.call",
-                      "config": {
-                        "flow": "tools"
+                      "kind": "builtin.dispatch",
+                      "config": {},
+                      "subgraphs": {
+                        "branches": {
+                          "reference": "tools"
+                        }
                       }
                     }
                   ],
@@ -583,22 +561,15 @@
               "config": {
                 "language": "cel",
                 "inputs": {
-                  "round": "int",
                   "max_rounds": "int",
-                  "outcome": "string"
+                  "outcome": "string",
+                  "index": "int"
                 },
                 "code": {
-                  "round": "round + 1",
-                  "done": "outcome != 'tool_calls' || round + 1 >= max_rounds"
+                  "done": "outcome != 'tool_calls' || index + 1 >= max_rounds"
                 }
               },
               "inputs": {
-                "round": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "round"
-                  }
-                },
                 "max_rounds": {
                   "from": {
                     "node": "%loop",
@@ -610,20 +581,11 @@
                     "node": "chat",
                     "port": "outcome"
                   }
-                }
-              }
-            },
-            {
-              "id": "save_round",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "round"
-              },
-              "inputs": {
-                "value": {
+                },
+                "index": {
                   "from": {
-                    "node": "next_round",
-                    "port": "round"
+                    "node": "%loop",
+                    "port": "index"
                   }
                 }
               }
@@ -679,44 +641,38 @@
         },
         "usages": {
           "from": {
-            "node": "empty_usages",
-            "port": "value"
+            "node": "initial",
+            "port": "usages"
           }
         },
         "status": {
           "from": {
-            "node": "initial_status",
-            "port": "value"
+            "node": "initial",
+            "port": "status"
           }
         },
         "outcome": {
           "from": {
-            "node": "initial_outcome",
-            "port": "value"
+            "node": "initial",
+            "port": "outcome"
           }
         },
         "text": {
           "from": {
-            "node": "empty_text",
-            "port": "value"
+            "node": "initial",
+            "port": "text"
           }
         },
         "error": {
           "from": {
-            "node": "empty_text",
-            "port": "value"
+            "node": "initial",
+            "port": "text"
           }
         },
         "tool_inputs": {
           "from": {
             "node": "params",
             "port": "tool_inputs"
-          }
-        },
-        "descriptions": {
-          "from": {
-            "node": "params",
-            "port": "descriptions"
           }
         },
         "max_rounds": {
@@ -731,16 +687,16 @@
             "port": "max_tool_calls"
           }
         },
-        "round": {
-          "from": {
-            "node": "zero",
-            "port": "value"
-          }
-        },
         "done": {
           "from": {
-            "node": "not_done",
-            "port": "value"
+            "node": "initial",
+            "port": "done"
+          }
+        },
+        "tools": {
+          "from": {
+            "node": "catalog",
+            "port": "tools"
           }
         }
       }
@@ -818,7 +774,6 @@
       "port": "error"
     }
   ],
-  "flows": {},
   "edges": [
     {
       "from_node": "limits",
@@ -828,5 +783,10 @@
       "from_node": "limits_valid",
       "to_node": "chat_messages"
     }
-  ]
+  ],
+  "subgraphs": {
+    "tools": {
+      "parameter": "collection"
+    }
+  }
 }

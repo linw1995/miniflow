@@ -45,13 +45,13 @@ pub use context::{
 };
 pub use definition::{
     CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
-    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, FlowSource,
+    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError,
     InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
     LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
     MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
     NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
-    validate_exclusive_inputs,
+    SubgraphMember, SubgraphParameterKind, SubgraphSource, WorkflowDefinition,
+    WorkflowDefinitionVersion, WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{
@@ -120,7 +120,11 @@ pub use stream_plan::{
     StreamEmissionBinding, StreamInputResolver, StreamMessageInitializer, StreamMessageProgram,
     StreamOutputSelector, StreamPlan, StreamProgram,
 };
-pub use subgraph::{PreparedSubgraph, SubgraphStreamOutput};
+pub use subgraph::{
+    PreparedSubgraph, PreparedSubgraphParameter, PreparedSubgraphs, SubgraphInterface,
+    SubgraphStreamOutput, project_subgraph_inputs, take_subgraph, take_subgraph_collection,
+    take_subgraph_interfaces,
+};
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,
     TypedTaskStreamNode,

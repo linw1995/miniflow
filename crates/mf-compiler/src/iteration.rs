@@ -66,6 +66,7 @@ pub fn body_definition(
     }
     let mut nodes = Vec::with_capacity(config.body.nodes.len() + 1);
     nodes.push(NodeDefinition {
+        subgraphs: Default::default(),
         id: ITERATION_INPUT_ID.into(),
         kind: ITERATION_INPUT_KIND.into(),
         config: serde_json::json!({"input_mode": config.input_mode}),
@@ -75,7 +76,7 @@ pub fn body_definition(
     Ok(WorkflowDefinition {
         version: parent.version,
         execution: None,
-        flows: Default::default(),
+        subgraphs: Default::default(),
         dependencies: parent.dependencies.clone(),
         nodes,
         edges: config.body.edges.clone(),

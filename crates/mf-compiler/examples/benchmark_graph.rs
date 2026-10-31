@@ -17,6 +17,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
         Value::String("x".repeat(payload))
     };
     let mut nodes = vec![NodeDefinition {
+        subgraphs: Default::default(),
         id: id(0).into(),
         kind: "builtin.constant".into(),
         config: json!({ "value": value }),
@@ -25,6 +26,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
     let mut edges = Vec::new();
     for index in 1..count {
         nodes.push(NodeDefinition {
+            subgraphs: Default::default(),
             id: id(index).into(),
             kind: "builtin.identity".into(),
             config: json!({}),
@@ -41,7 +43,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
     WorkflowDefinition {
         version: WorkflowDefinitionVersion::CURRENT,
         execution: None,
-        flows: Default::default(),
+        subgraphs: Default::default(),
         dependencies: BTreeMap::new(),
         nodes,
         edges,

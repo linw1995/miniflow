@@ -106,16 +106,6 @@ impl Drop for WorkflowInputsGuard<'_> {
     }
 }
 
-struct WorkflowGraphGuard<'a> {
-    context: &'a mut ExecutionContext,
-    previous: Option<Arc<crate::WorkflowGraph>>,
-}
-impl Drop for WorkflowGraphGuard<'_> {
-    fn drop(&mut self) {
-        self.context.workflow_graph = self.previous.take();
-    }
-}
-
 struct NodeInvocationGuard<'a> {
     context: &'a mut ExecutionContext,
     previous: Option<crate::DefinitionId>,
@@ -222,7 +212,6 @@ pub struct ExecutionContext {
     pending_loop_write: Option<(String, Value)>,
     current_position: Option<usize>,
     current_node: Option<crate::DefinitionId>,
-    workflow_graph: Option<Arc<crate::WorkflowGraph>>,
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
@@ -247,7 +236,6 @@ impl Default for ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
-            workflow_graph: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
@@ -265,34 +253,6 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
-    pub fn workflow_graph(&self) -> Option<&crate::WorkflowGraph> {
-        self.workflow_graph.as_deref()
-    }
-
-    pub fn with_workflow_graph<T, E>(
-        &mut self,
-        graph: &Arc<crate::WorkflowGraph>,
-        run: impl FnOnce(&mut Self) -> Result<T, E>,
-    ) -> Result<T, E> {
-        if self
-            .workflow_graph
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, graph))
-        {
-            return run(self);
-        }
-        let previous = self.workflow_graph.replace(graph.clone());
-        let guard = WorkflowGraphGuard {
-            context: self,
-            previous,
-        };
-        run(guard.context)
-    }
-
-    pub(super) fn set_workflow_graph(&mut self, graph: Arc<crate::WorkflowGraph>) {
-        self.workflow_graph = Some(graph);
-    }
-
     /// Identifies the executing node independently of optional observation.
     pub fn current_node(&self) -> Option<&str> {
         self.current_node.as_ref().map(crate::DefinitionId::as_str)
@@ -364,7 +324,6 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
-            workflow_graph: self.workflow_graph.clone(),
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
             scope_prefix: self.scope_prefix.clone(),
@@ -577,7 +536,6 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             current_node: None,
-            workflow_graph: self.workflow_graph.clone(),
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),

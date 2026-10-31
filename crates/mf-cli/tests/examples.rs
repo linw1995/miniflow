@@ -154,8 +154,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
     fs::create_dir(&definitions).unwrap();
     fs::create_dir(definitions.join("flows")).unwrap();
     fs::copy(
-        workspace().join("examples/flows/chat-tools.json"),
-        definitions.join("flows/chat-tools.json"),
+        workspace().join("examples/flows/multiply-tool.json"),
+        definitions.join("flows/multiply-tool.json"),
     )
     .unwrap();
     fs::create_dir(&runtime).unwrap();

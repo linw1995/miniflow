@@ -1,6 +1,6 @@
 use crate::{
     CallOutcome, ToolCall, ToolDefinition, ToolResult,
-    tools::{self, DispatchBinding, ToolCatalog},
+    tools::{self, ToolCatalog},
 };
 use mf_runtime::{
     NodeBuildError, NodeExecutionError, NodeMetadata, NodeRegistration, NodeValue, PreparedNode,
@@ -8,27 +8,25 @@ use mf_runtime::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use snafu::{OptionExt, Snafu, ensure};
+use snafu::{Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CatalogConfig {
-    #[serde(default)]
-    source: Vec<mf_runtime::DefinitionId>,
-}
+struct CatalogConfig {}
 #[derive(NodeValue)]
 struct CatalogInputs {
     #[value(default)]
     descriptions: BTreeMap<String, String>,
+    #[value(default)]
+    bindings: BTreeMap<String, BTreeMap<String, ValueRef>>,
 }
 #[derive(NodeValue)]
 struct CatalogOutputs {
     tools: Vec<ToolDefinition>,
-    binding: DispatchBinding,
 }
 struct CatalogNode {
-    source: Vec<mf_runtime::DefinitionId>,
+    interfaces: BTreeMap<String, mf_runtime::SubgraphInterface>,
 }
 impl mf_runtime::TypedTaskNode for CatalogNode {
     type Input = CatalogInputs;
@@ -36,27 +34,45 @@ impl mf_runtime::TypedTaskNode for CatalogNode {
     fn execute(
         &self,
         inputs: Self::Input,
-        context: &mut mf_runtime::ExecutionContext,
+        _: &mut mf_runtime::ExecutionContext,
     ) -> Result<mf_runtime::TypedNodeResult<Self::Output>, NodeExecutionError> {
-        let graph = context.workflow_graph().context(tools::UnavailableSnafu)?;
-        let catalog = ToolCatalog::from_path(graph, &self.source, &inputs.descriptions)?;
+        let catalog = ToolCatalog::new(&self.interfaces, &inputs.descriptions, &inputs.bindings)?;
         Ok(CatalogOutputs {
             tools: catalog.tools,
-            binding: catalog.binding,
         }
         .into())
     }
 }
-fn prepare_catalog(config: Value) -> Result<PreparedNode, NodeBuildError> {
-    let config: CatalogConfig = mf_runtime::deserialize_config(config)?;
-    PreparedNode::typed_task(
-        CatalogNode {
-            source: config.source,
-        },
-        NodeMetadata::default(),
-    )
+fn prepare_catalog(
+    _: &str,
+    config: Value,
+    _: Value,
+    mut parameters: mf_runtime::PreparedSubgraphs,
+) -> Result<PreparedNode, NodeBuildError> {
+    let _: CatalogConfig = mf_runtime::deserialize_config(config)?;
+    let interfaces = mf_runtime::take_subgraph_interfaces(&mut parameters, "tools")?;
+    ensure!(
+        parameters.is_empty(),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "unexpected catalog subgraph parameter"
+        }
+    );
+    let mut metadata = NodeMetadata::default();
+    if interfaces
+        .values()
+        .any(|interface| interface.inputs.values().any(|input| input.secret))
+    {
+        metadata.input_bindings.insert(
+            "bindings".into(),
+            mf_runtime::InputBinding {
+                secret: true,
+                ..Default::default()
+            },
+        );
+    }
+    PreparedNode::typed_task(CatalogNode { interfaces }, metadata)
 }
-inventory::submit! { NodeRegistration { kind: "builtin.tool_catalog", factory: mf_runtime::NodeFactory::Plain(prepare_catalog) } }
+inventory::submit! { NodeRegistration { kind: "builtin.tool_catalog", factory: mf_runtime::NodeFactory::Subgraphs(prepare_catalog) } }
 
 #[derive(Debug, Snafu)]
 pub enum AgentCallsError {
@@ -76,9 +92,8 @@ impl From<AgentCallsError> for NodeExecutionError {
 struct AgentCallsInputs {
     outcome: CallOutcome,
     tool_calls: Vec<ToolCall>,
-    binding: DispatchBinding,
     #[value(default)]
-    shared: BTreeMap<String, ValueRef>,
+    shared: BTreeMap<String, BTreeMap<String, ValueRef>>,
     max_tool_calls: usize,
 }
 #[derive(NodeValue)]
@@ -117,29 +132,21 @@ impl mf_runtime::TypedTaskNode for AgentCalls {
                 .all(|call| !call.id.trim().is_empty() && ids.insert(&call.id)),
             CallIdentitySnafu
         );
-        let shared: BTreeMap<String, ValueRef> = input
-            .shared
-            .into_iter()
-            .map(|(key, value)| (format!("{}.{key}", self.node), value))
-            .collect();
+        let shared = ValueRef::object(input.shared.into_iter().map(|(name, values)| {
+            (
+                name.into(),
+                ValueRef::object(values.into_iter().map(|(name, value)| (name.into(), value))),
+            )
+        }));
         let records = input
             .tool_calls
             .into_iter()
             .map(|call| {
-                let mut arguments = shared.clone();
-                arguments.insert(
-                    format!("{}.{}", self.node, input.binding.selector),
-                    call.name.into(),
-                );
-                arguments.insert(
-                    format!("{}.{}", self.node, input.binding.arguments),
-                    call.arguments,
-                );
-                ValueRef::object(
-                    arguments
-                        .into_iter()
-                        .map(|(key, value)| (key.into(), value)),
-                )
+                ValueRef::object([
+                    (format!("{}.selector", self.node).into(), call.name.into()),
+                    (format!("{}.arguments", self.node).into(), call.arguments),
+                    (format!("{}.bindings", self.node).into(), shared.clone()),
+                ])
             })
             .collect();
         Ok(AgentCallsOutputs { records }.into())
@@ -290,7 +297,7 @@ mod tests {
         assert!(!result[0].content.contains("private-value"));
     }
     #[test]
-    fn call_records_use_workflow_arguments_and_per_call_values_override_shared_inputs() {
+    fn call_records_keep_selector_arguments_and_caller_bindings_separate() {
         let node = prepare_calls(json!({"node":"invoke"})).unwrap();
         let secret = ValueRef::from("private").into_secret();
         let calls = ValueRef::array(vec![ValueRef::object([
@@ -304,14 +311,7 @@ mod tests {
         let input = Inputs::from([
             ("outcome".into(), "tool_calls".into()),
             ("tool_calls".into(), calls),
-            (
-                "binding".into(),
-                json!({"selector":"dispatch.selector","arguments":"dispatch.arguments"}).into(),
-            ),
-            (
-                "shared".into(),
-                json!({"config.factor":2,"dispatch.selector":"wrong"}).into(),
-            ),
+            ("shared".into(), json!({"multiply":{"factor":2}}).into()),
             ("max_tool_calls".into(), 128u64.into()),
         ]);
         let output = node
@@ -321,8 +321,8 @@ mod tests {
             .execute(input, &mut mf_runtime::ExecutionContext::default())
             .unwrap();
         let record = &output.outputs["records"].as_array().unwrap()[0];
-        assert_eq!(record["invoke.dispatch.selector"], json!("multiply"));
-        assert_eq!(record["invoke.config.factor"], json!(2));
-        assert!(record["invoke.dispatch.arguments"]["amount"].is_secret());
+        assert_eq!(record["invoke.selector"], json!("multiply"));
+        assert_eq!(record["invoke.bindings"]["multiply"]["factor"], json!(2));
+        assert!(record["invoke.arguments"]["amount"].is_secret());
     }
 }

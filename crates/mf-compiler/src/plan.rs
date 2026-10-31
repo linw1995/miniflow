@@ -178,7 +178,10 @@ impl CompiledWorkflow {
                 loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
                 clusters: Vec::new(),
             };
-            if original.version.supports_clusters() {
+            if original.version.supports_subgraph_parameters() {
+                description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_31;
+                description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
+            } else if original.version.supports_clusters() {
                 description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23;
                 description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
             } else if description.loop_bodies.iter().any(|body| !body.order_edges.is_empty() || body.nodes.iter().any(|node| node.id == mf_runtime::ITERATION_INPUT_ID)) {
@@ -640,6 +643,21 @@ fn generate_scope(
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         let bindings = dependency_tokens(dependencies);
+        if !node.subgraphs.is_empty()
+            || matches!(
+                node.kind.as_str(),
+                crate::LOOP_KIND | ITERATION_KIND | mf_runtime::CALL_KIND
+            )
+        {
+            preparations.push(parameter_preparations(
+                definition,
+                node,
+                scope,
+                index,
+                static_scope,
+            )?);
+        }
+        let parameters_ident = format_ident!("parameters_{scope}_{index}");
         if matches!(
             node.kind.as_str(),
             crate::LOOP_KIND | ITERATION_KIND | mf_runtime::CALL_KIND
@@ -651,6 +669,7 @@ fn generate_scope(
                 index,
                 static_scope,
                 &bindings,
+                false,
             )?);
             node_idents.push(node_ident);
             continue;
@@ -735,9 +754,10 @@ fn generate_scope(
             _ => {
                 let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
                 let config_lit = LitStr::new(&config_json, Span::call_site());
-                quote! {
-                    mf_compiler::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit)
-                        .inspect_err(|error| { #preparation_report })?
+                if node.subgraphs.is_empty() {
+                    quote! { mf_compiler::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit).inspect_err(|error| { #preparation_report })? }
+                } else {
+                    quote! { mf_compiler::instantiate_subgraphs_with_metadata(registry, #id_lit, #kind_lit, #config_lit, "null", #parameters_ident).inspect_err(|error| { #preparation_report })? }
                 }
             }
         };
@@ -820,6 +840,107 @@ fn dependency_tokens(dependencies: &[crate::ExecutionDependency<'_>]) -> Vec<Tok
 }
 
 #[cfg(feature = "codegen")]
+fn parameter_preparations(
+    parent: &WorkflowDefinition,
+    node: &crate::NodeDefinition,
+    scope: &str,
+    index: usize,
+    static_scope: &[String],
+) -> Result<TokenStream, PlanError> {
+    let ident = format_ident!("parameters_{scope}_{index}");
+    let mut tokens = vec![quote! { let mut #ident = mf_runtime::PreparedSubgraphs::new(); }];
+    for (name, source) in &node.subgraphs {
+        let (source, interface_only) = match source {
+            mf_runtime::SubgraphSource::Interfaces { interfaces } => (interfaces.as_ref(), true),
+            _ => (source, false),
+        };
+        if matches!(source, mf_runtime::SubgraphSource::Collection { .. }) {
+            let name = LitStr::new(name, Span::call_site());
+            let value = if interface_only {
+                quote! { mf_runtime::PreparedSubgraphParameter::Interfaces(Default::default()) }
+            } else {
+                quote! { mf_runtime::PreparedSubgraphParameter::Collection(Default::default()) }
+            };
+            tokens.push(quote! { #ident.insert(#name.into(), #value); });
+        }
+    }
+    let argument_scope = format!("{scope}_{index}_args");
+    let mut child_scope = static_scope.to_vec();
+    child_scope.push(node.id.to_string());
+    for (argument_index, member) in node.subgraph_members().into_iter().enumerate() {
+        let crate::subgraphs::SourceDefinition {
+            definition: source,
+            node: single_node,
+            projections,
+        } = crate::subgraphs::source_definition(parent, member.source, None)?;
+        ensure!(
+            !single_node,
+            crate::compiler::InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "prepare Node subgraph arguments before generating execution code"
+            }
+        );
+        let Some(aliases) = projections.last() else {
+            return crate::compiler::InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "subgraph input interface has not been frozen",
+            }
+            .fail()
+            .map_err(Into::into);
+        };
+        let aliases: BTreeMap<_, _> = aliases
+            .iter()
+            .map(|(name, target)| (name, mf_runtime::output_id(&member.call_id(), target)))
+            .collect();
+        let aliases = LitStr::new(
+            &serde_json::to_string(&aliases).context(SerializeSnafu)?,
+            Span::call_site(),
+        );
+        let wrapper = member.wrapper(parent, source);
+        let fake = crate::NodeDefinition {
+            id: member.id.clone(),
+            kind: mf_runtime::CALL_KIND.into(),
+            config: serde_json::json!({"flow":"parameter","definition":wrapper}),
+            subgraphs: Default::default(),
+            loop_definition: None,
+        };
+        tokens.push(subgraph_preparation(
+            parent,
+            &fake,
+            &argument_scope,
+            argument_index,
+            &child_scope,
+            &[],
+            true,
+        )?);
+        let body = format_ident!("body_{argument_scope}_{argument_index}");
+        tokens.push(quote! { let #body = #body.with_input_aliases(serde_json::from_str(#aliases).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu { definition_id: "subgraph" })?); });
+        let parameter = LitStr::new(member.parameter, Span::call_site());
+        if let Some(entry) = member.entry {
+            let entry = LitStr::new(entry, Span::call_site());
+            let (variant, value) = if member.interface_only {
+                (quote! { Interfaces }, quote! { #body.interface() })
+            } else {
+                (quote! { Collection }, quote! { #body })
+            };
+            tokens.push(quote! {
+                if let Some(mf_runtime::PreparedSubgraphParameter::#variant(collection)) = #ident.get_mut(#parameter) {
+                    collection.insert(#entry.into(), #value);
+                }
+            });
+        } else {
+            let value = if member.interface_only {
+                quote! { mf_runtime::PreparedSubgraphParameter::Interface(#body.interface()) }
+            } else {
+                quote! { mf_runtime::PreparedSubgraphParameter::Single(#body) }
+            };
+            tokens.push(quote! { #ident.insert(#parameter.into(), #value); });
+        }
+    }
+    Ok(quote! { #(#tokens)* })
+}
+
+#[cfg(feature = "codegen")]
 fn subgraph_preparation(
     parent: &WorkflowDefinition,
     node: &crate::NodeDefinition,
@@ -827,6 +948,7 @@ fn subgraph_preparation(
     index: usize,
     static_scope: &[String],
     bindings: &[TokenStream],
+    parameter_body: bool,
 ) -> Result<TokenStream, PlanError> {
     let node_ident = format_ident!("node_{scope}_{index}");
     let inference_ident = format_ident!("inference_{scope}");
@@ -980,6 +1102,20 @@ fn subgraph_preparation(
             }
         }
     };
+    let parameters_ident = format_ident!("parameters_{scope}_{index}");
+    let constructor = if parameter_body {
+        quote! {}
+    } else {
+        quote! {
+            #parameters_ident.insert("body".into(), mf_runtime::PreparedSubgraphParameter::Single(#body_ident));
+            let mut #node_ident = mf_compiler::instantiate_subgraphs_with_metadata(
+                registry, #outer_id, #kind, #config, #options, #parameters_ident,
+            ).inspect_err(|error| { #report })?;
+            #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
+                .inspect_err(|error| { #report }).boxed()
+                .context(mf_compiler::WorkflowMetadataSnafu { definition_id: #outer_id })?;
+        }
+    };
     Ok(quote! {
         let #body_flow = (|| -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
             #(#preparations)*
@@ -993,14 +1129,8 @@ fn subgraph_preparation(
             move |state, sink| { #body_flow.execute_with_sink(state, sink) },
         );
         let #body_ident = #body_ident.with_input_schema(input_schema).with_graph(graph);
-        let mut #node_ident = mf_compiler::instantiate_subgraph_with_metadata(
-            registry, #outer_id, #kind, #config, #options, #body_ident,
-        )
-            .inspect_err(|error| { #report })?;
-        #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
-            .inspect_err(|error| { #report })
-            .boxed()
-            .context(mf_compiler::WorkflowMetadataSnafu { definition_id: #outer_id })?;
+        #constructor
+
     })
 }
 
@@ -1035,8 +1165,9 @@ impl CompiledWorkflow {
         if order != self.execution_order {
             return InvalidExecutionOrderSnafu.fail();
         }
+        let frozen = crate::subgraphs::freeze(&self.definition, &body_layouts, &mut Vec::new())?;
         let resolved = Self {
-            definition: crate::compiler::resolve_execution(&self.definition, &nodes)?,
+            definition: crate::compiler::resolve_execution(&frozen, &nodes)?,
             execution_order: order.clone(),
         };
         resolved.generate_resolved_execution_plans(nodes, order, body_layouts, standard)
@@ -1607,6 +1738,51 @@ fn collect_body_layouts(
             .iter()
             .find(|node| &node.id == id)
             .expect("validated node ID");
+        path.push(node.id.clone());
+        for (argument_index, member) in node.subgraph_members().into_iter().enumerate() {
+            let crate::subgraphs::SourceDefinition {
+                definition: source,
+                node: single_node,
+                ..
+            } = crate::subgraphs::source_definition(definition, member.source, None)?;
+            ensure!(
+                !single_node,
+                crate::compiler::InvalidCallSnafu {
+                    definition_id: node.id.clone(),
+                    message: "subgraph Node interface has not been frozen"
+                }
+            );
+            let mut wrapper = member.wrapper(definition, source);
+            let order = crate::compiler::structural_order_graph(&wrapper)?;
+            path.push(member.id.clone());
+            let (domains, streams, graph) = &body_layouts[path.as_slice()];
+            let argument_scope = format!("{scope}_{index}_args_{argument_index}");
+            layouts.push(subgraph_stream_tokens(
+                &argument_scope,
+                &member.id,
+                streams,
+            )?);
+            wrapper
+                .outputs
+                .retain(|output| !streams.iter().any(|stream| stream.name == output.name));
+            layouts.push(task_layout_tokens(
+                &wrapper,
+                &order,
+                &argument_scope,
+                domains,
+                graph,
+            ));
+            collect_body_layouts(
+                &wrapper,
+                &order,
+                &argument_scope,
+                path,
+                body_layouts,
+                layouts,
+            )?;
+            path.pop();
+        }
+        path.pop();
         let mut body = if let Some(loop_definition) = &node.loop_definition {
             crate::loops::body_definition(
                 &loop_definition.body,

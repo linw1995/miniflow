@@ -1,10 +1,10 @@
-# Built-in agent orchestration through ordinary workflow nodes
+# Built-in agent Flow with external subgraph parameters
 
-Keep the LLM node responsible for one model request. Move argument routing into a reusable
-`builtin.dispatch` node and provide a provider-owned `mfn-llm.agent` Flow. The agent composes existing
-Loop, Iteration, Call, and stream-export capabilities with protocol adapters. Callers bind their tool
-workflow through explicit Flow imports; real tools and downstream processing remain normal nodes.
+Keep `builtin.llm` as one explicit-tools model request. Compose model rounds, tool dispatch, and
+protocol results with existing workflow execution. Callers supply tools as named subgraph arguments;
+each member can be an ordinary Node or a Flow with real downstream connections.
 
-A single Iteration handles the complete tool-call list. Remove tool-specific batch output ports and
-per-tool Iteration wrappers. Derive model schemas only from dispatch-linked receiver ports, keeping
-other upstreams and defaults outside the model contract.
+Generalize existing Flow sources and single-body factories to named single/collection parameters,
+lexical forwarding, input interface projection, and read-only metadata views. Reuse `PreparedSubgraph`,
+Call scopes, ordinary scheduling, and frozen generated execution layouts. Remove the handwritten tool
+router, branch argument lists, dispatch binding descriptors, and runtime full-graph context injection.

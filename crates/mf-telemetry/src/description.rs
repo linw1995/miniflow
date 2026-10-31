@@ -21,26 +21,38 @@ pub enum WorkflowDescriptionVersion {
     V2026_10_19,
     #[serde(rename = "2026-10-23")]
     V2026_10_23,
+    #[serde(rename = "2026-10-31")]
+    V2026_10_31,
 }
 
 impl WorkflowDescriptionVersion {
     /// Default protocol for finite workflow observations.
     pub const CURRENT: Self = Self::V2026_09_29;
 
+    pub fn supports_subgraph_parameters(self) -> bool {
+        self == Self::V2026_10_31
+    }
+
     pub fn supports_loops(self) -> bool {
         self != Self::V2026_09_27
     }
 
     pub fn supports_iteration_bodies(self) -> bool {
-        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+        matches!(
+            self,
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_31
+        )
     }
 
     pub fn supports_clusters(self) -> bool {
-        self == Self::V2026_10_23
+        matches!(self, Self::V2026_10_23 | Self::V2026_10_31)
     }
 
     pub fn uses_node_success_edges(self) -> bool {
-        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+        matches!(
+            self,
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_31
+        )
     }
 }
 
@@ -184,6 +196,25 @@ impl WorkflowDescription {
         self.loop_bodies.iter().find(|body| body.path == path)
     }
 
+    pub fn scope_node(&self, path: &[String]) -> Option<&NodeDescription> {
+        let (id, parent) = path.split_last()?;
+        let nodes = if parent.is_empty() {
+            &self.nodes
+        } else {
+            &self.body(parent)?.nodes
+        };
+        nodes.iter().find(|node| node.id == *id)
+    }
+
+    pub fn is_call_scope(&self, path: &[String]) -> bool {
+        self.scope_node(path).is_some_and(|node| {
+            node.kind == "workflow.call"
+                || (self.version.supports_subgraph_parameters()
+                    && !matches!(node.kind.as_str(), "workflow.loop" | "builtin.iteration")
+                    && self.body(path).is_some())
+        })
+    }
+
     pub fn validate_scope_path(
         &self,
         path: &[crate::event::ScopePathEntry],
@@ -199,15 +230,15 @@ impl WorkflowDescription {
                 .iter()
                 .find(|node| node.id == entry.node_id())
                 .ok_or_else(|| crate::invalid("unknown scope container"))?;
+            static_path.push(entry.node_id().to_owned());
             require(
                 if entry.is_call() {
-                    container.kind == "workflow.call"
+                    self.is_call_scope(&static_path)
                 } else {
                     container.kind == "workflow.loop"
                 },
                 "scope path kind disagrees with its container",
             )?;
-            static_path.push(entry.node_id().to_owned());
             parent = &self
                 .body(&static_path)
                 .ok_or_else(|| crate::invalid("unknown scope body"))?
@@ -226,10 +257,10 @@ impl WorkflowDescription {
         let mut has_call = false;
         for (index, id) in path.iter().enumerate() {
             let container = nodes.iter().find(|node| node.id == *id)?;
-            match container.kind.as_str() {
-                "workflow.call" => has_call = true,
-                "workflow.loop" => {}
-                _ => return None,
+            if self.is_call_scope(&path[..=index]) {
+                has_call = true;
+            } else if container.kind != "workflow.loop" {
+                return None;
             }
             if !has_call && index >= crate::MAX_LOOP_DEPTH {
                 return None;
@@ -256,6 +287,7 @@ impl WorkflowDescription {
             WorkflowDescriptionVersion::V2026_10_03
                 | WorkflowDescriptionVersion::V2026_10_19
                 | WorkflowDescriptionVersion::V2026_10_23
+                | WorkflowDescriptionVersion::V2026_10_31
         ) {
             require(
                 self.execution.is_some(),
@@ -370,7 +402,7 @@ impl WorkflowDescription {
                 .ok_or_else(|| crate::invalid("unknown body container"))?;
             let iteration =
                 self.version.supports_iteration_bodies() && container.kind == "builtin.iteration";
-            let call = container.kind == "workflow.call";
+            let call = self.is_call_scope(&body.path);
             let has_call = *parent_has_call || call;
             require(
                 has_call || body.path.len() <= crate::MAX_LOOP_DEPTH,

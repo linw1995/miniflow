@@ -348,30 +348,18 @@ impl StreamPlan {
             definition_id: node.definition_id.clone(),
             message: "stream execution domain contains a non-task node",
         })?;
-        context.with_workflow_graph(&self.graph, |context| {
-            crate::execute_resolved_node_in_context(
-                node,
-                context,
-                |ctx, inputs| resolve(node, ctx, inputs),
-                |inputs, ctx| {
-                    task.execute(inputs, ctx)
-                        .map(crate::GeneratedNodeResult::Dynamic)
-                },
-            )
-        })
+        crate::execute_resolved_node_in_context(
+            node,
+            context,
+            |ctx, inputs| resolve(node, ctx, inputs),
+            |inputs, ctx| {
+                task.execute(inputs, ctx)
+                    .map(crate::GeneratedNodeResult::Dynamic)
+            },
+        )
     }
 
     pub fn execute_domain(
-        &self,
-        id: usize,
-        context: &mut crate::ExecutionContext,
-    ) -> Result<(), crate::WorkflowRunError> {
-        context.with_workflow_graph(&self.graph, |context| {
-            self.execute_domain_with_graph(id, context)
-        })
-    }
-
-    fn execute_domain_with_graph(
         &self,
         id: usize,
         context: &mut crate::ExecutionContext,

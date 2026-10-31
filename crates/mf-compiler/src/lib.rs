@@ -1,5 +1,6 @@
 mod calls;
 mod flow_sources;
+mod subgraphs;
 pub use flow_sources::{
     FlowResolutionError, ResolvedWorkflow, load_embedded_workflow, load_workflow, resolve_flows,
 };
@@ -69,15 +70,15 @@ pub use inputs::{BuildInputs, InputError};
 pub use mf_runtime::{
     CALL_KIND, CallConfig, ContextReference, ContextValue, ControlEdgeDefinition, DefinitionId,
     DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, ExecutionContext,
-    Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowSource, InputBindingDefinition,
-    Inputs, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
-    LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
-    MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeBuildError,
-    NodeDefinition, NodeDependency, NodeExecutionError, NodeFactory, NodeId, NodeMetadata,
-    NodePorts, NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult, OrderEdgeDefinition,
+    Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, InputBindingDefinition, Inputs,
+    LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition, LoopComparisonOperator,
+    LoopConditionDefinition, LoopDefinition, LoopVariableDefinition, MAX_CALL_DEPTH,
+    MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeBuildError, NodeDefinition,
+    NodeDependency, NodeExecutionError, NodeFactory, NodeId, NodeMetadata, NodePorts,
+    NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult, OrderEdgeDefinition,
     OutputDerivation, OutputDerivationError, OutputReferenceDefinition, Outputs, PortSpec,
-    PreparedNode, RunObservation, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch,
-    ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
+    PreparedNode, RunObservation, SubgraphSource, TaskNode, TypeCompatibility, TypeDepthError,
+    TypeMismatch, ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
     WorkflowOutputDefinition, WorkflowRunError, deserialize_config, execute_node_in_context,
     output_id, select_context_output, validate_exclusive_inputs,
 };
@@ -106,9 +107,10 @@ pub use construction::{
     StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
     UnknownKindSnafu as WorkflowUnknownKindSnafu, WorkflowBuildError, bind_workflow_inputs,
     build_flow, build_stream_program, instantiate_node_with_metadata,
-    instantiate_subgraph_with_metadata, into_task, partition_execution_domains, prepare_stream,
-    prepared_loop_assign_from_json, prepared_loop_source_from_json, stream_workflow_inputs,
-    validate_execution, validate_stream_limits, validate_success_connection, workflow_input_schema,
+    instantiate_subgraph_with_metadata, instantiate_subgraphs_with_metadata, into_task,
+    partition_execution_domains, prepare_stream, prepared_loop_assign_from_json,
+    prepared_loop_source_from_json, stream_workflow_inputs, validate_execution,
+    validate_stream_limits, validate_success_connection, workflow_input_schema,
 };
 pub use mf_runtime::{
     FlowRuntime, RuntimeOptions, TaskFlowNode, WorkflowInputError, WorkflowInputSchema,

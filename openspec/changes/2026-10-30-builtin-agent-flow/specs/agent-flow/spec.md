@@ -1,40 +1,41 @@
-# Agent Flow requirements
+# Agent and subgraph requirements
 
-## Explicit LLM responsibility
+## Named subgraph parameters
 
-Each LLM execution SHALL perform one model request using its ordinary tools input. It SHALL NOT
-route workflow arguments or require a particular downstream container.
+A Node or Flow SHALL accept declared named subgraphs. Each argument SHALL be one Node, one Flow, or
+a named collection. A Flow SHALL support required/default parameters and lexical argument forwarding.
+Preparation SHALL reject missing, unknown, unresolved, or cardinality-incompatible arguments.
+Public input projections SHALL preserve decoded contracts, optional/default behavior, and sensitivity;
+required inputs SHALL remain exposed. Source paths SHALL resolve relative to their declaring scope.
 
-## Ordinary dispatch
+## Shared execution
 
-Dispatch SHALL select a declared branch from its selector, publish that branch gate and parameter
-ports, and mark the other branches skipped. It SHALL NOT execute child nodes. Required routed values
-and unknown arguments SHALL be checked before publication. Ordinary workflow nodes SHALL execute
-selected tools and downstream processing.
+Node arguments SHALL adapt to ordinary single-node subgraphs. Native and custom container factories
+SHALL use the same named prepared argument map. Calls SHALL retain independent values and Loop state,
+shared cancellation and budgets, typed error chains, and existing finite-body restrictions. Compiled
+runners SHALL freeze sources, public interfaces, and output selection without runtime source lookup.
 
-## Prepared tool definitions
+## Read-only metadata
 
-The agent SHALL prepare model tool definitions before requesting the model. Schemas and sensitivity
-SHALL come from dispatch-linked receiver ports; unrelated upstream inputs SHALL remain excluded.
-Incomplete codec schemas SHALL fail before model I/O. Reusable tool workflow interfaces SHALL retain
-their qualified input names.
+Interface projections SHALL contain contracts without executable bodies, environment names, default
+contents, or runtime values. Metadata consumers SHALL NOT execute them. Runtime contexts SHALL NOT
+require full-graph injection. Generated scopes SHALL reject interface/schema drift before effects.
 
-## Shared orchestration
+## Agent composition
 
-The provider-owned built-in agent SHALL use one Iteration for the complete call list and an ordinary
-Loop for model rounds. Repeated and mixed tool names SHALL preserve model order in protocol results.
-Per-call routing fields SHALL override shared tool inputs. Limits SHALL bound model rounds and calls
-per round. Existing workflow step budgets and error policies SHALL remain authoritative.
+The caller SHALL supply tools through a named collection whose members can be Nodes or Flows.
+The catalog SHALL derive schemas before the model-round Loop from the bound public interfaces.
+Caller-bound inputs SHALL be validated and excluded from model declarations. Model arguments SHALL
+NOT overwrite caller bindings. The LLM SHALL perform one request per execution with explicit tools.
 
-## Portable Flow composition
+One Iteration SHALL process mixed/repeated terminal calls. Dispatch SHALL select a bound subgraph
+and execute it through normal Call scopes and workflow scheduling. Results SHALL preserve call order,
+validate identity/counts, redact secret values, and enforce protocol size bounds. The Loop SHALL own
+history, usages, termination, and budgets, using its existing index for round counting.
 
-A caller SHALL be able to bind the built-in agent's tool Flow source. Binding paths SHALL resolve
-relative to the caller. Every body SHALL be frozen before runtime, and execution SHALL remain
-possible after source Flow files are removed.
+## Observation and examples
 
-## Observation and streams
-
-Ordinary tool nodes, Calls, Loops, and Iteration items SHALL remain visible to existing observation.
-Optional text deltas SHALL cross existing child-stream exports. An unobserved text stream SHALL NOT
-force an otherwise unary workflow request. Sensitive argument and result values SHALL retain their
-markers and be redacted at observation and protocol-result boundaries.
+Generic callable parameter bodies SHALL use existing Call lifecycle records under a supported
+description version. Stream and terminal outputs SHALL retain their existing contracts. The example
+SHALL keep a real multiply Flow output connected to downstream formatting and bind factor externally.
+Earlier definitions SHALL retain their legacy Flow source wire representation and restrictions.

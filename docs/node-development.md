@@ -76,9 +76,17 @@ the workflow. Manifest inspection reads the frozen graph and interface without c
 Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
 
 Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
-Use `NodeFactory::Subgraph` when construction also needs the occurrence ID, execution options, and a
-`PreparedSubgraph`. The compiler supplies Loop and Iteration bodies through this second form. Missing
-or inappropriate body arguments fail during preparation; an executor is returned only after binding.
+Use `NodeFactory::Subgraphs` when construction also needs the occurrence ID, execution options, and
+`PreparedSubgraphs`: named single children, named collections, or read-only interface projections.
+`take_subgraph`, `take_subgraph_collection`, and `take_subgraph_interfaces` validate the expected shape.
+Factories reject unused arguments. Existing Call, Loop, and Iteration bodies use the same map under
+`body`; the single-body instantiation helper delegates to this entry point.
+
+Callable children retain `PreparedSubgraph` as their execution carrier. Bind public arguments through
+`bind_arguments`, then enter the existing `ExecutionContext::run_call` and execute the prepared body.
+Inputs retain decoded constraints and secret markers. Read-only `SubgraphInterface` values contain no
+executor and can be used to inspect metadata without invoking the source. Generated typed constructors
+accept value configuration only, so captured subgraphs use the ordinary prepared-node path.
 
 ## Select dependencies in a Flow
 
@@ -155,18 +163,14 @@ Declare context reads in `NodeMetadata.context_references`. Each `ContextReferen
 
 ## Workflow metadata and tool ports
 
-`ExecutionContext::workflow_graph()` exposes the current prepared graph's port contracts and ordinary
-connections. The descriptor contains no executors, environment names, default values, or runtime
-payloads. It records decoded input schemas, sensitivity flags, and prepared subgraphs. `locate` resolves
-literal node-ID paths through those subgraphs. Domain forks share immutable descriptors; a new body
-starts without the parent's graph, and its own Flow installs the correct descriptor during execution.
-Errors and unwinding restore the enclosing graph.
+`Flow::workflow_graph()` and `StreamPlan::workflow_graph()` expose prepared port contracts and ordinary
+connections to hosts. Descriptors contain decoded schemas and sensitivity, without runtime values,
+environment names, or default contents. `PreparedSubgraph::with_graph` carries the same descriptor to
+container factories. Named subgraph parameters provide their own interface directly; execution contexts
+do not expose a global graph lookup.
 
-`Flow::workflow_graph()` and `StreamPlan::workflow_graph()` expose the same descriptor to hosts.
-`PreparedSubgraph::with_graph` carries the prepared body into its normal provider metadata. Compiler
-preparation and generated programs populate it from the same nodes and connections that they execute.
-Generated scopes verify decoded refinements and sensitivity against frozen metadata before business
-execution. Ordinary port and workflow interface validation retains its existing path diagnostics. There is no independent tool execution graph or runtime node invocation interface.
+Generated scopes validate decoded refinements and sensitivity against frozen metadata before business
+execution. Ordinary port and workflow interface validation retains its existing path diagnostics.
 
 Workflow input descriptors optionally include a `schema` refinement. The existing Call provider
 propagates these descriptors on its normal input ports. Reflection describes records, enum variants,
@@ -571,7 +575,7 @@ Pass ordinary `NodeMetadata` when the factory supplies output derivations, conte
 requirements. The typed constructor preserves those fields and requires empty input and output declarations;
 even matching hand-written ports return `NodeBuildError::ConflictingInputDeclarations` or
 `ConflictingOutputDeclarations`. Register the factory with the existing `NodeFactory::Plain` or
-`NodeFactory::Subgraph` contract.
+`NodeFactory::Subgraphs` contract.
 
 Input and output declarations always come from their value contracts. `TypedTaskNode::output_ports`
 has been removed. Keep type evidence separate in `NodeMetadata.output_derivations`: use literal or forwarding
@@ -683,9 +687,10 @@ Event, stream, and nested-scope execution retain the existing dynamic scheduler 
   mutable context. Convert ordinary output maps with `.into()` to return `NodeResult`.
 - Move port declarations, output derivations, and context references into the factory's `NodeMetadata`.
 - Return `PreparedNode` from factories and register them through `NodeFactory::Plain` or
-  `NodeFactory::Subgraph`. Static input/output fields on `NodeRegistration` have moved into metadata.
-- Construct container nodes with their prepared body. Remove declaration objects and `with_subgraph`
-  methods that previously replaced them after construction.
+  `NodeFactory::Subgraphs`. Static input/output fields on `NodeRegistration` have moved into metadata.
+- Update container factory signatures to receive `PreparedSubgraphs`; take the native body with
+  `take_subgraph(&mut parameters, "body")` and reject unused arguments. The single-body instantiation
+  helper delegates to this named entry point.
 - Rebuild the plugin and consumers against the same runtime package identity.
 
 ## Combined Task and Stream execution

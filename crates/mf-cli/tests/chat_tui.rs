@@ -297,10 +297,10 @@ fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
             .unwrap()
             .iter_mut()
             .find(|node| node["id"] == "agent")
-            .unwrap()["config"]["flows"]["tools"]["path"] = crates
+            .unwrap()["subgraphs"]["tools"]["collection"]["multiply"]["source"]["path"] = crates
             .parent()
             .unwrap()
-            .join("examples/flows/chat-tools.json")
+            .join("examples/flows/multiply-tool.json")
             .to_str()
             .unwrap()
             .into();

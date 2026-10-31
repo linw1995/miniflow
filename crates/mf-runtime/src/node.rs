@@ -1387,8 +1387,8 @@ impl PreparedNode {
 #[derive(Clone, Copy, Debug)]
 pub enum NodeFactory {
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
-    Subgraph(
-        fn(&str, Value, Value, crate::PreparedSubgraph) -> Result<PreparedNode, NodeBuildError>,
+    Subgraphs(
+        fn(&str, Value, Value, crate::PreparedSubgraphs) -> Result<PreparedNode, NodeBuildError>,
     ),
 }
 
@@ -1402,8 +1402,8 @@ impl NodeRegistration {
     pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
             NodeFactory::Plain(factory) => factory(config),
-            NodeFactory::Subgraph(_) => crate::NodeInvalidSubgraphSnafu {
-                message: format!("node `{}` requires a prepared body", self.kind),
+            NodeFactory::Subgraphs(_) => crate::NodeInvalidSubgraphSnafu {
+                message: format!("node `{}` requires prepared subgraph parameters", self.kind),
             }
             .fail(),
         }
@@ -1416,15 +1416,41 @@ impl NodeRegistration {
         options: Value,
         body: crate::PreparedSubgraph,
     ) -> Result<PreparedNode, NodeBuildError> {
+        self.instantiate_subgraphs(
+            id,
+            config,
+            options,
+            std::collections::BTreeMap::from([(
+                "body".into(),
+                crate::PreparedSubgraphParameter::Single(body),
+            )]),
+        )
+    }
+
+    pub fn instantiate_subgraphs(
+        &self,
+        id: &str,
+        config: Value,
+        options: Value,
+        parameters: crate::PreparedSubgraphs,
+    ) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
-            NodeFactory::Subgraph(factory) => {
-                let graph = body.graph.clone();
-                let mut prepared = factory(id, config, options, body)?;
-                prepared.metadata.subgraph = graph;
+            NodeFactory::Subgraphs(factory) => {
+                let graph = match parameters.get("body") {
+                    Some(crate::PreparedSubgraphParameter::Single(body)) => body.graph.clone(),
+                    _ => None,
+                };
+                let mut prepared = factory(id, config, options, parameters)?;
+                // Typed constructors accept value configuration, not captured subgraphs.
+                prepared.metadata.typed_generation = None;
+                if prepared.metadata.subgraph.is_none() {
+                    prepared.metadata.subgraph = graph;
+                }
                 Ok(prepared)
             }
+            NodeFactory::Plain(factory) if parameters.is_empty() => factory(config),
             NodeFactory::Plain(_) => crate::NodeInvalidSubgraphSnafu {
-                message: format!("node `{}` does not accept a prepared body", self.kind),
+                message: format!("node `{}` does not accept subgraph parameters", self.kind),
             }
             .fail(),
         }

@@ -35,8 +35,16 @@ fn factory(
     id: &str,
     config: Value,
     options: Value,
-    body: PreparedSubgraph,
+    mut parameters: mf_runtime::PreparedSubgraphs,
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let body = mf_runtime::take_subgraph(&mut parameters, "body")?;
+    ensure!(
+        parameters.is_empty(),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "unexpected subgraph parameter"
+        }
+    );
+
     let _: Config = deserialize_config(config)?;
     let config: ExecutionConfig = deserialize_config(options)?;
     ensure!(
@@ -70,7 +78,7 @@ fn factory(
 }
 
 inventory::submit! {
-    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Subgraph(factory) }
+    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Subgraphs(factory) }
 }
 
 #[cfg(test)]

@@ -28,8 +28,17 @@ fn definition() -> mf_compiler::WorkflowDefinition {
     .definition
 }
 fn execute(server: &Server, max_rounds: i64) -> Vec<Value> {
+    execute_document(&definition(), server, max_rounds, None)
+}
+
+fn execute_document(
+    document: &mf_compiler::WorkflowDefinition,
+    server: &Server,
+    max_rounds: i64,
+    snapshots: Option<mf_runtime::SnapshotRecorder>,
+) -> Vec<Value> {
     let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&definition(), &registry).unwrap();
+    let plan = compile_definition(document, &registry).unwrap();
     let prepared = instantiate_stream(&plan, &registry).unwrap();
     let arguments=WorkflowArguments::from_json(json!({"params.prompt":"Calculate 21","params.model":"example-model","params.base_url":server.base_url,"params.api_key":"synthetic-key","params.factor":2,"params.max_rounds":max_rounds}).to_string().as_bytes()).unwrap();
     let instance = FlowRuntime::default()
@@ -37,6 +46,7 @@ fn execute(server: &Server, max_rounds: i64) -> Vec<Value> {
             prepared,
             StreamOptions {
                 arguments,
+                snapshots,
                 ..Default::default()
             },
         )
@@ -123,7 +133,7 @@ fn builtin_agent_generated_runner_keeps_tools_without_source_files() {
     let build = root.path().join("build");
     let executable = root.path().join("agent");
     let encoded = serde_json::to_string(&definition).unwrap();
-    assert!(!encoded.contains("flows/chat-tools.json"));
+    assert!(!encoded.contains("flows/multiply-tool.json"));
     fs::write(&source, encoded).unwrap();
     compile_project_with_options(
         &CompileRequest {
@@ -215,9 +225,17 @@ fn unobserved_agent_stream_keeps_normal_unary_workflow_execution() {
 }
 
 fn failure(server: &Server, overrides: Value) -> (String, Vec<String>) {
+    failure_in(&definition(), server, overrides)
+}
+
+fn failure_in(
+    definition: &mf_compiler::WorkflowDefinition,
+    server: &Server,
+    overrides: Value,
+) -> (String, Vec<String>) {
     use std::sync::{Arc, Mutex};
     let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&definition(), &registry).unwrap();
+    let plan = compile_definition(definition, &registry).unwrap();
     let prepared = instantiate_stream(&plan, &registry).unwrap();
     let mut inputs = json!({"params.prompt":"Calculate 21","params.model":"example-model","params.base_url":server.base_url,"params.api_key":"synthetic-key"});
     inputs
@@ -269,11 +287,137 @@ fn agent_limits_and_malformed_calls_prevent_tool_side_effects() {
         json!({}),
     )])]);
     let (error, nodes) = failure(&server, json!({}));
-    assert!(error.contains("requires parameter `amount`"), "{error}");
+    assert!(
+        error.contains("required input was not provided") && error.contains("amount"),
+        "{error}"
+    );
     assert_eq!(server.requests().len(), 1);
     assert!(
         !nodes
             .iter()
             .any(|node| node == "multiply_flow" || node == "multiply")
+    );
+}
+
+#[test]
+fn caller_bindings_are_checked_before_model_io_and_cannot_be_overwritten() {
+    let server = Server::start(vec![]);
+    let mut document = definition();
+    let params = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "params")
+        .unwrap();
+    params.config["parameters"]["factor"]["type"] = "any".into();
+    let bindings = document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "tool_inputs")
+        .unwrap();
+    bindings.config["inputs"]["factor"] = "any".into();
+    let (error, nodes) = failure_in(&document, &server, json!({"params.factor":"invalid"}));
+    assert!(
+        error.contains("invalid bindings for tool `multiply`"),
+        "{error}"
+    );
+    assert!(server.requests().is_empty());
+    assert!(!nodes.iter().any(|node| node == "chat"));
+
+    let server = Server::start(vec![Reply::stream_tool_calls(vec![(
+        "bad",
+        "multiply",
+        json!({"amount":21,"factor":9}),
+    )])]);
+    let (error, nodes) = failure(&server, json!({}));
+    assert!(error.contains("already bound by the caller"), "{error}");
+    assert_eq!(server.requests().len(), 1);
+    assert!(!nodes.iter().any(|node| node == "multiply_flow"));
+}
+
+#[cfg(feature = "codegen")]
+#[test]
+fn public_codegen_preserves_the_agent_contract_without_model_or_tool_execution() {
+    let server = Server::start(vec![]);
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition(), &registry).unwrap();
+    let expected = plan.manifest(&registry).unwrap();
+    for standard in [false, true] {
+        let artifacts = if standard {
+            plan.generate_runner_execution_plans(&registry)
+        } else {
+            plan.generate_execution_plans(&registry)
+        }
+        .unwrap();
+        let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+        assert_eq!(manifest, expected);
+        let frozen = mf_compiler::plan_definition(&manifest.definition).unwrap();
+        let generated = frozen.generate_runner_artifacts().unwrap();
+        assert_eq!(
+            mf_compiler::CompiledWorkflow::from_json(&generated.plan_json).unwrap(),
+            frozen
+        );
+        let targets: Vec<mf_runtime::NodeTarget> =
+            serde_json::from_str(&artifacts.node_targets_json).unwrap();
+        assert!(targets.iter().any(|target| target.id == "agent"));
+    }
+    assert!(server.requests().is_empty());
+}
+
+#[test]
+fn private_caller_bindings_stay_out_of_model_messages_and_snapshots() {
+    use std::sync::{Arc, Mutex};
+    let examples = common::crates_dir().parent().unwrap().join("examples");
+    let mut authored: Value =
+        serde_json::from_slice(&std::fs::read(examples.join("chat-tools-flow.json")).unwrap())
+            .unwrap();
+    authored["nodes"][0]["config"]["parameters"]["token"] =
+        json!({"type":"string","default":"private-value","secret":true});
+    let nodes = authored["nodes"].as_array_mut().unwrap();
+    let bindings = nodes
+        .iter_mut()
+        .find(|node| node["id"] == "tool_inputs")
+        .unwrap();
+    bindings["config"]["inputs"] = json!({"token":"string"});
+    bindings["config"]["code"]["value"] = "{'private':{'token':token}}".into();
+    bindings["inputs"] = json!({"token":{"from":{"node":"params","port":"token"}}});
+    let agent = nodes.iter_mut().find(|node| node["id"] == "agent").unwrap();
+    agent["subgraphs"]["tools"] = json!({"collection":{"private":{"node":{"id":"private","kind":"builtin.parameters","config":{"parameters":{"value":{"type":"string","secret":false},"token":{"type":"string","secret":true}}}}}}});
+    let document =
+        mf_compiler::resolve_flows(&serde_json::from_value(authored).unwrap(), Some(&examples))
+            .unwrap()
+            .definition;
+    let server = Server::start(vec![
+        Reply::stream_tool_calls(vec![(
+            "private-call",
+            "private",
+            json!({"value":"visible"}),
+        )]),
+        Reply::stream_text("done"),
+    ]);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let saved = captured.clone();
+    let recorder = mf_runtime::SnapshotRecorder::new(move |event| {
+        saved
+            .lock()
+            .unwrap()
+            .push(serde_json::to_string(&event).unwrap())
+    });
+    let outputs = execute_document(&document, &server, 4, Some(recorder));
+    assert_eq!(terminal(&outputs)["text"], "done");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.body.to_string().contains("private-value"))
+    );
+    let properties = &requests[0].body["tools"][0]["function"]["parameters"]["properties"];
+    assert!(properties.get("value").is_some() && properties.get("token").is_none());
+    let snapshots = captured.lock().unwrap();
+    assert!(!snapshots.is_empty());
+    assert!(
+        snapshots
+            .iter()
+            .all(|snapshot| !snapshot.contains("private-value"))
     );
 }

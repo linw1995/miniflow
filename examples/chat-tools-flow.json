@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-10-31",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -12,11 +12,6 @@
     "code": {
       "package": "mfn-code",
       "path": "../crates/builtin-nodes/code"
-    }
-  },
-  "flows": {
-    "agent": {
-      "builtin": "mfn-llm.agent"
     }
   },
   "nodes": [
@@ -89,7 +84,7 @@
           "factor": "int"
         },
         "code": {
-          "value": "{'config.factor':factor}"
+          "value": "{'multiply':{'factor':factor}}"
         }
       },
       "inputs": {
@@ -105,12 +100,7 @@
       "id": "agent",
       "kind": "workflow.call",
       "config": {
-        "flow": "agent",
-        "flows": {
-          "tools": {
-            "path": "flows/chat-tools.json"
-          }
-        }
+        "flow": "agent"
       },
       "inputs": {
         "params.model": {
@@ -173,6 +163,37 @@
             "port": "value"
           }
         }
+      },
+      "subgraphs": {
+        "tools": {
+          "collection": {
+            "multiply": {
+              "source": {
+                "path": "flows/multiply-tool.json"
+              },
+              "inputs": {
+                "amount": "multiply_flow.multiply.amount",
+                "factor": "multiply_flow.multiply.factor"
+              }
+            },
+            "add": {
+              "node": {
+                "id": "add",
+                "kind": "builtin.code",
+                "config": {
+                  "language": "cel",
+                  "inputs": {
+                    "a": "int",
+                    "b": "int"
+                  },
+                  "code": {
+                    "content": "'The sum is ' + string(a + b)"
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   ],
@@ -203,5 +224,10 @@
       "node": "agent",
       "port": "error"
     }
-  ]
+  ],
+  "subgraphs": {
+    "agent": {
+      "builtin": "mfn-llm.agent"
+    }
+  }
 }

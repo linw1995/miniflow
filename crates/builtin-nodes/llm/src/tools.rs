@@ -1,7 +1,7 @@
-use mf_runtime::{GraphInput, NodeValue, ValueSchema, ValueType, WorkflowGraph};
+use mf_runtime::{GraphInput, Inputs, SubgraphInterface, ValueSchema, ValueType};
 use serde::Serialize;
 use serde_json::{Value, json};
-use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use snafu::{ResultExt, Snafu, ensure};
 use std::{collections::BTreeMap, io::Write};
 
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
@@ -24,19 +24,15 @@ pub enum ToolSchemaError {
     },
     #[snafu(display("LLM tool declarations exceed the supported size or count"))]
     DeclarationsLimit,
-    #[snafu(display("dispatch branch `{name}` requires connected gates and parameter ports"))]
-    Connection { name: String },
-    #[snafu(display("tool workflow requires one public dispatch selector and arguments input"))]
-    Entry,
-    #[snafu(display("tool workflow metadata is missing at `{path}`"))]
-    Source { path: String },
+    #[snafu(display("tool bindings name an unknown tool `{tool}`"))]
+    UnknownBinding { tool: String },
+    #[snafu(display("invalid bindings for tool `{tool}`: {source}"))]
+    Binding {
+        tool: String,
+        source: mf_runtime::WorkflowInputError,
+    },
     #[snafu(display("could not encode tool declarations: {source}"))]
     Encode { source: mf_runtime::TypeMismatch },
-    #[snafu(
-        display("tool metadata is unavailable outside workflow execution"),
-        visibility(pub)
-    )]
-    Unavailable,
 }
 impl From<ToolSchemaError> for mf_runtime::NodeExecutionError {
     fn from(source: ToolSchemaError) -> Self {
@@ -52,12 +48,6 @@ pub enum ToolEncodingError {
     Json { source: serde_json::Error },
 }
 
-#[derive(Clone, Debug, NodeValue)]
-pub struct DispatchBinding {
-    pub selector: String,
-    pub arguments: String,
-}
-
 struct Parameter {
     name: String,
     descriptors: Vec<GraphInput>,
@@ -66,9 +56,8 @@ impl Parameter {
     fn name(&self) -> &str {
         &self.name
     }
-    // A selected route publishes every explicitly connected argument value.
     fn required(&self) -> bool {
-        true
+        self.descriptors.iter().any(|input| input.required)
     }
     fn constraints(&self) -> impl Iterator<Item = &ValueType> {
         self.descriptors.iter().map(|input| &input.value_type)
@@ -85,133 +74,39 @@ impl Parameter {
 
 pub struct ToolCatalog {
     pub tools: Vec<crate::ToolDefinition>,
-    pub binding: DispatchBinding,
-}
-
-fn input_location<'graph>(
-    mut graph: &'graph WorkflowGraph,
-    mut input: &'graph GraphInput,
-) -> (&'graph WorkflowGraph, &'graph GraphInput) {
-    while let Some(child) = graph
-        .nodes
-        .get(&input.node)
-        .and_then(|node| node.subgraph.as_deref())
-        && let Some(origin) = child.inputs.get(&input.port)
-    {
-        graph = child;
-        input = origin;
-    }
-    (graph, input)
 }
 
 impl ToolCatalog {
-    pub fn from_path(
-        graph: &WorkflowGraph,
-        source: &[mf_runtime::DefinitionId],
-        descriptions: &BTreeMap<String, String>,
-    ) -> Result<Self, ToolSchemaError> {
-        let graph = if source.is_empty() {
-            graph
-        } else {
-            graph
-                .locate(source)
-                .and_then(|(_, node)| node.subgraph.as_deref())
-                .with_context(|| SourceSnafu {
-                    path: source
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("/"),
-                })?
-        };
-        Self::new(graph, descriptions)
-    }
     pub fn new(
-        graph: &WorkflowGraph,
+        interfaces: &BTreeMap<String, SubgraphInterface>,
         descriptions: &BTreeMap<String, String>,
+        bindings: &BTreeMap<String, Inputs>,
     ) -> Result<Self, ToolSchemaError> {
-        let entries: Vec<_> = graph
-            .inputs
-            .iter()
-            .filter_map(|(name, input)| {
-                let (scope, input) = input_location(graph, input);
-                if input.port != "selector" {
-                    return None;
-                }
-                let Some(ValueSchema::Enum(branches)) = input.schema.as_ref() else {
-                    return None;
-                };
-                let arguments = graph.inputs.iter().find(|(_, candidate)| {
-                    let (candidate_scope, candidate) = input_location(graph, candidate);
-                    std::ptr::eq(scope, candidate_scope)
-                        && candidate.node == input.node
-                        && candidate.port == "arguments"
-                })?;
-                let node = scope.nodes.get(&input.node)?;
-                (node.exclusive_outputs == *branches).then_some((
-                    name,
-                    input,
-                    arguments.0,
-                    node,
-                    branches,
-                    scope,
-                ))
-            })
-            .collect();
-        ensure!(entries.len() == 1, EntrySnafu);
-        let (selector, entry, arguments, node, branches, graph) = entries[0];
-        ensure!(branches.len() <= MAX_TOOL_CALLS, DeclarationsLimitSnafu);
+        ensure!(interfaces.len() <= MAX_TOOL_CALLS, DeclarationsLimitSnafu);
+        for tool in bindings.keys() {
+            ensure!(interfaces.contains_key(tool), UnknownBindingSnafu { tool });
+        }
         let mut tools = Vec::new();
-        for name in branches {
+        for (name, interface) in interfaces {
             ensure!(crate::call::valid_name(name), AliasSnafu { name });
-            ensure!(
-                graph
-                    .controls
-                    .iter()
-                    .any(|edge| edge.from_node == entry.node && edge.from_output == *name),
-                ConnectionSnafu { name }
-            );
-            let prefix = format!("{name}.");
-            let mut parameters = Vec::new();
-            for output in node
-                .ports
-                .outputs
-                .iter()
-                .filter(|port| port.name.starts_with(&prefix))
-            {
-                let field = output.name.strip_prefix(&prefix).unwrap();
-                let mut descriptors = Vec::new();
-                for edge in graph
-                    .connections
-                    .iter()
-                    .filter(|edge| edge.from_node == entry.node && edge.from_output == output.name)
-                {
-                    let target = graph
-                        .nodes
-                        .get(&edge.to_node)
-                        .context(ConnectionSnafu { name })?;
-                    let port = target
-                        .ports
-                        .inputs
-                        .iter()
-                        .find(|port| port.name == edge.to_input)
-                        .context(ConnectionSnafu { name })?;
-                    descriptors.push(GraphInput {
-                        node: edge.to_node.clone(),
-                        port: edge.to_input.clone(),
-                        value_type: port.value_type.clone(),
-                        required: true,
-                        schema: target.input_schemas.get(&edge.to_input).cloned(),
-                        secret: target.secret_inputs.contains(&edge.to_input),
-                    });
-                }
-                ensure!(!descriptors.is_empty(), ConnectionSnafu { name });
-                parameters.push(Parameter {
-                    name: field.into(),
-                    descriptors,
-                });
+            if let Some(bound) = bindings.get(name) {
+                interface
+                    .validate_supplied(bound)
+                    .context(BindingSnafu { tool: name })?;
             }
-            parameters.sort_by(|left, right| left.name.cmp(&right.name));
+            let parameters = interface
+                .inputs
+                .iter()
+                .filter(|(field, _)| {
+                    bindings
+                        .get(name)
+                        .is_none_or(|bound| !bound.contains_key(*field))
+                })
+                .map(|(field, input)| Parameter {
+                    name: field.clone(),
+                    descriptors: vec![input.clone()],
+                })
+                .collect::<Vec<_>>();
             tools.push(crate::ToolDefinition {
                 name: name.clone(),
                 description: descriptions.get(name).cloned().unwrap_or_default(),
@@ -223,13 +118,7 @@ impl ToolCatalog {
             bounded_json(&encoded, MAX_TOOL_SCHEMA_BYTES).is_ok(),
             DeclarationsLimitSnafu
         );
-        Ok(Self {
-            tools,
-            binding: DispatchBinding {
-                selector: selector.clone(),
-                arguments: arguments.clone(),
-            },
-        })
+        Ok(Self { tools })
     }
 }
 
@@ -501,143 +390,82 @@ pub fn validate_wire_arguments(reply: &Value) -> Result<(), crate::LlmExecutionE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{
-        ControlEdgeDefinition, DefinitionId, EdgeDefinition, GraphNode, NodePorts, PortSpec,
-    };
-    use std::collections::BTreeSet;
-    fn node() -> GraphNode {
-        GraphNode {
-            ports: NodePorts::default(),
-            stream_outputs: vec![],
-            input_schemas: BTreeMap::new(),
-            secret_inputs: BTreeSet::new(),
-            exclusive_outputs: vec![],
-            subgraph: None,
-        }
-    }
-    fn graph() -> WorkflowGraph {
-        let mut dispatch = node();
-        dispatch.ports.inputs = vec![
-            PortSpec::new("selector", ValueType::String, true),
-            PortSpec::new("arguments", ValueType::Object, true),
-        ];
-        dispatch.ports.outputs = vec![
-            PortSpec::new("multiply", ValueType::Boolean, false),
-            PortSpec::new("multiply.amount", ValueType::Any, false),
-        ];
-        dispatch.exclusive_outputs = vec!["multiply".into()];
-        dispatch.input_schemas.insert(
-            "selector".into(),
-            ValueSchema::Enum(vec!["multiply".into()]),
-        );
-        let mut calculate = node();
-        calculate.ports.inputs = vec![
-            PortSpec::new("amount", ValueType::Int64, true),
-            PortSpec::new("factor", ValueType::Int64, true),
-        ];
-        WorkflowGraph {
-            inputs: BTreeMap::from([
-                (
-                    "router.selector".into(),
+    fn interfaces() -> BTreeMap<String, SubgraphInterface> {
+        BTreeMap::from([(
+            "multiply".into(),
+            SubgraphInterface {
+                inputs: BTreeMap::from([(
+                    "amount".into(),
                     GraphInput {
-                        node: "router".into(),
-                        port: "selector".into(),
-                        value_type: ValueType::String,
+                        node: "calculate".into(),
+                        port: "amount".into(),
+                        value_type: ValueType::Int64,
                         required: true,
-                        schema: Some(ValueSchema::Enum(vec!["multiply".into()])),
+                        schema: Some(ValueSchema::Type(ValueType::Int64)),
                         secret: false,
                     },
-                ),
-                (
-                    "router.arguments".into(),
-                    GraphInput {
-                        node: "router".into(),
-                        port: "arguments".into(),
-                        value_type: ValueType::Object,
-                        required: true,
-                        schema: None,
-                        secret: false,
-                    },
-                ),
-            ]),
-            nodes: BTreeMap::from([
-                ("router".into(), dispatch),
-                ("calculate".into(), calculate),
-                ("config".into(), node()),
-            ]),
-            connections: vec![
-                EdgeDefinition {
-                    exclusive: false,
-                    from_node: "router".into(),
-                    from_output: "multiply.amount".into(),
-                    to_node: "calculate".into(),
-                    to_input: "amount".into(),
-                },
-                EdgeDefinition {
-                    exclusive: false,
-                    from_node: "config".into(),
-                    from_output: "factor".into(),
-                    to_node: "calculate".into(),
-                    to_input: "factor".into(),
-                },
-            ],
-            controls: vec![ControlEdgeDefinition {
-                from_node: "router".into(),
-                from_output: "multiply".into(),
-                to_node: "calculate".into(),
-            }],
-        }
-    }
-    #[test]
-    fn dispatch_catalog_uses_linked_ports_and_excludes_other_upstreams() {
-        let catalog = ToolCatalog::new(&graph(), &BTreeMap::new()).unwrap();
-        assert_eq!(catalog.binding.selector, "router.selector");
-        assert_eq!(catalog.binding.arguments, "router.arguments");
-        let schema = &catalog.tools[0].input_schema;
-        assert!(schema["properties"].get("amount").is_some());
-        assert!(schema["properties"].get("factor").is_none());
-        assert_eq!(schema["required"], json!(["amount"]));
-    }
-    #[test]
-    fn reusable_router_calls_keep_their_public_input_names() {
-        let child = graph();
-        let inputs = child
-            .inputs
-            .iter()
-            .map(|(name, input)| {
-                (
-                    format!("wrapper.{name}"),
-                    GraphInput {
-                        node: "wrapper".into(),
-                        port: name.clone(),
-                        ..input.clone()
-                    },
-                )
-            })
-            .collect();
-        let mut wrapper = node();
-        wrapper.subgraph = Some(std::sync::Arc::new(child));
-        let graph = WorkflowGraph {
-            inputs,
-            nodes: BTreeMap::from([("wrapper".into(), wrapper)]),
-            ..Default::default()
-        };
-        let catalog = ToolCatalog::new(&graph, &BTreeMap::new()).unwrap();
-        assert_eq!(catalog.binding.selector, "wrapper.router.selector");
-        assert_eq!(catalog.binding.arguments, "wrapper.router.arguments");
-        assert_eq!(catalog.tools[0].name, "multiply");
+                )]),
+                outputs: vec![],
+                stream_outputs: vec![],
+            },
+        )])
     }
 
     #[test]
-    fn receiver_sensitivity_marks_model_call_arguments_before_publication() {
-        let mut graph = graph();
-        graph
-            .nodes
-            .get_mut(&DefinitionId::from("calculate"))
+    fn catalog_exposes_only_unbound_public_inputs() {
+        let mut interfaces = interfaces();
+        let mut factor = interfaces["multiply"].inputs["amount"].clone();
+        factor.port = "factor".into();
+        interfaces
+            .get_mut("multiply")
             .unwrap()
-            .secret_inputs
-            .insert("amount".into());
-        let catalog = ToolCatalog::new(&graph, &BTreeMap::new()).unwrap();
+            .inputs
+            .insert("factor".into(), factor);
+        let bound = BTreeMap::from([(
+            "multiply".into(),
+            Inputs::from([("factor".into(), 2.into())]),
+        )]);
+        let catalog = ToolCatalog::new(&interfaces, &BTreeMap::new(), &bound).unwrap();
+        assert_eq!(catalog.tools[0].input_schema["required"], json!(["amount"]));
+        assert!(
+            catalog.tools[0].input_schema["properties"]
+                .get("factor")
+                .is_none()
+        );
+        assert!(
+            ToolCatalog::new(
+                &interfaces,
+                &BTreeMap::new(),
+                &BTreeMap::from([("unknown".into(), Inputs::new())])
+            )
+            .is_err()
+        );
+        assert!(
+            ToolCatalog::new(
+                &interfaces,
+                &BTreeMap::new(),
+                &BTreeMap::from([(
+                    "multiply".into(),
+                    Inputs::from([("factor".into(), "bad".into())])
+                )])
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn optional_fields_and_sensitivity_come_from_the_subgraph_interface() {
+        let mut interfaces = interfaces();
+        let amount = interfaces
+            .get_mut("multiply")
+            .unwrap()
+            .inputs
+            .get_mut("amount")
+            .unwrap();
+        amount.required = false;
+        amount.secret = true;
+        let catalog = ToolCatalog::new(&interfaces, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+        assert_eq!(catalog.tools[0].input_schema["required"], json!([]));
         assert_eq!(
             catalog.tools[0].input_schema["properties"]["amount"]["writeOnly"],
             json!(true)
@@ -650,27 +478,33 @@ mod tests {
         call.mark_arguments(&catalog.tools);
         assert!(call.arguments["amount"].is_secret());
     }
+
     #[test]
-    fn unbound_routes_and_ambiguous_entries_are_rejected_before_model_io() {
-        let mut graph = graph();
-        graph
-            .connections
-            .retain(|edge| edge.from_node.as_str() != "router");
-        assert!(ToolCatalog::new(&graph, &BTreeMap::new()).is_err());
-        let mut graph = super::tests::graph();
-        for port in ["selector", "arguments"] {
-            let mut input = graph.inputs[&format!("router.{port}")].clone();
-            input.node = "another".into();
-            graph.inputs.insert(format!("another.{port}"), input);
+    fn declarations_reject_invalid_names_and_enforce_size_and_count_budgets() {
+        let interface = interfaces().remove("multiply").unwrap();
+        for name in ["", "invalid.name"] {
+            assert!(
+                ToolCatalog::new(
+                    &BTreeMap::from([(name.into(), interface.clone())]),
+                    &BTreeMap::new(),
+                    &BTreeMap::new()
+                )
+                .is_err()
+            );
         }
-        graph.nodes.insert(
-            "another".into(),
-            graph.nodes[&DefinitionId::from("router")].clone(),
+        let many = (0..=MAX_TOOL_CALLS)
+            .map(|i| (format!("tool_{i}"), interface.clone()))
+            .collect();
+        assert!(ToolCatalog::new(&many, &BTreeMap::new(), &BTreeMap::new()).is_err());
+        assert!(
+            ToolCatalog::new(
+                &interfaces(),
+                &BTreeMap::from([("multiply".into(), "x".repeat(MAX_TOOL_SCHEMA_BYTES))]),
+                &BTreeMap::new()
+            )
+            .is_err()
         );
-        assert!(matches!(
-            ToolCatalog::new(&graph, &BTreeMap::new()),
-            Err(ToolSchemaError::Entry)
-        ));
+        assert!(bounded_json(&"text", 2).is_err());
     }
     #[test]
     fn wire_argument_budgets_and_duplicate_json_keys_remain_checked() {
@@ -726,14 +560,17 @@ mod tests {
             text.described("A public label"),
         ];
         for schema in schemas {
-            let mut graph = graph();
-            let target = graph
-                .nodes
-                .get_mut(&DefinitionId::from("calculate"))
+            let mut interfaces = interfaces();
+            let target = interfaces
+                .get_mut("multiply")
+                .unwrap()
+                .inputs
+                .get_mut("amount")
                 .unwrap();
-            target.ports.inputs[0].value_type = schema.value_type();
-            target.input_schemas.insert("amount".into(), schema.clone());
-            let catalog = ToolCatalog::new(&graph, &BTreeMap::new()).unwrap();
+            target.value_type = schema.value_type();
+            target.schema = Some(schema.clone());
+            let catalog =
+                ToolCatalog::new(&interfaces, &BTreeMap::new(), &BTreeMap::new()).unwrap();
             assert_eq!(
                 catalog.tools[0].input_schema["additionalProperties"],
                 json!(false)
@@ -761,15 +598,17 @@ mod tests {
             },
             ValueSchema::opaque(ValueType::Object),
         ] {
-            let mut graph = graph();
-            let target = graph
-                .nodes
-                .get_mut(&DefinitionId::from("calculate"))
+            let mut interfaces = interfaces();
+            let target = interfaces
+                .get_mut("multiply")
+                .unwrap()
+                .inputs
+                .get_mut("amount")
                 .unwrap();
-            target.ports.inputs[0].value_type = schema.value_type();
-            target.input_schemas.insert("amount".into(), schema);
+            target.value_type = schema.value_type();
+            target.schema = Some(schema);
             assert!(matches!(
-                ToolCatalog::new(&graph, &BTreeMap::new()),
+                ToolCatalog::new(&interfaces, &BTreeMap::new(), &BTreeMap::new()),
                 Err(ToolSchemaError::Unsupported { .. })
             ));
         }
