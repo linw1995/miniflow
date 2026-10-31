@@ -236,6 +236,25 @@ retains portable registry requirements rather than checkout paths. Source factor
 metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
 catalog to prepare or execute its nodes.
 
+### Prepared workflow metadata
+
+Flows and stream plans retain a read-only `WorkflowGraph` describing their actual ports, schemas,
+connections, and subgraphs. Providers receive named `PreparedSubgraph` arguments or read-only
+`SubgraphInterface` projections during preparation. Metadata projections contain no executor or runtime
+value; no global execution-context graph injection is required.
+
+A Flow declares single or collection subgraph parameters in its `subgraphs` source map. Calling nodes
+bind Node or Flow sources through their own `subgraphs`; nested references forward those bindings.
+The resolver freezes sources and the compiler freezes their public input projections and outputs.
+`mfn-llm.agent` uses this generic mechanism for external tools. Metadata conversion runs before its
+Loop; one Iteration dispatches calls through ordinary prepared Call scopes. The LLM receives data-only
+tool definitions and performs one model request per execution.
+
+Ordinary workflow interface checks validate port contracts. Generated schema checks compare decoded
+refinements and sensitivity against frozen graph metadata before execution. Schema-only provider drift is rejected even when coarse port types
+stay unchanged. Normal workflow cancellation, worker limits, errors, observation, and streaming remain
+owned by the existing execution paths.
+
 ## Forwarding finite child emissions
 
 `Flow::with_stream_outputs` installs compiler-resolved `SubgraphStreamOutput` bindings. Each binding

@@ -176,6 +176,7 @@ fn graph_metrics_use_source_events_before_snapshots_and_keep_call_identity() {
     }
     let mut graph = graph();
     graph.nodes.push(NodeDescription {
+        subgraph_arguments: Default::default(),
         id: "model".into(),
         kind: "builtin.llm".into(),
     });

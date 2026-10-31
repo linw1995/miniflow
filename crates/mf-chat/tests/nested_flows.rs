@@ -155,9 +155,9 @@ fn profiles_load_local_child_flows_with_host_owned_provider_paths() {
     for dependency in definition.dependencies.values_mut() {
         dependency.path = Some(std::path::PathBuf::from("unused-by-host"));
     }
-    definition.flows.insert(
+    definition.subgraphs.insert(
         "title".into(),
-        mf_runtime::FlowSource::Path {
+        mf_runtime::SubgraphSource::Path {
             path: "flows/title.json".into(),
         },
     );

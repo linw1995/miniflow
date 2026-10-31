@@ -249,7 +249,7 @@ pub fn describe_definition(
     );
     let mut loop_bodies = Vec::new();
     describe_loops(
-        &definition.nodes,
+        definition,
         &mut Vec::new(),
         &mut orders,
         &mut loop_bodies,
@@ -261,9 +261,11 @@ pub fn describe_definition(
             message: "compiled execution order names an unknown Loop body"
         }
     );
-    let description = WorkflowDescription {
+    let mut description = WorkflowDescription {
         order_edges: order_edges(&definition.order_edges),
-        version: if definition.version.supports_clusters() {
+        version: if definition.contains_subgraph_parameters() {
+            WorkflowDescriptionVersion::V2026_10_31
+        } else if definition.version.supports_clusters() {
             WorkflowDescriptionVersion::V2026_10_23
         } else if definition.has_order_edges() {
             WorkflowDescriptionVersion::V2026_10_19
@@ -280,7 +282,8 @@ pub fn describe_definition(
                 | crate::WorkflowDefinitionVersion::V2026_10_19
                 | crate::WorkflowDefinitionVersion::V2026_10_23
                 | crate::WorkflowDefinitionVersion::V2026_10_25
-                | crate::WorkflowDefinitionVersion::V2026_10_28 => {
+                | crate::WorkflowDefinitionVersion::V2026_10_28
+                | crate::WorkflowDefinitionVersion::V2026_10_31 => {
                     WorkflowDescriptionVersion::V2026_10_03
                 }
             }
@@ -309,8 +312,21 @@ pub fn describe_definition(
         loop_bodies,
         clusters: clusters(&definition.clusters),
     };
+    attach_subgraph_arguments(&definition.nodes, &mut description.nodes);
     description.validate()?;
     Ok(description)
+}
+
+fn attach_subgraph_arguments(definitions: &[crate::NodeDefinition], nodes: &mut [NodeDescription]) {
+    let arguments: BTreeMap<_, _> = definitions
+        .iter()
+        .map(|node| (node.id.as_str(), &node.subgraph_arguments))
+        .collect();
+    for node in nodes {
+        if let Some(arguments) = arguments.get(node.id.as_str()) {
+            node.subgraph_arguments = (*arguments).clone();
+        }
+    }
 }
 
 fn ordered_nodes<'a>(
@@ -342,6 +358,7 @@ fn ordered_nodes<'a>(
                         message: format!("compiled execution order names unknown node `{id}`"),
                     })?;
             Ok(NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: id.clone(),
                 kind: (*kind).into(),
             })
@@ -395,15 +412,16 @@ fn order_edges(edges: &[crate::OrderEdgeDefinition]) -> Vec<OrderEdge> {
 }
 
 fn describe_loops(
-    nodes: &[crate::NodeDefinition],
+    parent: &crate::WorkflowDefinition,
     path: &mut Vec<String>,
     orders: &mut BTreeMap<Vec<String>, &[String]>,
     bodies: &mut Vec<LoopBodyDescription>,
     include_iterations: bool,
 ) -> Result<(), ContractError> {
-    for node in nodes {
+    for node in &parent.nodes {
         let iteration;
         let call;
+        let parameter;
         let (nodes, data, controls, successes, body_clusters, source_id, source_kind) =
             if let Some(definition) = &node.loop_definition {
                 let body = &definition.body;
@@ -445,6 +463,17 @@ fn describe_loops(
                     crate::ITERATION_INPUT_ID,
                     crate::ITERATION_INPUT_KIND,
                 )
+            } else if let Some(body) = node.parameter_body(parent) {
+                parameter = body;
+                (
+                    &parameter.nodes,
+                    &parameter.edges,
+                    &parameter.control_edges,
+                    &parameter.order_edges,
+                    &parameter.clusters,
+                    "",
+                    "",
+                )
             } else {
                 continue;
             };
@@ -472,7 +501,23 @@ fn describe_loops(
             execution_order: order.to_vec(),
             clusters: clusters(body_clusters),
         });
-        describe_loops(nodes, path, orders, bodies, include_iterations)?;
+        attach_subgraph_arguments(
+            nodes,
+            &mut bodies.last_mut().expect("body was appended").nodes,
+        );
+        let child = crate::WorkflowDefinition {
+            version: parent.version,
+            execution: None,
+            dependencies: parent.dependencies.clone(),
+            subgraphs: Default::default(),
+            nodes: nodes.clone(),
+            edges: data.clone(),
+            control_edges: controls.clone(),
+            outputs: vec![],
+            order_edges: successes.clone(),
+            clusters: body_clusters.clone(),
+        };
+        describe_loops(&child, path, orders, bodies, include_iterations)?;
         path.pop();
     }
     Ok(())

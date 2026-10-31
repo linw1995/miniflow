@@ -26,6 +26,43 @@ fn graph() -> WorkflowDescription {
     WorkflowDescription::from_json(include_bytes!("fixtures/description.json")).unwrap()
 }
 
+#[test]
+fn graph_arguments_are_versioned_readonly_descriptions_outside_execution_identity() {
+    let original = graph();
+    let mut value = serde_json::to_value(&original).unwrap();
+    value["version"] = json!("2026-10-31");
+    value["execution"] = json!({"mode":"single"});
+    value["nodes"][0]["subgraph_arguments"] = json!({"tools":[
+        {"name":"add", "kind":"builtin.code"},
+        {"name":"multiply", "kind":"workflow.call"}
+    ]});
+    let parse = |value: &Value| WorkflowDescription::from_json(&serde_json::to_vec(value).unwrap());
+    let described = parse(&value).unwrap();
+    assert_eq!(
+        described.node_count().unwrap(),
+        original.node_count().unwrap()
+    );
+    assert_eq!(described.execution_order, original.execution_order);
+    assert_eq!(
+        parse(&serde_json::to_value(&described).unwrap()).unwrap(),
+        described
+    );
+    let mut invalid = value.clone();
+    invalid["version"] = json!("2026-10-23");
+    assert!(parse(&invalid).is_err());
+    for arguments in [
+        json!({"":[{"name":"add", "kind":"builtin.code"}]}),
+        json!({"tools":[{"name":"", "kind":"builtin.code"}]}),
+        json!({"tools":[{"name":"add", "kind":""}]}),
+        json!({"tools":[{"name":"add", "kind":"builtin.code"},{"name":"add", "kind":"workflow.call"}]}),
+        json!({"tools":[{"name":"add", "kind":"builtin.code", "config":{"token":"private"}}]}),
+    ] {
+        let mut invalid = value.clone();
+        invalid["nodes"][0]["subgraph_arguments"] = arguments;
+        assert!(parse(&invalid).is_err());
+    }
+}
+
 fn branch_graph() -> WorkflowDescription {
     let mut value = serde_json::to_value(graph()).unwrap();
     value["nodes"].as_array_mut().unwrap().push(json!({

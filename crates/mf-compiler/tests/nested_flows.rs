@@ -237,9 +237,9 @@ fn builtin_sources_are_resolved_from_linked_providers() {
         Some("fallback")
     );
     let mut unknown = definition;
-    unknown.flows.insert(
+    unknown.subgraphs.insert(
         "echo".into(),
-        mf_runtime::FlowSource::Builtin {
+        mf_runtime::SubgraphSource::Builtin {
             builtin: "missing".into(),
         },
     );
@@ -256,9 +256,9 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
     let base = graph(json!([call("invoke", &child())]), json!([]));
     let mut old_sources = base.clone();
     old_sources.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_23;
-    old_sources.flows.insert(
+    old_sources.subgraphs.insert(
         "echo".into(),
-        mf_runtime::FlowSource::Builtin {
+        mf_runtime::SubgraphSource::Builtin {
             builtin: "mf-compiler.echo".into(),
         },
     );
@@ -293,9 +293,9 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
             .contains("nested flows require")
     );
     let mut blank_source = base.clone();
-    blank_source.flows.insert(
+    blank_source.subgraphs.insert(
         " ".into(),
-        mf_runtime::FlowSource::Builtin {
+        mf_runtime::SubgraphSource::Builtin {
             builtin: "mf-compiler.echo".into(),
         },
     );

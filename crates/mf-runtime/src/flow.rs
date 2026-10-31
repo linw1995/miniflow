@@ -203,6 +203,7 @@ struct FlowData {
     generated_domains: BTreeMap<usize, Arc<GeneratedDomainExecutor>>,
     input_guards: BTreeMap<NodeId, Arc<crate::ExecutionGuard>>,
     stream_outputs: Vec<crate::SubgraphStreamOutput>,
+    graph: Arc<crate::WorkflowGraph>,
 }
 
 impl Flow {
@@ -260,6 +261,24 @@ impl Flow {
         plan: FlowPlan,
         input_schema: crate::WorkflowInputSchema,
     ) -> Self {
+        let controls = plan
+            .execution_order
+            .iter()
+            .zip(plan.dependencies.iter())
+            .flat_map(|(target, dependencies)| {
+                dependencies
+                    .iter()
+                    .filter(|dependency| dependency.input.is_none())
+                    .map(|dependency| crate::ControlEdgeDefinition {
+                        from_node: dependency.source_node.to_string().into(),
+                        from_output: dependency.source_output.to_string().into(),
+                        to_node: nodes[target.index()].definition_id.clone(),
+                    })
+            })
+            .collect();
+        let mut graph = crate::WorkflowGraph::from_connections(&nodes, &plan.connections, controls);
+        graph.inputs = crate::WorkflowGraph::describe_inputs(&input_schema);
+        let graph = Arc::new(graph);
         Self {
             inner: Arc::new(FlowData {
                 nodes,
@@ -268,9 +287,14 @@ impl Flow {
                 generated_domains: BTreeMap::new(),
                 input_guards: BTreeMap::new(),
                 stream_outputs: Vec::new(),
+                graph,
             }),
         }
     }
+    pub fn workflow_graph(&self) -> &Arc<crate::WorkflowGraph> {
+        &self.inner.graph
+    }
+
     /// Binds compiler-validated typed bodies without changing the domain graph.
     pub fn with_generated_domains(
         mut self,
@@ -445,7 +469,11 @@ impl Flow {
         &self.inner.input_schema
     }
     pub fn with_input_schema(mut self, schema: crate::WorkflowInputSchema) -> Self {
-        self.data_mut().input_schema = schema;
+        let data = self.data_mut();
+        let mut graph = (*data.graph).clone();
+        graph.inputs = crate::WorkflowGraph::describe_inputs(&schema);
+        data.graph = Arc::new(graph);
+        data.input_schema = schema;
         self
     }
 

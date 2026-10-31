@@ -1,0 +1,68 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {},
+  "nodes": [
+    {
+      "id": "multiply_flow",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "multiply",
+        "definition": {
+          "version": "2026-10-28",
+          "dependencies": {},
+          "nodes": [
+            {
+              "id": "multiply",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "amount": "int",
+                  "factor": "int"
+                },
+                "code": {
+                  "result": "amount * factor"
+                }
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "product",
+              "node": "multiply",
+              "port": "result"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "format_multiply",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "product": "int"
+        },
+        "code": {
+          "content": "'The product is ' + string(product)"
+        }
+      },
+      "inputs": {
+        "product": {
+          "from": {
+            "node": "multiply_flow",
+            "port": "product"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "content",
+      "node": "format_multiply",
+      "port": "content"
+    }
+  ]
+}

@@ -46,6 +46,13 @@ pub struct ToolCallEvent {
 }
 
 impl ToolCall {
+    /// Preserve declared argument sensitivity before publishing model outputs or stream events.
+    pub fn mark_arguments(&mut self, definitions: &[ToolDefinition]) {
+        if let Some(definition) = definitions.iter().find(|tool| tool.name == self.name) {
+            self.arguments = mark_schema(&self.arguments, &definition.input_schema);
+        }
+    }
+
     pub fn from_provider(call: rig::ToolCall) -> Result<Self, LlmExecutionError> {
         let id = call.id.wire().into_owned();
         ensure!(
@@ -60,6 +67,41 @@ impl ToolCall {
             arguments: call.function.arguments.into(),
         })
     }
+}
+
+fn mark_schema(value: &ValueRef, schema: &ValueRef) -> ValueRef {
+    if value.is_secret() || schema["writeOnly"].as_bool() == Some(true) {
+        return value.clone().into_secret();
+    }
+    if let (Some(values), Some(properties)) = (value.as_object(), schema["properties"].as_object())
+    {
+        return ValueRef::object(values.iter().map(|(name, value)| {
+            let value = properties
+                .get(name)
+                .map_or_else(|| value.clone(), |schema| mark_schema(value, schema));
+            (name.clone(), value)
+        }));
+    }
+    if let Some(values) = value.as_array()
+        && let Some(items) = schema.get("items")
+    {
+        return ValueRef::array(values.iter().map(|value| mark_schema(value, items)));
+    }
+    if (schema["properties"].as_object().is_some() && !value.is_object()
+        || schema.get("items").is_some() && !value.is_array())
+        && schema_contains_private(schema)
+    {
+        return value.clone().into_secret();
+    }
+    value.clone()
+}
+
+fn schema_contains_private(schema: &ValueRef) -> bool {
+    schema["writeOnly"].as_bool() == Some(true)
+        || schema["properties"]
+            .as_object()
+            .is_some_and(|properties| properties.values().any(schema_contains_private))
+        || schema.get("items").is_some_and(schema_contains_private)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, NodeEnum)]
@@ -247,7 +289,7 @@ fn require(
     Ok(())
 }
 
-fn valid_name(name: &str) -> bool {
+pub fn valid_name(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && name
             .bytes()
@@ -436,5 +478,50 @@ mod tests {
                 vec![rig::ToolResultContent::Text(text.into())]
             );
         }
+    }
+    #[test]
+    fn nested_private_arguments_are_marked_before_observation_even_on_shape_errors() {
+        let definitions = vec![ToolDefinition {
+            name: "lookup".into(),
+            description: String::new(),
+            input_schema: json!({
+                "properties": {
+                    "account": {"properties": {"token": {"writeOnly": true}}},
+                    "tokens": {"items": {"writeOnly": true}},
+                    "public": {"type": "string"}
+                }
+            })
+            .into(),
+        }];
+        let mut call = ToolCall {
+            id: "one".into(), name: "lookup".into(),
+            arguments: json!({"account": {"token": "private", "label": "visible"}, "tokens": ["first", "second"], "public": "visible"}).into(),
+        };
+        call.mark_arguments(&definitions);
+        assert!(call.arguments["account"]["token"].is_secret());
+        assert!(!call.arguments["account"]["label"].is_secret());
+        assert!(
+            call.arguments["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(ValueRef::is_secret)
+        );
+        assert!(!call.arguments["public"].is_secret());
+        for malformed in [json!({"account": "private"}), json!({"tokens": "private"})] {
+            let key = malformed
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            call.arguments = malformed.into();
+            call.mark_arguments(&definitions);
+            assert!(call.arguments[key.as_str()].is_secret());
+        }
+        call.arguments = ValueRef::from("already private").into_secret();
+        call.mark_arguments(&definitions);
+        assert!(call.arguments.is_secret());
     }
 }

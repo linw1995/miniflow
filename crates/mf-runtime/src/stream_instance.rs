@@ -1955,6 +1955,7 @@ mod tests {
             })
             .collect();
         crate::StreamProgram {
+            graph: Default::default(),
             execution_domains,
             messages,
             emissions,

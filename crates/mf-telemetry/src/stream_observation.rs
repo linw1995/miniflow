@@ -581,6 +581,7 @@ mod tests {
                     workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64)))
                         .unwrap(),
                     nodes: vec![crate::description::NodeDescription {
+                        subgraph_arguments: Default::default(),
                         id: "%input".into(),
                         kind: "%input".into(),
                     }],

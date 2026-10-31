@@ -33,6 +33,11 @@ pub fn contains_iteration_containers(
         {
             return Ok(true);
         }
+        if let Some(body) = node.parameter_body(definition)
+            && contains_iteration_containers(&body)?
+        {
+            return Ok(true);
+        }
     }
     Ok(false)
 }

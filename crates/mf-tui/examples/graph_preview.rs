@@ -198,6 +198,7 @@ pub fn description() -> WorkflowDescription {
         nodes: ["fetch", "transform", "publish", "archive"]
             .into_iter()
             .map(|id| NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: id.into(),
                 kind: format!("preview.{id}"),
             })
@@ -439,6 +440,7 @@ fn dump_graph() -> PreviewResult<()> {
         fixture.nodes = names
             .iter()
             .map(|id| NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: (*id).into(),
                 kind: "preview.node".into(),
             })
@@ -470,6 +472,7 @@ fn dump_graph() -> PreviewResult<()> {
     if std::env::args().any(|arg| arg == "--parameters") {
         fixture.nodes = ["params", "settings"]
             .map(|id| NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: id.into(),
                 kind: "preview.task".into(),
             })
@@ -502,6 +505,7 @@ fn dump_graph() -> PreviewResult<()> {
             fixture.version = WorkflowDescriptionVersion::V2026_09_29;
         }
         fixture.nodes = vec![NodeDescription {
+            subgraph_arguments: Default::default(),
             id: "repeat".into(),
             kind: "workflow.loop".into(),
         }];

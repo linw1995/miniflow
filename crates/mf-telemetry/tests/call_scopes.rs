@@ -285,3 +285,46 @@ fn call_events_reject_loop_semantics_and_invalid_paths() {
         assert!(lifecycle(event, &graph).validate().is_err());
     }
 }
+
+#[test]
+fn generic_parameter_containers_use_declared_call_scopes_in_the_new_description() {
+    let mut description = graph(&["fixture.container", "workflow.call", "workflow.loop"]);
+    assert!(description.validate().is_err());
+    description.version = WorkflowDescriptionVersion::V2026_10_31;
+    description.validate().unwrap();
+    let path = vec![
+        ScopePathEntry::Call {
+            call_id: "scope0".into(),
+        },
+        ScopePathEntry::Call {
+            call_id: "scope1".into(),
+        },
+        ScopePathEntry::Loop {
+            loop_id: "scope2".into(),
+            index: count(0),
+        },
+    ];
+    description.validate_scope_path(&path).unwrap();
+    assert!(
+        description
+            .loop_body(&["scope0".into(), "scope1".into(), "scope2".into()])
+            .is_some()
+    );
+    assert_eq!(
+        description.scope_node(&["scope0".into()]).unwrap().kind,
+        "fixture.container"
+    );
+    assert!(!description.is_call_scope(&["scope0".into(), "scope1".into(), "scope2".into()]));
+    let call = lifecycle(
+        Event::CallStarted {
+            path: call_path(),
+            elapsed_ns: count(1),
+        },
+        &description,
+    );
+    call.validate_for(&description).unwrap();
+    let mut missing = description.clone();
+    missing.loop_bodies.clear();
+    assert!(!missing.is_call_scope(&["scope0".into()]));
+    assert!(missing.validate_scope_path(&call_path()).is_err());
+}

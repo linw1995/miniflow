@@ -20,6 +20,8 @@ Its factory validates configuration without credentials or I/O; execution uses o
 The node also accepts function `tools` and explicit `tool_results`, both optional list inputs, and returns
 tool calls in its current assistant message and its `tool_calls` output. Explicit results follow `messages`
 in the provider request and must match pending assistant call IDs. Flows own history and persistence.
+The model node can declare ordinary tool batch output ports. It reads connected workflow input metadata
+and publishes argument records; normal Iteration and downstream nodes execute the work.
 `ToolDefinition`, `ToolCall`, `ToolResult`, and `ToolCallEvent` are exported by `mfn_llm`;
 `ChatMessage` derives `NodeEnum` with the `role` tag and has `System`, `User`, `Assistant`, and
 `ToolResult` variants. Only the assistant variant carries `tool_calls`; the tool-result variant
@@ -74,9 +76,17 @@ the workflow. Manifest inspection reads the frozen graph and interface without c
 Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
 
 Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
-Use `NodeFactory::Subgraph` when construction also needs the occurrence ID, execution options, and a
-`PreparedSubgraph`. The compiler supplies Loop and Iteration bodies through this second form. Missing
-or inappropriate body arguments fail during preparation; an executor is returned only after binding.
+Use `NodeFactory::Subgraphs` when construction also needs the occurrence ID, execution options, and
+`PreparedSubgraphs`: named single children, named collections, or read-only interface projections.
+`take_subgraph`, `take_subgraph_collection`, and `take_subgraph_interfaces` validate the expected shape.
+Factories reject unused arguments. Existing Call, Loop, and Iteration bodies use the same map under
+`body`; the single-body instantiation helper delegates to this entry point.
+
+Callable children retain `PreparedSubgraph` as their execution carrier. Bind public arguments through
+`bind_arguments`, then enter the existing `ExecutionContext::run_call` and execute the prepared body.
+Inputs retain decoded constraints and secret markers. Read-only `SubgraphInterface` values contain no
+executor and can be used to inspect metadata without invoking the source. Generated typed constructors
+accept value configuration only, so captured subgraphs use the ordinary prepared-node path.
 
 ## Select dependencies in a Flow
 
@@ -150,6 +160,59 @@ Concrete conflicts such as `String` to `Int64` are rejected during compilation. 
 Rebuild plugins against the matching runtime package and correct declarations that do not describe their produced values.
 
 Declare context reads in `NodeMetadata.context_references`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
+
+## Workflow metadata and tool ports
+
+`Flow::workflow_graph()` and `StreamPlan::workflow_graph()` expose prepared port contracts and ordinary
+connections to hosts. Descriptors contain decoded schemas and sensitivity, without runtime values,
+environment names, or default contents. `PreparedSubgraph::with_graph` carries the same descriptor to
+container factories. Named subgraph parameters provide their own interface directly; execution contexts
+do not expose a global graph lookup.
+
+Generated scopes validate decoded refinements and sensitivity against frozen metadata before business
+execution. Ordinary port and workflow interface validation retains its existing path diagnostics.
+
+Workflow input descriptors optionally include a `schema` refinement. The existing Call provider
+propagates these descriptors on its normal input ports. Reflection describes records, enum variants,
+collections, optional fields, and descriptions without executing codecs or defaults.
+
+### Workflow argument batches
+
+`builtin.iteration` retains its standard `item` mode. In `input_mode: arguments`, each input item is a
+normal workflow argument object keyed by qualified input names. The body's unconnected initial input
+ports form its ordinary workflow input interface. The Iteration node exposes those names as optional
+shared input ports; per-item values override shared values before the normal workflow input resolver
+validates and binds that item's inputs. This mode accepts arrays and rejects stdin consumers.
+
+Each item runs the ordinary connected body. The body's existing `result` selection supplies one result
+per item, and parallel execution preserves input order. Missing, unknown, or invalid arguments retain
+the normal typed workflow error chain. Empty batches execute no body nodes. Argument scopes restore
+parent inputs when they finish, including on errors or unwinding.
+
+### Dispatch and built-in agent orchestration
+
+`builtin.llm` performs one model request using its explicit `tools` input. Its ports do not depend on
+the workflow's tool set. `builtin.dispatch`, supplied by `mfn-core`, consumes a `selector` and an
+`arguments` object. Configure branch IDs and parameter names, for example
+`{"branches":{"multiply":["amount"],"add":["a","b"]}}`. A selected branch publishes a Boolean gate
+and its parameter ports (`multiply` and `multiply.amount`); the remaining branch ports are skipped.
+Connect the gate through an execution edge and the parameter ports through normal input bindings.
+Every configured parameter is required when that route is selected. Leave externally owned or
+defaulted target inputs out of the route and wire them independently.
+
+`builtin.tool_catalog` reads the prepared graph of a tool workflow. Its public entry is one unbound
+Dispatch `selector`/`arguments` pair. The catalog discovers their qualified workflow input names,
+reflects decoded schemas and sensitivity from the dispatch-linked receiver ports, and publishes the
+LLM tool definitions plus an ordinary binding value. It executes before the model request and never
+executes tool nodes. Opaque codecs remain unavailable for automatic projection.
+
+The provider-owned `mfn-llm.agent` Flow is registered through the existing built-in Flow registry.
+Its ordinary Loop owns model rounds and conversation state. One argument-mode Iteration processes
+all calls in model order, including repeated calls to the same tool, and invokes the caller's tool
+workflow through `workflow.call`. `builtin.agent_calls` adapts the model protocol into standard
+WorkflowArguments while preserving secret markers. Explicit per-call routing fields override shared
+tool inputs. `builtin.tool_results` pairs the single ordered results list with call IDs, redacts
+sensitive subtrees, and encodes bounded protocol content. Neither protocol adapter executes tools.
 
 ## Context-aware execution
 
@@ -512,7 +575,7 @@ Pass ordinary `NodeMetadata` when the factory supplies output derivations, conte
 requirements. The typed constructor preserves those fields and requires empty input and output declarations;
 even matching hand-written ports return `NodeBuildError::ConflictingInputDeclarations` or
 `ConflictingOutputDeclarations`. Register the factory with the existing `NodeFactory::Plain` or
-`NodeFactory::Subgraph` contract.
+`NodeFactory::Subgraphs` contract.
 
 Input and output declarations always come from their value contracts. `TypedTaskNode::output_ports`
 has been removed. Keep type evidence separate in `NodeMetadata.output_derivations`: use literal or forwarding
@@ -624,9 +687,10 @@ Event, stream, and nested-scope execution retain the existing dynamic scheduler 
   mutable context. Convert ordinary output maps with `.into()` to return `NodeResult`.
 - Move port declarations, output derivations, and context references into the factory's `NodeMetadata`.
 - Return `PreparedNode` from factories and register them through `NodeFactory::Plain` or
-  `NodeFactory::Subgraph`. Static input/output fields on `NodeRegistration` have moved into metadata.
-- Construct container nodes with their prepared body. Remove declaration objects and `with_subgraph`
-  methods that previously replaced them after construction.
+  `NodeFactory::Subgraphs`. Static input/output fields on `NodeRegistration` have moved into metadata.
+- Update container factory signatures to receive `PreparedSubgraphs`; take the native body with
+  `take_subgraph(&mut parameters, "body")` and reject unused arguments. The single-body instantiation
+  helper delegates to this named entry point.
 - Rebuild the plugin and consumers against the same runtime package identity.
 
 ## Combined Task and Stream execution
@@ -977,3 +1041,38 @@ Catalog construction validates registrations without invoking their factories. T
 to request a definition and handles its typed `DefinitionParseError`. Each provider owns its source
 and dependency declarations. Factories must not execute the Flow or perform business I/O.
 The catalog exposes definitions independently of compilation and execution.
+
+### Decoded input schemas
+
+`NodeInputs`, `NodeValue`, and `NodeEnum` derive structural input schemas alongside their coarse
+`ValueType` ports. Schemas retain closed object fields, string and tagged enum variants, collection
+elements, nullable values, and requiredness. Field defaults affect presence without running the
+function or publishing its value. Explicit descriptions are public metadata:
+
+```rust
+#[derive(mf_runtime::NodeEnum)]
+enum MatchMode { Exact, Prefix }
+
+#[derive(mf_runtime::NodeValue)]
+struct SearchRequest {
+    #[value(description = "Text to find")]
+    query: String,
+    mode: MatchMode,
+    limit: Option<u64>,
+}
+```
+
+Input-only derives accept `#[input(description = "...")]`. Typed task, event, stream, and combined
+constructors populate `NodeMetadata::input_schemas`; plain schemas already expressed by the port
+are omitted. Typed constructors reject manual schema overrides. Dynamic providers may declare
+refinements directly in metadata, subject to input-name, type-compatibility, and schema-size checks.
+
+Manual `InputValue`, `InputField`, `NodeInputs`, and `NodeValue` implementations default to opaque
+schemas. Override their schema hook when the codec has a representable contract, and use
+`ValueSchemaContext::describe` for nested codecs. Recursive types and exhausted reflection budgets
+remain explicitly opaque. Readers requiring a complete contract must check `is_complete()`.
+
+Reflection never decodes input data. `Shared<T>` exposes the underlying decoded schema while retaining
+lazy decoding. Ordinary codecs and coarse argument binding keep their existing behavior; callers may
+opt into `CallInterface::validate_decoded_arguments` to check known strict refinements. Generated
+runners include schema metadata in startup drift checks, even when coarse port types stay unchanged.

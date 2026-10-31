@@ -45,6 +45,7 @@ impl Runner {
                                 (
                                     port.name.to_string(),
                                     WorkflowInput {
+                                        schema: None,
                                         value_type: port.value_type,
                                         required: port.required,
                                         binding: InputBinding::default(),

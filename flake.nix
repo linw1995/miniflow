@@ -42,6 +42,7 @@
               ./.config/nextest.toml
               ./examples
               ./tools/test-affected
+              ./crates/builtin-nodes/llm/workflows
               ./crates/mf-chat/migrations
               ./crates/mf-chat/workflows
               ./crates/mf-chat/tests/fixtures

@@ -137,6 +137,146 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
     );
 }
 
+#[test]
+fn tool_chat_workflow_reuses_the_application_contract() {
+    use mf_chat::contract::CompletionState;
+    use mf_tui::chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions};
+    let tool = Reply::stream_tool_calls(vec![(
+        "multiply-1",
+        "multiply",
+        serde_json::json!({"amount":21}),
+    )]);
+    let server = Server::start(vec![
+        tool,
+        Reply::stream_text("first answer"),
+        Reply::text("Tool title"),
+        Reply::stream_text("second answer"),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let binary = compiled(root.path(), &server, "chat-tools-flow.json");
+    let path = root.path().join("chat.sqlite");
+    let launch = ChatLaunch::prepare(
+        &binary,
+        ChatOptions {
+            database_path: path.clone(),
+            profile: "tools".into(),
+            run: mf_tui::run::RunOptions {
+                arguments: vec![
+                    "--params.model=fixture-model".into(),
+                    "--params.api_key=synthetic-key".into(),
+                    "--params.factor=3".into(),
+                ],
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    let controller = ChatController::open(launch).unwrap();
+    let mut session_id = None;
+    let mut observation = None;
+    for (prompt, expected, count) in [("first", "first answer", 3), ("second", "second answer", 1)]
+    {
+        controller
+            .send(ChatCommand::Submit {
+                session_id: session_id.clone(),
+                prompt: prompt.into(),
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "tool conversation did not finish"
+            );
+            match controller.try_event() {
+                Some(ChatEvent::Submitted { session, .. }) => session_id = Some(session.id),
+                Some(ChatEvent::Observing(view)) => observation = Some(view),
+                None => thread::sleep(Duration::from_millis(10)),
+                Some(ChatEvent::Preview { preview, .. }) => assert!(preview.segments.len() <= 32),
+                Some(ChatEvent::Finished {
+                    resolution,
+                    stderr,
+                    capture_error,
+                    ..
+                }) => {
+                    assert!(!stderr.contains("data history incomplete"), "{stderr}");
+                    assert!(capture_error.is_none(), "{capture_error:?}");
+                    assert_eq!(
+                        observation.as_ref().unwrap().reader.data_snapshot().status,
+                        "Complete"
+                    );
+                    let resolution = resolution.unwrap();
+                    assert!(
+                        resolution.diagnostics.is_empty(),
+                        "{:?}",
+                        resolution.diagnostics
+                    );
+                    let CompletionState::Committed(completion) = resolution.state else {
+                        panic!("expected a committed tool conversation")
+                    };
+                    assert_eq!(completion.result.text, expected);
+                    assert_eq!(completion.result.usages.len(), count);
+                    assert!(completion.result.usages.iter().all(|usage| {
+                        usage
+                            .timing
+                            .as_ref()
+                            .is_some_and(|timing| timing.is_valid())
+                    }));
+                    break;
+                }
+                Some(ChatEvent::Error { source, .. }) => {
+                    panic!("tool conversation failed: {source}")
+                }
+                _ => panic!("unexpected tool conversation event"),
+            }
+        }
+    }
+    controller.close().unwrap();
+    let database = ChatDatabase::open(path).unwrap();
+    let id = session_id.unwrap();
+    assert_eq!(database.session(&id).unwrap().title, "Tool title");
+    let history = database.history(&id).unwrap().history;
+    assert_eq!(history.len(), 4);
+    assert!(
+        matches!(&history[1],mfn_llm::ChatMessage::Assistant {content,..} if content=="first answer")
+    );
+    assert_eq!(
+        database
+            .usage(Default::default())
+            .unwrap()
+            .overall
+            .attempted_calls,
+        4
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    let multiply = requests[0].body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "multiply")
+        .unwrap();
+    let properties = &multiply["function"]["parameters"]["properties"];
+    assert!(properties.get("amount").is_some());
+    assert!(properties.get("factor").is_none());
+    let result = requests[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .unwrap();
+    assert_eq!(result["tool_call_id"], "multiply-1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(result["content"].as_str().unwrap()).unwrap(),
+        serde_json::json!({"content":"The product is 63"})
+    );
+    assert!(
+        messages(&requests[3])
+            .iter()
+            .any(|message| message["content"] == "first answer")
+    );
+}
+
 fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let definition = root.join("flow.json");
@@ -150,6 +290,20 @@ fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
         crates.join("builtin-nodes/core").to_str().unwrap().into();
     if let Some(code) = value["dependencies"].get_mut("code") {
         code["path"] = crates.join("builtin-nodes/code").to_str().unwrap().into();
+    }
+    if example == "chat-tools-flow.json" {
+        value["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["id"] == "agent")
+            .unwrap()["subgraphs"]["tools"]["collection"]["multiply"]["source"]["path"] = crates
+            .parent()
+            .unwrap()
+            .join("examples/flows/multiply-tool.json")
+            .to_str()
+            .unwrap()
+            .into();
     }
     let parameters = &mut value["nodes"][0]["config"]["parameters"];
     parameters["model"]["default"] = "wrong-default-model".into();

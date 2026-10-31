@@ -1,7 +1,7 @@
 use mf_runtime::{
     CallConfig, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
     NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, PortSpec,
-    PreparedNode, PreparedSubgraph, TaskNode, WorkflowArguments,
+    PreparedNode, PreparedSubgraph, TaskNode,
 };
 use serde_json::Value;
 use snafu::{ResultExt, Snafu, ensure};
@@ -17,20 +17,9 @@ impl NodePortContract for CallNode {
         NodePorts {
             inputs: self
                 .body
-                .inputs
-                .inputs
-                .iter()
-                .flat_map(|(node, ports)| {
-                    ports.iter().map(move |(name, input)| {
-                        PortSpec::owned(
-                            mf_runtime::output_id(node, name),
-                            input.value_type.clone(),
-                            input.required
-                                && input.binding.env.is_none()
-                                && input.binding.default.is_none(),
-                        )
-                    })
-                })
+                .public_inputs()
+                .into_iter()
+                .map(|(name, input)| PortSpec::owned(name, input.value_type, input.required))
                 .collect(),
             outputs: self.body.outputs.clone(),
         }
@@ -47,6 +36,18 @@ struct CallFailure {
     node: String,
     flow: String,
     source: mf_runtime::WorkflowRunError,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("Flow call `{node}` arguments: {source}"))]
+struct ArgumentsError {
+    node: String,
+    source: mf_runtime::WorkflowInputError,
+}
+impl From<ArgumentsError> for NodeExecutionError {
+    fn from(source: ArgumentsError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
 }
 
 impl From<CallFailure> for NodeExecutionError {
@@ -83,13 +84,14 @@ impl CallNode {
         context: &mut ExecutionContext,
         sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
+        let arguments = self
+            .body
+            .bind_arguments(inputs)
+            .context(ArgumentsSnafu { node: &self.id })?;
         let outputs = context
-            .run_call(
-                &self.id,
-                WorkflowArguments(inputs),
-                &self.body.nodes,
-                |state| self.body.execute_with_sink(state, sink),
-            )
+            .run_call(&self.id, arguments, &self.body.nodes, |state| {
+                self.body.execute_with_sink(state, sink)
+            })
             .context(CallFailureSnafu {
                 node: &self.id,
                 flow: &self.flow,
@@ -113,8 +115,16 @@ fn factory(
     id: &str,
     config: Value,
     _options: Value,
-    body: PreparedSubgraph,
+    mut parameters: mf_runtime::PreparedSubgraphs,
 ) -> Result<PreparedNode, NodeBuildError> {
+    let body = mf_runtime::take_subgraph(&mut parameters, "body")?;
+    ensure!(
+        parameters.is_empty(),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "unexpected subgraph parameter"
+        }
+    );
+
     let config: CallConfig = mf_runtime::deserialize_config(config)?;
     ensure!(
         !config.flow.trim().is_empty(),
@@ -128,24 +138,24 @@ fn factory(
             message: "Flow calls cannot read stdin"
         }
     );
-    let input_bindings = body
-        .inputs
-        .inputs
+    let body = body.project_inputs(config.node_source, &config.input_projections)?;
+    let inputs = body.public_inputs();
+    let input_bindings = inputs
         .iter()
-        .flat_map(|(node, ports)| {
-            ports
-                .iter()
-                .filter(|(_, input)| input.binding.secret)
-                .map(move |(name, _)| {
-                    (
-                        mf_runtime::output_id(node, name),
-                        mf_runtime::InputBinding {
-                            secret: true,
-                            ..Default::default()
-                        },
-                    )
-                })
+        .filter(|(_, input)| input.secret)
+        .map(|(name, _)| {
+            (
+                name.clone(),
+                mf_runtime::InputBinding {
+                    secret: true,
+                    ..Default::default()
+                },
+            )
         })
+        .collect();
+    let input_schemas = inputs
+        .into_iter()
+        .filter_map(|(name, input)| input.schema.map(|schema| (name, schema)))
         .collect();
     let streaming = !body.stream_outputs.is_empty();
     let node = CallNode {
@@ -155,6 +165,7 @@ fn factory(
     };
     let metadata = NodeMetadata {
         input_bindings,
+        input_schemas,
         ..Default::default()
     };
     if streaming {
@@ -165,7 +176,7 @@ fn factory(
 }
 
 inventory::submit! {
-    NodeRegistration { kind: mf_runtime::CALL_KIND, factory: NodeFactory::Subgraph(factory) }
+    NodeRegistration { kind: mf_runtime::CALL_KIND, factory: NodeFactory::Subgraphs(factory) }
 }
 
 #[cfg(test)]
@@ -177,14 +188,26 @@ mod tests {
         PreparedSubgraph::new(vec![], vec![], |_| Ok(Default::default()))
     }
 
+    fn parameters(body: PreparedSubgraph) -> mf_runtime::PreparedSubgraphs {
+        std::collections::BTreeMap::from([(
+            "body".into(),
+            mf_runtime::PreparedSubgraphParameter::Single(body),
+        )])
+    }
+
     #[test]
     fn direct_call_factories_reject_blank_names_and_stdin_before_execution() {
         assert!(
-            factory("invoke", json!({"flow":" "}), Value::Null, body())
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("must not be blank")
+            factory(
+                "invoke",
+                json!({"flow":" "}),
+                Value::Null,
+                parameters(body())
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("must not be blank")
         );
         let mut inputs = mf_runtime::WorkflowInputSchema::default();
         inputs
@@ -195,7 +218,7 @@ mod tests {
                 "invoke",
                 json!({"flow":"child"}),
                 Value::Null,
-                body().with_input_schema(inputs)
+                parameters(body().with_input_schema(inputs))
             )
             .err()
             .unwrap()

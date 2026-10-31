@@ -110,6 +110,7 @@ fn program(
 ) -> mf_runtime::StreamProgram {
     use mf_runtime::{MessageSchedule, StreamEmissionBinding, StreamMessageProgram, StreamProgram};
     StreamProgram {
+        graph: Default::default(),
         execution_domains,
         messages: vec![
             StreamMessageProgram {

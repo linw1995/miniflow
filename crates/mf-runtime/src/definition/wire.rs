@@ -57,6 +57,46 @@ fn decode_scope(
         return Ok(());
     };
     ensure!(
+        version.supports_subgraph_parameters() || !scope.contains_key("subgraphs"),
+        InvalidSnafu {
+            path,
+            message: "subgraphs source maps require version 2026-10-31"
+        }
+    );
+    if let Some(legacy) = scope.remove("flows") {
+        ensure!(
+            !scope.contains_key("subgraphs"),
+            InvalidSnafu {
+                path,
+                message: "use one subgraph source map"
+            }
+        );
+        scope.insert("subgraphs".into(), legacy);
+    }
+    ensure!(
+        version.supports_subgraph_parameters()
+            || (scope
+                .get("subgraphs")
+                .and_then(Value::as_object)
+                .is_none_or(|sources| sources.values().all(|source| {
+                    source.get("path").is_some() || source.get("builtin").is_some()
+                }))
+                && scope
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .is_none_or(|nodes| nodes.iter().all(|node| {
+                        ["subgraphs", "subgraph_arguments"].iter().all(|field| {
+                            node.get(*field)
+                                .and_then(Value::as_object)
+                                .is_none_or(Map::is_empty)
+                        })
+                    }))),
+        InvalidSnafu {
+            path,
+            message: "subgraph parameters require version 2026-10-31"
+        }
+    );
+    ensure!(
         version.supports_child_streams()
             || scope
                 .get("nodes")
@@ -78,7 +118,7 @@ fn decode_scope(
     );
     ensure!(
         version.supports_nested_flows()
-            || (!scope.contains_key("flows")
+            || (!scope.contains_key("subgraphs")
                 && scope
                     .get("nodes")
                     .and_then(Value::as_array)
@@ -225,6 +265,39 @@ fn encode_scope(
     let Some(scope) = value.as_object_mut() else {
         return Ok(());
     };
+    if let Some(legacy) = scope.remove("flows") {
+        ensure!(
+            !scope.contains_key("subgraphs"),
+            InvalidSnafu {
+                path,
+                message: "use one subgraph source map"
+            }
+        );
+        scope.insert("subgraphs".into(), legacy);
+    }
+    ensure!(
+        version.supports_subgraph_parameters()
+            || (scope
+                .get("subgraphs")
+                .and_then(Value::as_object)
+                .is_none_or(|sources| sources.values().all(|source| {
+                    source.get("path").is_some() || source.get("builtin").is_some()
+                }))
+                && scope
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .is_none_or(|nodes| nodes.iter().all(|node| {
+                        ["subgraphs", "subgraph_arguments"].iter().all(|field| {
+                            node.get(*field)
+                                .and_then(Value::as_object)
+                                .is_none_or(Map::is_empty)
+                        })
+                    }))),
+        InvalidSnafu {
+            path,
+            message: "subgraph parameters require version 2026-10-31"
+        }
+    );
     ensure!(
         version.supports_child_streams()
             || scope
@@ -247,7 +320,7 @@ fn encode_scope(
     );
     ensure!(
         version.supports_nested_flows()
-            || (!scope.contains_key("flows")
+            || (!scope.contains_key("subgraphs")
                 && scope
                     .get("nodes")
                     .and_then(Value::as_array)
@@ -347,7 +420,13 @@ fn encode_scope(
         );
         scope.remove("order_edges");
     }
-    visit_bodies(scope, modern, version, path, encode_scope)
+    visit_bodies(scope, modern, version, path, encode_scope)?;
+    if !version.supports_subgraph_parameters()
+        && let Some(sources) = scope.remove("subgraphs")
+    {
+        scope.insert("flows".into(), sources);
+    }
+    Ok(())
 }
 
 fn visit_bodies(
@@ -357,12 +436,52 @@ fn visit_bodies(
     path: &str,
     visit: fn(&mut Value, bool, WorkflowDefinitionVersion, &str) -> Result<(), WireError>,
 ) -> Result<(), WireError> {
+    fn source(
+        value: &mut Value,
+        modern: bool,
+        version: WorkflowDefinitionVersion,
+        path: &str,
+        visit: fn(&mut Value, bool, WorkflowDefinitionVersion, &str) -> Result<(), WireError>,
+    ) -> Result<(), WireError> {
+        if let Some(node) = value.get_mut("node") {
+            let mut wrapper = Map::new();
+            wrapper.insert("nodes".into(), Value::Array(vec![node.take()]));
+            visit_bodies(&mut wrapper, modern, version, path, visit)?;
+            *node = wrapper
+                .remove("nodes")
+                .expect("node wrapper")
+                .as_array_mut()
+                .expect("node array")
+                .remove(0);
+        }
+        for field in ["source", "interfaces", "default"] {
+            if let Some(value) = value.get_mut(field) {
+                source(value, modern, version, path, visit)?;
+            }
+        }
+        if let Some(collection) = value.get_mut("collection").and_then(Value::as_object_mut) {
+            for (name, value) in collection {
+                source(value, modern, version, &format!("{path}/{name}"), visit)?;
+            }
+        }
+        Ok(())
+    }
+    if let Some(sources) = scope.get_mut("subgraphs").and_then(Value::as_object_mut) {
+        for (name, value) in sources {
+            source(value, modern, version, &format!("{path}/{name}"), visit)?;
+        }
+    }
     if let Some(nodes) = scope.get_mut("nodes").and_then(Value::as_array_mut) {
         for node in nodes {
             let nested = format!(
                 "{path}/{}",
                 node.get("id").and_then(Value::as_str).unwrap_or("?")
             );
+            if let Some(parameters) = node.get_mut("subgraphs").and_then(Value::as_object_mut) {
+                for (name, value) in parameters {
+                    source(value, modern, version, &format!("{nested}/{name}"), visit)?;
+                }
+            }
             if let Some(body) = node.get_mut("loop").and_then(|value| value.get_mut("body")) {
                 visit(body, modern, version, &nested)?;
             }

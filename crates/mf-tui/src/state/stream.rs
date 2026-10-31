@@ -684,12 +684,16 @@ impl StreamState {
         let (last, parent) = path.split_last().expect("validated path");
         let node = mf_telemetry::event::NodeIdentity {
             id: last.node_id().to_owned(),
-            kind: if last.is_call() {
-                "workflow.call"
-            } else {
-                "workflow.loop"
-            }
-            .into(),
+            kind: description
+                .scope_node(
+                    &path
+                        .iter()
+                        .map(|entry| entry.node_id().to_owned())
+                        .collect::<Vec<_>>(),
+                )
+                .expect("validated scope container")
+                .kind
+                .clone(),
             path: parent.to_vec(),
         };
         let admission = self.ensure_invocation(record, &node)?;
@@ -1186,10 +1190,12 @@ mod tests {
             }),
             nodes: vec![
                 NodeDescription {
+                    subgraph_arguments: Default::default(),
                     id: "source".into(),
                     kind: "test.source".into(),
                 },
                 NodeDescription {
+                    subgraph_arguments: Default::default(),
                     id: "consume".into(),
                     kind: "test.consume".into(),
                 },
@@ -1532,6 +1538,7 @@ mod tests {
         use mf_telemetry::description::LoopBodyDescription;
         let mut graph = description();
         graph.nodes[1] = NodeDescription {
+            subgraph_arguments: Default::default(),
             id: "repeat".into(),
             kind: "workflow.loop".into(),
         };
@@ -1541,6 +1548,7 @@ mod tests {
             order_edges: Vec::new(),
             path: vec!["repeat".into()],
             nodes: vec![NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "%loop".into(),
                 kind: "%loop".into(),
             }],
@@ -1726,102 +1734,109 @@ mod tests {
 
     #[test]
     fn call_scopes_isolate_messages_and_retain_reordered_duplicate_evidence() {
-        let run = RunId::new();
-        let (mut graph, mut records) = loop_records(run, 1, 2);
-        graph.version = WorkflowDescriptionVersion::V2026_10_23;
-        graph.nodes[1].kind = "workflow.call".into();
-        graph.loop_bodies[0].nodes[0] = NodeDescription {
-            id: "leaf".into(),
-            kind: "fixture.task".into(),
-        };
-        graph.loop_bodies[0].execution_order = vec!["leaf".into()];
-        let path = vec![LoopPathEntry::Call {
-            call_id: "repeat".into(),
-        }];
-        for record in &mut records {
-            let StreamPayload::Execution(event) = &mut record.payload else {
-                continue;
+        for container_kind in ["workflow.call", "fixture.container"] {
+            let run = RunId::new();
+            let (mut graph, mut records) = loop_records(run, 1, 2);
+            graph.version = if container_kind == "workflow.call" {
+                WorkflowDescriptionVersion::V2026_10_23
+            } else {
+                WorkflowDescriptionVersion::V2026_10_31
             };
-            match event {
-                Event::NodeStarted { node, .. } | Event::NodeFinished { node, .. } => {
-                    if node.id == "repeat" {
-                        node.kind = "workflow.call".into();
+            graph.nodes[1].kind = container_kind.into();
+            graph.loop_bodies[0].nodes[0] = NodeDescription {
+                subgraph_arguments: Default::default(),
+                id: "leaf".into(),
+                kind: "fixture.task".into(),
+            };
+            graph.loop_bodies[0].execution_order = vec!["leaf".into()];
+            let path = vec![LoopPathEntry::Call {
+                call_id: "repeat".into(),
+            }];
+            for record in &mut records {
+                let StreamPayload::Execution(event) = &mut record.payload else {
+                    continue;
+                };
+                match event {
+                    Event::NodeStarted { node, .. } | Event::NodeFinished { node, .. } => {
+                        if node.id == "repeat" {
+                            node.kind = container_kind.into();
+                        }
+                        if !node.path.is_empty() {
+                            node.path = path.clone();
+                            node.id = "leaf".into();
+                            node.kind = "fixture.task".into();
+                        }
+                        if let Event::NodeFinished { loop_summary, .. } = event {
+                            *loop_summary = None;
+                        }
                     }
-                    if !node.path.is_empty() {
-                        node.path = path.clone();
-                        node.id = "leaf".into();
-                        node.kind = "fixture.task".into();
+                    Event::LoopPassStarted { elapsed_ns, .. } => {
+                        *event = Event::CallStarted {
+                            path: path.clone(),
+                            elapsed_ns: *elapsed_ns,
+                        };
                     }
-                    if let Event::NodeFinished { loop_summary, .. } = event {
-                        *loop_summary = None;
+                    Event::LoopPassFinished {
+                        elapsed_ns,
+                        outcome,
+                        ..
+                    } => {
+                        *event = Event::CallFinished {
+                            path: path.clone(),
+                            elapsed_ns: *elapsed_ns,
+                            outcome: *outcome,
+                        };
                     }
+                    _ => {}
                 }
-                Event::LoopPassStarted { elapsed_ns, .. } => {
-                    *event = Event::CallStarted {
-                        path: path.clone(),
-                        elapsed_ns: *elapsed_ns,
-                    };
-                }
-                Event::LoopPassFinished {
-                    elapsed_ns,
-                    outcome,
-                    ..
-                } => {
-                    *event = Event::CallFinished {
-                        path: path.clone(),
-                        elapsed_ns: *elapsed_ns,
-                        outcome: *outcome,
-                    };
-                }
-                _ => {}
             }
-        }
-        graph.validate().unwrap();
-        for reverse in [false, true] {
-            let mut state = SessionState::new(graph.clone(), run).unwrap();
-            let mut ordered = records.clone();
-            if reverse {
-                ordered.reverse();
-            }
-            for record in ordered {
+            graph.validate().unwrap();
+            for reverse in [false, true] {
+                let mut state = SessionState::new(graph.clone(), run).unwrap();
+                let mut ordered = records.clone();
+                if reverse {
+                    ordered.reverse();
+                }
+                for record in ordered {
+                    assert_eq!(
+                        state.apply_stream(record.clone()).unwrap(),
+                        Admission::Applied
+                    );
+                    assert_eq!(state.apply_stream(record).unwrap(), Admission::Duplicate);
+                }
+                let snapshot = state.snapshot();
                 assert_eq!(
-                    state.apply_stream(record.clone()).unwrap(),
-                    Admission::Applied
+                    snapshot.lifecycle.completeness,
+                    Completeness::Complete,
+                    "{snapshot:?}"
                 );
-                assert_eq!(state.apply_stream(record).unwrap(), Admission::Duplicate);
+                assert_eq!(snapshot.loop_passes.len(), 2);
+                assert_ne!(
+                    snapshot.loop_passes[0].stream_invocation,
+                    snapshot.loop_passes[1].stream_invocation
+                );
+                for pass in &snapshot.loop_passes {
+                    assert_eq!(pass.path, path);
+                    assert_eq!(pass.nodes[0].status, NodeStatus::Succeeded);
+                }
             }
-            let snapshot = state.snapshot();
-            assert_eq!(
-                snapshot.lifecycle.completeness,
-                Completeness::Complete,
-                "{snapshot:?}"
-            );
-            assert_eq!(snapshot.loop_passes.len(), 2);
-            assert_ne!(
-                snapshot.loop_passes[0].stream_invocation,
-                snapshot.loop_passes[1].stream_invocation
-            );
-            for pass in &snapshot.loop_passes {
-                assert_eq!(pass.path, path);
-                assert_eq!(pass.nodes[0].status, NodeStatus::Succeeded);
-            }
-        }
-        let mut forged = records.iter().find(|record| matches!(
+            let mut forged = records.iter().find(|record| matches!(
             &record.payload,
             StreamPayload::Execution(Event::NodeStarted { node, .. }) if !node.path.is_empty()
         )).unwrap().clone();
-        if let StreamPayload::Execution(Event::NodeStarted { node, .. }) = &mut forged.payload {
-            node.path = vec![LoopPathEntry::Loop {
-                loop_id: "repeat".into(),
-                index: Count::ZERO,
-            }];
+            if let StreamPayload::Execution(Event::NodeStarted { node, .. }) = &mut forged.payload {
+                node.path = vec![LoopPathEntry::Loop {
+                    loop_id: "repeat".into(),
+                    index: Count::ZERO,
+                }];
+            }
+            assert!(
+                SessionState::new(graph, run)
+                    .unwrap()
+                    .apply_stream(forged)
+                    .is_err()
+            );
         }
-        assert!(
-            SessionState::new(graph, run)
-                .unwrap()
-                .apply_stream(forged)
-                .is_err()
-        );
     }
 
     #[test]

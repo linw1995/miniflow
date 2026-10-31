@@ -25,6 +25,19 @@ pub type Outputs = NodeValues;
 /// ```
 pub trait NodeValue: Sized {
     fn ports() -> Vec<PortSpec>;
+    fn input_schemas_with_context(
+        _: &mut crate::ValueSchemaContext,
+    ) -> std::collections::BTreeMap<String, crate::ValueSchema> {
+        Self::ports()
+            .into_iter()
+            .map(|port| {
+                (
+                    port.name.to_string(),
+                    crate::ValueSchema::opaque(port.value_type),
+                )
+            })
+            .collect()
+    }
     fn from_values(values: NodeValues) -> Result<Self, crate::InputDecodeError>;
     fn into_values(self) -> Result<NodeValues, crate::OutputEncodeError>;
 }
@@ -480,7 +493,7 @@ impl PortSpec {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NodePorts {
     pub inputs: Vec<PortSpec>,
     pub outputs: Vec<PortSpec>,
@@ -660,6 +673,10 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
+    #[snafu(transparent)]
+    InputSchemas { source: crate::SchemaContractError },
+    #[snafu(display("input schemas must be reflected from the typed input contract"))]
+    ConflictingInputSchemas,
     #[snafu(display("could not serialize generated metadata: {source}"))]
     GenerationMetadata { source: serde_json::Error },
     #[snafu(display("prepared metadata differs from the compiled typed generation contract"))]
@@ -805,12 +822,16 @@ struct TypedTaskAdapter<N>(N);
 /// Like direct `TaskNode::execute`, this does not schedule the task or publish its
 /// outputs. Providers retaining a dynamic task interface can delegate here to
 /// share the runtime adapter's decoding and error context.
+pub fn decode_node_inputs<I: crate::NodeInputs>(inputs: Inputs) -> Result<I, NodeExecutionError> {
+    I::from_inputs(inputs).context(InputDecodeSnafu)
+}
+
 pub fn execute_typed_task<N: TypedTaskNode + ?Sized>(
     task: &N,
     inputs: Inputs,
     ctx: &mut crate::ExecutionContext,
 ) -> Result<crate::NodeResult, NodeExecutionError> {
-    let input = <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)?;
+    let input = decode_node_inputs::<N::Input>(inputs)?;
     let result = task.execute(input, ctx)?;
     encode_typed_result(result)
 }
@@ -841,6 +862,12 @@ impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
+    /// Codec refinements beyond coarse port types; never contains runtime values or defaults.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub input_schemas: std::collections::BTreeMap<String, crate::ValueSchema>,
+    /// Static contracts of the node's ordinary prepared workflow body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subgraph: Option<std::sync::Arc<crate::WorkflowGraph>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stream_outputs: Vec<PortSpec>,
     /// At most one listed output may produce a value per task invocation.
@@ -854,6 +881,10 @@ pub struct NodeMetadata {
 }
 
 impl NodeMetadata {
+    pub fn validate_input_schemas(&self) -> Result<(), crate::SchemaContractError> {
+        crate::value_schema::validate_port_schemas(&self.ports.inputs, &self.input_schemas)
+    }
+
     pub fn output_ports(&self) -> impl Iterator<Item = &PortSpec> {
         self.ports.outputs.iter().chain(&self.stream_outputs)
     }
@@ -1017,7 +1048,7 @@ where
         constructor: TypedConstructor,
         context_free: bool,
     ) -> Result<Self, NodeBuildError> {
-        let mut metadata = reflected_node_metadata(
+        let mut metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
@@ -1043,7 +1074,7 @@ where
     }
 
     pub fn decode_inputs(&self, inputs: Inputs) -> Result<N::Input, NodeExecutionError> {
-        <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)
+        decode_node_inputs::<N::Input>(inputs)
     }
 
     pub fn input_from_fields(&self, fields: <N::Input as TypedNodeValue>::Fields) -> N::Input {
@@ -1082,6 +1113,17 @@ pub const fn port_names_match(actual: &[&str], expected: &[&str]) -> bool {
     true
 }
 
+pub fn verify_generated_graph_schemas(
+    actual: &crate::WorkflowGraph,
+    expected: &crate::WorkflowGraph,
+) -> Result<(), NodeBuildError> {
+    ensure!(
+        actual.same_schema_contract(expected),
+        GenerationMetadataMismatchSnafu
+    );
+    Ok(())
+}
+
 pub fn verify_generated_metadata(
     actual: &NodeMetadata,
     expected: &serde_json::Value,
@@ -1108,6 +1150,29 @@ fn reflected_node_metadata(
         ConflictingStreamDeclarationsSnafu
     );
     metadata.ports = ports;
+    metadata.validate_input_schemas()?;
+    Ok(metadata)
+}
+
+fn reflected_typed_metadata<I: crate::NodeInputs>(
+    ports: NodePorts,
+    metadata: NodeMetadata,
+) -> Result<NodeMetadata, NodeBuildError> {
+    ensure!(
+        metadata.input_schemas.is_empty(),
+        ConflictingInputSchemasSnafu
+    );
+    let mut metadata = reflected_node_metadata(ports, metadata)?;
+    metadata.input_schemas = I::input_schemas();
+    metadata.input_schemas.retain(|name, schema| {
+        match metadata.ports.inputs.iter().find(|port| port.name == *name) {
+            // Preserve the established diagnostic boundary for invalid coarse descriptors.
+            Some(port) if port.value_type.check_depth().is_err() => false,
+            Some(port) => *schema != crate::ValueSchema::Type(port.value_type.clone()),
+            None => true,
+        }
+    });
+    metadata.validate_input_schemas()?;
     Ok(metadata)
 }
 
@@ -1161,15 +1226,15 @@ impl PreparedNode {
         task: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let metadata = reflected_node_metadata(
+        let metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
-        Ok(Self::combined(
+        Self::combined(
             Box::new(crate::task_stream::TypedTaskStreamAdapter(task)),
             <N::Emission as crate::NodeOutputs>::ports(),
             metadata,
-        ))
+        )
     }
 
     pub fn task_stream<N: crate::TaskStreamNode + NodePortContract + 'static>(
@@ -1178,19 +1243,19 @@ impl PreparedNode {
     ) -> Result<Self, NodeBuildError> {
         let metadata = reflected_node_metadata(task.ports(), metadata.into())?;
         let outputs = task.stream_outputs();
-        Ok(Self::combined(Box::new(task), outputs, metadata))
+        Self::combined(Box::new(task), outputs, metadata)
     }
 
     fn combined(
         task: Box<dyn crate::TaskStreamNode>,
         outputs: Vec<PortSpec>,
         mut metadata: NodeMetadata,
-    ) -> Self {
+    ) -> Result<Self, NodeBuildError> {
         metadata.stream_outputs = outputs.clone();
-        Self::from_parts(
+        Ok(Self::from_parts(
             NodeExecution::TaskStream(Box::new(crate::TaskStreamExecutor::new(task, outputs))),
             metadata,
-        )
+        ))
     }
 
     /// Reflects both value contracts and adapts typed event execution without dispatching an event.
@@ -1198,7 +1263,7 @@ impl PreparedNode {
         state: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let metadata = reflected_node_metadata(
+        let metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
@@ -1213,7 +1278,7 @@ impl PreparedNode {
         producer: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let metadata = reflected_node_metadata(
+        let metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
@@ -1299,7 +1364,7 @@ impl PreparedNode {
         task: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let metadata = reflected_node_metadata(
+        let metadata = reflected_typed_metadata::<N::Input>(
             NodePorts::from_types::<N::Input, N::Output>(),
             metadata.into(),
         )?;
@@ -1322,8 +1387,8 @@ impl PreparedNode {
 #[derive(Clone, Copy, Debug)]
 pub enum NodeFactory {
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
-    Subgraph(
-        fn(&str, Value, Value, crate::PreparedSubgraph) -> Result<PreparedNode, NodeBuildError>,
+    Subgraphs(
+        fn(&str, Value, Value, crate::PreparedSubgraphs) -> Result<PreparedNode, NodeBuildError>,
     ),
 }
 
@@ -1337,8 +1402,8 @@ impl NodeRegistration {
     pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
             NodeFactory::Plain(factory) => factory(config),
-            NodeFactory::Subgraph(_) => crate::NodeInvalidSubgraphSnafu {
-                message: format!("node `{}` requires a prepared body", self.kind),
+            NodeFactory::Subgraphs(_) => crate::NodeInvalidSubgraphSnafu {
+                message: format!("node `{}` requires prepared subgraph parameters", self.kind),
             }
             .fail(),
         }
@@ -1351,10 +1416,41 @@ impl NodeRegistration {
         options: Value,
         body: crate::PreparedSubgraph,
     ) -> Result<PreparedNode, NodeBuildError> {
+        self.instantiate_subgraphs(
+            id,
+            config,
+            options,
+            std::collections::BTreeMap::from([(
+                "body".into(),
+                crate::PreparedSubgraphParameter::Single(body),
+            )]),
+        )
+    }
+
+    pub fn instantiate_subgraphs(
+        &self,
+        id: &str,
+        config: Value,
+        options: Value,
+        parameters: crate::PreparedSubgraphs,
+    ) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
-            NodeFactory::Subgraph(factory) => factory(id, config, options, body),
+            NodeFactory::Subgraphs(factory) => {
+                let graph = match parameters.get("body") {
+                    Some(crate::PreparedSubgraphParameter::Single(body)) => body.graph.clone(),
+                    _ => None,
+                };
+                let mut prepared = factory(id, config, options, parameters)?;
+                // Typed constructors accept value configuration, not captured subgraphs.
+                prepared.metadata.typed_generation = None;
+                if prepared.metadata.subgraph.is_none() {
+                    prepared.metadata.subgraph = graph;
+                }
+                Ok(prepared)
+            }
+            NodeFactory::Plain(factory) if parameters.is_empty() => factory(config),
             NodeFactory::Plain(_) => crate::NodeInvalidSubgraphSnafu {
-                message: format!("node `{}` does not accept a prepared body", self.kind),
+                message: format!("node `{}` does not accept subgraph parameters", self.kind),
             }
             .fail(),
         }

@@ -28,7 +28,9 @@ mod task_stream;
 mod typed_inputs;
 mod typed_outputs;
 mod value;
+mod value_schema;
 mod worker;
+mod workflow_graph;
 mod workflow_inputs;
 mod workflow_manifest;
 
@@ -43,13 +45,13 @@ pub use context::{
 };
 pub use definition::{
     CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
-    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, FlowSource,
+    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError,
     InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
     LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
     MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
     NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
-    validate_exclusive_inputs,
+    SubgraphMember, SubgraphParameterKind, SubgraphSource, WorkflowDefinition,
+    WorkflowDefinitionVersion, WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{
@@ -66,8 +68,8 @@ pub use future_execution::FutureExecutionError;
 pub use inventory::submit as __submit_builtin_flow;
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
-    IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
-    iteration_input_flow_node,
+    IterationConfig, IterationErrorPolicy, IterationInputMode, IterationMode,
+    IterationResultDefinition, iteration_input_flow_node,
 };
 pub use loop_node::{
     LoopVariableError, loop_variable_types, prepared_loop_assign, prepared_loop_exit,
@@ -85,8 +87,9 @@ pub use node::{
     NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
     TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch, TypeMismatchDetails,
-    TypedTaskNode, ValueType, deserialize_config, encode_typed_result, execute_typed_task,
-    output_id, port_names_match, verify_generated_metadata,
+    TypedTaskNode, ValueType, decode_node_inputs, deserialize_config, encode_typed_result,
+    execute_typed_task, output_id, port_names_match, verify_generated_graph_schemas,
+    verify_generated_metadata,
 };
 pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,
@@ -117,7 +120,11 @@ pub use stream_plan::{
     StreamEmissionBinding, StreamInputResolver, StreamMessageInitializer, StreamMessageProgram,
     StreamOutputSelector, StreamPlan, StreamProgram,
 };
-pub use subgraph::{PreparedSubgraph, SubgraphStreamOutput};
+pub use subgraph::{
+    PreparedSubgraph, PreparedSubgraphParameter, PreparedSubgraphs, SubgraphInterface,
+    SubgraphStreamOutput, project_subgraph_inputs, take_subgraph, take_subgraph_collection,
+    take_subgraph_interfaces,
+};
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,
     TypedTaskStreamNode,
@@ -165,3 +172,8 @@ pub use workflow_manifest::{
     MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES,
     WorkflowManifest, WorkflowManifestError, WorkflowManifestVersion, describe_definition,
 };
+
+pub use value_schema::{
+    SchemaContractError, SchemaField, SchemaOpacity, ValueSchema, ValueSchemaContext,
+};
+pub use workflow_graph::{GraphInput, GraphNode, WorkflowGraph};

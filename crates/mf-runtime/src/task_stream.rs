@@ -266,8 +266,7 @@ impl<N: TypedTaskStreamNode> TaskStreamNode for TypedTaskStreamAdapter<N> {
         context: &mut ExecutionContext,
         emitter: &mut Emitter<'_>,
     ) -> Result<NodeResult, NodeExecutionError> {
-        let input = <N::Input as crate::NodeInputs>::from_inputs(inputs)
-            .context(crate::node::InputDecodeSnafu)?;
+        let input = crate::decode_node_inputs::<N::Input>(inputs)?;
         let result = self
             .0
             .execute(input, context, &mut TypedEmitter::new(emitter));

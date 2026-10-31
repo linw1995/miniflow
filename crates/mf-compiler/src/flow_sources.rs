@@ -1,5 +1,5 @@
 use crate::{NodeDependency, WorkflowDefinition};
-use mf_runtime::{CALL_KIND, CallConfig, FlowSource, MAX_CALL_DEPTH, NodeDefinition};
+use mf_runtime::{CALL_KIND, CallConfig, MAX_CALL_DEPTH, NodeDefinition, SubgraphSource};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -66,6 +66,7 @@ pub fn resolve_embedded_flows(
         &BTreeMap::new(),
         0,
         "workflow",
+        &BTreeMap::new(),
     )?;
     Ok(ResolvedWorkflow {
         definition,
@@ -75,7 +76,7 @@ pub fn resolve_embedded_flows(
 
 pub fn load_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResolutionError> {
     let mut resolver = Resolver::default();
-    let mut definition = resolver.file(path, &BTreeMap::new(), 0)?;
+    let mut definition = resolver.file(path, &BTreeMap::new(), &BTreeMap::new(), 0)?;
     resolver.finish(&mut definition);
     Ok(ResolvedWorkflow {
         definition,
@@ -89,7 +90,7 @@ pub fn load_embedded_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResol
         host_dependencies: true,
         ..Default::default()
     };
-    let definition = resolver.file(path, &BTreeMap::new(), 0)?;
+    let definition = resolver.file(path, &BTreeMap::new(), &BTreeMap::new(), 0)?;
     Ok(ResolvedWorkflow {
         definition,
         sources: resolver.sources,
@@ -108,7 +109,14 @@ pub fn resolve_flows(
     }
     let mut resolver = Resolver::default();
     let mut definition = definition.clone();
-    resolver.definition(&mut definition, directory, &BTreeMap::new(), 0, "workflow")?;
+    resolver.definition(
+        &mut definition,
+        directory,
+        &BTreeMap::new(),
+        0,
+        "workflow",
+        &BTreeMap::new(),
+    )?;
     resolver.finish(&mut definition);
     Ok(ResolvedWorkflow {
         definition,
@@ -117,11 +125,13 @@ pub fn resolve_flows(
 }
 
 fn needs_resolution(definition: &WorkflowDefinition) -> bool {
-    !definition.flows.is_empty() || definition.nodes.iter().any(node_needs_resolution)
+    !definition.subgraphs.is_empty() || definition.nodes.iter().any(node_needs_resolution)
 }
 
 fn wire_node_needs_resolution(node: &serde_json::Value) -> bool {
-    node["kind"] == CALL_KIND
+    node.get("subgraphs")
+        .is_some_and(|value| value.as_object().is_some_and(|value| !value.is_empty()))
+        || node["kind"] == CALL_KIND
         || [
             node.pointer("/loop/body/nodes"),
             node.pointer("/config/body/nodes"),
@@ -134,7 +144,8 @@ fn wire_node_needs_resolution(node: &serde_json::Value) -> bool {
 }
 
 fn node_needs_resolution(node: &NodeDefinition) -> bool {
-    node.kind == CALL_KIND
+    !node.subgraphs.is_empty()
+        || node.kind == CALL_KIND
         || node
             .loop_definition
             .as_ref()
@@ -145,6 +156,40 @@ fn node_needs_resolution(node: &NodeDefinition) -> bool {
                 .pointer("/body/nodes")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|nodes| nodes.iter().any(wire_node_needs_resolution)))
+}
+
+fn argument_descriptions(
+    arguments: &BTreeMap<String, SubgraphSource>,
+) -> BTreeMap<String, Vec<mf_telemetry::description::SubgraphArgumentDescription>> {
+    fn source(value: &SubgraphSource) -> &SubgraphSource {
+        match value {
+            SubgraphSource::Interface { source: inner, .. }
+            | SubgraphSource::Interfaces { interfaces: inner } => source(inner),
+            source => source,
+        }
+    }
+    let describe = |name: &str, value: &SubgraphSource| {
+        mf_telemetry::description::SubgraphArgumentDescription {
+            name: name.to_owned(),
+            kind: match source(value) {
+                SubgraphSource::Node { node } => node.kind.clone(),
+                _ => CALL_KIND.to_owned(),
+            },
+        }
+    };
+    arguments
+        .iter()
+        .map(|(parameter, value)| {
+            let entries = match source(value) {
+                SubgraphSource::Collection { collection } => collection
+                    .iter()
+                    .map(|(name, value)| describe(name, value))
+                    .collect(),
+                value => vec![describe(parameter, value)],
+            };
+            (parameter.clone(), entries)
+        })
+        .collect()
 }
 
 impl Resolver {
@@ -174,6 +219,7 @@ impl Resolver {
         &mut self,
         path: &Path,
         inherited: &BTreeMap<String, NodeDependency>,
+        bindings: &BTreeMap<String, SubgraphSource>,
         depth: usize,
     ) -> Result<WorkflowDefinition, FlowResolutionError> {
         let path = fs::canonicalize(path).context(ReadSnafu { path })?;
@@ -195,6 +241,7 @@ impl Resolver {
             inherited,
             depth,
             &path.display().to_string(),
+            bindings,
         );
         self.stack.pop();
         result.context(SourceSnafu { path: &path })?;
@@ -208,8 +255,9 @@ impl Resolver {
         inherited: &BTreeMap<String, NodeDependency>,
         depth: usize,
         reference: &str,
+        bindings: &BTreeMap<String, SubgraphSource>,
     ) -> Result<(), FlowResolutionError> {
-        let resolve = needs_resolution(definition);
+        let resolve = needs_resolution(definition) || !bindings.is_empty();
         ensure!(
             depth <= MAX_CALL_DEPTH,
             InvalidSnafu {
@@ -218,7 +266,7 @@ impl Resolver {
             }
         );
         ensure!(
-            definition.flows.is_empty() || definition.version.supports_nested_flows(),
+            definition.subgraphs.is_empty() || definition.version.supports_nested_flows(),
             InvalidSnafu {
                 reference,
                 message: "Flow sources require version 2026-10-25"
@@ -246,15 +294,60 @@ impl Resolver {
                 .values()
                 .map(|value| (value.package.clone(), value.clone())),
         );
-        let flows = std::mem::take(&mut definition.flows);
-        for alias in flows.keys() {
+        let mut flows = std::mem::take(&mut definition.subgraphs);
+        for name in bindings.keys() {
             ensure!(
-                !alias.trim().is_empty(),
+                matches!(flows.get(name), Some(SubgraphSource::Parameter { .. })),
                 InvalidSnafu {
-                    reference,
-                    message: "Flow alias must not be blank"
+                    reference: name,
+                    message: "unknown subgraph parameter"
                 }
             );
+        }
+        let mut declarations = Vec::new();
+        for (name, source) in &mut flows {
+            ensure!(
+                !name.trim().is_empty(),
+                InvalidSnafu {
+                    reference: name,
+                    message: "subgraph names must not be blank"
+                }
+            );
+            if let SubgraphSource::Parameter { parameter, default } = source {
+                let selected = bindings
+                    .get(name)
+                    .cloned()
+                    .or_else(|| default.as_deref().cloned())
+                    .context(InvalidSnafu {
+                        reference: name,
+                        message: "required subgraph parameter was not provided",
+                    })?;
+                declarations.push((name.clone(), *parameter));
+                *source = selected;
+            }
+        }
+        for (name, kind) in declarations {
+            let source = self.source(
+                &flows[&name],
+                &flows,
+                directory,
+                &available,
+                depth,
+                &BTreeMap::new(),
+            )?;
+            let cardinality = match &source {
+                SubgraphSource::Interfaces { interfaces } => interfaces.as_ref(),
+                source => source,
+            };
+            ensure!(
+                matches!(cardinality, SubgraphSource::Collection { .. })
+                    == (kind == mf_runtime::SubgraphParameterKind::Collection),
+                InvalidSnafu {
+                    reference: &name,
+                    message: "subgraph parameter cardinality does not match its declaration"
+                }
+            );
+            flows.insert(name, source);
         }
         self.nodes(
             &mut definition.nodes,
@@ -296,16 +389,243 @@ impl Resolver {
         Ok(())
     }
 
+    fn source(
+        &mut self,
+        source: &SubgraphSource,
+        scope: &BTreeMap<String, SubgraphSource>,
+        directory: Option<&Path>,
+        available: &BTreeMap<String, NodeDependency>,
+        depth: usize,
+        bindings: &BTreeMap<String, SubgraphSource>,
+    ) -> Result<SubgraphSource, FlowResolutionError> {
+        ensure!(
+            depth <= MAX_CALL_DEPTH,
+            InvalidSnafu {
+                reference: "subgraph",
+                message: "subgraph reference depth exceeds sixteen levels",
+            }
+        );
+        let mut definition = match source {
+            SubgraphSource::Reference { reference } => {
+                let source = scope.get(reference).context(InvalidSnafu {
+                    reference,
+                    message: "unknown subgraph parameter or source",
+                })?;
+                return self.source(source, scope, directory, available, depth + 1, bindings);
+            }
+            SubgraphSource::Interfaces { interfaces } => {
+                ensure!(
+                    bindings.is_empty(),
+                    InvalidSnafu {
+                        reference: "interfaces",
+                        message: "interfaces cannot be called"
+                    }
+                );
+                let interfaces =
+                    self.source(interfaces, scope, directory, available, depth + 1, bindings)?;
+                return Ok(if matches!(interfaces, SubgraphSource::Interfaces { .. }) {
+                    interfaces
+                } else {
+                    SubgraphSource::Interfaces {
+                        interfaces: Box::new(interfaces),
+                    }
+                });
+            }
+            SubgraphSource::Collection { collection } => {
+                ensure!(
+                    bindings.is_empty(),
+                    InvalidSnafu {
+                        reference: "collection",
+                        message: "a collection cannot be called as one Flow"
+                    }
+                );
+                let mut resolved = BTreeMap::new();
+                for (name, source) in collection {
+                    ensure!(
+                        !name.trim().is_empty() && !name.contains(':'),
+                        InvalidSnafu {
+                            reference: name,
+                            message: "subgraph names must be nonblank and cannot contain colons"
+                        }
+                    );
+                    let source = self.source(
+                        source,
+                        scope,
+                        directory,
+                        available,
+                        depth + 1,
+                        &BTreeMap::new(),
+                    )?;
+                    ensure!(
+                        !matches!(
+                            source,
+                            SubgraphSource::Collection { .. } | SubgraphSource::Interfaces { .. }
+                        ),
+                        InvalidSnafu {
+                            reference: name,
+                            message: "subgraph collections contain individual callable subgraphs"
+                        }
+                    );
+                    resolved.insert(name.clone(), source);
+                }
+                return Ok(SubgraphSource::Collection {
+                    collection: resolved,
+                });
+            }
+            SubgraphSource::Interface { source, inputs } => {
+                let source =
+                    self.source(source, scope, directory, available, depth + 1, bindings)?;
+                ensure!(
+                    !matches!(source, SubgraphSource::Collection { .. }),
+                    InvalidSnafu {
+                        reference: "interface",
+                        message: "an interface requires one subgraph"
+                    }
+                );
+                return Ok(match source {
+                    SubgraphSource::Interfaces { interfaces } => {
+                        ensure!(
+                            !matches!(interfaces.as_ref(), SubgraphSource::Collection { .. }),
+                            InvalidSnafu {
+                                reference: "interface",
+                                message: "an input projection requires one subgraph interface"
+                            }
+                        );
+                        SubgraphSource::Interfaces {
+                            interfaces: Box::new(SubgraphSource::Interface {
+                                source: interfaces,
+                                inputs: inputs.clone(),
+                            }),
+                        }
+                    }
+                    source => SubgraphSource::Interface {
+                        source: Box::new(source),
+                        inputs: inputs.clone(),
+                    },
+                });
+            }
+            SubgraphSource::Node { node } => {
+                let mut node = node.clone();
+                node.subgraphs.extend(bindings.clone());
+                self.nodes(
+                    std::slice::from_mut(&mut node),
+                    scope,
+                    directory,
+                    available,
+                    depth + 1,
+                    mf_runtime::WorkflowDefinitionVersion::CURRENT,
+                )?;
+                return Ok(SubgraphSource::Node { node });
+            }
+            SubgraphSource::Parameter { .. } => {
+                return InvalidSnafu {
+                    reference: "parameter",
+                    message: "unbound subgraph parameter",
+                }
+                .fail();
+            }
+            SubgraphSource::Path { path } => {
+                let path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    directory
+                        .context(InvalidSnafu {
+                            reference: path.display().to_string(),
+                            message: "relative subgraph sources require a source directory",
+                        })?
+                        .join(path)
+                };
+                return self
+                    .file(&path, available, bindings, depth + 1)
+                    .map(|definition| SubgraphSource::Definition {
+                        definition: Box::new(definition),
+                    });
+            }
+            SubgraphSource::Builtin { builtin } => {
+                let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
+                let registration = registry.get(builtin).context(InvalidSnafu {
+                    reference: builtin,
+                    message: "unknown built-in Flow; link its provider before resolving sources",
+                })?;
+                let mut definition = (registration.definition)().context(ParseSnafu {
+                    path: PathBuf::from(format!("builtin:{builtin}")),
+                })?;
+                for dependency in definition.dependencies.values_mut() {
+                    if let Some(selected) = available
+                        .values()
+                        .find(|selected| selected.package == dependency.package)
+                    {
+                        let features = std::mem::take(&mut dependency.features);
+                        let default_features = dependency.default_features;
+                        *dependency = selected.clone();
+                        dependency.features.extend(features);
+                        dependency.features.sort();
+                        dependency.features.dedup();
+                        dependency.default_features |= default_features;
+                    }
+                }
+                self.definition(
+                    &mut definition,
+                    None,
+                    available,
+                    depth + 1,
+                    builtin,
+                    bindings,
+                )?;
+                return Ok(SubgraphSource::Definition {
+                    definition: Box::new(definition),
+                });
+            }
+            SubgraphSource::Definition { definition } => *definition.clone(),
+        };
+        self.definition(
+            &mut definition,
+            directory,
+            available,
+            depth + 1,
+            "subgraph",
+            bindings,
+        )?;
+        Ok(SubgraphSource::Definition {
+            definition: Box::new(definition),
+        })
+    }
+
     fn nodes(
         &mut self,
         nodes: &mut [NodeDefinition],
-        flows: &BTreeMap<String, FlowSource>,
+        sources: &BTreeMap<String, SubgraphSource>,
         directory: Option<&Path>,
         available: &BTreeMap<String, NodeDependency>,
         depth: usize,
         version: mf_runtime::WorkflowDefinitionVersion,
     ) -> Result<(), FlowResolutionError> {
         for node in nodes {
+            let mut arguments = BTreeMap::new();
+            for (name, source) in std::mem::take(&mut node.subgraphs) {
+                ensure!(
+                    !name.trim().is_empty() && !name.contains(':'),
+                    InvalidSnafu {
+                        reference: &name,
+                        message: "subgraph parameter names must be nonblank and cannot contain colons"
+                    }
+                );
+                arguments.insert(
+                    name,
+                    self.source(
+                        &source,
+                        sources,
+                        directory,
+                        available,
+                        depth + 1,
+                        &BTreeMap::new(),
+                    )?,
+                );
+            }
+            // Freezing adapts Nodes into Flows; retain the original caller-facing identities.
+            if node.subgraph_arguments.is_empty() && !arguments.is_empty() {
+                node.subgraph_arguments = argument_descriptions(&arguments);
+            }
             if node.kind == CALL_KIND {
                 let mut config: CallConfig =
                     serde_json::from_value(node.config.clone()).context(ConfigurationSnafu {
@@ -314,85 +634,87 @@ impl Resolver {
                 ensure!(
                     version.supports_nested_flows(),
                     InvalidSnafu {
-                        reference: node.id.as_str(),
-                        message: "Flow calls require version 2026-10-25"
+                        reference: &config.flow,
+                        message: "Flow calls require version 2026-10-25 or later"
                     }
                 );
                 ensure!(
                     !config.flow.trim().is_empty(),
                     InvalidSnafu {
-                        reference: node.id.as_str(),
+                        reference: &config.flow,
                         message: "Flow alias must not be blank"
                     }
                 );
-                let mut child = if let Some(mut definition) = config.definition.take() {
-                    self.definition(
-                        &mut definition,
-                        directory,
-                        available,
-                        depth + 1,
-                        &config.flow,
-                    )?;
-                    definition
+                let source = if let Some(definition) = config.definition.take() {
+                    SubgraphSource::Definition { definition }
                 } else {
-                    let source = flows.get(&config.flow).ok_or_else(|| {
-                        InvalidSnafu {
+                    sources
+                        .get(&config.flow)
+                        .context(InvalidSnafu {
                             reference: &config.flow,
                             message: "unknown Flow alias",
-                        }
-                        .build()
-                    })?;
-                    Box::new(match source {
-                        FlowSource::Path { path } => {
-                            let directory = directory.with_context(|| InvalidSnafu { reference: &config.flow, message: "local Flow references require load_workflow or a source directory" })?;
-                            self.file(&directory.join(path), available, depth + 1)?
-                        }
-                        FlowSource::Builtin { builtin } => {
-                            let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
-                            let registration = registry.get(builtin).with_context(|| InvalidSnafu {
-                                reference: builtin, message: "unknown built-in Flow; link its provider before resolving sources"
-                            })?;
-                            let mut definition =
-                                (registration.definition)().context(ParseSnafu {
-                                    path: PathBuf::from(format!("builtin:{builtin}")),
-                                })?;
-                            for dependency in definition.dependencies.values_mut() {
-                                if let Some(selected) = available
-                                    .values()
-                                    .find(|selected| selected.package == dependency.package)
-                                {
-                                    let features = std::mem::take(&mut dependency.features);
-                                    let default_features = dependency.default_features;
-                                    *dependency = selected.clone();
-                                    dependency.features.extend(features);
-                                    dependency.features.sort();
-                                    dependency.features.dedup();
-                                    dependency.default_features |= default_features;
-                                }
-                            }
-                            self.definition(&mut definition, None, available, depth + 1, builtin)?;
-                            definition
-                        }
-                    })
+                        })?
+                        .clone()
                 };
+                let resolved =
+                    self.source(&source, sources, directory, available, depth, &arguments)?;
+                let Some((definition, node_source)) =
+                    resolved.frozen_definition(&WorkflowDefinition {
+                        version,
+                        execution: None,
+                        dependencies: available.clone(),
+                        subgraphs: Default::default(),
+                        nodes: vec![],
+                        edges: vec![],
+                        control_edges: vec![],
+                        outputs: vec![],
+                        order_edges: vec![],
+                        clusters: vec![],
+                    })
+                else {
+                    return InvalidSnafu {
+                        reference: &config.flow,
+                        message: "Flow calls require one callable subgraph",
+                    }
+                    .fail();
+                };
+                fn projections(
+                    source: &SubgraphSource,
+                    output: &mut Vec<BTreeMap<String, String>>,
+                ) {
+                    if let SubgraphSource::Interface { source, inputs } = source {
+                        projections(source, output);
+                        output.push(inputs.clone());
+                    }
+                }
+                if node_source {
+                    config.node_source = true;
+                }
+                let mut inputs = Vec::new();
+                projections(&resolved, &mut inputs);
+                if !inputs.is_empty() {
+                    config.input_projections = inputs;
+                }
+                let mut definition = Box::new(definition);
                 ensure!(
-                    child.execution.is_none() || version.supports_child_streams(),
+                    definition.execution.is_none() || version.supports_child_streams(),
                     InvalidSnafu {
                         reference: &config.flow,
                         message: "Flow calls require a terminal child interface"
                     }
                 );
-                // The resolved body is frozen in the plan, so runtime never follows a source path.
-                child.flows.clear();
-                config.definition = Some(child);
+                definition.subgraphs.clear();
+                config.definition = Some(definition);
                 node.config = serde_json::to_value(config).context(ConfigurationSnafu {
                     node: node.id.as_str(),
                 })?;
+            } else {
+                node.subgraphs = arguments;
             }
             if let Some(definition) = &mut node.loop_definition {
                 self.nodes(
                     &mut definition.body.nodes,
-                    flows,
+                    sources,
                     directory,
                     available,
                     depth,
@@ -406,7 +728,7 @@ impl Resolver {
                     })?;
                 self.nodes(
                     &mut config.body.nodes,
-                    flows,
+                    sources,
                     directory,
                     available,
                     depth,

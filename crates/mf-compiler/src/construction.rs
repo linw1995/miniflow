@@ -15,6 +15,11 @@ use std::{
 };
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
+    #[snafu(display("node `{definition_id}` input schemas: {source}"))]
+    InputSchemas {
+        definition_id: DefinitionId,
+        source: mf_runtime::SchemaContractError,
+    },
     #[snafu(display("invalid node-success dependency `{from_node}` -> `{to_node}`: {message}"))]
     InvalidSuccessDependency {
         from_node: String,
@@ -456,6 +461,11 @@ impl FlowBuilder {
         crate::validate_exclusive_inputs(&connections)?;
         let mut definition_indices = BTreeMap::new();
         for (index, node) in nodes.iter().enumerate() {
+            node.metadata
+                .validate_input_schemas()
+                .context(InputSchemasSnafu {
+                    definition_id: node.definition_id.clone(),
+                })?;
             ensure!(
                 node.metadata.stream_outputs.is_empty()
                     || matches!(node.node, Some(NodeExecution::TaskStream(_))),
@@ -886,7 +896,7 @@ pub fn instantiate_node_with_metadata(
         definition_id: DefinitionId::from(definition_id),
     })?;
     let node = registration
-        .instantiate(config)
+        .instantiate_subgraphs(definition_id, config, Value::Null, Default::default())
         .context(NodeConstructionSnafu {
             definition_id: DefinitionId::from(definition_id),
         })?;
@@ -901,6 +911,28 @@ pub fn instantiate_subgraph_with_metadata(
     options_json: &str,
     body: mf_runtime::PreparedSubgraph,
 ) -> Result<crate::FlowNode, WorkflowBuildError> {
+    let parameters = std::collections::BTreeMap::from([(
+        "body".into(),
+        mf_runtime::PreparedSubgraphParameter::Single(body),
+    )]);
+    instantiate_subgraphs_with_metadata(
+        registry,
+        definition_id,
+        kind,
+        config_json,
+        options_json,
+        parameters,
+    )
+}
+
+pub fn instantiate_subgraphs_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+    options_json: &str,
+    parameters: mf_runtime::PreparedSubgraphs,
+) -> Result<crate::FlowNode, WorkflowBuildError> {
     let Some(registration) = registry.get(kind) else {
         return UnknownKindSnafu {
             definition_id: DefinitionId::from(definition_id),
@@ -914,11 +946,11 @@ pub fn instantiate_subgraph_with_metadata(
         })
     };
     let prepared = registration
-        .instantiate_subgraph(
+        .instantiate_subgraphs(
             definition_id,
             parse(config_json)?,
             parse(options_json)?,
-            body,
+            parameters,
         )
         .context(NodeConstructionSnafu {
             definition_id: DefinitionId::from(definition_id),
@@ -1425,7 +1457,37 @@ pub fn build_stream_program(
             ) as std::sync::Arc<mf_runtime::StreamInputResolver>
         })
         .collect();
+    let mut graph = mf_runtime::WorkflowGraph {
+        inputs: BTreeMap::new(),
+        nodes: mf_runtime::WorkflowGraph::describe_nodes(nodes),
+        connections: Vec::new(),
+        controls: Vec::new(),
+    };
+    for (target, dependencies) in nodes.iter().zip(dependencies) {
+        for dependency in dependencies {
+            let dependency = dependency.borrowed();
+            let Some(output) = dependency.source_output() else {
+                continue;
+            };
+            if let Some(input) = dependency.input() {
+                graph.connections.push(EdgeDefinition {
+                    exclusive: dependency.exclusive(),
+                    from_node: dependency.source_node().into(),
+                    from_output: output.to_owned(),
+                    to_node: target.definition_id.clone(),
+                    to_input: input.into(),
+                });
+            } else {
+                graph.controls.push(crate::ControlEdgeDefinition {
+                    from_node: dependency.source_node().into(),
+                    from_output: output.to_owned().into(),
+                    to_node: target.definition_id.clone(),
+                });
+            }
+        }
+    }
     Ok(mf_runtime::StreamProgram {
+        graph: std::sync::Arc::new(graph),
         execution_domains,
         messages,
         emissions,
@@ -1527,6 +1589,11 @@ pub fn workflow_input_schema<'a, N: 'a>(
                             WorkflowInput {
                                 value_type: port.value_type.clone(),
                                 required: port.required,
+                                schema: node
+                                    .metadata
+                                    .input_schemas
+                                    .get(port.name.as_ref())
+                                    .cloned(),
                                 binding: node
                                     .metadata
                                     .input_bindings

@@ -1,0 +1,233 @@
+{
+  "version": "2026-10-31",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string",
+            "default": ""
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
+          "factor": {
+            "type": "int",
+            "default": 2,
+            "secret": false
+          },
+          "descriptions": {
+            "type": {
+              "map": "string"
+            },
+            "default": {
+              "multiply": "Multiply an integer by the configured factor.",
+              "add": "Add two integers."
+            },
+            "secret": false
+          },
+          "max_rounds": {
+            "type": "int",
+            "default": 4,
+            "secret": false
+          },
+          "max_tool_calls": {
+            "type": "int",
+            "default": 128,
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "tool_inputs",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "factor": "int"
+        },
+        "code": {
+          "value": "{'multiply':{'factor':factor}}"
+        }
+      },
+      "inputs": {
+        "factor": {
+          "from": {
+            "node": "params",
+            "port": "factor"
+          }
+        }
+      }
+    },
+    {
+      "id": "agent",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "agent"
+      },
+      "inputs": {
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        },
+        "params.prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "params.system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        },
+        "params.history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "params.descriptions": {
+          "from": {
+            "node": "params",
+            "port": "descriptions"
+          }
+        },
+        "params.max_rounds": {
+          "from": {
+            "node": "params",
+            "port": "max_rounds"
+          }
+        },
+        "params.max_tool_calls": {
+          "from": {
+            "node": "params",
+            "port": "max_tool_calls"
+          }
+        },
+        "params.tool_inputs": {
+          "from": {
+            "node": "tool_inputs",
+            "port": "value"
+          }
+        }
+      },
+      "subgraphs": {
+        "tools": {
+          "collection": {
+            "multiply": {
+              "source": {
+                "path": "flows/multiply-tool.json"
+              },
+              "inputs": {
+                "amount": "multiply_flow.multiply.amount",
+                "factor": "multiply_flow.multiply.factor"
+              }
+            },
+            "add": {
+              "node": {
+                "id": "add",
+                "kind": "builtin.code",
+                "config": {
+                  "language": "cel",
+                  "inputs": {
+                    "a": "int",
+                    "b": "int"
+                  },
+                  "code": {
+                    "content": "'The sum is ' + string(a + b)"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "agent",
+      "port": "answer",
+      "optional": true
+    },
+    {
+      "name": "status",
+      "node": "agent",
+      "port": "status"
+    },
+    {
+      "name": "text",
+      "node": "agent",
+      "port": "text"
+    },
+    {
+      "name": "usages",
+      "node": "agent",
+      "port": "usages"
+    },
+    {
+      "name": "error",
+      "node": "agent",
+      "port": "error"
+    }
+  ],
+  "subgraphs": {
+    "agent": {
+      "builtin": "mfn-llm.agent"
+    }
+  }
+}

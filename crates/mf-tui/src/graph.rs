@@ -27,6 +27,20 @@ use std::{
 
 const NODE_WIDTH: u32 = 24;
 const NODE_HEIGHT: u32 = 4;
+const ARGUMENT_WIDTH: u32 = 24;
+const MAX_VISIBLE_ARGUMENTS: usize = 4;
+
+fn argument_dimensions(node: &NodeDescription) -> (u32, u32) {
+    let mut width = 0;
+    let mut height = 0;
+    for arguments in node.subgraph_arguments.values() {
+        let count = arguments.len().min(MAX_VISIBLE_ARGUMENTS);
+        let columns = count.clamp(1, 2);
+        width = width.max(columns as u32 * (ARGUMENT_WIDTH + 1) + 1);
+        height += count.div_ceil(columns) as u32 * NODE_HEIGHT + 3;
+    }
+    (width, height)
+}
 const COLUMN_GAP: u32 = 10;
 const ROW_GAP: u32 = 2;
 const COMPONENT_GAP: u32 = 4;
@@ -174,7 +188,22 @@ impl GraphLayout {
         collapsed: &BTreeSet<usize>,
     ) -> Result<Self, GraphError> {
         let scope = Self::body_description(description, path)?;
-        Self::with_view_and_collapsed(&scope, view, collapsed)
+        let mut layout = Self::with_view_and_collapsed(&scope, view, collapsed)?;
+        layout.source_paths.fill(path.to_vec());
+        for (scope, _) in &mut layout.cluster_keys {
+            *scope = path.to_vec();
+        }
+        layout.body_nodes = layout
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                let mut child = path.to_vec();
+                child.push(node.id.clone());
+                description.body(&child).is_some().then_some(index)
+            })
+            .collect();
+        Ok(layout)
     }
 
     fn body_description(
@@ -369,6 +398,11 @@ impl GraphLayout {
             } else {
                 NODE_WIDTH
             };
+            let base_width = base_width.max(if children.contains_key(&node.id) {
+                0
+            } else {
+                argument_dimensions(node).0
+            });
             let width = node_cluster[node_index].map_or(base_width, |cluster| {
                 let label_width =
                     ratatui::text::Span::raw(&description.clusters[cluster].label).width() as u32;
@@ -624,6 +658,9 @@ impl GraphLayout {
             .max(outgoing_height)
             .max(incoming_height)
                 + annotation_heights[index];
+            if node.kind != CLUSTER_KIND && !children.contains_key(&node.id) {
+                node.rect.height += argument_dimensions(&description.nodes[sources[index][0]]).1;
+            }
             if let Some(child) = children.get(&node.id).filter(|_| node.kind != CLUSTER_KIND) {
                 node.rect.width = node.rect.width.max(child.width + 2);
                 node.rect.height += child.height + 1;
@@ -1860,39 +1897,7 @@ impl<'a> GraphView<'a> {
         );
     }
 
-    fn draw_node(&self, area: Rect, buffer: &mut Buffer, index: usize, node: &GraphNode) {
-        let mut rect = node.rect;
-        if rect.x >= self.offset.0.saturating_add(u32::from(area.width))
-            || rect.x.saturating_add(rect.width) <= self.offset.0
-            || rect.y >= self.offset.1.saturating_add(u32::from(area.height))
-            || rect.y.saturating_add(rect.height) <= self.offset.1
-        {
-            return;
-        }
-        let annotation = &self.layout.node_annotations[index];
-        let collapsed = self.layout.is_collapsed_cluster(index);
-        let annotation_y = if collapsed { rect.y + 3 } else { rect.y };
-        if !collapsed && !annotation.is_empty() {
-            let header = annotation.len() as u32 + 1;
-            rect.y += header;
-            rect.height -= header;
-        }
-        let observed = self
-            .layout
-            .sources(index)
-            .first()
-            .copied()
-            .filter(|_| !self.layout.is_collapsed_cluster(index))
-            .and_then(|source| self.observation(source));
-        let status = if self.layout.is_collapsed_cluster(index) {
-            self.display_status(index)
-        } else {
-            observed.map_or(NodeStatus::Pending, |item| item.status)
-        };
-        let style = node_style(status);
-        let border_style = self.layout.cluster_of(index).map_or(style, |cluster| {
-            cluster_style(self.layout.cluster_key(cluster).1)
-        });
+    fn draw_box(&self, area: Rect, buffer: &mut Buffer, rect: GraphRect, border_style: Style) {
         self.horizontal(
             area,
             buffer,
@@ -1932,6 +1937,144 @@ impl<'a> GraphView<'a> {
             (rect.x + rect.width - 1, rect.y + rect.height - 1, "┘"),
         ] {
             self.put(area, buffer, x, y, symbol, border_style);
+        }
+    }
+
+    fn draw_arguments(
+        &self,
+        area: Rect,
+        buffer: &mut Buffer,
+        parent: GraphRect,
+        node: &NodeDescription,
+    ) {
+        let style = Style::default().fg(Color::Blue);
+        let mut y = parent.y + parent.height + 1;
+        for (parameter, arguments) in &node.subgraph_arguments {
+            let count = arguments.len().min(MAX_VISIBLE_ARGUMENTS);
+            let columns = count.clamp(1, 2);
+            let frame = GraphRect {
+                x: parent.x,
+                y,
+                width: parent.width,
+                height: count.div_ceil(columns) as u32 * NODE_HEIGHT + 2,
+            };
+            self.draw_box(area, buffer, frame, style);
+            self.put(
+                area,
+                buffer,
+                frame.x + frame.width / 2,
+                frame.y - 1,
+                "┆",
+                style,
+            );
+            self.text(
+                area,
+                buffer,
+                GraphRect {
+                    x: frame.x + 2,
+                    width: frame.width - 4,
+                    height: 1,
+                    ..frame
+                },
+                &format!(
+                    " {}.{} · {} arguments ",
+                    display_line(&node.id),
+                    display_line(parameter),
+                    arguments.len()
+                ),
+                style,
+            );
+            for (index, argument) in arguments.iter().take(MAX_VISIBLE_ARGUMENTS).enumerate() {
+                let card = GraphRect {
+                    x: frame.x + 1 + (index % columns) as u32 * (ARGUMENT_WIDTH + 1),
+                    y: frame.y + 1 + (index / columns) as u32 * NODE_HEIGHT,
+                    width: ARGUMENT_WIDTH,
+                    height: NODE_HEIGHT,
+                };
+                self.draw_box(area, buffer, card, style);
+                for (row, text) in [&argument.name, &argument.kind].into_iter().enumerate() {
+                    self.text(
+                        area,
+                        buffer,
+                        GraphRect {
+                            x: card.x + 1,
+                            y: card.y + 1 + row as u32,
+                            width: card.width - 2,
+                            height: 1,
+                        },
+                        &display_line(text),
+                        Style::default().fg(if row == 0 {
+                            Color::Cyan
+                        } else {
+                            Color::DarkGray
+                        }),
+                    );
+                }
+            }
+            if arguments.len() > count {
+                self.text(
+                    area,
+                    buffer,
+                    GraphRect {
+                        x: frame.x + 2,
+                        y: frame.y + frame.height - 1,
+                        width: frame.width - 4,
+                        height: 1,
+                    },
+                    &format!(" +{} more ", arguments.len() - count),
+                    style,
+                );
+            }
+            y += frame.height + 1;
+        }
+    }
+
+    fn draw_node(&self, area: Rect, buffer: &mut Buffer, index: usize, node: &GraphNode) {
+        let mut rect = node.rect;
+        if rect.x >= self.offset.0.saturating_add(u32::from(area.width))
+            || rect.x.saturating_add(rect.width) <= self.offset.0
+            || rect.y >= self.offset.1.saturating_add(u32::from(area.height))
+            || rect.y.saturating_add(rect.height) <= self.offset.1
+        {
+            return;
+        }
+        let annotation = &self.layout.node_annotations[index];
+        let collapsed = self.layout.is_collapsed_cluster(index);
+        let annotation_y = if collapsed { rect.y + 3 } else { rect.y };
+        if !collapsed && !annotation.is_empty() {
+            let header = annotation.len() as u32 + 1;
+            rect.y += header;
+            rect.height -= header;
+        }
+        let observed = self
+            .layout
+            .sources(index)
+            .first()
+            .copied()
+            .filter(|_| !self.layout.is_collapsed_cluster(index))
+            .and_then(|source| self.observation(source));
+        let status = if self.layout.is_collapsed_cluster(index) {
+            self.display_status(index)
+        } else {
+            observed.map_or(NodeStatus::Pending, |item| item.status)
+        };
+        let style = node_style(status);
+        let border_style = self.layout.cluster_of(index).map_or(style, |cluster| {
+            cluster_style(self.layout.cluster_key(cluster).1)
+        });
+        let arguments = self
+            .layout
+            .sources(index)
+            .first()
+            .filter(|_| {
+                !self.layout.is_collapsed_cluster(index) && !self.layout.is_expanded_body(index)
+            })
+            .map(|source| &self.layout.all_nodes()[*source]);
+        let argument_height = arguments.map_or(0, |node| argument_dimensions(node).1);
+        rect.height -= argument_height;
+        self.draw_box(area, buffer, rect, border_style);
+        if let Some(arguments) = arguments.filter(|_| argument_height > 0) {
+            self.draw_arguments(area, buffer, rect, arguments);
         }
 
         let marker = status_marker(status, observed, self.elapsed_ns);
@@ -2337,6 +2480,7 @@ mod rendering_tests {
             all_nodes: nodes
                 .iter()
                 .map(|node| NodeDescription {
+                    subgraph_arguments: Default::default(),
                     id: node.id.clone(),
                     kind: node.kind.clone(),
                 })

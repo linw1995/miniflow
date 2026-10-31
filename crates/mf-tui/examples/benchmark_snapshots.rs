@@ -15,6 +15,7 @@ pub fn description(nodes: usize) -> WorkflowDescription {
         nodes: order
             .iter()
             .map(|id| NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: id.clone(),
                 kind: "benchmark.node".into(),
             })

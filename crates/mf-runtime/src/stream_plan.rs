@@ -68,6 +68,7 @@ pub struct StreamMessageProgram {
 
 /// Executable wiring and scheduling layout lowered before business execution.
 pub struct StreamProgram {
+    pub graph: Arc<crate::WorkflowGraph>,
     pub execution_domains: ExecutionDomains,
     pub messages: Vec<StreamMessageProgram>,
     pub emissions: Vec<Option<StreamEmissionBinding>>,
@@ -92,6 +93,7 @@ pub struct StreamPlan {
     nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>>,
     program: StreamProgram,
     input_schema: crate::WorkflowInputSchema,
+    graph: Arc<crate::WorkflowGraph>,
     generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
     emission_nodes: Vec<Option<FlowNode<()>>>,
 }
@@ -133,6 +135,12 @@ impl PreparedStream {
         program: StreamProgram,
         input_schema: crate::WorkflowInputSchema,
     ) -> Self {
+        let graph = Arc::new(crate::WorkflowGraph {
+            inputs: crate::WorkflowGraph::describe_inputs(&input_schema),
+            nodes: crate::WorkflowGraph::describe_nodes(&nodes),
+            connections: program.graph.connections.clone(),
+            controls: program.graph.controls.clone(),
+        });
         let mut operator_states = Vec::with_capacity(nodes.len());
         let emission_nodes = nodes
             .iter()
@@ -199,6 +207,7 @@ impl PreparedStream {
             nodes,
             program,
             input_schema,
+            graph,
             generated_domains: BTreeMap::new(),
             emission_nodes,
         };
@@ -226,6 +235,10 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
+    pub fn workflow_graph(&self) -> &Arc<crate::WorkflowGraph> {
+        &self.graph
+    }
+
     pub fn emission_node(&self, node: usize) -> &FlowNode<()> {
         self.emission_nodes[node]
             .as_ref()

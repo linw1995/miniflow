@@ -131,6 +131,7 @@ pub fn target_ports(ports: &[crate::PortSpec]) -> BTreeMap<String, WorkflowInput
                 WorkflowInput {
                     value_type: port.value_type.clone(),
                     required: port.required,
+                    schema: None,
                     binding: crate::InputBinding::default(),
                 },
             )

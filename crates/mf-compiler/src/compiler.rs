@@ -37,6 +37,11 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("node `{definition_id}` input schemas: {source}"))]
+    InputSchemas {
+        definition_id: DefinitionId,
+        source: mf_runtime::SchemaContractError,
+    },
     #[snafu(transparent)]
     FlowResolution { source: crate::FlowResolutionError },
     #[snafu(
@@ -92,7 +97,10 @@ pub enum WorkflowCompileError {
         definition_id: DefinitionId,
         kind: String,
     },
-    #[snafu(display("failed to construct node `{definition_id}` of kind `{kind}`: {source}"))]
+    #[snafu(
+        display("failed to construct node `{definition_id}` of kind `{kind}`: {source}"),
+        visibility(pub)
+    )]
     NodeConstruction {
         source: NodeBuildError,
         definition_id: DefinitionId,
@@ -536,6 +544,7 @@ pub fn prepare_definition_with_layouts(
             registry,
             body_layouts,
             path: Vec::new(),
+            parameter_layout_depth: 0,
         },
         None,
         false,
@@ -547,6 +556,7 @@ pub type ScopeLayouts = BTreeMap<
     (
         mf_runtime::ExecutionDomains,
         Vec<mf_runtime::SubgraphStreamOutput>,
+        std::sync::Arc<mf_runtime::WorkflowGraph>,
     ),
 >;
 
@@ -554,6 +564,7 @@ struct GraphPreparation<'a> {
     registry: &'a NodeRegistry,
     body_layouts: Option<&'a mut ScopeLayouts>,
     path: Vec<DefinitionId>,
+    parameter_layout_depth: usize,
 }
 
 fn prepare_graph(
@@ -598,7 +609,10 @@ fn prepare_graph(
     let incoming = incoming_dependencies(definition);
     let startup = definition.version.supports_startup_inputs()
         && enclosing.is_none()
-        && !allow_iteration_input;
+        && (!allow_iteration_input
+            || definition.nodes.iter().any(|node| {
+                node.kind == ITERATION_INPUT_KIND && node.config["input_mode"] == "arguments"
+            }));
     validate_base_metadata(definition, &nodes, &incoming, startup)?;
     if startup {
         crate::workflow_input_schema(
@@ -703,6 +717,11 @@ fn validate_base_metadata(
     };
     let mut output_index = BTreeMap::new();
     for node in nodes {
+        node.metadata
+            .validate_input_schemas()
+            .context(InputSchemasSnafu {
+                definition_id: node.definition_id.clone(),
+            })?;
         let ports = registrations[&node.definition_id];
         for (name, binding) in &ports.input_bindings {
             let port = ports
@@ -1221,8 +1240,11 @@ pub fn compile_resolved_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let (nodes, execution_order) = prepare_definition(definition, registry)?;
-    let definition = resolve_execution(definition, &nodes)?;
+    let mut layouts = ScopeLayouts::new();
+    let (nodes, execution_order) =
+        prepare_definition_with_layouts(definition, registry, Some(&mut layouts))?;
+    let definition = crate::subgraphs::freeze(definition, &layouts, &mut Vec::new())?;
+    let definition = resolve_execution(&definition, &nodes)?;
     let flow = crate::FlowBuilder::prepare(
         nodes,
         definition.edges.clone(),
@@ -1353,7 +1375,7 @@ pub fn normalize_plan(
         definition: WorkflowDefinition {
             version: definition.version,
             execution: definition.execution.clone(),
-            flows: definition.flows.clone(),
+            subgraphs: definition.subgraphs.clone(),
             dependencies: definition.dependencies.clone(),
             nodes,
             edges,
@@ -1408,12 +1430,15 @@ pub fn prepare_compiled_plan(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<(CompiledWorkflow, crate::FlowBuilder), WorkflowCompileError> {
-    let (nodes, canonical_order) = prepare_definition(&plan.definition, registry)?;
+    let mut layouts = ScopeLayouts::new();
+    let (nodes, canonical_order) =
+        prepare_definition_with_layouts(&plan.definition, registry, Some(&mut layouts))?;
+    let frozen = crate::subgraphs::freeze(&plan.definition, &layouts, &mut Vec::new())?;
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
     }
     let resolved = CompiledWorkflow {
-        definition: resolve_execution(&plan.definition, &nodes)?,
+        definition: resolve_execution(&frozen, &nodes)?,
         execution_order: canonical_order,
     };
     let builder = crate::FlowBuilder::prepare(
@@ -1601,6 +1626,8 @@ fn collect_loop_execution_orders(
                     definition_id: node.id.clone(),
                 })
                 .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?
+        } else if let Some(body) = node.parameter_body(definition) {
+            body
         } else {
             continue;
         };
@@ -1658,6 +1685,7 @@ pub fn resolve_nodes(
             registry,
             body_layouts: None,
             path: Vec::new(),
+            parameter_layout_depth: 0,
         },
         None,
         false,
@@ -1718,22 +1746,153 @@ fn prepare_stream_outputs(
         })
 }
 
-fn bind_subgraph_node(
+fn prepare_subgraph_parameters(
+    node: &crate::NodeDefinition,
+    parent: &WorkflowDefinition,
+    preparation: &mut GraphPreparation<'_>,
+    inside_iteration: bool,
+) -> Result<mf_runtime::PreparedSubgraphs, WorkflowCompileError> {
+    use mf_runtime::{PreparedSubgraphParameter, SubgraphSource};
+    let mut parameters = BTreeMap::new();
+    for (name, source) in &node.subgraphs {
+        match source {
+            SubgraphSource::Collection { .. } => {
+                parameters.insert(
+                    name.clone(),
+                    PreparedSubgraphParameter::Collection(BTreeMap::new()),
+                );
+            }
+            SubgraphSource::Interfaces { interfaces }
+                if matches!(interfaces.as_ref(), SubgraphSource::Collection { .. }) =>
+            {
+                parameters.insert(
+                    name.clone(),
+                    PreparedSubgraphParameter::Interfaces(BTreeMap::new()),
+                );
+            }
+            _ => {}
+        }
+    }
+    preparation.path.push(node.id.clone());
+    let result = (|| {
+        for member in node.subgraph_members() {
+            let crate::subgraphs::SourceDefinition {
+                definition: mut source,
+                node: single_node,
+                projections,
+            } = crate::subgraphs::source_definition(parent, member.source, None)?;
+            ensure!(
+                !inside_iteration || !crate::calls::contains_iteration_containers(&source)?,
+                InvalidCallSnafu {
+                    definition_id: node.id.clone(),
+                    message: "subgraphs inside Iteration cannot contain Loop or Iteration constructs",
+                }
+            );
+            let fake = crate::NodeDefinition {
+                subgraph_arguments: Default::default(),
+                id: member.id.clone(),
+                kind: mf_runtime::CALL_KIND.into(),
+                config: serde_json::json!({}),
+                subgraphs: Default::default(),
+                loop_definition: None,
+            };
+            if single_node {
+                let inner = crate::NodeDefinition {
+                    subgraph_arguments: Default::default(),
+                    id: member.call_id().into(),
+                    ..fake.clone()
+                };
+                preparation.path.push(member.id.clone());
+                preparation.parameter_layout_depth += 1;
+                let prepared =
+                    prepare_subgraph_body(&inner, preparation, &source, None, false, true);
+                preparation.path.pop();
+                preparation.parameter_layout_depth -= 1;
+                let prepared = prepared?;
+                source = crate::subgraphs::source_definition(
+                    parent,
+                    member.source,
+                    prepared.graph.as_deref(),
+                )?
+                .definition;
+            }
+            let wrapper = member.wrapper(parent, source);
+            preparation.parameter_layout_depth += 1;
+            let prepared = prepare_subgraph_body(&fake, preparation, &wrapper, None, false, false);
+            preparation.parameter_layout_depth -= 1;
+            let prepared = prepared?;
+            ensure!(
+                prepared.inputs.stdin.is_empty(),
+                InvalidCallSnafu {
+                    definition_id: node.id.clone(),
+                    message: "subgraph parameters cannot read stdin"
+                }
+            );
+            let wrapper_graph = prepared.graph.as_ref().expect("prepared parameter wrapper");
+            let fallback;
+            let source_graph = if let Some(graph) = wrapper_graph
+                .nodes
+                .get(&DefinitionId::from(member.call_id()))
+                .and_then(|node| node.subgraph.as_deref())
+                .filter(|_| single_node)
+            {
+                graph
+            } else {
+                fallback =
+                    crate::subgraphs::source_interface_graph(wrapper_graph, &member.call_id());
+                &fallback
+            };
+            let aliases = crate::subgraphs::aliases(source_graph, single_node, &projections)?
+                .into_iter()
+                .map(|(name, target)| (name, mf_runtime::output_id(&member.call_id(), &target)))
+                .collect();
+            let prepared = prepared.with_input_aliases(aliases);
+            if let Some(entry) = member.entry {
+                match parameters.get_mut(member.parameter) {
+                    Some(PreparedSubgraphParameter::Collection(collection)) => {
+                        collection.insert(entry.to_owned(), prepared);
+                    }
+                    Some(PreparedSubgraphParameter::Interfaces(interfaces)) => {
+                        interfaces.insert(entry.to_owned(), prepared.interface());
+                    }
+                    _ => unreachable!("collection initialized above"),
+                }
+            } else {
+                parameters.insert(
+                    member.parameter.to_owned(),
+                    if member.interface_only {
+                        PreparedSubgraphParameter::Interface(prepared.interface())
+                    } else {
+                        PreparedSubgraphParameter::Single(prepared)
+                    },
+                );
+            }
+        }
+        Ok(parameters)
+    })();
+    preparation.path.pop();
+    result
+}
+
+fn prepare_subgraph_body(
     node: &crate::NodeDefinition,
     preparation: &mut GraphPreparation<'_>,
     body: &WorkflowDefinition,
     enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
-    options: Value,
-) -> Result<FlowNode, WorkflowCompileError> {
+    export_node: bool,
+) -> Result<PreparedSubgraph, WorkflowCompileError> {
     ensure!(
-        preparation.path.len() < mf_telemetry::MAX_SCOPE_DEPTH,
+        preparation
+            .path
+            .len()
+            .saturating_sub(preparation.parameter_layout_depth)
+            < mf_telemetry::MAX_SCOPE_DEPTH,
         InvalidCallSnafu {
             definition_id: node.id.clone(),
             message: "combined container nesting exceeds twenty scopes"
         }
     );
-    let registration = registration_for(node, preparation.registry)?;
     preparation.path.push(node.id.clone());
     let prepared = prepare_graph(body, preparation, enclosing, allow_iteration_input);
     let path = preparation
@@ -1784,7 +1943,30 @@ fn bind_subgraph_node(
     }
     let mut terminal_outputs = Vec::new();
     let mut outputs = Vec::new();
-    for output in &body.outputs {
+    let inferred_outputs;
+    let exports = if export_node {
+        inferred_outputs = nodes
+            .iter()
+            .flat_map(|child| {
+                child
+                    .metadata
+                    .ports
+                    .outputs
+                    .iter()
+                    .chain(child.metadata.stream_outputs.iter())
+                    .map(|port| mf_runtime::WorkflowOutputDefinition {
+                        name: port.name.clone(),
+                        node: child.definition_id.clone(),
+                        port: port.name.clone(),
+                        optional: !port.required,
+                    })
+            })
+            .collect::<Vec<_>>();
+        &inferred_outputs
+    } else {
+        &body.outputs
+    };
+    for output in exports {
         let (index, source) = nodes
             .iter()
             .enumerate()
@@ -1833,7 +2015,12 @@ fn bind_subgraph_node(
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
         .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
         .context(FlowConstructionSnafu)?;
-    let builder = if node.kind == mf_runtime::CALL_KIND {
+    let builder = if node.kind == mf_runtime::CALL_KIND
+        || (node.kind == ITERATION_KIND
+            && matches!(
+                parse_config(node)?.input_mode,
+                mf_runtime::IterationInputMode::Arguments
+            )) {
         builder.with_workflow_inputs()?
     } else {
         builder
@@ -1855,7 +2042,11 @@ fn bind_subgraph_node(
             .collect();
         layouts.insert(
             path.expect("layout collection has a body path"),
-            (flow.execution_domains().clone(), streams),
+            (
+                flow.execution_domains().clone(),
+                streams,
+                flow.workflow_graph().clone(),
+            ),
         );
     }
     let flow = flow
@@ -1865,14 +2056,49 @@ fn bind_subgraph_node(
             kind: node.kind.clone(),
         })?;
     let input_schema = flow.input_schema().clone();
+    let graph = flow.workflow_graph().clone();
     let stream_ports = flow.stream_output_ports();
     let body =
         PreparedSubgraph::streaming(identities, outputs, stream_ports, move |state, sink| {
             flow.execute_with_sink(state, sink)
         })
-        .with_input_schema(input_schema);
+        .with_input_schema(input_schema)
+        .with_graph(graph);
+    Ok(body)
+}
+
+fn bind_subgraph_node(
+    node: &crate::NodeDefinition,
+    preparation: &mut GraphPreparation<'_>,
+    body: &WorkflowDefinition,
+    enclosing: Option<&BTreeMap<String, ValueType>>,
+    allow_iteration_input: bool,
+    options: Value,
+    mut parameters: mf_runtime::PreparedSubgraphs,
+) -> Result<FlowNode, WorkflowCompileError> {
+    let registration = registration_for(node, preparation.registry)?;
+    ensure!(
+        !parameters.contains_key("body"),
+        InvalidCallSnafu {
+            definition_id: node.id.clone(),
+            message: "inline body and body parameter cannot both be supplied"
+        }
+    );
+    let export_node = node.kind == mf_runtime::CALL_KIND && node.config["node_source"] == true;
+    let body = prepare_subgraph_body(
+        node,
+        preparation,
+        body,
+        enclosing,
+        allow_iteration_input,
+        export_node,
+    )?;
+    parameters.insert(
+        "body".into(),
+        mf_runtime::PreparedSubgraphParameter::Single(body),
+    );
     let instance = registration
-        .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
+        .instantiate_subgraphs(node.id.as_str(), node.config.clone(), options, parameters)
         .context(NodeConstructionSnafu {
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
@@ -1890,6 +2116,7 @@ fn resolve_nodes_in_scope(
         .nodes
         .iter()
         .map(|node| {
+            let parameters = prepare_subgraph_parameters(node, definition, preparation, allow_iteration_input)?;
             if node.kind == mf_runtime::CALL_KIND {
                 let body = crate::calls::body_definition(node)?;
                 crate::validate_execution(&body).context(StreamConstructionSnafu)?;
@@ -1917,7 +2144,7 @@ fn resolve_nodes_in_scope(
                         })?;
                     FlowNode::new(node.id.clone(), instance)
                 } else {
-                    bind_subgraph_node(node, preparation, &body, None, false, Value::Null)?
+                    bind_subgraph_node(node, preparation, &body, None, false, Value::Null, parameters)?
                 };
                 ensure!(prepared.metadata.stream_outputs.is_empty() || definition.version.supports_child_streams(), InvalidCallSnafu {
                     definition_id: node.id.clone(), message: "Flow call streams require version 2026-10-28"
@@ -1946,6 +2173,7 @@ fn resolve_nodes_in_scope(
                         Some(&types),
                         false,
                         options,
+                        parameters,
                     );
                 }
                 crate::LOOP_ASSIGN_KIND => {
@@ -1991,10 +2219,10 @@ fn resolve_nodes_in_scope(
                 }
                 let config = parse_config(node)?;
                 let body = body_definition(definition, &config).context(IterationValidationSnafu { definition_id: node.id.clone() })?;
-                return bind_subgraph_node(node, preparation, &body, None, true, Value::Null);
+                return bind_subgraph_node(node, preparation, &body, None, true, Value::Null, parameters);
             }
             let instance = registration_for(node, preparation.registry)?
-                .instantiate(node.config.clone())
+                .instantiate_subgraphs(node.id.as_str(), node.config.clone(), Value::Null, parameters)
                 .context(NodeConstructionSnafu {
                     definition_id: node.id.clone(),
                     kind: node.kind.clone(),

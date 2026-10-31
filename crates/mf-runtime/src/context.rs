@@ -96,6 +96,16 @@ impl Drop for ScopeGuard<'_> {
     }
 }
 
+struct WorkflowInputsGuard<'a> {
+    context: &'a mut ExecutionContext,
+    previous: crate::ExecutionInputs,
+}
+impl Drop for WorkflowInputsGuard<'_> {
+    fn drop(&mut self) {
+        self.context.inputs = std::mem::take(&mut self.previous);
+    }
+}
+
 struct NodeInvocationGuard<'a> {
     context: &'a mut ExecutionContext,
     previous: Option<crate::DefinitionId>,
@@ -377,6 +387,22 @@ impl ExecutionContext {
             }
         }
         Ok(outputs)
+    }
+
+    pub fn with_workflow_inputs<T>(
+        &mut self,
+        schema: &crate::WorkflowInputSchema,
+        arguments: crate::WorkflowArguments,
+        run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
+    ) -> Result<T, WorkflowRunError> {
+        let previous = std::mem::take(&mut self.inputs);
+        let guard = WorkflowInputsGuard {
+            context: self,
+            previous,
+        };
+        guard.context.inputs.set_arguments(arguments);
+        guard.context.inputs.bind_scoped(schema)?;
+        run(guard.context)
     }
 
     pub fn bind_workflow_inputs(

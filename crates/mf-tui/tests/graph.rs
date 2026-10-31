@@ -28,6 +28,7 @@ fn description() -> WorkflowDescription {
         nodes: nodes
             .iter()
             .map(|id| NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: (*id).into(),
                 kind: (*id).into(),
             })
@@ -72,6 +73,39 @@ fn description() -> WorkflowDescription {
         loop_bodies: Vec::new(),
         clusters: Vec::new(),
     }
+}
+
+#[test]
+fn argument_frames_keep_routing_identity_and_bound_large_and_empty_collections() {
+    let mut graph = description();
+    graph.version = WorkflowDescriptionVersion::V2026_10_31;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.nodes[0].subgraph_arguments = serde_json::from_value(serde_json::json!({
+        "empty":[],
+        "tools":(0..7).map(|index| serde_json::json!({"name":format!("tool-{index}"), "kind":"builtin.code"})).collect::<Vec<_>>()
+    })).unwrap();
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_eq!(layout.nodes().len(), graph.nodes.len());
+    assert_eq!(layout.all_nodes().len(), graph.nodes.len());
+    assert!(layout.display_index_for_node_id("tool-0").is_none());
+    assert_completed_geometry_is_safe(&layout);
+    let mut buffer = Buffer::empty(Rect::new(
+        0,
+        0,
+        layout.size().0 as u16,
+        layout.size().1 as u16,
+    ));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("empty · 0 arguments"), "{text}");
+    assert!(
+        text.contains("tools · 7 arguments") && text.contains("+3 more"),
+        "{text}"
+    );
+    assert!(text.contains("tool-0") && text.contains("tool-3"), "{text}");
+    assert!(!text.contains("tool-4"), "{text}");
 }
 
 fn inline_description() -> WorkflowDescription {
@@ -893,6 +927,7 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
     let mut graph = description();
     graph.version = WorkflowDescriptionVersion::V2026_09_29;
     graph.nodes = vec![NodeDescription {
+        subgraph_arguments: Default::default(),
         id: "repeat".into(),
         kind: "workflow.loop".into(),
     }];
@@ -904,10 +939,12 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
         path: vec!["repeat".into()],
         nodes: vec![
             NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "%loop".into(),
                 kind: "%loop".into(),
             },
             NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "child".into(),
                 kind: "fixture.child".into(),
             },
@@ -926,6 +963,10 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
     let layout = GraphLayout::from_loop_body(&graph, &["repeat".into()]).unwrap();
     assert_eq!(layout.nodes().len(), 2);
     assert_eq!(layout.edges().len(), 1);
+    let child = layout
+        .display_index_for_scoped_node(&["repeat".into()], "child")
+        .unwrap();
+    assert_eq!(layout.node_path(child), ["repeat"]);
     let mut nodes = vec![
         NodeObservation::pending("%loop", "%loop"),
         NodeObservation::pending("child", "fixture.child"),
@@ -1262,6 +1303,7 @@ fn body_clusters_collapse_within_their_scope() {
         mode: ExecutionMode::Single,
     });
     graph.nodes = vec![NodeDescription {
+        subgraph_arguments: Default::default(),
         id: "repeat".into(),
         kind: "workflow.loop".into(),
     }];
@@ -1272,14 +1314,17 @@ fn body_clusters_collapse_within_their_scope() {
         path: vec!["repeat".into()],
         nodes: vec![
             NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "%loop".into(),
                 kind: "%loop".into(),
             },
             NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "step".into(),
                 kind: "fixture.task".into(),
             },
             NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "next".into(),
                 kind: "fixture.task".into(),
             },
@@ -1361,6 +1406,7 @@ fn fan_graph(count: usize) -> WorkflowDescription {
     graph.nodes = names
         .iter()
         .map(|id| NodeDescription {
+            subgraph_arguments: Default::default(),
             id: id.clone(),
             kind: "fixture.node".into(),
         })
@@ -1464,6 +1510,7 @@ fn long_edges_use_passages_and_keep_isolated_components_disjoint() {
         to_input: "extra".into(),
     });
     graph.nodes.push(NodeDescription {
+        subgraph_arguments: Default::default(),
         id: "orphan".into(),
         kind: "fixture.orphan".into(),
     });
@@ -1869,6 +1916,7 @@ fn root_and_loop_body_share_routing_geometry() {
     let mut description = body_graph.clone();
     description.version = WorkflowDescriptionVersion::V2026_09_29;
     description.nodes = vec![NodeDescription {
+        subgraph_arguments: Default::default(),
         id: "repeat".into(),
         kind: "workflow.loop".into(),
     }];
@@ -1976,6 +2024,7 @@ fn parameter_graph() -> WorkflowDescription {
         execution: None,
         nodes: ["params", "settings"]
             .map(|id| NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: id.into(),
                 kind: "fixture.task".into(),
             })
@@ -2360,6 +2409,7 @@ fn graph_node_limit_rejects_oversized_descriptions_before_layout() {
     graph.control_edges.clear();
     graph.nodes = (0..=MAX_SESSION_NODES)
         .map(|index| NodeDescription {
+            subgraph_arguments: Default::default(),
             id: format!("node-{index}"),
             kind: "builtin.constant".into(),
         })
