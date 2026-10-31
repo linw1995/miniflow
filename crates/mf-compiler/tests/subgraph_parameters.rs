@@ -357,6 +357,16 @@ fn readonly_views_can_be_forwarded_and_projected_without_regaining_execution() {
 }
 
 #[test]
+fn readonly_views_cannot_be_called() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let value = flow_parent(json!({"source":node_source(),"readonly":true}));
+    let error = compile_definition(&decode(&value), &registry)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("callable subgraph"), "{error}");
+}
+
+#[test]
 fn legacy_callers_inherit_generic_subgraph_description_capabilities() {
     let value = json!({"version":"2026-10-28","dependencies":{},"nodes":[
         {"id":"outer","kind":"workflow.call","config":{"flow":"child","definition":node_parent(node_source())}}
