@@ -54,6 +54,13 @@ fn public_subgraph_contract_prepares_and_executes_terminal_nodes() {
         .execute(Inputs::new(), &mut ExecutionContext::default())
         .unwrap();
     assert_eq!(result.outputs, output());
+
+    let mut sink = Collect::default();
+    let result = task
+        .execute_with_sink(Inputs::new(), &mut ExecutionContext::default(), &mut sink)
+        .unwrap();
+    assert_eq!(result.outputs, output());
+    assert!(sink.emissions.is_empty());
 }
 
 #[derive(Default)]
