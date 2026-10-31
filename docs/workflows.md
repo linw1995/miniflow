@@ -127,6 +127,8 @@ parameters, cardinality mismatches, unresolved references, and invalid interface
 Argument and collection member names are nonblank and reserve `:` for scope qualification.
 Relative sources belong to their declaring file. The compiler freezes definitions, output selection,
 and input projections into standalone executables. Subgraph parameters are not JSON value ports.
+Compiled descriptions retain caller-facing argument names and Node/Flow kinds for graph presentation. These
+read-only identities add no execution nodes and contain no configuration, defaults, or runtime values.
 
 `{"interfaces":{"reference":"tools"}}` projects read-only interfaces from a binding. It contains
 port contracts and sensitivity, without executors, environment names, defaults, or runtime values.

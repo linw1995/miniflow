@@ -39,3 +39,8 @@ Generic callable parameter bodies SHALL use existing Call lifecycle records unde
 description version. Stream and terminal outputs SHALL retain their existing contracts. The example
 SHALL keep a real multiply Flow output connected to downstream formatting and bind factor externally.
 Earlier definitions SHALL retain their legacy Flow source wire representation and restrictions.
+
+Caller views SHALL retain graph argument identities without treating them as scheduled nodes or exposing values.
+Chat SHALL keep a folded overview and show passed tools in argument frames. Separate execution PiPs SHALL use the
+fully expanded graph, focus running leaves, distinguish concurrent Iteration items, deduplicate active ancestors,
+and adapt their visible count to available space without changing Inspector navigation or history.

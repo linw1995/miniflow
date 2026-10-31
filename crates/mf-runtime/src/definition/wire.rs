@@ -85,9 +85,11 @@ fn decode_scope(
                     .get("nodes")
                     .and_then(Value::as_array)
                     .is_none_or(|nodes| nodes.iter().all(|node| {
-                        node.get("subgraphs")
-                            .and_then(Value::as_object)
-                            .is_none_or(Map::is_empty)
+                        ["subgraphs", "subgraph_arguments"].iter().all(|field| {
+                            node.get(*field)
+                                .and_then(Value::as_object)
+                                .is_none_or(Map::is_empty)
+                        })
                     }))),
         InvalidSnafu {
             path,
@@ -285,9 +287,11 @@ fn encode_scope(
                     .get("nodes")
                     .and_then(Value::as_array)
                     .is_none_or(|nodes| nodes.iter().all(|node| {
-                        node.get("subgraphs")
-                            .and_then(Value::as_object)
-                            .is_none_or(Map::is_empty)
+                        ["subgraphs", "subgraph_arguments"].iter().all(|field| {
+                            node.get(*field)
+                                .and_then(Value::as_object)
+                                .is_none_or(Map::is_empty)
+                        })
                     }))),
         InvalidSnafu {
             path,

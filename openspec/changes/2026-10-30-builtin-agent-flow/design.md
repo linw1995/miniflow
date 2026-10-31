@@ -33,3 +33,9 @@ connects directly to `format_multiply.product`. Model rounds retain ordinary Loo
 Description version `2026-10-31` recognizes explicit callable parameter bodies independently of a
 provider's node kind. Existing Call lifecycle records, cancellation, worker/step budgets, typed error
 chains, optional streams, and finite-body restrictions continue to apply.
+
+Caller-facing argument identities retain names and Node/Flow kinds across specialization and freezing.
+They project into read-only description metadata and argument frames, without creating execution nodes
+or exposing source configuration. Chat keeps a folded overview plus separate fully expanded execution
+PiPs. The shared running-leaf selection deduplicates ancestors and distinguishes parallel Iteration
+items. Initial layouts share immutable storage; Inspector navigation and folding remain independent.

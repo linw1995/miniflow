@@ -898,6 +898,7 @@ fn parameter_preparations(
         );
         let wrapper = member.wrapper(parent, source);
         let fake = crate::NodeDefinition {
+            subgraph_arguments: Default::default(),
             id: member.id.clone(),
             kind: mf_runtime::CALL_KIND.into(),
             config: serde_json::json!({"flow":"parameter","definition":wrapper}),

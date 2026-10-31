@@ -1190,10 +1190,12 @@ mod tests {
             }),
             nodes: vec![
                 NodeDescription {
+                    subgraph_arguments: Default::default(),
                     id: "source".into(),
                     kind: "test.source".into(),
                 },
                 NodeDescription {
+                    subgraph_arguments: Default::default(),
                     id: "consume".into(),
                     kind: "test.consume".into(),
                 },
@@ -1536,6 +1538,7 @@ mod tests {
         use mf_telemetry::description::LoopBodyDescription;
         let mut graph = description();
         graph.nodes[1] = NodeDescription {
+            subgraph_arguments: Default::default(),
             id: "repeat".into(),
             kind: "workflow.loop".into(),
         };
@@ -1545,6 +1548,7 @@ mod tests {
             order_edges: Vec::new(),
             path: vec!["repeat".into()],
             nodes: vec![NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "%loop".into(),
                 kind: "%loop".into(),
             }],
@@ -1740,6 +1744,7 @@ mod tests {
             };
             graph.nodes[1].kind = container_kind.into();
             graph.loop_bodies[0].nodes[0] = NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "leaf".into(),
                 kind: "fixture.task".into(),
             };

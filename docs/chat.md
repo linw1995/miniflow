@@ -593,7 +593,11 @@ menu. The Flow panel is enabled by default; Ctrl+E or the command menu toggles i
 This preference lasts for the current application run, including new turns and conversation switches.
 When enabled, each execution shows a live Flow panel: wide terminals place the graph beside the conversation, narrower tall
 terminals place it below, and small terminals show a single status line. Resizing updates the layout automatically.
-The graph follows the latest executing node and shows node progress, elapsed time, and observation completeness. The
+The overview keeps Calls folded and displays passed Node/Flow arguments in labeled frames. Separate execution PiPs
+use the fully expanded nested graph and center on running leaf nodes. A single nested node gets one PiP; parallel
+nodes and Iteration items get additional PiPs as space permits, with `+N more` for overflow. The overview, execution
+PiPs, and Inspector keep independent navigation and history selections. Progress, elapsed time, and observation
+completeness remain visible. The
 last run remains visible until another turn starts or the conversation changes. Inspect current run opens the shared
 graph, trace, log, and data views; Esc returns to chat. Only the current turn's observation is retained, and changing
 conversation or starting another turn releases it.

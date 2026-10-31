@@ -645,7 +645,9 @@ available terminal area on every frame. It shows every running node when space p
 `+N more` overflow otherwise. Completed nodes leave the grid, and fewer than two running nodes removes
 it entirely. Expanded bodies with running descendants do not add duplicate PiPs for the same branch.
 PiP titles include the body path to distinguish nodes with the same ID in different scopes.
-Compact chat execution summaries retain their existing presentation.
+Chat keeps a folded overview with labeled Node/Flow argument frames. Its separate execution PiPs use the fully
+expanded graph and also appear for a single running nested leaf. Concurrent leaves and Iteration items share the
+same adaptive grid and ancestor deduplication. The overview remains separate from Inspector folding and history.
 Declared node clusters show a labeled boundary and a wrapped annotation inside the graph and in Details.
 Cluster boundaries, member node borders, and labels share a stable color from a six-color palette.
 Node titles and status markers retain their execution-state colors. Annotations wrap at word boundaries;

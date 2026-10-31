@@ -158,6 +158,40 @@ fn node_needs_resolution(node: &NodeDefinition) -> bool {
                 .is_some_and(|nodes| nodes.iter().any(wire_node_needs_resolution)))
 }
 
+fn argument_descriptions(
+    arguments: &BTreeMap<String, SubgraphSource>,
+) -> BTreeMap<String, Vec<mf_telemetry::description::SubgraphArgumentDescription>> {
+    fn source(value: &SubgraphSource) -> &SubgraphSource {
+        match value {
+            SubgraphSource::Interface { source: inner, .. }
+            | SubgraphSource::Interfaces { interfaces: inner } => source(inner),
+            source => source,
+        }
+    }
+    let describe = |name: &str, value: &SubgraphSource| {
+        mf_telemetry::description::SubgraphArgumentDescription {
+            name: name.to_owned(),
+            kind: match source(value) {
+                SubgraphSource::Node { node } => node.kind.clone(),
+                _ => CALL_KIND.to_owned(),
+            },
+        }
+    };
+    arguments
+        .iter()
+        .map(|(parameter, value)| {
+            let entries = match source(value) {
+                SubgraphSource::Collection { collection } => collection
+                    .iter()
+                    .map(|(name, value)| describe(name, value))
+                    .collect(),
+                value => vec![describe(parameter, value)],
+            };
+            (parameter.clone(), entries)
+        })
+        .collect()
+}
+
 impl Resolver {
     fn finish(&self, definition: &mut WorkflowDefinition) {
         for dependency in self.dependencies.values() {
@@ -587,6 +621,10 @@ impl Resolver {
                         &BTreeMap::new(),
                     )?,
                 );
+            }
+            // Freezing adapts Nodes into Flows; retain the original caller-facing identities.
+            if node.subgraph_arguments.is_empty() && !arguments.is_empty() {
+                node.subgraph_arguments = argument_descriptions(&arguments);
             }
             if node.kind == CALL_KIND {
                 let mut config: CallConfig =

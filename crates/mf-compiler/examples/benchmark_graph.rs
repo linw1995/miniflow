@@ -17,6 +17,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
         Value::String("x".repeat(payload))
     };
     let mut nodes = vec![NodeDefinition {
+        subgraph_arguments: Default::default(),
         subgraphs: Default::default(),
         id: id(0).into(),
         kind: "builtin.constant".into(),
@@ -26,6 +27,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
     let mut edges = Vec::new();
     for index in 1..count {
         nodes.push(NodeDefinition {
+            subgraph_arguments: Default::default(),
             subgraphs: Default::default(),
             id: id(index).into(),
             kind: "builtin.identity".into(),

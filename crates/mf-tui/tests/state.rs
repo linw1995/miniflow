@@ -175,10 +175,12 @@ fn graph() -> WorkflowDescription {
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
         nodes: vec![
             NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "a".into(),
                 kind: "fixture.source".into(),
             },
             NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "b".into(),
                 kind: "fixture.sink".into(),
             },
@@ -290,6 +292,7 @@ fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
         clusters: vec![],
     }];
     description.nodes = vec![NodeDescription {
+        subgraph_arguments: Default::default(),
         id: "call".into(),
         kind: "workflow.call".into(),
     }];
@@ -416,6 +419,7 @@ fn loop_graph() -> WorkflowDescription {
         version: WorkflowDescriptionVersion::V2026_09_29,
         workflow_id: graph().workflow_id,
         nodes: vec![NodeDescription {
+            subgraph_arguments: Default::default(),
             id: "repeat".into(),
             kind: "workflow.loop".into(),
         }],
@@ -428,10 +432,12 @@ fn loop_graph() -> WorkflowDescription {
             path: vec!["repeat".into()],
             nodes: vec![
                 NodeDescription {
+                    subgraph_arguments: Default::default(),
                     id: "%loop".into(),
                     kind: "%loop".into(),
                 },
                 NodeDescription {
+                    subgraph_arguments: Default::default(),
                     id: "step".into(),
                     kind: "fixture.sink".into(),
                 },
@@ -1195,6 +1201,7 @@ fn missing_ranges_and_diagnostic_history_have_fixed_display_budgets() {
     let mut description = graph();
     description.nodes = (0..130)
         .map(|position| NodeDescription {
+            subgraph_arguments: Default::default(),
             id: format!("node_{position}"),
             kind: "fixture.empty".into(),
         })
@@ -1235,6 +1242,7 @@ fn missing_ranges_and_diagnostic_history_have_fixed_display_budgets() {
         .nodes
         .extend(
             (130..=mf_tui::state::MAX_SESSION_NODES).map(|position| NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: format!("node_{position}"),
                 kind: "fixture.empty".into(),
             }),

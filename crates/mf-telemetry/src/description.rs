@@ -111,6 +111,16 @@ pub struct ClusterDescription {
 pub struct NodeDescription {
     pub id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subgraph_arguments: BTreeMap<String, Vec<SubgraphArgumentDescription>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// A caller-facing argument identity, never an independently scheduled node.
+pub struct SubgraphArgumentDescription {
+    pub name: String,
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -308,6 +318,27 @@ impl WorkflowDescription {
         }
         let mut nodes = BTreeMap::new();
         for node in &self.nodes {
+            require(
+                node.subgraph_arguments.is_empty() || self.version.supports_subgraph_parameters(),
+                "subgraph argument descriptions require a supported version",
+            )?;
+            for (parameter, arguments) in &node.subgraph_arguments {
+                require(
+                    !parameter.trim().is_empty(),
+                    "blank subgraph parameter name",
+                )?;
+                let mut names = BTreeSet::new();
+                for argument in arguments {
+                    require(
+                        !argument.name.trim().is_empty() && !argument.kind.trim().is_empty(),
+                        "blank subgraph argument name or kind",
+                    )?;
+                    require(
+                        names.insert(&argument.name),
+                        "duplicate subgraph argument name",
+                    )?;
+                }
+            }
             require(
                 !node.id.trim().is_empty() && !node.kind.trim().is_empty(),
                 "blank node ID or kind",

@@ -261,7 +261,7 @@ pub fn describe_definition(
             message: "compiled execution order names an unknown Loop body"
         }
     );
-    let description = WorkflowDescription {
+    let mut description = WorkflowDescription {
         order_edges: order_edges(&definition.order_edges),
         version: if definition.contains_subgraph_parameters() {
             WorkflowDescriptionVersion::V2026_10_31
@@ -312,8 +312,21 @@ pub fn describe_definition(
         loop_bodies,
         clusters: clusters(&definition.clusters),
     };
+    attach_subgraph_arguments(&definition.nodes, &mut description.nodes);
     description.validate()?;
     Ok(description)
+}
+
+fn attach_subgraph_arguments(definitions: &[crate::NodeDefinition], nodes: &mut [NodeDescription]) {
+    let arguments: BTreeMap<_, _> = definitions
+        .iter()
+        .map(|node| (node.id.as_str(), &node.subgraph_arguments))
+        .collect();
+    for node in nodes {
+        if let Some(arguments) = arguments.get(node.id.as_str()) {
+            node.subgraph_arguments = (*arguments).clone();
+        }
+    }
 }
 
 fn ordered_nodes<'a>(
@@ -345,6 +358,7 @@ fn ordered_nodes<'a>(
                         message: format!("compiled execution order names unknown node `{id}`"),
                     })?;
             Ok(NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: id.clone(),
                 kind: (*kind).into(),
             })
@@ -487,6 +501,10 @@ fn describe_loops(
             execution_order: order.to_vec(),
             clusters: clusters(body_clusters),
         });
+        attach_subgraph_arguments(
+            nodes,
+            &mut bodies.last_mut().expect("body was appended").nodes,
+        );
         let child = crate::WorkflowDefinition {
             version: parent.version,
             execution: None,

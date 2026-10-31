@@ -1380,8 +1380,12 @@ fn parallel_pip_areas(count: usize, area: Rect) -> (Vec<Rect>, usize) {
     if count < 2 {
         return (Vec::new(), 0);
     }
+    pip_areas(count, area, area.height / 2)
+}
+
+fn pip_areas(count: usize, area: Rect, reserved_height: u16) -> (Vec<Rect>, usize) {
     let max_columns = usize::from(area.width / PIP_MIN_WIDTH);
-    let max_rows = usize::from(area.height / 2 / PIP_MIN_HEIGHT);
+    let max_rows = usize::from(area.height.saturating_sub(reserved_height) / PIP_MIN_HEIGHT);
     let capacity = max_columns.saturating_mul(max_rows);
     let visible = count.min(capacity);
     if visible == 0 {
@@ -1416,19 +1420,21 @@ fn parallel_pip_areas(count: usize, area: Rect) -> (Vec<Rect>, usize) {
     (areas, count - visible)
 }
 
-fn draw_parallel_pips(
-    frame: &mut Frame<'_>,
-    area: Rect,
+struct ExecutionPip<'a> {
+    display: usize,
+    item: Option<&'a IterationItemObservation>,
+    title: String,
+}
+
+fn execution_pips<'a>(
     layout: &GraphLayout,
     observations: &[NodeObservation],
-    receiver: &ObservationReader,
-    elapsed_ns: u64,
-    iterations: Option<&crate::state::IterationSnapshot>,
-) {
+    iterations: Option<&'a crate::state::IterationSnapshot>,
+) -> Vec<ExecutionPip<'a>> {
     let active: Vec<_> = iterations
         .into_iter()
         .flat_map(|snapshot| &snapshot.items)
-        .filter(|item| !item.closed && !item.interrupted)
+        .filter(|item| !item.closed && !item.interrupted && item.outcome.is_none())
         .flat_map(|item| {
             item.nodes
                 .iter()
@@ -1471,16 +1477,16 @@ fn draw_parallel_pips(
         if let Some(display) = display
             && seen.insert((item.identity.clone(), display))
         {
-            views.push((
+            views.push(ExecutionPip {
                 display,
-                Some(item),
-                format!(
+                item: Some(item),
+                title: format!(
                     "{} · item {} · call {}",
                     display_text(&observed.node.id).replace('\n', " "),
                     item.identity.index.get(),
                     item.identity.invocation.get()
                 ),
-            ));
+            });
         }
     }
     for display in running_display_nodes(layout, observations) {
@@ -1495,11 +1501,60 @@ fn draw_parallel_pips(
             .map(|id| display_text(id).replace('\n', " "))
             .collect::<Vec<_>>()
             .join(" / ");
-        views.push((display, None, title));
+        views.push(ExecutionPip {
+            display,
+            item: None,
+            title,
+        });
     }
+    views
+}
+
+fn draw_parallel_pips(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    layout: &GraphLayout,
+    observations: &[NodeObservation],
+    receiver: &ObservationReader,
+    elapsed_ns: u64,
+    iterations: Option<&crate::state::IterationSnapshot>,
+) {
+    let views = execution_pips(layout, observations, iterations);
     let (areas, overflow) = parallel_pip_areas(views.len(), area);
+    draw_pips(
+        frame,
+        layout,
+        observations,
+        receiver,
+        elapsed_ns,
+        views,
+        (areas, overflow),
+    );
+}
+
+fn draw_pips(
+    frame: &mut Frame<'_>,
+    layout: &GraphLayout,
+    observations: &[NodeObservation],
+    receiver: &ObservationReader,
+    elapsed_ns: u64,
+    views: Vec<ExecutionPip<'_>>,
+    placement: (Vec<Rect>, usize),
+) {
+    let (areas, overflow) = placement;
     let visible = areas.len();
-    for (position, ((display, item, title), rect)) in views.into_iter().zip(areas).enumerate() {
+    for (
+        position,
+        (
+            ExecutionPip {
+                display,
+                item,
+                title,
+            },
+            rect,
+        ),
+    ) in views.into_iter().zip(areas).enumerate()
+    {
         let node = &layout.nodes()[display];
         let mut block = Block::default()
             .title(format!(" Running: {title} "))
@@ -2442,9 +2497,9 @@ struct GraphViewport {
 
 pub struct ObservationView {
     description: WorkflowDescription,
-    root: GraphLayout,
+    root: Arc<GraphLayout>,
     execution: GraphLayout,
-    execution_bodies: BTreeMap<Vec<String>, GraphLayout>,
+    execution_expanded: Arc<GraphLayout>,
     expanded: BTreeSet<Vec<String>>,
     viewports: BTreeMap<ConnectionView, GraphViewport>,
     collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
@@ -2452,27 +2507,6 @@ pub struct ObservationView {
     state: ViewState,
 }
 impl ObservationView {
-    fn execution_bodies(
-        description: &WorkflowDescription,
-        view: ConnectionView,
-        collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
-    ) -> Result<BTreeMap<Vec<String>, GraphLayout>, RunError> {
-        description
-            .loop_bodies
-            .iter()
-            .map(|body| {
-                let layout = GraphLayout::from_body_with_view_and_collapsed(
-                    description,
-                    &body.path,
-                    view,
-                    &collapsed.get(&body.path).cloned().unwrap_or_default(),
-                )
-                .context(GraphSnafu)?;
-                Ok((body.path.clone(), layout))
-            })
-            .collect()
-    }
-
     pub fn new(description: &WorkflowDescription) -> Result<Self, RunError> {
         let expanded = description
             .loop_bodies
@@ -2481,21 +2515,19 @@ impl ObservationView {
             .collect();
         let execution =
             GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
-        let root = GraphLayout::with_expanded_bodies(
-            description,
-            ConnectionView::Execution,
-            &expanded,
-            &BTreeMap::new(),
-        )
-        .context(GraphSnafu)?;
+        let root = Arc::new(
+            GraphLayout::with_expanded_bodies(
+                description,
+                ConnectionView::Execution,
+                &expanded,
+                &BTreeMap::new(),
+            )
+            .context(GraphSnafu)?,
+        );
         Ok(Self {
             description: description.clone(),
             execution,
-            execution_bodies: Self::execution_bodies(
-                description,
-                ConnectionView::Execution,
-                &BTreeMap::new(),
-            )?,
+            execution_expanded: Arc::clone(&root),
             root,
             expanded,
             viewports: BTreeMap::new(),
@@ -2545,7 +2577,7 @@ impl ObservationView {
         self.state.selected = root
             .display_index_for_scoped_node(parent, id)
             .unwrap_or_default();
-        self.root = root;
+        self.root = Arc::new(root);
         self.expanded = expanded;
         self.state.sync_scope(&self.root);
         self.state.reveal_selected = true;
@@ -2581,20 +2613,6 @@ impl ObservationView {
             &folded,
         )
         .context(GraphSnafu)?;
-        let execution = if path.is_empty() {
-            Some(
-                GraphLayout::with_view_and_collapsed(
-                    &self.description,
-                    self.root.connection_view(),
-                    folded.get(&path).expect("updated cluster scope exists"),
-                )
-                .context(GraphSnafu)?,
-            )
-        } else {
-            None
-        };
-        let execution_bodies =
-            Self::execution_bodies(&self.description, self.root.connection_view(), &folded)?;
         self.state.selected = if collapsed {
             self.cluster_focus
                 .get(&(path.clone(), index))
@@ -2604,12 +2622,8 @@ impl ObservationView {
             anchor_display(&root, &anchor)
         }
         .unwrap_or_default();
-        self.root = root;
+        self.root = Arc::new(root);
         self.collapsed = folded;
-        if let Some(execution) = execution {
-            self.execution = execution;
-        }
-        self.execution_bodies = execution_bodies;
         self.state.sync_scope(&self.root);
         self.state.reveal_selected = true;
         self.state.details_offset = 0;
@@ -2648,18 +2662,24 @@ impl ObservationView {
             &self.collapsed,
         )
         .context(GraphSnafu)?;
-        let execution = GraphLayout::with_view_and_collapsed(
+        let execution = GraphLayout::with_view(&self.description, root.connection_view())
+            .context(GraphSnafu)?;
+        let execution_expanded = GraphLayout::with_expanded_bodies(
             &self.description,
             root.connection_view(),
-            &self.collapsed.get(&Vec::new()).cloned().unwrap_or_default(),
+            &self
+                .description
+                .loop_bodies
+                .iter()
+                .map(|body| body.path.clone())
+                .collect(),
+            &BTreeMap::new(),
         )
         .context(GraphSnafu)?;
-        let execution_bodies =
-            Self::execution_bodies(&self.description, root.connection_view(), &self.collapsed)?;
         self.save_viewport();
-        self.root = root;
+        self.root = Arc::new(root);
         self.execution = execution;
-        self.execution_bodies = execution_bodies;
+        self.execution_expanded = Arc::new(execution_expanded);
         self.restore_viewport();
         if let Some(anchor) = anchor
             && let Some(selected) = anchor_display(&self.root, &anchor)
@@ -2784,25 +2804,8 @@ impl ObservationView {
         elapsed: Duration,
         phase: &str,
     ) {
-        let path = if let Some(latest) = &snapshot.iterations.latest_node_event
-            && latest.revision > snapshot.latest_node_revision
-        {
-            latest.context.body_path.clone()
-        } else {
-            snapshot
-                .latest_node_event
-                .as_ref()
-                .map(|latest| {
-                    latest
-                        .node
-                        .path
-                        .iter()
-                        .map(|entry| entry.node_id().to_owned())
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let layout = self.execution_bodies.get(&path).unwrap_or(&self.execution);
+        let layout = &self.execution;
+        let expanded = &self.execution_expanded;
         // Live following must not inherit the inspector's folded scopes or history selection.
         let mut state = ViewState::default();
         state.follow_latest(snapshot, layout);
@@ -2811,8 +2814,30 @@ impl ObservationView {
             &self.description,
             snapshot,
             &BTreeMap::new(),
-            &state.iteration_items,
+            &BTreeMap::new(),
         );
+        let mut detail_state = ViewState::default();
+        detail_state.follow_latest(snapshot, expanded);
+        let detail_nodes = inline_observations_with_items(
+            expanded,
+            &self.description,
+            snapshot,
+            &BTreeMap::new(),
+            &detail_state.iteration_items,
+        );
+        let mut views: Vec<_> = execution_pips(expanded, &detail_nodes, Some(&snapshot.iterations))
+            .into_iter()
+            .filter(|view| !expanded.node_path(view.display).is_empty())
+            .collect();
+        for view in &mut views {
+            let node = &expanded.nodes()[view.display];
+            let scope = expanded.node_path(view.display).join(" / ");
+            if view.item.is_none() {
+                view.title = node.id.clone();
+            }
+            view.title.push_str(&format!(" | {scope}"));
+        }
+        let nested_count = views.len();
         let completed = nodes
             .iter()
             .filter(|node| {
@@ -2826,7 +2851,6 @@ impl ObservationView {
             .nodes()
             .get(state.selected)
             .map_or("", |node| node.id.as_str());
-        let scope = layout.node_path(state.selected).join(" / ");
         let [header, graph, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
@@ -2835,25 +2859,58 @@ impl ObservationView {
         .areas(area);
         frame.render_widget(
             Paragraph::new(format!(
-                "Flow: {phase} | {current} | {completed}/{} | {:.1}s | {scope}",
+                "Flow: {phase} | {current} | {completed}/{} | {:.1}s",
                 nodes.len(),
-                elapsed.as_secs_f64(),
+                elapsed.as_secs_f64()
             )),
             header,
         );
-        state.reveal(layout, graph);
+        let overview_height = layout.nodes().get(state.selected).map_or(4, |node| {
+            node.rect.height.min(u32::from(graph.height)) as u16
+        });
+        let reserved = (graph.height / 2)
+            .min(graph.height.saturating_sub(PIP_MIN_HEIGHT))
+            .max(overview_height);
+        let placement = pip_areas(nested_count, graph, reserved);
+        let overflow = placement.1;
+        let overview = Rect {
+            height: placement
+                .0
+                .first()
+                .map_or(graph.height, |area| area.y.saturating_sub(graph.y)),
+            ..graph
+        };
+        state.reveal(layout, overview);
+        let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
         frame.render_widget(
             GraphView::new(layout)
                 .reader(reader)
                 .nodes(&nodes)
                 .selected(state.selected)
                 .offset(state.offset.0, state.offset.1)
-                .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64),
-            graph,
+                .elapsed_ns(elapsed_ns),
+            overview,
         );
+        draw_pips(
+            frame,
+            expanded,
+            &detail_nodes,
+            reader,
+            elapsed_ns,
+            views,
+            placement,
+        );
+        let more = if overflow > 0 {
+            format!(" | +{overflow} more")
+        } else {
+            String::new()
+        };
         frame.render_widget(
-            Paragraph::new(format!("Delivery: {:?}", snapshot.lifecycle.completeness))
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!(
+                "Delivery: {:?} | Nested: {nested_count}{more}",
+                snapshot.lifecycle.completeness
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
             footer,
         );
     }
@@ -3068,7 +3125,7 @@ mod tests {
         };
         serde_json::from_value(serde_json::json!({
             "version":"2026-10-31", "workflow_id":format!("sha256:{}", "9".repeat(64)),
-            "execution":{"mode":"single"}, "nodes":[{"id":"agent","kind":"workflow.call"}],
+            "execution":{"mode":"single"}, "nodes":[{"id":"agent","kind":"workflow.call", "subgraph_arguments":{"tools":[{"name":"add","kind":"builtin.code"},{"name":"multiply","kind":"workflow.call"}]}}],
             "execution_order":["agent"], "data_edges":[], "control_edges":[],
             "loop_bodies":[
                 body(&["agent"], &[("rounds", "workflow.loop")]),
@@ -3081,9 +3138,19 @@ mod tests {
     }
 
     fn render_execution_snapshot(view: &ObservationView, snapshot: &StateSnapshot) -> String {
+        render_execution_snapshot_at(view, snapshot, 180, 32)
+    }
+
+    fn render_execution_snapshot_at(
+        view: &ObservationView,
+        snapshot: &StateSnapshot,
+        width: u16,
+        height: u16,
+    ) -> String {
         let receiver = LoopbackReceiver::bind(view.description.clone(), RunId::new()).unwrap();
         let reader = receiver.reader();
-        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(180, 20)).unwrap();
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 view.render_execution_snapshot(
@@ -3096,10 +3163,11 @@ mod tests {
                 );
             })
             .unwrap();
+
         let buffer = terminal.backend().buffer();
-        (0..20)
+        (0..height)
             .map(|y| {
-                (0..180)
+                (0..width)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             })
@@ -3161,12 +3229,14 @@ mod tests {
         view.state.offset = (400, 500);
         view.state.pass_offset = 1;
         let text = render_execution_snapshot(&view, &session.snapshot());
-        assert!(text.contains("Flow: Running | chat"), "{text}");
+        assert!(text.contains("Flow: Running | agent"), "{text}");
+        assert!(text.contains("Running: chat"), "{text}");
+        assert!(text.contains("tools · 2 arguments"), "{text}");
+        assert!(text.contains("add") && text.contains("multiply"), "{text}");
+        assert_eq!(view.execution.nodes().len(), 1);
+        assert!(!view.execution.is_expanded_body(0));
         assert!(text.contains("agent / rounds"), "{text}");
-        assert!(
-            text.contains("builtin.llm") && !text.contains("branches:multiply"),
-            "{text}"
-        );
+        assert!(text.contains("builtin.llm"), "{text}");
         assert_eq!(view.state.offset, (400, 500));
         assert_eq!(view.state.pass_offset, 1);
         assert!(!view.expanded.contains(&vec!["agent".into()]));
@@ -3211,7 +3281,7 @@ mod tests {
                 context: IterationContext {
                     body_path,
                     sequence: Count::try_from(2).unwrap(),
-                    ..context
+                    ..context.clone()
                 },
                 event: IterationEvent::NodeStarted {
                     node: NodeIdentity {
@@ -3226,19 +3296,96 @@ mod tests {
             .unwrap();
         let view = ObservationView::new(&description).unwrap();
         let text = render_execution_snapshot(&view, &session.snapshot());
-        assert!(text.contains("Flow: Running | multiply"), "{text}");
+        assert!(text.contains("Flow: Running | agent"), "{text}");
+        assert!(
+            text.contains("Running: multiply · item 0 · call 1"),
+            "{text}"
+        );
+        assert!(text.contains("tools · 2 arguments"), "{text}");
         assert!(
             text.contains("agent / rounds / each / invoke / branches:multiply"),
             "{text}"
         );
+        assert!(text.contains("fixture.work"), "{text}");
+        for (width, height) in [(80, 32), (80, 24), (40, 16), (20, 6)] {
+            let text = render_execution_snapshot_at(&view, &session.snapshot(), width, height);
+            assert!(text.contains("Flow: Running"), "{text}");
+            assert_eq!(
+                text.matches(" Running: ").count(),
+                usize::from(width >= PIP_MIN_WIDTH && height >= 21),
+                "{text}"
+            );
+        }
+        let mut sequence = 2;
+        for index in 1..9 {
+            let mut context = IterationContext {
+                index: Count::try_from(index).unwrap(),
+                ..context.clone()
+            };
+            sequence += 1;
+            context.sequence = Count::try_from(sequence).unwrap();
+            session
+                .apply_iteration(IterationRecord {
+                    context: context.clone(),
+                    event: IterationEvent::ItemStarted,
+                    correlation: None,
+                })
+                .unwrap();
+            for (id, kind) in [
+                ("invoke", "builtin.dispatch"),
+                ("branches:multiply", "workflow.call"),
+                ("multiply", "fixture.work"),
+            ] {
+                sequence += 1;
+                context.sequence = Count::try_from(sequence).unwrap();
+                session
+                    .apply_iteration(IterationRecord {
+                        context: context.clone(),
+                        event: IterationEvent::NodeStarted {
+                            node: NodeIdentity {
+                                id: id.into(),
+                                kind: kind.into(),
+                                path: Vec::new(),
+                            },
+                            selected_inputs: Vec::new(),
+                        },
+                        correlation: None,
+                    })
+                    .unwrap();
+                context.body_path.push(id.into());
+            }
+            if index == 1 {
+                let text = render_execution_snapshot(&view, &session.snapshot());
+                assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+                assert!(text.contains("item 0") && text.contains("item 1"), "{text}");
+            }
+        }
+        let text = render_execution_snapshot(&view, &session.snapshot());
+        assert_eq!(text.matches(" Running: ").count(), 5, "{text}");
+        assert!(text.contains("Nested: 9 | +4 more"), "{text}");
         assert!(
-            text.contains("fixture.work") && text.contains("format"),
+            !text.contains("Running: invoke") && !text.contains("Running: branches"),
             "{text}"
         );
-        assert!(
-            !text.contains("builtin.dispatch") && !text.contains("builtin.llm"),
-            "{text}"
-        );
+        let text = render_execution_snapshot_at(&view, &session.snapshot(), 80, 24);
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+        assert!(text.contains("+7 more"), "{text}");
+        session
+            .apply_iteration(IterationRecord {
+                context: IterationContext {
+                    sequence: Count::try_from(sequence + 1).unwrap(),
+                    ..context
+                },
+                event: IterationEvent::ItemFinished {
+                    outcome: mf_telemetry::event::Outcome::Succeeded,
+                    duration_ns: None,
+                },
+                correlation: None,
+            })
+            .unwrap();
+        let text = render_execution_snapshot(&view, &session.snapshot());
+        assert!(text.contains("Nested: 8"), "{text}");
+        assert!(!text.contains("item 0"), "{text}");
         assert_eq!(view.state.selected, 0);
     }
 
@@ -3249,6 +3396,7 @@ mod tests {
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
             nodes: (0..count)
                 .map(|index| NodeDescription {
+                    subgraph_arguments: Default::default(),
                     id: format!("parallel-{index}"),
                     kind: "fixture.task".into(),
                 })
@@ -3825,6 +3973,7 @@ mod tests {
             }),
             nodes: ["read", "parse", "publish"]
                 .map(|id| NodeDescription {
+                    subgraph_arguments: Default::default(),
                     id: id.into(),
                     kind: "fixture.task".into(),
                 })
@@ -3860,6 +4009,12 @@ mod tests {
         view.toggle_cluster().unwrap();
         assert!(view.root.clusters()[0].collapsed);
         assert!(view.root.is_collapsed_cluster(view.state.selected));
+        assert!(
+            view.execution
+                .clusters()
+                .iter()
+                .all(|cluster| !cluster.collapsed)
+        );
         assert_eq!(view.root.sources(view.state.selected), &[0, 1]);
 
         view.toggle_cluster().unwrap();
@@ -3890,6 +4045,12 @@ mod tests {
             view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
             assert!(view.state.graph_notice.is_none());
             assert!(view.root.is_collapsed_cluster(view.state.selected));
+            assert!(
+                view.execution
+                    .clusters()
+                    .iter()
+                    .all(|cluster| !cluster.collapsed)
+            );
         }
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert!(view.state.graph_notice.is_none());
@@ -4006,6 +4167,7 @@ mod tests {
         use mf_telemetry::event::{NodeIdentity, Outcome};
         let mut description = scope_fixture();
         description.nodes.push(NodeDescription {
+            subgraph_arguments: Default::default(),
             id: "completed".into(),
             kind: "fixture.task".into(),
         });
@@ -4209,6 +4371,7 @@ mod tests {
             mode: ExecutionMode::Single,
         });
         description.loop_bodies[0].nodes.push(NodeDescription {
+            subgraph_arguments: Default::default(),
             id: "nested".into(),
             kind: "workflow.call".into(),
         });
@@ -4545,10 +4708,12 @@ mod tests {
         let mut description = scope_fixture();
         description.nodes = vec![
             NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "source".into(),
                 kind: "fixture.task".into(),
             },
             NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "target".into(),
                 kind: "fixture.task".into(),
             },
@@ -4788,6 +4953,7 @@ mod tests {
         description.nodes = ["source", "target"]
             .into_iter()
             .map(|id| NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: id.into(),
                 kind: "fixture.node".into(),
             })
@@ -5073,6 +5239,7 @@ mod tests {
             version: WorkflowDescriptionVersion::V2026_09_29,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64))).unwrap(),
             nodes: vec![NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: "repeat".into(),
                 kind: "workflow.loop".into(),
             }],
@@ -5085,10 +5252,12 @@ mod tests {
                 path: vec!["repeat".into()],
                 nodes: vec![
                     NodeDescription {
+                        subgraph_arguments: Default::default(),
                         id: "%loop".into(),
                         kind: "%loop".into(),
                     },
                     NodeDescription {
+                        subgraph_arguments: Default::default(),
                         id: "child".into(),
                         kind: "fixture.node".into(),
                     },

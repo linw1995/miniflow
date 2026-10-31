@@ -33,7 +33,7 @@ fn execution_areas(body: Rect) -> (Rect, Rect) {
     } else if body.height >= 18 {
         let [chat, panel] = Layout::vertical([
             Constraint::Min(10),
-            Constraint::Length((body.height / 3).clamp(8, 14)),
+            Constraint::Length(body.height.saturating_sub(10).clamp(16, 32)),
         ])
         .areas(body);
         (chat, panel)

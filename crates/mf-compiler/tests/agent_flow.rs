@@ -68,6 +68,38 @@ fn terminal(records: &[Value]) -> &Value {
 }
 
 #[test]
+fn agent_argument_descriptions_survive_freezing_without_becoming_execution_nodes() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition(), &registry).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    let agent = description
+        .nodes
+        .iter()
+        .find(|node| node.id == "agent")
+        .unwrap();
+    let tools = &agent.subgraph_arguments["tools"];
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool.kind.as_str()))
+            .collect::<Vec<_>>(),
+        [("add", "builtin.code"), ("multiply", "workflow.call")]
+    );
+    assert_eq!(description.nodes.len(), 3);
+    assert_eq!(description.static_node_count().unwrap().get(), 34);
+    let manifest = plan.manifest(&registry).unwrap();
+    assert_eq!(manifest.description().unwrap(), description);
+    let replanned = mf_compiler::plan_definition(&manifest.definition).unwrap();
+    assert_eq!(
+        mf_compiler::describe_compiled(&replanned).unwrap(),
+        description
+    );
+    let encoded = serde_json::to_value(&agent.subgraph_arguments).unwrap();
+    assert!(!encoded.to_string().contains("api_key"));
+    assert!(!encoded.to_string().contains("factor"));
+}
+
+#[test]
 fn builtin_agent_routes_mixed_and_repeated_calls_through_one_iteration() {
     let server = Server::start(vec![tool_reply(), Reply::stream_text("done")]);
     let results = execute(&server, 4);

@@ -289,6 +289,7 @@ impl SubgraphMember<'_> {
             dependencies: parent.dependencies.clone(),
             subgraphs: Default::default(),
             nodes: vec![NodeDefinition {
+                subgraph_arguments: Default::default(),
                 id: name.clone().into(),
                 kind: CALL_KIND.into(),
                 config: serde_json::json!({"flow":self.entry.unwrap_or(self.parameter),"definition":body}),
@@ -334,6 +335,10 @@ pub struct NodeDefinition {
     pub subgraphs: BTreeMap<String, SubgraphSource>,
     #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
     pub loop_definition: Option<Box<LoopDefinition>>,
+    /// Retain caller-facing identities after argument specialization and Node-to-Flow freezing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subgraph_arguments:
+        BTreeMap<String, Vec<mf_telemetry::description::SubgraphArgumentDescription>>,
 }
 
 impl NodeDefinition {
@@ -357,6 +362,7 @@ impl NodeDefinition {
                     })
         }
         !self.subgraphs.is_empty()
+            || !self.subgraph_arguments.is_empty()
             || self.loop_definition.as_ref().is_some_and(|body| {
                 body.body
                     .nodes

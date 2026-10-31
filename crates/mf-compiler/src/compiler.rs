@@ -1789,6 +1789,7 @@ fn prepare_subgraph_parameters(
                 }
             );
             let fake = crate::NodeDefinition {
+                subgraph_arguments: Default::default(),
                 id: member.id.clone(),
                 kind: mf_runtime::CALL_KIND.into(),
                 config: serde_json::json!({}),
@@ -1797,6 +1798,7 @@ fn prepare_subgraph_parameters(
             };
             if single_node {
                 let inner = crate::NodeDefinition {
+                    subgraph_arguments: Default::default(),
                     id: member.call_id().into(),
                     ..fake.clone()
                 };

@@ -9,3 +9,6 @@
 - [x] Remove router-specific discovery, DispatchBinding, and execution-context graph injection.
 - [x] Preserve real multiply Flow downstream wiring, shared bindings, secrets, and optional streams.
 - [x] Complete generic, generated, chat, affected-test, and coverage validation.
+- [x] Retain caller graph argument identities and render folded Call argument frames.
+- [x] Reuse running-leaf PiPs for fully expanded nested and parallel chat execution views.
+- [x] Complete argument-frame, PiP, generated-manifest, and affected-test validation.

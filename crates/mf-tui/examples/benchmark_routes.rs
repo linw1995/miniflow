@@ -16,6 +16,7 @@ pub fn description(size: usize) -> WorkflowDescription {
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "d".repeat(64))).unwrap(),
         nodes: (0..size)
             .map(|index| NodeDescription {
+                subgraph_arguments: Default::default(),
                 id: format!("node-{index:05}"),
                 kind: "fixture.node".into(),
             })

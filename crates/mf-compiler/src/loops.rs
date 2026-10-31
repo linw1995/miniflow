@@ -55,6 +55,7 @@ pub fn body_definition(
 ) -> WorkflowDefinition {
     let mut nodes = Vec::with_capacity(body.nodes.len() + 1);
     nodes.push(NodeDefinition {
+        subgraph_arguments: Default::default(),
         subgraphs: Default::default(),
         id: LOOP_SOURCE_ID.into(),
         kind: LOOP_SOURCE_ID.into(),

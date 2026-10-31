@@ -66,6 +66,7 @@ pub fn body_definition(
     }
     let mut nodes = Vec::with_capacity(config.body.nodes.len() + 1);
     nodes.push(NodeDefinition {
+        subgraph_arguments: Default::default(),
         subgraphs: Default::default(),
         id: ITERATION_INPUT_ID.into(),
         kind: ITERATION_INPUT_KIND.into(),
