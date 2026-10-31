@@ -197,14 +197,18 @@ pub enum SubgraphSource {
     Builtin {
         builtin: String,
     },
-    Node {
-        node: Box<NodeDefinition>,
+    /// One inline subgraph body: either a single Node or a complete Flow.
+    ///
+    /// Exactly one field is populated. Keeping both pieces of wire syntax on one variant lets the
+    /// compiler normalize Nodes and Flows into the same resolved representation.
+    Inline {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<Box<NodeDefinition>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition: Option<Box<WorkflowDefinition>>,
     },
     Reference {
         reference: String,
-    },
-    Interfaces {
-        interfaces: Box<SubgraphSource>,
     },
     Parameter {
         parameter: SubgraphParameterKind,
@@ -214,22 +218,78 @@ pub enum SubgraphSource {
     Collection {
         collection: BTreeMap<String, SubgraphSource>,
     },
-    Interface {
+    /// A callable input projection or a read-only interface view.
+    ///
+    /// `readonly` views carry contracts only and cannot execute. Callable views project public
+    /// input names onto the source interface before freezing.
+    View {
         source: Box<SubgraphSource>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         inputs: BTreeMap<String, String>,
-    },
-    Definition {
-        definition: Box<WorkflowDefinition>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        readonly: bool,
     },
 }
 
 impl SubgraphSource {
+    pub fn inline(definition: Box<WorkflowDefinition>) -> Self {
+        Self::Inline {
+            node: None,
+            definition: Some(definition),
+        }
+    }
+
+    pub fn inline_node(node: Box<NodeDefinition>) -> Self {
+        Self::Inline {
+            node: Some(node),
+            definition: None,
+        }
+    }
+
+    pub fn view(source: Box<Self>, inputs: BTreeMap<String, String>, readonly: bool) -> Self {
+        Self::View {
+            source,
+            inputs,
+            readonly,
+        }
+    }
+
+    /// Follows view wrappers to the underlying source.
+    pub fn innermost(&self) -> &Self {
+        match self {
+            Self::View { source, .. } => source.innermost(),
+            source => source,
+        }
+    }
+
+    pub fn inline_node_definition(&self) -> Option<&NodeDefinition> {
+        match self.innermost() {
+            Self::Inline {
+                node: Some(node),
+                definition: None,
+            } => Some(node),
+            _ => None,
+        }
+    }
+
+    pub fn is_readonly(&self) -> bool {
+        match self {
+            Self::View {
+                source, readonly, ..
+            } => *readonly || source.is_readonly(),
+            _ => false,
+        }
+    }
+
     pub fn frozen_definition(
         &self,
         parent: &WorkflowDefinition,
     ) -> Option<(WorkflowDefinition, bool)> {
         match self {
-            Self::Node { node } => Some((
+            Self::Inline {
+                node: Some(node),
+                definition: None,
+            } => Some((
                 WorkflowDefinition {
                     version: parent.version,
                     execution: None,
@@ -244,8 +304,11 @@ impl SubgraphSource {
                 },
                 true,
             )),
-            Self::Definition { definition } => Some((*definition.clone(), false)),
-            Self::Interface { source, .. } => source.frozen_definition(parent),
+            Self::Inline {
+                definition: Some(definition),
+                node: None,
+            } => Some((*definition.clone(), false)),
+            Self::View { source, .. } => source.frozen_definition(parent),
             _ => None,
         }
     }
@@ -376,11 +439,8 @@ impl NodeDefinition {
     pub fn subgraph_members(&self) -> Vec<SubgraphMember<'_>> {
         let mut members = Vec::new();
         for (parameter, source) in &self.subgraphs {
-            let (source, interface_only) = match source {
-                SubgraphSource::Interfaces { interfaces } => (interfaces.as_ref(), true),
-                _ => (source, false),
-            };
-            match source {
+            let interface_only = source.is_readonly();
+            match source.innermost() {
                 SubgraphSource::Collection { collection } => {
                     for (entry, source) in collection {
                         members.push(SubgraphMember {

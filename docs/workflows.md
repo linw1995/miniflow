@@ -119,7 +119,8 @@ Sources accept `path`, `builtin`, an inline `node`, or an inline `definition`. N
 their own input ports and all declared outputs. Flow arguments retain their public input and output
 contracts. The `source`/`inputs` form projects public input names onto the source interface; required
 inputs cannot be hidden and multiple aliases cannot select the same input. Aliases preserve types,
-optional/default handling, and sensitivity.
+optional/default handling, and sensitivity. The same `source` form with `"readonly":true` declares a
+read-only interface view; it may also carry `inputs` projections.
 
 A child Node forwards a binding with `{"reference":"tools"}`. These references are lexical and
 resolved before execution, including through nested Flows and Loop/Iteration bodies. Missing or unknown
@@ -130,10 +131,10 @@ and input projections into standalone executables. Subgraph parameters are not J
 Compiled descriptions retain caller-facing argument names and Node/Flow kinds for graph presentation. These
 read-only identities add no execution nodes and contain no configuration, defaults, or runtime values.
 
-`{"interfaces":{"reference":"tools"}}` projects read-only interfaces from a binding. It contains
-port contracts and sensitivity, without executors, environment names, defaults, or runtime values.
-Metadata consumers cannot invoke this projection. Callable arguments execute through normal Call
-scopes with the existing cancellation, worker, step, error, and finite-body restrictions.
+`{"source":{"reference":"tools"},"readonly":true}` projects read-only interfaces from a binding. It
+contains port contracts and sensitivity, without executors, environment names, defaults, or runtime
+values. Metadata consumers cannot invoke this projection. Callable arguments execute through normal
+Call scopes with the existing cancellation, worker, step, error, and finite-body restrictions.
 
 Earlier definitions continue to read and serialize their `flows` source map. The Rust definition API
 uses `subgraphs` and `SubgraphSource`; the obsolete call-specific `config.flows` binding is replaced by

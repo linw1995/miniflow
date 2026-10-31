@@ -851,10 +851,15 @@ fn parameter_preparations(
     let mut tokens = vec![quote! { let mut #ident = mf_runtime::PreparedSubgraphs::new(); }];
     for (name, source) in &node.subgraphs {
         let (source, interface_only) = match source {
-            mf_runtime::SubgraphSource::Interfaces { interfaces } => (interfaces.as_ref(), true),
+            mf_runtime::SubgraphSource::View {
+                source, readonly, ..
+            } => (source.as_ref(), *readonly),
             _ => (source, false),
         };
-        if matches!(source, mf_runtime::SubgraphSource::Collection { .. }) {
+        if matches!(
+            source.innermost(),
+            mf_runtime::SubgraphSource::Collection { .. }
+        ) {
             let name = LitStr::new(name, Span::call_site());
             let value = if interface_only {
                 quote! { mf_runtime::PreparedSubgraphParameter::Interfaces(Default::default()) }

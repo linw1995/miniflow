@@ -1762,9 +1762,11 @@ fn prepare_subgraph_parameters(
                     PreparedSubgraphParameter::Collection(BTreeMap::new()),
                 );
             }
-            SubgraphSource::Interfaces { interfaces }
-                if matches!(interfaces.as_ref(), SubgraphSource::Collection { .. }) =>
-            {
+            SubgraphSource::View {
+                source,
+                readonly: true,
+                ..
+            } if matches!(source.innermost(), SubgraphSource::Collection { .. }) => {
                 parameters.insert(
                     name.clone(),
                     PreparedSubgraphParameter::Interfaces(BTreeMap::new()),

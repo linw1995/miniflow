@@ -191,9 +191,10 @@
       },
       "subgraphs": {
         "tools": {
-          "interfaces": {
+          "source": {
             "reference": "tools"
-          }
+          },
+          "readonly": true
         }
       }
     },

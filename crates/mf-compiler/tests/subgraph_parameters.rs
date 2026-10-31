@@ -219,7 +219,7 @@ fn reused_arguments_keep_call_inputs_isolated_and_preserve_secret_values() {
 fn interface_projection_exposes_contracts_without_running_the_child() {
     EFFECTS.store(0, Ordering::SeqCst);
     let value = json!({"version":"2026-10-31","dependencies":{},"nodes":[
-        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"interfaces":{"node":{"id":"effect","kind":"test.subgraph_effect"}}}}}
+        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"source":{"node":{"id":"effect","kind":"test.subgraph_effect"}},"readonly":true}}}
     ],"outputs":[{"name":"value","node":"inspect","port":"value"}]});
     assert_eq!(execute(&value), json!({"value":1}));
     assert_eq!(EFFECTS.load(Ordering::SeqCst), 0);
@@ -233,7 +233,7 @@ fn interface_projection_exposes_contracts_without_running_the_child() {
             .loop_bodies
             .is_empty()
     );
-    let callable = node_parent(json!({"interfaces":node_source()}));
+    let callable = node_parent(json!({"source":node_source(),"readonly":true}));
     assert!(compile_definition(&decode(&callable), &registry).is_err());
 }
 
@@ -348,10 +348,10 @@ fn graph_parameters_reuse_registered_flow_executors_without_leaf_providers() {
 #[test]
 fn readonly_views_can_be_forwarded_and_projected_without_regaining_execution() {
     let parent = json!({"version":"2026-10-31","dependencies":{},"subgraphs":{"handler":{"parameter":"single"}},"nodes":[
-        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"interfaces":{"reference":"handler"}}}}
+        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"source":{"reference":"handler"},"readonly":true}}}
     ],"outputs":[{"name":"value","node":"inspect","port":"value"}]});
     let value = json!({"version":"2026-10-31","dependencies":{},"subgraphs":{"parent":{"definition":parent}},"nodes":[
-        {"id":"parent","kind":"workflow.call","config":{"flow":"parent"},"subgraphs":{"handler":{"source":{"interfaces":node_source()},"inputs":{"renamed":"x"}}}}
+        {"id":"parent","kind":"workflow.call","config":{"flow":"parent"},"subgraphs":{"handler":{"source":node_source(),"inputs":{"renamed":"x"},"readonly":true}}}
     ],"outputs":[{"name":"value","node":"parent","port":"value"}]});
     assert_eq!(execute(&value), json!({"value":1}));
 }
@@ -427,7 +427,7 @@ fn invalid_reference_graphs_and_capability_upgrades_have_contextual_errors() {
             "individual callable",
         ),
         (
-            json!({"collection":{"readonly":{"interfaces":node_source()}}}),
+            json!({"collection":{"readonly":{"source":node_source(),"readonly":true}}}),
             "individual callable",
         ),
         (
@@ -435,10 +435,15 @@ fn invalid_reference_graphs_and_capability_upgrades_have_contextual_errors() {
             "requires one subgraph",
         ),
         (
-            json!({"source":{"interfaces":{"collection":{}}},"inputs":{}}),
+            json!({"source":{"source":{"collection":{}},"readonly":true},"inputs":{}}),
             "requires one subgraph interface",
         ),
         (json!({"parameter":"single"}), "unbound subgraph parameter"),
+        (json!({}), "exactly one"),
+        (
+            json!({"node":code_node(),"definition":code_flow()}),
+            "exactly one",
+        ),
         (
             json!({"source":node_source(),"inputs":{"":"x"}}),
             "must not be empty",
@@ -458,7 +463,7 @@ fn invalid_reference_graphs_and_capability_upgrades_have_contextual_errors() {
     assert!(error.contains("exceeds sixteen"), "{error}");
 
     for source in [
-        json!({"interfaces":node_source()}),
+        json!({"source":node_source(),"readonly":true}),
         json!({"collection":{"one":node_source()}}),
     ] {
         let mut value = flow_parent(source);
@@ -486,7 +491,7 @@ fn invalid_reference_graphs_and_capability_upgrades_have_contextual_errors() {
 #[test]
 fn public_codegen_preserves_single_callbacks_and_readonly_contracts() {
     let readonly = json!({"version":"2026-10-31","dependencies":{},"nodes":[
-        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"interfaces":{"node":{"id":"effect","kind":"test.subgraph_effect"}}}}}
+        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"source":{"node":{"id":"effect","kind":"test.subgraph_effect"}},"readonly":true}}}
     ],"outputs":[{"name":"value","node":"inspect","port":"value"}]});
     let registry = NodeRegistry::from_inventory().unwrap();
     EFFECTS.store(0, Ordering::SeqCst);

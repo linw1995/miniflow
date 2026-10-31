@@ -14,41 +14,79 @@ pub fn source_definition(
     source: &SubgraphSource,
     graph: Option<&WorkflowGraph>,
 ) -> Result<SourceDefinition, WorkflowCompileError> {
-    match source {
-        SubgraphSource::Node { node } => {
-            let (mut definition, _) = source.frozen_definition(parent).expect("node source");
-            definition.outputs = graph
-                .into_iter()
-                .flat_map(|graph| graph.nodes.get(&node.id))
-                .flat_map(|node| node.ports.outputs.iter().chain(&node.stream_outputs))
-                .map(|port| WorkflowOutputDefinition {
-                    name: port.name.clone(),
-                    node: node.id.clone(),
-                    port: port.name.clone(),
-                    optional: !port.required,
-                })
-                .collect();
-            Ok(SourceDefinition {
-                definition,
-                node: true,
-                projections: vec![],
-            })
-        }
-        SubgraphSource::Definition { definition } => Ok(SourceDefinition {
-            definition: *definition.clone(),
-            node: false,
-            projections: vec![],
-        }),
-        SubgraphSource::Interface { source, inputs } => {
-            let mut source = source_definition(parent, source, graph)?;
-            source.projections.push(inputs.clone());
-            Ok(source)
-        }
-        _ => crate::compiler::InvalidCallSnafu {
+    let (mut definition, node) = source.frozen_definition(parent).ok_or_else(|| {
+        crate::compiler::InvalidCallSnafu {
             definition_id: "subgraph",
             message: "subgraph parameter has not been resolved",
         }
-        .fail(),
+        .build()
+    })?;
+    if let Some(node) = source.inline_node_definition() {
+        definition.outputs = graph
+            .into_iter()
+            .flat_map(|graph| graph.nodes.get(&node.id))
+            .flat_map(|node| node.ports.outputs.iter().chain(&node.stream_outputs))
+            .map(|port| WorkflowOutputDefinition {
+                name: port.name.clone(),
+                node: node.id.clone(),
+                port: port.name.clone(),
+                optional: !port.required,
+            })
+            .collect();
+    }
+    let mut projections = Vec::new();
+    collect_projections(source, &mut projections);
+    Ok(SourceDefinition {
+        definition,
+        node,
+        projections,
+    })
+}
+
+fn collect_projections(source: &SubgraphSource, output: &mut Vec<BTreeMap<String, String>>) {
+    if let SubgraphSource::View {
+        source,
+        inputs,
+        readonly,
+    } = source
+    {
+        collect_projections(source, output);
+        if !readonly || !inputs.is_empty() {
+            output.push(inputs.clone());
+        }
+    }
+}
+
+fn empty_collection(source: &SubgraphSource) -> Option<SubgraphSource> {
+    match source.innermost() {
+        SubgraphSource::Collection { .. } => Some(replace_collection(source)),
+        _ => None,
+    }
+}
+
+fn replace_collection(source: &SubgraphSource) -> SubgraphSource {
+    match source {
+        SubgraphSource::View {
+            source,
+            inputs,
+            readonly,
+        } => SubgraphSource::view(
+            Box::new(replace_collection(source)),
+            inputs.clone(),
+            *readonly,
+        ),
+        SubgraphSource::Collection { .. } => SubgraphSource::Collection {
+            collection: BTreeMap::new(),
+        },
+        _ => unreachable!("collection wrapper"),
+    }
+}
+
+fn collection_mut(source: &mut SubgraphSource) -> Option<&mut BTreeMap<String, SubgraphSource>> {
+    match source {
+        SubgraphSource::View { source, .. } => collection_mut(source),
+        SubgraphSource::Collection { collection } => Some(collection),
+        _ => None,
     }
 }
 
@@ -76,28 +114,8 @@ pub fn freeze(
         path.push(node.id.clone());
         let mut arguments = BTreeMap::new();
         for (name, source) in &node.subgraphs {
-            match source {
-                SubgraphSource::Collection { .. } => {
-                    arguments.insert(
-                        name.clone(),
-                        SubgraphSource::Collection {
-                            collection: BTreeMap::new(),
-                        },
-                    );
-                }
-                SubgraphSource::Interfaces { interfaces }
-                    if matches!(interfaces.as_ref(), SubgraphSource::Collection { .. }) =>
-                {
-                    arguments.insert(
-                        name.clone(),
-                        SubgraphSource::Interfaces {
-                            interfaces: Box::new(SubgraphSource::Collection {
-                                collection: BTreeMap::new(),
-                            }),
-                        },
-                    );
-                }
-                _ => {}
+            if let Some(source) = empty_collection(source) {
+                arguments.insert(name.clone(), source);
             }
         }
         for member in original.subgraph_members() {
@@ -127,36 +145,24 @@ pub fn freeze(
             };
             path.pop();
             path.pop();
-            let source = SubgraphSource::Interface {
-                source: Box::new(SubgraphSource::Definition {
-                    definition: Box::new(source),
-                }),
+            let source = SubgraphSource::view(
+                Box::new(SubgraphSource::inline(Box::new(source))),
                 inputs,
+                false,
+            );
+            let source = if member.interface_only && member.entry.is_none() {
+                SubgraphSource::view(Box::new(source), BTreeMap::new(), true)
+            } else {
+                source
             };
             if let Some(entry) = member.entry {
-                let value = arguments
+                let collection = arguments
                     .get_mut(member.parameter)
+                    .and_then(collection_mut)
                     .expect("collection initialized");
-                let value = if let SubgraphSource::Interfaces { interfaces } = value {
-                    interfaces.as_mut()
-                } else {
-                    value
-                };
-                let SubgraphSource::Collection { collection } = value else {
-                    unreachable!()
-                };
                 collection.insert(entry.to_owned(), source);
             } else {
-                arguments.insert(
-                    member.parameter.to_owned(),
-                    if member.interface_only {
-                        SubgraphSource::Interfaces {
-                            interfaces: Box::new(source),
-                        }
-                    } else {
-                        source
-                    },
-                );
+                arguments.insert(member.parameter.to_owned(), source);
             }
         }
         node.subgraphs = arguments;
