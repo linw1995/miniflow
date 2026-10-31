@@ -75,8 +75,62 @@ Building a Rust plugin can execute its build scripts and procedural macros with 
 
 Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
 Use `NodeFactory::Subgraph` when construction also needs the occurrence ID, execution options, and a
-`PreparedSubgraph`. The compiler supplies Loop and Iteration bodies through this second form. Missing
+`PreparedSubgraph`. The compiler supplies Loop, Iteration, and Call bodies through this second form. Missing
 or inappropriate body arguments fail during preparation; an executor is returned only after binding.
+
+### Subgraph container execution
+
+Dynamic container providers implement `NodePortContract` for terminal ports and `SubgraphNode` for one
+body-aware execution method. Return the prepared body from `SubgraphNode::body`, forward the supplied
+`EmissionSink` when invoking it, and prepare the node with `PreparedNode::subgraph`:
+
+```rust
+use mf_runtime::{
+    EmissionSink, ExecutionContext, Inputs, NodeExecutionError, NodePortContract,
+    NodeResult, PreparedNode, PreparedSubgraph, SubgraphNode,
+};
+
+struct Container {
+    body: PreparedSubgraph,
+    // Configuration and terminal port contract omitted.
+}
+
+impl NodePortContract for Container {
+    fn ports(&self) -> mf_runtime::NodePorts {
+        // Reflect the container's configured terminal interface.
+        mf_runtime::NodePorts::default()
+    }
+}
+
+impl SubgraphNode for Container {
+    fn body(&self) -> &PreparedSubgraph {
+        &self.body
+    }
+
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn EmissionSink,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        // Containers may instead establish a scope or invoke the body repeatedly.
+        Ok(self.body.execute_with_sink(context, sink)?.into())
+    }
+}
+
+fn prepare(body: PreparedSubgraph) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
+    PreparedNode::subgraph(
+        Container { body },
+        mf_runtime::NodeMetadata::default(),
+    )
+}
+```
+
+The constructor reflects stream outputs from the body and automatically selects ordinary Task or TaskStream
+execution. Both modes call the same `SubgraphNode::execute`; terminal-only execution supplies `DiscardSink`.
+Its `supports_success_dependencies` policy is forwarded in both modes. Providers do not need separate
+`TaskNode` and `TaskStreamNode` adapters or a manual streaming branch in their factories. Invocation count,
+scope isolation, error policies, and terminal result aggregation remain container-specific behavior.
 
 ## Select dependencies in a Flow
 

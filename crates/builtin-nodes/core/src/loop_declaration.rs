@@ -1,7 +1,7 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, LoopComparisonOperator, LoopConditionDefinition,
     LoopVariableDefinition, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts,
-    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedSubgraph, TaskNode, ValueType,
+    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedSubgraph, SubgraphNode, ValueType,
     compare_json_numbers, deserialize_config, loop_variable_types,
 };
 use mf_telemetry::{
@@ -54,7 +54,6 @@ fn factory(
             message: "Loop stream outputs must not overlap loop variables"
         }
     );
-    let streaming = !body.stream_outputs.is_empty();
     let node = LoopNode {
         id: id.into(),
         max_iterations: config.max_iterations,
@@ -62,11 +61,7 @@ fn factory(
         types,
         body,
     };
-    if streaming {
-        mf_runtime::PreparedNode::task_stream(node, mf_runtime::NodeMetadata::default())
-    } else {
-        mf_runtime::PreparedNode::new(node, mf_runtime::NodeMetadata::default())
-    }
+    mf_runtime::PreparedNode::subgraph(node, mf_runtime::NodeMetadata::default())
 }
 
 inventory::submit! {
@@ -136,9 +131,6 @@ impl NodePortContract for LoopNode {
             outputs: ports,
         }
     }
-    fn stream_outputs(&self) -> Vec<PortSpec> {
-        self.body.stream_outputs.clone()
-    }
 }
 
 #[derive(Debug, Snafu)]
@@ -155,37 +147,16 @@ impl From<LoopPassFailure> for NodeExecutionError {
     }
 }
 
-impl TaskNode for LoopNode {
+impl SubgraphNode for LoopNode {
+    fn body(&self) -> &PreparedSubgraph {
+        &self.body
+    }
+
     fn supports_success_dependencies(&self) -> bool {
         false
     }
 
     fn execute(
-        &self,
-        inputs: Inputs,
-        ctx: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        self.run(inputs, ctx, &mut mf_runtime::DiscardSink)
-    }
-}
-
-impl mf_runtime::TaskStreamNode for LoopNode {
-    fn supports_success_dependencies(&self) -> bool {
-        false
-    }
-
-    fn execute(
-        &self,
-        inputs: Inputs,
-        ctx: &mut ExecutionContext,
-        emitter: &mut mf_runtime::Emitter<'_>,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        self.run(inputs, ctx, emitter)
-    }
-}
-
-impl LoopNode {
-    fn run(
         &self,
         inputs: Inputs,
         ctx: &mut ExecutionContext,

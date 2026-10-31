@@ -16,6 +16,77 @@ pub struct PreparedSubgraph {
     body: Arc<SubgraphBody>,
 }
 
+/// A dynamic container that executes one prepared body with optional stream forwarding.
+///
+/// Prepare implementations through [`crate::PreparedNode::subgraph`]. The runtime
+/// adapts the same execution method to terminal and streaming tasks and reflects
+/// stream outputs from [`SubgraphNode::body`]. Scope creation, invocation count,
+/// and result aggregation remain node-specific policies.
+pub trait SubgraphNode: crate::NodePortContract + Send + Sync {
+    fn body(&self) -> &PreparedSubgraph;
+
+    fn supports_success_dependencies(&self) -> bool {
+        true
+    }
+
+    fn execute(
+        &self,
+        inputs: crate::Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn crate::EmissionSink,
+    ) -> Result<crate::NodeResult, crate::NodeExecutionError>;
+}
+
+pub(crate) struct SubgraphTask<N>(pub N);
+
+impl<N: SubgraphNode> crate::NodePortContract for SubgraphTask<N> {
+    fn ports(&self) -> crate::NodePorts {
+        self.0.ports()
+    }
+
+    fn stream_outputs(&self) -> Vec<PortSpec> {
+        self.0.body().stream_outputs.clone()
+    }
+}
+
+impl<N: SubgraphNode> crate::TaskNode for SubgraphTask<N> {
+    fn supports_success_dependencies(&self) -> bool {
+        self.0.supports_success_dependencies()
+    }
+
+    fn execute(
+        &self,
+        inputs: crate::Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<crate::NodeResult, crate::NodeExecutionError> {
+        self.0.execute(inputs, context, &mut crate::DiscardSink)
+    }
+
+    fn execute_with_sink(
+        &self,
+        inputs: crate::Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn crate::EmissionSink,
+    ) -> Result<crate::NodeResult, crate::NodeExecutionError> {
+        self.0.execute(inputs, context, sink)
+    }
+}
+
+impl<N: SubgraphNode> crate::TaskStreamNode for SubgraphTask<N> {
+    fn supports_success_dependencies(&self) -> bool {
+        self.0.supports_success_dependencies()
+    }
+
+    fn execute(
+        &self,
+        inputs: crate::Inputs,
+        context: &mut ExecutionContext,
+        emitter: &mut crate::Emitter<'_>,
+    ) -> Result<crate::NodeResult, crate::NodeExecutionError> {
+        self.0.execute(inputs, context, emitter)
+    }
+}
+
 impl PreparedSubgraph {
     pub fn new(
         nodes: Vec<NodeIdentity>,
