@@ -5,6 +5,6 @@ protocol results with existing workflow execution. Callers supply tools as named
 each member can be an ordinary Node or a Flow with real downstream connections.
 
 Generalize existing Flow sources and single-body factories to named single/collection parameters,
-lexical forwarding, input interface projection, and read-only metadata views. Reuse `PreparedSubgraph`,
+lexical forwarding, and input interface projection. Reuse `PreparedSubgraph`,
 Call scopes, ordinary scheduling, and frozen generated execution layouts. Remove the handwritten tool
 router, branch argument lists, dispatch binding descriptors, and runtime full-graph context injection.

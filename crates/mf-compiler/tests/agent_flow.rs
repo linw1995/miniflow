@@ -86,7 +86,7 @@ fn agent_argument_descriptions_survive_freezing_without_becoming_execution_nodes
         [("add", "builtin.code"), ("multiply", "workflow.call")]
     );
     assert_eq!(description.nodes.len(), 3);
-    assert_eq!(description.static_node_count().unwrap().get(), 34);
+    assert_eq!(description.static_node_count().unwrap().get(), 40);
     let manifest = plan.manifest(&registry).unwrap();
     assert_eq!(manifest.description().unwrap(), description);
     let replanned = mf_compiler::plan_definition(&manifest.definition).unwrap();

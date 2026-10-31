@@ -21,7 +21,6 @@ pub enum ResolvedSubgraphSource {
     View {
         source: Box<ResolvedSubgraphSource>,
         inputs: BTreeMap<String, String>,
-        readonly: bool,
     },
 }
 
@@ -40,12 +39,8 @@ impl ResolvedSubgraphSource {
         }
     }
 
-    pub fn view(source: Box<Self>, inputs: BTreeMap<String, String>, readonly: bool) -> Self {
-        Self::View {
-            source,
-            inputs,
-            readonly,
-        }
+    pub fn view(source: Box<Self>, inputs: BTreeMap<String, String>) -> Self {
+        Self::View { source, inputs }
     }
 
     pub fn from_source(
@@ -73,14 +68,9 @@ impl ResolvedSubgraphSource {
                     .collect::<Result<_, WorkflowCompileError>>()?;
                 Ok(Self::Collection { collection })
             }
-            SubgraphSource::View {
-                source,
-                inputs,
-                readonly,
-            } => Ok(Self::view(
+            SubgraphSource::View { source, inputs } => Ok(Self::view(
                 Box::new(Self::from_source(source, parent)?),
                 inputs.clone(),
-                *readonly,
             )),
             _ => crate::compiler::InvalidCallSnafu {
                 definition_id: "subgraph",
@@ -105,11 +95,9 @@ impl ResolvedSubgraphSource {
                     .map(|(name, source)| (name, source.into_source()))
                     .collect(),
             },
-            Self::View {
-                source,
-                inputs,
-                readonly,
-            } => SubgraphSource::view(Box::new(source.into_source()), inputs, readonly),
+            Self::View { source, inputs } => {
+                SubgraphSource::view(Box::new(source.into_source()), inputs)
+            }
         }
     }
 
@@ -124,15 +112,6 @@ impl ResolvedSubgraphSource {
         match self.innermost() {
             Self::Inline { node, .. } => node.as_deref(),
             _ => None,
-        }
-    }
-
-    pub fn is_readonly(&self) -> bool {
-        match self {
-            Self::View {
-                source, readonly, ..
-            } => *readonly || source.is_readonly(),
-            _ => false,
         }
     }
 
@@ -193,16 +172,9 @@ fn collect_projections(
     source: &ResolvedSubgraphSource,
     output: &mut Vec<BTreeMap<String, String>>,
 ) {
-    if let ResolvedSubgraphSource::View {
-        source,
-        inputs,
-        readonly,
-    } = source
-    {
+    if let ResolvedSubgraphSource::View { source, inputs } = source {
         collect_projections(source, output);
-        if !readonly || !inputs.is_empty() {
-            output.push(inputs.clone());
-        }
+        output.push(inputs.clone());
     }
 }
 
@@ -214,17 +186,8 @@ fn empty_collection(source: &SubgraphSource) -> Option<SubgraphSource> {
 }
 
 fn replace_collection(source: &SubgraphSource) -> SubgraphSource {
-    if let SubgraphSource::View {
-        source,
-        inputs,
-        readonly,
-    } = source
-    {
-        SubgraphSource::view(
-            Box::new(replace_collection(source)),
-            inputs.clone(),
-            *readonly,
-        )
+    if let SubgraphSource::View { source, inputs } = source {
+        SubgraphSource::view(Box::new(replace_collection(source)), inputs.clone())
     } else {
         SubgraphSource::Collection {
             collection: BTreeMap::new(),
@@ -295,16 +258,8 @@ pub fn freeze(
             };
             path.pop();
             path.pop();
-            let source = SubgraphSource::view(
-                Box::new(SubgraphSource::inline(Box::new(source))),
-                inputs,
-                false,
-            );
-            let source = if member.interface_only && member.entry.is_none() {
-                SubgraphSource::view(Box::new(source), BTreeMap::new(), true)
-            } else {
-                source
-            };
+            let source =
+                SubgraphSource::view(Box::new(SubgraphSource::inline(Box::new(source))), inputs);
             if let Some(entry) = member.entry {
                 let collection = arguments
                     .get_mut(member.parameter)
@@ -448,23 +403,21 @@ mod tests {
             ResolvedSubgraphSource::Collection { .. }
         ));
         assert!(resolved.frozen_definition().is_none());
-        assert!(!resolved.is_readonly());
         assert!(resolved.node_definition().is_none());
         assert!(matches!(
             resolved.into_source(),
             SubgraphSource::Collection { .. }
         ));
 
-        let view = SubgraphSource::view(Box::new(node_source()), BTreeMap::new(), true);
+        let view = SubgraphSource::view(Box::new(node_source()), BTreeMap::new());
         let resolved = ResolvedSubgraphSource::from_source(&view, &parent).unwrap();
-        assert!(resolved.is_readonly());
         assert!(resolved.node_definition().is_some());
         let (definition, node) = resolved.frozen_definition().unwrap();
         assert!(node);
         assert_eq!(definition.nodes.len(), 1);
         assert!(matches!(
             resolved.into_source(),
-            SubgraphSource::View { readonly: true, .. }
+            SubgraphSource::View { .. }
         ));
 
         let unresolved = SubgraphSource::Reference {

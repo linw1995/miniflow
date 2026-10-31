@@ -410,44 +410,22 @@ impl Resolver {
                 })?;
                 return self.source(source, scope, directory, available, depth + 1, bindings);
             }
-            SubgraphSource::View {
-                source,
-                inputs,
-                readonly,
-            } => {
+            SubgraphSource::View { source, inputs } => {
                 let source =
                     self.source(source, scope, directory, available, depth + 1, bindings)?;
-                let explicit_readonly = *readonly;
-                let readonly = explicit_readonly || source.is_readonly();
-                if matches!(
-                    source.innermost(),
-                    ResolvedSubgraphSource::Collection { .. }
-                ) {
-                    ensure!(
-                        explicit_readonly && inputs.is_empty(),
-                        InvalidSnafu {
-                            reference: "view",
-                            message: if explicit_readonly || source.is_readonly() {
-                                "an input projection requires one subgraph interface"
-                            } else {
-                                "an interface requires one subgraph"
-                            }
-                        }
-                    );
-                }
-                if readonly {
-                    ensure!(
-                        bindings.is_empty(),
-                        InvalidSnafu {
-                            reference: "view",
-                            message: "read-only interfaces cannot be called"
-                        }
-                    );
-                }
+                ensure!(
+                    !matches!(
+                        source.innermost(),
+                        ResolvedSubgraphSource::Collection { .. }
+                    ),
+                    InvalidSnafu {
+                        reference: "view",
+                        message: "an input projection requires one subgraph"
+                    }
+                );
                 return Ok(ResolvedSubgraphSource::view(
                     Box::new(source),
                     inputs.clone(),
-                    readonly,
                 ));
             }
             SubgraphSource::Collection { collection } => {
@@ -476,8 +454,7 @@ impl Resolver {
                         &BTreeMap::new(),
                     )?;
                     ensure!(
-                        !matches!(source, ResolvedSubgraphSource::Collection { .. })
-                            && !source.is_readonly(),
+                        !matches!(source, ResolvedSubgraphSource::Collection { .. }),
                         InvalidSnafu {
                             reference: name,
                             message: "subgraph collections contain individual callable subgraphs"
@@ -665,13 +642,6 @@ impl Resolver {
                 };
                 let resolved =
                     self.source(&source, sources, directory, available, depth, &arguments)?;
-                ensure!(
-                    !resolved.is_readonly(),
-                    InvalidSnafu {
-                        reference: &config.flow,
-                        message: "Flow calls require one callable subgraph"
-                    }
-                );
                 let Some((definition, node_source)) = resolved.frozen_definition() else {
                     return InvalidSnafu {
                         reference: &config.flow,
@@ -683,7 +653,7 @@ impl Resolver {
                     source: &ResolvedSubgraphSource,
                     output: &mut Vec<BTreeMap<String, String>>,
                 ) {
-                    if let ResolvedSubgraphSource::View { source, inputs, .. } = source {
+                    if let ResolvedSubgraphSource::View { source, inputs } = source {
                         projections(source, output);
                         output.push(inputs.clone());
                     }

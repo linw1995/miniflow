@@ -17,8 +17,9 @@ runners SHALL freeze sources, public interfaces, and output selection without ru
 
 ## Read-only metadata
 
-Interface projections SHALL contain contracts without executable bodies, environment names, default
-contents, or runtime values. Metadata consumers SHALL NOT execute them. Runtime contexts SHALL NOT
+Prepared subgraph interfaces SHALL contain contracts without executable bodies, environment names,
+default contents, or runtime values. Metadata consumers receive only these interfaces and SHALL NOT
+execute them. Runtime contexts SHALL NOT
 require full-graph injection. Generated scopes SHALL reject interface/schema drift before effects.
 
 ## Agent composition

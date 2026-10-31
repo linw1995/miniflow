@@ -123,7 +123,7 @@ pub use stream_plan::{
 pub use subgraph::{
     PreparedSubgraph, PreparedSubgraphParameter, PreparedSubgraphs, SubgraphInterface,
     SubgraphStreamOutput, project_subgraph_inputs, take_subgraph, take_subgraph_collection,
-    take_subgraph_interfaces,
+    take_subgraph_interface, take_subgraph_interfaces,
 };
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,

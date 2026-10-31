@@ -13,12 +13,13 @@ original decoded types, defaults, optionality, and sensitivity. Preparation vali
 cardinality, rejects missing/unknown arguments, and freezes Node output selection and interfaces.
 Generated parameter scopes use the same immutable layouts and contract checks as ordinary bodies.
 
-Interface projections contain only public input/output contracts and stream capabilities. They
-carry neither executors nor environment/default/runtime values. Metadata consumers have no call
-capability. Execution contexts no longer install or expose a global workflow graph. Prepared Flow
-and stream-plan graph descriptors remain useful for compilation, hosts, and generated schema checks.
+Prepared subgraph interfaces contain only public input/output contracts and stream capabilities. They
+carry neither executors nor environment/default/runtime values. Metadata consumers receive only these
+interfaces and have no call capability. Execution contexts no longer install or expose a global
+workflow graph. Prepared Flow and stream-plan graph descriptors remain useful for compilation, hosts,
+and generated schema checks.
 
-The agent accepts a caller-owned `tools` collection. Its catalog reads an interface projection once
+The agent accepts a caller-owned `tools` collection. Its catalog reads prepared interfaces once
 before the model-round Loop and excludes explicit caller-bound fields from model schemas. One
 argument-mode Iteration processes terminal model calls in order. Dispatch selects a named callable
 subgraph and enters existing Call scopes; its children run through normal workflow scheduling.

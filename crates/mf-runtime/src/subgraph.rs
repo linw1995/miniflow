@@ -243,8 +243,6 @@ impl SubgraphInterface {
 pub enum PreparedSubgraphParameter {
     Single(PreparedSubgraph),
     Collection(BTreeMap<String, PreparedSubgraph>),
-    Interface(SubgraphInterface),
-    Interfaces(BTreeMap<String, SubgraphInterface>),
 }
 
 pub type PreparedSubgraphs = BTreeMap<String, PreparedSubgraphParameter>;
@@ -326,14 +324,24 @@ impl crate::EmissionSink for ProjectedSink<'_> {
     }
 }
 
+pub fn take_subgraph_interface(
+    parameters: &mut PreparedSubgraphs,
+    name: &str,
+) -> Result<SubgraphInterface, crate::NodeBuildError> {
+    take_subgraph(parameters, name).map(|body| body.interface())
+}
+
 pub fn take_subgraph_interfaces(
     parameters: &mut PreparedSubgraphs,
     name: &str,
 ) -> Result<BTreeMap<String, SubgraphInterface>, crate::NodeBuildError> {
     match parameters.remove(name) {
-        Some(PreparedSubgraphParameter::Interfaces(interfaces)) => Ok(interfaces),
+        Some(PreparedSubgraphParameter::Collection(bodies)) => Ok(bodies
+            .into_iter()
+            .map(|(name, body)| (name, body.interface()))
+            .collect()),
         _ => crate::NodeInvalidSubgraphSnafu {
-            message: format!("subgraph parameter `{name}` requires collection interfaces"),
+            message: format!("subgraph parameter `{name}` requires a collection"),
         }
         .fail(),
     }

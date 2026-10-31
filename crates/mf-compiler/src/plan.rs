@@ -850,23 +850,17 @@ fn parameter_preparations(
     let ident = format_ident!("parameters_{scope}_{index}");
     let mut tokens = vec![quote! { let mut #ident = mf_runtime::PreparedSubgraphs::new(); }];
     for (name, source) in &node.subgraphs {
-        let (source, interface_only) = match source {
-            mf_runtime::SubgraphSource::View {
-                source, readonly, ..
-            } => (source.as_ref(), *readonly),
-            _ => (source, false),
-        };
         if matches!(
             source.innermost(),
             mf_runtime::SubgraphSource::Collection { .. }
         ) {
             let name = LitStr::new(name, Span::call_site());
-            let value = if interface_only {
-                quote! { mf_runtime::PreparedSubgraphParameter::Interfaces(Default::default()) }
-            } else {
-                quote! { mf_runtime::PreparedSubgraphParameter::Collection(Default::default()) }
-            };
-            tokens.push(quote! { #ident.insert(#name.into(), #value); });
+            tokens.push(quote! {
+                #ident.insert(
+                    #name.into(),
+                    mf_runtime::PreparedSubgraphParameter::Collection(Default::default()),
+                );
+            });
         }
     }
     let argument_scope = format!("{scope}_{index}_args");
@@ -924,23 +918,18 @@ fn parameter_preparations(
         let parameter = LitStr::new(member.parameter, Span::call_site());
         if let Some(entry) = member.entry {
             let entry = LitStr::new(entry, Span::call_site());
-            let (variant, value) = if member.interface_only {
-                (quote! { Interfaces }, quote! { #body.interface() })
-            } else {
-                (quote! { Collection }, quote! { #body })
-            };
             tokens.push(quote! {
-                if let Some(mf_runtime::PreparedSubgraphParameter::#variant(collection)) = #ident.get_mut(#parameter) {
-                    collection.insert(#entry.into(), #value);
+                if let Some(mf_runtime::PreparedSubgraphParameter::Collection(collection)) = #ident.get_mut(#parameter) {
+                    collection.insert(#entry.into(), #body);
                 }
             });
         } else {
-            let value = if member.interface_only {
-                quote! { mf_runtime::PreparedSubgraphParameter::Interface(#body.interface()) }
-            } else {
-                quote! { mf_runtime::PreparedSubgraphParameter::Single(#body) }
-            };
-            tokens.push(quote! { #ident.insert(#parameter.into(), #value); });
+            tokens.push(quote! {
+                #ident.insert(
+                    #parameter.into(),
+                    mf_runtime::PreparedSubgraphParameter::Single(#body),
+                );
+            });
         }
     }
     Ok(quote! { #(#tokens)* })

@@ -204,16 +204,11 @@ pub enum SubgraphSource {
     Collection {
         collection: BTreeMap<String, SubgraphSource>,
     },
-    /// A callable input projection or a read-only interface view.
-    ///
-    /// `readonly` views carry contracts only and cannot execute. Callable views project public
-    /// input names onto the source interface before freezing.
+    /// A callable input projection over another source.
     View {
         source: Box<SubgraphSource>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         inputs: BTreeMap<String, String>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        readonly: bool,
     },
 }
 
@@ -257,12 +252,8 @@ impl SubgraphSource {
         })
     }
 
-    pub fn view(source: Box<Self>, inputs: BTreeMap<String, String>, readonly: bool) -> Self {
-        Self::View {
-            source,
-            inputs,
-            readonly,
-        }
+    pub fn view(source: Box<Self>, inputs: BTreeMap<String, String>) -> Self {
+        Self::View { source, inputs }
     }
 
     /// Follows view wrappers to the underlying source.
@@ -280,15 +271,6 @@ impl SubgraphSource {
                 definition: None,
             }) => Some(node),
             _ => None,
-        }
-    }
-
-    pub fn is_readonly(&self) -> bool {
-        match self {
-            Self::View {
-                source, readonly, ..
-            } => *readonly || source.is_readonly(),
-            _ => false,
         }
     }
 
@@ -330,7 +312,6 @@ pub struct SubgraphMember<'a> {
     pub entry: Option<&'a str>,
     pub id: DefinitionId,
     pub source: &'a SubgraphSource,
-    pub interface_only: bool,
 }
 
 impl SubgraphMember<'_> {
@@ -450,7 +431,6 @@ impl NodeDefinition {
     pub fn subgraph_members(&self) -> Vec<SubgraphMember<'_>> {
         let mut members = Vec::new();
         for (parameter, source) in &self.subgraphs {
-            let interface_only = source.is_readonly();
             match source.innermost() {
                 SubgraphSource::Collection { collection } => {
                     for (entry, source) in collection {
@@ -459,7 +439,6 @@ impl NodeDefinition {
                             entry: Some(entry),
                             id: format!("subgraph:{parameter}:{entry}").into(),
                             source,
-                            interface_only,
                         });
                     }
                 }
@@ -468,7 +447,6 @@ impl NodeDefinition {
                     entry: None,
                     id: format!("subgraph:{parameter}").into(),
                     source,
-                    interface_only,
                 }),
             }
         }
@@ -477,11 +455,7 @@ impl NodeDefinition {
 
     pub fn parameter_body(&self, parent: &WorkflowDefinition) -> Option<WorkflowDefinition> {
         let mut result: Option<WorkflowDefinition> = None;
-        for member in self
-            .subgraph_members()
-            .into_iter()
-            .filter(|member| !member.interface_only)
-        {
+        for member in self.subgraph_members() {
             let (body, _) = member.source.frozen_definition(parent)?;
             let wrapper = member.wrapper(parent, body);
             if let Some(result) = &mut result {
