@@ -1,5 +1,7 @@
 use crate::{NodeDependency, WorkflowDefinition};
-use mf_runtime::{CALL_KIND, CallConfig, MAX_CALL_DEPTH, NodeDefinition, SubgraphSource};
+use mf_runtime::{
+    CALL_KIND, CallConfig, MAX_CALL_DEPTH, NodeDefinition, SubgraphSource, SubgraphSourceKind,
+};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -484,10 +486,10 @@ impl Resolver {
                     collection: resolved,
                 });
             }
-            SubgraphSource::Inline {
+            SubgraphSource::Source(SubgraphSourceKind::Inline {
                 node: Some(node),
                 definition: None,
-            } => {
+            }) => {
                 let mut node = node.clone();
                 node.subgraphs.extend(bindings.clone());
                 self.nodes(
@@ -500,11 +502,11 @@ impl Resolver {
                 )?;
                 return Ok(SubgraphSource::inline_node(node));
             }
-            SubgraphSource::Inline {
+            SubgraphSource::Source(SubgraphSourceKind::Inline {
                 definition: Some(definition),
                 node: None,
-            } => *definition.clone(),
-            SubgraphSource::Inline { .. } => {
+            }) => *definition.clone(),
+            SubgraphSource::Source(SubgraphSourceKind::Inline { .. }) => {
                 return InvalidSnafu {
                     reference: "inline",
                     message: "inline subgraphs require exactly one of node or definition",
@@ -518,7 +520,7 @@ impl Resolver {
                 }
                 .fail();
             }
-            SubgraphSource::Path { path } => {
+            SubgraphSource::Source(SubgraphSourceKind::Path { path }) => {
                 let path = if path.is_absolute() {
                     path.clone()
                 } else {
@@ -533,7 +535,7 @@ impl Resolver {
                     .file(&path, available, bindings, depth + 1)
                     .map(|definition| SubgraphSource::inline(Box::new(definition)));
             }
-            SubgraphSource::Builtin { builtin } => {
+            SubgraphSource::Source(SubgraphSourceKind::Builtin { builtin }) => {
                 let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
                 let registration = registry.get(builtin).context(InvalidSnafu {
                     reference: builtin,

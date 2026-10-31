@@ -248,9 +248,9 @@ fn embedded_application_declares_and_prepares_the_builtin_title_call() {
         WorkflowDefinition::from_json(include_str!("../workflows/conversation.json")).unwrap();
     assert_eq!(
         authored.subgraphs["title"],
-        mf_runtime::SubgraphSource::Builtin {
+        mf_runtime::SubgraphSource::Source(mf_runtime::SubgraphSourceKind::Builtin {
             builtin: "mf-chat.chat-title".into()
-        }
+        })
     );
     let plan = mf_chat::flows::conversation::plan().unwrap();
     for (id, kind) in [

@@ -50,7 +50,7 @@ pub use definition::{
     LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
     MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
     NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
-    SubgraphMember, SubgraphParameterKind, SubgraphSource, WorkflowDefinition,
+    SubgraphMember, SubgraphParameterKind, SubgraphSource, SubgraphSourceKind, WorkflowDefinition,
     WorkflowDefinitionVersion, WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
