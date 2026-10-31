@@ -1181,6 +1181,23 @@ impl PreparedNode {
         Ok(Self::combined(Box::new(task), outputs, metadata))
     }
 
+    /// Reflects a container's ports and prepares its body for terminal or streaming execution.
+    ///
+    /// Stream outputs come from the prepared body. Their presence selects the
+    /// streaming executor; both execution modes call the same [`crate::SubgraphNode::execute`].
+    pub fn subgraph<N: crate::SubgraphNode + 'static>(
+        node: N,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Result<Self, NodeBuildError> {
+        let streaming = !node.body().stream_outputs.is_empty();
+        let task = crate::subgraph::SubgraphTask(node);
+        if streaming {
+            Self::task_stream(task, metadata)
+        } else {
+            Self::new(task, metadata)
+        }
+    }
+
     fn combined(
         task: Box<dyn crate::TaskStreamNode>,
         outputs: Vec<PortSpec>,

@@ -2,8 +2,8 @@ use mf_runtime::{
     EmissionSink, ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy,
     IterationMode, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts,
     NodeRegistration, NodeResult, NodeValue, OutputDerivation, Outputs, PreparedSubgraph,
-    StreamCancellation, StreamError, TaskNode, TypedNodeResult, TypedTaskNode, ValueKind, ValueRef,
-    ValueType, deserialize_config, execute_typed_task,
+    StreamCancellation, StreamError, SubgraphNode, TaskNode, TypedNodeResult, TypedTaskNode,
+    ValueKind, ValueRef, ValueType, deserialize_config, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
@@ -32,11 +32,7 @@ fn factory(
         output_derivations: vec![node.result_derivation()],
         ..Default::default()
     };
-    if node.body.stream_outputs.is_empty() {
-        mf_runtime::PreparedNode::typed_task(node, metadata)
-    } else {
-        mf_runtime::PreparedNode::task_stream(node, metadata)
-    }
+    mf_runtime::PreparedNode::subgraph(node, metadata)
 }
 
 inventory::submit! {
@@ -421,13 +417,13 @@ impl NodePortContract for IterationNode {
     fn ports(&self) -> NodePorts {
         IterationNode::ports(self)
     }
-
-    fn stream_outputs(&self) -> Vec<mf_runtime::PortSpec> {
-        self.body.stream_outputs.clone()
-    }
 }
 
-impl mf_runtime::TaskStreamNode for IterationNode {
+impl SubgraphNode for IterationNode {
+    fn body(&self) -> &PreparedSubgraph {
+        &self.body
+    }
+
     fn supports_success_dependencies(&self) -> bool {
         false
     }
@@ -436,7 +432,7 @@ impl mf_runtime::TaskStreamNode for IterationNode {
         &self,
         inputs: Inputs,
         context: &mut ExecutionContext,
-        emitter: &mut mf_runtime::Emitter<'_>,
+        sink: &mut dyn EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
         let inputs = <IterationInputs as mf_runtime::NodeInputs>::from_inputs(inputs).boxed()?;
         let observation = context.observation().and_then(|run| {
@@ -447,7 +443,7 @@ impl mf_runtime::TaskStreamNode for IterationNode {
             )
         });
         let mut sink = DeliverySink {
-            sink: emitter,
+            sink,
             cancellation: context.cancellation(),
         };
         let outputs = self.execute_items(inputs.items, observation, context, &mut sink)?;

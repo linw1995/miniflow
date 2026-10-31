@@ -1,7 +1,7 @@
 use mf_runtime::{
     CallConfig, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
     NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, PortSpec,
-    PreparedNode, PreparedSubgraph, TaskNode, WorkflowArguments,
+    PreparedNode, PreparedSubgraph, SubgraphNode, WorkflowArguments,
 };
 use serde_json::Value;
 use snafu::{ResultExt, Snafu, ensure};
@@ -35,10 +35,6 @@ impl NodePortContract for CallNode {
             outputs: self.body.outputs.clone(),
         }
     }
-
-    fn stream_outputs(&self) -> Vec<PortSpec> {
-        self.body.stream_outputs.clone()
-    }
 }
 
 #[derive(Debug, Snafu)]
@@ -55,29 +51,12 @@ impl From<CallFailure> for NodeExecutionError {
     }
 }
 
-impl TaskNode for CallNode {
-    fn execute(
-        &self,
-        inputs: Inputs,
-        context: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        self.run(inputs, context, &mut mf_runtime::DiscardSink)
+impl SubgraphNode for CallNode {
+    fn body(&self) -> &PreparedSubgraph {
+        &self.body
     }
-}
 
-impl mf_runtime::TaskStreamNode for CallNode {
     fn execute(
-        &self,
-        inputs: Inputs,
-        context: &mut ExecutionContext,
-        emitter: &mut mf_runtime::Emitter<'_>,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        self.run(inputs, context, emitter)
-    }
-}
-
-impl CallNode {
-    fn run(
         &self,
         inputs: Inputs,
         context: &mut ExecutionContext,
@@ -147,7 +126,6 @@ fn factory(
                 })
         })
         .collect();
-    let streaming = !body.stream_outputs.is_empty();
     let node = CallNode {
         id: id.into(),
         flow: config.flow,
@@ -157,11 +135,7 @@ fn factory(
         input_bindings,
         ..Default::default()
     };
-    if streaming {
-        PreparedNode::task_stream(node, metadata)
-    } else {
-        PreparedNode::new(node, metadata)
-    }
+    PreparedNode::subgraph(node, metadata)
 }
 
 inventory::submit! {
