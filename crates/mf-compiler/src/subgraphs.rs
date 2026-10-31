@@ -1,7 +1,128 @@
 use crate::{WorkflowCompileError, WorkflowDefinition};
-use mf_runtime::{SubgraphSource, WorkflowGraph, WorkflowOutputDefinition};
+use mf_runtime::{
+    NodeDefinition, SubgraphSource, SubgraphSourceKind, WorkflowGraph, WorkflowOutputDefinition,
+};
 use snafu::ResultExt;
 use std::collections::BTreeMap;
+
+/// The closed, post-resolution form of a subgraph source.
+///
+/// References, parameter declarations, and path/builtin lookups are gone: every value is an
+/// executable inline body, a collection of them, or a view over one.
+#[derive(Clone, Debug)]
+pub enum ResolvedSubgraphSource {
+    Inline {
+        node: Option<Box<NodeDefinition>>,
+        definition: Box<WorkflowDefinition>,
+    },
+    Collection {
+        collection: BTreeMap<String, ResolvedSubgraphSource>,
+    },
+    View {
+        source: Box<ResolvedSubgraphSource>,
+        inputs: BTreeMap<String, String>,
+    },
+}
+
+impl ResolvedSubgraphSource {
+    pub fn inline(definition: Box<WorkflowDefinition>) -> Self {
+        Self::Inline {
+            node: None,
+            definition,
+        }
+    }
+
+    pub fn inline_node(node: Box<NodeDefinition>, definition: Box<WorkflowDefinition>) -> Self {
+        Self::Inline {
+            node: Some(node),
+            definition,
+        }
+    }
+
+    pub fn view(source: Box<Self>, inputs: BTreeMap<String, String>) -> Self {
+        Self::View { source, inputs }
+    }
+
+    pub fn from_source(
+        source: &SubgraphSource,
+        parent: &WorkflowDefinition,
+    ) -> Result<Self, WorkflowCompileError> {
+        match source {
+            SubgraphSource::Source(SubgraphSourceKind::Inline {
+                node: Some(node),
+                definition: None,
+            }) => {
+                let (definition, _) = source
+                    .frozen_definition(parent)
+                    .expect("inline node source");
+                Ok(Self::inline_node(node.clone(), Box::new(definition)))
+            }
+            SubgraphSource::Source(SubgraphSourceKind::Inline {
+                definition: Some(definition),
+                node: None,
+            }) => Ok(Self::inline(definition.clone())),
+            SubgraphSource::Collection { collection } => {
+                let collection = collection
+                    .iter()
+                    .map(|(name, source)| Ok((name.clone(), Self::from_source(source, parent)?)))
+                    .collect::<Result<_, WorkflowCompileError>>()?;
+                Ok(Self::Collection { collection })
+            }
+            SubgraphSource::View { source, inputs } => Ok(Self::view(
+                Box::new(Self::from_source(source, parent)?),
+                inputs.clone(),
+            )),
+            _ => crate::compiler::InvalidCallSnafu {
+                definition_id: "subgraph",
+                message: "subgraph parameter has not been resolved",
+            }
+            .fail(),
+        }
+    }
+
+    pub fn into_source(self) -> SubgraphSource {
+        match self {
+            Self::Inline {
+                node: Some(node), ..
+            } => SubgraphSource::inline_node(node),
+            Self::Inline {
+                node: None,
+                definition,
+            } => SubgraphSource::inline(definition),
+            Self::Collection { collection } => SubgraphSource::Collection {
+                collection: collection
+                    .into_iter()
+                    .map(|(name, source)| (name, source.into_source()))
+                    .collect(),
+            },
+            Self::View { source, inputs } => {
+                SubgraphSource::view(Box::new(source.into_source()), inputs)
+            }
+        }
+    }
+
+    pub fn innermost(&self) -> &Self {
+        match self {
+            Self::View { source, .. } => source.innermost(),
+            source => source,
+        }
+    }
+
+    pub fn node_definition(&self) -> Option<&NodeDefinition> {
+        match self.innermost() {
+            Self::Inline { node, .. } => node.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn frozen_definition(&self) -> Option<(WorkflowDefinition, bool)> {
+        match self {
+            Self::Inline { node, definition } => Some(((**definition).clone(), node.is_some())),
+            Self::View { source, .. } => source.frozen_definition(),
+            Self::Collection { .. } => None,
+        }
+    }
+}
 
 pub struct SourceDefinition {
     pub definition: WorkflowDefinition,
@@ -14,41 +135,71 @@ pub fn source_definition(
     source: &SubgraphSource,
     graph: Option<&WorkflowGraph>,
 ) -> Result<SourceDefinition, WorkflowCompileError> {
-    match source {
-        SubgraphSource::Node { node } => {
-            let (mut definition, _) = source.frozen_definition(parent).expect("node source");
-            definition.outputs = graph
-                .into_iter()
-                .flat_map(|graph| graph.nodes.get(&node.id))
-                .flat_map(|node| node.ports.outputs.iter().chain(&node.stream_outputs))
-                .map(|port| WorkflowOutputDefinition {
-                    name: port.name.clone(),
-                    node: node.id.clone(),
-                    port: port.name.clone(),
-                    optional: !port.required,
-                })
-                .collect();
-            Ok(SourceDefinition {
-                definition,
-                node: true,
-                projections: vec![],
+    let source = ResolvedSubgraphSource::from_source(source, parent)?;
+    source_definition_resolved(&source, graph)
+}
+
+fn source_definition_resolved(
+    source: &ResolvedSubgraphSource,
+    graph: Option<&WorkflowGraph>,
+) -> Result<SourceDefinition, WorkflowCompileError> {
+    let (mut definition, node) = source
+        .frozen_definition()
+        .expect("resolved subgraph is callable");
+    if let Some(node) = source.node_definition() {
+        definition.outputs = graph
+            .into_iter()
+            .flat_map(|graph| graph.nodes.get(&node.id))
+            .flat_map(|node| node.ports.outputs.iter().chain(&node.stream_outputs))
+            .map(|port| WorkflowOutputDefinition {
+                name: port.name.clone(),
+                node: node.id.clone(),
+                port: port.name.clone(),
+                optional: !port.required,
             })
+            .collect();
+    }
+    let mut projections = Vec::new();
+    collect_projections(source, &mut projections);
+    Ok(SourceDefinition {
+        definition,
+        node,
+        projections,
+    })
+}
+
+fn collect_projections(
+    source: &ResolvedSubgraphSource,
+    output: &mut Vec<BTreeMap<String, String>>,
+) {
+    if let ResolvedSubgraphSource::View { source, inputs } = source {
+        collect_projections(source, output);
+        output.push(inputs.clone());
+    }
+}
+
+fn empty_collection(source: &SubgraphSource) -> Option<SubgraphSource> {
+    match source.innermost() {
+        SubgraphSource::Collection { .. } => Some(replace_collection(source)),
+        _ => None,
+    }
+}
+
+fn replace_collection(source: &SubgraphSource) -> SubgraphSource {
+    if let SubgraphSource::View { source, inputs } = source {
+        SubgraphSource::view(Box::new(replace_collection(source)), inputs.clone())
+    } else {
+        SubgraphSource::Collection {
+            collection: BTreeMap::new(),
         }
-        SubgraphSource::Definition { definition } => Ok(SourceDefinition {
-            definition: *definition.clone(),
-            node: false,
-            projections: vec![],
-        }),
-        SubgraphSource::Interface { source, inputs } => {
-            let mut source = source_definition(parent, source, graph)?;
-            source.projections.push(inputs.clone());
-            Ok(source)
-        }
-        _ => crate::compiler::InvalidCallSnafu {
-            definition_id: "subgraph",
-            message: "subgraph parameter has not been resolved",
-        }
-        .fail(),
+    }
+}
+
+fn collection_mut(source: &mut SubgraphSource) -> Option<&mut BTreeMap<String, SubgraphSource>> {
+    match source {
+        SubgraphSource::View { source, .. } => collection_mut(source),
+        SubgraphSource::Collection { collection } => Some(collection),
+        _ => None,
     }
 }
 
@@ -76,28 +227,8 @@ pub fn freeze(
         path.push(node.id.clone());
         let mut arguments = BTreeMap::new();
         for (name, source) in &node.subgraphs {
-            match source {
-                SubgraphSource::Collection { .. } => {
-                    arguments.insert(
-                        name.clone(),
-                        SubgraphSource::Collection {
-                            collection: BTreeMap::new(),
-                        },
-                    );
-                }
-                SubgraphSource::Interfaces { interfaces }
-                    if matches!(interfaces.as_ref(), SubgraphSource::Collection { .. }) =>
-                {
-                    arguments.insert(
-                        name.clone(),
-                        SubgraphSource::Interfaces {
-                            interfaces: Box::new(SubgraphSource::Collection {
-                                collection: BTreeMap::new(),
-                            }),
-                        },
-                    );
-                }
-                _ => {}
+            if let Some(source) = empty_collection(source) {
+                arguments.insert(name.clone(), source);
             }
         }
         for member in original.subgraph_members() {
@@ -127,36 +258,16 @@ pub fn freeze(
             };
             path.pop();
             path.pop();
-            let source = SubgraphSource::Interface {
-                source: Box::new(SubgraphSource::Definition {
-                    definition: Box::new(source),
-                }),
-                inputs,
-            };
+            let source =
+                SubgraphSource::view(Box::new(SubgraphSource::inline(Box::new(source))), inputs);
             if let Some(entry) = member.entry {
-                let value = arguments
+                let collection = arguments
                     .get_mut(member.parameter)
+                    .and_then(collection_mut)
                     .expect("collection initialized");
-                let value = if let SubgraphSource::Interfaces { interfaces } = value {
-                    interfaces.as_mut()
-                } else {
-                    value
-                };
-                let SubgraphSource::Collection { collection } = value else {
-                    unreachable!()
-                };
                 collection.insert(entry.to_owned(), source);
             } else {
-                arguments.insert(
-                    member.parameter.to_owned(),
-                    if member.interface_only {
-                        SubgraphSource::Interfaces {
-                            interfaces: Box::new(source),
-                        }
-                    } else {
-                        source
-                    },
-                );
+                arguments.insert(member.parameter.to_owned(), source);
             }
         }
         node.subgraphs = arguments;
@@ -240,5 +351,78 @@ pub fn source_interface_graph(wrapper: &WorkflowGraph, call: &str) -> WorkflowGr
             })
             .collect(),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn definition() -> WorkflowDefinition {
+        serde_json::from_value(json!({
+            "version": "2026-10-31",
+            "dependencies": {},
+            "nodes": []
+        }))
+        .unwrap()
+    }
+
+    fn inline_source() -> SubgraphSource {
+        serde_json::from_value(json!({
+            "definition": {
+                "version": "2026-10-31",
+                "dependencies": {},
+                "nodes": []
+            }
+        }))
+        .unwrap()
+    }
+
+    fn node_source() -> SubgraphSource {
+        serde_json::from_value(json!({
+            "node": {
+                "id": "constant",
+                "kind": "builtin.constant",
+                "config": {"value": 1}
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn resolved_sources_are_closed_and_convert_back_to_wire_sources() {
+        let parent = definition();
+
+        let collection = SubgraphSource::Collection {
+            collection: BTreeMap::from([("one".into(), inline_source())]),
+        };
+        let resolved = ResolvedSubgraphSource::from_source(&collection, &parent).unwrap();
+        assert!(matches!(
+            resolved.innermost(),
+            ResolvedSubgraphSource::Collection { .. }
+        ));
+        assert!(resolved.frozen_definition().is_none());
+        assert!(resolved.node_definition().is_none());
+        assert!(matches!(
+            resolved.into_source(),
+            SubgraphSource::Collection { .. }
+        ));
+
+        let view = SubgraphSource::view(Box::new(node_source()), BTreeMap::new());
+        let resolved = ResolvedSubgraphSource::from_source(&view, &parent).unwrap();
+        assert!(resolved.node_definition().is_some());
+        let (definition, node) = resolved.frozen_definition().unwrap();
+        assert!(node);
+        assert_eq!(definition.nodes.len(), 1);
+        assert!(matches!(
+            resolved.into_source(),
+            SubgraphSource::View { .. }
+        ));
+
+        let unresolved = SubgraphSource::Reference {
+            reference: "missing".into(),
+        };
+        assert!(ResolvedSubgraphSource::from_source(&unresolved, &parent).is_err());
     }
 }

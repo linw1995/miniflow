@@ -5,7 +5,7 @@ use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instanti
 use mf_runtime::{
     ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeMetadata, NodePortContract,
     NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode, PreparedSubgraph,
-    PreparedSubgraphParameter, PreparedSubgraphs, TaskNode, ValueType,
+    PreparedSubgraphs, TaskNode, ValueType,
 };
 use serde_json::{Value, json};
 use snafu::ensure;
@@ -112,12 +112,7 @@ fn inspect(
     _: Value,
     mut parameters: PreparedSubgraphs,
 ) -> Result<PreparedNode, NodeBuildError> {
-    let Some(PreparedSubgraphParameter::Interface(interface)) = parameters.remove("child") else {
-        return mf_runtime::NodeInvalidSubgraphSnafu {
-            message: "Inspect requires an interface",
-        }
-        .fail();
-    };
+    let interface = mf_runtime::take_subgraph_interface(&mut parameters, "child")?;
     PreparedNode::new(Inspect(interface.outputs.len()), NodeMetadata::default())
 }
 inventory::submit! { NodeRegistration { kind: "test.subgraph_inspect", factory: mf_runtime::NodeFactory::Subgraphs(inspect) } }
@@ -219,22 +214,12 @@ fn reused_arguments_keep_call_inputs_isolated_and_preserve_secret_values() {
 fn interface_projection_exposes_contracts_without_running_the_child() {
     EFFECTS.store(0, Ordering::SeqCst);
     let value = json!({"version":"2026-10-31","dependencies":{},"nodes":[
-        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"interfaces":{"node":{"id":"effect","kind":"test.subgraph_effect"}}}}}
+        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"source":{"node":{"id":"effect","kind":"test.subgraph_effect"}}}}}
     ],"outputs":[{"name":"value","node":"inspect","port":"value"}]});
     assert_eq!(execute(&value), json!({"value":1}));
     assert_eq!(EFFECTS.load(Ordering::SeqCst), 0);
     let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&decode(&value), &registry).unwrap();
-    assert!(
-        plan.manifest(&registry)
-            .unwrap()
-            .description()
-            .unwrap()
-            .loop_bodies
-            .is_empty()
-    );
-    let callable = node_parent(json!({"interfaces":node_source()}));
-    assert!(compile_definition(&decode(&callable), &registry).is_err());
+    compile_definition(&decode(&value), &registry).unwrap();
 }
 
 #[test]
@@ -346,12 +331,12 @@ fn graph_parameters_reuse_registered_flow_executors_without_leaf_providers() {
 }
 
 #[test]
-fn readonly_views_can_be_forwarded_and_projected_without_regaining_execution() {
+fn views_can_be_forwarded_and_projected_through_nested_flows() {
     let parent = json!({"version":"2026-10-31","dependencies":{},"subgraphs":{"handler":{"parameter":"single"}},"nodes":[
-        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"interfaces":{"reference":"handler"}}}}
+        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"reference":"handler"}}}
     ],"outputs":[{"name":"value","node":"inspect","port":"value"}]});
     let value = json!({"version":"2026-10-31","dependencies":{},"subgraphs":{"parent":{"definition":parent}},"nodes":[
-        {"id":"parent","kind":"workflow.call","config":{"flow":"parent"},"subgraphs":{"handler":{"source":{"interfaces":node_source()},"inputs":{"renamed":"x"}}}}
+        {"id":"parent","kind":"workflow.call","config":{"flow":"parent"},"subgraphs":{"handler":{"source":node_source(),"inputs":{"renamed":"x"}}}}
     ],"outputs":[{"name":"value","node":"parent","port":"value"}]});
     assert_eq!(execute(&value), json!({"value":1}));
 }
@@ -427,18 +412,15 @@ fn invalid_reference_graphs_and_capability_upgrades_have_contextual_errors() {
             "individual callable",
         ),
         (
-            json!({"collection":{"readonly":{"interfaces":node_source()}}}),
-            "individual callable",
-        ),
-        (
             json!({"source":{"collection":{}},"inputs":{}}),
             "requires one subgraph",
         ),
-        (
-            json!({"source":{"interfaces":{"collection":{}}},"inputs":{}}),
-            "requires one subgraph interface",
-        ),
         (json!({"parameter":"single"}), "unbound subgraph parameter"),
+        (json!({}), "exactly one"),
+        (
+            json!({"node":code_node(),"definition":code_flow()}),
+            "exactly one",
+        ),
         (
             json!({"source":node_source(),"inputs":{"":"x"}}),
             "must not be empty",
@@ -457,24 +439,12 @@ fn invalid_reference_graphs_and_capability_upgrades_have_contextual_errors() {
         .to_string();
     assert!(error.contains("exceeds sixteen"), "{error}");
 
-    for source in [
-        json!({"interfaces":node_source()}),
-        json!({"collection":{"one":node_source()}}),
-    ] {
-        let mut value = flow_parent(source);
-        value["subgraphs"]["parent"]["definition"]["nodes"][1]["subgraphs"] =
-            json!({"child":node_source()});
-        value["subgraphs"]["parent"]["definition"]["subgraphs"]["child"]["parameter"] =
-            if value["nodes"][0]["subgraphs"]["child"]
-                .get("collection")
-                .is_some()
-            {
-                "collection".into()
-            } else {
-                "single".into()
-            };
-        assert!(compile_definition(&decode(&value), &registry).is_err());
-    }
+    let mut value = flow_parent(json!({"collection":{"one":node_source()}}));
+    value["subgraphs"]["parent"]["definition"]["nodes"][1]["subgraphs"] =
+        json!({"child":node_source()});
+    value["subgraphs"]["parent"]["definition"]["subgraphs"]["child"]["parameter"] =
+        json!("collection");
+    assert!(compile_definition(&decode(&value), &registry).is_err());
     let native = json!({"version":"2026-10-31","dependencies":{},"nodes":[{"id":"repeat","kind":"workflow.loop","subgraphs":{"body":node_source()},"loop":{"max_iterations":1,"variables":[{"name":"value","type":"int"}],"body":{"nodes":[{"id":"noop","kind":"builtin.constant","config":{"value":0}}]}}}]});
     let error = compile_definition(&decode(&native), &registry)
         .unwrap_err()
@@ -484,16 +454,16 @@ fn invalid_reference_graphs_and_capability_upgrades_have_contextual_errors() {
 
 #[cfg(feature = "codegen")]
 #[test]
-fn public_codegen_preserves_single_callbacks_and_readonly_contracts() {
-    let readonly = json!({"version":"2026-10-31","dependencies":{},"nodes":[
-        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"interfaces":{"node":{"id":"effect","kind":"test.subgraph_effect"}}}}}
+fn public_codegen_preserves_single_callbacks_and_projections() {
+    let projected = json!({"version":"2026-10-31","dependencies":{},"nodes":[
+        {"id":"inspect","kind":"test.subgraph_inspect","subgraphs":{"child":{"source":{"node":{"id":"effect","kind":"test.subgraph_effect"}}}}}
     ],"outputs":[{"name":"value","node":"inspect","port":"value"}]});
     let registry = NodeRegistry::from_inventory().unwrap();
     EFFECTS.store(0, Ordering::SeqCst);
     for document in [
         node_parent(node_source()),
         flow_parent(flow_source()),
-        readonly,
+        projected,
     ] {
         let plan = compile_definition(&decode(&document), &registry).unwrap();
         let expected = plan.manifest(&registry).unwrap();

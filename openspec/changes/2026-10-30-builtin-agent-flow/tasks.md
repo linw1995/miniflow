@@ -2,7 +2,7 @@
 
 - [x] Generalize Flow sources to named Node/Flow subgraph parameters and lexical forwarding.
 - [x] Reuse PreparedSubgraph and one named factory entry for native and custom containers.
-- [x] Add readonly interface projection without executable or runtime-value access.
+- [x] Derive interface views from prepared subgraphs without executable or runtime-value access.
 - [x] Freeze public input aliases and Node output selection in generated layouts.
 - [x] Register external tools and dispatch through existing Call scopes and scheduling.
 - [x] Move catalog before the Loop and remove redundant round counting and pure constants.

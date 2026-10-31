@@ -77,8 +77,9 @@ Building a Rust plugin can execute its build scripts and procedural macros with 
 
 Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
 Use `NodeFactory::Subgraphs` when construction also needs the occurrence ID, execution options, and
-`PreparedSubgraphs`: named single children, named collections, or read-only interface projections.
-`take_subgraph`, `take_subgraph_collection`, and `take_subgraph_interfaces` validate the expected shape.
+`PreparedSubgraphs`: named single children or named collections. `take_subgraph` and
+`take_subgraph_collection` validate the expected shape; `take_subgraph_interface` and
+`take_subgraph_interfaces` derive read-only contracts from prepared bodies.
 Factories reject unused arguments. Existing Call, Loop, and Iteration bodies use the same map under
 `body`; the single-body instantiation helper delegates to this entry point.
 

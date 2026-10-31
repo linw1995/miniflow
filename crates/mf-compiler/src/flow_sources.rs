@@ -1,5 +1,7 @@
-use crate::{NodeDependency, WorkflowDefinition};
-use mf_runtime::{CALL_KIND, CallConfig, MAX_CALL_DEPTH, NodeDefinition, SubgraphSource};
+use crate::{NodeDependency, WorkflowDefinition, subgraphs::ResolvedSubgraphSource};
+use mf_runtime::{
+    CALL_KIND, CallConfig, MAX_CALL_DEPTH, NodeDefinition, SubgraphSource, SubgraphSourceKind,
+};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -162,19 +164,14 @@ fn argument_descriptions(
     arguments: &BTreeMap<String, SubgraphSource>,
 ) -> BTreeMap<String, Vec<mf_telemetry::description::SubgraphArgumentDescription>> {
     fn source(value: &SubgraphSource) -> &SubgraphSource {
-        match value {
-            SubgraphSource::Interface { source: inner, .. }
-            | SubgraphSource::Interfaces { interfaces: inner } => source(inner),
-            source => source,
-        }
+        value.innermost()
     }
     let describe = |name: &str, value: &SubgraphSource| {
         mf_telemetry::description::SubgraphArgumentDescription {
             name: name.to_owned(),
-            kind: match source(value) {
-                SubgraphSource::Node { node } => node.kind.clone(),
-                _ => CALL_KIND.to_owned(),
-            },
+            kind: source(value)
+                .inline_node_definition()
+                .map_or_else(|| CALL_KIND.to_owned(), |node| node.kind.clone()),
         }
     };
     arguments
@@ -335,19 +332,16 @@ impl Resolver {
                 depth,
                 &BTreeMap::new(),
             )?;
-            let cardinality = match &source {
-                SubgraphSource::Interfaces { interfaces } => interfaces.as_ref(),
-                source => source,
-            };
+            let cardinality = source.innermost();
             ensure!(
-                matches!(cardinality, SubgraphSource::Collection { .. })
+                matches!(cardinality, ResolvedSubgraphSource::Collection { .. })
                     == (kind == mf_runtime::SubgraphParameterKind::Collection),
                 InvalidSnafu {
                     reference: &name,
                     message: "subgraph parameter cardinality does not match its declaration"
                 }
             );
-            flows.insert(name, source);
+            flows.insert(name, source.into_source());
         }
         self.nodes(
             &mut definition.nodes,
@@ -389,6 +383,9 @@ impl Resolver {
         Ok(())
     }
 
+    /// Resolves an author-facing source into one of the normalized `Inline`, `Collection`, or
+    /// `View` shapes. Paths, built-ins, references, parameters, and bindings do not survive this
+    /// boundary, so call lowering and freezing never depend on the original source kind.
     fn source(
         &mut self,
         source: &SubgraphSource,
@@ -397,7 +394,7 @@ impl Resolver {
         available: &BTreeMap<String, NodeDependency>,
         depth: usize,
         bindings: &BTreeMap<String, SubgraphSource>,
-    ) -> Result<SubgraphSource, FlowResolutionError> {
+    ) -> Result<ResolvedSubgraphSource, FlowResolutionError> {
         ensure!(
             depth <= MAX_CALL_DEPTH,
             InvalidSnafu {
@@ -413,23 +410,23 @@ impl Resolver {
                 })?;
                 return self.source(source, scope, directory, available, depth + 1, bindings);
             }
-            SubgraphSource::Interfaces { interfaces } => {
+            SubgraphSource::View { source, inputs } => {
+                let source =
+                    self.source(source, scope, directory, available, depth + 1, bindings)?;
                 ensure!(
-                    bindings.is_empty(),
+                    !matches!(
+                        source.innermost(),
+                        ResolvedSubgraphSource::Collection { .. }
+                    ),
                     InvalidSnafu {
-                        reference: "interfaces",
-                        message: "interfaces cannot be called"
+                        reference: "view",
+                        message: "an input projection requires one subgraph"
                     }
                 );
-                let interfaces =
-                    self.source(interfaces, scope, directory, available, depth + 1, bindings)?;
-                return Ok(if matches!(interfaces, SubgraphSource::Interfaces { .. }) {
-                    interfaces
-                } else {
-                    SubgraphSource::Interfaces {
-                        interfaces: Box::new(interfaces),
-                    }
-                });
+                return Ok(ResolvedSubgraphSource::view(
+                    Box::new(source),
+                    inputs.clone(),
+                ));
             }
             SubgraphSource::Collection { collection } => {
                 ensure!(
@@ -457,10 +454,7 @@ impl Resolver {
                         &BTreeMap::new(),
                     )?;
                     ensure!(
-                        !matches!(
-                            source,
-                            SubgraphSource::Collection { .. } | SubgraphSource::Interfaces { .. }
-                        ),
+                        !matches!(source, ResolvedSubgraphSource::Collection { .. }),
                         InvalidSnafu {
                             reference: name,
                             message: "subgraph collections contain individual callable subgraphs"
@@ -468,43 +462,14 @@ impl Resolver {
                     );
                     resolved.insert(name.clone(), source);
                 }
-                return Ok(SubgraphSource::Collection {
+                return Ok(ResolvedSubgraphSource::Collection {
                     collection: resolved,
                 });
             }
-            SubgraphSource::Interface { source, inputs } => {
-                let source =
-                    self.source(source, scope, directory, available, depth + 1, bindings)?;
-                ensure!(
-                    !matches!(source, SubgraphSource::Collection { .. }),
-                    InvalidSnafu {
-                        reference: "interface",
-                        message: "an interface requires one subgraph"
-                    }
-                );
-                return Ok(match source {
-                    SubgraphSource::Interfaces { interfaces } => {
-                        ensure!(
-                            !matches!(interfaces.as_ref(), SubgraphSource::Collection { .. }),
-                            InvalidSnafu {
-                                reference: "interface",
-                                message: "an input projection requires one subgraph interface"
-                            }
-                        );
-                        SubgraphSource::Interfaces {
-                            interfaces: Box::new(SubgraphSource::Interface {
-                                source: interfaces,
-                                inputs: inputs.clone(),
-                            }),
-                        }
-                    }
-                    source => SubgraphSource::Interface {
-                        source: Box::new(source),
-                        inputs: inputs.clone(),
-                    },
-                });
-            }
-            SubgraphSource::Node { node } => {
+            SubgraphSource::Source(SubgraphSourceKind::Inline {
+                node: Some(node),
+                definition: None,
+            }) => {
                 let mut node = node.clone();
                 node.subgraphs.extend(bindings.clone());
                 self.nodes(
@@ -515,7 +480,33 @@ impl Resolver {
                     depth + 1,
                     mf_runtime::WorkflowDefinitionVersion::CURRENT,
                 )?;
-                return Ok(SubgraphSource::Node { node });
+                let definition = WorkflowDefinition {
+                    version: mf_runtime::WorkflowDefinitionVersion::CURRENT,
+                    execution: None,
+                    dependencies: available.clone(),
+                    subgraphs: Default::default(),
+                    nodes: vec![*node.clone()],
+                    edges: vec![],
+                    control_edges: vec![],
+                    outputs: vec![],
+                    order_edges: vec![],
+                    clusters: vec![],
+                };
+                return Ok(ResolvedSubgraphSource::inline_node(
+                    node,
+                    Box::new(definition),
+                ));
+            }
+            SubgraphSource::Source(SubgraphSourceKind::Inline {
+                definition: Some(definition),
+                node: None,
+            }) => *definition.clone(),
+            SubgraphSource::Source(SubgraphSourceKind::Inline { .. }) => {
+                return InvalidSnafu {
+                    reference: "inline",
+                    message: "inline subgraphs require exactly one of node or definition",
+                }
+                .fail();
             }
             SubgraphSource::Parameter { .. } => {
                 return InvalidSnafu {
@@ -524,7 +515,7 @@ impl Resolver {
                 }
                 .fail();
             }
-            SubgraphSource::Path { path } => {
+            SubgraphSource::Source(SubgraphSourceKind::Path { path }) => {
                 let path = if path.is_absolute() {
                     path.clone()
                 } else {
@@ -535,13 +526,10 @@ impl Resolver {
                         })?
                         .join(path)
                 };
-                return self
-                    .file(&path, available, bindings, depth + 1)
-                    .map(|definition| SubgraphSource::Definition {
-                        definition: Box::new(definition),
-                    });
+                let definition = self.file(&path, available, bindings, depth + 1)?;
+                return Ok(ResolvedSubgraphSource::inline(Box::new(definition)));
             }
-            SubgraphSource::Builtin { builtin } => {
+            SubgraphSource::Source(SubgraphSourceKind::Builtin { builtin }) => {
                 let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
                 let registration = registry.get(builtin).context(InvalidSnafu {
                     reference: builtin,
@@ -572,11 +560,8 @@ impl Resolver {
                     builtin,
                     bindings,
                 )?;
-                return Ok(SubgraphSource::Definition {
-                    definition: Box::new(definition),
-                });
+                return Ok(ResolvedSubgraphSource::inline(Box::new(definition)));
             }
-            SubgraphSource::Definition { definition } => *definition.clone(),
         };
         self.definition(
             &mut definition,
@@ -586,9 +571,7 @@ impl Resolver {
             "subgraph",
             bindings,
         )?;
-        Ok(SubgraphSource::Definition {
-            definition: Box::new(definition),
-        })
+        Ok(ResolvedSubgraphSource::inline(Box::new(definition)))
     }
 
     fn nodes(
@@ -601,7 +584,7 @@ impl Resolver {
         version: mf_runtime::WorkflowDefinitionVersion,
     ) -> Result<(), FlowResolutionError> {
         for node in nodes {
-            let mut arguments = BTreeMap::new();
+            let mut arguments: BTreeMap<String, SubgraphSource> = BTreeMap::new();
             for (name, source) in std::mem::take(&mut node.subgraphs) {
                 ensure!(
                     !name.trim().is_empty() && !name.contains(':'),
@@ -619,7 +602,8 @@ impl Resolver {
                         available,
                         depth + 1,
                         &BTreeMap::new(),
-                    )?,
+                    )?
+                    .into_source(),
                 );
             }
             // Freezing adapts Nodes into Flows; retain the original caller-facing identities.
@@ -646,7 +630,7 @@ impl Resolver {
                     }
                 );
                 let source = if let Some(definition) = config.definition.take() {
-                    SubgraphSource::Definition { definition }
+                    SubgraphSource::inline(definition)
                 } else {
                     sources
                         .get(&config.flow)
@@ -658,20 +642,7 @@ impl Resolver {
                 };
                 let resolved =
                     self.source(&source, sources, directory, available, depth, &arguments)?;
-                let Some((definition, node_source)) =
-                    resolved.frozen_definition(&WorkflowDefinition {
-                        version,
-                        execution: None,
-                        dependencies: available.clone(),
-                        subgraphs: Default::default(),
-                        nodes: vec![],
-                        edges: vec![],
-                        control_edges: vec![],
-                        outputs: vec![],
-                        order_edges: vec![],
-                        clusters: vec![],
-                    })
-                else {
+                let Some((definition, node_source)) = resolved.frozen_definition() else {
                     return InvalidSnafu {
                         reference: &config.flow,
                         message: "Flow calls require one callable subgraph",
@@ -679,10 +650,10 @@ impl Resolver {
                     .fail();
                 };
                 fn projections(
-                    source: &SubgraphSource,
+                    source: &ResolvedSubgraphSource,
                     output: &mut Vec<BTreeMap<String, String>>,
                 ) {
-                    if let SubgraphSource::Interface { source, inputs } = source {
+                    if let ResolvedSubgraphSource::View { source, inputs } = source {
                         projections(source, output);
                         output.push(inputs.clone());
                     }

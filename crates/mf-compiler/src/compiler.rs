@@ -1755,22 +1755,11 @@ fn prepare_subgraph_parameters(
     use mf_runtime::{PreparedSubgraphParameter, SubgraphSource};
     let mut parameters = BTreeMap::new();
     for (name, source) in &node.subgraphs {
-        match source {
-            SubgraphSource::Collection { .. } => {
-                parameters.insert(
-                    name.clone(),
-                    PreparedSubgraphParameter::Collection(BTreeMap::new()),
-                );
-            }
-            SubgraphSource::Interfaces { interfaces }
-                if matches!(interfaces.as_ref(), SubgraphSource::Collection { .. }) =>
-            {
-                parameters.insert(
-                    name.clone(),
-                    PreparedSubgraphParameter::Interfaces(BTreeMap::new()),
-                );
-            }
-            _ => {}
+        if let SubgraphSource::Collection { .. } = source {
+            parameters.insert(
+                name.clone(),
+                PreparedSubgraphParameter::Collection(BTreeMap::new()),
+            );
         }
     }
     preparation.path.push(node.id.clone());
@@ -1848,23 +1837,16 @@ fn prepare_subgraph_parameters(
                 .collect();
             let prepared = prepared.with_input_aliases(aliases);
             if let Some(entry) = member.entry {
-                match parameters.get_mut(member.parameter) {
-                    Some(PreparedSubgraphParameter::Collection(collection)) => {
-                        collection.insert(entry.to_owned(), prepared);
-                    }
-                    Some(PreparedSubgraphParameter::Interfaces(interfaces)) => {
-                        interfaces.insert(entry.to_owned(), prepared.interface());
-                    }
-                    _ => unreachable!("collection initialized above"),
-                }
+                let Some(PreparedSubgraphParameter::Collection(collection)) =
+                    parameters.get_mut(member.parameter)
+                else {
+                    unreachable!("collection initialized above")
+                };
+                collection.insert(entry.to_owned(), prepared);
             } else {
                 parameters.insert(
                     member.parameter.to_owned(),
-                    if member.interface_only {
-                        PreparedSubgraphParameter::Interface(prepared.interface())
-                    } else {
-                        PreparedSubgraphParameter::Single(prepared)
-                    },
+                    PreparedSubgraphParameter::Single(prepared),
                 );
             }
         }

@@ -239,9 +239,9 @@ fn builtin_sources_are_resolved_from_linked_providers() {
     let mut unknown = definition;
     unknown.subgraphs.insert(
         "echo".into(),
-        mf_runtime::SubgraphSource::Builtin {
+        mf_runtime::SubgraphSource::Source(mf_runtime::SubgraphSourceKind::Builtin {
             builtin: "missing".into(),
-        },
+        }),
     );
     assert!(
         compile_definition(&unknown, &registry)
@@ -258,9 +258,9 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
     old_sources.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_23;
     old_sources.subgraphs.insert(
         "echo".into(),
-        mf_runtime::SubgraphSource::Builtin {
+        mf_runtime::SubgraphSource::Source(mf_runtime::SubgraphSourceKind::Builtin {
             builtin: "mf-compiler.echo".into(),
-        },
+        }),
     );
     assert!(
         mf_compiler::resolve_flows(&old_sources, None)
@@ -295,9 +295,9 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
     let mut blank_source = base.clone();
     blank_source.subgraphs.insert(
         " ".into(),
-        mf_runtime::SubgraphSource::Builtin {
+        mf_runtime::SubgraphSource::Source(mf_runtime::SubgraphSourceKind::Builtin {
             builtin: "mf-compiler.echo".into(),
-        },
+        }),
     );
     let mut blank_call = base.clone();
     blank_call.nodes[0].config["flow"] = json!("");

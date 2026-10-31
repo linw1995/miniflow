@@ -157,9 +157,9 @@ fn profiles_load_local_child_flows_with_host_owned_provider_paths() {
     }
     definition.subgraphs.insert(
         "title".into(),
-        mf_runtime::SubgraphSource::Path {
+        mf_runtime::SubgraphSource::Source(mf_runtime::SubgraphSourceKind::Path {
             path: "flows/title.json".into(),
-        },
+        }),
     );
     std::fs::write(
         root.path().join("flows/title.json"),

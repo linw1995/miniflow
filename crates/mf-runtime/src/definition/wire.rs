@@ -454,7 +454,7 @@ fn visit_bodies(
                 .expect("node array")
                 .remove(0);
         }
-        for field in ["source", "interfaces", "default"] {
+        for field in ["source", "default"] {
             if let Some(value) = value.get_mut(field) {
                 source(value, modern, version, path, visit)?;
             }

@@ -191,20 +191,10 @@ pub const MAX_CALL_DEPTH: usize = 16;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum SubgraphSource {
-    Path {
-        path: PathBuf,
-    },
-    Builtin {
-        builtin: String,
-    },
-    Node {
-        node: Box<NodeDefinition>,
-    },
+    /// A concrete subgraph origin.
+    Source(SubgraphSourceKind),
     Reference {
         reference: String,
-    },
-    Interfaces {
-        interfaces: Box<SubgraphSource>,
     },
     Parameter {
         parameter: SubgraphParameterKind,
@@ -214,22 +204,85 @@ pub enum SubgraphSource {
     Collection {
         collection: BTreeMap<String, SubgraphSource>,
     },
-    Interface {
+    /// A callable input projection over another source.
+    View {
         source: Box<SubgraphSource>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         inputs: BTreeMap<String, String>,
     },
-    Definition {
-        definition: Box<WorkflowDefinition>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum SubgraphSourceKind {
+    Path {
+        path: PathBuf,
+    },
+    Builtin {
+        builtin: String,
+    },
+    /// One inline subgraph body: either a single Node or a complete Flow.
+    ///
+    /// Exactly one field is populated. Keeping both pieces of wire syntax on one variant lets the
+    /// compiler normalize Nodes and Flows into the same resolved representation.
+    Inline {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<Box<NodeDefinition>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition: Option<Box<WorkflowDefinition>>,
     },
 }
 
 impl SubgraphSource {
+    pub fn source(kind: SubgraphSourceKind) -> Self {
+        Self::Source(kind)
+    }
+
+    pub fn inline(definition: Box<WorkflowDefinition>) -> Self {
+        Self::source(SubgraphSourceKind::Inline {
+            node: None,
+            definition: Some(definition),
+        })
+    }
+
+    pub fn inline_node(node: Box<NodeDefinition>) -> Self {
+        Self::source(SubgraphSourceKind::Inline {
+            node: Some(node),
+            definition: None,
+        })
+    }
+
+    pub fn view(source: Box<Self>, inputs: BTreeMap<String, String>) -> Self {
+        Self::View { source, inputs }
+    }
+
+    /// Follows view wrappers to the underlying source.
+    pub fn innermost(&self) -> &Self {
+        match self {
+            Self::View { source, .. } => source.innermost(),
+            source => source,
+        }
+    }
+
+    pub fn inline_node_definition(&self) -> Option<&NodeDefinition> {
+        match self.innermost() {
+            Self::Source(SubgraphSourceKind::Inline {
+                node: Some(node),
+                definition: None,
+            }) => Some(node),
+            _ => None,
+        }
+    }
+
     pub fn frozen_definition(
         &self,
         parent: &WorkflowDefinition,
     ) -> Option<(WorkflowDefinition, bool)> {
         match self {
-            Self::Node { node } => Some((
+            Self::Source(SubgraphSourceKind::Inline {
+                node: Some(node),
+                definition: None,
+            }) => Some((
                 WorkflowDefinition {
                     version: parent.version,
                     execution: None,
@@ -244,8 +297,11 @@ impl SubgraphSource {
                 },
                 true,
             )),
-            Self::Definition { definition } => Some((*definition.clone(), false)),
-            Self::Interface { source, .. } => source.frozen_definition(parent),
+            Self::Source(SubgraphSourceKind::Inline {
+                definition: Some(definition),
+                node: None,
+            }) => Some((*definition.clone(), false)),
+            Self::View { source, .. } => source.frozen_definition(parent),
             _ => None,
         }
     }
@@ -256,7 +312,6 @@ pub struct SubgraphMember<'a> {
     pub entry: Option<&'a str>,
     pub id: DefinitionId,
     pub source: &'a SubgraphSource,
-    pub interface_only: bool,
 }
 
 impl SubgraphMember<'_> {
@@ -376,11 +431,7 @@ impl NodeDefinition {
     pub fn subgraph_members(&self) -> Vec<SubgraphMember<'_>> {
         let mut members = Vec::new();
         for (parameter, source) in &self.subgraphs {
-            let (source, interface_only) = match source {
-                SubgraphSource::Interfaces { interfaces } => (interfaces.as_ref(), true),
-                _ => (source, false),
-            };
-            match source {
+            match source.innermost() {
                 SubgraphSource::Collection { collection } => {
                     for (entry, source) in collection {
                         members.push(SubgraphMember {
@@ -388,7 +439,6 @@ impl NodeDefinition {
                             entry: Some(entry),
                             id: format!("subgraph:{parameter}:{entry}").into(),
                             source,
-                            interface_only,
                         });
                     }
                 }
@@ -397,7 +447,6 @@ impl NodeDefinition {
                     entry: None,
                     id: format!("subgraph:{parameter}").into(),
                     source,
-                    interface_only,
                 }),
             }
         }
@@ -406,11 +455,7 @@ impl NodeDefinition {
 
     pub fn parameter_body(&self, parent: &WorkflowDefinition) -> Option<WorkflowDefinition> {
         let mut result: Option<WorkflowDefinition> = None;
-        for member in self
-            .subgraph_members()
-            .into_iter()
-            .filter(|member| !member.interface_only)
-        {
+        for member in self.subgraph_members() {
             let (body, _) = member.source.frozen_definition(parent)?;
             let wrapper = member.wrapper(parent, body);
             if let Some(result) = &mut result {
