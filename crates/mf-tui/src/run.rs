@@ -1854,6 +1854,7 @@ fn iteration_for_scope<'a>(
         })
 }
 
+#[cfg(test)]
 fn inline_observations(
     layout: &GraphLayout,
     description: &WorkflowDescription,
@@ -2443,6 +2444,7 @@ pub struct ObservationView {
     description: WorkflowDescription,
     root: GraphLayout,
     execution: GraphLayout,
+    execution_bodies: BTreeMap<Vec<String>, GraphLayout>,
     expanded: BTreeSet<Vec<String>>,
     viewports: BTreeMap<ConnectionView, GraphViewport>,
     collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
@@ -2450,6 +2452,27 @@ pub struct ObservationView {
     state: ViewState,
 }
 impl ObservationView {
+    fn execution_bodies(
+        description: &WorkflowDescription,
+        view: ConnectionView,
+        collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
+    ) -> Result<BTreeMap<Vec<String>, GraphLayout>, RunError> {
+        description
+            .loop_bodies
+            .iter()
+            .map(|body| {
+                let layout = GraphLayout::from_body_with_view_and_collapsed(
+                    description,
+                    &body.path,
+                    view,
+                    &collapsed.get(&body.path).cloned().unwrap_or_default(),
+                )
+                .context(GraphSnafu)?;
+                Ok((body.path.clone(), layout))
+            })
+            .collect()
+    }
+
     pub fn new(description: &WorkflowDescription) -> Result<Self, RunError> {
         let expanded = description
             .loop_bodies
@@ -2468,6 +2491,11 @@ impl ObservationView {
         Ok(Self {
             description: description.clone(),
             execution,
+            execution_bodies: Self::execution_bodies(
+                description,
+                ConnectionView::Execution,
+                &BTreeMap::new(),
+            )?,
             root,
             expanded,
             viewports: BTreeMap::new(),
@@ -2565,6 +2593,8 @@ impl ObservationView {
         } else {
             None
         };
+        let execution_bodies =
+            Self::execution_bodies(&self.description, self.root.connection_view(), &folded)?;
         self.state.selected = if collapsed {
             self.cluster_focus
                 .get(&(path.clone(), index))
@@ -2579,6 +2609,7 @@ impl ObservationView {
         if let Some(execution) = execution {
             self.execution = execution;
         }
+        self.execution_bodies = execution_bodies;
         self.state.sync_scope(&self.root);
         self.state.reveal_selected = true;
         self.state.details_offset = 0;
@@ -2623,9 +2654,12 @@ impl ObservationView {
             &self.collapsed.get(&Vec::new()).cloned().unwrap_or_default(),
         )
         .context(GraphSnafu)?;
+        let execution_bodies =
+            Self::execution_bodies(&self.description, root.connection_view(), &self.collapsed)?;
         self.save_viewport();
         self.root = root;
         self.execution = execution;
+        self.execution_bodies = execution_bodies;
         self.restore_viewport();
         if let Some(anchor) = anchor
             && let Some(selected) = anchor_display(&self.root, &anchor)
@@ -2731,8 +2765,55 @@ impl ObservationView {
                 |status| format!("Exited {}", exit_code(status)),
             ),
         };
-        let completed = snapshot
-            .nodes
+        self.render_execution_snapshot(
+            frame,
+            area,
+            &observation.reader,
+            &snapshot,
+            elapsed,
+            &phase,
+        );
+    }
+
+    fn render_execution_snapshot(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        reader: &ObservationReader,
+        snapshot: &StateSnapshot,
+        elapsed: Duration,
+        phase: &str,
+    ) {
+        let path = if let Some(latest) = &snapshot.iterations.latest_node_event
+            && latest.revision > snapshot.latest_node_revision
+        {
+            latest.context.body_path.clone()
+        } else {
+            snapshot
+                .latest_node_event
+                .as_ref()
+                .map(|latest| {
+                    latest
+                        .node
+                        .path
+                        .iter()
+                        .map(|entry| entry.node_id().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let layout = self.execution_bodies.get(&path).unwrap_or(&self.execution);
+        // Live following must not inherit the inspector's folded scopes or history selection.
+        let mut state = ViewState::default();
+        state.follow_latest(snapshot, layout);
+        let nodes = inline_observations_with_items(
+            layout,
+            &self.description,
+            snapshot,
+            &BTreeMap::new(),
+            &state.iteration_items,
+        );
+        let completed = nodes
             .iter()
             .filter(|node| {
                 matches!(
@@ -2741,14 +2822,11 @@ impl ObservationView {
                 )
             })
             .count();
-        // Follow root execution independently of the full inspector's navigation state.
-        let mut state = ViewState::default();
-        state.follow_latest(&snapshot, &self.execution);
-        let current = self
-            .execution
+        let current = layout
             .nodes()
             .get(state.selected)
             .map_or("", |node| node.id.as_str());
+        let scope = layout.node_path(state.selected).join(" / ");
         let [header, graph, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
@@ -2757,22 +2835,16 @@ impl ObservationView {
         .areas(area);
         frame.render_widget(
             Paragraph::new(format!(
-                "Flow: {phase} | {completed}/{} | {current} | {:.1}s",
-                snapshot.nodes.len(),
+                "Flow: {phase} | {current} | {completed}/{} | {:.1}s | {scope}",
+                nodes.len(),
                 elapsed.as_secs_f64(),
             )),
             header,
         );
-        state.reveal(&self.execution, graph);
-        let nodes = inline_observations(
-            &self.execution,
-            &self.description,
-            &snapshot,
-            &BTreeMap::new(),
-        );
+        state.reveal(layout, graph);
         frame.render_widget(
-            GraphView::new(&self.execution)
-                .reader(&observation.reader)
+            GraphView::new(layout)
+                .reader(reader)
                 .nodes(&nodes)
                 .selected(state.selected)
                 .offset(state.offset.0, state.offset.1)
@@ -2983,6 +3055,191 @@ mod tests {
                 "control_edges":[],"execution_order":["%loop","source","target"]
             })))
         })).unwrap()
+    }
+
+    fn execution_fixture() -> WorkflowDescription {
+        let body = |path: &[&str], nodes: &[(&str, &str)]| {
+            serde_json::json!({
+                "path": path,
+                "nodes": nodes.iter().map(|(id, kind)| serde_json::json!({"id":id,"kind":kind})).collect::<Vec<_>>(),
+                "execution_order": nodes.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                "data_edges":[], "control_edges":[]
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "version":"2026-10-31", "workflow_id":format!("sha256:{}", "9".repeat(64)),
+            "execution":{"mode":"single"}, "nodes":[{"id":"agent","kind":"workflow.call"}],
+            "execution_order":["agent"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[
+                body(&["agent"], &[("rounds", "workflow.loop")]),
+                body(&["agent", "rounds"], &[("%loop", "%loop"), ("chat", "builtin.llm"), ("each", "builtin.iteration")]),
+                body(&["agent", "rounds", "each"], &[("%iteration", "builtin.iteration_input"), ("invoke", "builtin.dispatch")]),
+                body(&["agent", "rounds", "each", "invoke"], &[("branches:multiply", "workflow.call")]),
+                body(&["agent", "rounds", "each", "invoke", "branches:multiply"], &[("multiply", "fixture.work"), ("format", "fixture.format")])
+            ]
+        })).unwrap()
+    }
+
+    fn render_execution_snapshot(view: &ObservationView, snapshot: &StateSnapshot) -> String {
+        let receiver = LoopbackReceiver::bind(view.description.clone(), RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(180, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                view.render_execution_snapshot(
+                    frame,
+                    frame.area(),
+                    &reader,
+                    snapshot,
+                    Duration::from_secs(1),
+                    "Running",
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..20)
+            .map(|y| {
+                (0..180)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn chat_execution_follows_nested_calls_and_loops_without_changing_inspector_navigation() {
+        use mf_telemetry::event::NodeIdentity;
+        let description = execution_fixture();
+        let run = RunId::new();
+        let mut session = crate::state::SessionState::new(description.clone(), run).unwrap();
+        let agent = vec![LoopPathEntry::Call {
+            call_id: "agent".into(),
+        }];
+        let mut rounds = agent.clone();
+        rounds.push(LoopPathEntry::Loop {
+            loop_id: "rounds".into(),
+            index: Count::ZERO,
+        });
+        for (sequence, event) in [
+            LifecycleKind::WorkflowStarted {
+                elapsed_ns: Count::ZERO,
+            },
+            LifecycleKind::CallStarted {
+                path: agent.clone(),
+                elapsed_ns: Count::ZERO,
+            },
+            LifecycleKind::LoopPassStarted {
+                path: rounds.clone(),
+                elapsed_ns: Count::ZERO,
+            },
+            LifecycleKind::NodeStarted {
+                node: NodeIdentity {
+                    id: "chat".into(),
+                    kind: "builtin.llm".into(),
+                    path: rounds,
+                },
+                position: Count::try_from(1).unwrap(),
+                elapsed_ns: Count::ZERO,
+                selected_inputs: Vec::new(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            session
+                .apply(LifecycleEvent {
+                    workflow_id: description.workflow_id.clone(),
+                    run_id: run,
+                    sequence: Count::try_from(sequence as i64 + 1).unwrap(),
+                    event,
+                })
+                .unwrap();
+        }
+        let mut view = ObservationView::new(&description).unwrap();
+        view.fold_body(vec!["agent".into()], false).unwrap();
+        view.state.offset = (400, 500);
+        view.state.pass_offset = 1;
+        let text = render_execution_snapshot(&view, &session.snapshot());
+        assert!(text.contains("Flow: Running | chat"), "{text}");
+        assert!(text.contains("agent / rounds"), "{text}");
+        assert!(
+            text.contains("builtin.llm") && !text.contains("branches:multiply"),
+            "{text}"
+        );
+        assert_eq!(view.state.offset, (400, 500));
+        assert_eq!(view.state.pass_offset, 1);
+        assert!(!view.expanded.contains(&vec!["agent".into()]));
+    }
+
+    #[test]
+    fn chat_execution_follows_tool_leaves_inside_iteration_parameter_calls() {
+        use crate::state::{IterationEvent, IterationRecord, SessionState};
+        use mf_telemetry::{event::NodeIdentity, iteration::IterationContext};
+        let description = execution_fixture();
+        let mut session = SessionState::new(description.clone(), RunId::new()).unwrap();
+        let iteration_path = vec!["agent".into(), "rounds".into(), "each".into()];
+        let mut body_path = iteration_path.clone();
+        body_path.extend(["invoke".into(), "branches:multiply".into()]);
+        let context = IterationContext {
+            invocation: Count::try_from(1).unwrap(),
+            iteration_path: iteration_path.clone(),
+            body_path: iteration_path,
+            parent_path: vec![
+                LoopPathEntry::Call {
+                    call_id: "agent".into(),
+                },
+                LoopPathEntry::Loop {
+                    loop_id: "rounds".into(),
+                    index: Count::ZERO,
+                },
+            ],
+            parent_stream_invocation: None,
+            index: Count::ZERO,
+            sequence: Count::try_from(1).unwrap(),
+            elapsed_ns: Count::ZERO,
+        };
+        session
+            .apply_iteration(IterationRecord {
+                context: context.clone(),
+                event: IterationEvent::ItemStarted,
+                correlation: None,
+            })
+            .unwrap();
+        session
+            .apply_iteration(IterationRecord {
+                context: IterationContext {
+                    body_path,
+                    sequence: Count::try_from(2).unwrap(),
+                    ..context
+                },
+                event: IterationEvent::NodeStarted {
+                    node: NodeIdentity {
+                        id: "multiply".into(),
+                        kind: "fixture.work".into(),
+                        path: Vec::new(),
+                    },
+                    selected_inputs: Vec::new(),
+                },
+                correlation: None,
+            })
+            .unwrap();
+        let view = ObservationView::new(&description).unwrap();
+        let text = render_execution_snapshot(&view, &session.snapshot());
+        assert!(text.contains("Flow: Running | multiply"), "{text}");
+        assert!(
+            text.contains("agent / rounds / each / invoke / branches:multiply"),
+            "{text}"
+        );
+        assert!(
+            text.contains("fixture.work") && text.contains("format"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("builtin.dispatch") && !text.contains("builtin.llm"),
+            "{text}"
+        );
+        assert_eq!(view.state.selected, 0);
     }
 
     fn parallel_fixture(count: usize) -> WorkflowDescription {

@@ -174,7 +174,22 @@ impl GraphLayout {
         collapsed: &BTreeSet<usize>,
     ) -> Result<Self, GraphError> {
         let scope = Self::body_description(description, path)?;
-        Self::with_view_and_collapsed(&scope, view, collapsed)
+        let mut layout = Self::with_view_and_collapsed(&scope, view, collapsed)?;
+        layout.source_paths.fill(path.to_vec());
+        for (scope, _) in &mut layout.cluster_keys {
+            *scope = path.to_vec();
+        }
+        layout.body_nodes = layout
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                let mut child = path.to_vec();
+                child.push(node.id.clone());
+                description.body(&child).is_some().then_some(index)
+            })
+            .collect();
+        Ok(layout)
     }
 
     fn body_description(

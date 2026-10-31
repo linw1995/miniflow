@@ -926,6 +926,10 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
     let layout = GraphLayout::from_loop_body(&graph, &["repeat".into()]).unwrap();
     assert_eq!(layout.nodes().len(), 2);
     assert_eq!(layout.edges().len(), 1);
+    let child = layout
+        .display_index_for_scoped_node(&["repeat".into()], "child")
+        .unwrap();
+    assert_eq!(layout.node_path(child), ["repeat"]);
     let mut nodes = vec![
         NodeObservation::pending("%loop", "%loop"),
         NodeObservation::pending("child", "fixture.child"),
