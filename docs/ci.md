@@ -56,8 +56,9 @@ Clippy checks, and full nextest suite. Each preparation runs only the Cargo phas
 its consumer needs, with matching package, target, feature, and profile settings.
 Lint and coverage share a Nix development-environment cache keyed by the toolchain,
 flake, and setup action, independent of repository sources. Build checks retain
-source-keyed stores. Nightly first restores its test store, then falls back to the
-same platform's check store to reuse package and Clippy artifacts on a cold run.
+source-keyed stores. Nightly Linux reuses the check store directly because its
+Rust tests run in the coverage job. Nightly macOS first restores its test store,
+then falls back to the check store to reuse package and Clippy artifacts on a cold run.
 
 Coverage dependencies and generated-project builds use persistent caches.
 Coverage preparation defaults dev/test debug information to zero while retaining
@@ -124,7 +125,7 @@ After reporting, CI runs `scripts/run-cov.sh --prune-cache` before saving the
 cache. It removes checkout artifacts that the next preparation would delete and
 executables belonging to temporary generated projects. Registry libraries,
 proc macros, and dependency build scripts remain cached. Reports are preserved;
-run `--prepare` again before executing more package steps after pruning.
+run `--prepare` again before executing more test phases after pruning.
 Caches accelerate compilation without changing which tests execute.
 
 ## Coverage step timings
@@ -135,30 +136,25 @@ Set `MF_COVERAGE_REPORT_FORMAT=lcov` for compact local reports. Reporting logs
 separate timings for profile collection, binary preparation, grcov, publication,
 and removal of the temporary binary view.
 
-CI and nightly prepare and build the selected packages together, run a separate
-`Coverage tests (<package>)` step for each workspace package, and generate one
-combined report after all selected suites pass. The shared build preserves Cargo
-feature unification and is timed separately. Package steps reuse nextest's binary
-and Cargo metadata, including only test discovery, setup, and execution. Generated
-project builds inside tests still count toward their package's time, and their
-caches are shared across steps. Generated-project dependencies are cleaned and
-prewarmed once per coverage preparation session, when the first matching package
-runs. Later package steps reuse that preparation; a new `--prepare` invocation
-creates a new session and invalidates the marker. Package steps must run
-sequentially against the same checkout and prepared binaries. New workspace
-packages must also be added to both workflows; the CI script tests check that every package has exactly one step.
+CI and nightly prepare and build the selected packages together, then run all
+selected suites in one `Coverage tests` step. A single nextest process schedules
+tests across package boundaries instead of serializing crates, while the existing
+test groups continue to protect shared generated-project builds. The shared build
+preserves Cargo feature unification and is timed separately. Test execution reuses
+nextest's binary and Cargo metadata, including only test discovery, setup, and
+execution. Generated-project dependencies are cleaned and prewarmed once per
+coverage preparation session, when the first matching test runs. A new `--prepare`
+invocation creates a new session and invalidates the marker. One combined report is
+generated only after every selected suite passes; complete crate reports are still
+published separately.
 
-On PRs, step-level conditions skip packages absent from the affected plan.
-An empty plan skips preparation, all package steps, report generation, and uploads.
-After each non-cancelled PR CI run, the timing monitor creates or updates one PR
-comment. Its Summary lists skipped crates, total CI wall time, coverage job time,
-the sum of executed crate-step durations, and each crate's result and duration.
-Skipped crates show `N/A`; missing timestamps also produce `N/A` rather than a
-partial total. Shared compilation, report generation, uploads, and other steps
-remain available in the detailed timing comparison. The Summary uses GitHub's
-second-resolution timestamps, so a successful `0s` step is distinct from a skip.
-Failed runs can skip crates because an earlier step failed, not just because
-the affected plan excluded them.
+On PRs, an empty plan skips preparation, test execution, report generation, and
+uploads. After each non-cancelled PR CI run, the timing monitor creates or updates
+one PR comment. Its Summary reports total CI wall time, coverage job time, and the
+combined parallel test step's wall time. Because packages overlap, that duration is
+not attributed to individual crates. Shared compilation, report generation,
+uploads, and other steps remain available in the detailed timing comparison.
+Historical per-crate steps remain supported in old run reports and timing baselines.
 
 The monitor omits skipped steps from timing comparisons and computes each step's baseline median
 from successful executions of that exact step name only. Skipped, missing, and
@@ -167,14 +163,15 @@ successful baseline samples shows `N/A`. Job and wall times still reflect the
 work actually selected, so runs with different selections are not equivalent
 full-suite measurements.
 
-The script's `--prepare`, `--test-package <name>`, and `--report` modes support
-these separate steps. Preparation accepts `--affected-plan <path>`, clears stale
+The script's `--prepare`, `--test-selected`, and `--report` modes support these
+separate CI steps. Preparation accepts `--affected-plan <path>`, clears stale
 profiles and workspace binaries, and builds the selected suites. Exact-case plans
 build their conservative baseline once so missing runnable identities can widen
 selection without rebuilding. The actual nextest inventory resolves per-package
 filters and promotes exact selections covering a complete suite to package scope.
-Package steps accumulate profiles, and reporting merges them. Local invocations
-without a phase argument still prepare, test, and report in one command.
+Test execution accumulates profiles, and reporting merges them. The focused
+`--test-package <name>` mode remains available for local debugging. Local
+invocations without a phase argument still prepare, test, and report in one command.
 
 ## Codecov reports
 
@@ -203,8 +200,10 @@ when report generation succeeded, but never publish a successful validation reco
 ## Scheduled full tests
 
 `Nightly full tests` checks the default branch daily at 18:23 UTC (02:23 in
-Asia/Shanghai). It runs all Linux and macOS flake checks and generates a
-complete Linux coverage report for Codecov.
+Asia/Shanghai). It runs all macOS flake checks plus Linux build, formatting,
+Clippy, and workflow checks. The complete Linux nextest suite runs once with
+coverage instead of being repeated by the flake `test` check, and generates a
+complete coverage report for Codecov.
 
 Scheduled full tests run when any of these conditions holds:
 

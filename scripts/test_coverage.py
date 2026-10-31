@@ -5,41 +5,33 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import tomllib
 import unittest
 
 import pr_validation
 
 
 class CoverageTests(unittest.TestCase):
-    def test_workflows_cover_every_workspace_package_and_skip_unselected_steps(self):
+    def test_workflows_run_selected_packages_together_before_reporting(self):
         root = Path(__file__).resolve().parent.parent
-        workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]
-        packages = {
-            tomllib.loads(manifest.read_text())["package"]["name"]
-            for member in workspace["members"]
-            for manifest in root.glob(f"{member}/Cargo.toml")
-        }
         for filename in ["CI.yaml", "Nightly.yaml"]:
             with self.subTest(workflow=filename):
                 workflow = (root / ".github/workflows" / filename).read_text()
                 steps = re.findall(
-                    r"      - name: Coverage tests \(([^)]+)\)\n(.*?)(?=      - name:)",
+                    r"      - name: Coverage tests\n(.*?)(?=      - name:)",
                     workflow, re.DOTALL,
                 )
-                self.assertEqual(sorted(name for name, _ in steps), sorted(packages))
+                self.assertEqual(len(steps), 1)
+                self.assertIn("scripts/run-cov.sh --test-selected\n", steps[0])
                 self.assertLess(workflow.index("name: Generate coverage reports"),
                                 workflow.index("name: Prune coverage build cache"))
                 self.assertLess(workflow.index("name: Prune coverage build cache"),
                                 workflow.index("name: Upload coverage artifact"))
-                for name, body in steps:
-                    self.assertIn(f"scripts/run-cov.sh --test-package {name}\n", body)
-                    if filename == "CI.yaml":
-                        self.assertIn(
-                            "if: steps.selection.outputs.scoped != 'true' || "
-                            f"contains(fromJSON(steps.prepared.outputs.packages || '[]'), '{name}')",
-                            body,
-                        )
+                if filename == "CI.yaml":
+                    self.assertIn(
+                        "if: steps.selection.outputs.scoped != 'true' || "
+                        "steps.selection.outputs.run == 'true'",
+                        steps[0],
+                    )
 
     def test_full_selected_empty_and_failed_test_reports(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -304,8 +296,8 @@ mod tests {{
             self.assertNotIn("other/src/lib.rs", report.read_text())
             self.assertIn("src/alpha.rs", report.read_text())
 
-            # Skipping the other package in the phased path must also omit its mappings.
-            for args in [("--prepare", "--affected-plan", str(plan)), ("--test-package", "coverage-fixture"), ("--report",)]:
+            # The combined CI phase runs all selected packages without rebuilding.
+            for args in [("--prepare", "--affected-plan", str(plan)), ("--test-selected",), ("--report",)]:
                 result = execute("bash", "scripts/run-cov.sh", *args)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotIn("other/src/lib.rs", report.read_text())
@@ -315,10 +307,10 @@ mod tests {{
             exact = {"packages": [], "baseline_packages": ["coverage-fixture"], "tests": [
                 {"package": "coverage-fixture", "binary": "coverage-fixture", "name": "alpha::tests::value_matches"}]}
             plan.write_text(json.dumps(exact))
-            for args in [("--prepare", "--affected-plan", str(plan)), ("--test-package", "coverage-fixture"), ("--report",)]:
+            for args in [("--prepare", "--affected-plan", str(plan)), ("--test-selected",), ("--report",)]:
                 result = execute("bash", "scripts/run-cov.sh", *args)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                if args[0] == "--test-package":
+                if args[0] == "--test-selected":
                     self.assertIn("1 passed", result.stdout + result.stderr)
             selection = json.loads(report.with_name("selection.json").read_text())
             self.assertEqual(selection["partial_packages"], ["coverage-fixture"])

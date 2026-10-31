@@ -219,8 +219,34 @@ PYTHON
   report_timing clean-binaries "$started"
 }
 
-# CI keeps one instrumented build and accumulates profiles across package steps.
+run_selected_tests() {
+  local status=0 expression
+  local completion=()
+  expression="$(jq -r '[.filters[]] | join(" | ")' "${coverage_dir}/selection.json")"
+  cargo nextest run --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
+    --binaries-metadata "${coverage_dir}/binaries.json" -E "$expression" --no-tests warn "$@" || status=$?
+  collect_profiles
+  if [[ "$status" -ne 0 ]]; then
+    return "$status"
+  fi
+  if [[ $# -gt 0 && "$*" != "--run-ignored all" ]]; then
+    completion+=(--partial)
+  fi
+  python3 -B scripts/coverage_selection.py complete "${completion[@]}"
+}
+
+# CI keeps one instrumented build and lets nextest schedule all selected packages together.
 case "${1:-}" in
+  --test-selected)
+    shift
+    if coverage_graph_requested; then
+      activate_per_test_profiles
+    fi
+    MF_TEST_BUILD_CACHE_SESSION="$(cat "${coverage_dir}/build-cache-session")"
+    export MF_TEST_BUILD_CACHE_SESSION
+    run_selected_tests "$@"
+    exit
+    ;;
   --test-package)
     [[ $# -ge 2 && -n "$2" ]]
     selected_package="$2"
@@ -321,19 +347,7 @@ if [[ "$phase" == "prepare" ]]; then
   [[ $# -eq 0 ]]
   exit 0
 fi
-status=0
-expression="$(jq -r '[.filters[]] | join(" | ")' "${coverage_dir}/selection.json")"
-cargo nextest run --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
-  --binaries-metadata "${coverage_dir}/binaries.json" -E "$expression" --no-tests warn "$@" || status=$?
-collect_profiles
-if [[ "$status" -ne 0 ]]; then
-  exit "$status"
-fi
-completion=()
-if [[ $# -gt 0 && "$*" != "--run-ignored all" ]]; then
-  completion+=(--partial)
-fi
-python3 -B scripts/coverage_selection.py complete "${completion[@]}"
+run_selected_tests "$@"
 report_coverage
 if [[ -n "$coverage_graph" ]]; then
   build_coverage_graph "$coverage_graph"

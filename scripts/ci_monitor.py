@@ -128,7 +128,21 @@ def coverage_summary(jobs, current_wall):
         if (match := re.fullmatch(r"Coverage tests \(([^)]+)\)", step["name"]))
     ]
     if not crates:
-        return []
+        combined = next((step for step in coverage.get("steps", []) if step["name"] == "Coverage tests"), None)
+        if combined is None:
+            return []
+        return [
+            "### Summary",
+            "",
+            "| Metric | Duration |",
+            "| --- | ---: |",
+            f"| CI wall time (including queueing) | {format_duration(current_wall)} |",
+            f"| Coverage job (including setup and cache upload) | {format_duration(duration(coverage))} |",
+            f"| Selected tests (parallel nextest execution) | {format_duration(duration(combined))} |",
+            "",
+            "All selected packages run in one nextest process, so wall time is not attributed to individual crates.",
+            "",
+        ]
     skipped = [name for name, step in crates if step["conclusion"] == "skipped"]
     values = [duration(step) for _, step in crates if step["conclusion"] != "skipped"]
     total = sum(values) if all(value is not None for value in values) else None
