@@ -140,6 +140,22 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
                 "prepare_workflow"
             ]
         );
+        // Preparation must enter the observation-aware path before constructing nodes.
+        // Eager `finalized_plan` here would hide initialization failures from observation.
+        for item in &syntax.items {
+            if let syn::Item::Fn(function) = item
+                && matches!(
+                    function.sig.ident.to_string().as_str(),
+                    "prepare_stream" | "prepare_workflow"
+                )
+            {
+                assert!(
+                    !quote::quote!(#function)
+                        .to_string()
+                        .contains("finalized_plan")
+                );
+            }
+        }
         assert!(embedded.rust_source.contains("instantiate_stream"));
         assert!(
             embedded

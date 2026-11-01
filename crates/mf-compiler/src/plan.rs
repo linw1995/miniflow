@@ -323,7 +323,7 @@ impl CompiledWorkflow {
             pub fn prepare_stream(
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::PreparedStream, mf_compiler::PlanError> {
-                Ok(mf_compiler::instantiate_stream(&finalized_plan(registry)?, registry)?)
+                Ok(mf_compiler::instantiate_stream(&plan()?, registry)?)
             }
 
             pub fn prepare_workflow(
@@ -331,7 +331,7 @@ impl CompiledWorkflow {
                 observation: Option<&mut mf_runtime::RunObservation>,
             ) -> Result<mf_runtime::Flow, mf_compiler::PlanError> {
                 Ok(mf_compiler::instantiate_compiled_with_observation(
-                    &finalized_plan(registry)?, registry, observation,
+                    &plan()?, registry, observation,
                 )?)
             }
         };
