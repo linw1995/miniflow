@@ -2984,9 +2984,8 @@ fn running_comet_keeps_ordered_trails_through_corners_and_attachments() {
                 let index = (step + border.len() - offset) % border.len();
                 expected[index] = symbol;
                 let cell = buffer.cell(border[index]).unwrap();
-                let channel = [255, 178, 102, 51][offset];
-                assert_eq!(cell.fg, Color::Rgb(channel, channel, 0));
-                assert!(!cell.modifier.contains(Modifier::BOLD | Modifier::DIM));
+                assert_eq!(cell.fg, Color::Yellow);
+                assert!(cell.modifier.contains(Modifier::BOLD));
             }
             let actual = border
                 .iter()
@@ -2998,7 +2997,7 @@ fn running_comet_keeps_ordered_trails_through_corners_and_attachments() {
 }
 
 #[test]
-fn terminal_node_activity_flashes_once_and_restores_the_border() {
+fn terminal_node_activity_pulses_one_lap_and_restores_the_border() {
     let graph = description();
     let layout = GraphLayout::new(&graph).unwrap();
     let mut session = TestSession::new(&graph);
@@ -3044,42 +3043,46 @@ fn terminal_node_activity_flashes_once_and_restores_the_border() {
     };
     let source_rect = layout.nodes()[node_index(&layout, "source")].rect;
     let mut sides = [false; 4];
-    for step in 0..12 {
-        let (source, left, right, buffer) = render(step * 100_000_000);
-        let expected_symbol = ["▓", "▒", "░", "·"][(step / 3) as usize];
-        for id in ["source", "left", "right"] {
-            let channel = [255, 178, 102, 51][(step / 3) as usize];
-            let expected_color = match id {
-                "source" => Color::Rgb(0, channel, 0),
-                "left" => Color::Rgb(channel, 0, 0),
-                "right" => {
-                    let gray = [128, 89, 51, 25][(step / 3) as usize];
-                    Color::Rgb(gray, gray, gray)
-                }
-                _ => unreachable!(),
-            };
-            for position in node_perimeter(&layout, id) {
-                assert_eq!(buffer.cell(position).unwrap().fg, expected_color);
-                assert_eq!(
-                    buffer.cell(position).unwrap().symbol(),
-                    expected_symbol,
-                    "{id} flash missed a border or attachment at {position:?}, step {step}"
+    let mut heads = BTreeSet::new();
+    let mut attachment_activity = BTreeSet::new();
+    let mut ordinary = Buffer::empty(Rect::new(0, 0, 150, 45));
+    GraphView::new(&layout).render(ordinary.area, &mut ordinary);
+    let perimeter = node_perimeter(&layout, "source");
+    let cells = perimeter.len() as u64;
+    for step in 0..cells {
+        let elapsed = (step * 1_200_000_000).div_ceil(cells);
+        let (source, left, right, buffer) = render(elapsed);
+        for (activity, color) in [
+            (&source, Color::Green),
+            (&left, Color::Red),
+            (&right, Color::DarkGray),
+        ] {
+            assert_eq!(
+                activity.len(),
+                4,
+                "terminal pulse must have exactly four cells"
+            );
+            let symbols = activity
+                .iter()
+                .map(|position| {
+                    let cell = buffer.cell(*position).unwrap();
+                    assert_eq!(cell.fg, color);
+                    assert!(cell.modifier.contains(Modifier::BOLD));
+                    cell.symbol()
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(symbols, BTreeSet::from(["▓", "▒", "░", "·"]));
+        }
+        for position in source {
+            if buffer.cell(position).unwrap().symbol() == "▓" {
+                assert!(
+                    heads.insert(position),
+                    "terminal pulse repeated before completing its lap"
                 );
             }
-        }
-        assert!(!source.is_empty(), "source terminal flash missing");
-        assert!(!left.is_empty(), "failed terminal flash missing");
-        assert!(!right.is_empty(), "skipped terminal flash missing");
-        let symbols = source
-            .iter()
-            .map(|position| buffer.cell(*position).unwrap().symbol())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            symbols.len(),
-            1,
-            "terminal flash should light the whole border together, got {symbols:?}"
-        );
-        for position in source {
+            if ordinary.cell(position).unwrap().symbol() == "├" {
+                attachment_activity.insert(position);
+            }
             let (x, y) = (u32::from(position.x), u32::from(position.y));
             sides[0] |= y == source_rect.y;
             sides[1] |= x == source_rect.x + source_rect.width - 1;
@@ -3087,7 +3090,20 @@ fn terminal_node_activity_flashes_once_and_restores_the_border() {
             sides[3] |= x == source_rect.x;
         }
     }
-    assert_eq!(sides, [true; 4], "terminal flash skipped a border side");
+    assert_eq!(
+        heads.len(),
+        perimeter.len(),
+        "terminal pulse skipped border cells"
+    );
+    assert!(
+        !attachment_activity.is_empty(),
+        "terminal pulse skipped the connection attachment"
+    );
+    assert_eq!(sides, [true; 4], "terminal pulse skipped a border side");
+    let at_boundary = render(1_200_000_000);
+    assert!(at_boundary.0.is_empty());
+    assert!(at_boundary.1.is_empty());
+    assert!(at_boundary.2.is_empty());
     let (source, left, right, restored) = render(2_000_000_000);
     assert!(source.is_empty(), "source terminal pulse did not clear");
     assert!(left.is_empty(), "failed terminal pulse did not clear");
@@ -3153,7 +3169,7 @@ fn live_terminal_activity_uses_lifecycle_receipt_time() {
     let sweeping = render(&snapshot);
     assert!(
         !sweeping.is_empty(),
-        "expected lifecycle receipt time to flash the terminal border"
+        "expected lifecycle receipt time to pulse the terminal border"
     );
 
     snapshot.nodes[source].terminal_received_at = Some(Instant::now() - Duration::from_secs(2));

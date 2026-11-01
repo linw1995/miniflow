@@ -575,14 +575,18 @@ has enough space. It includes the routed topology, status-colored nodes, the sel
 viewport frame. Press `m` to toggle it; small viewports and picture-in-picture graphs omit it.
 `GraphView::minimap(true)` opts widget callers into the overlay without changing graph coordinates.
 
-Glyph-style `·░▒▓` motion distinguishes execution from data movement. Running nodes have a comet
-pulse traveling counter-clockwise around the complete node border. Real terminal observations use a
-different effect: the whole border flashes together through `▓ → ▒ → ░ → ·`, then restores the ordinary
-border. Border-to-connection attachments participate in both effects and restore their junction
-glyphs afterward. Both effects attenuate foreground brightness as well as character density: the
-comet has a bright head and progressively darker tail, and terminal flashes dim over time. No fixed
-terminal pattern remains. Status markers and colors remain authoritative; uncertain observations do
-not animate.
+Glyph-style `·░▒▓` motion distinguishes execution from data movement. Running nodes have a moving
+pulse traveling counter-clockwise around the complete node border. Real terminal observations send
+that pulse around the border once over 1.2 seconds, then restore the ordinary border. Border pulses
+use the same `▓▒░·` density trail and bold terminal-palette styling as connection pulses, retaining the
+node's status hue without additional RGB attenuation. Border-to-connection attachments participate
+in the pulse and restore their junction glyphs afterward. No full-border flash or fixed terminal
+pattern remains. Status markers and colors remain authoritative; uncertain observations do not
+animate.
+
+Shade glyph appearance is terminal-dependent. Ghostty may render `▓▒░` as translucent solid blocks
+rather than dotted textures; applications cannot reliably query that visual choice. Users who prefer
+font-rendered textures can configure Ghostty with `font-codepoint-map = U+2591-U+2593=Menlo`.
 
 Connection pulses represent observed data boundaries, not time spent Running. Finite Tasks pulse
 once when inputs have resolved at the destination's Started boundary; exclusive mappings additionally

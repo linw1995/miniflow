@@ -2368,18 +2368,10 @@ impl<'a> GraphView<'a> {
                 );
             }
         } else if let Some(age) = terminal_age.filter(|age| *age < NODE_TRANSITION_NS) {
-            let phase = (u128::from(age) * ACTIVITY_DENSITIES.len() as u128
-                / u128::from(NODE_TRANSITION_NS)) as usize;
-            if let Some(symbol) = ACTIVITY_DENSITIES.get(phase) {
-                let brightness = [100, 70, 40, 20][phase];
-                self.draw_perimeter_flash(
-                    area,
-                    buffer,
-                    rect,
-                    symbol,
-                    activity_style(style, brightness),
-                );
-            }
+            let cells = perimeter_cells(rect);
+            let head =
+                (u128::from(age) * u128::from(cells) / u128::from(NODE_TRANSITION_NS)) as u64;
+            self.draw_perimeter_chase(area, buffer, rect, head, style);
         }
     }
 
@@ -2395,34 +2387,9 @@ impl<'a> GraphView<'a> {
         if cells == 0 {
             return;
         }
+        let style = style.add_modifier(Modifier::BOLD);
         for (offset, symbol) in ACTIVITY_DENSITIES.into_iter().enumerate() {
             let position = (head + cells - offset as u64 % cells) % cells;
-            let (x, y) = perimeter_cell(rect, position).expect("position is within the perimeter");
-            let brightness = [100, 70, 40, 20][offset];
-            self.put(
-                area,
-                buffer,
-                x,
-                y,
-                symbol,
-                activity_style(style, brightness),
-            );
-        }
-    }
-
-    fn draw_perimeter_flash(
-        &self,
-        area: Rect,
-        buffer: &mut Buffer,
-        rect: GraphRect,
-        symbol: &str,
-        style: Style,
-    ) {
-        let cells = perimeter_cells(rect);
-        if cells == 0 {
-            return;
-        }
-        for position in 0..cells {
             let (x, y) = perimeter_cell(rect, position).expect("position is within the perimeter");
             self.put(area, buffer, x, y, symbol, style);
         }
@@ -2696,7 +2663,7 @@ impl Widget for GraphView<'_> {
         for index in 0..self.layout.edges.len() {
             self.draw_ports(area, buffer, index);
         }
-        // Attachments belong to the border: chase and flash must cover them too.
+        // Attachments belong to the border: node pulses must cover them too.
         // Each frame restores their ordinary glyph before applying node activity.
         for (index, node) in self.layout.nodes.iter().enumerate() {
             self.draw_node_activity(
@@ -2759,23 +2726,6 @@ fn node_style(status: NodeStatus) -> Style {
         NodeStatus::Skipped => Style::default().fg(Color::DarkGray),
         NodeStatus::Unknown | NodeStatus::Interrupted => Style::default().fg(Color::Magenta),
     }
-}
-
-// Character density alone changes coverage, not pixel brightness. Keep the node's
-// status hue while attenuating the tail/fade, without assuming a background color.
-fn activity_style(style: Style, brightness: u16) -> Style {
-    let rgb = match style.fg {
-        Some(Color::Yellow) => (255, 255, 0),
-        Some(Color::Green) => (0, 255, 0),
-        Some(Color::Red) => (255, 0, 0),
-        Some(Color::DarkGray) => (128, 128, 128),
-        Some(Color::Magenta) => (255, 0, 255),
-        _ => unreachable!("node activity uses the status palette"),
-    };
-    let scale = |channel: u16| (channel * brightness / 100) as u8;
-    style
-        .fg(Color::Rgb(scale(rgb.0), scale(rgb.1), scale(rgb.2)))
-        .remove_modifier(Modifier::BOLD | Modifier::DIM)
 }
 
 fn perimeter_cells(rect: GraphRect) -> u64 {
@@ -2956,13 +2906,6 @@ mod rendering_tests {
                 0,
                 node_style(NodeStatus::Running),
             );
-            view.draw_perimeter_flash(
-                buffer.area,
-                &mut buffer,
-                rect,
-                "▓",
-                node_style(NodeStatus::Succeeded),
-            );
             assert_eq!(buffer, original);
         }
         let rect = GraphRect {
@@ -2980,7 +2923,15 @@ mod rendering_tests {
     }
 
     #[test]
-    fn activity_brightness_fades_each_status_hue_without_bold() {
+    fn border_pulses_use_the_connection_density_and_style_contract() {
+        let layout = crossing_layout(EdgeKind::Data, EdgeKind::Control, true);
+        let view = GraphView::new(&layout);
+        let rect = GraphRect {
+            x: 3,
+            y: 4,
+            width: 10,
+            height: 6,
+        };
         for status in [
             NodeStatus::Running,
             NodeStatus::Succeeded,
@@ -2989,20 +2940,15 @@ mod rendering_tests {
             NodeStatus::Unknown,
             NodeStatus::Interrupted,
         ] {
-            let mut previous = u16::MAX;
-            for brightness in [100, 70, 40, 20] {
-                let style = activity_style(node_style(status), brightness);
-                let Some(Color::Rgb(r, g, b)) = style.fg else {
-                    panic!("expected RGB activity")
-                };
-                let total = u16::from(r) + u16::from(g) + u16::from(b);
-                assert!(total < previous);
-                previous = total;
-                assert!(
-                    !style
-                        .add_modifier
-                        .intersects(Modifier::BOLD | Modifier::DIM)
-                );
+            let style = node_style(status).add_modifier(Modifier::BOLD);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 22, 22));
+            view.draw_perimeter_chase(buffer.area, &mut buffer, rect, 3, node_style(status));
+            for (offset, symbol) in ACTIVITY_DENSITIES.into_iter().enumerate() {
+                let (x, y) = perimeter_cell(rect, 3 - offset as u64).unwrap();
+                let cell = buffer.cell(Position::new(x as u16, y as u16)).unwrap();
+                assert_eq!(cell.symbol(), symbol);
+                assert_eq!(cell.fg, style.fg.unwrap());
+                assert_eq!(cell.modifier, style.add_modifier);
             }
         }
     }
