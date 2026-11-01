@@ -575,10 +575,11 @@ has enough space. It includes the routed topology, status-colored nodes, the sel
 viewport frame. Press `m` to toggle it; small viewports and picture-in-picture graphs omit it.
 `GraphView::minimap(true)` opts widget callers into the overlay without changing graph coordinates.
 
-Glyph-style `·░▒▓` motion distinguishes execution from data movement. Running nodes have a moving
-bottom-border pulse. Real terminal observations trigger one short sweep, then settle into a static
-status line: `▓` succeeded, `▒` failed, `░` skipped, and `·` unknown/interrupted. Status markers and
-colors remain authoritative; uncertain observations do not animate.
+Glyph-style `·░▒▓` motion distinguishes execution from data movement. Running nodes have a comet
+pulse traveling counter-clockwise around the complete node border. Real terminal observations use a
+different effect: the whole border flashes together through `▓ → ▒ → ░`, then restores the ordinary
+border. No fixed terminal pattern remains. Status markers and colors remain authoritative; uncertain
+observations do not animate.
 
 Connection pulses represent observed data boundaries, not time spent Running. Finite Tasks pulse
 once when inputs have resolved at the destination's Started boundary; exclusive mappings additionally

@@ -2518,24 +2518,25 @@ fn edge_index(layout: &GraphLayout, from: &str, to: &str, output: Option<&str>) 
         .unwrap()
 }
 
-fn bottom_activity(buffer: &Buffer, layout: &GraphLayout, id: &str) -> String {
+fn node_perimeter(layout: &GraphLayout, id: &str) -> Vec<Position> {
     let rect = layout.nodes()[node_index(layout, id)].rect;
-    let y = rect.y + rect.height - 1;
-    (rect.x + 1..rect.x + rect.width - 1)
-        .map(|x| {
-            buffer
-                .cell(Position::new(x as u16, y as u16))
-                .unwrap()
-                .symbol()
-                .to_owned()
-        })
-        .collect()
+    let mut cells = Vec::new();
+    for x in rect.x..rect.x + rect.width {
+        cells.push(Position::new(x as u16, rect.y as u16));
+        cells.push(Position::new(x as u16, (rect.y + rect.height - 1) as u16));
+    }
+    for y in rect.y + 1..rect.y + rect.height - 1 {
+        cells.push(Position::new(rect.x as u16, y as u16));
+        cells.push(Position::new((rect.x + rect.width - 1) as u16, y as u16));
+    }
+    cells
 }
 
-fn activity_density(row: &str) -> usize {
-    row.chars()
-        .filter(|symbol| matches!(symbol, '▓' | '▒' | '░' | '·'))
-        .count()
+fn perimeter_activity(buffer: &Buffer, layout: &GraphLayout, id: &str) -> Vec<Position> {
+    node_perimeter(layout, id)
+        .into_iter()
+        .filter(|position| transfer_symbol(buffer.cell(*position).unwrap().symbol()))
+        .collect()
 }
 
 fn transfer_symbol(symbol: &str) -> bool {
@@ -2881,8 +2882,11 @@ fn minimap_and_graph_clip_safely_for_empty_tiny_and_extreme_viewports() {
 }
 
 #[test]
-fn running_node_activity_density_changes_with_elapsed_time() {
-    let graph = description();
+fn running_node_activity_travels_around_the_full_border() {
+    let mut graph = description();
+    // Keep attachment glyphs out of this isolated border-animation check.
+    graph.data_edges.clear();
+    graph.control_edges.clear();
     let layout = GraphLayout::new(&graph).unwrap();
     let mut session = TestSession::new(&graph);
     session.start("source", 0, Vec::new());
@@ -2895,18 +2899,52 @@ fn running_node_activity_density_changes_with_elapsed_time() {
             .snapshot(&snapshot)
             .elapsed_ns(elapsed_ns)
             .render(buffer.area, &mut buffer);
-        bottom_activity(&buffer, &layout, "source")
+        perimeter_activity(&buffer, &layout, "source")
     };
-    let first = render(0);
-    let later = render(300_000_000);
-    assert_ne!(first, later);
-    assert!(activity_density(&first) > 0);
-    assert!(activity_density(&later) > 0);
-    assert_ne!(activity_density(&first), activity_density(&later));
+    let rect = layout.nodes()[node_index(&layout, "source")].rect;
+    let mut sides = [false; 4];
+    let mut previous = None;
+    for step in 0..200 {
+        let activity = render(step * 100_000_000);
+        assert_eq!(activity.len(), 4, "the running comet trail was truncated");
+        for position in &activity {
+            let (x, y) = (u32::from(position.x), u32::from(position.y));
+            sides[0] |= y == rect.y;
+            sides[1] |= x == rect.x + rect.width - 1;
+            sides[2] |= y == rect.y + rect.height - 1;
+            sides[3] |= x == rect.x;
+        }
+        if let Some(previous) = previous {
+            assert_ne!(previous, activity, "the running pulse stopped moving");
+        }
+        previous = Some(activity);
+    }
+    assert_eq!(
+        sides, [true; 4],
+        "the pulse did not visit every border side"
+    );
+
+    let head = |elapsed_ns| {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+        GraphView::new(&layout)
+            .snapshot(&snapshot)
+            .elapsed_ns(elapsed_ns)
+            .render(buffer.area, &mut buffer);
+        node_perimeter(&layout, "source")
+            .into_iter()
+            .find(|position| buffer.cell(*position).unwrap().symbol() == "▓")
+            .expect("running pulse head is on the border")
+    };
+    let heads = [head(0), head(100_000_000), head(200_000_000)];
+    assert!(heads.iter().all(|position| u32::from(position.y) == rect.y));
+    assert!(
+        heads[0].x > heads[1].x && heads[1].x > heads[2].x,
+        "running pulse should travel counter-clockwise along the top edge: {heads:?}"
+    );
 }
 
 #[test]
-fn terminal_node_activity_settles_to_static_density_per_outcome() {
+fn terminal_node_activity_flashes_once_and_restores_the_border() {
     let graph = description();
     let layout = GraphLayout::new(&graph).unwrap();
     let mut session = TestSession::new(&graph);
@@ -2944,18 +2982,56 @@ fn terminal_node_activity_settles_to_static_density_per_outcome() {
             .elapsed_ns(elapsed_ns)
             .render(buffer.area, &mut buffer);
         (
-            bottom_activity(&buffer, &layout, "source"),
-            bottom_activity(&buffer, &layout, "left"),
-            bottom_activity(&buffer, &layout, "right"),
+            perimeter_activity(&buffer, &layout, "source"),
+            perimeter_activity(&buffer, &layout, "left"),
+            perimeter_activity(&buffer, &layout, "right"),
+            buffer,
         )
     };
-    let settled = render(1_000_000_000);
-    assert_eq!(settled, render(3_000_000_000));
-    for (row, symbol) in [(&settled.0, '▓'), (&settled.1, '▒'), (&settled.2, '░')] {
-        assert!(row.chars().all(|actual| actual == symbol), "row: {row:?}");
-        let width = layout.nodes()[node_index(&layout, "source")].rect.width;
-        assert_eq!(row.chars().count(), width as usize - 2);
+    let source_rect = layout.nodes()[node_index(&layout, "source")].rect;
+    let mut sides = [false; 4];
+    for step in 0..12 {
+        let (source, left, right, buffer) = render(step * 100_000_000);
+        assert!(!source.is_empty(), "source terminal flash missing");
+        assert!(!left.is_empty(), "failed terminal flash missing");
+        assert!(!right.is_empty(), "skipped terminal flash missing");
+        let symbols = source
+            .iter()
+            .map(|position| buffer.cell(*position).unwrap().symbol())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            symbols.len(),
+            1,
+            "terminal flash should light the whole border together, got {symbols:?}"
+        );
+        for position in source {
+            let (x, y) = (u32::from(position.x), u32::from(position.y));
+            sides[0] |= y == source_rect.y;
+            sides[1] |= x == source_rect.x + source_rect.width - 1;
+            sides[2] |= y == source_rect.y + source_rect.height - 1;
+            sides[3] |= x == source_rect.x;
+        }
     }
+    assert_eq!(sides, [true; 4], "terminal flash skipped a border side");
+    let (source, left, right, restored) = render(2_000_000_000);
+    assert!(source.is_empty(), "source terminal pulse did not clear");
+    assert!(left.is_empty(), "failed terminal pulse did not clear");
+    assert!(right.is_empty(), "skipped terminal pulse did not clear");
+
+    let mut baseline = snapshot.clone();
+    for node in &mut baseline.nodes {
+        node.terminal_elapsed_ns = None;
+        node.terminal_received_at = None;
+    }
+    let mut expected = Buffer::empty(Rect::new(0, 0, 150, 45));
+    GraphView::new(&layout)
+        .snapshot(&baseline)
+        .elapsed_ns(2_000_000_000)
+        .render(expected.area, &mut expected);
+    assert_eq!(
+        restored, expected,
+        "terminal animation did not restore the border"
+    );
 }
 
 #[test]
@@ -2996,26 +3072,20 @@ fn live_terminal_activity_uses_lifecycle_receipt_time() {
             .data_snapshot(&history)
             .observed_at_unix_nano(now)
             .render(buffer.area, &mut buffer);
-        bottom_activity(&buffer, &layout, "source")
+        perimeter_activity(&buffer, &layout, "source")
     };
 
     let sweeping = render(&snapshot);
+    assert!(
+        !sweeping.is_empty(),
+        "expected lifecycle receipt time to flash the terminal border"
+    );
 
     snapshot.nodes[source].terminal_received_at = Some(Instant::now() - Duration::from_secs(2));
-    let settled = render(&snapshot);
-    assert_ne!(
-        sweeping, settled,
-        "expected lifecycle receipt time to animate the terminal sweep"
-    );
+    let restored = render(&snapshot);
     assert!(
-        activity_density(&sweeping) < activity_density(&settled),
-        "live sweep {sweeping:?} should be sparser than settled row {settled:?}"
-    );
-    let width = layout.nodes()[node_index(&layout, "source")].rect.width;
-    assert_eq!(settled.chars().count(), width as usize - 2);
-    assert!(
-        settled.chars().all(|symbol| symbol == '▓'),
-        "expected settled row, got {settled:?}"
+        restored.is_empty(),
+        "expired live terminal pulse should restore the border"
     );
 }
 
@@ -3035,7 +3105,7 @@ fn ordinary_start_timestamp_pulses_a_task_path_and_expires_while_running() {
     assert!(!route_transfer_cells(&pulsing, &layout, edge).is_empty());
     let expired = render_snapshot(&layout, &snapshot, 1_700_000_000);
     assert!(route_transfer_cells(&expired, &layout, edge).is_empty());
-    assert!(activity_density(&bottom_activity(&expired, &layout, "router")) > 0);
+    assert!(!perimeter_activity(&expired, &layout, "router").is_empty());
 }
 
 #[test]

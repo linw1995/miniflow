@@ -36,9 +36,8 @@ const MARGIN: u32 = 2;
 const LAYOUT_STACK_BYTES: usize = 64 * 1024 * 1024;
 const CLUSTER_KIND: &str = "node cluster";
 const FLOW_FRAME_NS: u64 = 100_000_000;
-const FLOW_PERIOD: u64 = 16;
 const TRANSFER_PULSE_NS: u64 = 600_000_000;
-const NODE_TRANSITION_NS: u64 = 450_000_000;
+const NODE_TRANSITION_NS: u64 = 1_200_000_000;
 
 #[derive(Debug, Snafu)]
 pub enum GraphError {
@@ -2317,7 +2316,6 @@ impl<'a> GraphView<'a> {
             rect.y += header;
             rect.height -= header;
         }
-        let y = rect.y + rect.height - 1;
         let style = node_style(status);
         let terminal_age = if let Some(events) = events {
             let now = Instant::now();
@@ -2357,32 +2355,65 @@ impl<'a> GraphView<'a> {
                 .filter_map(|terminal| self.elapsed_ns.checked_sub(terminal.get().max(0) as u64))
                 .min()
         };
-        let tick = self.elapsed_ns / FLOW_FRAME_NS;
-        let left = (rect.x + 1).max(self.offset.0);
-        let right =
-            (rect.x + rect.width - 1).min(self.offset.0.saturating_add(u32::from(area.width)));
-        for x in left..right {
-            let distance = u64::from(x - rect.x - 1);
-            let symbol = if status == NodeStatus::Running {
-                running_flow_symbol(distance, tick)
-            } else if let Some(age) = terminal_age.filter(|age| *age <= NODE_TRANSITION_NS) {
-                let width = u64::from(rect.width.saturating_sub(1));
-                let head = u128::from(age) * u128::from(width + 3) / u128::from(NODE_TRANSITION_NS);
-                let head = head as u64;
-                (distance <= head && head - distance < 4)
-                    .then(|| ["▓", "▒", "░", "·"][(head - distance) as usize])
-            } else {
-                Some(match status {
-                    NodeStatus::Succeeded => "▓",
-                    NodeStatus::Failed => "▒",
-                    NodeStatus::Skipped => "░",
-                    NodeStatus::Unknown | NodeStatus::Interrupted => "·",
-                    NodeStatus::Pending | NodeStatus::Running => unreachable!(),
-                })
-            };
-            if let Some(symbol) = symbol {
-                self.put(area, buffer, x, y, symbol, style);
+        if status == NodeStatus::Running {
+            let cells = perimeter_cells(rect);
+            if cells != 0 {
+                self.draw_perimeter_chase(
+                    area,
+                    buffer,
+                    rect,
+                    (self.elapsed_ns / FLOW_FRAME_NS) % cells,
+                    style,
+                );
             }
+        } else if let Some(age) = terminal_age.filter(|age| *age < NODE_TRANSITION_NS) {
+            let level = 3 - (u128::from(age) * 3 / u128::from(NODE_TRANSITION_NS)) as usize;
+            if let Some(symbol) = ["", "░", "▒", "▓"].get(level) {
+                self.draw_perimeter_flash(area, buffer, rect, symbol, style);
+            }
+        }
+    }
+
+    fn draw_perimeter_chase(
+        &self,
+        area: Rect,
+        buffer: &mut Buffer,
+        rect: GraphRect,
+        head: u64,
+        style: Style,
+    ) {
+        let cells = perimeter_cells(rect);
+        if cells == 0 {
+            return;
+        }
+        let style = style.add_modifier(Modifier::BOLD);
+        for (offset, symbol) in ["▓", "▒", "░", "·"].into_iter().enumerate() {
+            let position = (head + cells - offset as u64 % cells) % cells;
+            let Some((x, y)) = perimeter_cell(rect, position) else {
+                continue;
+            };
+            self.put(area, buffer, x, y, symbol, style);
+        }
+    }
+
+    fn draw_perimeter_flash(
+        &self,
+        area: Rect,
+        buffer: &mut Buffer,
+        rect: GraphRect,
+        symbol: &str,
+        style: Style,
+    ) {
+        let cells = perimeter_cells(rect);
+        if cells == 0 {
+            return;
+        }
+        let style = style.add_modifier(Modifier::BOLD);
+        for position in 0..cells {
+            let Some((x, y)) = perimeter_cell(rect, position) else {
+                continue;
+            };
+            self.put(area, buffer, x, y, symbol, style);
         }
     }
 
@@ -2715,9 +2746,38 @@ fn node_style(status: NodeStatus) -> Style {
     }
 }
 
-fn running_flow_symbol(distance: u64, tick: u64) -> Option<&'static str> {
-    let age = (tick + FLOW_PERIOD - distance % FLOW_PERIOD) % FLOW_PERIOD;
-    (age < 4).then(|| ["▓", "▒", "░", "·"][age as usize])
+fn perimeter_cells(rect: GraphRect) -> u64 {
+    if rect.width < 2 || rect.height < 2 {
+        return 0;
+    }
+    u64::from(rect.width + rect.height) * 2 - 4
+}
+
+fn perimeter_cell(rect: GraphRect, position: u64) -> Option<(u32, u32)> {
+    let width = u64::from(rect.width);
+    let height = u64::from(rect.height);
+    let cells = perimeter_cells(rect);
+    if position >= cells {
+        return None;
+    }
+    let right = rect.x + rect.width - 1;
+    let bottom = rect.y + rect.height - 1;
+    let top_run = width;
+    let left_run = height - 1;
+    let bottom_run = width - 1;
+    Some(if position < top_run {
+        // Counter-clockwise from the top-right corner.
+        (right - position as u32, rect.y)
+    } else if position < top_run + left_run {
+        (rect.x, rect.y + 1 + (position - top_run) as u32)
+    } else if position < top_run + left_run + bottom_run {
+        (rect.x + 1 + (position - top_run - left_run) as u32, bottom)
+    } else {
+        (
+            right,
+            bottom - 1 - (position - top_run - left_run - bottom_run) as u32,
+        )
+    })
 }
 
 fn status_marker(status: NodeStatus, observed: Option<&NodeObservation>, elapsed_ns: u64) -> char {
