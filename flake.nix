@@ -44,6 +44,7 @@
               ./tools/test-affected
               ./crates/mf-chat/migrations
               ./crates/mf-chat/workflows
+              ./crates/builtin-nodes/llm/workflows
               ./crates/mf-chat/tests/fixtures
               ./crates/mf-telemetry/tests/fixtures
               ./crates/mf-compiler/tests/fixtures/embedding-host
