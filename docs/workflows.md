@@ -161,7 +161,10 @@ The LLM provider owns three built-in Flows:
 
 `agent-turn` performs exactly one model request. `agent` invokes it inside the Loop and calls
 `tool-uses` only when that request returns tool calls; the next Loop pass sends the tool results
-back to the model.
+back to the model. Unlike the single-node calculator, `agent-turn` retains a `builtin.parameters`
+node: it exposes runtime `model`, `base_url`, and secret `api_key` configuration with defaults and
+environment bindings. These are configuration-template sources, not data input ports on `builtin.llm`;
+removing the parameter node would change the callable interface and credential behavior.
 
 Inject tool subgraphs when selecting a configurable built-in Flow:
 
@@ -262,11 +265,18 @@ Binding the addition argument above as `add` produces this provider-neutral tool
 Arguments `{"left":2,"right":3}` become `{"calculate.left":2,"calculate.right":3}` at the call
 boundary. The tool result is JSON text `{"sum":5}`; `sum` is not an input-schema property.
 
+Tool expansion runs after the selected node providers are linked and their interfaces can be
+inspected. The LLM provider precomputes a single constant tool catalog from these interfaces and
+binding descriptions; schema generation is not a runtime task and needs no per-tool schema nodes
+or CEL catalog collector. Metadata requests are compile-time relationships, not execution edges.
+
 Expansion creates ordinary router gates, `workflow.call` nodes, and provider-owned
-`llm.tool_definition`, `llm.tool_arguments`, and `llm.tool_result` adapters. The first two receive
-**metadata only**, never a child execution closure. `mfn-llm.tool-uses` declares its `builtin.router`
-in the provider-owned JSON body; configuration replaces the placeholder route, branch edges, and
-fallback result selection with the injected tools. The runtime knows no Tool types or LLM schema policy.
+`llm.tool_arguments` and `llm.tool_result` adapters. The argument adapter receives a frozen interface,
+not another embedded executable child definition. Its runtime job is still to validate each model
+call and map short parameter names. Metadata consumers never receive child execution closures.
+`mfn-llm.tool-uses` declares its `builtin.router` in the provider-owned JSON body; expansion replaces
+the placeholder route, branch edges, and fallback result selection with the injected tools. The
+runtime knows no Tool types or LLM schema policy.
 
 `workflow.call` optionally accepts `arguments_object: true` to bind one object of qualified startup
 input names and `capture_errors: true` to return a `result` envelope (`outputs` or `error`). These are

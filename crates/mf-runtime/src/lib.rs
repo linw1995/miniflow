@@ -43,13 +43,13 @@ pub use context::{
 };
 pub use definition::{
     CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
-    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, FlowArgument,
-    FlowBodyDefinition, FlowParameterDescription, FlowSource, InputBindingDefinition,
-    LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition, LoopComparisonOperator,
-    LoopConditionDefinition, LoopDefinition, LoopVariableDefinition, MAX_CALL_DEPTH,
-    MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency,
-    NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition, ResolvedFlowArgument,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    DefinitionParseError, DescribedFlowArgument, EXIT_LOOP_KIND, EdgeDefinition,
+    ExclusiveInputError, FlowArgument, FlowBodyDefinition, FlowParameterDescription, FlowSource,
+    InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
+    LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
+    MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
+    NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
+    ResolvedFlowArgument, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
     validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
@@ -98,8 +98,8 @@ pub use node_target::{
 };
 pub use number::{compare_json_numbers, number_to_f64, number_to_i64, number_to_u64};
 pub use registry::{
-    BuiltinFlowExpansion, BuiltinFlowRegistration, BuiltinFlowRegistry, BuiltinFlowRegistryError,
-    NodeRegistry, NodeRegistryError, RegisteredFlow,
+    BuiltinFlowExpansion, BuiltinFlowMetadataExpansion, BuiltinFlowRegistration,
+    BuiltinFlowRegistry, BuiltinFlowRegistryError, NodeRegistry, NodeRegistryError, RegisteredFlow,
 };
 pub use runner::{NodeExecutionSnafu, SuccessDependencySnafu, WorkflowRunError};
 pub use stream::{
@@ -120,7 +120,8 @@ pub use stream_plan::{
 };
 pub use subgraph::{
     PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata, SubgraphMetadata,
-    SubgraphNode, SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
+    SubgraphMetadataError, SubgraphNode, SubgraphStream, SubgraphStreamOutput,
+    SubgraphStreamSender,
 };
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,

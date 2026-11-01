@@ -1,10 +1,10 @@
 //! Provider-owned agent Flows. Expansion only builds ordinary graph/node definitions.
-use mf_runtime::{NodeBuildError, ResolvedFlowArgument, WorkflowDefinition};
+use mf_runtime::{DescribedFlowArgument, NodeBuildError, WorkflowDefinition};
 use serde_json::{Value, json};
 use snafu::{ResultExt, ensure};
 use std::collections::BTreeMap;
 
-type Flows = BTreeMap<String, ResolvedFlowArgument>;
+type Flows = BTreeMap<String, DescribedFlowArgument>;
 
 pub fn agent_turn_definition() -> Result<WorkflowDefinition, mf_runtime::DefinitionParseError> {
     WorkflowDefinition::from_json(include_str!("../workflows/agent-turn.json"))
@@ -29,8 +29,16 @@ fn source(node: &str, port: &str) -> Value {
 fn subgraph(name: &str, definition: &WorkflowDefinition) -> Value {
     json!({"flow": name, "definition": definition})
 }
-fn adapter(kind: &str, id: &str, name: &str, binding: &ResolvedFlowArgument) -> Value {
-    json!({"id": id, "kind": kind, "config": {"name": name, "description": binding.description, "parameters": binding.parameters, "subgraph": subgraph(name, &binding.definition)}})
+fn project(
+    name: &str,
+    binding: &DescribedFlowArgument,
+) -> Result<(crate::ToolDefinition, Value), NodeBuildError> {
+    crate::tools::project_tool(
+        name,
+        binding.description.as_deref().unwrap_or_default(),
+        &binding.parameters,
+        &binding.metadata,
+    )
 }
 fn validate(flows: &Flows) -> Result<(), NodeBuildError> {
     for (name, binding) in flows {
@@ -63,32 +71,20 @@ fn validate(flows: &Flows) -> Result<(), NodeBuildError> {
     Ok(())
 }
 
-fn catalog(flows: &Flows) -> Vec<Value> {
-    let mut nodes = Vec::new();
-    let mut inputs = serde_json::Map::new();
-    let mut types = serde_json::Map::new();
-    for (name, binding) in flows {
-        // One metadata adapter per tool derives its definition; the CEL node below
-        // collects those definitions into the list consumed by the LLM node.
-        let id = format!("tool_{name}");
-        nodes.push(adapter("llm.tool_definition", &id, name, binding));
-        inputs.insert(id.clone(), source(&id, "tool"));
-        types.insert(id, json!("object"));
-    }
-    let expression = format!(
-        "[{}]",
-        types
-            .keys()
-            .map(|name| format!("dyn({name})"))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    if flows.is_empty() {
-        nodes.push(json!({"id": "tools", "kind": "builtin.constant", "config": {"value": []}}));
-    } else {
-        nodes.push(json!({"id": "tools", "kind": "builtin.code", "config": {"language": "cel", "inputs": types, "code": {"value": expression}}, "inputs": inputs}));
-    }
-    nodes
+fn catalog(flows: &Flows) -> Result<Value, NodeBuildError> {
+    let tools = flows
+        .iter()
+        .map(|(name, binding)| {
+            project(name, binding).map(|(definition, _)| {
+                json!({
+                    "name": definition.name,
+                    "description": definition.description,
+                    "input_schema": definition.input_schema,
+                })
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"id": "tools", "kind": "builtin.constant", "config": {"value": tools}}))
 }
 
 pub fn configure_tool_uses(
@@ -130,7 +126,8 @@ pub fn configure_tool_uses(
         let arguments = format!("arguments_{index}");
         let invoke = format!("invoke_{index}");
         let encode = format!("encode_{index}");
-        let mut node = adapter("llm.tool_arguments", &arguments, name, binding);
+        let (_, config) = project(name, binding)?;
+        let mut node = json!({"id": arguments, "kind": "llm.tool_arguments", "config": config});
         node["inputs"] = json!({"call": source("%iteration", "item")});
         nodes.push(node);
         edges.push(json!({"from_node": "route", "from_output": name, "to_node": arguments}));
@@ -163,7 +160,7 @@ pub fn configure_agent(config: Value, flows: Flows) -> Result<WorkflowDefinition
         .iter()
         .position(|node| node["id"] == "tools")
         .expect("catalog placeholder");
-    nodes.splice(position..=position, catalog(&flows));
+    nodes[position] = catalog(&flows)?;
     let mut uses = configure_tool_uses(config.clone(), flows)?;
     // The enclosing agent supplies these providers; don't re-select registry sources in a frozen child.
     uses.dependencies.clear();
@@ -192,10 +189,28 @@ mod tests {
     use super::*;
     use mf_runtime::FlowParameterDescription;
 
-    fn binding(description: Option<&str>) -> ResolvedFlowArgument {
-        ResolvedFlowArgument {
+    fn binding(description: Option<&str>) -> DescribedFlowArgument {
+        DescribedFlowArgument {
             definition: tool_uses_definition().unwrap(),
             description: description.map(str::to_owned),
+            metadata: mf_runtime::SubgraphMetadata {
+                inputs: mf_runtime::WorkflowInputSchema {
+                    inputs: BTreeMap::from([(
+                        "params".into(),
+                        BTreeMap::from([(
+                            "calls".into(),
+                            mf_runtime::WorkflowInput {
+                                value_type: mf_runtime::ValueType::Array,
+                                required: true,
+                                binding: Default::default(),
+                            },
+                        )]),
+                    )]),
+                    ..Default::default()
+                },
+                outputs: vec![],
+                stream_outputs: vec![],
+            },
             parameters: BTreeMap::from([(
                 "params.calls".into(),
                 FlowParameterDescription {
@@ -215,23 +230,94 @@ mod tests {
     }
 
     #[test]
-    fn adapters_forward_binding_metadata_without_changing_the_definition() {
+    fn adapters_contain_linked_metadata_not_a_duplicate_child_definition() {
         let binding = binding(Some("Dispatch supplied calls."));
-        for kind in ["llm.tool_definition", "llm.tool_arguments"] {
-            let node = adapter(kind, "adapter", "dispatch", &binding);
-            assert_eq!(node["config"]["description"], "Dispatch supplied calls.");
-            assert_eq!(
-                node["config"]["parameters"],
-                json!({"params.calls": {"description": "Calls to dispatch."}})
-            );
-            assert_eq!(
-                node["config"]["subgraph"]["definition"],
-                serde_json::to_value(&binding.definition).unwrap()
-            );
-        }
+        let (_, config) = project("dispatch", &binding).unwrap();
+        assert_eq!(config["description"], "Dispatch supplied calls.");
+        assert_eq!(
+            config["parameters"],
+            json!({"params.calls": {"description": "Calls to dispatch."}})
+        );
+        assert_eq!(
+            config["metadata"],
+            serde_json::to_value(&binding.metadata).unwrap()
+        );
+        assert!(config.get("subgraph").is_none());
+        assert!(config.get("definition").is_none());
+        let uses = configure_tool_uses(
+            Value::Null,
+            BTreeMap::from([("dispatch".into(), binding.clone())]),
+        )
+        .unwrap();
+        let value = serde_json::to_value(uses).unwrap();
+        let body = &value["nodes"][1]["config"]["body"]["nodes"];
+        let nodes = body.as_array().unwrap();
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["kind"] == "llm.tool_arguments" && node["config"] == config)
+        );
+        assert!(nodes.iter().any(|node| node["kind"] == "workflow.call"
+            && node["config"]["definition"] == serde_json::to_value(&binding.definition).unwrap()));
+    }
+
+    #[test]
+    fn catalog_is_one_constant_even_for_non_cel_identifiers() {
+        let flows = BTreeMap::from([
+            ("search-web".into(), binding(Some("Search the web."))),
+            ("9lookup".into(), binding(Some("Look up a value."))),
+        ]);
+        let agent = serde_json::to_value(configure_agent(Value::Null, flows).unwrap()).unwrap();
+        let nodes = agent["nodes"].as_array().unwrap();
+        let tools = nodes.iter().find(|node| node["id"] == "tools").unwrap();
+        assert_eq!(tools["kind"], "builtin.constant");
+        assert_eq!(tools["config"]["value"][0]["name"], "9lookup");
+        assert_eq!(tools["config"]["value"][1]["name"], "search-web");
+        assert!(
+            !nodes
+                .iter()
+                .any(|node| node["kind"] == "llm.tool_definition")
+        );
+        assert!(
+            !nodes
+                .iter()
+                .any(|node| node["id"].as_str().unwrap_or_default().starts_with("tool_"))
+        );
+        assert_eq!(
+            catalog(&Flows::new()).unwrap()["config"]["value"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn projection_rejects_unknown_description_keys() {
+        let mut binding = binding(Some("Dispatch calls."));
+        binding.parameters.insert(
+            "params.missing".into(),
+            FlowParameterDescription {
+                description: "Unknown".into(),
+            },
+        );
+        let flows = BTreeMap::from([("dispatch".into(), binding)]);
+        assert!(
+            configure_agent(Value::Null, flows.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("describes unknown input")
+        );
+        assert!(
+            configure_tool_uses(Value::Null, flows)
+                .unwrap_err()
+                .to_string()
+                .contains("describes unknown input")
+        );
     }
 }
 
 mf_runtime::register_builtin_flow!("agent-turn", agent_turn_definition);
-mf_runtime::register_builtin_flow!("agent", agent_definition, configure_agent);
-mf_runtime::register_builtin_flow!("tool-uses", tool_uses_definition, configure_tool_uses);
+mf_runtime::register_builtin_flow!("agent", agent_definition, metadata = configure_agent);
+mf_runtime::register_builtin_flow!(
+    "tool-uses",
+    tool_uses_definition,
+    metadata = configure_tool_uses
+);

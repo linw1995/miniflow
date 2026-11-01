@@ -55,7 +55,8 @@ pub fn is_flow_with_registry(
     node: &NodeDefinition,
     registry: Option<&mf_runtime::NodeRegistry>,
 ) -> bool {
-    node.kind == mf_runtime::CALL_KIND || is_metadata(&node.kind, registry)
+    node.kind == mf_runtime::CALL_KIND
+        || (is_metadata(&node.kind, registry) && node.config.get("subgraph_metadata").is_none())
 }
 
 pub fn config(node: &NodeDefinition) -> Result<CallConfig, WorkflowCompileError> {

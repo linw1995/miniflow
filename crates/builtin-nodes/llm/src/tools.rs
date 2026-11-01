@@ -23,8 +23,7 @@ struct Config {
     description: String,
     #[serde(default)]
     parameters: BTreeMap<String, mf_runtime::FlowParameterDescription>,
-    #[serde(rename = "subgraph")]
-    _subgraph: Value,
+    metadata: mf_runtime::SubgraphMetadata,
 }
 
 fn value_schema(value_type: &ValueType) -> Value {
@@ -53,6 +52,7 @@ fn prepare_tool_interface(
     name: &str,
     body: mf_runtime::SubgraphMetadata,
 ) -> Result<ToolInterface, NodeBuildError> {
+    body.validate().boxed().map_err(NodeBuildError::from)?;
     ensure!(
         body.stream_outputs.is_empty(),
         mf_runtime::NodeInvalidSubgraphSnafu {
@@ -147,28 +147,6 @@ fn tool_definition(
             "additionalProperties": false,
         })
         .into(),
-    }
-}
-
-struct DefinitionNode(ToolDefinition);
-#[derive(NodeValue)]
-struct Empty {}
-#[derive(NodeValue)]
-struct DefinitionOutput {
-    tool: ToolDefinition,
-}
-impl TypedTaskNode for DefinitionNode {
-    type Input = Empty;
-    type Output = DefinitionOutput;
-    fn execute(
-        &self,
-        _: Empty,
-        _: &mut ExecutionContext,
-    ) -> Result<TypedNodeResult<DefinitionOutput>, NodeExecutionError> {
-        Ok(DefinitionOutput {
-            tool: self.0.clone(),
-        }
-        .into())
     }
 }
 
@@ -300,29 +278,39 @@ impl TypedTaskNode for EncodeNode {
     }
 }
 
-fn definition_factory(
-    config: Value,
-    body: mf_runtime::SubgraphMetadata,
-) -> Result<PreparedNode, NodeBuildError> {
-    let config: Config = deserialize_config(config)?;
-    let interface = prepare_tool_interface(&config.name, body)?;
-    validate_binding(&config, &interface)?;
-    PreparedNode::typed_task(
-        DefinitionNode(tool_definition(
-            config.name,
-            config.description,
-            &config.parameters,
-            &interface,
-        )),
-        NodeMetadata::default(),
-    )
+/// Pure projection of a linked interface into the LLM catalog and adapter configuration.
+/// This inspects binding declarations only: defaults and environment variables remain unresolved.
+pub fn project_tool(
+    name: &str,
+    description: &str,
+    parameters: &BTreeMap<String, mf_runtime::FlowParameterDescription>,
+    metadata: &mf_runtime::SubgraphMetadata,
+) -> Result<(ToolDefinition, Value), NodeBuildError> {
+    let config = json!({
+        "name": name,
+        "description": description,
+        "parameters": parameters,
+        "metadata": metadata,
+    });
+    let definition = project_definition(config.clone())?;
+    Ok((definition, config))
 }
-fn arguments_factory(
-    config: Value,
-    body: mf_runtime::SubgraphMetadata,
-) -> Result<PreparedNode, NodeBuildError> {
+
+fn project_definition(config: Value) -> Result<ToolDefinition, NodeBuildError> {
     let config: Config = deserialize_config(config)?;
-    let interface = prepare_tool_interface(&config.name, body)?;
+    let interface = prepare_tool_interface(&config.name, config.metadata.clone())?;
+    validate_binding(&config, &interface)?;
+    Ok(tool_definition(
+        config.name,
+        config.description,
+        &config.parameters,
+        &interface,
+    ))
+}
+
+fn arguments_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    let config: Config = deserialize_config(config)?;
+    let interface = prepare_tool_interface(&config.name, config.metadata.clone())?;
     validate_binding(&config, &interface)?;
     let node = ArgumentsNode(interface);
     PreparedNode::new(
@@ -340,8 +328,7 @@ fn encode_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let _: Config = deserialize_config(config)?;
     PreparedNode::typed_task(EncodeNode, NodeMetadata::default())
 }
-inventory::submit! { NodeRegistration { kind: "llm.tool_definition", factory: NodeFactory::Metadata(definition_factory) } }
-inventory::submit! { NodeRegistration { kind: "llm.tool_arguments", factory: NodeFactory::Metadata(arguments_factory) } }
+inventory::submit! { NodeRegistration { kind: "llm.tool_arguments", factory: NodeFactory::Plain(arguments_factory) } }
 inventory::submit! { NodeRegistration { kind: "llm.tool_result", factory: NodeFactory::Plain(encode_factory) } }
 
 #[cfg(test)]
@@ -349,6 +336,29 @@ mod tests {
     use super::*;
     use mf_runtime::{InputBinding, SubgraphMetadata, WorkflowInput, WorkflowInputSchema};
     use std::collections::BTreeMap;
+
+    fn with_metadata(mut config: Value, body: SubgraphMetadata) -> Value {
+        if let Some(object) = config.as_object_mut()
+            && object.remove("subgraph").is_some()
+        {
+            object.insert("metadata".into(), serde_json::to_value(body).unwrap());
+        }
+        config
+    }
+
+    fn definition_projection(
+        config: Value,
+        body: SubgraphMetadata,
+    ) -> Result<ToolDefinition, NodeBuildError> {
+        project_definition(with_metadata(config, body))
+    }
+
+    fn arguments_adapter(
+        config: Value,
+        body: SubgraphMetadata,
+    ) -> Result<PreparedNode, NodeBuildError> {
+        arguments_factory(with_metadata(config, body))
+    }
 
     fn metadata() -> SubgraphMetadata {
         SubgraphMetadata {
@@ -419,9 +429,9 @@ mod tests {
             },
             "subgraph": {}
         });
-        assert!(definition_factory(config.clone(), body.clone()).is_ok());
-        assert!(arguments_factory(config.clone(), body.clone()).is_ok());
-        let config: Config = deserialize_config(config).unwrap();
+        assert!(definition_projection(config.clone(), body.clone()).is_ok());
+        assert!(arguments_adapter(config.clone(), body.clone()).is_ok());
+        let config: Config = deserialize_config(with_metadata(config, body.clone())).unwrap();
         let interface = prepare_tool_interface(&config.name, body).unwrap();
         let definition = tool_definition(
             config.name,
@@ -471,10 +481,10 @@ mod tests {
                 "parameters": {parameter: {"description": "Not an input"}}
             });
             for error in [
-                definition_factory(config.clone(), metadata())
+                definition_projection(config.clone(), metadata())
                     .err()
                     .unwrap(),
-                arguments_factory(config, metadata()).err().unwrap(),
+                arguments_adapter(config, metadata()).err().unwrap(),
             ] {
                 assert!(error.to_string().contains("describes unknown input"));
                 assert!(error.to_string().contains(parameter));
@@ -540,8 +550,8 @@ mod tests {
             })
             .collect();
         let config = json!({"name": "x", "description": "Static description", "parameters": parameters, "subgraph": {}});
-        assert!(definition_factory(config.clone(), body.clone()).is_ok());
-        assert!(arguments_factory(config, body.clone()).is_ok());
+        assert!(definition_projection(config.clone(), body.clone()).is_ok());
+        assert!(arguments_adapter(config, body.clone()).is_ok());
         let interface = prepare_tool_interface("x", body).unwrap();
         let definition = tool_definition(
             "x".into(),
@@ -642,15 +652,15 @@ mod tests {
 
     fn assert_invalid_metadata(body: SubgraphMetadata) {
         let config = json!({"name":"x", "description":"x", "subgraph":{}});
-        assert!(definition_factory(config.clone(), body.clone()).is_err());
-        assert!(arguments_factory(config, body).is_err());
+        assert!(definition_projection(config.clone(), body.clone()).is_err());
+        assert!(arguments_adapter(config, body).is_err());
     }
 
     #[test]
     fn factories_preserve_config_validation() {
         let config = json!({"name":"x", "description":"x", "subgraph":{}});
-        assert!(definition_factory(config.clone(), metadata()).is_ok());
-        assert!(arguments_factory(config, metadata()).is_ok());
+        assert!(definition_projection(config.clone(), metadata()).is_ok());
+        assert!(arguments_adapter(config, metadata()).is_ok());
         for config in [
             json!({"description":"x", "subgraph":{}}),
             json!({"name":"x", "subgraph":{}}),
@@ -663,8 +673,32 @@ mod tests {
             json!({"name":"x", "description":"x", "parameters":[], "subgraph":{}}),
             json!({"name":"x", "description":"x", "parameters":{"params.visible":{}}, "subgraph":{}}),
         ] {
-            assert!(definition_factory(config.clone(), metadata()).is_err());
-            assert!(arguments_factory(config, metadata()).is_err());
+            assert!(definition_projection(config.clone(), metadata()).is_err());
+            assert!(arguments_adapter(config, metadata()).is_err());
+        }
+    }
+
+    #[test]
+    fn projection_and_arguments_reject_malformed_frozen_metadata() {
+        let mut duplicate_outputs = metadata();
+        duplicate_outputs.outputs = vec![
+            PortSpec::new("content", ValueType::String, true),
+            PortSpec::new("content", ValueType::String, true),
+        ];
+        let mut invalid_default = metadata();
+        invalid_default
+            .inputs
+            .inputs
+            .get_mut("params")
+            .unwrap()
+            .get_mut("visible")
+            .unwrap()
+            .binding
+            .default = Some(json!(42));
+        for body in [duplicate_outputs, invalid_default] {
+            let config = json!({"name": "x", "description": "Description", "metadata": body});
+            assert!(project_tool("x", "Description", &BTreeMap::new(), &body).is_err());
+            assert!(arguments_factory(config).is_err());
         }
     }
 
@@ -695,6 +729,45 @@ mod tests {
         let mut body = metadata();
         body.inputs.inputs.insert("other".into(), BTreeMap::new());
         assert_invalid_metadata(body);
+    }
+
+    #[test]
+    fn precomputed_metadata_preserves_map_argument_validation() {
+        let mut body = metadata();
+        body.inputs
+            .inputs
+            .get_mut("params")
+            .unwrap()
+            .get_mut("visible")
+            .unwrap()
+            .value_type = ValueType::Map(Box::new(ValueType::Boolean));
+        let (definition, config) =
+            project_tool("lookup", "Look up flags.", &BTreeMap::new(), &body).unwrap();
+        assert_eq!(
+            serde_json::to_value(&definition.input_schema["properties"]["visible"]).unwrap(),
+            json!({"type": "object", "additionalProperties": {"type": "boolean"}})
+        );
+        assert!(arguments_factory(config.clone()).is_ok());
+        assert!(config.get("subgraph").is_none());
+        let config: Config = deserialize_config(config).unwrap();
+        let interface = prepare_tool_interface(&config.name, config.metadata).unwrap();
+        let node = ArgumentsNode(interface);
+        for (visible, valid) in [
+            (json!({"flag": true}), true),
+            (json!({"flag": "not boolean"}), false),
+        ] {
+            let result = node
+                .execute(
+                    Inputs::from([(
+                        "call".into(),
+                        json!({"id":"id", "name":"lookup", "arguments":{"visible":visible}}).into(),
+                    )]),
+                    &mut ExecutionContext::default(),
+                )
+                .unwrap();
+            assert_eq!(result.outputs.contains_key("arguments"), valid);
+            assert_eq!(result.outputs.contains_key("error"), !valid);
+        }
     }
 
     #[test]

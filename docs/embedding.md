@@ -113,18 +113,22 @@ to stop a running instance. Generated modules do not claim global stdio or initi
 
 ## Plans, manifests, and observation
 
-Every module exposes `plan() -> Result<CompiledWorkflow, PlanError>`. It reads embedded program data
-and supports existing planning, description, and observation APIs without loading nodes.
+Every module exposes `plan() -> Result<CompiledWorkflow, PlanError>`. It reads embedded structural
+program data without loading nodes. Metadata-dependent built-ins may remain frozen expansion
+requests in this structural plan. Use `finalized_plan(&registry)` to obtain the actual expanded graph
+before deriving execution descriptions or observation identities for those workflows.
 
 `manifest(&registry) -> Result<WorkflowManifest, PlanError>` derives the current configured interface
 from the host registry. Inspection prepares separate nodes without executing them. There is no
 frozen build-time schema or comparison between build and target node features. Node metadata must
 obey the existing preparation contracts and remain stable for the same configuration.
 
-Start task observation from the structural plan before fallible preparation:
+For ordinary workflows, structural plans support observation before fallible preparation as before.
+For metadata-dependent expansion, finalize with the host registry first so observation and execution
+use the same graph identity:
 
 ```rust
-let observation = answer::plan()?.start_observation(
+let observation = answer::finalized_plan(&registry)?.start_observation(
     &observer,
     mf_telemetry::identity::RunId::new(),
 )?;
@@ -135,7 +139,8 @@ let outputs = mf_runtime::ExecutionContext::run(Some(observation), |context| {
 ```
 
 The host supplies `observer` and its telemetry dependencies. For streaming preparation observation,
-use the structural plan with existing `mf_compiler::start_stream` and `StreamOptions` APIs.
+use the same finalized plan with existing `mf_compiler::start_stream` and `StreamOptions` APIs when
+metadata-dependent expansion is present.
 Manifests are module data, without standalone executable sections; a multi-workflow host is not
 automatically a runner accepted by `mf run --tui`.
 

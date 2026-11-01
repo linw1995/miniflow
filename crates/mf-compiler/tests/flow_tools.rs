@@ -117,6 +117,73 @@ fn execute_source(
     (plan, resolved, serde_json::to_value(outputs).unwrap())
 }
 
+fn graph_nodes(value: &Value) -> Vec<&Value> {
+    let mut nodes = Vec::new();
+    match value {
+        Value::Object(fields) => {
+            if fields.contains_key("kind") && fields.contains_key("id") {
+                nodes.push(value);
+            }
+            for value in fields.values() {
+                nodes.extend(graph_nodes(value));
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                nodes.extend(graph_nodes(value));
+            }
+        }
+        _ => {}
+    }
+    nodes
+}
+
+fn assert_precomputed_tools(definition: &WorkflowDefinition, expected_tools: usize) {
+    let value = serde_json::to_value(definition).unwrap();
+    let nodes = graph_nodes(&value);
+    for node in &nodes {
+        let kind = node["kind"].as_str().unwrap();
+        assert_ne!(kind, "compiler.metadata_expansion", "{node}");
+        assert_ne!(kind, "llm.tool_definition", "{node}");
+        assert!(
+            !node["id"].as_str().unwrap().starts_with("tool_") || node["id"] == "tool_messages",
+            "unexpected schema task: {node}"
+        );
+        if kind == "llm.tool_arguments" {
+            let config = &node["config"];
+            assert!(config.get("subgraph").is_none(), "{node}");
+            assert!(config.get("definition").is_none(), "{node}");
+            let metadata: mf_runtime::SubgraphMetadata =
+                serde_json::from_value(config["metadata"].clone()).unwrap();
+            assert!(!metadata.outputs.is_empty());
+        }
+    }
+    let catalogs = nodes
+        .iter()
+        .filter(|node| node["id"] == "tools")
+        .collect::<Vec<_>>();
+    assert_eq!(catalogs.len(), 1);
+    assert_eq!(catalogs[0]["kind"], "builtin.constant");
+    assert_eq!(
+        catalogs[0]["config"]["value"].as_array().unwrap().len(),
+        expected_tools
+    );
+    assert_eq!(
+        nodes
+            .iter()
+            .filter(|node| node["kind"] == "llm.tool_arguments")
+            .count(),
+        expected_tools
+    );
+    assert_eq!(
+        nodes
+            .iter()
+            .filter(|node| node["kind"] == "workflow.call" && node["config"]["injected"] == true)
+            .count(),
+        expected_tools
+    );
+}
+
 fn error_content(result: &Value) -> String {
     serde_json::from_str::<Value>(result["content"].as_str().unwrap()).unwrap()["error"]
         .as_str()
@@ -128,11 +195,11 @@ fn error_content(result: &Value) -> String {
 fn local_named_flows_freeze_definitions_expose_schemas_and_dispatch_in_order() {
     let root = tempfile::tempdir().unwrap();
     let definition = write_fixture(root.path(), parent(calls()));
-    let (_plan, resolved, outputs) = execute_source(&definition);
+    let (plan, resolved, outputs) = execute_source(&definition);
 
     assert_eq!(resolved.sources.len(), 3);
     assert!(resolved.definition.flows.is_empty());
-    let frozen = resolved
+    let frozen = plan
         .definition
         .nodes
         .iter()
@@ -240,7 +307,11 @@ fn tool_bindings_require_descriptions_but_children_need_no_new_version_or_annota
             binding.as_object_mut().unwrap().remove("description");
         }
         let definition = write_fixture(root.path(), caller);
-        let error = load_workflow(&definition).err().unwrap().to_string();
+        let resolved = load_workflow(&definition).unwrap();
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let error = compile_resolved_definition(&resolved.definition, &registry)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("nonblank binding description"), "{error}");
         assert!(error.contains("greet"), "{error}");
     }
@@ -307,7 +378,10 @@ fn flow_tool_bodies_reject_multiple_startups_stdin_and_streaming_interfaces() {
         .to_string(),
     )
     .unwrap();
-    let error = load_workflow(&definition).err().unwrap().to_string();
+    let resolved = load_workflow(&definition).unwrap();
+    let error = compile_resolved_definition(&resolved.definition, &registry)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("terminal interface"), "{error}");
 }
 
@@ -485,7 +559,8 @@ fn injected_flow_bodies_are_marked_for_inspection() {
         .unwrap()
         .join("examples/chat-calculator-flow.json");
     let resolved = load_workflow(&example).unwrap();
-    let plan = mf_compiler::plan_definition(&resolved.definition).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_resolved_definition(&resolved.definition, &registry).unwrap();
     let description = describe_compiled(&plan).unwrap();
     assert_eq!(description.injected_bodies.len(), 1);
     let path = &description.injected_bodies[0];
@@ -498,7 +573,6 @@ fn injected_flow_bodies_are_marked_for_inspection() {
             .collect::<Vec<_>>(),
         ["calculate"]
     );
-    let registry = NodeRegistry::from_inventory().unwrap();
     let manifest = plan.manifest(&registry).unwrap();
     assert_eq!(
         manifest.description().unwrap().injected_bodies,
@@ -553,9 +627,9 @@ fn injection_markers_survive_noncanonical_source_order() {
         fs::write(path, value.to_string()).unwrap();
     }
     let resolved = load_workflow(&path).unwrap();
-    let plan = mf_compiler::plan_definition(&resolved.definition).unwrap();
-    assert_eq!(describe_compiled(&plan).unwrap().injected_bodies.len(), 2);
     let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_resolved_definition(&resolved.definition, &registry).unwrap();
+    assert_eq!(describe_compiled(&plan).unwrap().injected_bodies.len(), 2);
     assert_eq!(
         plan.manifest(&registry)
             .unwrap()
@@ -578,7 +652,14 @@ fn builtin_configuration_and_metadata_errors_keep_typed_boundaries() {
         let definition = WorkflowDefinition::from_json(&json!({"version":"2026-11-01", "dependencies":{}, "flows":{"child":source}, "nodes":[{"id":"child", "kind":"workflow.call", "config":{"flow":"child"}}]}).to_string()).unwrap();
         assert!(mf_compiler::compile_definition(&definition, &registry).is_err());
     }
-    let metadata = json!({"subgraph":{"flow":"tool", "definition":text_tool()}, "name":"tool", "description":"Description"}).to_string();
+    let node = serde_json::from_value(json!({
+        "id": "tool", "kind": "workflow.call",
+        "config": {"flow": "tool", "definition": text_tool()}
+    }))
+    .unwrap();
+    let metadata = mf_compiler::describe_subgraph(&node, &registry).unwrap();
+    let config = json!({"metadata": metadata, "name": "tool", "description": "Description"});
+    let metadata = config.to_string();
     assert!(
         mf_compiler::instantiate_metadata_with_metadata(&registry, "x", "missing", &metadata)
             .is_err()
@@ -587,7 +668,7 @@ fn builtin_configuration_and_metadata_errors_keep_typed_boundaries() {
         mf_compiler::instantiate_metadata_with_metadata(
             &registry,
             "x",
-            "llm.tool_definition",
+            "llm.tool_arguments",
             "not json"
         )
         .is_err()
@@ -601,14 +682,22 @@ fn builtin_configuration_and_metadata_errors_keep_typed_boundaries() {
         )
         .is_err()
     );
-    let prepared = mf_compiler::instantiate_metadata_with_metadata(
-        &registry,
-        "x",
-        "llm.tool_definition",
-        &metadata,
-    )
-    .unwrap();
-    assert!(prepared.metadata.ports.inputs.is_empty());
+    let prepared = registry
+        .get("llm.tool_arguments")
+        .unwrap()
+        .instantiate(config)
+        .unwrap();
+    assert_eq!(prepared.metadata.ports.inputs[0].name, "call");
+    assert!(
+        registry
+            .get("llm.tool_arguments")
+            .unwrap()
+            .instantiate(
+                json!({"subgraph": {"flow": "tool", "definition": text_tool()},
+                            "name": "tool", "description": "Description"})
+            )
+            .is_err()
+    );
 }
 
 fn addition_body() -> Value {
@@ -668,6 +757,7 @@ fn inline_single_code_tool_exposes_exact_schema_and_maps_short_arguments() {
     .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
+    assert_precomputed_tools(&plan.definition, 1);
     let outputs = instantiate_compiled(&plan, &registry)
         .unwrap()
         .execute_with_inputs(
@@ -815,6 +905,14 @@ fn callers_can_describe_the_same_child_differently_without_changing_it() {
     let original = fs::read(root.path().join("flows/greet.json")).unwrap();
     let server = Server::start(vec![Reply::text("No tool needed")]);
     let resolved = load_workflow(&path).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_resolved_definition(&resolved.definition, &registry).unwrap();
+    assert_precomputed_tools(&plan.definition, 2);
+    let frozen =
+        WorkflowDefinition::from_json(&serde_json::to_string(&plan.definition).unwrap()).unwrap();
+    let frozen_plan = compile_resolved_definition(&frozen, &registry).unwrap();
+    assert_eq!(frozen_plan.definition, plan.definition);
+    assert_precomputed_tools(&frozen_plan.definition, 2);
     fn injected_definitions(value: &Value, definitions: &mut Vec<Value>) {
         match value {
             Value::Object(fields) => {
@@ -837,7 +935,7 @@ fn callers_can_describe_the_same_child_differently_without_changing_it() {
     }
     let mut children = Vec::new();
     injected_definitions(
-        &serde_json::to_value(&resolved.definition).unwrap(),
+        &serde_json::to_value(&plan.definition).unwrap(),
         &mut children,
     );
     assert_eq!(children.len(), 2);
@@ -846,8 +944,6 @@ fn callers_can_describe_the_same_child_differently_without_changing_it() {
         assert!(child.get("description").is_none());
         assert!(child.get("annotation").is_none());
     }
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_resolved_definition(&resolved.definition, &registry).unwrap();
     instantiate_compiled(&plan, &registry)
         .unwrap()
         .execute_with_inputs(
@@ -884,6 +980,53 @@ fn callers_can_describe_the_same_child_differently_without_changing_it() {
         serde_json::from_slice::<Value>(&original).unwrap(),
         text_tool()
     );
+}
+
+#[test]
+fn compiled_agent_roundtrips_without_sources_or_pending_expansions() {
+    let root = tempfile::tempdir().unwrap();
+    let path = write_fixture(
+        root.path(),
+        agent_parent(json!({
+            "greet": {"source": {"path": "flows/greet.json"}, "description": "Greet a person."},
+            "stats": {"source": {"path": "flows/stats.json"}, "description": "Calculate statistics."}
+        })),
+    );
+    let resolved = load_workflow(&path).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_resolved_definition(&resolved.definition, &registry).unwrap();
+    assert_precomputed_tools(&plan.definition, 2);
+    let description = describe_compiled(&plan).unwrap();
+    assert_eq!(description.injected_bodies.len(), 2);
+    fs::remove_file(path).unwrap();
+    fs::remove_dir_all(root.path().join("flows")).unwrap();
+    let frozen =
+        WorkflowDefinition::from_json(&serde_json::to_string(&plan.definition).unwrap()).unwrap();
+    let rebuilt = compile_resolved_definition(&frozen, &registry).unwrap();
+    assert_eq!(rebuilt.definition, plan.definition);
+    assert_precomputed_tools(&rebuilt.definition, 2);
+    assert_eq!(
+        describe_compiled(&rebuilt).unwrap().injected_bodies,
+        description.injected_bodies
+    );
+    for plan in [&plan, &rebuilt] {
+        use mfn_llm::test_support::{Reply, Server};
+        let server = Server::start(vec![Reply::text("Same frozen agent")]);
+        let outputs = instantiate_compiled(plan, &registry)
+            .unwrap()
+            .execute_with_inputs(
+                mf_runtime::WorkflowArguments::try_from(json!({
+                    "agent.params.prompt": "Hello", "agent.params.model": "example-model",
+                    "agent.params.base_url": server.base_url, "agent.params.api_key": "synthetic"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(outputs["text"].as_str(), Some("Same frozen agent"));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].body["tools"].as_array().unwrap().len(), 2);
+    }
 }
 
 #[test]

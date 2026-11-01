@@ -237,7 +237,9 @@ mod tests {
         .unwrap();
         let module =
             fs::read_to_string(output.path().join("mf-embedded/agent/workflow.rs")).unwrap();
-        assert!(module.contains(r#"\"injected\":true"#), "{module}");
+        assert!(module.contains("compiler.metadata_expansion"), "{module}");
+        assert!(module.contains(r#"\"calculator\""#), "{module}");
+        assert!(module.contains("pub fn finalized_plan"), "{module}");
     }
 
     #[test]

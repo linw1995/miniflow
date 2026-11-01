@@ -216,11 +216,21 @@ pub struct FlowParameterDescription {
 }
 
 /// Frozen injection passed to a provider after source resolution.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedFlowArgument {
     pub definition: WorkflowDefinition,
     pub description: Option<String>,
     pub parameters: BTreeMap<String, FlowParameterDescription>,
+}
+
+/// A resolved injection and its provider-linked interface; contains no executable capability.
+#[derive(Clone, Debug)]
+pub struct DescribedFlowArgument {
+    pub definition: WorkflowDefinition,
+    pub description: Option<String>,
+    pub parameters: BTreeMap<String, FlowParameterDescription>,
+    pub metadata: crate::SubgraphMetadata,
 }
 
 /// An inline Flow inherits its enclosing version, dependencies and alias scope.

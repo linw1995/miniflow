@@ -63,7 +63,12 @@ fn container_definitions() -> [WorkflowDefinition; 2] {
 
 #[test]
 fn review_plain_provider_subgraph_config_is_opaque() {
-    let config = json!({"value": 42, "subgraph": "opaque"});
+    let config = json!({
+        "value": 42,
+        "subgraph": "opaque",
+        "subgraph_metadata": {"arbitrary": "provider-owned"},
+        "metadata": {"definition": {"nodes": "not a graph"}}
+    });
     let definition = definition(
         json!([{"id": "constant", "kind": "builtin.constant", "config": config}]),
         json!([{"name": "value", "node": "constant", "port": "value"}]),
@@ -83,6 +88,53 @@ fn review_plain_provider_subgraph_config_is_opaque() {
             .as_i64(),
         Some(42)
     );
+}
+
+#[test]
+fn ordinary_metadata_definition_references_use_host_bound_interfaces() {
+    let child = definition(
+        json!([{"id": "remote", "kind": "unlinked.provider"}]),
+        json!([{"name": "value", "node": "remote", "port": "value"}]),
+    );
+    let reference = json!({"id": "inspect", "kind": "test.metadata_reference", "config": {
+        "subgraph": {"flow": "host.child", "definition": child}
+    }});
+    let node = serde_json::from_value(reference.clone()).unwrap();
+    let caller = definition(
+        json!([reference]),
+        json!([{"name": "value", "node": "inspect", "port": "value"}]),
+    );
+    let mut registry = NodeRegistry::from_inventory().unwrap();
+    assert!(mf_compiler::describe_subgraph(&node, &registry).is_err());
+    registry
+        .register_flow(
+            "host.child",
+            child,
+            mf_runtime::PreparedSubgraph::new(
+                vec![],
+                vec![mf_runtime::PortSpec::new(
+                    "value",
+                    mf_runtime::ValueType::String,
+                    true,
+                )],
+                |_| panic!("metadata inspection must not execute the host Flow"),
+            ),
+        )
+        .unwrap();
+    let metadata = mf_compiler::describe_subgraph(&node, &registry).unwrap();
+    assert_eq!(metadata.outputs.len(), 1);
+    assert_eq!(
+        metadata.outputs[0].value_type,
+        mf_runtime::ValueType::String
+    );
+    let plan = compile_definition(&caller, &registry).unwrap();
+    // Ordinary Metadata providers retain their existing definition-reference wire format.
+    assert_eq!(plan.definition.nodes[0].config, caller.nodes[0].config);
+    let output = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap();
+    assert_eq!(output["value"].as_i64(), Some(42));
 }
 
 #[test]
@@ -114,6 +166,48 @@ fn review_iteration_metadata_references_do_not_nest_executable_containers() {
                 json!({"results": [42]})
             );
         }
+    }
+}
+
+#[test]
+fn precomputed_interfaces_need_no_definition_and_reject_conflicting_sources() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let metadata = json!({
+        "inputs": {"inputs": {}, "stdin": {}},
+        "outputs": [{"name": "result", "value_type": "int", "required": true}],
+        "stream_outputs": []
+    });
+    let config = json!({"subgraph_metadata": metadata});
+    let compiled = compile_definition(
+        &definition(
+            json!([{"id": "inspect", "kind": "test.metadata_reference", "config": config}]),
+            json!([{"name": "value", "node": "inspect", "port": "value"}]),
+        ),
+        &registry,
+    )
+    .unwrap();
+    let result = instantiate_compiled(&compiled, &registry)
+        .unwrap()
+        .execute()
+        .unwrap();
+    assert_eq!(result["value"].as_i64(), Some(42));
+    let generated = compiled.generate_execution_plans(&registry).unwrap();
+    let manifest = mf_runtime::WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
+    assert_eq!(manifest.definition.nodes[0].config, config);
+    assert!(!generated.rust_source.contains("unlinked.provider"));
+
+    for invalid in [
+        json!({"subgraph_metadata": metadata, "subgraph": {"flow": "conflict"}}),
+        json!({"subgraph_metadata": {"inputs": {"inputs": {}, "stdin": {}},
+            "outputs": [
+                {"name": "duplicate", "value_type": "int", "required": true},
+                {"name": "duplicate", "value_type": "int", "required": true}
+            ], "stream_outputs": []}}),
+    ] {
+        assert!(compile_definition(&definition(
+            json!([{"id": "inspect", "kind": "test.metadata_reference", "config": invalid}]),
+            json!([]),
+        ), &registry).is_err());
     }
 }
 

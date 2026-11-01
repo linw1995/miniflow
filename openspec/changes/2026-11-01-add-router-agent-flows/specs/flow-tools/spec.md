@@ -29,6 +29,24 @@ terminal interfaces without stdin or stream outputs.
 - **THEN** the tool schema exposes required integer properties `left` and `right` with the supplied descriptions
 - **AND** model arguments are qualified as `calculate.left` and `calculate.right` before invocation, returning the JSON result `{"sum":5}` for inputs 2 and 3
 
+### Requirement: Precompute metadata-dependent provider expansion
+
+The compiler SHALL retain metadata-dependent expansion requests through structural planning and
+resolve them only where selected node providers are linked. Provider callbacks SHALL receive frozen
+interface facts without executable child closures. Final generated artifacts SHALL contain expanded
+graphs and frozen metadata, with no source-path reads or schema-reflection tasks at startup.
+
+The LLM provider SHALL generate a constant tool catalog during expansion rather than executable
+per-tool schema adapters and a CEL collector. Runtime argument validation SHALL retain only the
+required frozen interface, without embedding another copy of the executable child definition.
+Metadata references SHALL NOT create execution dependencies or observation scopes.
+
+#### Scenario: Compile a source-free agent without schema tasks
+
+- **WHEN** an agent is built with described injected tools
+- **THEN** its final graph contains the precomputed tool catalog and actual tool invocation calls, but no per-tool schema-generation tasks
+- **AND** arguments are validated against frozen interfaces and execution remains valid after source files are removed
+
 ### Requirement: Route user Flows with an ordinary runtime task
 
 `mfn-core` SHALL register `builtin.router` as an ordinary runtime task directly usable in user-authored

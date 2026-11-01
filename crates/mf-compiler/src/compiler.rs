@@ -37,6 +37,11 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("invalid frozen metadata for node `{definition_id}`: {source}"))]
+    FrozenMetadata {
+        definition_id: DefinitionId,
+        source: mf_runtime::SubgraphMetadataError,
+    },
     #[snafu(transparent)]
     FlowResolution { source: crate::FlowResolutionError },
     #[snafu(
@@ -547,7 +552,40 @@ pub fn describe_subgraph(
     node: &crate::NodeDefinition,
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::SubgraphMetadata, WorkflowCompileError> {
+    if let Some(value) = node.config.get("subgraph_metadata") {
+        ensure!(
+            node.config.get("subgraph").is_none(),
+            InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "metadata accepts exactly one source"
+            }
+        );
+        let metadata: mf_runtime::SubgraphMetadata = serde_json::from_value(value.clone())
+            .context(CallConfigurationSnafu {
+                definition_id: node.id.clone(),
+            })?;
+        metadata.validate().context(FrozenMetadataSnafu {
+            definition_id: node.id.clone(),
+        })?;
+        return Ok(metadata);
+    }
+    let config = crate::calls::config(node)?;
     let definition = crate::calls::body_definition(node)?;
+    if let Some(registered) = registry.flow(&config.flow) {
+        ensure!(
+            plan_resolved_definition(&definition)?.definition
+                == plan_resolved_definition(&registered.definition)?.definition,
+            InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "host Flow binding differs from the frozen metadata definition"
+            }
+        );
+        return Ok(mf_runtime::SubgraphMetadata {
+            inputs: registered.body.inputs.clone(),
+            outputs: registered.body.outputs.clone(),
+            stream_outputs: registered.body.stream_outputs.clone(),
+        });
+    }
     crate::loops::validate_structure(&definition)?;
     crate::validate_execution(&definition).context(StreamConstructionSnafu)?;
     let body = prepare_subgraph_body(
@@ -566,6 +604,22 @@ pub fn describe_subgraph(
         outputs: body.outputs,
         stream_outputs: body.stream_outputs,
     })
+}
+
+/// Describe a resolved injected Flow using a named host binding when one exists.
+pub fn describe_flow_argument(
+    alias: &str,
+    definition: &WorkflowDefinition,
+    registry: &NodeRegistry,
+) -> Result<mf_runtime::SubgraphMetadata, WorkflowCompileError> {
+    let node: crate::NodeDefinition = serde_json::from_value(serde_json::json!({
+        "id": "metadata", "kind": mf_runtime::CALL_KIND,
+        "config": {"flow": alias, "definition": definition}
+    }))
+    .context(CallConfigurationSnafu {
+        definition_id: "metadata",
+    })?;
+    describe_subgraph(&node, registry)
 }
 
 pub type ScopeLayouts = BTreeMap<
@@ -1248,6 +1302,8 @@ pub fn compile_resolved_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
+    let finalized = crate::flow_sources::finalize_metadata(definition, registry)?;
+    let definition = &finalized;
     let (nodes, execution_order) = prepare_definition(definition, registry)?;
     let definition = resolve_execution(definition, &nodes)?;
     let flow = crate::FlowBuilder::prepare(
@@ -1435,6 +1491,14 @@ pub fn prepare_compiled_plan(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<(CompiledWorkflow, crate::FlowBuilder), WorkflowCompileError> {
+    // Expansion replaces child scopes, never the caller's execution occurrences.
+    // Validate the supplied outer order rather than silently repairing a corrupt plan.
+    if plan.execution_order != structural_order(&plan.definition)? {
+        return NonCanonicalPlanOrderSnafu.fail();
+    }
+    let finalized = crate::flow_sources::finalize_metadata(&plan.definition, registry)?;
+    let finalized = plan_resolved_definition(&finalized)?;
+    let plan = &finalized;
     let (nodes, canonical_order) = prepare_definition(&plan.definition, registry)?;
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
@@ -1930,6 +1994,16 @@ fn resolve_nodes_in_scope(
         .nodes
         .iter()
         .map(|node| {
+            if crate::calls::is_metadata(&node.kind, Some(preparation.registry))
+                && node.config.get("subgraph_metadata").is_some()
+            {
+                let mf_runtime::NodeFactory::Metadata(factory) = registration_for(node, preparation.registry)?.factory else { unreachable!() };
+                let metadata = describe_subgraph(node, preparation.registry)?;
+                let instance = factory(node.config.clone(), metadata).context(NodeConstructionSnafu {
+                    definition_id: node.id.clone(), kind: node.kind.clone(),
+                })?;
+                return Ok(FlowNode::new(node.id.clone(), instance));
+            }
             if crate::calls::is_flow_with_registry(node, Some(preparation.registry)) {
                 let body = crate::calls::body_definition(node)?;
                 crate::validate_execution(&body).context(StreamConstructionSnafu)?;

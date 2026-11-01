@@ -1055,9 +1055,19 @@ generated calls and applies the caller's provider selections. Zero-argument regi
 unchanged and reject unexpected
 configuration/injections. Expansion is compile-time graph construction, not execution.
 
-A node that only needs a child interface can register `NodeFactory::Metadata`. Its `config.subgraph`
-uses the generic call reference (`flow`, optional frozen `definition`); preparation supplies
+Providers whose expansion depends on reflected child interfaces use
+`register_builtin_flow!("example", definition, metadata = expand)`. The pure expansion callback
+receives described Flow arguments after the selected providers are linked. It must not read
+runtime environment values, perform I/O, or execute tasks. Structural planning retains the frozen
+request until linked preparation can resolve it; final generated artifacts contain the expanded
+graph and its frozen facts, not deferred source reads. Metadata relationships do not establish
+execution prerequisites.
+
+A node that only needs a child interface can register `NodeFactory::Metadata`. Preparation supplies
 `SubgraphMetadata` containing startup inputs and terminal/stream output contracts, with **no executor**.
-This works in memory and generated runners using the supplied provider registry. Such nodes do not
-create runtime observation scopes. Executable containers continue to use `NodeFactory::Subgraph`;
-metadata-only factories cannot execute the inspected body.
+Definition-backed requests remain available for ordinary metadata consumers; compiled expansions can
+instead supply precomputed interfaces without embedding another child definition. This works in
+memory and generated runners using the supplied provider registry. Such nodes do not create child
+observation scopes, but any returned task is still an ordinary runtime task: metadata-dependent
+static projection belongs in the explicit pure expansion callback, not by executing that task at build
+time. Executable containers continue to use `NodeFactory::Subgraph`.

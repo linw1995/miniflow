@@ -39,6 +39,12 @@ pub enum FlowResolutionError {
         reference: String,
         source: mf_runtime::NodeBuildError,
     },
+    #[snafu(display("could not describe injected Flow `{reference}`: {source}"))]
+    Metadata {
+        reference: String,
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
+    },
     #[snafu(display("invalid Flow reference `{reference}`: {message}"))]
     Invalid { reference: String, message: String },
     #[snafu(display("conflicting provider sources for package `{package}` in Flow `{reference}`"))]
@@ -48,6 +54,16 @@ pub enum FlowResolutionError {
 pub struct ResolvedWorkflow {
     pub definition: WorkflowDefinition,
     pub sources: BTreeSet<PathBuf>,
+}
+
+const METADATA_EXPANSION_KIND: &str = "compiler.metadata_expansion";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataExpansionRequest {
+    builtin: String,
+    config: serde_json::Value,
+    arguments: BTreeMap<String, ResolvedFlowArgument>,
 }
 
 #[derive(Default)]
@@ -136,11 +152,30 @@ pub fn resolve_flows_with_registry(
     })
 }
 
+/// Finalize frozen requests without reinterpreting dependency ownership or source paths.
+pub fn finalize_metadata(
+    definition: &WorkflowDefinition,
+    registry: &mf_runtime::NodeRegistry,
+) -> Result<WorkflowDefinition, FlowResolutionError> {
+    let mut resolver = Resolver {
+        registry: Some(registry),
+        host_dependencies: true,
+        ..Default::default()
+    };
+    let mut definition = definition.clone();
+    resolver.definition(&mut definition, None, &BTreeMap::new(), 0, "workflow")?;
+    Ok(definition)
+}
+
 fn needs_resolution(
     definition: &WorkflowDefinition,
     registry: Option<&mf_runtime::NodeRegistry>,
 ) -> bool {
-    !definition.flows.is_empty()
+    definition
+        .nodes
+        .iter()
+        .any(|node| node.kind == METADATA_EXPANSION_KIND)
+        || !definition.flows.is_empty()
         || definition
             .nodes
             .iter()
@@ -251,6 +286,82 @@ impl Resolver<'_> {
         depth: usize,
         reference: &str,
     ) -> Result<(), FlowResolutionError> {
+        if definition.nodes.len() == 1
+            && definition.nodes[0].kind == METADATA_EXPANSION_KIND
+            && let Some(registry) = self.registry
+        {
+            ensure!(
+                depth <= MAX_CALL_DEPTH,
+                InvalidSnafu {
+                    reference,
+                    message: "Flow nesting exceeds sixteen calls"
+                }
+            );
+            let request: MetadataExpansionRequest = serde_json::from_value(
+                definition.nodes[0].config.clone(),
+            )
+            .context(ConfigurationSnafu {
+                node: "metadata_expansion",
+            })?;
+            let builtins = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
+            let registration = builtins.get(&request.builtin).context(InvalidSnafu {
+                reference: &request.builtin,
+                message: "unknown metadata-dependent built-in Flow",
+            })?;
+            let configure = registration.configure_metadata.context(InvalidSnafu {
+                reference: &request.builtin,
+                message: "built-in Flow no longer supports metadata expansion",
+            })?;
+            let mut described = BTreeMap::new();
+            for (alias, argument) in request.arguments {
+                let mut resolved = argument.definition;
+                self.definition(&mut resolved, None, inherited, depth + 1, &alias)
+                    .context(SourceSnafu {
+                        path: PathBuf::from(format!("argument:{alias}")),
+                    })?;
+                // Retain authored interface declarations for provider policy checks.
+                let frozen = resolved;
+                let metadata = crate::compiler::describe_flow_argument(&alias, &frozen, registry)
+                    .context(MetadataSnafu { reference: &alias })?;
+                described.insert(
+                    alias,
+                    mf_runtime::DescribedFlowArgument {
+                        definition: frozen,
+                        description: argument.description,
+                        parameters: argument.parameters,
+                        metadata,
+                    },
+                );
+            }
+            let mut expanded = configure(request.config, described).context(ExpansionSnafu {
+                reference: &request.builtin,
+            })?;
+            // Preserve dependency selections made by the source-resolution host.
+            for dependency in expanded.dependencies.values_mut() {
+                if let Some(selected) = definition
+                    .dependencies
+                    .values()
+                    .find(|selected| selected.package == dependency.package)
+                {
+                    let features = std::mem::take(&mut dependency.features);
+                    let default_features = dependency.default_features;
+                    *dependency = selected.clone();
+                    dependency.features.extend(features);
+                    dependency.features.sort();
+                    dependency.features.dedup();
+                    dependency.default_features |= default_features;
+                }
+            }
+            self.definition(
+                &mut expanded,
+                directory,
+                inherited,
+                depth + 1,
+                &request.builtin,
+            )?;
+            *definition = expanded;
+            return Ok(());
+        }
         let resolve = needs_resolution(definition, self.registry);
         ensure!(
             depth <= MAX_CALL_DEPTH,
@@ -433,7 +544,57 @@ impl Resolver<'_> {
                         },
                     );
                 }
-                let mut definition = if let Some(configure) = registration.configure {
+                let mut definition = if let Some(configure) = registration.configure_metadata {
+                    if let Some(registry) = self.registry {
+                        let mut described = BTreeMap::new();
+                        for (alias, argument) in injected {
+                            let mut definition = argument.definition;
+                            self.definition(&mut definition, None, available, depth + 1, &alias)?;
+                            let metadata = crate::compiler::describe_flow_argument(
+                                &alias,
+                                &definition,
+                                registry,
+                            )
+                            .context(MetadataSnafu { reference: &alias })?;
+                            described.insert(
+                                alias,
+                                mf_runtime::DescribedFlowArgument {
+                                    definition,
+                                    description: argument.description,
+                                    parameters: argument.parameters,
+                                    metadata,
+                                },
+                            );
+                        }
+                        configure(config.clone(), described)
+                            .context(ExpansionSnafu { reference: builtin })?
+                    } else {
+                        // Preserve a source-free request until the selected providers are linked.
+                        let request = MetadataExpansionRequest {
+                            builtin: builtin.clone(),
+                            config: config.clone(),
+                            arguments: injected,
+                        };
+                        let mut definition = (registration.definition)().context(ParseSnafu {
+                            path: PathBuf::from(format!("builtin:{builtin}")),
+                        })?;
+                        definition.nodes = vec![
+                            serde_json::from_value(serde_json::json!({
+                                "id": "metadata_expansion", "kind": METADATA_EXPANSION_KIND,
+                                "config": request,
+                            }))
+                            .context(ConfigurationSnafu {
+                                node: "metadata_expansion",
+                            })?,
+                        ];
+                        definition.edges.clear();
+                        definition.control_edges.clear();
+                        definition.order_edges.clear();
+                        definition.outputs.clear();
+                        definition.clusters.clear();
+                        definition
+                    }
+                } else if let Some(configure) = registration.configure {
                     configure(config.clone(), injected)
                         .context(ExpansionSnafu { reference: builtin })?
                 } else {
@@ -693,6 +854,126 @@ mod tests {
     }
 
     mf_runtime::register_builtin_flow!("resolution_test", provider_definition, configure_provider);
+
+    fn configure_metadata_provider(
+        config: Value,
+        mut arguments: BTreeMap<String, mf_runtime::DescribedFlowArgument>,
+    ) -> Result<WorkflowDefinition, mf_runtime::NodeBuildError> {
+        assert_eq!(config, json!({"pure": true}));
+        let argument = arguments.remove("tool").unwrap();
+        assert!(argument.metadata.inputs.inputs.is_empty());
+        assert!(argument.metadata.outputs.is_empty());
+        assert!(argument.metadata.stream_outputs.is_empty());
+        Ok(argument.definition)
+    }
+
+    mf_runtime::register_builtin_flow!(
+        "metadata_resolution_test",
+        provider_definition,
+        metadata = configure_metadata_provider
+    );
+
+    #[test]
+    fn metadata_expansion_is_deferred_and_frozen_after_linking() {
+        let authored = definition(
+            json!({"provider": {
+                "builtin": "mf-compiler.metadata_resolution_test",
+                "config": {"pure": true},
+                "flows": {"tool": {"source": {"body": {"nodes": []}}}}
+            }}),
+            json!([call("provider")]),
+        );
+        let structural = crate::plan_definition(&authored).unwrap();
+        assert_eq!(
+            child(&structural.definition).nodes[0].kind,
+            METADATA_EXPANSION_KIND
+        );
+        let serialized = structural.to_json().unwrap();
+        let restored = crate::CompiledWorkflow::from_json(&serialized).unwrap();
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        let finalized =
+            crate::compile_resolved_definition(&restored.definition, &registry).unwrap();
+        assert!(child(&finalized.definition).nodes.is_empty());
+        assert!(
+            !finalized
+                .to_json()
+                .unwrap()
+                .contains(METADATA_EXPANSION_KIND)
+        );
+        let direct = crate::compile_definition(&authored, &registry).unwrap();
+        assert_eq!(direct, finalized);
+        let mut invalid = restored;
+        invalid.execution_order.clear();
+        assert!(crate::compiler::prepare_compiled_plan(&invalid, &registry).is_err());
+        assert!(invalid.finalize(&registry).is_err());
+    }
+
+    #[test]
+    fn nested_deferred_arguments_share_the_call_depth_budget() {
+        let mut nested = definition(json!({}), json!([]));
+        for _ in 0..=MAX_CALL_DEPTH {
+            nested = definition(
+                json!({}),
+                json!([{
+                    "id": "metadata_expansion", "kind": METADATA_EXPANSION_KIND,
+                    "config": {
+                        "builtin": "mf-compiler.metadata_resolution_test",
+                        "config": {"pure": true},
+                        "arguments": {"tool": {
+                            "definition": nested, "description": null, "parameters": {}
+                        }}
+                    }
+                }]),
+            );
+        }
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        let error = finalize_metadata(&nested, &registry).unwrap_err();
+        assert!(error.to_string().contains("sixteen calls"), "{error}");
+    }
+
+    #[test]
+    fn deferred_expansion_preserves_provider_feature_requirements() {
+        let mut selected = definition(json!({}), json!([]));
+        selected.dependencies.insert(
+            "provider".into(),
+            serde_json::from_value(json!({
+                "package": "test-provider", "path": "unused-host-source",
+                "features": ["required"], "default-features": true
+            }))
+            .unwrap(),
+        );
+        let mut structural = crate::plan_definition(&definition(
+            json!({"provider": {
+                "builtin": "mf-compiler.metadata_resolution_test", "config": {"pure": true},
+                "flows": {"tool": {"source": {"body": {"nodes": []}}}}
+            }}),
+            json!([call("provider")]),
+        ))
+        .unwrap();
+        let mut pending = child(&structural.definition);
+        pending.nodes[0].config["arguments"]["tool"]["definition"] =
+            serde_json::to_value(selected).unwrap();
+        pending.dependencies.insert(
+            "host".into(),
+            serde_json::from_value(json!({
+                "package": "test-provider", "path": "different-host-source",
+                "features": ["selected"], "default-features": false
+            }))
+            .unwrap(),
+        );
+        structural.definition.nodes[0].config["definition"] =
+            serde_json::to_value(pending).unwrap();
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        let finalized = structural.finalize(&registry).unwrap();
+        let expanded = child(&finalized.definition);
+        let dependency = &expanded.dependencies["provider"];
+        assert_eq!(
+            dependency.path.as_deref(),
+            Some(Path::new("different-host-source"))
+        );
+        assert_eq!(dependency.features, ["required", "selected"]);
+        assert!(dependency.default_features);
+    }
 
     #[test]
     fn configurable_provider_receives_frozen_argument_and_metadata() {

@@ -21,7 +21,15 @@ bodies, merges dependencies, expands the provider definition, and resolves gener
 zero-argument registrations remain supported.
 
 Metadata-only node factories receive `SubgraphMetadata` (startup schema and output contracts), never
-an executable closure. Runtime metadata has no Tool types, JSON Schema conversion, result encoding,
+an executable closure. Metadata-dependent provider expansion is deferred until the selected node
+providers are linked. Structural source resolution freezes requests and source dependencies without
+requiring every node factory. Linked preparation derives interface facts and invokes an explicitly
+pure provider expansion callback before final graph normalization and artifact generation.
+
+The LLM provider uses that callback to emit one constant catalog, without per-tool schema tasks or
+a CEL catalog collector. Runtime argument adapters consume frozen interfaces instead of duplicating
+executable child definitions. Compile-time metadata references do not add scheduling edges or
+observation scopes. Runtime metadata has no Tool types, JSON Schema conversion, result encoding,
 or LLM recovery policy.
 
 ## Routing and invocation
