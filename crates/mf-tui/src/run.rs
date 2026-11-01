@@ -4500,6 +4500,10 @@ mod tests {
         assert_eq!(view.state.selected, 1);
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert_eq!(view.root.nodes().len(), 8);
+        assert!(view.root.body_summary(1).is_none());
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert_eq!(view.root.nodes().len(), 5);
+        assert!(view.root.body_summary(1).is_some());
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert_eq!(view.root.nodes().len(), 5);
         assert_eq!(view.viewports.len(), 3);
@@ -5056,9 +5060,11 @@ mod tests {
         view.cycle_body(path.clone()).unwrap();
         assert_eq!(view.body_states[&path], BodyDisplay::Summary);
         assert!(view.root.body_summary(owner).is_some());
+        assert_eq!(view.root.nodes().len(), 1);
         view.cycle_body(path.clone()).unwrap();
         assert_eq!(view.body_states[&path], BodyDisplay::Hidden);
         assert!(view.root.body_summary(owner).is_none());
+        assert_eq!(view.root.nodes().len(), 1);
         view.cycle_body(path.clone()).unwrap();
         assert_eq!(view.body_states[&path], BodyDisplay::Expanded);
         assert!(view.root.is_expanded_body(owner));

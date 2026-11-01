@@ -174,7 +174,7 @@ fn inline_bodies_keep_nested_geometry_and_routes_inside_their_owners() {
 }
 
 #[test]
-fn body_summary_shows_the_collapsed_subgraph_without_inlining_it() {
+fn summary_bodies_show_passed_inputs_without_inlining() {
     use mf_tui::graph::{BodyDisplay, ConnectionView};
     let description = inline_description();
     let outer = vec!["box".into()];
@@ -186,18 +186,16 @@ fn body_summary_shows_the_collapsed_subgraph_without_inlining_it() {
         &BTreeMap::new(),
     )
     .unwrap();
-    assert_eq!(layout.nodes().len(), 3);
     let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
-    assert_eq!(
-        layout.body_summary(owner),
-        Some("subgraph: source, inner, sink")
-    );
+    assert_eq!(layout.body_summary(owner), Some("input ← source"));
     assert!(!layout.is_expanded_body(owner));
+    assert_eq!(layout.nodes().len(), 3);
     let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 30));
     GraphView::new(&layout).render(buffer.area, &mut buffer);
     let text = buffer_text(&buffer);
     assert!(text.contains("box [~]"));
-    assert!(text.contains("subgraph: source, inner, sink"));
+    assert!(text.contains("input ← source"));
+    assert!(!text.contains("subgraph:"));
 
     let states = BTreeMap::from([(outer, BodyDisplay::Hidden)]);
     let hidden = GraphLayout::with_body_states(
@@ -215,51 +213,33 @@ fn body_summary_shows_the_collapsed_subgraph_without_inlining_it() {
 }
 
 #[test]
-fn nested_body_summaries_survive_inlining_and_connection_views() {
+fn nested_summary_bodies_show_inputs_across_connection_views() {
     use mf_tui::graph::{BodyDisplay, ConnectionView};
-    let mut description = inline_description();
+    let description = inline_description();
     let outer = vec!["box".into()];
     let inner = vec!["box".into(), "inner".into()];
     let states = BTreeMap::from([
         (outer, BodyDisplay::Expanded),
         (inner, BodyDisplay::Summary),
     ]);
-    for names in [vec![], vec!["a", "b", "c", "d"]] {
-        let body = description.loop_bodies.last_mut().unwrap();
-        body.nodes = names
-            .iter()
-            .map(|id| NodeDescription {
-                id: (*id).into(),
-                kind: "fixture.task".into(),
-            })
-            .collect();
-        body.execution_order = names.iter().map(|id| (*id).into()).collect();
-        body.data_edges.clear();
-        let expected = if names.is_empty() {
-            "subgraph: empty"
-        } else {
-            "subgraph: a, b, c +1"
-        };
-        for view in [
-            ConnectionView::Execution,
-            ConnectionView::Dependencies,
-            ConnectionView::Ports,
-        ] {
-            let layout =
-                GraphLayout::with_body_states(&description, view, &states, &BTreeMap::new())
-                    .unwrap();
-            let owner = layout
-                .display_index_for_scoped_node(&["box".into()], "inner")
-                .unwrap();
-            assert_eq!(layout.body_summary(owner), Some(expected));
-            assert!(!layout.is_expanded_body(owner));
-            assert!(layout.nodes()[owner].rect.width >= 24);
-            let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 60));
-            GraphView::new(&layout).render(buffer.area, &mut buffer);
-            let text = buffer_text(&buffer);
-            assert!(text.contains("inner [~]"));
-            assert!(text.contains(expected));
-        }
+    for view in [
+        ConnectionView::Execution,
+        ConnectionView::Dependencies,
+        ConnectionView::Ports,
+    ] {
+        let layout =
+            GraphLayout::with_body_states(&description, view, &states, &BTreeMap::new()).unwrap();
+        let owner = layout
+            .display_index_for_scoped_node(&["box".into()], "inner")
+            .unwrap();
+        assert_eq!(layout.body_summary(owner), Some("input ← source"));
+        assert!(!layout.is_expanded_body(owner));
+        assert_eq!(layout.nodes().len(), 6);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
+        GraphView::new(&layout).render(buffer.area, &mut buffer);
+        let text = buffer_text(&buffer);
+        assert!(text.contains("inner [~]"));
+        assert!(text.contains("input ← source"));
     }
 }
 

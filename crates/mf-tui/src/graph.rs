@@ -1037,12 +1037,10 @@ impl GraphLayout {
                         )?,
                     );
                 }
-                BodyDisplay::Summary => {
-                    if let Some(body) = description.body(&child_path) {
-                        summaries.push((node.id.clone(), body_summary(body)));
-                    }
+                BodyDisplay::Summary if description.body(&child_path).is_some() => {
+                    summaries.push((node.id.clone(), input_summary(scope, &node.id)));
                 }
-                BodyDisplay::Expanded | BodyDisplay::Hidden => {}
+                BodyDisplay::Expanded | BodyDisplay::Summary | BodyDisplay::Hidden => {}
             }
         }
         let extra_widths = summaries
@@ -2197,24 +2195,6 @@ fn status_marker(status: NodeStatus, observed: Option<&NodeObservation>, elapsed
     }
 }
 
-fn body_summary(body: &mf_telemetry::description::LoopBodyDescription) -> String {
-    let mut names: Vec<_> = body
-        .nodes
-        .iter()
-        .map(|node| node.id.as_str())
-        .filter(|id| !id.starts_with('%'))
-        .collect();
-    let total = names.len();
-    names.truncate(3);
-    if total == 0 {
-        "subgraph: empty".into()
-    } else if total > names.len() {
-        format!("subgraph: {} +{}", names.join(", "), total - names.len())
-    } else {
-        format!("subgraph: {}", names.join(", "))
-    }
-}
-
 fn node_detail(node: &GraphNode, observed: Option<&NodeObservation>, elapsed_ns: u64) -> String {
     let Some(observed) = observed else {
         return node.kind.clone();
@@ -2253,6 +2233,41 @@ fn status_name(status: NodeStatus) -> &'static str {
         NodeStatus::Unknown => "unknown",
         NodeStatus::Interrupted => "interrupted",
     }
+}
+
+fn input_summary(scope: &WorkflowDescription, id: &str) -> String {
+    let mut inputs: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for edge in scope.data_edges.iter().filter(|edge| edge.to_node == id) {
+        inputs
+            .entry(edge.to_input.as_str())
+            .or_default()
+            .push(edge.from_node.as_str());
+    }
+    if inputs.is_empty() {
+        return "no inputs".into();
+    }
+    let mut parts = Vec::new();
+    for (input, mut sources) in inputs {
+        sources.sort_unstable();
+        sources.dedup();
+        parts.push(format!("{input} ← {}", sources.join("|")));
+    }
+    let text = parts.join(", ");
+    let width = ratatui::text::Span::raw(&text).width();
+    if width <= 34 {
+        return text;
+    }
+    let mut truncated = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let cells = ratatui::text::Span::raw(ch.to_string()).width();
+        if used + cells > 32 {
+            break;
+        }
+        truncated.push(ch);
+        used += cells;
+    }
+    format!("{truncated}…")
 }
 
 fn display_line(value: &str) -> String {
