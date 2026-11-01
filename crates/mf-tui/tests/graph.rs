@@ -213,6 +213,89 @@ fn summary_bodies_show_passed_inputs_without_inlining() {
 }
 
 #[test]
+fn summary_bodies_join_and_truncate_passed_inputs() {
+    use mf_tui::graph::{BodyDisplay, ConnectionView};
+    let mut description = inline_description();
+    let edge = |from_node: &str, to_input: &str, exclusive: bool| DataEdge {
+        exclusive,
+        from_node: from_node.into(),
+        from_output: "value".into(),
+        to_node: "box".into(),
+        to_input: to_input.into(),
+    };
+    let with_sources = |description: &mut WorkflowDescription, sources: &[&str]| {
+        description.nodes = sources
+            .iter()
+            .map(|id| NodeDescription {
+                id: (*id).into(),
+                kind: "fixture.task".into(),
+            })
+            .chain(["box", "sink"].map(|id| NodeDescription {
+                id: id.into(),
+                kind: if id == "box" {
+                    "workflow.call".into()
+                } else {
+                    "fixture.task".into()
+                },
+            }))
+            .collect();
+        description.execution_order = sources
+            .iter()
+            .map(|id| (*id).into())
+            .chain(["box".into(), "sink".into()])
+            .collect();
+    };
+    with_sources(&mut description, &["x", "y", "z"]);
+    description.data_edges = vec![
+        edge("y", "a", true),
+        edge("x", "a", true),
+        edge("z", "b", false),
+        DataEdge {
+            exclusive: false,
+            from_node: "box".into(),
+            from_output: "value".into(),
+            to_node: "sink".into(),
+            to_input: "input".into(),
+        },
+    ];
+    let states = BTreeMap::from([(vec!["box".into()], BodyDisplay::Summary)]);
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
+    assert_eq!(layout.body_summary(owner), Some("a ← x|y, b ← z"));
+
+    let upstream: Vec<String> = (0..4)
+        .map(|index| format!("upstream_source_{index}"))
+        .collect();
+    let upstream_refs: Vec<&str> = upstream.iter().map(String::as_str).collect();
+    with_sources(&mut description, &upstream_refs);
+    description.data_edges = upstream_refs
+        .iter()
+        .map(|source| edge(source, "input.wide_parameter", true))
+        .collect();
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
+    let summary = layout.body_summary(owner).unwrap();
+    assert!(summary.ends_with('…'), "{summary}");
+    assert!(summary.len() <= 40, "{summary}");
+    assert!(
+        summary.starts_with("input.wide_parameter ← upstream"),
+        "{summary}"
+    );
+}
+
+#[test]
 fn nested_summary_bodies_show_inputs_across_connection_views() {
     use mf_tui::graph::{BodyDisplay, ConnectionView};
     let description = inline_description();
