@@ -4,6 +4,7 @@
 - [x] Compute a dynamic grid from running-node count and available area, with overflow reporting and safe compact-terminal behavior.
 - [x] Render PiP without changing main graph navigation, details, help, or telemetry state.
 - [x] Discover running members of folded clusters and bodies through a shared fully expanded PiP layout, including the chat Flow execution panel.
+- [x] Keep a single Running node inside a folded chat `workflow.call` body visible as a PiP.
 
 ## Validation
 

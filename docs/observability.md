@@ -647,7 +647,7 @@ it entirely. Expanded bodies with running descendants do not add duplicate PiPs 
 Running members of folded clusters and bodies remain visible in separate PiPs through a shared fully
 expanded PiP layout; folding the main graph does not hide them. PiP titles include the body path to
 distinguish nodes with the same ID in different scopes. The compact chat Flow execution panel uses the
-same PiP grid alongside its folded root overview.
+same PiP grid alongside its folded root overview and keeps a single running nested Call node visible.
 Declared node clusters show a labeled boundary and a wrapped annotation inside the graph and in Details.
 Cluster boundaries, member node borders, and labels share a stable color from a six-color palette.
 Node titles and status markers retain their execution-state colors. Annotations wrap at word boundaries;

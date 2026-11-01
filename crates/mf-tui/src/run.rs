@@ -1380,8 +1380,15 @@ fn parallel_pip_areas(count: usize, area: Rect) -> (Vec<Rect>, usize) {
     if count < 2 {
         return (Vec::new(), 0);
     }
+    pip_areas(count, area, area.height / 2)
+}
+
+fn pip_areas(count: usize, area: Rect, reserved_height: u16) -> (Vec<Rect>, usize) {
+    if count == 0 {
+        return (Vec::new(), 0);
+    }
     let max_columns = usize::from(area.width / PIP_MIN_WIDTH);
-    let max_rows = usize::from(area.height / 2 / PIP_MIN_HEIGHT);
+    let max_rows = usize::from(area.height.saturating_sub(reserved_height) / PIP_MIN_HEIGHT);
     let capacity = max_columns.saturating_mul(max_rows);
     let visible = count.min(capacity);
     if visible == 0 {
@@ -1416,15 +1423,13 @@ fn parallel_pip_areas(count: usize, area: Rect) -> (Vec<Rect>, usize) {
     (areas, count - visible)
 }
 
-fn draw_parallel_pips(
-    frame: &mut Frame<'_>,
-    area: Rect,
+type ExecutionPip<'a> = (usize, Option<&'a IterationItemObservation>, String);
+
+fn execution_pips<'a>(
     layout: &GraphLayout,
     observations: &[NodeObservation],
-    receiver: &ObservationReader,
-    elapsed_ns: u64,
-    iterations: Option<&crate::state::IterationSnapshot>,
-) {
+    iterations: Option<&'a crate::state::IterationSnapshot>,
+) -> Vec<ExecutionPip<'a>> {
     let active: Vec<_> = iterations
         .into_iter()
         .flat_map(|snapshot| &snapshot.items)
@@ -1497,7 +1502,41 @@ fn draw_parallel_pips(
             .join(" / ");
         views.push((display, None, title));
     }
-    let (areas, overflow) = parallel_pip_areas(views.len(), area);
+    views
+}
+
+fn draw_parallel_pips(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    layout: &GraphLayout,
+    observations: &[NodeObservation],
+    receiver: &ObservationReader,
+    elapsed_ns: u64,
+    iterations: Option<&crate::state::IterationSnapshot>,
+) {
+    let views = execution_pips(layout, observations, iterations);
+    let placement = parallel_pip_areas(views.len(), area);
+    draw_pips(
+        frame,
+        layout,
+        observations,
+        receiver,
+        elapsed_ns,
+        views,
+        placement,
+    );
+}
+
+fn draw_pips(
+    frame: &mut Frame<'_>,
+    layout: &GraphLayout,
+    observations: &[NodeObservation],
+    receiver: &ObservationReader,
+    elapsed_ns: u64,
+    views: Vec<ExecutionPip<'_>>,
+    placement: (Vec<Rect>, usize),
+) {
+    let (areas, overflow) = placement;
     let visible = areas.len();
     for (position, ((display, item, title), rect)) in views.into_iter().zip(areas).enumerate() {
         let node = &layout.nodes()[display];
@@ -2829,14 +2868,24 @@ impl ObservationView {
             snapshot,
             &BTreeMap::new(),
         );
-        draw_parallel_pips(
+        let pip_views = execution_pips(&self.pip_layout, &pip_nodes, Some(&snapshot.iterations));
+        // The chat overview is always folded, so a single running body node still needs its own PiP.
+        let nested = pip_views
+            .iter()
+            .any(|(display, _, _)| !self.pip_layout.node_path(*display).is_empty());
+        let placement = if nested {
+            pip_areas(pip_views.len(), graph, graph.height / 2)
+        } else {
+            parallel_pip_areas(pip_views.len(), graph)
+        };
+        draw_pips(
             frame,
-            graph,
             &self.pip_layout,
             &pip_nodes,
             reader,
             elapsed_ns,
-            Some(&snapshot.iterations),
+            pip_views,
+            placement,
         );
         frame.render_widget(
             Paragraph::new(format!("Delivery: {:?}", snapshot.lifecycle.completeness))
@@ -3745,6 +3794,12 @@ mod tests {
         assert_eq!(chat.matches(" Running: ").count(), 2, "{chat}");
         assert!(chat.contains(" Running: first / source "), "{chat}");
         assert!(chat.contains(" Running: first / target "), "{chat}");
+
+        snapshot.loop_passes[0].nodes[1].status = NodeStatus::Succeeded;
+        let chat = render_chat_execution(&view, &snapshot);
+        assert_eq!(chat.matches(" Running: ").count(), 1, "{chat}");
+        assert!(chat.contains(" Running: first / source "), "{chat}");
+        assert!(!chat.contains(" Running: first / target "), "{chat}");
     }
 
     #[test]
