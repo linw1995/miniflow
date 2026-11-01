@@ -23,6 +23,8 @@ use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::RangeInclusive,
+    sync::Arc,
+    time::Instant,
 };
 
 const NODE_WIDTH: u32 = 24;
@@ -33,6 +35,10 @@ const COMPONENT_GAP: u32 = 4;
 const MARGIN: u32 = 2;
 const LAYOUT_STACK_BYTES: usize = 64 * 1024 * 1024;
 const CLUSTER_KIND: &str = "node cluster";
+const FLOW_FRAME_NS: u64 = 100_000_000;
+const ACTIVITY_DENSITIES: [&str; 4] = ["▓", "▒", "░", "·"];
+const TRANSFER_PULSE_NS: u64 = 600_000_000;
+const NODE_TRANSITION_NS: u64 = 1_200_000_000;
 
 #[derive(Debug, Snafu)]
 pub enum GraphError {
@@ -127,7 +133,25 @@ impl GraphEdge {
     }
 }
 
+#[derive(Clone)]
+struct TransferMapping {
+    source: String,
+    target: String,
+    output: String,
+    input: String,
+    exclusive: bool,
+}
+
+type TransferEvents = BTreeMap<(Vec<String>, String), Vec<TransferEvent>>;
+
+struct TransferEvent {
+    age_ns: u64,
+    correlation: Option<crate::traces::SpanKey>,
+    snapshot: Arc<mf_runtime::NodeSnapshot>,
+}
+
 pub struct GraphLayout {
+    streaming: bool,
     view: ConnectionView,
     hidden_data_count: usize,
     hidden_transitive_count: usize,
@@ -144,6 +168,7 @@ pub struct GraphLayout {
     body_nodes: BTreeSet<usize>,
     clusters: Vec<GraphCluster>,
     edges: Vec<GraphEdge>,
+    transfer_members: Vec<Vec<TransferMapping>>,
     routes: Vec<EdgeRoute>,
     crossings: Vec<Crossing>,
     routing_stats: routing::RoutingStats,
@@ -486,15 +511,15 @@ impl GraphLayout {
                 continue;
             }
             topology.insert((from as u32, to as u32));
+            let member = DataMapping {
+                output: edge.from_output.clone(),
+                input: edge.to_input.clone(),
+            };
             // An explicit execution connection already shows this dependency's direction.
             if view == ConnectionView::Execution && execution_pairs.contains(&(from, to)) {
                 hidden_data_count += 1;
                 continue;
             }
-            let member = DataMapping {
-                output: edge.from_output.clone(),
-                input: edge.to_input.clone(),
-            };
             if view != ConnectionView::Ports {
                 if let Some(&index) = bundles.get(&(from, to, kind)) {
                     edges[index].members.push(member);
@@ -596,6 +621,52 @@ impl GraphLayout {
             }
         }
         edges.sort_by(|left, right| left.key.cmp(&right.key));
+        let mut transfer_members = vec![Vec::new(); edges.len()];
+        let mut transfer_routes = BTreeMap::new();
+        let mut execution_routes = BTreeMap::new();
+        for (index, edge) in edges.iter().enumerate() {
+            for member in &edge.members {
+                transfer_routes.insert((edge.from, edge.to, edge.kind, member), index);
+            }
+            if matches!(edge.kind, EdgeKind::Control | EdgeKind::Success) {
+                execution_routes
+                    .entry((edge.from, edge.to))
+                    .or_insert(index);
+            }
+        }
+        for mapping in &description.data_edges {
+            let from = display_of_node[node_index[mapping.from_node.as_str()]];
+            let to = display_of_node[node_index[mapping.to_node.as_str()]];
+            if from == to {
+                continue;
+            }
+            let kind = if mapping.exclusive {
+                EdgeKind::Exclusive
+            } else {
+                EdgeKind::Data
+            };
+            let member = DataMapping {
+                output: mapping.from_output.clone(),
+                input: mapping.to_input.clone(),
+            };
+            let index = transfer_routes
+                .get(&(from, to, kind, &member))
+                .copied()
+                .or_else(|| {
+                    (view == ConnectionView::Execution)
+                        .then(|| execution_routes.get(&(from, to)).copied())
+                        .flatten()
+                });
+            if let Some(index) = index {
+                transfer_members[index].push(TransferMapping {
+                    source: mapping.from_node.clone(),
+                    target: mapping.to_node.clone(),
+                    output: mapping.from_output.clone(),
+                    input: mapping.to_input.clone(),
+                    exclusive: mapping.exclusive,
+                });
+            }
+        }
         let mut outgoing = vec![Vec::new(); nodes.len()];
         let mut incoming = vec![Vec::new(); nodes.len()];
         for (index, edge) in edges.iter().enumerate() {
@@ -906,6 +977,7 @@ impl GraphLayout {
             })
             .collect();
         Ok(Self {
+            streaming: description.is_streaming(),
             view,
             hidden_data_count,
             hidden_transitive_count,
@@ -927,6 +999,7 @@ impl GraphLayout {
             body_nodes,
             clusters,
             edges,
+            transfer_members,
             width: right + MARGIN,
             height,
         })
@@ -1092,6 +1165,7 @@ impl GraphLayout {
         self.cluster_keys.extend(child.cluster_keys);
         self.clusters.extend(child.clusters);
         self.edges.extend(child.edges);
+        self.transfer_members.extend(child.transfer_members);
         self.routes.extend(child.routes);
         self.crossings.extend(child.crossings);
         self.hidden_data_count += child.hidden_data_count;
@@ -1410,6 +1484,9 @@ pub struct GraphView<'a> {
     selected: Option<usize>,
     offset: (u32, u32),
     elapsed_ns: u64,
+    observed_at_unix_nano: Option<u64>,
+    data: Option<&'a crate::snapshots::HistorySnapshot>,
+    minimap: bool,
     reader: Option<&'a crate::receiver::ObservationReader>,
 }
 
@@ -1421,6 +1498,9 @@ impl<'a> GraphView<'a> {
             selected: None,
             offset: (0, 0),
             elapsed_ns: 0,
+            observed_at_unix_nano: None,
+            data: None,
+            minimap: false,
             reader: None,
         }
     }
@@ -1452,6 +1532,21 @@ impl<'a> GraphView<'a> {
 
     pub fn elapsed_ns(mut self, elapsed_ns: u64) -> Self {
         self.elapsed_ns = elapsed_ns;
+        self
+    }
+
+    pub fn observed_at_unix_nano(mut self, timestamp: u64) -> Self {
+        self.observed_at_unix_nano = Some(timestamp);
+        self
+    }
+
+    pub fn data_snapshot(mut self, data: &'a crate::snapshots::HistorySnapshot) -> Self {
+        self.data = Some(data);
+        self
+    }
+
+    pub fn minimap(mut self, visible: bool) -> Self {
+        self.minimap = visible;
         self
     }
 
@@ -1758,6 +1853,169 @@ impl<'a> GraphView<'a> {
         Style::default().fg(default)
     }
 
+    fn matching_events<'b>(
+        &self,
+        events: &'b TransferEvents,
+        source: usize,
+    ) -> impl Iterator<Item = &'b TransferEvent> {
+        let described = &self.layout.all_nodes[source];
+        let path = self.layout.source_path(source);
+        let correlation = self
+            .observation(source)
+            .and_then(|node| node.correlation.clone());
+        let scoped = !path.is_empty();
+        events
+            .get(&(path.to_vec(), described.id.clone()))
+            .into_iter()
+            .flatten()
+            .filter(move |event| {
+                // Never borrow current emissions for a historical pass/item or another invocation.
+                match (&correlation, &event.correlation) {
+                    (Some(expected), Some(actual)) => expected == actual,
+                    _ => !scoped && correlation.is_none(),
+                }
+            })
+    }
+
+    fn task_transfer_age(&self, index: usize, events: Option<&TransferEvents>) -> Option<u64> {
+        let edge = &self.layout.edges[index];
+        self.layout
+            .transfer_members
+            .get(index)?
+            .iter()
+            .filter_map(|member| {
+                let target = *self
+                    .layout
+                    .sources(edge.to)
+                    .iter()
+                    .find(|target| self.layout.all_nodes[**target].id == member.target)?;
+                let observation = self.observation(target)?;
+                if member.exclusive
+                    && !observation.input_selections.iter().any(|selection| {
+                        selection.input == member.input
+                            && selection.source_output == member.output
+                            && selection.source_node == member.source
+                    })
+                {
+                    return None;
+                }
+                if let Some(events) = events {
+                    self.matching_events(events, target)
+                        .filter(|event| {
+                            event.snapshot.outcome == mf_runtime::SnapshotOutcome::Started
+                                && (!self.layout.streaming
+                                    || event.snapshot.inputs.get(member.input.as_str()).is_some())
+                        })
+                        .map(|event| event.age_ns)
+                        .min()
+                } else if self.layout.streaming {
+                    None
+                } else {
+                    // Ordinary inputs resolve before NodeStarted. Only exclusive bindings need
+                    // a selected_inputs witness; Running alone is never a transfer event.
+                    self.elapsed_ns
+                        .checked_sub(observation.started_elapsed_ns?.get().max(0) as u64)
+                }
+            })
+            .min()
+    }
+
+    fn stream_transfer_ages(&self, index: usize, events: &TransferEvents) -> Vec<u64> {
+        let edge = &self.layout.edges[index];
+        let mut ages = BTreeSet::new();
+        for member in &self.layout.transfer_members[index] {
+            let Some(source) = self
+                .layout
+                .sources(edge.from)
+                .iter()
+                .find(|source| self.layout.all_nodes[**source].id == member.source)
+            else {
+                continue;
+            };
+            for event in self.matching_events(events, *source) {
+                if event.snapshot.outcome == mf_runtime::SnapshotOutcome::Emitted
+                    && event.snapshot.outputs.get(member.output.as_str()).is_some()
+                {
+                    // Coalesce emissions in the same visual frame, not every emission
+                    // from a hot producer into a continually restarted source pulse.
+                    ages.insert(event.age_ns / FLOW_FRAME_NS * FLOW_FRAME_NS);
+                }
+            }
+        }
+        ages.into_iter().collect()
+    }
+
+    fn draw_transfer(&self, area: Rect, buffer: &mut Buffer, index: usize, age_ns: u64) {
+        if age_ns > TRANSFER_PULSE_NS {
+            return;
+        }
+        let edge = &self.layout.edges[index];
+        let route = &self.layout.routes[index];
+        if route.unresolved.is_some() {
+            return;
+        }
+        let total: u64 = route
+            .points
+            .windows(2)
+            .map(|points| {
+                u64::from(points[0].x.abs_diff(points[1].x))
+                    + u64::from(points[0].y.abs_diff(points[1].y))
+            })
+            .sum();
+        if total == 0 {
+            return;
+        }
+        let head =
+            (u128::from(age_ns) * u128::from(total + 3) / u128::from(TRANSFER_PULSE_NS)) as u64;
+        let style = self.edge_style(edge).add_modifier(Modifier::BOLD);
+        let mut travelled = 0_u64;
+        for points in route.points.windows(2) {
+            let (from, to) = (points[0], points[1]);
+            let length = from.x.abs_diff(to.x) + from.y.abs_diff(to.y);
+            if length == 0 {
+                continue;
+            }
+            let (first, last) = if from.y == to.y {
+                let low = from.x.min(to.x).max(self.offset.0);
+                let high = from.x.max(to.x).min(
+                    self.offset
+                        .0
+                        .saturating_add(u32::from(area.width))
+                        .saturating_sub(1),
+                );
+                (low, high)
+            } else {
+                let low = from.y.min(to.y).max(self.offset.1);
+                let high = from.y.max(to.y).min(
+                    self.offset
+                        .1
+                        .saturating_add(u32::from(area.height))
+                        .saturating_sub(1),
+                );
+                (low, high)
+            };
+            for coordinate in first..=last {
+                let (x, y, step) = if from.y == to.y {
+                    (coordinate, from.y, from.x.abs_diff(coordinate))
+                } else {
+                    (from.x, coordinate, from.y.abs_diff(coordinate))
+                };
+                let distance = travelled + u64::from(step);
+                if distance <= head && head - distance < 4 {
+                    let symbol = ACTIVITY_DENSITIES[(head - distance) as usize];
+                    self.put(area, buffer, x, y, symbol, style);
+                }
+            }
+            travelled += u64::from(length);
+        }
+        if let Some(to) = route.points.last() {
+            self.put(area, buffer, to.x, to.y, "▶", style);
+        }
+        if let Some(label) = &route.label {
+            self.text(area, buffer, label.rect, &label.text, style);
+        }
+    }
+
     fn draw_cluster(&self, area: Rect, buffer: &mut Buffer, index: usize, cluster: &GraphCluster) {
         if cluster.collapsed {
             return;
@@ -2032,15 +2290,369 @@ impl<'a> GraphView<'a> {
             );
         }
     }
+
+    fn draw_node_activity(
+        &self,
+        area: Rect,
+        buffer: &mut Buffer,
+        index: usize,
+        node: &GraphNode,
+        events: Option<&TransferEvents>,
+    ) {
+        let status = self.display_status(index);
+        if status == NodeStatus::Pending
+            || self.display_uncertain(index)
+            || node.rect.x >= self.offset.0.saturating_add(u32::from(area.width))
+            || node.rect.x.saturating_add(node.rect.width) <= self.offset.0
+            || node.rect.y >= self.offset.1.saturating_add(u32::from(area.height))
+            || node.rect.y.saturating_add(node.rect.height) <= self.offset.1
+        {
+            return;
+        }
+        let mut rect = node.rect;
+        let collapsed = self.layout.is_collapsed_cluster(index);
+        let annotation = &self.layout.node_annotations[index];
+        if !collapsed && !annotation.is_empty() {
+            let header = annotation.len() as u32 + 1;
+            rect.y += header;
+            rect.height -= header;
+        }
+        let style = node_style(status);
+        let terminal_age = if let Some(events) = events {
+            let now = Instant::now();
+            self.layout
+                .sources(index)
+                .iter()
+                .filter_map(|source| self.observation(*source))
+                .filter_map(|observation| observation.terminal_received_at)
+                .map(|received_at| {
+                    now.saturating_duration_since(received_at)
+                        .as_nanos()
+                        .min(u64::MAX as u128) as u64
+                })
+                .min()
+                .or_else(|| {
+                    self.layout
+                        .sources(index)
+                        .iter()
+                        .flat_map(|source| self.matching_events(events, *source))
+                        .filter(|event| {
+                            matches!(
+                                event.snapshot.outcome,
+                                mf_runtime::SnapshotOutcome::Succeeded
+                                    | mf_runtime::SnapshotOutcome::Failed
+                                    | mf_runtime::SnapshotOutcome::Skipped
+                            )
+                        })
+                        .map(|event| event.age_ns)
+                        .min()
+                })
+        } else {
+            self.layout
+                .sources(index)
+                .iter()
+                .filter_map(|source| self.observation(*source))
+                .filter_map(|observation| observation.terminal_elapsed_ns)
+                .filter_map(|terminal| self.elapsed_ns.checked_sub(terminal.get().max(0) as u64))
+                .min()
+        };
+        if status == NodeStatus::Running {
+            let cells = perimeter_cells(rect);
+            if cells != 0 {
+                self.draw_perimeter_chase(
+                    area,
+                    buffer,
+                    rect,
+                    (self.elapsed_ns / FLOW_FRAME_NS) % cells,
+                    style,
+                );
+            }
+        } else if let Some(age) = terminal_age.filter(|age| *age < NODE_TRANSITION_NS) {
+            let cells = perimeter_cells(rect);
+            let head =
+                (u128::from(age) * u128::from(cells) / u128::from(NODE_TRANSITION_NS)) as u64;
+            self.draw_perimeter_chase(area, buffer, rect, head, style);
+        }
+    }
+
+    fn draw_perimeter_chase(
+        &self,
+        area: Rect,
+        buffer: &mut Buffer,
+        rect: GraphRect,
+        head: u64,
+        style: Style,
+    ) {
+        let cells = perimeter_cells(rect);
+        if cells == 0 {
+            return;
+        }
+        let style = style.add_modifier(Modifier::BOLD);
+        for (offset, symbol) in ACTIVITY_DENSITIES.into_iter().enumerate() {
+            let position = (head + cells - offset as u64 % cells) % cells;
+            let (x, y) = perimeter_cell(rect, position).expect("position is within the perimeter");
+            self.put(area, buffer, x, y, symbol, style);
+        }
+    }
+
+    fn minimap_area(&self, area: Rect) -> Option<Rect> {
+        let (width, height) = self.layout.size();
+        if !self.minimap
+            || area.width < 24
+            || area.height < 8
+            || width <= u32::from(area.width) && height <= u32::from(area.height)
+        {
+            return None;
+        }
+        let width = (area.width / 3).clamp(14, 32);
+        let height = (area.height / 3).clamp(5, 12);
+        Some(Rect {
+            x: area.x + area.width - width,
+            y: area.y + area.height - height,
+            width,
+            height,
+        })
+    }
+
+    fn mini_put(buffer: &mut Buffer, area: Rect, x: u16, y: u16, symbol: &str, style: Style) {
+        if x < area.x || y < area.y || x >= area.x + area.width || y >= area.y + area.height {
+            return;
+        }
+        if let Some(cell) = buffer.cell_mut(Position::new(x, y)) {
+            cell.reset();
+            cell.set_symbol(symbol).set_style(style);
+        }
+    }
+
+    fn draw_minimap(&self, area: Rect, buffer: &mut Buffer, map: Rect) {
+        for y in map.y..map.y + map.height {
+            for x in map.x..map.x + map.width {
+                Self::mini_put(buffer, map, x, y, " ", Style::default());
+            }
+        }
+        let border = Style::default().fg(Color::DarkGray);
+        for x in map.x + 1..map.x + map.width - 1 {
+            Self::mini_put(buffer, map, x, map.y, "─", border);
+            Self::mini_put(buffer, map, x, map.y + map.height - 1, "─", border);
+        }
+        for y in map.y + 1..map.y + map.height - 1 {
+            Self::mini_put(buffer, map, map.x, y, "│", border);
+            Self::mini_put(buffer, map, map.x + map.width - 1, y, "│", border);
+        }
+        for (x, y, symbol) in [
+            (map.x, map.y, "┌"),
+            (map.x + map.width - 1, map.y, "┐"),
+            (map.x, map.y + map.height - 1, "└"),
+            (map.x + map.width - 1, map.y + map.height - 1, "┘"),
+        ] {
+            Self::mini_put(buffer, map, x, y, symbol, border);
+        }
+        for (offset, symbol) in [" ", "M", "a", "p", " "].into_iter().enumerate() {
+            Self::mini_put(
+                buffer,
+                map,
+                map.x + 1 + offset as u16,
+                map.y,
+                symbol,
+                border,
+            );
+        }
+        let inner = Rect {
+            x: map.x + 1,
+            y: map.y + 1,
+            width: map.width - 2,
+            height: map.height - 2,
+        };
+        let (canvas_width, canvas_height) = self.layout.size();
+        let scale = |x: u32, y: u32| {
+            let x = u64::from(x) * u64::from(inner.width.saturating_sub(1))
+                / u64::from(canvas_width.saturating_sub(1).max(1));
+            let y = u64::from(y) * u64::from(inner.height.saturating_sub(1))
+                / u64::from(canvas_height.saturating_sub(1).max(1));
+            (inner.x + x as u16, inner.y + y as u16)
+        };
+        let line_style = Style::default().fg(Color::DarkGray);
+        for route in &self.layout.routes {
+            if route.unresolved.is_some() {
+                continue;
+            }
+            for points in route.points.windows(2) {
+                let (from, to) = (
+                    scale(points[0].x, points[0].y),
+                    scale(points[1].x, points[1].y),
+                );
+                let dx = to.0.abs_diff(from.0);
+                let dy = to.1.abs_diff(from.1);
+                let steps = dx.max(dy);
+                for step in 0..=steps {
+                    let x = if steps == 0 {
+                        i32::from(from.0)
+                    } else {
+                        i32::from(from.0)
+                            + (i32::from(to.0) - i32::from(from.0)) * i32::from(step)
+                                / i32::from(steps)
+                    } as u16;
+                    let y = if steps == 0 {
+                        i32::from(from.1)
+                    } else {
+                        i32::from(from.1)
+                            + (i32::from(to.1) - i32::from(from.1)) * i32::from(step)
+                                / i32::from(steps)
+                    } as u16;
+                    Self::mini_put(buffer, inner, x, y, "·", line_style);
+                }
+            }
+        }
+        for (index, node) in self.layout.nodes.iter().enumerate() {
+            let (x, y) = scale(
+                node.rect.x + node.rect.width / 2,
+                node.rect.y + node.rect.height / 2,
+            );
+            let style = node_style(self.display_status(index));
+            Self::mini_put(
+                buffer,
+                inner,
+                x,
+                y,
+                if self.selected == Some(index) {
+                    "◆"
+                } else {
+                    "■"
+                },
+                if self.selected == Some(index) {
+                    style.add_modifier(Modifier::REVERSED)
+                } else {
+                    style
+                },
+            );
+        }
+        let viewport = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let (left, top) = scale(
+            self.offset.0.min(canvas_width.saturating_sub(1)),
+            self.offset.1.min(canvas_height.saturating_sub(1)),
+        );
+        let (mut right, mut bottom) = scale(
+            self.offset
+                .0
+                .saturating_add(u32::from(area.width))
+                .min(canvas_width - 1),
+            self.offset
+                .1
+                .saturating_add(u32::from(area.height))
+                .min(canvas_height - 1),
+        );
+        if right == left && right < inner.x + inner.width - 1 {
+            right += 1;
+        }
+        if bottom == top && bottom < inner.y + inner.height - 1 {
+            bottom += 1;
+        }
+        for x in left + 1..right {
+            Self::mini_put(buffer, inner, x, top, "─", viewport);
+            Self::mini_put(buffer, inner, x, bottom, "─", viewport);
+        }
+        for y in top + 1..bottom {
+            Self::mini_put(buffer, inner, left, y, "│", viewport);
+            Self::mini_put(buffer, inner, right, y, "│", viewport);
+        }
+        for (x, y, symbol) in [
+            (left, top, "┌"),
+            (right, top, "┐"),
+            (left, bottom, "└"),
+            (right, bottom, "┘"),
+        ] {
+            Self::mini_put(buffer, inner, x, y, symbol, viewport);
+        }
+        // Keep the selection legible when compression lands it on the viewport frame
+        // or on another node in the same minimap cell.
+        if let Some(selected) = self.selected
+            && let Some(node) = self.layout.nodes.get(selected)
+        {
+            let (x, y) = scale(
+                node.rect.x + node.rect.width / 2,
+                node.rect.y + node.rect.height / 2,
+            );
+            Self::mini_put(
+                buffer,
+                inner,
+                x,
+                y,
+                "◆",
+                node_style(self.display_status(selected)).add_modifier(Modifier::REVERSED),
+            );
+        }
+    }
 }
 
 impl Widget for GraphView<'_> {
     fn render(self, area: Rect, buffer: &mut Buffer) {
+        let reader_data = self.reader.map(|reader| {
+            reader.recent_data_snapshot(std::time::Duration::from_nanos(TRANSFER_PULSE_NS))
+        });
+        let data = self.data.or(reader_data.as_ref());
+        let observed_at_unix_nano = self.observed_at_unix_nano.or_else(|| {
+            self.reader.and_then(|_| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|elapsed| elapsed.as_nanos().min(u64::MAX as u128) as u64)
+            })
+        });
+        let mut stream_events = BTreeMap::new();
+        let animation_now = std::time::Instant::now();
+        if let (Some(data), Some(now)) = (data, observed_at_unix_nano) {
+            for (entry, metadata) in data.entries.iter().zip(&data.metadata).rev() {
+                let age = if let Some(received_at) = metadata.received_at {
+                    animation_now
+                        .saturating_duration_since(received_at)
+                        .as_nanos()
+                        .min(u64::MAX as u128) as u64
+                } else if let Some(age) = now.checked_sub(metadata.time_unix_nano) {
+                    age
+                } else {
+                    continue;
+                };
+                if age > TRANSFER_PULSE_NS {
+                    // Live receipt times are monotonic even when source records are reordered.
+                    if metadata.received_at.is_some() {
+                        break;
+                    }
+                    continue;
+                }
+                let scope = entry
+                    .scope
+                    .iter()
+                    .map(|entry| entry.node_id().to_owned())
+                    .collect::<Vec<_>>();
+                let key = (scope, entry.node.to_string());
+                if let Some(snapshot) = entry.snapshot.node(&entry.scope, &entry.node) {
+                    stream_events
+                        .entry(key)
+                        .or_insert_with(Vec::new)
+                        .push(TransferEvent {
+                            age_ns: age,
+                            correlation: metadata.correlation.clone(),
+                            snapshot: Arc::clone(snapshot),
+                        });
+                }
+            }
+        }
         for (index, cluster) in self.layout.clusters().iter().enumerate() {
             self.draw_cluster(area, buffer, index, cluster);
         }
         for index in 0..self.layout.edges.len() {
             self.draw_edge(area, buffer, index);
+            let task = self.task_transfer_age(index, observed_at_unix_nano.map(|_| &stream_events));
+            for age in self
+                .stream_transfer_ages(index, &stream_events)
+                .into_iter()
+                .rev()
+                .chain(task)
+            {
+                self.draw_transfer(area, buffer, index, age);
+            }
         }
         for crossing in &self.layout.crossings {
             self.draw_crossing(area, buffer, crossing);
@@ -2051,9 +2663,23 @@ impl Widget for GraphView<'_> {
         for index in 0..self.layout.edges.len() {
             self.draw_ports(area, buffer, index);
         }
+        // Attachments belong to the border: node pulses must cover them too.
+        // Each frame restores their ordinary glyph before applying node activity.
+        for (index, node) in self.layout.nodes.iter().enumerate() {
+            self.draw_node_activity(
+                area,
+                buffer,
+                index,
+                node,
+                observed_at_unix_nano.map(|_| &stream_events),
+            );
+        }
         // Pinned labels must remain readable over nodes and connections after panning.
         for (index, cluster) in self.layout.clusters().iter().enumerate() {
             self.draw_cluster_label(area, buffer, index, cluster);
+        }
+        if let Some(map) = self.minimap_area(area) {
+            self.draw_minimap(area, buffer, map);
         }
     }
 }
@@ -2100,6 +2726,40 @@ fn node_style(status: NodeStatus) -> Style {
         NodeStatus::Skipped => Style::default().fg(Color::DarkGray),
         NodeStatus::Unknown | NodeStatus::Interrupted => Style::default().fg(Color::Magenta),
     }
+}
+
+fn perimeter_cells(rect: GraphRect) -> u64 {
+    if rect.width < 2 || rect.height < 2 {
+        return 0;
+    }
+    u64::from(rect.width + rect.height) * 2 - 4
+}
+
+fn perimeter_cell(rect: GraphRect, position: u64) -> Option<(u32, u32)> {
+    let width = u64::from(rect.width);
+    let height = u64::from(rect.height);
+    let cells = perimeter_cells(rect);
+    if position >= cells {
+        return None;
+    }
+    let right = rect.x + rect.width - 1;
+    let bottom = rect.y + rect.height - 1;
+    let top_run = width;
+    let left_run = height - 1;
+    let bottom_run = width - 1;
+    Some(if position < top_run {
+        // Counter-clockwise from the top-right corner.
+        (right - position as u32, rect.y)
+    } else if position < top_run + left_run {
+        (rect.x, rect.y + 1 + (position - top_run) as u32)
+    } else if position < top_run + left_run + bottom_run {
+        (rect.x + 1 + (position - top_run - left_run) as u32, bottom)
+    } else {
+        (
+            right,
+            bottom - 1 - (position - top_run - left_run - bottom_run) as u32,
+        )
+    })
 }
 
 fn status_marker(status: NodeStatus, observed: Option<&NodeObservation>, elapsed_ns: u64) -> char {
@@ -2225,6 +2885,75 @@ mod rendering_tests {
     use routing::{Point, RoutingStats};
 
     #[test]
+    fn perimeter_activity_rejects_degenerate_rectangles_without_drawing() {
+        let layout = crossing_layout(EdgeKind::Data, EdgeKind::Control, true);
+        let view = GraphView::new(&layout);
+        for (width, height) in [(0, 0), (1, 4), (4, 1), (0, 4), (4, 0)] {
+            let rect = GraphRect {
+                x: 3,
+                y: 4,
+                width,
+                height,
+            };
+            assert_eq!(perimeter_cells(rect), 0);
+            assert_eq!(perimeter_cell(rect, 0), None);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 12, 12));
+            let original = buffer.clone();
+            view.draw_perimeter_chase(
+                buffer.area,
+                &mut buffer,
+                rect,
+                0,
+                node_style(NodeStatus::Running),
+            );
+            assert_eq!(buffer, original);
+        }
+        let rect = GraphRect {
+            x: 3,
+            y: 4,
+            width: 2,
+            height: 2,
+        };
+        assert_eq!(perimeter_cells(rect), 4);
+        assert_eq!(perimeter_cell(rect, 4), None);
+        let cells = (0..4)
+            .map(|index| perimeter_cell(rect, index).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(cells, [(4, 4), (3, 4), (3, 5), (4, 5)]);
+    }
+
+    #[test]
+    fn border_pulses_use_the_connection_density_and_style_contract() {
+        let layout = crossing_layout(EdgeKind::Data, EdgeKind::Control, true);
+        let view = GraphView::new(&layout);
+        let rect = GraphRect {
+            x: 3,
+            y: 4,
+            width: 10,
+            height: 6,
+        };
+        for status in [
+            NodeStatus::Running,
+            NodeStatus::Succeeded,
+            NodeStatus::Failed,
+            NodeStatus::Skipped,
+            NodeStatus::Unknown,
+            NodeStatus::Interrupted,
+        ] {
+            let style = node_style(status).add_modifier(Modifier::BOLD);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 22, 22));
+            view.draw_perimeter_chase(buffer.area, &mut buffer, rect, 3, node_style(status));
+            for (offset, symbol) in ACTIVITY_DENSITIES.into_iter().enumerate() {
+                let (x, y) = perimeter_cell(rect, 3 - offset as u64).unwrap();
+                let cell = buffer.cell(Position::new(x as u16, y as u16)).unwrap();
+                assert_eq!(cell.symbol(), symbol);
+                assert_eq!(cell.fg, style.fg.unwrap());
+                assert_eq!(cell.modifier, style.add_modifier);
+            }
+        }
+    }
+
+    #[test]
     fn annotations_prefer_word_boundaries_and_preserve_explicit_lines() {
         for (text, width, expected) in [
             (
@@ -2322,6 +3051,7 @@ mod rendering_tests {
             })
             .collect();
         GraphLayout {
+            streaming: false,
             view: ConnectionView::Ports,
             hidden_data_count: 0,
             hidden_transitive_count: 0,
@@ -2344,6 +3074,7 @@ mod rendering_tests {
             clusters: Vec::new(),
             nodes,
             edges,
+            transfer_members: vec![Vec::new(), Vec::new()],
             routes: vec![
                 EdgeRoute::from_points([Point::new(2, 10), Point::new(18, 10)]),
                 EdgeRoute::from_points([

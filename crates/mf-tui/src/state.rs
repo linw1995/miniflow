@@ -76,6 +76,7 @@ pub struct NodeObservation {
     pub possibly_missing_events: bool,
     pub started_elapsed_ns: Option<Count>,
     pub terminal_elapsed_ns: Option<Count>,
+    pub terminal_received_at: Option<std::time::Instant>,
     pub duration_ns: Option<Count>,
     pub produced_ports: Vec<String>,
     pub skipped_ports: Vec<String>,
@@ -902,6 +903,7 @@ impl SessionState {
                         };
                         observed.terminal_sequence = Some(sequence);
                         observed.terminal_elapsed_ns = Some(*elapsed_ns);
+                        observed.terminal_received_at = Some(std::time::Instant::now());
                         observed.duration_ns = *duration_ns;
                         let (produced, omitted_produced) = bounded_ports(produced_ports);
                         let (skipped, omitted_skipped) = bounded_ports(skipped_ports);
@@ -936,6 +938,7 @@ impl SessionState {
                         observed.set_selections(event.selected_inputs());
                         observed.terminal_sequence = Some(sequence);
                         observed.terminal_elapsed_ns = Some(*elapsed_ns);
+                        observed.terminal_received_at = Some(std::time::Instant::now());
                         let (visible_causes, omitted_causes) = bounded_causes(causes);
                         observed.skip_causes = visible_causes;
                         observed.omitted_skip_causes = omitted_causes;
@@ -1026,6 +1029,7 @@ impl SessionState {
                 observed.last_known = None;
                 observed.terminal_sequence = Some(sequence);
                 observed.terminal_elapsed_ns = Some(*elapsed_ns);
+                observed.terminal_received_at = Some(std::time::Instant::now());
                 observed.duration_ns = *duration_ns;
                 let (produced, omitted_produced) = bounded_ports(produced_ports);
                 let (skipped, omitted_skipped) = bounded_ports(skipped_ports);
@@ -1062,6 +1066,7 @@ impl SessionState {
                 observed.last_known = None;
                 observed.terminal_sequence = Some(sequence);
                 observed.terminal_elapsed_ns = Some(*elapsed_ns);
+                observed.terminal_received_at = Some(std::time::Instant::now());
                 let (visible_causes, omitted_causes) = bounded_causes(causes);
                 observed.skip_causes = visible_causes;
                 observed.omitted_skip_causes = omitted_causes;
@@ -1203,6 +1208,7 @@ fn pending_node_parts(id: &str, kind: &str) -> NodeObservation {
         possibly_missing_events: false,
         started_elapsed_ns: None,
         terminal_elapsed_ns: None,
+        terminal_received_at: None,
         duration_ns: None,
         produced_ports: Vec::new(),
         skipped_ports: Vec::new(),
