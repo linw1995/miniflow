@@ -2883,10 +2883,7 @@ fn minimap_and_graph_clip_safely_for_empty_tiny_and_extreme_viewports() {
 
 #[test]
 fn running_node_activity_travels_around_the_full_border() {
-    let mut graph = description();
-    // Keep attachment glyphs out of this isolated border-animation check.
-    graph.data_edges.clear();
-    graph.control_edges.clear();
+    let graph = description();
     let layout = GraphLayout::new(&graph).unwrap();
     let mut session = TestSession::new(&graph);
     session.start("source", 0, Vec::new());
@@ -2944,6 +2941,62 @@ fn running_node_activity_travels_around_the_full_border() {
 }
 
 #[test]
+fn running_comet_keeps_ordered_trails_through_corners_and_attachments() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut session = TestSession::new(&graph);
+    for id in ["source", "router", "join"] {
+        session.start(id, 0, Vec::new());
+    }
+    let snapshot = session.snapshot();
+    let mut ordinary = Buffer::empty(Rect::new(0, 0, 150, 45));
+    GraphView::new(&layout).render(ordinary.area, &mut ordinary);
+
+    for id in ["source", "router", "join"] {
+        let rect = layout.nodes()[node_index(&layout, id)].rect;
+        // Independent traversal, including each corner exactly once.
+        let border = (rect.x..rect.x + rect.width)
+            .rev()
+            .map(|x| (x, rect.y))
+            .chain((rect.y + 1..rect.y + rect.height).map(|y| (rect.x, y)))
+            .chain((rect.x + 1..rect.x + rect.width).map(|x| (x, rect.y + rect.height - 1)))
+            .chain(
+                (rect.y + 1..rect.y + rect.height - 1)
+                    .rev()
+                    .map(|y| (rect.x + rect.width - 1, y)),
+            )
+            .map(|(x, y)| Position::new(x as u16, y as u16))
+            .collect::<Vec<_>>();
+        assert!(border.iter().any(|position| {
+            matches!(ordinary.cell(*position).unwrap().symbol(), "├" | "┤")
+        }));
+        for step in 0..border.len() * 2 {
+            let mut buffer = Buffer::empty(ordinary.area);
+            GraphView::new(&layout)
+                .snapshot(&snapshot)
+                .elapsed_ns(step as u64 * 100_000_000)
+                .render(buffer.area, &mut buffer);
+            let mut expected = border
+                .iter()
+                .map(|position| ordinary.cell(*position).unwrap().symbol())
+                .collect::<Vec<_>>();
+            for (offset, symbol) in ["▓", "▒", "░", "·"].into_iter().enumerate() {
+                let index = (step + border.len() - offset) % border.len();
+                expected[index] = symbol;
+                let cell = buffer.cell(border[index]).unwrap();
+                assert_eq!(cell.fg, Color::Yellow);
+                assert!(cell.modifier.contains(Modifier::BOLD));
+            }
+            let actual = border
+                .iter()
+                .map(|position| buffer.cell(*position).unwrap().symbol())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{id} comet broke at step {step}");
+        }
+    }
+}
+
+#[test]
 fn terminal_node_activity_flashes_once_and_restores_the_border() {
     let graph = description();
     let layout = GraphLayout::new(&graph).unwrap();
@@ -2992,6 +3045,16 @@ fn terminal_node_activity_flashes_once_and_restores_the_border() {
     let mut sides = [false; 4];
     for step in 0..12 {
         let (source, left, right, buffer) = render(step * 100_000_000);
+        let expected_symbol = ["▓", "▒", "░"][(step / 4) as usize];
+        for id in ["source", "left", "right"] {
+            for position in node_perimeter(&layout, id) {
+                assert_eq!(
+                    buffer.cell(position).unwrap().symbol(),
+                    expected_symbol,
+                    "{id} flash missed a border or attachment at {position:?}, step {step}"
+                );
+            }
+        }
         assert!(!source.is_empty(), "source terminal flash missing");
         assert!(!left.is_empty(), "failed terminal flash missing");
         assert!(!right.is_empty(), "skipped terminal flash missing");

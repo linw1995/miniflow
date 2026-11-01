@@ -2681,6 +2681,13 @@ impl Widget for GraphView<'_> {
         }
         for (index, node) in self.layout.nodes.iter().enumerate() {
             self.draw_node(area, buffer, index, node);
+        }
+        for index in 0..self.layout.edges.len() {
+            self.draw_ports(area, buffer, index);
+        }
+        // Attachments belong to the border: chase and flash must cover them too.
+        // Each frame restores their ordinary glyph before applying node activity.
+        for (index, node) in self.layout.nodes.iter().enumerate() {
             self.draw_node_activity(
                 area,
                 buffer,
@@ -2688,9 +2695,6 @@ impl Widget for GraphView<'_> {
                 node,
                 observed_at_unix_nano.map(|_| &stream_events),
             );
-        }
-        for index in 0..self.layout.edges.len() {
-            self.draw_ports(area, buffer, index);
         }
         // Pinned labels must remain readable over nodes and connections after panning.
         for (index, cluster) in self.layout.clusters().iter().enumerate() {
