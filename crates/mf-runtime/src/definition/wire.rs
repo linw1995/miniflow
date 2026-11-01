@@ -550,6 +550,31 @@ mod tests {
     }
 
     #[test]
+    fn nested_flow_arguments_are_validated_recursively() {
+        let definition: WorkflowDefinition = serde_json::from_value(workflow(json!({
+            "builtin": "test.agent",
+            "flows": {
+                "tool": {
+                    "source": {"builtin": "test.agent", "flows": {
+                        "leaf": {"source": {"path": "leaf.json"}, "description": "Leaf"}
+                    }},
+                    "description": "Tool"
+                }
+            }
+        })))
+        .unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkflowDefinition>(
+                serde_json::to_value(&definition).unwrap()
+            )
+            .unwrap(),
+            definition
+        );
+        let missing_source = workflow(json!({"builtin": "test.agent", "flows": {"tool": {}}}));
+        assert!(serde_json::from_value::<WorkflowDefinition>(missing_source).is_err());
+    }
+
+    #[test]
     fn flow_arguments_and_bodies_require_new_version_on_decode_and_encode() {
         for source in [
             json!({"body": body()}),

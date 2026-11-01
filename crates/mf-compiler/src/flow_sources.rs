@@ -631,6 +631,40 @@ mod tests {
     }
 
     #[test]
+    fn flow_arguments_and_inline_bodies_reject_old_versions_and_propagate_nested_errors() {
+        let mut inline = definition(
+            json!({"inline": {"body": {"nodes": []}}}),
+            json!([call("inline")]),
+        );
+        inline.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_28;
+        let error = resolve_flows(&inline, None).err().unwrap();
+        assert!(error.to_string().contains("inline Flow bodies require"));
+
+        let mut arguments = definition(
+            json!({"provider": {"builtin": "mf-compiler.resolution_test", "flows": {
+                "tool": {"source": {"body": {"nodes": []}}, "description": "Tool"}
+            }}}),
+            json!([call("provider")]),
+        );
+        arguments.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_28;
+        let error = resolve_flows(&arguments, None).err().unwrap();
+        assert!(error.to_string().contains("Flow arguments require"));
+
+        let failing = definition(
+            json!({"provider": {"builtin": "mf-compiler.resolution_test", "flows": {
+                "tool": {"source": {"path": "missing.json"}, "description": "Tool"}
+            }}}),
+            json!([call("provider")]),
+        );
+        let error = resolve_flows(&failing, None).err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("local Flow references require load_workflow")
+        );
+    }
+
+    #[test]
     fn recursive_inline_aliases_hit_the_depth_guard() {
         let authored = definition(
             json!({"recursive": {"body": {"nodes": [call("recursive")]}}}),
