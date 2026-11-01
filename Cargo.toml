@@ -38,7 +38,7 @@ rpds = "1.2.1"
 # Application database storage and ownership.
 diesel = { version = "2.3.12", default-features = false }
 diesel_migrations = "2.3.2"
-libsqlite3-sys = "0.37.0"
+libsqlite3-sys = "0.38.2"
 fs2 = "0.4.3"
 
 # Rust code generation.
