@@ -196,6 +196,14 @@ class CoverageSummaryTests(unittest.TestCase):
         self.assertEqual(monitor.coverage_summary({}, 70), [])
         self.assertEqual(monitor.coverage_summary({"coverage": job("coverage")}, 70), [])
 
+    def test_combined_test_step_reports_parallel_wall_time(self):
+        coverage = job("coverage", 10, 600)
+        coverage["steps"] = [job("Coverage tests", 20, 200)]
+        report = "\n".join(monitor.coverage_summary({"coverage": coverage}, 610))
+        self.assertIn("| Selected tests (parallel nextest execution) | 3m 00s |", report)
+        self.assertIn("wall time is not attributed to individual crates", report)
+        self.assertNotIn("Skipped crates:", report)
+
     def test_untrusted_crate_names_remain_literal(self):
         report = self.summary([("unsafe|<img>\n`name`", 10, 70, "skipped")])
         self.assertIn("<code>unsafe&#124;&lt;img&gt; &#96;name&#96;</code>", report)

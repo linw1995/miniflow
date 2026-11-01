@@ -40,7 +40,7 @@ def main(optimized=False):
     )
     if optimized:
         directory /= "optimized"
-    # Package steps share immutable binaries and one preparation session. A new
+    # Prepared test phases share immutable binaries and one session. A new
     # coverage invocation must still discard restored workspace artifacts.
     session = os.environ.get("MF_TEST_BUILD_CACHE_SESSION")
     marker = directory / "prepared-session.json"
