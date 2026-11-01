@@ -8,45 +8,54 @@ use std::{
 };
 use syn::Item;
 
-/// Refine only changes confined to ordinary test functions. Parsing, module
-/// resolution, and identity uncertainty all leave the existing planner in charge.
-pub fn select<'a>(
+/// Added or modified test functions found in one changed file.
+pub struct TestChanges {
+    /// Exact identities of the changed test functions.
+    pub cases: Vec<TestCase>,
+    /// True when every non-test item is unchanged and no test was removed or
+    /// renamed, so the cases fully describe the file's change.
+    pub exclusive: bool,
+}
+
+/// Finds test functions that were added or modified even when the same file
+/// also changed production code. These cases must still execute: a coverage
+/// graph cannot select new test bodies because it indexes only base-side lines.
+///
+/// `Ok(None)` means no test function changed. `Err(())` means changed tests
+/// exist but their identities cannot be proven, so callers must widen scope.
+pub fn changed<'a>(
     comparison: &Comparison,
     change: &Change,
     package: &str,
     targets: impl Iterator<Item = (&'a str, &'a [String], &'a Path)>,
-) -> Option<Vec<TestCase>> {
+) -> Result<Option<TestChanges>, ()> {
     if change.deleted || !change.path.ends_with(".rs") {
-        return None;
+        return Ok(None);
     }
     let path = comparison.head_root.join(&change.path);
     let base_path = comparison.base_root.join(&change.path);
     let before = match fs::read_to_string(base_path) {
         Ok(source) => source,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(_) => return None,
+        Err(_) => return Err(()),
     };
-    let mut before = syn::parse_file(&before).ok()?;
-    let mut after = parse(&path)?;
+    let mut before = syn::parse_file(&before).map_err(|_| ())?;
+    let mut after = parse(&path).ok_or(())?;
     let mut old_tests = BTreeMap::new();
     let mut new_tests = BTreeMap::new();
-    extract(&mut before.items, "", &mut old_tests)?;
-    extract(&mut after.items, "", &mut new_tests)?;
-    if before.to_token_stream().to_string() != after.to_token_stream().to_string() {
-        return None;
-    }
-    // Deletions and renames retain the baseline: no surviving identity can
-    // validate the removed case against the runnable inventory.
-    if old_tests.keys().any(|name| !new_tests.contains_key(name)) {
-        return None;
-    }
+    extract(&mut before.items, "", &mut old_tests).ok_or(())?;
+    extract(&mut after.items, "", &mut new_tests).ok_or(())?;
+    let exclusive = before.to_token_stream().to_string() == after.to_token_stream().to_string()
+        // Deletions and renames cannot be exclusive: no surviving identity
+        // validates the removed case against the runnable inventory.
+        && !old_tests.keys().any(|name| !new_tests.contains_key(name));
     let changed: BTreeSet<_> = new_tests
         .iter()
         .filter(|(name, tokens)| old_tests.get(*name) != Some(*tokens))
         .map(|(name, _)| name.clone())
         .collect();
     if changed.is_empty() {
-        return None;
+        return Ok(None);
     }
     let names: BTreeSet<_> = changed
         .iter()
@@ -55,11 +64,11 @@ pub fn select<'a>(
     let mut remaining = after.to_token_stream();
     for (name, tokens) in &new_tests {
         if !changed.contains(name) {
-            remaining.extend(tokens.parse::<TokenStream>().ok()?);
+            remaining.extend(tokens.parse::<TokenStream>().map_err(|_| ())?);
         }
     }
     if references(remaining, &names) {
-        return None;
+        return Err(());
     }
 
     let mut selected = BTreeSet::new();
@@ -74,10 +83,10 @@ pub fn select<'a>(
         } else if kind.iter().any(|kind| kind == "bin") {
             format!("{package}::bin/{name}")
         } else {
-            return None;
+            return Err(());
         };
         let mut files = BTreeMap::new();
-        modules(source, "", source.parent()?, &mut files)?;
+        modules(source, "", source.parent().ok_or(())?, &mut files).ok_or(())?;
         let Some((prefix, _)) = files.get(&path) else {
             continue;
         };
@@ -87,7 +96,7 @@ pub fn select<'a>(
             .iter()
             .any(|(file, (_, tokens))| file != &path && references(tokens.clone(), &names))
         {
-            return None;
+            return Err(());
         }
         for name in &changed {
             selected.insert(TestCase {
@@ -97,7 +106,13 @@ pub fn select<'a>(
             });
         }
     }
-    (!selected.is_empty()).then(|| selected.into_iter().collect())
+    if selected.is_empty() {
+        return Err(());
+    }
+    Ok(Some(TestChanges {
+        cases: selected.into_iter().collect(),
+        exclusive,
+    }))
 }
 
 fn parse(path: &Path) -> Option<syn::File> {

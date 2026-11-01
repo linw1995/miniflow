@@ -165,6 +165,82 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'not_applicable')
         self.assertEqual(result['non_executable_files'], ['lib.rs'])
 
+    def test_test_code_lines_cover_only_positive_test_scopes(self):
+        source = (
+            'pub fn production() -> u32 { 1 }\n'
+            '#[cfg(test)]\nmod tests {\n'
+            '    fn helper() {}\n'
+            '    #[test]\n    fn one() {}\n'
+            '}\n'
+            '#[tokio::test]\nasync fn async_case() {}\n'
+            '#[cfg(feature = "test")]\nfn feature_code() {}\n'
+            '#[cfg(not(test))]\nfn non_test_code() {}\n')
+        lines = validation.test_code_lines(source)
+        self.assertNotIn(1, lines)
+        self.assertTrue({3, 4, 5, 6, 7} <= lines)
+        self.assertTrue({8, 9} <= lines)
+        self.assertNotIn(11, lines)
+        self.assertNotIn(13, lines)
+        with patch.object(validation.subprocess, 'run', side_effect=OSError('unavailable')):
+            self.assertEqual(validation.test_code_lines(source), set())
+
+    def test_test_code_changes_are_exempt_but_production_lines_are_not(self):
+        source = self.root / 'source.rs'
+        source.write_text(
+            'pub fn production() -> u32 { 1 }\n'
+            '#[cfg(test)]\nmod tests {\n'
+            '    #[test]\n    fn one() { assert!(true); }\n'
+            '}\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'test(ci): rust base')
+        base = self.git('rev-parse', 'HEAD')
+        source.write_text(
+            'pub fn production() -> u32 { 2 }\n'
+            '#[cfg(test)]\nmod tests {\n'
+            '    #[test]\n    fn one() { helper(); }\n'
+            '    fn helper() { assert!(true); }\n'
+            '}\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'test(ci): rust head')
+        head = self.git('rev-parse', 'HEAD')
+        merge = self.git('commit-tree', self.git('rev-parse', 'HEAD^{tree}'), '-p', base, '-p', head, '-m', 'merge')
+        self.git('checkout', '-q', '--detach', merge)
+        self.current = validation.current_context(self.root, 'owner/repo', 7,
+            {'id': 9, 'run_attempt': 1, 'workflow_id': 2}, {'coverage_target': 95, 'policy': validation.POLICY})
+        current, comparison, plan, report = self.coverage_inputs()
+        comparison['base'] = plan['base'] = base
+        # Changed test lines are validated by execution; only the changed
+        # production line participates in the coverage denominator.
+        report.write_text('SF:source.rs\nDA:1,0\nDA:5,1\nDA:6,1\nend_of_record\n')
+        result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        self.assertEqual((result['covered'], result['total']), (0, 1))
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['test_only_files'], [])
+        report.write_text(report.read_text().replace('DA:1,0', 'DA:1,1'))
+        result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        self.assertEqual((result['covered'], result['total'], result['status']), (1, 1, 'passed'))
+        previous = merge
+
+        source.write_text(
+            'pub fn production() -> u32 { 2 }\n'
+            '#[cfg(test)]\nmod tests {\n'
+            '    #[test]\n    fn one() { helper(); helper(); }\n'
+            '    fn helper() { assert!(true); }\n'
+            '}\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'test(ci): test-only head')
+        head = self.git('rev-parse', 'HEAD')
+        merge = self.git('commit-tree', self.git('rev-parse', 'HEAD^{tree}'), '-p', previous, '-p', head, '-m', 'merge')
+        self.git('checkout', '-q', '--detach', merge)
+        self.current = validation.current_context(self.root, 'owner/repo', 7,
+            {'id': 9, 'run_attempt': 1, 'workflow_id': 2}, {'coverage_target': 95, 'policy': validation.POLICY})
+        current, comparison, plan, report = self.coverage_inputs()
+        comparison['base'] = plan['base'] = previous
+        report.write_text('SF:source.rs\nDA:1,1\nDA:5,1\nDA:6,1\nend_of_record\n')
+        result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        self.assertEqual((result['total'], result['status']), (0, 'not_applicable'))
+        self.assertEqual(result['test_only_files'], ['source.rs'])
+
     def test_new_renamed_deleted_and_comment_only_sources(self):
         previous = self.current['merge']
         self.git('mv', 'source.rs', 'renamed source.rs')

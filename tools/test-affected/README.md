@@ -89,9 +89,13 @@ inputs retain full-workspace fallback. Source diffs are the impact seed.
 With test precision, syntax-tree comparison first selects only added or modified recognized
 test functions when all other source items remain unchanged, without requiring coverage history.
 Ordinary inline/external modules in library, binary, and integration-test targets are resolved
-to exact identities for `#[test]`, `#[tokio::test]`, and `#[async_std::test]`. Deleted/renamed tests,
-helper changes, unsupported attributes or module layouts, and tests called as helpers retain
-the existing graph/package fallback. Package precision disables this refinement.
+to exact identities for `#[test]`, `#[tokio::test]`, and `#[async_std::test]`. Added or modified
+test functions in a file that also changes other items still join the final exact selection, so
+new test bodies always execute even when a coverage graph narrows the same file. Deleted/renamed
+tests, helper changes, unsupported attributes or module layouts, and tests called as helpers
+retain the existing graph/package fallback; when changed test identities are unproven, the file
+widens to package scope rather than relying on base-side graph evidence. Package precision
+disables this refinement.
 
 A resolved coverage graph narrows other changed Rust files to the
 exact tests covering its base-side line ranges. Files the graph predates (changed between the graph

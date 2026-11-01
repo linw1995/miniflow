@@ -154,8 +154,8 @@ pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestP
                 },
                 change.path
             ));
-            if options.exact_tests
-                && let Some(selected) = crate::source_tests::select(
+            let source_tests = options.exact_tests.then(|| {
+                crate::source_tests::changed(
                     comparison,
                     change,
                     &owner,
@@ -171,57 +171,80 @@ pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestP
                             )
                         }),
                 )
-            {
-                reasons.entry(owner.clone()).or_default().push(format!(
-                    "Test-only source change: mapped {} to {} exact tests without coverage history",
-                    change.path,
-                    selected.len()
-                ));
-                tests.extend(selected);
-            } else if options.exact_tests
-                && change.path.ends_with(".rs")
-                && let Some(open) = graph.open.as_mut()
-            {
-                // The graph narrows one file at a time; unresolved files keep
-                // the existing package scope with a recorded reason.
-                match graph_select(open, change) {
-                    Ok(selected) => {
+            });
+            match &source_tests {
+                Some(Ok(Some(changes))) if changes.exclusive => {
+                    reasons.entry(owner.clone()).or_default().push(format!(
+                        "Test-only source change: mapped {} to {} exact tests without coverage history",
+                        change.path,
+                        changes.cases.len()
+                    ));
+                    tests.extend(changes.cases.iter().cloned());
+                }
+                Some(Err(())) => {
+                    // Changed test identities are unproven. Retain package
+                    // scope so the new or modified tests still execute.
+                    production.insert(owner.clone());
+                    reasons.entry(owner.clone()).or_default().push(format!(
+                        "Test source change: retained package scope for {} because exact test identities are unproven",
+                        change.path
+                    ));
+                }
+                _ if options.exact_tests
+                    && change.path.ends_with(".rs")
+                    && graph.open.is_some() =>
+                {
+                    if let Some(Ok(Some(changes))) = &source_tests {
                         reasons.entry(owner.clone()).or_default().push(format!(
-                            "Coverage graph {}: mapped {} to {} exact tests",
-                            open.record.commit_sha,
+                            "Test source change: mapped {} to {} exact tests alongside coverage narrowing",
                             change.path,
-                            selected.len()
+                            changes.cases.len()
                         ));
-                        for test in &selected {
-                            if direct.insert(test.package.clone()) {
-                                reasons
-                                    .entry(test.package.clone())
-                                    .or_default()
-                                    .push(format!(
-                                        "Coverage graph {}: covers changed lines in {}",
-                                        open.record.commit_sha, change.path
-                                    ));
-                            }
-                        }
-                        tests.extend(selected);
+                        tests.extend(changes.cases.iter().cloned());
                     }
-                    Err(reason) => {
-                        production.insert(owner.clone());
-                        reasons.entry(owner.clone()).or_default().push(format!(
-                            "Coverage graph {}: retained package scope for {}: {}",
-                            open.record.commit_sha, change.path, reason
-                        ));
-                        if let Some(plan) = graph.plan.as_mut() {
-                            plan.widened.push(GraphWidening {
-                                file: change.path.clone(),
-                                package: owner.clone(),
-                                reason,
-                            });
+                    let open = graph.open.as_mut().unwrap();
+                    // The graph narrows one file at a time; unresolved files
+                    // keep the existing package scope with a recorded reason.
+                    match graph_select(open, change) {
+                        Ok(selected) => {
+                            reasons.entry(owner.clone()).or_default().push(format!(
+                                "Coverage graph {}: mapped {} to {} exact tests",
+                                open.record.commit_sha,
+                                change.path,
+                                selected.len()
+                            ));
+                            for test in &selected {
+                                if direct.insert(test.package.clone()) {
+                                    reasons
+                                        .entry(test.package.clone())
+                                        .or_default()
+                                        .push(format!(
+                                            "Coverage graph {}: covers changed lines in {}",
+                                            open.record.commit_sha, change.path
+                                        ));
+                                }
+                            }
+                            tests.extend(selected);
+                        }
+                        Err(reason) => {
+                            production.insert(owner.clone());
+                            reasons.entry(owner.clone()).or_default().push(format!(
+                                "Coverage graph {}: retained package scope for {}: {}",
+                                open.record.commit_sha, change.path, reason
+                            ));
+                            if let Some(plan) = graph.plan.as_mut() {
+                                plan.widened.push(GraphWidening {
+                                    file: change.path.clone(),
+                                    package: owner.clone(),
+                                    reason,
+                                });
+                            }
                         }
                     }
                 }
-            } else {
-                production.insert(owner.clone());
+                _ => {
+                    production.insert(owner.clone());
+                }
             }
         } else if deferred_input(&change.path) {
             ignored_files.push(change.path.clone());

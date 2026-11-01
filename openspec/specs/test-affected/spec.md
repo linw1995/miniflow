@@ -287,6 +287,16 @@ When a compatible coverage graph resolves for the comparison base, the plan SHAL
 - **WHEN** part of the change is unresolved by the graph
 - **THEN** the affected files widen to package and reverse-dependency scope while resolved files retain exact selectors, with reasons recorded per scope
 
+#### Scenario: Keep new test functions executable during graph narrowing
+
+- **WHEN** a changed file contains an added or modified recognized test function and also changes lines the graph can narrow
+- **THEN** the plan includes that test function in the exact selection alongside graph-derived selectors, because the graph indexes only base-side lines and cannot attribute new test bodies
+
+#### Scenario: Widen unproven test identities
+
+- **WHEN** a changed file contains test edits whose exact identities cannot be proven
+- **THEN** the file widens to package scope so the changed tests still execute, rather than relying on base-side graph evidence
+
 ### Requirement: Preserve existing selection tiers and fallbacks
 
 Graph unavailability SHALL retain package-level selection with a recorded reason and SHALL NOT itself force full-workspace fallback. Test-body isolation, shared-input policy, unknown-input fallback, analyzer-failure fallback, and empty-selection semantics SHALL remain unchanged and take precedence as today.

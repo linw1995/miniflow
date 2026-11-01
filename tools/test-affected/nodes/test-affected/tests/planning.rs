@@ -957,6 +957,98 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
 }
 
 #[test]
+fn graph_narrowing_keeps_added_and_modified_test_functions_in_the_selection() {
+    let (directory, base) = fixture();
+    let root = directory.path();
+    let toolchain = git::command(root, "rustc", &["-vV"]).unwrap();
+    let signature = graph_signature(&toolchain, "ci");
+    // The head changes production code and both modifies an existing test and
+    // adds another. The graph can only map the changed base-side production
+    // line, so the changed test bodies must join the selection from source.
+    write(
+        root,
+        "core/src/lib.rs",
+        "pub fn value() -> u32 { 2 }\n\
+         #[cfg(test)] mod tests {\n\
+         \x20   #[test] fn changed() { helper(); }\n\
+         \x20   #[test] fn stable() { assert!(true); }\n\
+         \x20   #[test] fn added() { assert_eq!(2, 2); }\n\
+         \x20   fn helper() { assert_eq!(2, 2); }\n\
+         }\n",
+    );
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    let graph = write_graph(
+        root,
+        "mixed-test-source",
+        &base,
+        signature,
+        vec![(
+            "sample-core",
+            "sample-core",
+            "tests::stable",
+            vec![("core/src/lib.rs", vec![(1, 1)])],
+        )],
+    );
+    let plan = make_plan(&comparison, &graph_options(graph_source(graph, &base))).unwrap();
+    assert!(plan.packages.is_empty(), "{:?}", plan.reasons);
+    let names: Vec<_> = plan.tests.iter().map(|test| test.name.as_str()).collect();
+    assert!(names.contains(&"tests::changed"), "{names:?}");
+    assert!(names.contains(&"tests::added"), "{names:?}");
+    assert!(names.contains(&"tests::stable"), "{names:?}");
+    assert!(
+        plan.reasons["sample-core"]
+            .iter()
+            .any(|reason| reason.contains("alongside coverage narrowing")),
+        "{:?}",
+        plan.reasons
+    );
+}
+
+#[test]
+fn unproven_changed_test_identities_widen_even_with_a_graph() {
+    let (directory, _) = fixture();
+    let root = directory.path();
+    let with_caller = "pub fn value() -> u32 { 1 }\n\
+         #[cfg(test)] mod tests {\n\
+         \x20   #[test] fn changed() { assert_eq!(1, 1); }\n\
+         \x20   #[test] fn caller() { changed(); }\n\
+         }\n";
+    write(root, "core/src/lib.rs", with_caller);
+    let base = commit(root);
+    write(
+        root,
+        "core/src/lib.rs",
+        &with_caller.replace("assert_eq!(1, 1)", "assert_eq!(2, 2)"),
+    );
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    let toolchain = git::command(root, "rustc", &["-vV"]).unwrap();
+    let graph = write_graph(
+        root,
+        "unproven-test-source",
+        &base,
+        graph_signature(&toolchain, "ci"),
+        vec![(
+            "sample-core",
+            "sample-core",
+            "tests::caller",
+            vec![("core/src/lib.rs", vec![(1, 1)])],
+        )],
+    );
+    let plan = make_plan(&comparison, &graph_options(graph_source(graph, &base))).unwrap();
+    assert_eq!(plan.packages, plan.baseline_packages);
+    assert!(plan.tests.is_empty());
+    assert!(
+        plan.reasons["sample-core"]
+            .iter()
+            .any(|reason| reason.contains("exact test identities are unproven")),
+        "{:?}",
+        plan.reasons
+    );
+}
+
+#[test]
 fn graph_derived_selectors_execute_through_the_plan_consumer() {
     let (directory, base) = fixture();
     let root = directory.path();
