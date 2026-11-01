@@ -2,7 +2,9 @@
 
 use crate::{
     duration::format_duration_ns,
-    graph::{ConnectionView, GraphCluster, GraphError, GraphLayout, GraphRect, GraphView},
+    graph::{
+        BodyDisplay, ConnectionView, GraphCluster, GraphError, GraphLayout, GraphRect, GraphView,
+    },
     logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
@@ -1757,8 +1759,8 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
     } else {
         "Arrows         Pan graph\nTab / Shift-Tab, j/k   Select node\n\
          d              Show / hide details\nPgUp/PgDn      Scroll visible details\n\
-         e              Cycle connection view\nc              Fold selected body / cluster\nv              Open OTEL tracing\n\
-         l              Expand selected body inline\nh              Collapse body / enclosing body\n\
+         e              Cycle connection view\nc              Cycle body: expanded / summary / collapsed\nv              Open OTEL tracing\n\
+         l              Expand selected body inline\nh              Fully collapse body / enclosing body\n\
          Esc            Close details / collapse body\n\
          [ / ]          Older / newer pass or item\nf              Reset viewport\n\
          Ctrl-C         Interrupt / close\nq, Enter       Close after completion"
@@ -2491,26 +2493,30 @@ pub struct ObservationView {
     root: Arc<GraphLayout>,
     execution: GraphLayout,
     pip_layout: Arc<GraphLayout>,
-    expanded: BTreeSet<Vec<String>>,
+    body_states: BTreeMap<Vec<String>, BodyDisplay>,
     viewports: BTreeMap<ConnectionView, GraphViewport>,
     collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
     cluster_focus: BTreeMap<(Vec<String>, usize), String>,
     state: ViewState,
 }
+fn default_body_states(description: &WorkflowDescription) -> BTreeMap<Vec<String>, BodyDisplay> {
+    description
+        .loop_bodies
+        .iter()
+        .map(|body| (body.path.clone(), BodyDisplay::Expanded))
+        .collect()
+}
+
 impl ObservationView {
     pub fn new(description: &WorkflowDescription) -> Result<Self, RunError> {
-        let expanded = description
-            .loop_bodies
-            .iter()
-            .map(|body| body.path.clone())
-            .collect();
+        let body_states = default_body_states(description);
         let execution =
             GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
         let root = Arc::new(
-            GraphLayout::with_expanded_bodies(
+            GraphLayout::with_body_states(
                 description,
                 ConnectionView::Execution,
-                &expanded,
+                &body_states,
                 &BTreeMap::new(),
             )
             .context(GraphSnafu)?,
@@ -2520,7 +2526,7 @@ impl ObservationView {
             execution,
             pip_layout: Arc::clone(&root),
             root,
-            expanded,
+            body_states,
             viewports: BTreeMap::new(),
             collapsed: BTreeMap::new(),
             cluster_focus: BTreeMap::new(),
@@ -2529,7 +2535,7 @@ impl ObservationView {
     }
     fn collapse_body_path(&self) -> Option<Vec<String>> {
         self.selected_body()
-            .filter(|path| self.expanded.contains(path))
+            .filter(|path| self.body_states.get(path) != Some(&BodyDisplay::Hidden))
             .or_else(|| {
                 let path = self.root.node_path(self.state.selected);
                 (!path.is_empty()).then(|| path.to_vec())
@@ -2550,17 +2556,13 @@ impl ObservationView {
         self.description.body(&path).map(|_| path)
     }
 
-    fn fold_body(&mut self, path: Vec<String>, expand: bool) -> Result<(), RunError> {
-        let mut expanded = self.expanded.clone();
-        if expand {
-            expanded.insert(path.clone());
-        } else {
-            expanded.remove(&path);
-        }
-        let root = GraphLayout::with_expanded_bodies(
+    fn set_body_state(&mut self, path: Vec<String>, state: BodyDisplay) -> Result<(), RunError> {
+        let mut body_states = self.body_states.clone();
+        body_states.insert(path.clone(), state);
+        let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view(),
-            &expanded,
+            &body_states,
             &self.collapsed,
         )
         .context(GraphSnafu)?;
@@ -2569,11 +2571,31 @@ impl ObservationView {
             .display_index_for_scoped_node(parent, id)
             .unwrap_or_default();
         self.root = Arc::new(root);
-        self.expanded = expanded;
+        self.body_states = body_states;
         self.state.sync_scope(&self.root);
         self.state.reveal_selected = true;
         self.state.details_offset = 0;
         Ok(())
+    }
+
+    fn fold_body(&mut self, path: Vec<String>, expand: bool) -> Result<(), RunError> {
+        self.set_body_state(
+            path,
+            if expand {
+                BodyDisplay::Expanded
+            } else {
+                BodyDisplay::Hidden
+            },
+        )
+    }
+
+    fn cycle_body(&mut self, path: Vec<String>) -> Result<(), RunError> {
+        let next = match self.body_states.get(&path).copied().unwrap_or_default() {
+            BodyDisplay::Expanded => BodyDisplay::Summary,
+            BodyDisplay::Summary => BodyDisplay::Hidden,
+            BodyDisplay::Hidden => BodyDisplay::Expanded,
+        };
+        self.set_body_state(path, next)
     }
 
     fn toggle_cluster(&mut self) -> Result<(), RunError> {
@@ -2597,10 +2619,10 @@ impl ObservationView {
         } else {
             set.insert(index);
         }
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view(),
-            &self.expanded,
+            &self.body_states,
             &folded,
         )
         .context(GraphSnafu)?;
@@ -2661,10 +2683,10 @@ impl ObservationView {
     }
     fn switch_connections(&mut self) -> Result<(), RunError> {
         let anchor = selection_anchor(&self.root, self.state.selected);
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view().next(),
-            &self.expanded,
+            &self.body_states,
             &self.collapsed,
         )
         .context(GraphSnafu)?;
@@ -2674,15 +2696,10 @@ impl ObservationView {
             &self.collapsed.get(&Vec::new()).cloned().unwrap_or_default(),
         )
         .context(GraphSnafu)?;
-        let pip_layout = GraphLayout::with_expanded_bodies(
+        let pip_layout = GraphLayout::with_body_states(
             &self.description,
             root.connection_view(),
-            &self
-                .description
-                .loop_bodies
-                .iter()
-                .map(|body| body.path.clone())
-                .collect(),
+            &default_body_states(&self.description),
             &BTreeMap::new(),
         )
         .context(GraphSnafu)?;
@@ -2709,8 +2726,7 @@ impl ObservationView {
         if !self.state.traces.visible {
             let result = match key {
                 KeyCode::Char('c') => Some(if let Some(path) = self.selected_body() {
-                    let expand = !self.expanded.contains(&path);
-                    self.fold_body(path, expand)
+                    self.cycle_body(path)
                 } else {
                     self.toggle_cluster()
                 }),
@@ -5031,6 +5047,21 @@ mod tests {
         }
         let snapshot = session.snapshot();
         let mut view = ObservationView::new(&description).unwrap();
+        let owner = view
+            .root
+            .display_index_for_scoped_node(&[], "call")
+            .unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Expanded);
+        assert!(view.root.is_expanded_body(owner));
+        view.cycle_body(path.clone()).unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Summary);
+        assert!(view.root.body_summary(owner).is_some());
+        view.cycle_body(path.clone()).unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Hidden);
+        assert!(view.root.body_summary(owner).is_none());
+        view.cycle_body(path.clone()).unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Expanded);
+        assert!(view.root.is_expanded_body(owner));
         let traces = TraceSnapshot::default();
         let logs = LogSnapshot::default();
         view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);

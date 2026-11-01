@@ -70,6 +70,14 @@ pub struct GraphCluster {
     pub collapsed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BodyDisplay {
+    #[default]
+    Hidden,
+    Summary,
+    Expanded,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConnectionView {
     #[default]
@@ -142,6 +150,7 @@ pub struct GraphLayout {
     cluster_keys: Vec<(Vec<String>, usize)>,
     expanded_nodes: BTreeSet<usize>,
     body_nodes: BTreeSet<usize>,
+    body_summaries: BTreeMap<usize, String>,
     clusters: Vec<GraphCluster>,
     edges: Vec<GraphEdge>,
     routes: Vec<EdgeRoute>,
@@ -250,7 +259,14 @@ impl GraphLayout {
         limits: routing::RoutingLimits,
         collapsed: &BTreeSet<usize>,
     ) -> Result<Self, GraphError> {
-        Self::with_children(description, view, limits, collapsed, &BTreeMap::new())
+        Self::with_children(
+            description,
+            view,
+            limits,
+            collapsed,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
     }
 
     fn with_children(
@@ -259,6 +275,7 @@ impl GraphLayout {
         limits: routing::RoutingLimits,
         collapsed: &BTreeSet<usize>,
         children: &BTreeMap<String, Self>,
+        extra_widths: &BTreeMap<String, u32>,
     ) -> Result<Self, GraphError> {
         description.validate().context(DescriptionSnafu)?;
         ensure!(
@@ -275,6 +292,7 @@ impl GraphLayout {
             view,
             collapsed,
             children,
+            extra_widths,
         )?;
         if compact.unresolved_count() == 0 {
             return Ok(compact);
@@ -303,8 +321,15 @@ impl GraphLayout {
         if remaining.max_geometry_items < estimate || remaining.max_conflict_checks == 0 {
             return Ok(compact);
         }
-        let relaxed =
-            Self::with_attachment_spacing(description, remaining, 6, view, collapsed, children)?;
+        let relaxed = Self::with_attachment_spacing(
+            description,
+            remaining,
+            6,
+            view,
+            collapsed,
+            children,
+            extra_widths,
+        )?;
         let extra = relaxed.routing_stats;
         let mut selected = if relaxed.unresolved_count() < compact.unresolved_count() {
             relaxed
@@ -327,6 +352,7 @@ impl GraphLayout {
         view: ConnectionView,
         collapsed: &BTreeSet<usize>,
         children: &BTreeMap<String, Self>,
+        extra_widths: &BTreeMap<String, u32>,
     ) -> Result<Self, GraphError> {
         let node_index: BTreeMap<_, _> = description
             .nodes
@@ -364,11 +390,13 @@ impl GraphLayout {
         for id in &description.execution_order {
             let node_index = node_index[id.as_str()];
             let node = &description.nodes[node_index];
-            let base_width = if node.kind == "builtin.llm" {
-                40
-            } else {
-                NODE_WIDTH
-            };
+            let base_width = extra_widths.get(id.as_str()).copied().unwrap_or_else(|| {
+                if node.kind == "builtin.llm" {
+                    40
+                } else {
+                    NODE_WIDTH
+                }
+            });
             let width = node_cluster[node_index].map_or(base_width, |cluster| {
                 let label_width =
                     ratatui::text::Span::raw(&description.clusters[cluster].label).width() as u32;
@@ -925,6 +953,7 @@ impl GraphLayout {
                 .collect(),
             expanded_nodes: BTreeSet::new(),
             body_nodes,
+            body_summaries: BTreeMap::new(),
             clusters,
             edges,
             width: right + MARGIN,
@@ -938,16 +967,29 @@ impl GraphLayout {
         expanded: &BTreeSet<Vec<String>>,
         collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
     ) -> Result<Self, GraphError> {
+        let states = expanded
+            .iter()
+            .map(|path| (path.clone(), BodyDisplay::Expanded))
+            .collect();
+        Self::with_body_states(description, view, &states, collapsed)
+    }
+
+    pub fn with_body_states(
+        description: &WorkflowDescription,
+        view: ConnectionView,
+        states: &BTreeMap<Vec<String>, BodyDisplay>,
+        collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
+    ) -> Result<Self, GraphError> {
         description.validate().context(DescriptionSnafu)?;
         let mut remaining = MAX_SESSION_NODES;
-        Self::inline_scope(description, &[], view, expanded, collapsed, &mut remaining)
+        Self::inline_scope(description, &[], view, states, collapsed, &mut remaining)
     }
 
     fn inline_scope(
         description: &WorkflowDescription,
         path: &[String],
         view: ConnectionView,
-        expanded: &BTreeSet<Vec<String>>,
+        states: &BTreeMap<Vec<String>, BodyDisplay>,
         collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
         remaining: &mut usize,
     ) -> Result<Self, GraphError> {
@@ -974,32 +1016,51 @@ impl GraphLayout {
             .flat_map(|(_, cluster)| cluster.nodes.iter().map(String::as_str))
             .collect();
         let mut children = BTreeMap::new();
+        let mut summaries = Vec::new();
         for node in &scope.nodes {
             let mut child_path = path.to_vec();
             child_path.push(node.id.clone());
-            if !hidden.contains(node.id.as_str())
-                && expanded.contains(&child_path)
-                && description.body(&child_path).is_some()
-            {
-                children.insert(
-                    node.id.clone(),
-                    Self::inline_scope(
-                        description,
-                        &child_path,
-                        view,
-                        expanded,
-                        collapsed,
-                        remaining,
-                    )?,
-                );
+            if hidden.contains(node.id.as_str()) {
+                continue;
+            }
+            match states.get(&child_path).copied().unwrap_or_default() {
+                BodyDisplay::Expanded if description.body(&child_path).is_some() => {
+                    children.insert(
+                        node.id.clone(),
+                        Self::inline_scope(
+                            description,
+                            &child_path,
+                            view,
+                            states,
+                            collapsed,
+                            remaining,
+                        )?,
+                    );
+                }
+                BodyDisplay::Summary => {
+                    if let Some(body) = description.body(&child_path) {
+                        summaries.push((node.id.clone(), body_summary(body)));
+                    }
+                }
+                BodyDisplay::Expanded | BodyDisplay::Hidden => {}
             }
         }
+        let extra_widths = summaries
+            .iter()
+            .map(|(id, summary)| {
+                (
+                    id.clone(),
+                    (ratatui::text::Span::raw(summary).width() as u32 + 2).clamp(NODE_WIDTH, 44),
+                )
+            })
+            .collect();
         let mut layout = Self::with_children(
             scope,
             view,
             routing::RoutingLimits::default(),
             &folded,
             &children,
+            &extra_widths,
         )?;
         layout.source_paths.fill(path.to_vec());
         layout.body_nodes = layout
@@ -1012,6 +1073,11 @@ impl GraphLayout {
                 (node.kind != CLUSTER_KIND && description.body(&child).is_some()).then_some(index)
             })
             .collect();
+        for (id, summary) in summaries {
+            if let Some(owner) = layout.display_index_for_scoped_node(path, &id) {
+                layout.body_summaries.insert(owner, summary);
+            }
+        }
         for (scope, _) in &mut layout.cluster_keys {
             *scope = path.to_vec();
         }
@@ -1082,6 +1148,12 @@ impl GraphLayout {
         self.expanded_nodes.insert(owner);
         self.expanded_nodes
             .extend(child.expanded_nodes.into_iter().map(|index| index + nodes));
+        self.body_summaries.extend(
+            child
+                .body_summaries
+                .into_iter()
+                .map(|(index, summary)| (index + nodes, summary)),
+        );
         self.nodes.extend(child.nodes);
         self.sources.extend(child.sources);
         self.display_of_node.extend(child.display_of_node);
@@ -1119,6 +1191,10 @@ impl GraphLayout {
 
     pub fn is_expanded_body(&self, display: usize) -> bool {
         self.expanded_nodes.contains(&display)
+    }
+
+    pub fn body_summary(&self, display: usize) -> Option<&str> {
+        self.body_summaries.get(&display).map(String::as_str)
     }
 
     pub fn display_index_for_scoped_node(&self, path: &[String], id: &str) -> Option<usize> {
@@ -1937,6 +2013,8 @@ impl<'a> GraphView<'a> {
         let marker = status_marker(status, observed, self.elapsed_ns);
         let fold = if self.layout.is_expanded_body(index) {
             " [-]"
+        } else if self.layout.body_summary(index).is_some() {
+            " [~]"
         } else if self.layout.body_nodes.contains(&index) {
             " [+]"
         } else {
@@ -1946,7 +2024,10 @@ impl<'a> GraphView<'a> {
         let detail = if self.layout.is_collapsed_cluster(index) {
             format!("{} nodes | collapsed", self.layout.sources(index).len())
         } else {
-            display_line(&node_detail(node, observed, self.elapsed_ns))
+            self.layout.body_summary(index).map_or_else(
+                || display_line(&node_detail(node, observed, self.elapsed_ns)),
+                display_line,
+            )
         };
         let title_rect = GraphRect {
             x: rect.x + 1,
@@ -2113,6 +2194,24 @@ fn status_marker(status: NodeStatus, observed: Option<&NodeObservation>, elapsed
         NodeStatus::Failed => '×',
         NodeStatus::Skipped => '↷',
         NodeStatus::Unknown | NodeStatus::Interrupted => '?',
+    }
+}
+
+fn body_summary(body: &mf_telemetry::description::LoopBodyDescription) -> String {
+    let mut names: Vec<_> = body
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .filter(|id| !id.starts_with('%'))
+        .collect();
+    let total = names.len();
+    names.truncate(3);
+    if total == 0 {
+        "subgraph: empty".into()
+    } else if total > names.len() {
+        format!("subgraph: {} +{}", names.join(", "), total - names.len())
+    } else {
+        format!("subgraph: {}", names.join(", "))
     }
 }
 
@@ -2334,6 +2433,7 @@ mod rendering_tests {
             cluster_keys: Vec::new(),
             expanded_nodes: BTreeSet::new(),
             body_nodes: BTreeSet::new(),
+            body_summaries: BTreeMap::new(),
             all_nodes: nodes
                 .iter()
                 .map(|node| NodeDescription {

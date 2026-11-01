@@ -145,6 +145,13 @@ The LLM provider owns three built-in Flows:
 - `mfn-llm.tool-uses`: native parallel `builtin.iteration` over tool calls, preserving input order.
 - `mfn-llm.agent`: bounded native `workflow.loop`, transcript/usage accumulation, and tool dispatch.
 
+`agent-turn` deliberately performs exactly one model request. `agent` invokes it inside the Loop and
+calls `tool-uses` only when that request returns tool calls; the next Loop pass sends the tool results
+back to the model. This is a composition boundary, not a runtime restriction: a different turn Flow
+could group one request with tool execution and leave the next request to the outer Loop. Keeping
+dispatch separate makes the single-request Flow independently reusable. Only a turn Flow that also
+resolves all follow-up requests would need its own Loop, duplicating the agent iteration.
+
 Inject tool subgraphs when selecting a configurable built-in Flow:
 
 ```json

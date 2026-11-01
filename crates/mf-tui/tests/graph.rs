@@ -174,6 +174,96 @@ fn inline_bodies_keep_nested_geometry_and_routes_inside_their_owners() {
 }
 
 #[test]
+fn body_summary_shows_the_collapsed_subgraph_without_inlining_it() {
+    use mf_tui::graph::{BodyDisplay, ConnectionView};
+    let description = inline_description();
+    let outer = vec!["box".into()];
+    let states = BTreeMap::from([(outer.clone(), BodyDisplay::Summary)]);
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(layout.nodes().len(), 3);
+    let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
+    assert_eq!(
+        layout.body_summary(owner),
+        Some("subgraph: source, inner, sink")
+    );
+    assert!(!layout.is_expanded_body(owner));
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 30));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("box [~]"));
+    assert!(text.contains("subgraph: source, inner, sink"));
+
+    let states = BTreeMap::from([(outer, BodyDisplay::Hidden)]);
+    let hidden = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = hidden.display_index_for_scoped_node(&[], "box").unwrap();
+    assert_eq!(hidden.body_summary(owner), None);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 30));
+    GraphView::new(&hidden).render(buffer.area, &mut buffer);
+    assert!(buffer_text(&buffer).contains("box [+]"));
+}
+
+#[test]
+fn nested_body_summaries_survive_inlining_and_connection_views() {
+    use mf_tui::graph::{BodyDisplay, ConnectionView};
+    let mut description = inline_description();
+    let outer = vec!["box".into()];
+    let inner = vec!["box".into(), "inner".into()];
+    let states = BTreeMap::from([
+        (outer, BodyDisplay::Expanded),
+        (inner, BodyDisplay::Summary),
+    ]);
+    for names in [vec![], vec!["a", "b", "c", "d"]] {
+        let body = description.loop_bodies.last_mut().unwrap();
+        body.nodes = names
+            .iter()
+            .map(|id| NodeDescription {
+                id: (*id).into(),
+                kind: "fixture.task".into(),
+            })
+            .collect();
+        body.execution_order = names.iter().map(|id| (*id).into()).collect();
+        body.data_edges.clear();
+        let expected = if names.is_empty() {
+            "subgraph: empty"
+        } else {
+            "subgraph: a, b, c +1"
+        };
+        for view in [
+            ConnectionView::Execution,
+            ConnectionView::Dependencies,
+            ConnectionView::Ports,
+        ] {
+            let layout =
+                GraphLayout::with_body_states(&description, view, &states, &BTreeMap::new())
+                    .unwrap();
+            let owner = layout
+                .display_index_for_scoped_node(&["box".into()], "inner")
+                .unwrap();
+            assert_eq!(layout.body_summary(owner), Some(expected));
+            assert!(!layout.is_expanded_body(owner));
+            assert!(layout.nodes()[owner].rect.width >= 24);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 60));
+            GraphView::new(&layout).render(buffer.area, &mut buffer);
+            let text = buffer_text(&buffer);
+            assert!(text.contains("inner [~]"));
+            assert!(text.contains(expected));
+        }
+    }
+}
+
+#[test]
 fn inline_cluster_folds_hide_descendants_and_preserve_scope_local_members() {
     use mf_tui::graph::ConnectionView;
     let mut description = inline_description();
