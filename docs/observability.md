@@ -644,8 +644,10 @@ layout. The PiP grid recomputes its rows, columns, and visible count from the ru
 available terminal area on every frame. It shows every running node when space permits and reports a
 `+N more` overflow otherwise. Completed nodes leave the grid, and fewer than two running nodes removes
 it entirely. Expanded bodies with running descendants do not add duplicate PiPs for the same branch.
-PiP titles include the body path to distinguish nodes with the same ID in different scopes.
-Compact chat execution summaries retain their existing presentation.
+Running members of folded clusters and bodies remain visible in separate PiPs through a shared fully
+expanded PiP layout; folding the main graph does not hide them. PiP titles include the body path to
+distinguish nodes with the same ID in different scopes. The compact chat Flow execution panel uses the
+same PiP grid alongside its folded root overview.
 Declared node clusters show a labeled boundary and a wrapped annotation inside the graph and in Details.
 Cluster boundaries, member node borders, and labels share a stable color from a six-color palette.
 Node titles and status markers retain their execution-state colors. Annotations wrap at word boundaries;

@@ -1544,6 +1544,7 @@ fn draw_parallel_pips(
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     root_layout: &GraphLayout,
+    pip_layout: &GraphLayout,
     description: &WorkflowDescription,
     snapshot: &StateSnapshot,
     capture: &CaptureView,
@@ -1635,11 +1636,18 @@ fn draw(
         graph_view = graph_view.nodes(&display_nodes);
         frame.render_widget(graph_view, graph);
         let observations = display_nodes.as_slice();
+        let pip_nodes = inline_observations_with_items(
+            pip_layout,
+            description,
+            snapshot,
+            &view_state.history_offsets(),
+            &view_state.iteration_items,
+        );
         draw_parallel_pips(
             frame,
             graph,
-            layout,
-            observations,
+            pip_layout,
+            &pip_nodes,
             receiver,
             elapsed.as_nanos().min(u64::MAX as u128) as u64,
             Some(&snapshot.iterations),
@@ -2441,8 +2449,9 @@ struct GraphViewport {
 
 pub struct ObservationView {
     description: WorkflowDescription,
-    root: GraphLayout,
+    root: Arc<GraphLayout>,
     execution: GraphLayout,
+    pip_layout: Arc<GraphLayout>,
     expanded: BTreeSet<Vec<String>>,
     viewports: BTreeMap<ConnectionView, GraphViewport>,
     collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
@@ -2458,16 +2467,19 @@ impl ObservationView {
             .collect();
         let execution =
             GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
-        let root = GraphLayout::with_expanded_bodies(
-            description,
-            ConnectionView::Execution,
-            &expanded,
-            &BTreeMap::new(),
-        )
-        .context(GraphSnafu)?;
+        let root = Arc::new(
+            GraphLayout::with_expanded_bodies(
+                description,
+                ConnectionView::Execution,
+                &expanded,
+                &BTreeMap::new(),
+            )
+            .context(GraphSnafu)?,
+        );
         Ok(Self {
             description: description.clone(),
             execution,
+            pip_layout: Arc::clone(&root),
             root,
             expanded,
             viewports: BTreeMap::new(),
@@ -2517,7 +2529,7 @@ impl ObservationView {
         self.state.selected = root
             .display_index_for_scoped_node(parent, id)
             .unwrap_or_default();
-        self.root = root;
+        self.root = Arc::new(root);
         self.expanded = expanded;
         self.state.sync_scope(&self.root);
         self.state.reveal_selected = true;
@@ -2574,7 +2586,7 @@ impl ObservationView {
             anchor_display(&root, &anchor)
         }
         .unwrap_or_default();
-        self.root = root;
+        self.root = Arc::new(root);
         self.collapsed = folded;
         if let Some(execution) = execution {
             self.execution = execution;
@@ -2623,9 +2635,22 @@ impl ObservationView {
             &self.collapsed.get(&Vec::new()).cloned().unwrap_or_default(),
         )
         .context(GraphSnafu)?;
+        let pip_layout = GraphLayout::with_expanded_bodies(
+            &self.description,
+            root.connection_view(),
+            &self
+                .description
+                .loop_bodies
+                .iter()
+                .map(|body| body.path.clone())
+                .collect(),
+            &BTreeMap::new(),
+        )
+        .context(GraphSnafu)?;
         self.save_viewport();
-        self.root = root;
+        self.root = Arc::new(root);
         self.execution = execution;
+        self.pip_layout = Arc::new(pip_layout);
         self.restore_viewport();
         if let Some(anchor) = anchor
             && let Some(selected) = anchor_display(&self.root, &anchor)
@@ -2731,6 +2756,24 @@ impl ObservationView {
                 |status| format!("Exited {}", exit_code(status)),
             ),
         };
+        self.render_execution_snapshot(
+            frame,
+            area,
+            &observation.reader,
+            &snapshot,
+            elapsed,
+            &phase,
+        );
+    }
+    fn render_execution_snapshot(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        reader: &ObservationReader,
+        snapshot: &StateSnapshot,
+        elapsed: Duration,
+        phase: &str,
+    ) {
         let completed = snapshot
             .nodes
             .iter()
@@ -2743,7 +2786,7 @@ impl ObservationView {
             .count();
         // Follow root execution independently of the full inspector's navigation state.
         let mut state = ViewState::default();
-        state.follow_latest(&snapshot, &self.execution);
+        state.follow_latest(snapshot, &self.execution);
         let current = self
             .execution
             .nodes()
@@ -2767,17 +2810,33 @@ impl ObservationView {
         let nodes = inline_observations(
             &self.execution,
             &self.description,
-            &snapshot,
+            snapshot,
             &BTreeMap::new(),
         );
+        let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
         frame.render_widget(
             GraphView::new(&self.execution)
-                .reader(&observation.reader)
+                .reader(reader)
                 .nodes(&nodes)
                 .selected(state.selected)
                 .offset(state.offset.0, state.offset.1)
-                .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64),
+                .elapsed_ns(elapsed_ns),
             graph,
+        );
+        let pip_nodes = inline_observations(
+            &self.pip_layout,
+            &self.description,
+            snapshot,
+            &BTreeMap::new(),
+        );
+        draw_parallel_pips(
+            frame,
+            graph,
+            &self.pip_layout,
+            &pip_nodes,
+            reader,
+            elapsed_ns,
+            Some(&snapshot.iterations),
         );
         frame.render_widget(
             Paragraph::new(format!("Delivery: {:?}", snapshot.lifecycle.completeness))
@@ -2793,6 +2852,7 @@ impl ObservationView {
         draw(
             terminal,
             &self.root,
+            &self.pip_layout,
             &self.description,
             &observation.reader.snapshot_shared(),
             &observation.capture_view(),
@@ -3009,6 +3069,40 @@ mod tests {
         }
     }
 
+    fn render_parallel_pips_for_layout(
+        layout: &GraphLayout,
+        observations: &[NodeObservation],
+        iterations: Option<&crate::state::IterationSnapshot>,
+        receiver: &ObservationReader,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_parallel_pips(
+                    frame,
+                    frame.area(),
+                    layout,
+                    observations,
+                    receiver,
+                    1_000_000_000,
+                    iterations,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn render_parallel_pips(
         description: &WorkflowDescription,
         snapshot: &StateSnapshot,
@@ -3017,18 +3111,24 @@ mod tests {
         height: u16,
     ) -> String {
         let layout = GraphLayout::with_view(description, ConnectionView::Execution).unwrap();
+        render_parallel_pips_for_layout(&layout, &snapshot.nodes, None, receiver, width, height)
+    }
+
+    fn render_chat_execution(view: &ObservationView, snapshot: &StateSnapshot) -> String {
+        let receiver = LoopbackReceiver::bind(view.description.clone(), RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let (width, height) = (128, 64);
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
-                draw_parallel_pips(
+                view.render_execution_snapshot(
                     frame,
                     frame.area(),
-                    &layout,
-                    &snapshot.nodes,
-                    receiver,
-                    1_000_000_000,
-                    None,
+                    &reader,
+                    snapshot,
+                    Duration::from_secs(1),
+                    "Running",
                 );
             })
             .unwrap();
@@ -3521,6 +3621,8 @@ mod tests {
         for (width, height) in [(0, 0), (1, 1), (31, 7), (64, 16)] {
             render_parallel_pips(&description, &snapshot, &reader, width, height);
         }
+        assert_observation_and_chat_pips_include_running_nodes_in_a_folded_body();
+        assert_observation_pips_include_every_running_member_of_a_folded_cluster();
     }
 
     #[test]
@@ -3556,6 +3658,93 @@ mod tests {
         observations[1].status = NodeStatus::Running;
         observations[2].status = NodeStatus::Running;
         assert_eq!(running_display_nodes(&body, &observations), vec![1, 2]);
+        assert_observation_pips_include_every_running_member_of_a_folded_cluster();
+    }
+
+    fn assert_observation_pips_include_every_running_member_of_a_folded_cluster() {
+        let mut description = parallel_fixture(2);
+        description.clusters = vec![ClusterDescription {
+            label: "parallel group".into(),
+            annotation: "Parallel branches".into(),
+            nodes: vec!["parallel-0".into(), "parallel-1".into()],
+        }];
+        let mut view = ObservationView::new(&description).unwrap();
+        view.state.selected = view.root.display_index_for_node_id("parallel-0").unwrap();
+        view.toggle_cluster().unwrap();
+        assert!(view.root.is_collapsed_cluster(view.state.selected));
+
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        snapshot.nodes[0].status = NodeStatus::Running;
+        snapshot.nodes[1].status = NodeStatus::Running;
+        let observations =
+            inline_observations(&view.pip_layout, &description, &snapshot, &BTreeMap::new());
+        let receiver = LoopbackReceiver::bind(description, RunId::new()).unwrap();
+        let text = render_parallel_pips_for_layout(
+            &view.pip_layout,
+            &observations,
+            None,
+            &receiver.reader(),
+            128,
+            64,
+        );
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+        assert!(text.contains(" Running: parallel-0 "), "{text}");
+        assert!(text.contains(" Running: parallel-1 "), "{text}");
+    }
+
+    fn assert_observation_and_chat_pips_include_running_nodes_in_a_folded_body() {
+        let description = scope_fixture();
+        let mut view = ObservationView::new(&description).unwrap();
+        view.fold_body(vec!["first".into()], false).unwrap();
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&["first".into()], "source")
+                .is_none()
+        );
+
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        snapshot.nodes[0].status = NodeStatus::Running;
+        let mut source = NodeObservation::pending("source", "fixture.task");
+        source.status = NodeStatus::Running;
+        let mut target = NodeObservation::pending("target", "fixture.task");
+        target.status = NodeStatus::Running;
+        snapshot.loop_passes = vec![LoopPassObservation {
+            path: vec![LoopPathEntry::Loop {
+                loop_id: "first".into(),
+                index: Count::ZERO,
+            }],
+            nodes: vec![source, target],
+            started: true,
+            outcome: None,
+            interrupted: false,
+            stream_invocation: None,
+            compact_statuses: Vec::new(),
+        }];
+
+        let observations =
+            inline_observations(&view.pip_layout, &description, &snapshot, &BTreeMap::new());
+        let receiver = LoopbackReceiver::bind(description, RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let text = render_parallel_pips_for_layout(
+            &view.pip_layout,
+            &observations,
+            None,
+            &reader,
+            128,
+            64,
+        );
+        assert_eq!(text.matches(" Running: ").count(), 2, "{text}");
+        assert!(text.contains(" Running: first / source "), "{text}");
+        assert!(text.contains(" Running: first / target "), "{text}");
+
+        let chat = render_chat_execution(&view, &snapshot);
+        assert_eq!(chat.matches(" Running: ").count(), 2, "{chat}");
+        assert!(chat.contains(" Running: first / source "), "{chat}");
+        assert!(chat.contains(" Running: first / target "), "{chat}");
     }
 
     #[test]
