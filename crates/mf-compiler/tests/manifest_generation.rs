@@ -132,7 +132,13 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
             .collect();
         assert_eq!(
             functions,
-            ["plan", "manifest", "prepare_stream", "prepare_workflow"]
+            [
+                "plan",
+                "finalized_plan",
+                "manifest",
+                "prepare_stream",
+                "prepare_workflow"
+            ]
         );
         assert!(embedded.rust_source.contains("instantiate_stream"));
         assert!(
