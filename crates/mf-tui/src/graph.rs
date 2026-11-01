@@ -2369,7 +2369,14 @@ impl<'a> GraphView<'a> {
         } else if let Some(age) = terminal_age.filter(|age| *age < NODE_TRANSITION_NS) {
             let level = 3 - (u128::from(age) * 3 / u128::from(NODE_TRANSITION_NS)) as usize;
             if let Some(symbol) = ["", "░", "▒", "▓"].get(level) {
-                self.draw_perimeter_flash(area, buffer, rect, symbol, style);
+                let brightness = [0, 35, 65, 100][level];
+                self.draw_perimeter_flash(
+                    area,
+                    buffer,
+                    rect,
+                    symbol,
+                    activity_style(style, brightness),
+                );
             }
         }
     }
@@ -2386,13 +2393,18 @@ impl<'a> GraphView<'a> {
         if cells == 0 {
             return;
         }
-        let style = style.add_modifier(Modifier::BOLD);
         for (offset, symbol) in ["▓", "▒", "░", "·"].into_iter().enumerate() {
             let position = (head + cells - offset as u64 % cells) % cells;
-            let Some((x, y)) = perimeter_cell(rect, position) else {
-                continue;
-            };
-            self.put(area, buffer, x, y, symbol, style);
+            let (x, y) = perimeter_cell(rect, position).expect("position is within the perimeter");
+            let brightness = [100, 70, 40, 20][offset];
+            self.put(
+                area,
+                buffer,
+                x,
+                y,
+                symbol,
+                activity_style(style, brightness),
+            );
         }
     }
 
@@ -2408,11 +2420,8 @@ impl<'a> GraphView<'a> {
         if cells == 0 {
             return;
         }
-        let style = style.add_modifier(Modifier::BOLD);
         for position in 0..cells {
-            let Some((x, y)) = perimeter_cell(rect, position) else {
-                continue;
-            };
+            let (x, y) = perimeter_cell(rect, position).expect("position is within the perimeter");
             self.put(area, buffer, x, y, symbol, style);
         }
     }
@@ -2750,6 +2759,23 @@ fn node_style(status: NodeStatus) -> Style {
     }
 }
 
+// Character density alone changes coverage, not pixel brightness. Keep the node's
+// status hue while attenuating the tail/fade, without assuming a background color.
+fn activity_style(style: Style, brightness: u16) -> Style {
+    let rgb = match style.fg {
+        Some(Color::Yellow) => (255, 255, 0),
+        Some(Color::Green) => (0, 255, 0),
+        Some(Color::Red) => (255, 0, 0),
+        Some(Color::DarkGray) => (128, 128, 128),
+        Some(Color::Magenta) => (255, 0, 255),
+        _ => unreachable!("node activity uses the status palette"),
+    };
+    let scale = |channel: u16| (channel * brightness / 100) as u8;
+    style
+        .fg(Color::Rgb(scale(rgb.0), scale(rgb.1), scale(rgb.2)))
+        .remove_modifier(Modifier::BOLD | Modifier::DIM)
+}
+
 fn perimeter_cells(rect: GraphRect) -> u64 {
     if rect.width < 2 || rect.height < 2 {
         return 0;
@@ -2905,6 +2931,79 @@ fn wrap_annotation(text: &str, width: u32) -> Vec<String> {
 mod rendering_tests {
     use super::*;
     use routing::{Point, RoutingStats};
+
+    #[test]
+    fn perimeter_activity_rejects_degenerate_rectangles_without_drawing() {
+        let layout = crossing_layout(EdgeKind::Data, EdgeKind::Control, true);
+        let view = GraphView::new(&layout);
+        for (width, height) in [(0, 0), (1, 4), (4, 1), (0, 4), (4, 0)] {
+            let rect = GraphRect {
+                x: 3,
+                y: 4,
+                width,
+                height,
+            };
+            assert_eq!(perimeter_cells(rect), 0);
+            assert_eq!(perimeter_cell(rect, 0), None);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 12, 12));
+            let original = buffer.clone();
+            view.draw_perimeter_chase(
+                buffer.area,
+                &mut buffer,
+                rect,
+                0,
+                node_style(NodeStatus::Running),
+            );
+            view.draw_perimeter_flash(
+                buffer.area,
+                &mut buffer,
+                rect,
+                "▓",
+                node_style(NodeStatus::Succeeded),
+            );
+            assert_eq!(buffer, original);
+        }
+        let rect = GraphRect {
+            x: 3,
+            y: 4,
+            width: 2,
+            height: 2,
+        };
+        assert_eq!(perimeter_cells(rect), 4);
+        assert_eq!(perimeter_cell(rect, 4), None);
+        let cells = (0..4)
+            .map(|index| perimeter_cell(rect, index).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(cells, [(4, 4), (3, 4), (3, 5), (4, 5)]);
+    }
+
+    #[test]
+    fn activity_brightness_fades_each_status_hue_without_bold() {
+        for status in [
+            NodeStatus::Running,
+            NodeStatus::Succeeded,
+            NodeStatus::Failed,
+            NodeStatus::Skipped,
+            NodeStatus::Unknown,
+            NodeStatus::Interrupted,
+        ] {
+            let mut previous = u16::MAX;
+            for brightness in [100, 70, 40, 20] {
+                let style = activity_style(node_style(status), brightness);
+                let Some(Color::Rgb(r, g, b)) = style.fg else {
+                    panic!("expected RGB activity")
+                };
+                let total = u16::from(r) + u16::from(g) + u16::from(b);
+                assert!(total < previous);
+                previous = total;
+                assert!(
+                    !style
+                        .add_modifier
+                        .intersects(Modifier::BOLD | Modifier::DIM)
+                );
+            }
+        }
+    }
 
     #[test]
     fn annotations_prefer_word_boundaries_and_preserve_explicit_lines() {

@@ -2984,8 +2984,9 @@ fn running_comet_keeps_ordered_trails_through_corners_and_attachments() {
                 let index = (step + border.len() - offset) % border.len();
                 expected[index] = symbol;
                 let cell = buffer.cell(border[index]).unwrap();
-                assert_eq!(cell.fg, Color::Yellow);
-                assert!(cell.modifier.contains(Modifier::BOLD));
+                let channel = [255, 178, 102, 51][offset];
+                assert_eq!(cell.fg, Color::Rgb(channel, channel, 0));
+                assert!(!cell.modifier.contains(Modifier::BOLD | Modifier::DIM));
             }
             let actual = border
                 .iter()
@@ -3047,7 +3048,18 @@ fn terminal_node_activity_flashes_once_and_restores_the_border() {
         let (source, left, right, buffer) = render(step * 100_000_000);
         let expected_symbol = ["▓", "▒", "░"][(step / 4) as usize];
         for id in ["source", "left", "right"] {
+            let channel = [255, 165, 89][(step / 4) as usize];
+            let expected_color = match id {
+                "source" => Color::Rgb(0, channel, 0),
+                "left" => Color::Rgb(channel, 0, 0),
+                "right" => {
+                    let gray = [128, 83, 44][(step / 4) as usize];
+                    Color::Rgb(gray, gray, gray)
+                }
+                _ => unreachable!(),
+            };
             for position in node_perimeter(&layout, id) {
+                assert_eq!(buffer.cell(position).unwrap().fg, expected_color);
                 assert_eq!(
                     buffer.cell(position).unwrap().symbol(),
                     expected_symbol,

@@ -579,8 +579,10 @@ Glyph-style `·░▒▓` motion distinguishes execution from data movement. Run
 pulse traveling counter-clockwise around the complete node border. Real terminal observations use a
 different effect: the whole border flashes together through `▓ → ▒ → ░`, then restores the ordinary
 border. Border-to-connection attachments participate in both effects and restore their junction
-glyphs afterward. No fixed terminal pattern remains. Status markers and colors remain authoritative;
-uncertain observations do not animate.
+glyphs afterward. Both effects attenuate foreground brightness as well as character density: the
+comet has a bright head and progressively darker tail, and terminal flashes dim over time. No fixed
+terminal pattern remains. Status markers and colors remain authoritative; uncertain observations do
+not animate.
 
 Connection pulses represent observed data boundaries, not time spent Running. Finite Tasks pulse
 once when inputs have resolved at the destination's Started boundary; exclusive mappings additionally
