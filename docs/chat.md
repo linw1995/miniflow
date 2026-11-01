@@ -592,7 +592,9 @@ menu. The Flow panel is enabled by default; Ctrl+E or the command menu toggles i
 This preference lasts for the current application run, including new turns and conversation switches.
 When enabled, each execution shows a live Flow panel: wide terminals place the graph beside the conversation, narrower tall
 terminals place it below, and small terminals show a single status line. Resizing updates the layout automatically.
-The graph follows the latest executing node and shows node progress, elapsed time, and observation completeness. The
+The graph follows the latest executing node and shows node progress, elapsed time, and observation completeness. Parallel
+running nodes use the same picture-in-picture local graphs as the full execution view, including a single running member
+hidden inside a folded `workflow.call` or other body; the panel's root graph remains folded. The
 last run remains visible until another turn starts or the conversation changes. Inspect current run opens the shared
 graph, trace, log, and data views; Esc returns to chat. Only the current turn's observation is retained, and changing
 conversation or starting another turn releases it.

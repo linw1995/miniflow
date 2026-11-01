@@ -1,8 +1,13 @@
 ### Requirement: Display parallel running nodes in local PiP graphs
 
-When at least two different display nodes are Running in the current graph scope, the ordinary TUI execution view SHALL present a picture-in-picture local graph for each running node that fits the available area. Each PiP SHALL reuse the current scope's established layout and observations with an independent viewport centered on its running node. The main graph selection, pan state, navigation, geometry, and lifecycle state SHALL remain independent of PiP rendering.
+When at least two different display nodes are Running in the current graph scope, the ordinary TUI execution view SHALL
+present a picture-in-picture local graph for each running node that fits the available area. The chat Flow execution panel
+SHALL present the same PiPs and SHALL also present a PiP when exactly one node is Running inside a folded body. Each PiP
+SHALL use the current connection view's observations and a precomputed fully expanded layout with an independent viewport
+centered on its running node. The main graph selection, pan state, navigation, folding, geometry, and lifecycle state SHALL
+remain independent of PiP rendering.
 
-The visible PiP count and grid dimensions SHALL adapt to both the running-node count and available terminal width and height. The view SHALL display all running nodes when they fit and SHALL report the hidden count when space is insufficient. Compact chat execution summaries SHALL retain their existing presentation.
+The visible PiP count and grid dimensions SHALL adapt to both the running-node count and available terminal width and height. The view SHALL display all running nodes when they fit and SHALL report the hidden count when space is insufficient. The chat Flow execution panel SHALL retain its compact root overview alongside the PiP grid.
 
 #### Scenario: Observe two parallel branches
 
@@ -25,6 +30,13 @@ The visible PiP count and grid dimensions SHALL adapt to both the running-node c
 
 #### Scenario: Inspect a collapsed cluster or body scope
 
-- **WHEN** running source nodes share a collapsed display cluster or belong to the selected Loop or Call body
-- **THEN** each collapsed display node has at most one PiP
+- **WHEN** running source nodes are hidden by a collapsed cluster or a folded Loop, Iteration, or Call body
+- **THEN** each running source node has its own PiP in the ordinary execution view and chat Flow execution panel
 - **AND** body PiP graphs use only the selected body frame's observations
+- **AND** the visible main graph and chat root overview retain their folded presentation
+
+#### Scenario: Observe one nested Call node in chat
+
+- **WHEN** the chat Flow execution panel has exactly one Running node inside a folded `workflow.call` body
+- **THEN** the panel shows a PiP centered on and highlighting that node
+- **AND** the panel's root overview remains folded
