@@ -1541,6 +1541,44 @@ mod tests {
     register_task!("test.chat.context", ReadContext);
 
     #[test]
+    fn from_path_and_composition_preserve_injected_flow_bodies() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/chat-calculator-flow.json");
+        let profile = WorkflowProfile::from_path(
+            "agent",
+            &path,
+            WorkflowArguments::try_from(serde_json::json!({
+                "params.api_key": "synthetic"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (plan, parameters) = profile.backend.embedded_workflow().unwrap();
+        let description = mf_compiler::describe_compiled(plan).unwrap();
+        assert_eq!(description.injected_bodies.len(), 1);
+
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let composed = compose_conversation(
+            &plan.manifest(&registry).unwrap(),
+            parameters,
+            false,
+            &Invocation::new("session"),
+            None,
+            CompletionCapture {
+                calls: Default::default(),
+                delivered: Default::default(),
+            },
+            &registry,
+        )
+        .unwrap();
+        let composed = mf_compiler::describe_compiled(&composed.plan).unwrap();
+        assert_eq!(composed.injected_bodies.len(), 1);
+        let mut nested_path = vec!["workflow".to_owned()];
+        nested_path.extend(description.injected_bodies[0].iter().cloned());
+        assert_eq!(composed.injected_bodies[0], nested_path);
+    }
+
+    #[test]
     fn embedded_composition_keeps_resolved_credentials_out_of_the_definition() {
         let mut definition =
             WorkflowDefinition::from_json(include_str!("../../../examples/chat-flow.json"))

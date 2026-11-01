@@ -11,6 +11,7 @@ use std::time::Instant;
 
 pub fn description(size: usize) -> WorkflowDescription {
     WorkflowDescription {
+        injected_bodies: Vec::new(),
         order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "d".repeat(64))).unwrap(),

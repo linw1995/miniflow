@@ -176,6 +176,12 @@ impl CompiledWorkflow {
                 data_edges: Vec::new(), control_edges: Vec::new(),
                 execution_order: vec![id.clone()],
                 loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
+                injected_bodies: original
+                    .injected_bodies
+                    .iter()
+                    .filter(|path| path.first().map(String::as_str) == Some(id.as_str()))
+                    .cloned()
+                    .collect(),
                 clusters: Vec::new(),
             };
             if original.version.supports_clusters() {
@@ -652,8 +658,7 @@ fn generate_scope(
         if matches!(
             node.kind.as_str(),
             crate::LOOP_KIND | ITERATION_KIND | mf_runtime::CALL_KIND
-        ) || crate::calls::is_flow(node)
-        {
+        ) {
             preparations.push(subgraph_preparation(
                 definition,
                 node,
@@ -864,7 +869,7 @@ fn subgraph_preparation(
             Some(definition),
             None,
         )
-    } else if crate::calls::is_flow(node) {
+    } else if node.kind == mf_runtime::CALL_KIND {
         body_static_scope.push(node.id.to_string());
         (
             crate::calls::body_definition(node)?,
@@ -890,7 +895,7 @@ fn subgraph_preparation(
         order.context(crate::compiler::LoopBodySnafu {
             path: format!("{:?}", node.id),
         })?
-    } else if crate::calls::is_flow(node) {
+    } else if node.kind == mf_runtime::CALL_KIND {
         order.context(crate::compiler::CallBodySnafu {
             definition_id: node.id.clone(),
         })?
@@ -907,7 +912,7 @@ fn subgraph_preparation(
         &body_static_scope,
         enclosing,
         preparation_error.as_ref(),
-        if crate::calls::is_flow(node) {
+        if node.kind == mf_runtime::CALL_KIND {
             ScopeBuild::Call
         } else {
             ScopeBuild::Dynamic
@@ -928,7 +933,7 @@ fn subgraph_preparation(
             let kind = LitStr::new(&node.kind, Span::call_site());
             quote! { mf_runtime::NodeIdentity { id: #id.into(), kind: #kind.into(), path: Vec::new() } }
         });
-    let call = crate::calls::is_flow(node);
+    let call = node.kind == mf_runtime::CALL_KIND;
     let outputs = body.outputs.iter().map(|output| {
         let position = order
             .iter()
@@ -1602,7 +1607,7 @@ fn collect_body_layouts(
                 &definition.dependencies,
                 definition.version,
             )
-        } else if crate::calls::is_flow(node) {
+        } else if node.kind == mf_runtime::CALL_KIND {
             crate::calls::body_definition(node)?
         } else if node.kind == ITERATION_KIND {
             let config = parse_config(node)?;
@@ -1616,10 +1621,10 @@ fn collect_body_layouts(
         path.push(id.clone());
         let (domains, streams) = &body_layouts[path.as_slice()];
         let body_scope = format!("{scope}_{index}");
-        if crate::calls::is_flow(node) || !streams.is_empty() {
+        if node.kind == mf_runtime::CALL_KIND || !streams.is_empty() {
             layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
         }
-        if crate::calls::is_flow(node) {
+        if node.kind == mf_runtime::CALL_KIND {
             body.outputs
                 .retain(|output| !streams.iter().any(|stream| stream.name == output.name));
         }

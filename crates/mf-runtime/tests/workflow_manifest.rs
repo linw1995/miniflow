@@ -96,6 +96,62 @@ fn compiled_manifests_derive_views_from_original_facts() {
 }
 
 #[test]
+fn call_body_provenance_is_per_occurrence_and_round_trips() {
+    let body = serde_json::json!({
+        "version": "2026-11-01", "dependencies": {},
+        "nodes": [{"id": "value", "kind": "fixture.input"}]
+    });
+    let ordinary: mf_runtime::CallConfig = serde_json::from_value(serde_json::json!({
+        "flow": "child", "definition": body
+    }))
+    .unwrap();
+    assert!(!ordinary.injected);
+    assert!(
+        serde_json::to_value(&ordinary)
+            .unwrap()
+            .get("injected")
+            .is_none()
+    );
+    let mut injected = ordinary.clone();
+    injected.injected = true;
+    let definition = serde_json::from_value(serde_json::json!({
+        "version": "2026-11-01", "dependencies": {},
+        "nodes": [
+            {"id": "ordinary", "kind": "workflow.call", "config": ordinary},
+            {"id": "injected", "kind": "workflow.call", "config": injected}
+        ]
+    }))
+    .unwrap();
+    let manifest = WorkflowManifest {
+        version: WorkflowManifestVersion::V2026_10_16,
+        definition,
+        execution_order: vec!["ordinary".into(), "injected".into()],
+        loop_orders: ["ordinary", "injected"]
+            .into_iter()
+            .map(|id| mf_runtime::LoopExecutionOrder {
+                path: vec![id.into()],
+                execution_order: vec!["value".into()],
+            })
+            .collect(),
+        input_schema: WorkflowInputSchema {
+            inputs: ["ordinary", "injected"]
+                .into_iter()
+                .map(|id| (id.to_owned(), Default::default()))
+                .collect(),
+            ..Default::default()
+        },
+    };
+    let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, manifest);
+    let description = decoded.description().unwrap();
+    assert_eq!(description.loop_bodies.len(), 2);
+    assert_eq!(
+        description.injected_bodies,
+        vec![vec!["injected".to_owned()]]
+    );
+}
+
+#[test]
 fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
     let definition = serde_json::from_value(serde_json::json!({
         "version": "2026-09-29", "dependencies": {},

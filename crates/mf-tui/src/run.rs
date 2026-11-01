@@ -2538,7 +2538,32 @@ impl ObservationView {
             .filter(|path| self.body_states.get(path) != Some(&BodyDisplay::Hidden))
             .or_else(|| {
                 let path = self.root.node_path(self.state.selected);
-                (!path.is_empty()).then(|| path.to_vec())
+                if path.is_empty() {
+                    return None;
+                }
+                // A summarized ancestor inlines injected bodies directly, so the
+                // selected leaf can be visible without its original owner node and
+                // its own display state cannot control that projection. Collapse
+                // the nearest visible summary ancestor instead.
+                let injected = self
+                    .description
+                    .injected_bodies
+                    .iter()
+                    .any(|body| body.as_slice() == path);
+                if injected
+                    && let Some(summary) = (1..path.len()).rev().find_map(|len| {
+                        let ancestor = &path[..len];
+                        (self.body_states.get(ancestor) == Some(&BodyDisplay::Summary)
+                            && self
+                                .root
+                                .display_index_for_scoped_node(&path[..len - 1], &path[len - 1])
+                                .is_some())
+                        .then(|| ancestor.to_vec())
+                    })
+                {
+                    return Some(summary);
+                }
+                Some(path.to_vec())
             })
     }
 
@@ -3112,6 +3137,7 @@ mod tests {
 
     fn parallel_fixture(count: usize) -> WorkflowDescription {
         WorkflowDescription {
+            injected_bodies: Vec::new(),
             order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_10_23,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
@@ -3821,6 +3847,7 @@ mod tests {
     #[test]
     fn cluster_folding_rebuilds_the_layout_and_preserves_the_selected_member() {
         let description = WorkflowDescription {
+            injected_bodies: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_10_23,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "f".repeat(64))).unwrap(),
             execution: Some(ExecutionDescription {
@@ -5091,8 +5118,94 @@ mod tests {
     }
 
     #[test]
+    fn injected_leaf_collapses_the_visible_summary_owner() {
+        let mut description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "d".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"source","kind":"fixture.task"},{"id":"call","kind":"workflow.call"}],
+            "execution_order":["source","call"], "data_edges":[], "control_edges":[],
+            "injected_bodies":[["call","inner"]],
+            "loop_bodies":[
+                {"path":["call"], "nodes":[{"id":"inner","kind":"workflow.call"}],
+                 "execution_order":["inner"], "data_edges":[], "control_edges":[]},
+                {"path":["call","inner"], "nodes":[{"id":"leaf","kind":"fixture.task"}],
+                 "execution_order":["leaf"], "data_edges":[], "control_edges":[]}
+            ]
+        }))
+        .unwrap();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        let call = vec!["call".to_owned()];
+        let inner = vec!["call".to_owned(), "inner".to_owned()];
+        for key in [KeyCode::Char('h'), KeyCode::Esc] {
+            let mut view = ObservationView::new(&description).unwrap();
+            view.cycle_body(call.clone()).unwrap();
+            assert_eq!(view.body_states[&call], BodyDisplay::Summary);
+            let owner = view
+                .root
+                .display_index_for_scoped_node(&[], "call")
+                .unwrap();
+            assert_ne!(owner, 0, "the summary owner is not the root node");
+            assert!(
+                view.root
+                    .display_index_for_scoped_node(&call, "inner")
+                    .is_none(),
+                "the summarized projection omits the original owner"
+            );
+            let leaf = view
+                .root
+                .display_index_for_scoped_node(&inner, "leaf")
+                .unwrap();
+            view.state.selected = leaf;
+            view.state.sync_scope(&view.root);
+            view.handle_navigation(key, &snapshot, &traces, &logs);
+            assert_eq!(view.body_states[&call], BodyDisplay::Hidden);
+            assert_eq!(view.state.selected, owner);
+            assert!(
+                view.root
+                    .display_index_for_scoped_node(&inner, "leaf")
+                    .is_none()
+            );
+        }
+
+        // Stacking the injected body under its own summarized call also keeps
+        // the owner visible, but folding the injected body alone would leave
+        // the direct summary projection in place.
+        description.injected_bodies = vec![call.clone(), inner.clone()];
+        let mut view = ObservationView::new(&description).unwrap();
+        view.cycle_body(call.clone()).unwrap();
+        let owner = view
+            .root
+            .display_index_for_scoped_node(&[], "call")
+            .unwrap();
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&call, "inner")
+                .is_some()
+        );
+        let leaf = view
+            .root
+            .display_index_for_scoped_node(&inner, "leaf")
+            .unwrap();
+        view.state.selected = leaf;
+        view.state.sync_scope(&view.root);
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert_eq!(view.body_states[&call], BodyDisplay::Hidden);
+        assert_eq!(view.state.selected, owner);
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&inner, "leaf")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn loop_views_preserve_navigation_and_compacted_stream_totals() {
         let description = WorkflowDescription {
+            injected_bodies: Vec::new(),
             order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_09_29,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64))).unwrap(),

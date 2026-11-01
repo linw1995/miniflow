@@ -6,7 +6,8 @@ mod common;
 
 use mf_compiler::{
     CompileRequest, NodeRegistry, SupportPackages, WorkflowDefinition, compile_definition,
-    compile_project, compile_resolved_definition, instantiate_compiled, load_workflow,
+    compile_project, compile_resolved_definition, describe_compiled, instantiate_compiled,
+    load_workflow,
 };
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
@@ -349,6 +350,10 @@ fn tool_argument_errors_and_child_failures_recover_without_executing_other_route
 #[test]
 fn agent_builtin_without_tools_and_empty_tool_uses_are_valid() {
     let registry = NodeRegistry::from_inventory().unwrap();
+    assert_eq!(
+        mfn_llm::flows::configure_tool_uses(Value::Null, Default::default()).unwrap(),
+        mfn_llm::flows::tool_uses_definition().unwrap()
+    );
     for (name, input) in [("mfn-llm.agent", "prompt"), ("mfn-llm.tool-uses", "calls")] {
         let definition = WorkflowDefinition::from_json(
             &json!({
@@ -443,6 +448,95 @@ fn calculator_example_uses_provider_agent_and_native_loop() {
         "calculator"
     );
     assert_eq!(requests[1].body["messages"][2]["role"], "tool");
+}
+
+#[test]
+fn injected_flow_bodies_are_marked_for_inspection() {
+    let example = common::crates_dir()
+        .parent()
+        .unwrap()
+        .join("examples/chat-calculator-flow.json");
+    let resolved = load_workflow(&example).unwrap();
+    let plan = mf_compiler::plan_definition(&resolved.definition).unwrap();
+    let description = describe_compiled(&plan).unwrap();
+    assert_eq!(description.injected_bodies.len(), 1);
+    let path = &description.injected_bodies[0];
+    assert_eq!(path.last().map(String::as_str), Some("invoke_0"));
+    let body = description.body(path).unwrap();
+    assert_eq!(
+        body.nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        ["params", "calculate"]
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let manifest = plan.manifest(&registry).unwrap();
+    assert_eq!(
+        manifest.description().unwrap().injected_bodies,
+        description.injected_bodies
+    );
+}
+
+#[test]
+fn generic_injected_call_provenance_does_not_change_execution() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for injected in [false, true] {
+        let definition = WorkflowDefinition::from_json(
+            &json!({
+                "version": "2026-11-01", "dependencies": {},
+                "nodes": [{"id": "call", "kind": "workflow.call", "config": {
+                    "flow": "child", "injected": injected,
+                    "definition": {
+                        "version": "2026-11-01", "dependencies": {},
+                        "nodes": [{"id": "value", "kind": "builtin.constant", "config": {"value": "same"}}],
+                        "outputs": [{"name": "value", "node": "value", "port": "value"}]
+                    }
+                }}],
+                "outputs": [{"name": "value", "node": "call", "port": "value"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        assert_eq!(
+            describe_compiled(&plan).unwrap().injected_bodies.len(),
+            usize::from(injected)
+        );
+        let outputs = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute()
+            .unwrap();
+        assert_eq!(outputs["value"].as_str(), Some("same"));
+    }
+}
+
+#[test]
+fn injection_markers_survive_noncanonical_source_order() {
+    let root = tempfile::tempdir().unwrap();
+    let path = write_fixture(root.path(), parent(calls()));
+    for file in ["greet", "stats"] {
+        let path = root.path().join(format!("flows/{file}.json"));
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["nodes"].as_array_mut().unwrap().reverse();
+        if let Some(outputs) = value.get_mut("outputs").and_then(Value::as_array_mut) {
+            outputs.reverse();
+        }
+        fs::write(path, value.to_string()).unwrap();
+    }
+    let resolved = load_workflow(&path).unwrap();
+    let plan = mf_compiler::plan_definition(&resolved.definition).unwrap();
+    assert_eq!(describe_compiled(&plan).unwrap().injected_bodies.len(), 2);
+    let registry = NodeRegistry::from_inventory().unwrap();
+    assert_eq!(
+        plan.manifest(&registry)
+            .unwrap()
+            .description()
+            .unwrap()
+            .injected_bodies
+            .len(),
+        2
+    );
 }
 
 #[test]

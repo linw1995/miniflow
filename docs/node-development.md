@@ -1056,4 +1056,4 @@ uses the generic call reference (`flow`, optional frozen `definition`); preparat
 `SubgraphMetadata` containing startup inputs and terminal/stream output contracts, with **no executor**.
 This works in memory and generated runners using the supplied provider registry. Such nodes do not
 create runtime observation scopes. Executable containers continue to use `NodeFactory::Subgraph`;
-metadata partitions alone do not authorize executing each partition independently.
+metadata-only factories cannot execute the inspected body.

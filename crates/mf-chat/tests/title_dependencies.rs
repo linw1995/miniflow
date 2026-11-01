@@ -85,7 +85,7 @@ fn title_dependencies_reject_missing_or_nonportable_providers() {
 }
 
 #[test]
-fn registered_builtin_dependencies_match_the_chat_cargo_manifest() {
+fn registered_title_dependencies_match_the_chat_cargo_manifest() {
     let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .args(["read-manifest", "--manifest-path"])
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
@@ -98,10 +98,5 @@ fn registered_builtin_dependencies_match_the_chat_cargo_manifest() {
     assert_eq!(
         mf_chat::flows::title_definition().unwrap(),
         mf_runtime::WorkflowDefinition::from_json(&expected.to_string()).unwrap()
-    );
-    // This compatibility registration now belongs to the LLM provider, not the chat manifest.
-    assert_eq!(
-        mf_chat::flows::agent_turn_definition().unwrap(),
-        mfn_llm::flows::agent_turn_definition().unwrap()
     );
 }

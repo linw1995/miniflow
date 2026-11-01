@@ -202,6 +202,10 @@ pub enum FlowSource {
 #[serde(deny_unknown_fields)]
 pub struct CallConfig {
     pub flow: String,
+    /// Observation provenance: this call body was supplied as an injected Flow parameter.
+    /// Does not change execution behavior or imply tool semantics.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub injected: bool,
     /// Accept a single object keyed by qualified startup input names.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub arguments_object: bool,

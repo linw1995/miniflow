@@ -145,10 +145,11 @@ fn title_definition_is_owned_and_registered_by_chat() {
 }
 
 #[test]
-fn agent_turn_definition_is_owned_and_registered_by_chat() {
+fn agent_turn_definition_is_owned_and_registered_by_llm() {
     let registry = mf_runtime::BuiltinFlowRegistry::from_inventory().unwrap();
-    let definition = (registry.get("mf-chat.agent-turn").unwrap().definition)().unwrap();
-    assert_eq!(definition, mf_chat::flows::agent_turn_definition().unwrap());
+    assert!(registry.get("mf-chat.agent-turn").is_none());
+    let definition = (registry.get("mfn-llm.agent-turn").unwrap().definition)().unwrap();
+    assert_eq!(definition, mfn_llm::flows::agent_turn_definition().unwrap());
     assert!(
         definition
             .annotation
@@ -163,7 +164,7 @@ fn agent_turn_definition_is_owned_and_registered_by_chat() {
     );
     let caller: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-11-01","dependencies":{},
-        "flows":{"turn":{"builtin":"mf-chat.agent-turn"}},
+        "flows":{"turn":{"builtin":"mfn-llm.agent-turn"}},
         "nodes":[{"id":"turn","kind":"workflow.call","config":{"flow":"turn"}}],
         "outputs":[{"name":"status","node":"turn","port":"status"}]
     }))

@@ -12,7 +12,7 @@ fn title_definition() -> Result<mf_runtime::WorkflowDefinition, mf_runtime::Defi
         .clone())
 }
 
-// The build program resolves the same provider-owned calls as the linked application.
+// The build program resolves the same provider-owned call as the linked application.
 mf_runtime::register_builtin_flow!("chat-title", title_definition);
 
 fn cargo_manifest_output(
@@ -53,20 +53,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_str()
             .expect("Cargo workspace manifest")
     );
-    {
-        let (source, output, definitions) =
-            ("workflows/title.json", "title.json", &TITLE_DEFINITION);
-        println!("cargo:rerun-if-changed={source}");
-        let mut definition = serde_json::from_slice(&fs::read(source)?)?;
-        title::bind_dependencies(&mut definition, &package)?;
-        fs::write(
-            Path::new(&env::var("OUT_DIR")?).join(output),
-            serde_json::to_vec(&definition)?,
-        )?;
-        definitions
-            .set(serde_json::from_value(definition)?)
-            .expect("built-in definition is initialized once");
-    }
+    println!("cargo:rerun-if-changed=workflows/title.json");
+    let mut definition = serde_json::from_slice(&fs::read("workflows/title.json")?)?;
+    title::bind_dependencies(&mut definition, &package)?;
+    fs::write(
+        Path::new(&env::var("OUT_DIR")?).join("title.json"),
+        serde_json::to_vec(&definition)?,
+    )?;
+    TITLE_DEFINITION
+        .set(serde_json::from_value(definition)?)
+        .expect("title definition is initialized once");
     mf_compiler::embed_workflows(&[mf_compiler::EmbedRequest::new(
         "conversation",
         "workflows/conversation.json",

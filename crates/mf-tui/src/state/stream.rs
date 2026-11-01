@@ -1178,6 +1178,7 @@ mod tests {
     }
     fn description() -> WorkflowDescription {
         WorkflowDescription {
+            injected_bodies: Vec::new(),
             order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_10_03,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),

@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 fn description() -> WorkflowDescription {
     let nodes = ["source", "router", "left", "right", "join", "orphan"];
     WorkflowDescription {
+        injected_bodies: Vec::new(),
         order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "b".repeat(64))).unwrap(),
@@ -187,7 +188,10 @@ fn summary_bodies_show_passed_inputs_without_inlining() {
     )
     .unwrap();
     let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
-    assert_eq!(layout.body_summary(owner), Some("input ← source"));
+    assert_eq!(
+        layout.body_summary(owner),
+        Some(&["input ← source".to_owned()][..])
+    );
     assert!(!layout.is_expanded_body(owner));
     assert_eq!(layout.nodes().len(), 3);
     let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 30));
@@ -213,7 +217,7 @@ fn summary_bodies_show_passed_inputs_without_inlining() {
 }
 
 #[test]
-fn summary_bodies_join_and_truncate_passed_inputs() {
+fn summary_bodies_list_every_passed_input() {
     use mf_tui::graph::{BodyDisplay, ConnectionView};
     let mut description = inline_description();
     let edge = |from_node: &str, to_input: &str, exclusive: bool| DataEdge {
@@ -267,7 +271,17 @@ fn summary_bodies_join_and_truncate_passed_inputs() {
     )
     .unwrap();
     let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
-    assert_eq!(layout.body_summary(owner), Some("a ← x|y, b ← z"));
+    assert_eq!(
+        layout.body_summary(owner),
+        Some(&["a ← x|y".to_owned(), "b ← z".to_owned()][..])
+    );
+    let rect = layout.nodes()[owner].rect;
+    assert!(rect.height >= 5, "each input gets its own row");
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("a ← x|y"));
+    assert!(text.contains("b ← z"));
 
     let upstream: Vec<String> = (0..4)
         .map(|index| format!("upstream_source_{index}"))
@@ -287,12 +301,98 @@ fn summary_bodies_join_and_truncate_passed_inputs() {
     .unwrap();
     let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
     let summary = layout.body_summary(owner).unwrap();
-    assert!(summary.ends_with('…'), "{summary}");
-    assert!(summary.len() <= 40, "{summary}");
+    assert_eq!(summary.len(), 1);
+    assert!(summary[0].starts_with("input.wide_parameter ← upstream_source_0|"));
+    assert!(summary[0].ends_with("upstream_source_3"), "{}", summary[0]);
+    assert!(!summary[0].contains('…'));
+    assert!(layout.nodes()[owner].rect.width >= summary[0].chars().count() as u32 + 2);
+}
+
+#[test]
+fn summary_bodies_draw_injected_flows_instead_of_inputs() {
+    use mf_tui::graph::{BodyDisplay, ConnectionView};
+    let mut description = inline_description();
+    description.injected_bodies = vec![vec!["box".into(), "inner".into()]];
+    let states = BTreeMap::from([(vec!["box".into()], BodyDisplay::Summary)]);
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
+    assert_eq!(layout.body_summary(owner), Some(&[][..]));
+    // Parent nodes plus the injected body only; the called body stays folded.
+    assert_eq!(layout.nodes().len(), 5);
     assert!(
-        summary.starts_with("input.wide_parameter ← upstream"),
-        "{summary}"
+        layout
+            .display_index_for_scoped_node(&["box".into(), "inner".into()], "source")
+            .is_some()
     );
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("box [~]"));
+    assert!(!text.contains("input ← source"));
+
+    // Nested injections are rendered once through their outermost injected root.
+    description.injected_bodies = vec![vec!["box".into()], vec!["box".into(), "inner".into()]];
+    let states = BTreeMap::from([
+        (vec!["box".into()], BodyDisplay::Summary),
+        (vec!["box".into(), "inner".into()], BodyDisplay::Expanded),
+    ]);
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(layout.nodes().len(), 8);
+    let identities: BTreeSet<_> = layout
+        .all_nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (layout.source_path(index).to_vec(), node.id.clone()))
+        .collect();
+    assert_eq!(identities.len(), layout.all_nodes().len());
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 60));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("box [~]"));
+    assert!(text.contains("inner"));
+
+    // Independent injected roots are stacked inside the summarized call.
+    let mut sibling = description.loop_bodies[1].clone();
+    sibling.path = vec!["box".into(), "other".into()];
+    description.loop_bodies.push(sibling);
+    description.loop_bodies[0].nodes.push(NodeDescription {
+        id: "other".into(),
+        kind: "workflow.call".into(),
+    });
+    description.loop_bodies[0]
+        .execution_order
+        .push("other".into());
+    description.injected_bodies = vec![
+        vec!["box".into(), "inner".into()],
+        vec!["box".into(), "other".into()],
+    ];
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(layout.nodes().len(), 7);
+    let first = layout
+        .display_index_for_scoped_node(&["box".into(), "inner".into()], "source")
+        .unwrap();
+    let second = layout
+        .display_index_for_scoped_node(&["box".into(), "other".into()], "source")
+        .unwrap();
+    assert!(layout.nodes()[first].rect.y < layout.nodes()[second].rect.y);
 }
 
 #[test]
@@ -315,7 +415,10 @@ fn nested_summary_bodies_show_inputs_across_connection_views() {
         let owner = layout
             .display_index_for_scoped_node(&["box".into()], "inner")
             .unwrap();
-        assert_eq!(layout.body_summary(owner), Some("input ← source"));
+        assert_eq!(
+            layout.body_summary(owner),
+            Some(&["input ← source".to_owned()][..])
+        );
         assert!(!layout.is_expanded_body(owner));
         assert_eq!(layout.nodes().len(), 6);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
@@ -2124,6 +2227,7 @@ fn exclusive_candidates_have_distinct_edges_and_visible_labels() {
 
 fn parameter_graph() -> WorkflowDescription {
     WorkflowDescription {
+        injected_bodies: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "d".repeat(64))).unwrap(),
         execution: None,

@@ -9,8 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use snafu::{ResultExt, ensure};
 
-struct Catalog {
-    definition: ToolDefinition,
+struct ToolInterface {
     startup_node: String,
     inputs: mf_runtime::WorkflowInputSchema,
     plain_content: bool,
@@ -47,11 +46,10 @@ fn value_schema(value_type: &ValueType) -> Value {
     }
 }
 
-fn prepare_tool(
-    name: String,
-    annotation: &str,
+fn prepare_tool_interface(
+    name: &str,
     body: mf_runtime::SubgraphMetadata,
-) -> Result<Catalog, NodeBuildError> {
+) -> Result<ToolInterface, NodeBuildError> {
     ensure!(
         body.stream_outputs.is_empty(),
         mf_runtime::NodeInvalidSubgraphSnafu {
@@ -71,8 +69,6 @@ fn prepare_tool(
         }
     );
     let (startup_node, inputs) = body.inputs.inputs.iter().next().unwrap();
-    let mut properties = serde_json::Map::new();
-    let mut required = Vec::new();
     for (port, input) in inputs {
         ensure!(
             !input.binding.secret || input.binding.env.is_some() || input.binding.default.is_some(),
@@ -82,6 +78,19 @@ fn prepare_tool(
                 )
             }
         );
+    }
+    Ok(ToolInterface {
+        startup_node: startup_node.clone(),
+        inputs: body.inputs,
+        plain_content: matches!(body.outputs.as_slice(), [output]
+            if output.name == "content" && output.required && output.value_type == ValueType::String),
+    })
+}
+
+fn tool_definition(name: String, annotation: String, interface: &ToolInterface) -> ToolDefinition {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for (port, input) in &interface.inputs.inputs[&interface.startup_node] {
         if input.binding.secret {
             continue;
         }
@@ -90,23 +99,17 @@ fn prepare_tool(
             required.push(Value::String(port.clone()));
         }
     }
-    let input_schema = json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    });
-    Ok(Catalog {
-        definition: ToolDefinition {
-            name,
-            description: annotation.to_owned(),
-            input_schema: input_schema.into(),
-        },
-        startup_node: startup_node.clone(),
-        inputs: body.inputs.clone(),
-        plain_content: matches!(body.outputs.as_slice(), [output]
-            if output.name == "content" && output.required && output.value_type == ValueType::String),
-    })
+    ToolDefinition {
+        name,
+        description: annotation,
+        input_schema: json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        })
+        .into(),
+    }
 }
 
 struct DefinitionNode(ToolDefinition);
@@ -131,7 +134,7 @@ impl TypedTaskNode for DefinitionNode {
     }
 }
 
-struct ArgumentsNode(Catalog);
+struct ArgumentsNode(ToolInterface);
 impl NodePortContract for ArgumentsNode {
     fn ports(&self) -> NodePorts {
         NodePorts {
@@ -264,15 +267,18 @@ fn definition_factory(
     body: mf_runtime::SubgraphMetadata,
 ) -> Result<PreparedNode, NodeBuildError> {
     let config: Config = deserialize_config(config)?;
-    let catalog = prepare_tool(config.name, &config.annotation, body)?;
-    PreparedNode::typed_task(DefinitionNode(catalog.definition), NodeMetadata::default())
+    let interface = prepare_tool_interface(&config.name, body)?;
+    PreparedNode::typed_task(
+        DefinitionNode(tool_definition(config.name, config.annotation, &interface)),
+        NodeMetadata::default(),
+    )
 }
 fn arguments_factory(
     config: Value,
     body: mf_runtime::SubgraphMetadata,
 ) -> Result<PreparedNode, NodeBuildError> {
     let config: Config = deserialize_config(config)?;
-    let node = ArgumentsNode(prepare_tool(config.name, &config.annotation, body)?);
+    let node = ArgumentsNode(prepare_tool_interface(&config.name, body)?);
     PreparedNode::new(
         node,
         NodeMetadata {
@@ -362,18 +368,40 @@ mod tests {
         ] {
             assert_eq!(value_schema(&ty), expected);
         }
-        let catalog = prepare_tool("example".into(), "Description", metadata()).unwrap();
+        let interface = prepare_tool_interface("example", metadata()).unwrap();
+        let definition = tool_definition("example".into(), "Description".into(), &interface);
         assert_eq!(
-            serde_json::to_value(&catalog.definition.input_schema["required"]).unwrap(),
+            serde_json::to_value(&definition.input_schema["required"]).unwrap(),
             json!(["visible"])
         );
         assert!(
-            catalog.definition.input_schema["properties"]
+            definition.input_schema["properties"]
                 .get("secret")
                 .is_none()
         );
-        let arguments = ArgumentsNode(catalog).execute(Inputs::from([("call".into(), json!({"id":"id", "name":"example", "arguments":{"visible":"x", "secret":"override"}}).into())]), &mut ExecutionContext::default()).unwrap();
+        let arguments = ArgumentsNode(interface).execute(Inputs::from([("call".into(), json!({"id":"id", "name":"example", "arguments":{"visible":"x", "secret":"override"}}).into())]), &mut ExecutionContext::default()).unwrap();
         assert!(arguments.outputs.contains_key("error"));
+    }
+
+    fn assert_invalid_metadata(body: SubgraphMetadata) {
+        let config = json!({"name":"x", "annotation":"x", "subgraph":{}});
+        assert!(definition_factory(config.clone(), body.clone()).is_err());
+        assert!(arguments_factory(config, body).is_err());
+    }
+
+    #[test]
+    fn factories_preserve_config_validation() {
+        for config in [
+            json!({"annotation":"x", "subgraph":{}}),
+            json!({"name":"x", "subgraph":{}}),
+            json!({"name":1, "annotation":"x", "subgraph":{}}),
+            json!({"name":"x", "annotation":1, "subgraph":{}}),
+            json!({"name":"x", "annotation":"x"}),
+            json!({"name":"x", "annotation":"x", "subgraph":{}, "extra":true}),
+        ] {
+            assert!(definition_factory(config.clone(), metadata()).is_err());
+            assert!(arguments_factory(config, metadata()).is_err());
+        }
     }
 
     #[test]
@@ -381,12 +409,12 @@ mod tests {
         let mut body = metadata();
         body.stream_outputs
             .push(PortSpec::new("stream", ValueType::String, true));
-        assert!(prepare_tool("x".into(), "x", body).is_err());
+        assert_invalid_metadata(body);
         let mut body = metadata();
         body.inputs
             .stdin
             .insert("read".into(), mf_runtime::StdinRequirement::Always);
-        assert!(prepare_tool("x".into(), "x", body).is_err());
+        assert_invalid_metadata(body);
         let mut body = metadata();
         body.inputs
             .inputs
@@ -396,7 +424,13 @@ mod tests {
             .unwrap()
             .binding
             .default = None;
-        assert!(prepare_tool("x".into(), "x", body).is_err());
+        assert_invalid_metadata(body);
+        let mut body = metadata();
+        body.inputs.inputs.clear();
+        assert_invalid_metadata(body);
+        let mut body = metadata();
+        body.inputs.inputs.insert("other".into(), BTreeMap::new());
+        assert_invalid_metadata(body);
     }
 
     #[test]
@@ -427,9 +461,9 @@ mod tests {
         ] {
             let mut body = metadata();
             body.outputs = outputs;
-            let catalog = prepare_tool("example".into(), "Description", body).unwrap();
-            assert_eq!(catalog.plain_content, expected);
-            let arguments = ArgumentsNode(catalog)
+            let interface = prepare_tool_interface("example", body).unwrap();
+            assert_eq!(interface.plain_content, expected);
+            let arguments = ArgumentsNode(interface)
                 .execute(
                     Inputs::from([(
                         "call".into(),

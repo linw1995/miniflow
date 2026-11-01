@@ -660,10 +660,10 @@ expand the selected node's cluster; collapsed clusters render as one aggregate n
 connections, and hide internal connections. On a node with a described Loop, Iteration, or Call body,
 `c` cycles that body through expanded (`[-]`), summary (`[~]`), and fully collapsed (`[+]`) states;
 `l` expands it inside the parent node. Bodies start expanded, keeping parent nodes and external
-connections visible and supporting nested expansion. Summary states keep the subgraph folded and show
-the inputs the parent passes in, such as `input ← source.value`, widening the node as needed. Fully
-collapsed bodies show neither the subgraph nor its inputs and can be reopened without leaving the
-parent graph.
+connections visible and supporting nested expansion. Summary states keep the called subgraph folded:
+a call that received injected Flows draws those injected subgraphs in place of the call body, while
+other calls list every input the parent passes in, one row per input. Fully collapsed bodies show
+neither the subgraph nor its inputs and can be reopened without leaving the parent graph.
 Tab selects body nodes alongside parent nodes. `h` or Esc fully collapses the selected visible body or its
 enclosing body; Esc closes visible Details first. `[` and `]` inspect older and newer retained pass
 frames or Iteration items for the selected node's scope, with nested bodies following their enclosing pass.

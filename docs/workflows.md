@@ -145,12 +145,9 @@ The LLM provider owns three built-in Flows:
 - `mfn-llm.tool-uses`: native parallel `builtin.iteration` over tool calls, preserving input order.
 - `mfn-llm.agent`: bounded native `workflow.loop`, transcript/usage accumulation, and tool dispatch.
 
-`agent-turn` deliberately performs exactly one model request. `agent` invokes it inside the Loop and
-calls `tool-uses` only when that request returns tool calls; the next Loop pass sends the tool results
-back to the model. This is a composition boundary, not a runtime restriction: a different turn Flow
-could group one request with tool execution and leave the next request to the outer Loop. Keeping
-dispatch separate makes the single-request Flow independently reusable. Only a turn Flow that also
-resolves all follow-up requests would need its own Loop, duplicating the agent iteration.
+`agent-turn` performs exactly one model request. `agent` invokes it inside the Loop and calls
+`tool-uses` only when that request returns tool calls; the next Loop pass sends the tool results
+back to the model.
 
 Inject tool subgraphs when selecting a configurable built-in Flow:
 
@@ -182,8 +179,7 @@ underscores, or hyphens (`else` is reserved). Tool interfaces must be terminal a
 
 Expansion creates ordinary router gates, `workflow.call` nodes, and provider-owned
 `llm.tool_definition`, `llm.tool_arguments`, and `llm.tool_result` adapters. The first two receive
-**metadata only**, never a child execution closure. Independent metadata partitions are not treated
-as independently executable subgraphs. The runtime knows no Tool types or LLM schema policy.
+**metadata only**, never a child execution closure. The runtime knows no Tool types or LLM schema policy.
 
 `workflow.call` optionally accepts `arguments_object: true` to bind one object of qualified startup
 input names and `capture_errors: true` to return a `result` envelope (`outputs` or `error`). These are
@@ -195,10 +191,12 @@ remain failures. Unknown tools, invalid arguments, and ordinary child failures b
 error content so a subsequent model turn can recover. The native Iteration owns all dispatch
 concurrency and result ordering; the native Loop owns all agent repetition. The existing restriction
 on calls inside Iteration still applies: injected tools cannot themselves contain Loop or Iteration
-constructs. This refactor does not add a second scheduler to bypass that restriction.
+constructs.
 
 The [calculator example](../examples/chat-calculator-flow.json) only invokes the built-in agent and
-injects its [calculator Flow](../examples/agent-calculator/calculator.json):
+injects its [calculator Flow](../examples/agent-calculator/calculator.json). Compiled descriptions
+record each injected Flow body under the call that received it, so the terminal UI can draw the
+injected subgraph without walking the dispatch calls in between:
 
 ```sh
 mf compile examples/chat-calculator-flow.json --output ./calculator-agent
@@ -207,8 +205,7 @@ mf compile examples/chat-calculator-flow.json --output ./calculator-agent
 
 The agent preserves the public chat outputs (`answer`, `status`, `text`, `usages`, optional `error`).
 `agent-turn` exposes `message`, `text`, `tool_calls`, `outcome`, `status`, `usages`, optional `error`,
-`metadata`, `finish_reason`, and optional streamed `answer`. The compatibility alias
-`mf-chat.agent-turn` remains available, but its definition is owned by `mfn-llm`.
+`metadata`, `finish_reason`, and optional streamed `answer`.
 
 ## Node clusters
 

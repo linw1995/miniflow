@@ -100,6 +100,9 @@ pub fn configure_tool_uses(
         }
     );
     validate(&flows)?;
+    if flows.is_empty() {
+        return tool_uses_definition().boxed().map_err(NodeBuildError::from);
+    }
     let mut value: Value =
         serde_json::from_str(include_str!("../workflows/tool-uses.json")).expect("builtin JSON");
     let body = &mut value["nodes"][1]["config"]["body"];
@@ -109,9 +112,7 @@ pub fn configure_tool_uses(
     let names: Vec<_> = flows.keys().collect();
     let mut edges = Vec::new();
     let mut results = Vec::new();
-    if !flows.is_empty() {
-        nodes.push(json!({"id": "route", "kind": "workflow.router", "config": {"routes": names}, "inputs": {"route": source("name", "value")}}));
-    }
+    nodes.push(json!({"id": "route", "kind": "workflow.router", "config": {"routes": names}, "inputs": {"route": source("name", "value")}}));
     for (index, (name, definition)) in flows.iter().enumerate() {
         let arguments = format!("arguments_{index}");
         let invoke = format!("invoke_{index}");
@@ -120,21 +121,15 @@ pub fn configure_tool_uses(
         node["inputs"] = json!({"call": source("%iteration", "item")});
         nodes.push(node);
         edges.push(json!({"from_node": "route", "from_output": name, "to_node": arguments}));
-        nodes.push(json!({"id": invoke, "kind": "workflow.call", "config": {"flow": name, "definition": definition, "arguments_object": true, "capture_errors": true}, "inputs": {"arguments": source(&arguments, "arguments")}}));
+        nodes.push(json!({"id": invoke, "kind": "workflow.call", "config": {"flow": name, "definition": definition, "injected": true, "arguments_object": true, "capture_errors": true}, "inputs": {"arguments": source(&arguments, "arguments")}}));
         nodes.push(json!({"id": encode, "kind": "llm.tool_result", "inputs": {"call": source("%iteration", "item"), "plain_content": source(&arguments, "plain_content"), "result": {"exclusive": [{"node": arguments, "port": "error"}, {"node": invoke, "port": "result"}]}}}));
         results.push(json!({"node": encode, "port": "result"}));
     }
     nodes.push(json!({"id": "unknown", "kind": "builtin.constant", "config": {"value": {"error": "unknown tool"}}}));
-    if !flows.is_empty() {
-        edges.push(json!({"from_node": "route", "from_output": "else", "to_node": "unknown"}));
-    }
+    edges.push(json!({"from_node": "route", "from_output": "else", "to_node": "unknown"}));
     nodes.push(json!({"id": "unknown_result", "kind": "llm.tool_result", "inputs": {"call": source("%iteration", "item"), "result": source("unknown", "value")}}));
     results.push(json!({"node": "unknown_result", "port": "result"}));
-    let result_input = if results.len() == 1 {
-        json!({"from": results[0]})
-    } else {
-        json!({"exclusive": results})
-    };
+    let result_input = json!({"exclusive": results});
     nodes.push(
         json!({"id": "result", "kind": "builtin.identity", "inputs": {"input": result_input}}),
     );
@@ -175,6 +170,11 @@ pub fn configure_agent(config: Value, flows: Flows) -> Result<WorkflowDefinition
             }
         }
     }
+    // Dispatch now holds the frozen configured body; keep agent-turn's live source.
+    value["flows"]
+        .as_object_mut()
+        .expect("builtin Flow sources")
+        .remove("tool-uses");
     parse(value)
 }
 

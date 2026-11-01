@@ -12,7 +12,7 @@ zero-argument registrations remain supported.
 
 Metadata-only node factories receive `SubgraphMetadata` (startup schema and output contracts), never
 an executable closure. Runtime metadata has no Tool types, JSON Schema conversion, result encoding,
-or LLM recovery policy. Independent input metadata partitions do not imply independent executors.
+or LLM recovery policy.
 
 ## Routing and invocation
 
@@ -33,4 +33,5 @@ Iteration owns concurrency and ordered collection. `mfn-llm.agent` owns the boun
 transcript, usages, and final status normalization. No node reimplements Iteration or Loop.
 
 The calculator example only calls the built-in agent, injecting the calculator subgraph through its
-Flow source declaration. `mf-chat.agent-turn` remains a compatibility alias of the LLM-owned Flow.
+Flow source declaration. The generated call body carries an observation-only provenance marker, so
+compiled descriptions can project that injected subgraph; the marker does not affect execution.
