@@ -637,10 +637,23 @@ fn generate_scope(
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         let bindings = dependency_tokens(dependencies);
+        if node.kind != mf_runtime::CALL_KIND && crate::calls::is_flow(node) {
+            let config = LitStr::new(
+                &serde_json::to_string(&node.config).context(SerializeSnafu)?,
+                Span::call_site(),
+            );
+            preparations.push(quote! {
+                let mut #node_ident = mf_compiler::instantiate_metadata_with_metadata(registry, #id_lit, #kind_lit, #config)?;
+                #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*]).boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id_lit })?;
+            });
+            node_idents.push(node_ident);
+            continue;
+        }
         if matches!(
             node.kind.as_str(),
             crate::LOOP_KIND | ITERATION_KIND | mf_runtime::CALL_KIND
-        ) {
+        ) || crate::calls::is_flow(node)
+        {
             preparations.push(subgraph_preparation(
                 definition,
                 node,
@@ -851,7 +864,7 @@ fn subgraph_preparation(
             Some(definition),
             None,
         )
-    } else if node.kind == mf_runtime::CALL_KIND {
+    } else if crate::calls::is_flow(node) {
         body_static_scope.push(node.id.to_string());
         (
             crate::calls::body_definition(node)?,
@@ -877,7 +890,7 @@ fn subgraph_preparation(
         order.context(crate::compiler::LoopBodySnafu {
             path: format!("{:?}", node.id),
         })?
-    } else if node.kind == mf_runtime::CALL_KIND {
+    } else if crate::calls::is_flow(node) {
         order.context(crate::compiler::CallBodySnafu {
             definition_id: node.id.clone(),
         })?
@@ -894,7 +907,7 @@ fn subgraph_preparation(
         &body_static_scope,
         enclosing,
         preparation_error.as_ref(),
-        if node.kind == mf_runtime::CALL_KIND {
+        if crate::calls::is_flow(node) {
             ScopeBuild::Call
         } else {
             ScopeBuild::Dynamic
@@ -915,7 +928,7 @@ fn subgraph_preparation(
             let kind = LitStr::new(&node.kind, Span::call_site());
             quote! { mf_runtime::NodeIdentity { id: #id.into(), kind: #kind.into(), path: Vec::new() } }
         });
-    let call = node.kind == mf_runtime::CALL_KIND;
+    let call = crate::calls::is_flow(node);
     let outputs = body.outputs.iter().map(|output| {
         let position = order
             .iter()
@@ -1580,13 +1593,16 @@ fn collect_body_layouts(
             .iter()
             .find(|node| &node.id == id)
             .expect("validated node ID");
+        if node.kind != mf_runtime::CALL_KIND && crate::calls::is_flow(node) {
+            continue;
+        }
         let mut body = if let Some(loop_definition) = &node.loop_definition {
             crate::loops::body_definition(
                 &loop_definition.body,
                 &definition.dependencies,
                 definition.version,
             )
-        } else if node.kind == mf_runtime::CALL_KIND {
+        } else if crate::calls::is_flow(node) {
             crate::calls::body_definition(node)?
         } else if node.kind == ITERATION_KIND {
             let config = parse_config(node)?;
@@ -1600,10 +1616,10 @@ fn collect_body_layouts(
         path.push(id.clone());
         let (domains, streams) = &body_layouts[path.as_slice()];
         let body_scope = format!("{scope}_{index}");
-        if node.kind == mf_runtime::CALL_KIND || !streams.is_empty() {
+        if crate::calls::is_flow(node) || !streams.is_empty() {
             layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
         }
-        if node.kind == mf_runtime::CALL_KIND {
+        if crate::calls::is_flow(node) {
             body.outputs
                 .retain(|output| !streams.iter().any(|stream| stream.name == output.name));
         }

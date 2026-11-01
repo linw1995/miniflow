@@ -2,10 +2,11 @@
 
 ## JSON format
 
-Use version `2026-10-25` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+Use version `2026-11-01` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
 `outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
-display-only [node clusters](#node-clusters).
+display-only [node clusters](#node-clusters). Version `2026-11-01` adds the optional top-level `annotation` and
+[Router and LLM agent Flows](#router-and-llm-agent-flows).
 
 The [conditional convergence example](../examples/exclusive-inputs.json) and the [basic
 example](../examples/hello-workflow.json) use this format with annotated clusters. Existing supported versions keep their
@@ -60,7 +61,8 @@ sources in `flows`; Cargo node packages remain in `dependencies`:
 ```
 
 The snippet omits the surrounding graph. Each source accepts exactly one `path` or `builtin`.
-Paths resolve relative to their owning canonical definition file. Sources can call other sources;
+A Flow can declare an optional top-level `annotation`; tool registration requires it, while ordinary
+calls ignore it. Paths resolve relative to their owning canonical definition file. Sources can call other sources;
 recursive references and more than sixteen nested calls fail. The combined Call/Loop/Iteration
 container depth is bounded at twenty. The compiler freezes resolved bodies in the executable; running,
 inspecting, and isolating a compiled call do not require the original JSON files.
@@ -128,6 +130,78 @@ these process-local bindings are not serialized into generated runners. Executor
 call arguments through `ExecutionContext::workflow_arguments` and implement their own transport and
 startup binding. `mf run runner --chat` uses this mechanism to invoke a precompiled runner, including
 its native stream coordinator, without rebuilding it or linking its custom nodes into the CLI.
+
+## Router and LLM agent Flows
+
+`workflow.router` is a tool-independent selector. Configure `routes: ["first", "second"]` and
+connect its required string `route` input. It emits a boolean gate on exactly one named output
+(or `else` for an unknown route), skips the other outputs, and declares them mutually exclusive.
+Connect these gates to downstream nodes or `workflow.call` nodes using ordinary edges. The router
+never describes tools, parses arguments, invokes a child, encodes results, or recovers errors.
+
+The LLM provider owns three built-in Flows:
+
+- `mfn-llm.agent-turn`: one model request, with optional tool definitions and captured provider errors.
+- `mfn-llm.tool-uses`: native parallel `builtin.iteration` over tool calls, preserving input order.
+- `mfn-llm.agent`: bounded native `workflow.loop`, transcript/usage accumulation, and tool dispatch.
+
+Inject tool subgraphs when selecting a configurable built-in Flow:
+
+```json
+{
+  "flows": {
+    "agent": {
+      "builtin": "mfn-llm.agent",
+      "flows": {
+        "calculator": { "path": "./agent-calculator/calculator.json" }
+      }
+    }
+  },
+  "nodes": [
+    { "id": "agent", "kind": "workflow.call", "config": { "flow": "agent" } }
+  ]
+}
+```
+
+Paths in injected sources are relative to the **caller**, not the built-in provider. Resolution
+freezes the complete injected definitions and merges their dependencies before expansion. Generated
+runners do not follow source paths at runtime. Existing zero-argument built-in registrations remain
+valid; only configurable registrations accept `config` and injected `flows`.
+
+Give each tool a nonblank `annotation` and one startup node. The LLM adapter derives JSON Schema
+from the prepared input metadata; environment/default-backed inputs are optional, and secret inputs
+are hidden and cannot be overridden by a model. Tool aliases contain 1–64 ASCII letters, digits,
+underscores, or hyphens (`else` is reserved). Tool interfaces must be terminal and cannot read stdin.
+
+Expansion creates ordinary router gates, `workflow.call` nodes, and provider-owned
+`llm.tool_definition`, `llm.tool_arguments`, and `llm.tool_result` adapters. The first two receive
+**metadata only**, never a child execution closure. Independent metadata partitions are not treated
+as independently executable subgraphs. The runtime knows no Tool types or LLM schema policy.
+
+`workflow.call` optionally accepts `arguments_object: true` to bind one object of qualified startup
+input names and `capture_errors: true` to return a `result` envelope (`outputs` or `error`). These are
+generic child-call capabilities; the LLM adapters own unqualified argument mapping, validation,
+plain-content/JSON encoding, and recovery messages. Bare text is used only for exactly one required
+`String` output named `content`; optional or differently typed outputs retain their JSON object.
+Cancellation and worker infrastructure failures
+remain failures. Unknown tools, invalid arguments, and ordinary child failures become tool-result
+error content so a subsequent model turn can recover. The native Iteration owns all dispatch
+concurrency and result ordering; the native Loop owns all agent repetition. The existing restriction
+on calls inside Iteration still applies: injected tools cannot themselves contain Loop or Iteration
+constructs. This refactor does not add a second scheduler to bypass that restriction.
+
+The [calculator example](../examples/chat-calculator-flow.json) only invokes the built-in agent and
+injects its [calculator Flow](../examples/agent-calculator/calculator.json):
+
+```sh
+mf compile examples/chat-calculator-flow.json --output ./calculator-agent
+./calculator-agent --params.prompt 'Calculate 2 + 3 and 3 * 4.' --params.model your-model
+```
+
+The agent preserves the public chat outputs (`answer`, `status`, `text`, `usages`, optional `error`).
+`agent-turn` exposes `message`, `text`, `tool_calls`, `outcome`, `status`, `usages`, optional `error`,
+`metadata`, `finish_reason`, and optional streamed `answer`. The compatibility alias
+`mf-chat.agent-turn` remains available, but its definition is owned by `mfn-llm`.
 
 ## Node clusters
 
@@ -224,6 +298,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by execution prerequisites | One boolean activation output per branch, plus `else` |
 | `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
+| `mfn-core` | [`workflow.router`](#router-and-llm-agent-flows) | Nonempty `routes` | `route`: string | Exclusive named boolean gates and `else` |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |

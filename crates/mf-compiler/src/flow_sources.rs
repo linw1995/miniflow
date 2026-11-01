@@ -31,6 +31,11 @@ pub enum FlowResolutionError {
         node: String,
         source: serde_json::Error,
     },
+    #[snafu(display("could not expand built-in Flow `{reference}`: {source}"))]
+    Expansion {
+        reference: String,
+        source: mf_runtime::NodeBuildError,
+    },
     #[snafu(display("invalid Flow reference `{reference}`: {message}"))]
     Invalid { reference: String, message: String },
     #[snafu(display("conflicting provider sources for package `{package}` in Flow `{reference}`"))]
@@ -43,7 +48,8 @@ pub struct ResolvedWorkflow {
 }
 
 #[derive(Default)]
-struct Resolver {
+struct Resolver<'a> {
+    registry: Option<&'a mf_runtime::NodeRegistry>,
     host_dependencies: bool,
     stack: Vec<PathBuf>,
     sources: BTreeSet<PathBuf>,
@@ -100,13 +106,24 @@ pub fn resolve_flows(
     definition: &WorkflowDefinition,
     directory: Option<&Path>,
 ) -> Result<ResolvedWorkflow, FlowResolutionError> {
-    if directory.is_none() && !needs_resolution(definition) {
+    resolve_flows_with_registry(definition, directory, None)
+}
+
+pub fn resolve_flows_with_registry(
+    definition: &WorkflowDefinition,
+    directory: Option<&Path>,
+    registry: Option<&mf_runtime::NodeRegistry>,
+) -> Result<ResolvedWorkflow, FlowResolutionError> {
+    if directory.is_none() && !needs_resolution(definition, registry) {
         return Ok(ResolvedWorkflow {
             definition: definition.clone(),
             sources: BTreeSet::new(),
         });
     }
-    let mut resolver = Resolver::default();
+    let mut resolver = Resolver {
+        registry,
+        ..Default::default()
+    };
     let mut definition = definition.clone();
     resolver.definition(&mut definition, directory, &BTreeMap::new(), 0, "workflow")?;
     resolver.finish(&mut definition);
@@ -116,12 +133,25 @@ pub fn resolve_flows(
     })
 }
 
-fn needs_resolution(definition: &WorkflowDefinition) -> bool {
-    !definition.flows.is_empty() || definition.nodes.iter().any(node_needs_resolution)
+fn needs_resolution(
+    definition: &WorkflowDefinition,
+    registry: Option<&mf_runtime::NodeRegistry>,
+) -> bool {
+    !definition.flows.is_empty()
+        || definition
+            .nodes
+            .iter()
+            .any(|node| node_needs_resolution(node, registry))
 }
 
-fn wire_node_needs_resolution(node: &serde_json::Value) -> bool {
-    node["kind"] == CALL_KIND
+fn wire_node_needs_resolution(
+    node: &serde_json::Value,
+    registry: Option<&mf_runtime::NodeRegistry>,
+) -> bool {
+    matches!(node["kind"].as_str(), Some(CALL_KIND))
+        || node["kind"]
+            .as_str()
+            .is_some_and(|kind| crate::calls::is_metadata(kind, registry))
         || [
             node.pointer("/loop/body/nodes"),
             node.pointer("/config/body/nodes"),
@@ -130,24 +160,33 @@ fn wire_node_needs_resolution(node: &serde_json::Value) -> bool {
         .flatten()
         .filter_map(serde_json::Value::as_array)
         .flatten()
-        .any(wire_node_needs_resolution)
+        .any(|node| wire_node_needs_resolution(node, registry))
 }
 
-fn node_needs_resolution(node: &NodeDefinition) -> bool {
-    node.kind == CALL_KIND
-        || node
-            .loop_definition
-            .as_ref()
-            .is_some_and(|body| body.body.nodes.iter().any(node_needs_resolution))
+fn node_needs_resolution(
+    node: &NodeDefinition,
+    registry: Option<&mf_runtime::NodeRegistry>,
+) -> bool {
+    crate::calls::is_flow_with_registry(node, registry)
+        || node.loop_definition.as_ref().is_some_and(|body| {
+            body.body
+                .nodes
+                .iter()
+                .any(|node| node_needs_resolution(node, registry))
+        })
         || (node.kind == mf_runtime::ITERATION_KIND
             && node
                 .config
                 .pointer("/body/nodes")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|nodes| nodes.iter().any(wire_node_needs_resolution)))
+                .is_some_and(|nodes| {
+                    nodes
+                        .iter()
+                        .any(|node| wire_node_needs_resolution(node, registry))
+                }))
 }
 
-impl Resolver {
+impl Resolver<'_> {
     fn finish(&self, definition: &mut WorkflowDefinition) {
         for dependency in self.dependencies.values() {
             if let Some(existing) = definition
@@ -209,7 +248,7 @@ impl Resolver {
         depth: usize,
         reference: &str,
     ) -> Result<(), FlowResolutionError> {
-        let resolve = needs_resolution(definition);
+        let resolve = needs_resolution(definition, self.registry);
         ensure!(
             depth <= MAX_CALL_DEPTH,
             InvalidSnafu {
@@ -296,6 +335,81 @@ impl Resolver {
         Ok(())
     }
 
+    fn source(
+        &mut self,
+        source: &FlowSource,
+        directory: Option<&Path>,
+        available: &BTreeMap<String, NodeDependency>,
+        depth: usize,
+    ) -> Result<WorkflowDefinition, FlowResolutionError> {
+        ensure!(
+            depth <= MAX_CALL_DEPTH,
+            InvalidSnafu {
+                reference: "builtin",
+                message: "Flow nesting exceeds sixteen calls"
+            }
+        );
+        match source {
+            FlowSource::Path { path } => {
+                let directory = directory.context(InvalidSnafu {
+                    reference: path.display().to_string(),
+                    message: "local Flow references require load_workflow or a source directory",
+                })?;
+                self.file(&directory.join(path), available, depth)
+            }
+            FlowSource::Builtin {
+                builtin,
+                config,
+                flows,
+            } => {
+                let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
+                let registration = registry.get(builtin).context(InvalidSnafu {
+                    reference: builtin,
+                    message: "unknown built-in Flow; link its provider before resolving sources",
+                })?;
+                // Resolve injections in the caller's directory BEFORE entering the provider.
+                let mut injected = BTreeMap::new();
+                for (alias, source) in flows {
+                    injected.insert(
+                        alias.clone(),
+                        self.source(source, directory, available, depth + 1)?,
+                    );
+                }
+                let mut definition = if let Some(configure) = registration.configure {
+                    configure(config.clone(), injected)
+                        .context(ExpansionSnafu { reference: builtin })?
+                } else {
+                    ensure!(
+                        config.is_null() && injected.is_empty(),
+                        InvalidSnafu {
+                            reference: builtin,
+                            message: "this built-in Flow does not accept configuration or injected Flows"
+                        }
+                    );
+                    (registration.definition)().context(ParseSnafu {
+                        path: PathBuf::from(format!("builtin:{builtin}")),
+                    })?
+                };
+                for dependency in definition.dependencies.values_mut() {
+                    if let Some(selected) = available
+                        .values()
+                        .find(|selected| selected.package == dependency.package)
+                    {
+                        let features = std::mem::take(&mut dependency.features);
+                        let default_features = dependency.default_features;
+                        *dependency = selected.clone();
+                        dependency.features.extend(features);
+                        dependency.features.sort();
+                        dependency.features.dedup();
+                        dependency.default_features |= default_features;
+                    }
+                }
+                self.definition(&mut definition, None, available, depth, builtin)?;
+                Ok(definition)
+            }
+        }
+    }
+
     fn nodes(
         &mut self,
         nodes: &mut [NodeDefinition],
@@ -306,11 +420,13 @@ impl Resolver {
         version: mf_runtime::WorkflowDefinitionVersion,
     ) -> Result<(), FlowResolutionError> {
         for node in nodes {
-            if node.kind == CALL_KIND {
-                let mut config: CallConfig =
-                    serde_json::from_value(node.config.clone()).context(ConfigurationSnafu {
-                        node: node.id.as_str(),
-                    })?;
+            if crate::calls::is_flow_with_registry(node, self.registry) {
+                let mut config: CallConfig = serde_json::from_value(
+                    crate::calls::config_mut(node).clone(),
+                )
+                .context(ConfigurationSnafu {
+                    node: node.id.as_str(),
+                })?;
                 ensure!(
                     version.supports_nested_flows(),
                     InvalidSnafu {
@@ -342,38 +458,7 @@ impl Resolver {
                         }
                         .build()
                     })?;
-                    Box::new(match source {
-                        FlowSource::Path { path } => {
-                            let directory = directory.with_context(|| InvalidSnafu { reference: &config.flow, message: "local Flow references require load_workflow or a source directory" })?;
-                            self.file(&directory.join(path), available, depth + 1)?
-                        }
-                        FlowSource::Builtin { builtin } => {
-                            let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
-                            let registration = registry.get(builtin).with_context(|| InvalidSnafu {
-                                reference: builtin, message: "unknown built-in Flow; link its provider before resolving sources"
-                            })?;
-                            let mut definition =
-                                (registration.definition)().context(ParseSnafu {
-                                    path: PathBuf::from(format!("builtin:{builtin}")),
-                                })?;
-                            for dependency in definition.dependencies.values_mut() {
-                                if let Some(selected) = available
-                                    .values()
-                                    .find(|selected| selected.package == dependency.package)
-                                {
-                                    let features = std::mem::take(&mut dependency.features);
-                                    let default_features = dependency.default_features;
-                                    *dependency = selected.clone();
-                                    dependency.features.extend(features);
-                                    dependency.features.sort();
-                                    dependency.features.dedup();
-                                    dependency.default_features |= default_features;
-                                }
-                            }
-                            self.definition(&mut definition, None, available, depth + 1, builtin)?;
-                            definition
-                        }
-                    })
+                    Box::new(self.source(source, directory, available, depth + 1)?)
                 };
                 ensure!(
                     child.execution.is_none() || version.supports_child_streams(),
@@ -385,9 +470,10 @@ impl Resolver {
                 // The resolved body is frozen in the plan, so runtime never follows a source path.
                 child.flows.clear();
                 config.definition = Some(child);
-                node.config = serde_json::to_value(config).context(ConfigurationSnafu {
-                    node: node.id.as_str(),
-                })?;
+                *crate::calls::config_mut(node) =
+                    serde_json::to_value(config).context(ConfigurationSnafu {
+                        node: node.id.as_str(),
+                    })?;
             }
             if let Some(definition) = &mut node.loop_definition {
                 self.nodes(

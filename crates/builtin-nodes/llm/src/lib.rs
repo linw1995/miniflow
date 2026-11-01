@@ -1,4 +1,6 @@
 pub mod call;
+pub mod flows;
+mod tools;
 pub use call::{CallOutcome, ToolCall, ToolCallEvent, ToolDefinition, ToolResult};
 mod streaming;
 #[cfg(feature = "test-support")]

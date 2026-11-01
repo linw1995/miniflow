@@ -45,6 +45,7 @@ impl fmt::Display for DefinitionId {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkflowDefinition {
     pub version: WorkflowDefinitionVersion,
+    pub annotation: Option<String>,
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub flows: BTreeMap<String, FlowSource>,
@@ -62,6 +63,8 @@ mod wire;
 #[serde(remote = "WorkflowDefinition", deny_unknown_fields)]
 struct DefinitionFields {
     pub version: WorkflowDefinitionVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
     #[serde(
         default,
         deserialize_with = "deserialize_execution",
@@ -124,17 +127,26 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_25,
     #[serde(rename = "2026-10-28")]
     V2026_10_28,
+    #[serde(rename = "2026-11-01")]
+    V2026_11_01,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_28;
+    pub const CURRENT: Self = Self::V2026_11_01;
 
     pub fn supports_child_streams(self) -> bool {
-        matches!(self, Self::V2026_10_28)
+        matches!(self, Self::V2026_10_28 | Self::V2026_11_01)
     }
 
     pub fn supports_nested_flows(self) -> bool {
-        matches!(self, Self::V2026_10_25 | Self::V2026_10_28)
+        matches!(
+            self,
+            Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_01
+        )
+    }
+
+    pub fn supports_annotations(self) -> bool {
+        matches!(self, Self::V2026_11_01)
     }
 
     pub fn supports_startup_inputs(self) -> bool {
@@ -145,20 +157,25 @@ impl WorkflowDefinitionVersion {
                 | Self::V2026_10_23
                 | Self::V2026_10_25
                 | Self::V2026_10_28
+                | Self::V2026_11_01
         )
     }
 
     pub fn supports_node_success_edges(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+            Self::V2026_10_19
+                | Self::V2026_10_23
+                | Self::V2026_10_25
+                | Self::V2026_10_28
+                | Self::V2026_11_01
         )
     }
 
     pub fn supports_clusters(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_01
         )
     }
 }
@@ -169,14 +186,28 @@ pub const MAX_CALL_DEPTH: usize = 16;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum FlowSource {
-    Path { path: PathBuf },
-    Builtin { builtin: String },
+    Path {
+        path: PathBuf,
+    },
+    Builtin {
+        builtin: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        config: Value,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        flows: BTreeMap<String, FlowSource>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CallConfig {
     pub flow: String,
+    /// Accept a single object keyed by qualified startup input names.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub arguments_object: bool,
+    /// Return a result envelope instead of propagating recoverable child failures.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub capture_errors: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<Box<WorkflowDefinition>>,
 }

@@ -20,6 +20,7 @@ required-features = ["codegen"]
 
 [dependencies]
 # Runtime contracts and workflow observation.
+inventory.workspace = true
 mf-runtime.workspace = true
 mf-telemetry.workspace = true
 
@@ -36,7 +37,6 @@ snafu.workspace = true
 
 [dev-dependencies]
 # Built-in nodes and test node registration.
-inventory.workspace = true
 mfn-code.workspace = true
 mfn-core.workspace = true
 mfn-deepseek = { workspace = true, features = ["test-support"] }

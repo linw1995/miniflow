@@ -218,6 +218,14 @@ impl SubgraphInputMetadata {
     }
 }
 
+/// Compile-time interface facts. Deliberately contains no executable closure.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SubgraphMetadata {
+    pub inputs: crate::WorkflowInputSchema,
+    pub outputs: Vec<PortSpec>,
+    pub stream_outputs: Vec<PortSpec>,
+}
+
 #[derive(Clone)]
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,

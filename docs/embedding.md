@@ -229,7 +229,8 @@ Built-in Flow definitions are registered by their owning packages through
 `mf_runtime::register_builtin_flow!`. The macro captures the calling Cargo package, and the registry
 qualifies its local Flow name automatically. Link those packages in the build script as build dependencies
 when `embed_workflows` resolves their names. For example, `mf-chat` provides `mf-chat.chat-title` from its own
-`workflows/title.json`; the compiler does not depend on the chat package. The title source declares
+`workflows/title.json`; `mfn-llm` owns `agent-turn`, `agent`, and `tool-uses` under its `workflows/`
+directory. The compiler does not depend on either provider. `mf-chat.agent-turn` is a compatibility alias. The title source declares
 its provider packages, and the chat build fills their version requirements and feature policy from
 Cargo's resolved manifest declarations, including workspace inheritance. The embedded definition
 retains portable registry requirements rather than checkout paths. Source factories return

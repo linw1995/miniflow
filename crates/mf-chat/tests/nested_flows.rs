@@ -145,6 +145,34 @@ fn title_definition_is_owned_and_registered_by_chat() {
 }
 
 #[test]
+fn agent_turn_definition_is_owned_and_registered_by_chat() {
+    let registry = mf_runtime::BuiltinFlowRegistry::from_inventory().unwrap();
+    let definition = (registry.get("mf-chat.agent-turn").unwrap().definition)().unwrap();
+    assert_eq!(definition, mf_chat::flows::agent_turn_definition().unwrap());
+    assert!(
+        definition
+            .annotation
+            .as_deref()
+            .is_some_and(|annotation| !annotation.trim().is_empty())
+    );
+    assert!(
+        definition
+            .outputs
+            .iter()
+            .any(|output| output.name == "answer" && output.optional)
+    );
+    let caller: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-11-01","dependencies":{},
+        "flows":{"turn":{"builtin":"mf-chat.agent-turn"}},
+        "nodes":[{"id":"turn","kind":"workflow.call","config":{"flow":"turn"}}],
+        "outputs":[{"name":"status","node":"turn","port":"status"}]
+    }))
+    .unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    instantiate_compiled(&compile_definition(&caller, &registry).unwrap(), &registry).unwrap();
+}
+
+#[test]
 fn profiles_load_local_child_flows_with_host_owned_provider_paths() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("flows")).unwrap();

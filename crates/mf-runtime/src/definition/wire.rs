@@ -89,6 +89,13 @@ fn decode_scope(
         }
     );
     ensure!(
+        version.supports_annotations() || !scope.contains_key("annotation"),
+        InvalidSnafu {
+            path,
+            message: "Flow annotations require version 2026-11-01"
+        }
+    );
+    ensure!(
         !scope.contains_key("order_edges"),
         InvalidSnafu {
             path,
@@ -255,6 +262,13 @@ fn encode_scope(
         InvalidSnafu {
             path,
             message: "nested flows require version 2026-10-25"
+        }
+    );
+    ensure!(
+        version.supports_annotations() || !scope.contains_key("annotation"),
+        InvalidSnafu {
+            path,
+            message: "Flow annotations require version 2026-11-01"
         }
     );
     ensure!(

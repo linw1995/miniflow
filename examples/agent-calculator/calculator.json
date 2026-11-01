@@ -1,0 +1,78 @@
+{
+  "version": "2026-11-01",
+  "annotation": "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message.",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "operation": {
+            "type": "string",
+            "secret": false
+          },
+          "left": {
+            "type": "double",
+            "secret": false
+          },
+          "right": {
+            "type": "double",
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "calculate",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "operation": "string",
+          "left": "double",
+          "right": "double"
+        },
+        "code": {
+          "content": "operation == 'divide' && right == 0.0 ? 'Error: division by zero.' : operation == 'add' ? string(left + right) : operation == 'subtract' ? string(left - right) : operation == 'multiply' ? string(left * right) : operation == 'divide' ? string(left / right) : 'Error: unsupported operation `' + operation + '`.'"
+        }
+      },
+      "inputs": {
+        "operation": {
+          "from": {
+            "node": "params",
+            "port": "operation"
+          }
+        },
+        "left": {
+          "from": {
+            "node": "params",
+            "port": "left"
+          }
+        },
+        "right": {
+          "from": {
+            "node": "params",
+            "port": "right"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "content",
+      "node": "calculate",
+      "port": "content"
+    }
+  ]
+}

@@ -97,8 +97,8 @@ pub use node_target::{
 };
 pub use number::{compare_json_numbers, number_to_f64, number_to_i64, number_to_u64};
 pub use registry::{
-    BuiltinFlowRegistration, BuiltinFlowRegistry, BuiltinFlowRegistryError, NodeRegistry,
-    NodeRegistryError, RegisteredFlow,
+    BuiltinFlowExpansion, BuiltinFlowRegistration, BuiltinFlowRegistry, BuiltinFlowRegistryError,
+    NodeRegistry, NodeRegistryError, RegisteredFlow,
 };
 pub use runner::{NodeExecutionSnafu, SuccessDependencySnafu, WorkflowRunError};
 pub use stream::{
@@ -118,8 +118,8 @@ pub use stream_plan::{
     StreamOutputSelector, StreamPlan, StreamProgram,
 };
 pub use subgraph::{
-    PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata, SubgraphNode,
-    SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
+    PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata, SubgraphMetadata,
+    SubgraphNode, SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
 };
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,
