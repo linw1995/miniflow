@@ -1,8 +1,8 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, LoopComparisonOperator, LoopConditionDefinition,
     LoopVariableDefinition, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts,
-    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedSubgraph, SubgraphNode, ValueType,
-    compare_json_numbers, deserialize_config, loop_variable_types,
+    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedSubgraph, SubgraphNode,
+    SubgraphStream, ValueType, compare_json_numbers, deserialize_config, loop_variable_types,
 };
 use mf_telemetry::{
     Count,
@@ -163,6 +163,7 @@ impl SubgraphNode for LoopNode {
         sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
         let mut variables = inputs;
+        let mut stream = SubgraphStream::new(self.id.as_str(), ctx, sink);
         let mut pass_count = 0;
         let mut reason = LoopStopReason::Maximum;
         for index in 0..usize::from(self.max_iterations) {
@@ -185,7 +186,7 @@ impl SubgraphNode for LoopNode {
                     });
                     let _guard = pass.as_ref().map(|pass| pass.enter());
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        self.body.execute_with_sink(state, sink)
+                        self.body.execute_with_sink(state, &mut stream)
                     }));
                     let outcome = if !matches!(&result, Ok(Ok(_))) {
                         LoopPassOutcome::Failed

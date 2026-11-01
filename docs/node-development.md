@@ -82,12 +82,12 @@ or inappropriate body arguments fail during preparation; an executor is returned
 
 Dynamic container providers implement `NodePortContract` for terminal ports and `SubgraphNode` for one
 body-aware execution method. Return the prepared body from `SubgraphNode::body`, forward the supplied
-`EmissionSink` when invoking it, and prepare the node with `PreparedNode::subgraph`:
+`EmissionSink` through `SubgraphStream` when invoking it, and prepare the node with `PreparedNode::subgraph`:
 
 ```rust
 use mf_runtime::{
     EmissionSink, ExecutionContext, Inputs, NodeExecutionError, NodePortContract,
-    NodeResult, PreparedNode, PreparedSubgraph, SubgraphNode,
+    NodeResult, PreparedNode, PreparedSubgraph, SubgraphNode, SubgraphStream,
 };
 
 struct Container {
@@ -114,7 +114,8 @@ impl SubgraphNode for Container {
         sink: &mut dyn EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
         // Containers may instead establish a scope or invoke the body repeatedly.
-        Ok(self.body.execute_with_sink(context, sink)?.into())
+        let mut stream = SubgraphStream::new("container", context, sink);
+        Ok(self.body.execute_with_sink(context, &mut stream)?.into())
     }
 }
 
@@ -131,6 +132,14 @@ execution. Both modes call the same `SubgraphNode::execute`; terminal-only execu
 Its `supports_success_dependencies` policy is forwarded in both modes. Providers do not need separate
 `TaskNode` and `TaskStreamNode` adapters or a manual streaming branch in their factories. Invocation count,
 scope isolation, error policies, and terminal result aggregation remain container-specific behavior.
+
+`SubgraphStream` is also the shared delivery policy for container implementations. Sequential bodies use it
+as an `EmissionSink`; concurrent bodies call `SubgraphStream::forward` and clone the supplied
+`SubgraphStreamSender` for their workers. Forwarding uses a rendezvous and acknowledgment per emission,
+keeps the borrowed sink on the caller thread, and applies backpressure without buffering complete body
+streams. A delivery failure is returned to its producer and cancels the enclosing execution in both modes,
+so container-specific failure policies cannot accidentally continue after an output can no longer be
+delivered.
 
 ## Select dependencies in a Flow
 

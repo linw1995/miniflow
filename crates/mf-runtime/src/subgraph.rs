@@ -1,6 +1,127 @@
 use crate::{ExecutionContext, FlowOutputs, NodeIdentity, PortSpec, WorkflowRunError};
-use snafu::ResultExt;
-use std::sync::Arc;
+use snafu::{ResultExt, Snafu};
+use std::sync::{Arc, mpsc};
+
+#[derive(Debug, Snafu)]
+enum ForwardingError {
+    #[snafu(display("subgraph stream forwarding channel closed: {source}"))]
+    Send { source: mpsc::SendError<()> },
+    #[snafu(display("subgraph stream acknowledgement closed: {source}"))]
+    Acknowledge { source: mpsc::RecvError },
+    #[snafu(display("could not start subgraph stream coordinator: {source}"))]
+    Coordinator { source: std::io::Error },
+}
+
+struct Emission {
+    result: crate::NodeResult,
+    acknowledge: mpsc::SyncSender<Result<(), crate::StreamError>>,
+}
+
+/// A cloneable producer endpoint for concurrent prepared-body invocations.
+///
+/// Each send waits until the caller-owned sink has accepted or rejected the emission.
+/// Delivery failures are propagated to the producer and cancel the enclosing execution.
+#[derive(Clone)]
+pub struct SubgraphStreamSender {
+    id: crate::DefinitionId,
+    sender: mpsc::SyncSender<Emission>,
+    cancellation: crate::StreamCancellation,
+}
+
+impl crate::EmissionSink for SubgraphStreamSender {
+    fn send(&mut self, result: crate::NodeResult) -> Result<(), crate::StreamError> {
+        let result: Result<(), crate::NodeExecutionError> = (|| {
+            let (acknowledge, reply) = mpsc::sync_channel(0);
+            self.sender
+                .send(Emission {
+                    result,
+                    acknowledge,
+                })
+                // A disconnected channel needs no payload in its diagnostic.
+                .map_err(|_| mpsc::SendError(()))
+                .context(SendSnafu)
+                .boxed()?;
+            reply.recv().context(AcknowledgeSnafu).boxed()??;
+            Ok(())
+        })();
+        result
+            .context(crate::StreamProducerSnafu {
+                definition_id: self.id.clone(),
+            })
+            .inspect_err(|error| self.cancellation.cancel(error.clone()))
+    }
+}
+
+/// Forwards prepared-body emissions through one caller-owned sink.
+///
+/// Use this sink directly for sequential bodies. Concurrent bodies can call
+/// [`SubgraphStream::forward`] and clone the supplied [`SubgraphStreamSender`]
+/// for their workers. In both modes, delivery failures cancel the enclosing
+/// execution instead of becoming recoverable body or item failures.
+pub struct SubgraphStream<'a> {
+    id: crate::DefinitionId,
+    sink: &'a mut dyn crate::EmissionSink,
+    cancellation: crate::StreamCancellation,
+}
+
+impl<'a> SubgraphStream<'a> {
+    pub fn new(
+        id: impl Into<crate::DefinitionId>,
+        context: &ExecutionContext,
+        sink: &'a mut dyn crate::EmissionSink,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            sink,
+            cancellation: context.cancellation(),
+        }
+    }
+
+    /// Fans concurrent producers into the borrowed sink on the calling thread.
+    ///
+    /// The rendezvous channel preserves backpressure without buffering a body's
+    /// complete stream. Producer and coordinator panics retain their normal unwind.
+    pub fn forward<T>(
+        &mut self,
+        run: impl FnOnce(SubgraphStreamSender) -> Result<T, crate::NodeExecutionError> + Send,
+    ) -> Result<T, crate::NodeExecutionError>
+    where
+        T: Send,
+    {
+        std::thread::scope(|scope| {
+            let (sender, receiver) = mpsc::sync_channel::<Emission>(0);
+            let sender = SubgraphStreamSender {
+                id: self.id.clone(),
+                sender,
+                cancellation: self.cancellation.clone(),
+            };
+            let worker = std::thread::Builder::new()
+                .name(format!("subgraph-stream-{}", self.id))
+                .spawn_scoped(scope, || run(sender))
+                .context(CoordinatorSnafu)
+                .boxed()?;
+            for emission in receiver {
+                let result = crate::EmissionSink::send(self, emission.result);
+                let _ = emission.acknowledge.send(result);
+            }
+            worker
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+    }
+}
+
+impl crate::EmissionSink for SubgraphStream<'_> {
+    fn is_connected(&self) -> bool {
+        self.sink.is_connected()
+    }
+
+    fn send(&mut self, result: crate::NodeResult) -> Result<(), crate::StreamError> {
+        self.sink
+            .send(result)
+            .inspect_err(|error| self.cancellation.cancel(error.clone()))
+    }
+}
 
 type SubgraphBody = dyn Fn(&mut ExecutionContext, &mut dyn crate::EmissionSink) -> Result<FlowOutputs, WorkflowRunError>
     + Send
