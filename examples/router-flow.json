@@ -1,0 +1,109 @@
+{
+  "version": "2026-11-01",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "route": {
+            "type": "string",
+            "default": "first",
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "route",
+      "kind": "builtin.router",
+      "config": {
+        "routes": [
+          "first",
+          "second"
+        ]
+      },
+      "inputs": {
+        "route": {
+          "from": {
+            "node": "params",
+            "port": "route"
+          }
+        }
+      }
+    },
+    {
+      "id": "first",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "First branch"
+      }
+    },
+    {
+      "id": "second",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "Second branch"
+      }
+    },
+    {
+      "id": "fallback",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "Unknown route"
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "first",
+              "port": "value"
+            },
+            {
+              "node": "second",
+              "port": "value"
+            },
+            {
+              "node": "fallback",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "route",
+      "from_output": "first",
+      "to_node": "first"
+    },
+    {
+      "from_node": "route",
+      "from_output": "second",
+      "to_node": "second"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "fallback"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "result",
+      "node": "result",
+      "port": "value"
+    }
+  ]
+}

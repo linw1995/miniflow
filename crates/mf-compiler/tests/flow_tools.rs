@@ -154,7 +154,20 @@ fn local_named_flows_freeze_definitions_expose_schemas_and_dispatch_in_order() {
         .find(|node| node.id == "dispatch".into())
         .unwrap();
     let child = &frozen.config["definition"];
-    assert!(child.to_string().contains("workflow.router"));
+    assert!(child.to_string().contains("builtin.router"));
+    let dispatch = child["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "dispatch")
+        .unwrap();
+    let route = dispatch["config"]["body"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "route")
+        .unwrap();
+    assert_eq!(route["config"]["routes"], json!(["greet", "stats"]));
     assert!(child.to_string().contains("workflow.call"));
     assert!(!child.to_string().contains("workflow.tool_call"));
 
@@ -350,10 +363,20 @@ fn tool_argument_errors_and_child_failures_recover_without_executing_other_route
 #[test]
 fn agent_builtin_without_tools_and_empty_tool_uses_are_valid() {
     let registry = NodeRegistry::from_inventory().unwrap();
+    let empty = mfn_llm::flows::tool_uses_definition().unwrap();
     assert_eq!(
         mfn_llm::flows::configure_tool_uses(Value::Null, Default::default()).unwrap(),
-        mfn_llm::flows::tool_uses_definition().unwrap()
+        empty
     );
+    let body = &empty.nodes[1].config["body"];
+    assert!(
+        body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["kind"] == "builtin.router")
+    );
+    assert_eq!(body["nodes"][1]["config"]["routes"], json!(["unknown"]));
     for (name, input) in [("mfn-llm.agent", "prompt"), ("mfn-llm.tool-uses", "calls")] {
         let definition = WorkflowDefinition::from_json(
             &json!({
@@ -370,6 +393,30 @@ fn agent_builtin_without_tools_and_empty_tool_uses_are_valid() {
                 .to_string()
                 .contains(input)
         );
+    }
+}
+
+#[test]
+fn empty_tool_uses_routes_every_call_to_the_unknown_fallback() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition = mfn_llm::flows::tool_uses_definition().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let outputs = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_with_inputs(
+            mf_runtime::WorkflowArguments::try_from(json!({"params.calls": [
+                {"id": "named", "name": "unknown", "arguments": {}},
+                {"id": "other", "name": "missing", "arguments": {}}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+    let results = serde_json::to_value(&outputs).unwrap();
+    let results = results["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    for (result, id) in results.iter().zip(["named", "other"]) {
+        assert_eq!(result["tool_call_id"], id);
+        assert_eq!(error_content(result), "unknown tool");
     }
 }
 

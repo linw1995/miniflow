@@ -8,4 +8,4 @@
 - [x] Make the calculator example inject its tool into the built-in agent.
 - [x] Cover schemas, errors, concurrency, source-free runners, and the complete example.
 - [x] Update workflow, chat, and embedding documentation.
-- [ ] Run repository checks and the affected-test Flow on the final cleaned-up snapshot before submission.
+- [x] Run repository checks and the affected-test Flow on the final cleaned-up snapshot before submission.

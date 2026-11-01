@@ -106,13 +106,24 @@ pub fn configure_tool_uses(
     let mut value: Value =
         serde_json::from_str(include_str!("../workflows/tool-uses.json")).expect("builtin JSON");
     let body = &mut value["nodes"][1]["config"]["body"];
-    let mut nodes = vec![
-        json!({"id": "name", "kind": "builtin.code", "config": {"language": "cel", "inputs": {"call": "object"}, "code": {"value": "call.name"}}, "inputs": {"call": source("%iteration", "item")}}),
-    ];
-    let names: Vec<_> = flows.keys().collect();
-    let mut edges = Vec::new();
-    let mut results = Vec::new();
-    nodes.push(json!({"id": "route", "kind": "workflow.router", "config": {"routes": names}, "inputs": {"route": source("name", "value")}}));
+    let mut nodes = body["nodes"].as_array().cloned().expect("tool-uses nodes");
+    let mut edges = body["edges"].as_array().cloned().expect("tool-uses edges");
+    let route = nodes
+        .iter()
+        .position(|node| node["id"] == "route")
+        .expect("tool-uses router");
+    // The template routes every call to its placeholder `unknown` branch. Replace that branch with
+    // one route per injected tool while retaining the shared `else` fallback.
+    nodes[route]["config"]["routes"] = json!(flows.keys().collect::<Vec<_>>());
+    nodes.retain(|node| {
+        !matches!(
+            node["id"].as_str(),
+            Some("unknown_named" | "unknown_named_result")
+        )
+    });
+    edges.retain(|edge| edge["from_node"] != "route");
+    edges.push(json!({"from_node": "route", "from_output": "else", "to_node": "unknown_else"}));
+    let mut results = vec![json!({"node": "unknown_else_result", "port": "result"})];
     for (index, (name, definition)) in flows.iter().enumerate() {
         let arguments = format!("arguments_{index}");
         let invoke = format!("invoke_{index}");
@@ -125,17 +136,13 @@ pub fn configure_tool_uses(
         nodes.push(json!({"id": encode, "kind": "llm.tool_result", "inputs": {"call": source("%iteration", "item"), "plain_content": source(&arguments, "plain_content"), "result": {"exclusive": [{"node": arguments, "port": "error"}, {"node": invoke, "port": "result"}]}}}));
         results.push(json!({"node": encode, "port": "result"}));
     }
-    nodes.push(json!({"id": "unknown", "kind": "builtin.constant", "config": {"value": {"error": "unknown tool"}}}));
-    edges.push(json!({"from_node": "route", "from_output": "else", "to_node": "unknown"}));
-    nodes.push(json!({"id": "unknown_result", "kind": "llm.tool_result", "inputs": {"call": source("%iteration", "item"), "result": source("unknown", "value")}}));
-    results.push(json!({"node": "unknown_result", "port": "result"}));
-    let result_input = json!({"exclusive": results});
-    nodes.push(
-        json!({"id": "result", "kind": "builtin.identity", "inputs": {"input": result_input}}),
-    );
-    body["nodes"] = json!(nodes);
-    body["edges"] = json!(edges);
-    body["result"] = json!({"node": "result", "port": "value"});
+    let result = nodes
+        .iter()
+        .position(|node| node["id"] == "result")
+        .expect("tool-uses result");
+    nodes[result]["inputs"]["input"] = json!({"exclusive": results});
+    body["nodes"] = Value::Array(nodes);
+    body["edges"] = Value::Array(edges);
     parse(value)
 }
 

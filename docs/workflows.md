@@ -133,11 +133,24 @@ its native stream coordinator, without rebuilding it or linking its custom nodes
 
 ## Router and LLM agent Flows
 
-`workflow.router` is a tool-independent selector. Configure `routes: ["first", "second"]` and
-connect its required string `route` input. It emits a boolean gate on exactly one named output
-(or `else` for an unknown route), skips the other outputs, and declares them mutually exclusive.
-Connect these gates to downstream nodes or `workflow.call` nodes using ordinary edges. The router
-never describes tools, parses arguments, invokes a child, encodes results, or recovers errors.
+`mfn-core` provides `builtin.router` as an ordinary registered runtime task, directly usable in any
+user-authored Flow without compiler rewriting or LLM tool expansion. It is a tool-independent selector:
+configure `routes: ["first", "second"]` and connect its required string `route` input. It emits a boolean
+gate on exactly one named output (or `else` for an unknown route), skips the other outputs, and declares
+them mutually exclusive. Connect these gates to downstream nodes or `workflow.call` nodes using ordinary
+edges; downstream nodes gated by unselected outputs do not run. The router never describes tools,
+parses arguments, invokes a child, encodes results, or recovers errors.
+
+The [standalone router example](../examples/router-flow.json) declares `mfn-core` with the local path
+`../crates/builtin-nodes/core`. Its required string startup parameter `params.route` defaults to `first`
+and feeds a router with `first` and `second` routes. Each gate activates a branch constant, and an
+exclusive input binding on `builtin.identity` selects the active branch value as the result:
+
+```sh
+mf compile examples/router-flow.json --output ./router-flow
+./router-flow
+./router-flow --params.route second
+```
 
 The LLM provider owns three built-in Flows:
 
@@ -179,7 +192,9 @@ underscores, or hyphens (`else` is reserved). Tool interfaces must be terminal a
 
 Expansion creates ordinary router gates, `workflow.call` nodes, and provider-owned
 `llm.tool_definition`, `llm.tool_arguments`, and `llm.tool_result` adapters. The first two receive
-**metadata only**, never a child execution closure. The runtime knows no Tool types or LLM schema policy.
+**metadata only**, never a child execution closure. `mfn-llm.tool-uses` declares its `builtin.router`
+in the provider-owned JSON body; configuration replaces the placeholder route, branch edges, and
+fallback result selection with the injected tools. The runtime knows no Tool types or LLM schema policy.
 
 `workflow.call` optionally accepts `arguments_object: true` to bind one object of qualified startup
 input names and `capture_errors: true` to return a `result` envelope (`outputs` or `error`). These are
@@ -302,7 +317,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by execution prerequisites | One boolean activation output per branch, plus `else` |
 | `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
-| `mfn-core` | [`workflow.router`](#router-and-llm-agent-flows) | Nonempty `routes` | `route`: string | Exclusive named boolean gates and `else` |
+| `mfn-core` | [`builtin.router`](#router-and-llm-agent-flows) | Nonempty `routes` | Required `route`: string | Exclusive named boolean gates and `else` |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |

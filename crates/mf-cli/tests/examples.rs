@@ -71,7 +71,7 @@ fn search_result() -> Value {
     })
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 21] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 22] {
     [
         (
             "deepseek-fetch.json",
@@ -121,6 +121,7 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 21] {
         ),
         ("hello-workflow.json", None, json!({"answer": 42})),
         ("if-else.json", None, json!({"accepted": {"amount": 150}})),
+        ("router-flow.json", None, json!({"result": "First branch"})),
         ("iteration.json", None, json!({"results": [2, 5, 8]})),
         ("loop.json", None, json!({"count": 3})),
         (

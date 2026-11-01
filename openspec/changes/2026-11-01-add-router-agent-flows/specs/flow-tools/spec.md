@@ -13,10 +13,26 @@ default source. Tool Flows SHALL have terminal interfaces without stdin or strea
 - **WHEN** a calculator Flow annotates itself and exposes `operation`, `left`, and `right`
 - **THEN** the `mfn-llm.agent` metadata adapter publishes one tool with that description and an object schema requiring those arguments
 
+### Requirement: Route user Flows with an ordinary runtime task
+
+`mfn-core` SHALL register `builtin.router` as an ordinary runtime task directly usable in user-authored
+Flows without compiler rewriting or LLM tool expansion. It SHALL accept nonempty configured `routes`
+and a required string `route` input, emit exactly one exclusive boolean gate for the matching route or
+`else` for an unknown route, and skip all unselected outputs. Downstream execution SHALL use ordinary
+edges rather than router-owned invocation.
+
+#### Scenario: Route a user Flow without tool expansion
+
+- **GIVEN** a user Flow declares `mfn-core` and a `builtin.router` with routes `first` and `second`, with downstream tasks gated by each route and `else`
+- **WHEN** its `route` input is `second`
+- **THEN** only the `second` gate is emitted and its downstream task runs; tasks gated by `first` or `else` do not run
+- **WHEN** its `route` input is unknown
+- **THEN** only the `else` gate is emitted and its downstream task runs; tasks gated by named routes do not run
+
 ### Requirement: Dispatch tool calls concurrently and deterministically
 
 `mfn-llm.tool-uses` SHALL compose routing, argument adaptation, ordinary Flow calls, and result
-encoding. `workflow.router` SHALL only emit exclusive/skipped downstream gates. The runtime SHALL
+encoding. `builtin.router` SHALL only emit exclusive/skipped downstream gates. The runtime SHALL
 expose unbiased metadata without Tool types or tool policy. Concurrent dispatch SHALL reuse parallel `builtin.iteration`, including its bounded worker queue, ordered result collection,
 item isolation, and termination policy. Each invocation SHALL isolate Flow inputs, outputs, and loop
 state while sharing cancellation. Unknown tools, invalid arguments,

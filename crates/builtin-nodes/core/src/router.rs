@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use snafu::ensure;
 use std::collections::BTreeSet;
 
-pub const KIND: &str = "workflow.router";
+pub const KIND: &str = "builtin.router";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,9 +101,13 @@ mod tests {
     use super::*;
     #[test]
     fn selects_only_one_gate_without_executing_downstream_work() {
-        let router = Router {
-            routes: vec!["first".into(), "second".into()],
-        };
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        let prepared = registry
+            .get("builtin.router")
+            .unwrap()
+            .instantiate(json!({"routes": ["first", "second"]}))
+            .unwrap();
+        let router = prepared.execution.as_task_node().unwrap();
         for (requested, selected) in [
             ("first", "first"),
             ("second", "second"),

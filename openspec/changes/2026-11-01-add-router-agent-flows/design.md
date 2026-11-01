@@ -16,8 +16,11 @@ or LLM recovery policy.
 
 ## Routing and invocation
 
-`workflow.router` accepts a string route, emits one exclusive boolean gate (or `else`), and skips the
-others. It performs no downstream execution. Provider expansion creates ordinary downstream
+`mfn-core` provides `builtin.router` as an ordinary registered runtime task, directly usable in any
+user-authored Flow without compiler rewriting or LLM tool expansion. It accepts a required string
+`route` input, emits one exclusive boolean gate for a configured route (or `else` for an unknown
+route), and skips the others. It performs no downstream execution; ordinary edges gate downstream
+nodes, and consumers of unselected gates do not run. Provider expansion creates ordinary downstream
 `workflow.call` nodes. Calls support generic object arguments and captured output/error envelopes;
 cancellation and worker infrastructure failures remain failures.
 

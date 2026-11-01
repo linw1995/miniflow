@@ -8,7 +8,9 @@ Flow contract and makes a multi-turn agent difficult to express and validate.
 
 - Add optional Flow annotations and use them as model-visible tool descriptions.
 - Derive tool JSON Schema from the single startup node of each named tool Flow.
-- Add tool-independent `workflow.router` exclusive/skipped gates; downstream nodes perform all work.
+- Add tool-independent `builtin.router` as an ordinary registered runtime task in `mfn-core`, directly
+  usable in user Flows without compiler rewriting; downstream nodes perform all work through
+  exclusive/skipped gates.
 - Add generic configurable built-in Flow expansion and metadata-only subgraph inspection.
 - Add `mfn-llm.tool-uses`, composing router, adapters, ordinary calls, and native parallel Iteration.
 - Add LLM-owned `agent-turn` and `agent` built-in Flows, reusing native Loop for model turns.
