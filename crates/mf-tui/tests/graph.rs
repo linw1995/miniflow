@@ -3046,14 +3046,14 @@ fn terminal_node_activity_flashes_once_and_restores_the_border() {
     let mut sides = [false; 4];
     for step in 0..12 {
         let (source, left, right, buffer) = render(step * 100_000_000);
-        let expected_symbol = ["▓", "▒", "░"][(step / 4) as usize];
+        let expected_symbol = ["▓", "▒", "░", "·"][(step / 3) as usize];
         for id in ["source", "left", "right"] {
-            let channel = [255, 165, 89][(step / 4) as usize];
+            let channel = [255, 178, 102, 51][(step / 3) as usize];
             let expected_color = match id {
                 "source" => Color::Rgb(0, channel, 0),
                 "left" => Color::Rgb(channel, 0, 0),
                 "right" => {
-                    let gray = [128, 83, 44][(step / 4) as usize];
+                    let gray = [128, 89, 51, 25][(step / 3) as usize];
                     Color::Rgb(gray, gray, gray)
                 }
                 _ => unreachable!(),
@@ -3181,6 +3181,22 @@ fn ordinary_start_timestamp_pulses_a_task_path_and_expires_while_running() {
     let expired = render_snapshot(&layout, &snapshot, 1_700_000_000);
     assert!(route_transfer_cells(&expired, &layout, edge).is_empty());
     assert!(!perimeter_activity(&expired, &layout, "router").is_empty());
+}
+
+#[test]
+fn connection_pulse_has_all_four_density_levels_in_the_same_frame() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut session = TestSession::new(&graph);
+    session.start("router", 1_000_000_000, Vec::new());
+    let snapshot = session.snapshot();
+    let edge = edge_index(&layout, "source", "router", Some("value"));
+    let buffer = render_snapshot(&layout, &snapshot, 1_300_000_000);
+    let symbols = route_transfer_cells(&buffer, &layout, edge)
+        .into_iter()
+        .map(|position| buffer.cell(position).unwrap().symbol())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(symbols, BTreeSet::from(["▓", "▒", "░", "·"]));
 }
 
 #[test]

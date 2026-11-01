@@ -36,6 +36,7 @@ const MARGIN: u32 = 2;
 const LAYOUT_STACK_BYTES: usize = 64 * 1024 * 1024;
 const CLUSTER_KIND: &str = "node cluster";
 const FLOW_FRAME_NS: u64 = 100_000_000;
+const ACTIVITY_DENSITIES: [&str; 4] = ["▓", "▒", "░", "·"];
 const TRANSFER_PULSE_NS: u64 = 600_000_000;
 const NODE_TRANSITION_NS: u64 = 1_200_000_000;
 
@@ -2001,7 +2002,7 @@ impl<'a> GraphView<'a> {
                 };
                 let distance = travelled + u64::from(step);
                 if distance <= head && head - distance < 4 {
-                    let symbol = ["▓", "▒", "░", "·"][(head - distance) as usize];
+                    let symbol = ACTIVITY_DENSITIES[(head - distance) as usize];
                     self.put(area, buffer, x, y, symbol, style);
                 }
             }
@@ -2367,9 +2368,10 @@ impl<'a> GraphView<'a> {
                 );
             }
         } else if let Some(age) = terminal_age.filter(|age| *age < NODE_TRANSITION_NS) {
-            let level = 3 - (u128::from(age) * 3 / u128::from(NODE_TRANSITION_NS)) as usize;
-            if let Some(symbol) = ["", "░", "▒", "▓"].get(level) {
-                let brightness = [0, 35, 65, 100][level];
+            let phase = (u128::from(age) * ACTIVITY_DENSITIES.len() as u128
+                / u128::from(NODE_TRANSITION_NS)) as usize;
+            if let Some(symbol) = ACTIVITY_DENSITIES.get(phase) {
+                let brightness = [100, 70, 40, 20][phase];
                 self.draw_perimeter_flash(
                     area,
                     buffer,
@@ -2393,7 +2395,7 @@ impl<'a> GraphView<'a> {
         if cells == 0 {
             return;
         }
-        for (offset, symbol) in ["▓", "▒", "░", "·"].into_iter().enumerate() {
+        for (offset, symbol) in ACTIVITY_DENSITIES.into_iter().enumerate() {
             let position = (head + cells - offset as u64 % cells) % cells;
             let (x, y) = perimeter_cell(rect, position).expect("position is within the perimeter");
             let brightness = [100, 70, 40, 20][offset];
