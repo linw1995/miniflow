@@ -157,7 +157,6 @@ impl PreparedConfig {
 
 fn validate_field(field: &str, value: &mf_runtime::ValueRef) -> Result<(), DeepSeekConfigError> {
     let requirement = match field {
-        "api_key" if value.as_str().unwrap().is_empty() => Some("a nonempty credential"),
         "api_key_env"
             if value.as_str().unwrap().trim().is_empty()
                 || value.as_str().unwrap().contains(['=', '\0']) =>
@@ -307,17 +306,21 @@ impl HttpClient {
                 );
                 key
             };
-            let response = self
-                .get()?
-                .post(format!(
-                    "{}/v1/tools/{operation}",
-                    config.base_url.trim_end_matches('/')
-                ))
-                .bearer_auth(key)
-                .json(body)
-                .send()
-                .await
-                .context(RequestSnafu { operation })?;
+            let response = {
+                let request = self
+                    .get()?
+                    .post(format!(
+                        "{}/v1/tools/{operation}",
+                        config.base_url.trim_end_matches('/')
+                    ))
+                    .json(body);
+                let request = if key.is_empty() {
+                    request
+                } else {
+                    request.bearer_auth(key)
+                };
+                request.send().await.context(RequestSnafu { operation })?
+            };
             let status = response.status();
             ensure!(
                 status.is_success(),
