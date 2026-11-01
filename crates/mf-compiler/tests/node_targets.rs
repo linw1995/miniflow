@@ -173,10 +173,10 @@ fn injected_flow_bodies_follow_their_owning_node_target() {
     let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/chat-calculator-flow.json");
     let resolved = mf_compiler::load_workflow(&example).unwrap();
-    let plan = mf_compiler::plan_definition(&resolved.definition).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = mf_compiler::compile_resolved_definition(&resolved.definition, &registry).unwrap();
     let description = mf_compiler::describe_compiled(&plan).unwrap();
     assert_eq!(description.injected_bodies.len(), 1);
-    let registry = NodeRegistry::from_inventory().unwrap();
     let artifacts = plan.generate_execution_plans(&registry).unwrap();
     let targets: Vec<NodeTarget> = serde_json::from_str(&artifacts.node_targets_json).unwrap();
     let owner = description.injected_bodies[0]
