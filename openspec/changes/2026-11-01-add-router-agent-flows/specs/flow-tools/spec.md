@@ -19,7 +19,7 @@ terminal interfaces without stdin or stream outputs.
 
 #### Scenario: Generate a calculator tool definition
 
-- **WHEN** the builder binds a calculator source with an overall description and descriptions for `params.operation`, `params.left`, and `params.right`
+- **WHEN** the builder binds a calculator source with an overall description and descriptions for `calculate.operation`, `calculate.left`, and `calculate.right`
 - **THEN** the `mfn-llm.agent` metadata adapter publishes one tool with the binding description and an object schema requiring `operation`, `left`, and `right`, including their descriptions
 - **AND** the calculator definition remains unchanged
 

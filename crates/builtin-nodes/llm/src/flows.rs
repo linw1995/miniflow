@@ -67,8 +67,10 @@ fn catalog(flows: &Flows) -> Vec<Value> {
     let mut nodes = Vec::new();
     let mut inputs = serde_json::Map::new();
     let mut types = serde_json::Map::new();
-    for (index, (name, binding)) in flows.iter().enumerate() {
-        let id = format!("tool_{index}");
+    for (name, binding) in flows {
+        // One metadata adapter per tool derives its definition; the CEL node below
+        // collects those definitions into the list consumed by the LLM node.
+        let id = format!("tool_{name}");
         nodes.push(adapter("llm.tool_definition", &id, name, binding));
         inputs.insert(id.clone(), source(&id, "tool"));
         types.insert(id, json!("object"));

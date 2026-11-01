@@ -496,7 +496,7 @@ fn injected_flow_bodies_are_marked_for_inspection() {
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
-        ["params", "calculate"]
+        ["calculate"]
     );
     let registry = NodeRegistry::from_inventory().unwrap();
     let manifest = plan.manifest(&registry).unwrap();

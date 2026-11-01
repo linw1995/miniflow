@@ -24,13 +24,13 @@
           },
           "description": "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message.",
           "parameters": {
-            "params.operation": {
+            "calculate.operation": {
               "description": "Operation to perform: add, subtract, multiply, or divide."
             },
-            "params.left": {
+            "calculate.left": {
               "description": "Left operand."
             },
-            "params.right": {
+            "calculate.right": {
               "description": "Right operand; must be nonzero for division."
             }
           }

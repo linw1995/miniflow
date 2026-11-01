@@ -175,9 +175,9 @@ Inject tool subgraphs when selecting a configurable built-in Flow:
           "source": { "path": "./agent-calculator/calculator.json" },
           "description": "Perform arithmetic on two operands.",
           "parameters": {
-            "params.operation": { "description": "Operation: add, subtract, multiply, or divide." },
-            "params.left": { "description": "Left operand." },
-            "params.right": { "description": "Right operand; nonzero for division." }
+            "calculate.operation": { "description": "Operation: add, subtract, multiply, or divide." },
+            "calculate.left": { "description": "Left operand." },
+            "calculate.right": { "description": "Right operand; nonzero for division." }
           }
         }
       }
