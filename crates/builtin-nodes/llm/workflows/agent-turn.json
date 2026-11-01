@@ -1,6 +1,5 @@
 {
   "version": "2026-11-01",
-  "annotation": "Run one assistant turn with the supplied messages and optional tools.",
   "dependencies": {
     "core": {
       "package": "mfn-core",

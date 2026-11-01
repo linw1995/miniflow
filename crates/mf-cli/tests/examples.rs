@@ -412,9 +412,9 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                         "parameters":{
                             "type":"object",
                             "properties":{
-                                "left":{"type":"number"},
-                                "operation":{"type":"string"},
-                                "right":{"type":"number"}
+                                "left":{"type":"number", "description":"Left operand."},
+                                "operation":{"type":"string", "description":"Operation to perform: add, subtract, multiply, or divide."},
+                                "right":{"type":"number", "description":"Right operand; must be nonzero for division."}
                             },
                             "required":["left","operation","right"],
                             "additionalProperties":false

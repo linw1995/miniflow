@@ -1,10 +1,10 @@
 //! Provider-owned agent Flows. Expansion only builds ordinary graph/node definitions.
-use mf_runtime::{NodeBuildError, WorkflowDefinition};
+use mf_runtime::{NodeBuildError, ResolvedFlowArgument, WorkflowDefinition};
 use serde_json::{Value, json};
 use snafu::{ResultExt, ensure};
 use std::collections::BTreeMap;
 
-type Flows = BTreeMap<String, WorkflowDefinition>;
+type Flows = BTreeMap<String, ResolvedFlowArgument>;
 
 pub fn agent_turn_definition() -> Result<WorkflowDefinition, mf_runtime::DefinitionParseError> {
     WorkflowDefinition::from_json(include_str!("../workflows/agent-turn.json"))
@@ -29,11 +29,11 @@ fn source(node: &str, port: &str) -> Value {
 fn subgraph(name: &str, definition: &WorkflowDefinition) -> Value {
     json!({"flow": name, "definition": definition})
 }
-fn adapter(kind: &str, id: &str, name: &str, definition: &WorkflowDefinition) -> Value {
-    json!({"id": id, "kind": kind, "config": {"name": name, "annotation": definition.annotation, "subgraph": subgraph(name, definition)}})
+fn adapter(kind: &str, id: &str, name: &str, binding: &ResolvedFlowArgument) -> Value {
+    json!({"id": id, "kind": kind, "config": {"name": name, "description": binding.description, "parameters": binding.parameters, "subgraph": subgraph(name, &binding.definition)}})
 }
 fn validate(flows: &Flows) -> Result<(), NodeBuildError> {
-    for (name, definition) in flows {
+    for (name, binding) in flows {
         ensure!(
             (1..=64).contains(&name.len())
                 && name
@@ -45,16 +45,16 @@ fn validate(flows: &Flows) -> Result<(), NodeBuildError> {
             }
         );
         ensure!(
-            definition
-                .annotation
+            binding
+                .description
                 .as_ref()
                 .is_some_and(|value| !value.trim().is_empty()),
             mf_runtime::NodeInvalidSubgraphSnafu {
-                message: format!("tool `{name}` requires a nonblank annotation")
+                message: format!("tool `{name}` requires a nonblank binding description")
             }
         );
         ensure!(
-            definition.execution.is_none(),
+            binding.definition.execution.is_none(),
             mf_runtime::NodeInvalidSubgraphSnafu {
                 message: format!("tool `{name}` requires a terminal interface")
             }
@@ -67,9 +67,9 @@ fn catalog(flows: &Flows) -> Vec<Value> {
     let mut nodes = Vec::new();
     let mut inputs = serde_json::Map::new();
     let mut types = serde_json::Map::new();
-    for (index, (name, definition)) in flows.iter().enumerate() {
+    for (index, (name, binding)) in flows.iter().enumerate() {
         let id = format!("tool_{index}");
-        nodes.push(adapter("llm.tool_definition", &id, name, definition));
+        nodes.push(adapter("llm.tool_definition", &id, name, binding));
         inputs.insert(id.clone(), source(&id, "tool"));
         types.insert(id, json!("object"));
     }
@@ -124,15 +124,15 @@ pub fn configure_tool_uses(
     edges.retain(|edge| edge["from_node"] != "route");
     edges.push(json!({"from_node": "route", "from_output": "else", "to_node": "unknown_else"}));
     let mut results = vec![json!({"node": "unknown_else_result", "port": "result"})];
-    for (index, (name, definition)) in flows.iter().enumerate() {
+    for (index, (name, binding)) in flows.iter().enumerate() {
         let arguments = format!("arguments_{index}");
         let invoke = format!("invoke_{index}");
         let encode = format!("encode_{index}");
-        let mut node = adapter("llm.tool_arguments", &arguments, name, definition);
+        let mut node = adapter("llm.tool_arguments", &arguments, name, binding);
         node["inputs"] = json!({"call": source("%iteration", "item")});
         nodes.push(node);
         edges.push(json!({"from_node": "route", "from_output": name, "to_node": arguments}));
-        nodes.push(json!({"id": invoke, "kind": "workflow.call", "config": {"flow": name, "definition": definition, "injected": true, "arguments_object": true, "capture_errors": true}, "inputs": {"arguments": source(&arguments, "arguments")}}));
+        nodes.push(json!({"id": invoke, "kind": "workflow.call", "config": {"flow": name, "definition": binding.definition, "injected": true, "arguments_object": true, "capture_errors": true}, "inputs": {"arguments": source(&arguments, "arguments")}}));
         nodes.push(json!({"id": encode, "kind": "llm.tool_result", "inputs": {"call": source("%iteration", "item"), "plain_content": source(&arguments, "plain_content"), "result": {"exclusive": [{"node": arguments, "port": "error"}, {"node": invoke, "port": "result"}]}}}));
         results.push(json!({"node": encode, "port": "result"}));
     }
@@ -183,6 +183,51 @@ pub fn configure_agent(config: Value, flows: Flows) -> Result<WorkflowDefinition
         .expect("builtin Flow sources")
         .remove("tool-uses");
     parse(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mf_runtime::FlowParameterDescription;
+
+    fn binding(description: Option<&str>) -> ResolvedFlowArgument {
+        ResolvedFlowArgument {
+            definition: tool_uses_definition().unwrap(),
+            description: description.map(str::to_owned),
+            parameters: BTreeMap::from([(
+                "params.calls".into(),
+                FlowParameterDescription {
+                    description: "Calls to dispatch.".into(),
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn both_configurable_flows_require_binding_descriptions() {
+        for description in [None, Some(""), Some(" \n\t")] {
+            let flows = BTreeMap::from([("dispatch".into(), binding(description))]);
+            assert!(configure_agent(Value::Null, flows.clone()).is_err());
+            assert!(configure_tool_uses(Value::Null, flows).is_err());
+        }
+    }
+
+    #[test]
+    fn adapters_forward_binding_metadata_without_changing_the_definition() {
+        let binding = binding(Some("Dispatch supplied calls."));
+        for kind in ["llm.tool_definition", "llm.tool_arguments"] {
+            let node = adapter(kind, "adapter", "dispatch", &binding);
+            assert_eq!(node["config"]["description"], "Dispatch supplied calls.");
+            assert_eq!(
+                node["config"]["parameters"],
+                json!({"params.calls": {"description": "Calls to dispatch."}})
+            );
+            assert_eq!(
+                node["config"]["subgraph"]["definition"],
+                serde_json::to_value(&binding.definition).unwrap()
+            );
+        }
+    }
 }
 
 mf_runtime::register_builtin_flow!("agent-turn", agent_turn_definition);

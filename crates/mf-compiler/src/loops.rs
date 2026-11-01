@@ -63,7 +63,6 @@ pub fn body_definition(
     nodes.extend(body.nodes.iter().cloned());
     WorkflowDefinition {
         version,
-        annotation: None,
         execution: None,
         flows: Default::default(),
         dependencies: dependencies.clone(),

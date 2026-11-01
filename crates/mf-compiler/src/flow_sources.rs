@@ -1,5 +1,8 @@
 use crate::{NodeDependency, WorkflowDefinition};
-use mf_runtime::{CALL_KIND, CallConfig, FlowSource, MAX_CALL_DEPTH, NodeDefinition};
+use mf_runtime::{
+    CALL_KIND, CallConfig, FlowSource, MAX_CALL_DEPTH, NodeDefinition, ResolvedFlowArgument,
+    WorkflowDefinitionVersion,
+};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -341,6 +344,8 @@ impl Resolver<'_> {
         directory: Option<&Path>,
         available: &BTreeMap<String, NodeDependency>,
         depth: usize,
+        version: WorkflowDefinitionVersion,
+        enclosing_flows: &BTreeMap<String, FlowSource>,
     ) -> Result<WorkflowDefinition, FlowResolutionError> {
         ensure!(
             depth <= MAX_CALL_DEPTH,
@@ -350,6 +355,41 @@ impl Resolver<'_> {
             }
         );
         match source {
+            FlowSource::Body { body } => {
+                ensure!(
+                    version.supports_flow_arguments(),
+                    InvalidSnafu {
+                        reference: "body",
+                        message: "inline Flow bodies require version 2026-11-01"
+                    }
+                );
+                // Dependencies are already canonicalized in the enclosing scope.
+                // Do not run `definition` here: it would interpret inherited paths
+                // again relative to this body's source directory.
+                let mut definition = WorkflowDefinition {
+                    version,
+                    execution: None,
+                    dependencies: available.clone(),
+                    flows: BTreeMap::new(),
+                    nodes: body.nodes.clone(),
+                    edges: body.edges.clone(),
+                    control_edges: body.control_edges.clone(),
+                    order_edges: body.order_edges.clone(),
+                    outputs: body.outputs.clone(),
+                    clusters: body.clusters.clone(),
+                };
+                // Like loop/iteration bodies, inline Flows use lexical aliases.
+                // File and provider definitions deliberately keep their own scope.
+                self.nodes(
+                    &mut definition.nodes,
+                    enclosing_flows,
+                    directory,
+                    available,
+                    depth,
+                    version,
+                )?;
+                Ok(definition)
+            }
             FlowSource::Path { path } => {
                 let directory = directory.context(InvalidSnafu {
                     reference: path.display().to_string(),
@@ -362,6 +402,13 @@ impl Resolver<'_> {
                 config,
                 flows,
             } => {
+                ensure!(
+                    flows.is_empty() || version.supports_flow_arguments(),
+                    InvalidSnafu {
+                        reference: builtin,
+                        message: "Flow arguments require version 2026-11-01"
+                    }
+                );
                 let registry = mf_runtime::BuiltinFlowRegistry::from_inventory()?;
                 let registration = registry.get(builtin).context(InvalidSnafu {
                     reference: builtin,
@@ -369,10 +416,21 @@ impl Resolver<'_> {
                 })?;
                 // Resolve injections in the caller's directory BEFORE entering the provider.
                 let mut injected = BTreeMap::new();
-                for (alias, source) in flows {
+                for (alias, argument) in flows {
                     injected.insert(
                         alias.clone(),
-                        self.source(source, directory, available, depth + 1)?,
+                        ResolvedFlowArgument {
+                            definition: self.source(
+                                &argument.source,
+                                directory,
+                                available,
+                                depth + 1,
+                                version,
+                                enclosing_flows,
+                            )?,
+                            description: argument.description.clone(),
+                            parameters: argument.parameters.clone(),
+                        },
                     );
                 }
                 let mut definition = if let Some(configure) = registration.configure {
@@ -458,7 +516,14 @@ impl Resolver<'_> {
                         }
                         .build()
                     })?;
-                    Box::new(self.source(source, directory, available, depth + 1)?)
+                    Box::new(self.source(
+                        source,
+                        directory,
+                        available,
+                        depth + 1,
+                        version,
+                        flows,
+                    )?)
                 };
                 ensure!(
                     child.execution.is_none() || version.supports_child_streams(),
@@ -504,5 +569,113 @@ impl Resolver<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn definition(flows: Value, nodes: Value) -> WorkflowDefinition {
+        serde_json::from_value(json!({
+            "version": "2026-11-01", "dependencies": {},
+            "flows": flows, "nodes": nodes
+        }))
+        .unwrap()
+    }
+
+    fn call(alias: &str) -> Value {
+        json!({"id": "call", "kind": CALL_KIND, "config": {"flow": alias}})
+    }
+
+    fn child(definition: &WorkflowDefinition) -> WorkflowDefinition {
+        serde_json::from_value::<CallConfig>(definition.nodes[0].config.clone())
+            .unwrap()
+            .definition
+            .map(|definition| *definition)
+            .unwrap()
+    }
+
+    #[test]
+    fn inline_calls_resolve_enclosing_aliases_and_inherit_canonical_dependencies() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(
+            nested.join("leaf.json"),
+            serde_json::to_string(&definition(json!({}), json!([]))).unwrap(),
+        )
+        .unwrap();
+        let mut authored = definition(
+            json!({
+                "inline": {"body": {"nodes": [call("leaf")]}},
+                "leaf": {"path": "nested/leaf.json"}
+            }),
+            json!([call("inline")]),
+        );
+        authored.dependencies.insert(
+            "provider".into(),
+            serde_json::from_value(json!({"package": "test-provider", "path": "."})).unwrap(),
+        );
+        let resolved = resolve_flows(&authored, Some(directory.path())).unwrap();
+        let inline = child(&resolved.definition);
+        assert_eq!(inline.version, authored.version);
+        assert_eq!(
+            inline.dependencies["test-provider"].path.as_deref(),
+            Some(fs::canonicalize(directory.path()).unwrap().as_path())
+        );
+        assert!(child(&inline).nodes.is_empty());
+        assert!(inline.flows.is_empty());
+        assert_eq!(resolved.sources.len(), 1);
+    }
+
+    #[test]
+    fn recursive_inline_aliases_hit_the_depth_guard() {
+        let authored = definition(
+            json!({"recursive": {"body": {"nodes": [call("recursive")]}}}),
+            json!([call("recursive")]),
+        );
+        let error = resolve_flows(&authored, None).err().unwrap();
+        assert!(error.to_string().contains("sixteen calls"));
+    }
+
+    fn provider_definition() -> Result<WorkflowDefinition, mf_runtime::DefinitionParseError> {
+        Ok(definition(json!({}), json!([])))
+    }
+
+    fn configure_provider(
+        _: Value,
+        mut arguments: BTreeMap<String, ResolvedFlowArgument>,
+    ) -> Result<WorkflowDefinition, mf_runtime::NodeBuildError> {
+        let argument = arguments.remove("tool").unwrap();
+        assert_eq!(argument.description.as_deref(), Some("Tool description"));
+        assert_eq!(
+            argument.parameters["input"].description,
+            "Input description"
+        );
+        assert!(argument.definition.flows.is_empty());
+        Ok(argument.definition)
+    }
+
+    mf_runtime::register_builtin_flow!("resolution_test", provider_definition, configure_provider);
+
+    #[test]
+    fn configurable_provider_receives_frozen_argument_and_metadata() {
+        let authored = definition(
+            json!({
+                "provider": {"builtin": "mf-compiler.resolution_test", "flows": {
+                    "tool": {
+                        "source": {"body": {"nodes": [call("leaf")]}},
+                        "description": "Tool description",
+                        "parameters": {"input": {"description": "Input description"}}
+                    }
+                }},
+                "leaf": {"body": {"nodes": []}}
+            }),
+            json!([call("provider")]),
+        );
+        let resolved = resolve_flows(&authored, None).unwrap();
+        assert!(child(&child(&resolved.definition)).nodes.is_empty());
     }
 }

@@ -12,8 +12,8 @@ use mf_compiler::{
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
 
-fn text_tool(annotation: Option<&str>) -> Value {
-    let mut definition = json!({
+fn text_tool() -> Value {
+    json!({
         "version": "2026-11-01",
         "dependencies": {},
         "nodes": [
@@ -31,15 +31,11 @@ fn text_tool(annotation: Option<&str>) -> Value {
             }}
         ],
         "outputs": [{"name": "content", "node": "format", "port": "content"}]
-    });
-    if let Some(annotation) = annotation {
-        definition["annotation"] = json!(annotation);
-    }
-    definition
+    })
 }
 
-fn structured_tool(annotation: Option<&str>) -> Value {
-    let mut definition = json!({
+fn structured_tool() -> Value {
+    json!({
         "version": "2026-11-01",
         "dependencies": {},
         "nodes": [
@@ -60,11 +56,7 @@ fn structured_tool(annotation: Option<&str>) -> Value {
             {"name": "doubled", "node": "calculate", "port": "doubled"},
             {"name": "original", "node": "calculate", "port": "original"}
         ]
-    });
-    if let Some(annotation) = annotation {
-        definition["annotation"] = json!(annotation);
-    }
-    definition
+    })
 }
 
 fn calls() -> Value {
@@ -88,7 +80,8 @@ fn parent(calls: Value) -> Value {
             "llm": {"package": "mfn-llm", "path": common::crates_dir().join("builtin-nodes/llm")}
         },
         "flows": {"uses": {"builtin": "mfn-llm.tool-uses", "flows": {
-            "greet": {"path": "flows/greet.json"}, "stats": {"path": "flows/stats.json"}
+            "greet": {"source": {"path": "flows/greet.json"}, "description": "Greet a person by name."},
+            "stats": {"source": {"path": "flows/stats.json"}, "description": "Calculate a value and its multiple."}
         }}},
         "nodes": [
             {"id": "requests", "kind": "builtin.constant", "config": {"value": calls}},
@@ -100,16 +93,8 @@ fn parent(calls: Value) -> Value {
 
 fn write_fixture(root: &Path, parent_definition: Value) -> std::path::PathBuf {
     fs::create_dir(root.join("flows")).unwrap();
-    fs::write(
-        root.join("flows/greet.json"),
-        text_tool(Some("Greet a person by name.")).to_string(),
-    )
-    .unwrap();
-    fs::write(
-        root.join("flows/stats.json"),
-        structured_tool(Some("Calculate a value and its multiple.")).to_string(),
-    )
-    .unwrap();
+    fs::write(root.join("flows/greet.json"), text_tool().to_string()).unwrap();
+    fs::write(root.join("flows/stats.json"), structured_tool().to_string()).unwrap();
     let definition = root.join("workflow.json");
     fs::write(&definition, parent_definition.to_string()).unwrap();
     definition
@@ -220,7 +205,7 @@ fn review_optional_content_output_is_encoded_as_structured_json() {
         root.path(),
         parent(json!([{"id": "optional", "name": "greet", "arguments": {"name": "Alice"}}])),
     );
-    let mut greet = text_tool(Some("Greet a person by name."));
+    let mut greet = text_tool();
     greet["outputs"][0]["optional"] = json!(true);
     fs::write(root.path().join("flows/greet.json"), greet.to_string()).unwrap();
     let (_, _, outputs) = execute_source(&definition);
@@ -231,55 +216,45 @@ fn review_optional_content_output_is_encoded_as_structured_json() {
 }
 
 #[test]
-fn flow_tool_annotations_and_definition_versions_are_required() {
-    let current = WorkflowDefinition::from_json(
-        &json!({"version": "2026-11-01", "dependencies": {}, "nodes": []}).to_string(),
-    )
-    .unwrap();
-    assert_eq!(current.annotation, None);
-    let annotated = WorkflowDefinition::from_json(
-        &json!({
-            "version": "2026-11-01",
-            "annotation": "Optional workflow documentation.",
+fn tool_bindings_require_descriptions_but_children_need_no_new_version_or_annotation() {
+    for version in ["2026-10-28", "2026-11-01"] {
+        let annotated = json!({
+            "version": version,
+            "annotation": "Documentation belongs to the caller binding.",
             "dependencies": {},
             "nodes": []
-        })
-        .to_string(),
-    )
-    .unwrap();
-    assert_eq!(
-        annotated.annotation.as_deref(),
-        Some("Optional workflow documentation.")
-    );
+        });
+        assert!(
+            WorkflowDefinition::from_json(&annotated.to_string()).is_err(),
+            "top-level annotation must be rejected for {version}"
+        );
+    }
 
-    let old = json!({"version": "2026-10-28", "annotation": "Too early.", "dependencies": {}, "nodes": []});
-    assert!(
-        WorkflowDefinition::from_json(&old.to_string())
-            .unwrap_err()
-            .to_string()
-            .contains("2026-11-01")
-    );
-
-    for annotation in [None, Some(" \n\t")] {
+    for description in [None, Some(" \n\t")] {
         let root = tempfile::tempdir().unwrap();
-        let definition = write_fixture(root.path(), parent(json!([])));
-        fs::write(
-            root.path().join("flows/greet.json"),
-            text_tool(annotation).to_string(),
-        )
-        .unwrap();
+        let mut caller = parent(json!([]));
+        let binding = &mut caller["flows"]["uses"]["flows"]["greet"];
+        if let Some(description) = description {
+            binding["description"] = json!(description);
+        } else {
+            binding.as_object_mut().unwrap().remove("description");
+        }
+        let definition = write_fixture(root.path(), caller);
         let error = load_workflow(&definition).err().unwrap().to_string();
-        assert!(error.contains("nonblank annotation"), "{error}");
+        assert!(error.contains("nonblank binding description"), "{error}");
         assert!(error.contains("greet"), "{error}");
     }
 
     let root = tempfile::tempdir().unwrap();
-    let definition = write_fixture(root.path(), parent(json!([])));
-    let mut old_child = text_tool(Some("Valid annotation, unsupported version."));
+    let definition = write_fixture(
+        root.path(),
+        parent(json!([{"id": "old", "name": "greet", "arguments": {"name": "Alice"}}])),
+    );
+    let mut old_child = text_tool();
     old_child["version"] = json!("2026-10-28");
     fs::write(root.path().join("flows/greet.json"), old_child.to_string()).unwrap();
-    let error = load_workflow(&definition).err().unwrap().to_string();
-    assert!(error.contains("2026-11-01"), "{error}");
+    let (_, _, outputs) = execute_source(&definition);
+    assert_eq!(outputs["results"][0]["content"], "Hello, Alice!");
 }
 
 #[test]
@@ -289,7 +264,6 @@ fn flow_tool_bodies_reject_multiple_startups_stdin_and_streaming_interfaces() {
         (
             json!({
                 "version": "2026-11-01",
-                "annotation": "Two startup nodes.",
                 "dependencies": {},
                 "nodes": [
                     {"id": "first", "kind": "builtin.constant", "config": {"value": "first"}},
@@ -302,7 +276,6 @@ fn flow_tool_bodies_reject_multiple_startups_stdin_and_streaming_interfaces() {
         (
             json!({
                 "version": "2026-11-01",
-                "annotation": "Reads standard input.",
                 "dependencies": {},
                 "nodes": [{"id": "read", "kind": "builtin.readline"}],
                 "outputs": [{"name": "content", "node": "read", "port": "line"}]
@@ -326,7 +299,6 @@ fn flow_tool_bodies_reject_multiple_startups_stdin_and_streaming_interfaces() {
         root.path().join("flows/greet.json"),
         json!({
             "version": "2026-11-01",
-            "annotation": "Streaming is not a terminal tool interface.",
             "execution": {},
             "dependencies": {},
             "nodes": [{"id": "source", "kind": "builtin.constant", "config": {"value": "text"}}],
@@ -350,7 +322,7 @@ fn tool_argument_errors_and_child_failures_recover_without_executing_other_route
             {"id":"failure", "name":"stats", "arguments":{"value":1}}
         ])),
     );
-    let mut failing = structured_tool(Some("Always fails."));
+    let mut failing = structured_tool();
     failing["nodes"][1]["config"]["code"]["doubled"] = json!("value / 0");
     fs::write(root.path().join("flows/stats.json"), failing.to_string()).unwrap();
     let (_, _, outputs) = execute_source(&definition);
@@ -423,7 +395,16 @@ fn empty_tool_uses_routes_every_call_to_the_unknown_fallback() {
 #[test]
 fn generated_runner_matches_memory_after_all_flow_sources_and_build_are_removed() {
     let root = tempfile::tempdir().unwrap();
-    let definition = write_fixture(root.path(), parent(calls()));
+    let mut requests = calls();
+    requests.as_array_mut().unwrap().push(json!({
+        "id": "inline", "name": "add", "arguments": {"left": 2, "right": 3}
+    }));
+    let mut caller = parent(requests);
+    caller["flows"]["uses"]["flows"]["add"] = json!({
+        "source": {"body": addition_body()}, "description": "Add two integers.",
+        "parameters": {"add.left": {"description": "First operand."}}
+    });
+    let definition = write_fixture(root.path(), caller);
     let (_plan, _resolved, expected) = execute_source(&definition);
     let output = root.path().join("runner");
     let build = root.path().join("build");
@@ -592,12 +573,12 @@ fn builtin_configuration_and_metadata_errors_keep_typed_boundaries() {
     for source in [
         json!({"builtin":"mfn-llm.agent-turn", "config":{"unexpected":true}}),
         json!({"builtin":"mfn-llm.tool-uses", "config":{"unexpected":true}}),
-        json!({"builtin":"mfn-llm.tool-uses", "flows":{"else":{"builtin":"mfn-llm.agent-turn"}}}),
+        json!({"builtin":"mfn-llm.tool-uses", "flows":{"else":{"source":{"builtin":"mfn-llm.agent-turn"},"description":"Invalid reserved tool name."}}}),
     ] {
         let definition = WorkflowDefinition::from_json(&json!({"version":"2026-11-01", "dependencies":{}, "flows":{"child":source}, "nodes":[{"id":"child", "kind":"workflow.call", "config":{"flow":"child"}}]}).to_string()).unwrap();
         assert!(mf_compiler::compile_definition(&definition, &registry).is_err());
     }
-    let metadata = json!({"subgraph":{"flow":"tool", "definition":text_tool(Some("Description"))}, "name":"tool", "annotation":"Description"}).to_string();
+    let metadata = json!({"subgraph":{"flow":"tool", "definition":text_tool()}, "name":"tool", "description":"Description"}).to_string();
     assert!(
         mf_compiler::instantiate_metadata_with_metadata(&registry, "x", "missing", &metadata)
             .is_err()
@@ -628,6 +609,281 @@ fn builtin_configuration_and_metadata_errors_keep_typed_boundaries() {
     )
     .unwrap();
     assert!(prepared.metadata.ports.inputs.is_empty());
+}
+
+fn addition_body() -> Value {
+    json!({
+        "nodes": [{"id": "add", "kind": "builtin.code", "config": {
+            "language": "cel", "inputs": {"left": "int", "right": "int"},
+            "code": {"sum": "left + right"}
+        }}],
+        "outputs": [{"name": "sum", "node": "add", "port": "sum"}]
+    })
+}
+
+fn builtin_addition() -> Result<WorkflowDefinition, mf_runtime::DefinitionParseError> {
+    let mut definition = addition_body();
+    definition["version"] = json!("2026-10-28");
+    definition["dependencies"] = json!({});
+    WorkflowDefinition::from_json(&definition.to_string())
+}
+
+mf_runtime::register_builtin_flow!("test-addition", builtin_addition);
+
+fn agent_parent(flows: Value) -> Value {
+    json!({
+        "version": "2026-11-01", "dependencies": {},
+        "flows": {"agent": {"builtin": "mfn-llm.agent", "flows": flows}},
+        "nodes": [{"id": "agent", "kind": "workflow.call", "config": {"flow": "agent"}}],
+        "outputs": [{"name": "text", "node": "agent", "port": "text"},
+                    {"name": "status", "node": "agent", "port": "status"}]
+    })
+}
+
+#[test]
+fn inline_single_code_tool_exposes_exact_schema_and_maps_short_arguments() {
+    use mfn_llm::test_support::{Reply, Server};
+    let mut first = Reply::text("");
+    let mut response: Value = serde_json::from_str(&first.body).unwrap();
+    response["choices"][0]["message"]["tool_calls"] = json!([
+        {"id": "addition", "type": "function", "function": {
+            "name": "add", "arguments": "{\"left\":2,\"right\":3}"
+        }}
+    ]);
+    response["choices"][0]["finish_reason"] = json!("tool_calls");
+    first.body = response.to_string();
+    let server = Server::start(vec![first, Reply::text("Five")]);
+    let definition = WorkflowDefinition::from_json(
+        &agent_parent(json!({
+            "add": {
+                "source": {"body": addition_body()}, "description": "Add two integers.",
+                "parameters": {
+                    "add.left": {"description": "First operand."},
+                    "add.right": {"description": "Second operand."}
+                }
+            }
+        }))
+        .to_string(),
+    )
+    .unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let outputs = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_with_inputs(
+            mf_runtime::WorkflowArguments::try_from(json!({
+                "agent.params.prompt": "Add two and three", "agent.params.model": "example-model",
+                "agent.params.base_url": server.base_url, "agent.params.api_key": "synthetic"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(outputs["text"].as_str(), Some("Five"));
+    assert_eq!(outputs["status"].as_str(), Some("succeeded"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].body["tools"],
+        json!([{
+            "type": "function", "function": {
+                "name": "add", "description": "Add two integers.",
+                "parameters": {
+                    "type": "object", "properties": {
+                        "left": {"type": "integer", "description": "First operand."},
+                        "right": {"type": "integer", "description": "Second operand."}
+                    },
+                    "required": ["left", "right"], "additionalProperties": false
+                }
+            }
+        }])
+    );
+    let result = &requests[1].body["messages"][2];
+    assert_eq!(result["role"], "tool");
+    assert_eq!(result["tool_call_id"], "addition");
+    assert_eq!(
+        serde_json::from_str::<Value>(result["content"].as_str().unwrap()).unwrap(),
+        json!({"sum": 5})
+    );
+}
+
+#[test]
+fn inline_multi_node_body_preserves_input_bindings_through_roundtrip_and_execution() {
+    let mut caller = parent(json!([
+        {"id": "addition", "name": "greet", "arguments": {"left": 2, "right": 3}}
+    ]));
+    let body = json!({
+        "nodes": [
+            {"id": "params", "kind": "builtin.parameters", "config": {"parameters": {
+                "left": {"type": "int", "secret": false},
+                "right": {"type": "int", "secret": false}
+            }}},
+            {"id": "add", "kind": "builtin.code", "config": {
+                "language": "cel", "inputs": {"left": "int", "right": "int"},
+                "code": {"sum": "left + right"}
+            }, "inputs": {
+                "left": {"from": {"node": "params", "port": "left"}},
+                "right": {"from": {"node": "params", "port": "right"}}
+            }}
+        ],
+        "edges": [],
+        "outputs": [{"name": "sum", "node": "add", "port": "sum"}],
+        "clusters": []
+    });
+    caller["flows"]["uses"]["flows"]["greet"] = json!({
+        "source": {"body": body}, "description": "Add two integers."
+    });
+    let parsed = WorkflowDefinition::from_json(&caller.to_string()).unwrap();
+    let encoded = serde_json::to_value(&parsed).unwrap();
+    let roundtripped_body = &encoded["flows"]["uses"]["flows"]["greet"]["source"]["body"];
+    assert_eq!(
+        roundtripped_body["nodes"][1]["inputs"],
+        body["nodes"][1]["inputs"]
+    );
+    assert_eq!(
+        WorkflowDefinition::from_json(&encoded.to_string()).unwrap(),
+        parsed
+    );
+    let root = tempfile::tempdir().unwrap();
+    let path = write_fixture(root.path(), encoded);
+    let (_, _, outputs) = execute_source(&path);
+    assert_eq!(
+        serde_json::from_str::<Value>(outputs["results"][0]["content"].as_str().unwrap()).unwrap(),
+        json!({"sum": 5})
+    );
+}
+
+#[test]
+fn builtin_tool_source_uses_caller_description_and_short_arguments() {
+    let mut caller = parent(json!([
+        {"id": "addition", "name": "greet", "arguments": {"left": 2, "right": 3}}
+    ]));
+    caller["flows"]["uses"]["flows"]["greet"] = json!({
+        "source": {"builtin": "mf-compiler.test-addition"},
+        "description": "Add using a provider-owned Flow.",
+        "parameters": {"add.left": {"description": "First operand."}}
+    });
+    let root = tempfile::tempdir().unwrap();
+    let path = write_fixture(root.path(), caller);
+    let (_, _, outputs) = execute_source(&path);
+    assert_eq!(
+        serde_json::from_str::<Value>(outputs["results"][0]["content"].as_str().unwrap()).unwrap(),
+        json!({"sum": 5})
+    );
+    let builtin = builtin_addition().unwrap();
+    assert!(
+        serde_json::to_value(builtin)
+            .unwrap()
+            .get("description")
+            .is_none()
+    );
+}
+
+#[test]
+fn tool_parameter_descriptions_reject_unknown_or_unqualified_input_names() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for builtin in ["mfn-llm.agent", "mfn-llm.tool-uses"] {
+        for parameter in ["left", "add.missing"] {
+            let mut caller = agent_parent(json!({
+                "add": {"source": {"body": addition_body()}, "description": "Add two integers.",
+                        "parameters": {parameter: {"description": "Unknown input."}}}
+            }));
+            caller["flows"]["agent"]["builtin"] = json!(builtin);
+            caller["outputs"] = json!([]);
+            let definition = WorkflowDefinition::from_json(&caller.to_string()).unwrap();
+            let error = compile_definition(&definition, &registry)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("unknown input"), "{error}");
+            assert!(error.contains(parameter), "{error}");
+        }
+    }
+}
+
+#[test]
+fn callers_can_describe_the_same_child_differently_without_changing_it() {
+    use mfn_llm::test_support::{Reply, Server};
+    let root = tempfile::tempdir().unwrap();
+    let path = write_fixture(
+        root.path(),
+        agent_parent(json!({
+            "friendly": {"source": {"path": "flows/greet.json"}, "description": "Offer a friendly greeting.",
+                         "parameters": {"input.name": {"description": "Friend's name."}}},
+            "formal": {"source": {"path": "flows/greet.json"}, "description": "Offer a formal greeting.",
+                       "parameters": {"input.name": {"description": "Recipient's name."}}}
+        })),
+    );
+    let original = fs::read(root.path().join("flows/greet.json")).unwrap();
+    let server = Server::start(vec![Reply::text("No tool needed")]);
+    let resolved = load_workflow(&path).unwrap();
+    fn injected_definitions(value: &Value, definitions: &mut Vec<Value>) {
+        match value {
+            Value::Object(fields) => {
+                if fields.get("kind").and_then(Value::as_str) == Some("workflow.call")
+                    && value["config"]["injected"] == true
+                {
+                    definitions.push(value["config"]["definition"].clone());
+                }
+                for value in fields.values() {
+                    injected_definitions(value, definitions);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    injected_definitions(value, definitions);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut children = Vec::new();
+    injected_definitions(
+        &serde_json::to_value(&resolved.definition).unwrap(),
+        &mut children,
+    );
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0], children[1]);
+    for child in &children {
+        assert!(child.get("description").is_none());
+        assert!(child.get("annotation").is_none());
+    }
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_resolved_definition(&resolved.definition, &registry).unwrap();
+    instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_with_inputs(
+            mf_runtime::WorkflowArguments::try_from(json!({
+                "agent.params.prompt": "Hello", "agent.params.model": "example-model",
+                "agent.params.base_url": server.base_url, "agent.params.api_key": "synthetic"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let tools = requests[0].body["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 2);
+    for (name, description, parameter_description) in [
+        ("friendly", "Offer a friendly greeting.", "Friend's name."),
+        ("formal", "Offer a formal greeting.", "Recipient's name."),
+    ] {
+        let function = &tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == name)
+            .unwrap()["function"];
+        assert_eq!(function["description"], description);
+        assert_eq!(
+            function["parameters"]["properties"]["name"]["description"],
+            parameter_description
+        );
+    }
+    assert_eq!(
+        fs::read(root.path().join("flows/greet.json")).unwrap(),
+        original
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&original).unwrap(),
+        text_tool()
+    );
 }
 
 #[test]

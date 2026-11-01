@@ -1,6 +1,5 @@
 {
   "version": "2026-11-01",
-  "annotation": "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message.",
   "dependencies": {
     "core": {
       "package": "mfn-core",

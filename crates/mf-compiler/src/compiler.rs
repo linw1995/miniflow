@@ -1379,7 +1379,6 @@ pub fn normalize_plan(
     Ok(CompiledWorkflow {
         definition: WorkflowDefinition {
             version: definition.version,
-            annotation: definition.annotation.clone(),
             execution: definition.execution.clone(),
             flows: definition.flows.clone(),
             dependencies: definition.dependencies.clone(),

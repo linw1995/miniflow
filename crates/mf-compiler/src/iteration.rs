@@ -74,7 +74,6 @@ pub fn body_definition(
     nodes.extend(config.body.nodes.iter().cloned());
     Ok(WorkflowDefinition {
         version: parent.version,
-        annotation: None,
         execution: None,
         flows: Default::default(),
         dependencies: parent.dependencies.clone(),

@@ -151,10 +151,10 @@ fn agent_turn_definition_is_owned_and_registered_by_llm() {
     let definition = (registry.get("mfn-llm.agent-turn").unwrap().definition)().unwrap();
     assert_eq!(definition, mfn_llm::flows::agent_turn_definition().unwrap());
     assert!(
-        definition
-            .annotation
-            .as_deref()
-            .is_some_and(|annotation| !annotation.trim().is_empty())
+        serde_json::to_value(&definition)
+            .unwrap()
+            .get("annotation")
+            .is_none()
     );
     assert!(
         definition

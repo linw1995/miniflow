@@ -1045,10 +1045,14 @@ and dependency declarations. Factories must not execute the Flow or perform busi
 The catalog exposes definitions independently of compilation and execution.
 
 Configurable providers use `register_builtin_flow!("example", definition, expand)`. The expansion
-function receives a JSON configuration and a `BTreeMap<String, WorkflowDefinition>` of already
-resolved injected Flows, and returns a definition or `NodeBuildError`. Injection paths are resolved
-relative to the caller before expansion. The resolver then freezes all generated calls and applies
-the caller's provider selections. Zero-argument registrations remain unchanged and reject unexpected
+function receives a JSON configuration and a `BTreeMap<String, ResolvedFlowArgument>` of already
+resolved injected Flows, and returns a definition or `NodeBuildError`. Each argument retains its frozen
+`definition` and the builder-supplied optional `description` and qualified `parameters` descriptions.
+These values belong to the binding, never mutate the source Flow, and carry no runtime expression
+semantics. Inline bodies (including one-node bodies) inherit the caller's version and dependencies.
+Injection paths are resolved relative to the caller before expansion. The resolver then freezes all
+generated calls and applies the caller's provider selections. Zero-argument registrations remain
+unchanged and reject unexpected
 configuration/injections. Expansion is compile-time graph construction, not execution.
 
 A node that only needs a child interface can register `NodeFactory::Metadata`. Its `config.subgraph`

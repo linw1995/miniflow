@@ -1,6 +1,5 @@
 {
   "version": "2026-11-01",
-  "annotation": "Invoke the mfn-llm agent builtin with an injected calculator Flow.",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -20,7 +19,21 @@
       "builtin": "mfn-llm.agent",
       "flows": {
         "calculator": {
-          "path": "agent-calculator/calculator.json"
+          "source": {
+            "path": "agent-calculator/calculator.json"
+          },
+          "description": "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message.",
+          "parameters": {
+            "params.operation": {
+              "description": "Operation to perform: add, subtract, multiply, or divide."
+            },
+            "params.left": {
+              "description": "Left operand."
+            },
+            "params.right": {
+              "description": "Right operand; must be nonzero for division."
+            }
+          }
         }
       }
     }

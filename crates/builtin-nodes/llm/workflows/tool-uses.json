@@ -1,6 +1,5 @@
 {
   "version": "2026-11-01",
-  "annotation": "Adapt and dispatch a list of tool calls with native parallel Iteration.",
   "dependencies": {
     "core": {
       "package": "mfn-core",

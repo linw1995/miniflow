@@ -2,16 +2,32 @@
 
 ### Requirement: Describe named Flows as model tools
 
-Workflow version 2026-11-01 SHALL accept an optional top-level annotation. Tool registration SHALL
-require a nonblank annotation and SHALL publish it as the tool description. Tool names SHALL be Flow
-aliases containing 1-64 ASCII letters, digits, underscores, or hyphens. Tool arguments SHALL be
-derived from exactly one startup node. Secret inputs SHALL be hidden and require an environment or
-default source. Tool Flows SHALL have terminal interfaces without stdin or stream outputs.
+Workflow version 2026-11-01 SHALL accept injected Flow arguments containing a source and optional
+builder-supplied overall and qualified parameter descriptions. A source SHALL support a file path,
+a built-in reference, or an inline subgraph body with explicit outputs. Inline bodies SHALL inherit
+the enclosing version and provider dependencies; a single node SHALL use a one-node body.
+Descriptions SHALL be static binding metadata and SHALL NOT modify the referenced definition or
+its parameter declarations. Cluster annotations SHALL retain their display-only node-domain meaning.
+
+Tool registration SHALL require a nonblank binding description and SHALL publish it as the tool
+description. Tool names SHALL be Flow aliases containing 1-64 ASCII letters, digits, underscores,
+or hyphens. Tool arguments SHALL be derived from exactly one startup node. Builder parameter
+descriptions SHALL be merged into the matching schema properties; nonexistent input references
+SHALL fail preparation. Types and requiredness SHALL remain derived from the real interface.
+Secret inputs SHALL be hidden and require an environment or default source. Tool Flows SHALL have
+terminal interfaces without stdin or stream outputs.
 
 #### Scenario: Generate a calculator tool definition
 
-- **WHEN** a calculator Flow annotates itself and exposes `operation`, `left`, and `right`
-- **THEN** the `mfn-llm.agent` metadata adapter publishes one tool with that description and an object schema requiring those arguments
+- **WHEN** the builder binds a calculator source with an overall description and descriptions for `params.operation`, `params.left`, and `params.right`
+- **THEN** the `mfn-llm.agent` metadata adapter publishes one tool with the binding description and an object schema requiring `operation`, `left`, and `right`, including their descriptions
+- **AND** the calculator definition remains unchanged
+
+#### Scenario: Describe an inline single-node tool
+
+- **WHEN** the builder binds a one-node inline body whose `calculate` node adds integer inputs `left` and `right` and exports `sum`
+- **THEN** the tool schema exposes required integer properties `left` and `right` with the supplied descriptions
+- **AND** model arguments are qualified as `calculate.left` and `calculate.right` before invocation, returning the JSON result `{"sum":5}` for inputs 2 and 3
 
 ### Requirement: Route user Flows with an ordinary runtime task
 

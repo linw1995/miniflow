@@ -6,7 +6,8 @@ Flow contract and makes a multi-turn agent difficult to express and validate.
 
 ## What Changes
 
-- Add optional Flow annotations and use them as model-visible tool descriptions.
+- Add static builder-supplied Flow argument descriptions and parameter descriptions, without modifying referenced definitions.
+- Support inline Flow sources, including one-node subgraphs, alongside file and built-in references.
 - Derive tool JSON Schema from the single startup node of each named tool Flow.
 - Add tool-independent `builtin.router` as an ordinary registered runtime task in `mfn-core`, directly
   usable in user Flows without compiler rewriting; downstream nodes perform all work through

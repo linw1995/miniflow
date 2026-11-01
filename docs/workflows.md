@@ -5,8 +5,8 @@
 Use version `2026-11-01` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
 `outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
-display-only [node clusters](#node-clusters). Version `2026-11-01` adds the optional top-level `annotation` and
-[Router and LLM agent Flows](#router-and-llm-agent-flows).
+display-only [node clusters](#node-clusters). Version `2026-11-01` adds caller-described Flow arguments and
+inline Flow sources, used by [Router and LLM agent Flows](#router-and-llm-agent-flows).
 
 The [conditional convergence example](../examples/exclusive-inputs.json) and the [basic
 example](../examples/hello-workflow.json) use this format with annotated clusters. Existing supported versions keep their
@@ -60,9 +60,10 @@ sources in `flows`; Cargo node packages remain in `dependencies`:
 }
 ```
 
-The snippet omits the surrounding graph. Each source accepts exactly one `path` or `builtin`.
-A Flow can declare an optional top-level `annotation`; tool registration requires it, while ordinary
-calls ignore it. Paths resolve relative to their owning canonical definition file. Sources can call other sources;
+The snippet omits the surrounding graph. Each source accepts exactly one `path`, `builtin`, or
+(version `2026-11-01`) inline `body`. Paths resolve relative to their owning canonical definition file.
+Descriptions belong to the caller's Flow argument binding, not the referenced definition or its node
+clusters. Sources can call other sources;
 recursive references and more than sixteen nested calls fail. The combined Call/Loop/Iteration
 container depth is bounded at twenty. The compiler freezes resolved bodies in the executable; running,
 inspecting, and isolating a compiled call do not require the original JSON files.
@@ -170,7 +171,15 @@ Inject tool subgraphs when selecting a configurable built-in Flow:
     "agent": {
       "builtin": "mfn-llm.agent",
       "flows": {
-        "calculator": { "path": "./agent-calculator/calculator.json" }
+        "calculator": {
+          "source": { "path": "./agent-calculator/calculator.json" },
+          "description": "Perform arithmetic on two operands.",
+          "parameters": {
+            "params.operation": { "description": "Operation: add, subtract, multiply, or divide." },
+            "params.left": { "description": "Left operand." },
+            "params.right": { "description": "Right operand; nonzero for division." }
+          }
+        }
       }
     }
   },
@@ -180,15 +189,78 @@ Inject tool subgraphs when selecting a configurable built-in Flow:
 }
 ```
 
-Paths in injected sources are relative to the **caller**, not the built-in provider. Resolution
-freezes the complete injected definitions and merges their dependencies before expansion. Generated
-runners do not follow source paths at runtime. Existing zero-argument built-in registrations remain
-valid; only configurable registrations accept `config` and injected `flows`.
+Each injected Flow argument has a `source`, optional `description`, and optional `parameters` map
+of qualified input names to descriptions. These descriptions are static builder-supplied values:
+they do not change the referenced Flow, its parameter definitions, or its execution. The same source
+can be bound more than once with different descriptions. No runtime expressions or upstream output
+references are evaluated in descriptions. Cluster annotations remain display-only node-domain explanations.
 
-Give each tool a nonblank `annotation` and one startup node. The LLM adapter derives JSON Schema
-from the prepared input metadata; environment/default-backed inputs are optional, and secret inputs
-are hidden and cannot be overridden by a model. Tool aliases contain 1–64 ASCII letters, digits,
-underscores, or hyphens (`else` is reserved). Tool interfaces must be terminal and cannot read stdin.
+Paths in injected sources are relative to the **caller**, not the built-in provider. A source may
+also select a `builtin`, including an existing unmodified built-in Flow, or declare an inline `body`.
+Resolution freezes the complete injected definitions and merges their dependencies before expansion.
+Generated runners do not follow source paths at runtime. Existing zero-argument built-in registrations
+remain valid; only configurable registrations accept `config` and injected `flows`.
+
+An inline source uses a body like Loop/Iteration, with explicit nodes, connections, selected outputs,
+and optional clusters. It inherits the enclosing workflow version and provider dependencies. A single
+node is simply a one-node body; its unbound initial input ports form the callable interface without
+an extra `builtin.parameters` node. For example, this complete Flow argument defines an addition tool:
+
+```json
+{
+  "description": "Add two integers.",
+  "parameters": {
+    "calculate.left": { "description": "Left operand." },
+    "calculate.right": { "description": "Right operand." }
+  },
+  "source": {
+    "body": {
+      "nodes": [
+        {
+          "id": "calculate",
+          "kind": "builtin.code",
+          "config": {
+            "language": "cel",
+            "inputs": { "left": "int", "right": "int" },
+            "code": { "sum": "left + right" }
+          }
+        }
+      ],
+      "outputs": [{ "name": "sum", "node": "calculate", "port": "sum" }]
+    }
+  }
+}
+```
+
+The LLM adapter requires a nonblank binding `description` and exactly one startup node per tool.
+It derives JSON Schema types and requiredness from the prepared interface, and adds the builder's
+parameter descriptions. Unknown parameter names fail preparation. Qualified description keys such
+as `calculate.left` map to model-visible short names such as `left`; the argument adapter restores
+qualified names before calling the Flow. The tool's selected outputs do not become input-schema
+properties. Environment/default-backed inputs are optional, and secret inputs are hidden and cannot
+be overridden by a model. Tool aliases contain 1–64 ASCII letters, digits, underscores, or hyphens
+(`else` is reserved). Tool interfaces must be terminal and cannot read stdin.
+
+Binding the addition argument above as `add` produces this provider-neutral tool definition:
+
+```json
+{
+  "name": "add",
+  "description": "Add two integers.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "left": { "type": "integer", "description": "Left operand." },
+      "right": { "type": "integer", "description": "Right operand." }
+    },
+    "required": ["left", "right"],
+    "additionalProperties": false
+  }
+}
+```
+
+Arguments `{"left":2,"right":3}` become `{"calculate.left":2,"calculate.right":3}` at the call
+boundary. The tool result is JSON text `{"sum":5}`; `sum` is not an input-schema property.
 
 Expansion creates ordinary router gates, `workflow.call` nodes, and provider-owned
 `llm.tool_definition`, `llm.tool_arguments`, and `llm.tool_result` adapters. The first two receive

@@ -2,10 +2,10 @@ use crate::NodeRegistration;
 use snafu::Snafu;
 use std::collections::BTreeMap;
 
-/// Configurable provider expansion, supplied only resolved, frozen injected definitions.
+/// Configurable provider expansion, supplied resolved, frozen injections and their metadata.
 pub type BuiltinFlowExpansion = fn(
     serde_json::Value,
-    BTreeMap<String, crate::WorkflowDefinition>,
+    BTreeMap<String, crate::ResolvedFlowArgument>,
 ) -> Result<crate::WorkflowDefinition, crate::NodeBuildError>;
 
 /// Keeps application-owned Flow definitions discoverable without compiler dependencies on providers.

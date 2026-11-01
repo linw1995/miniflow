@@ -45,7 +45,6 @@ impl fmt::Display for DefinitionId {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkflowDefinition {
     pub version: WorkflowDefinitionVersion,
-    pub annotation: Option<String>,
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub flows: BTreeMap<String, FlowSource>,
@@ -63,8 +62,6 @@ mod wire;
 #[serde(remote = "WorkflowDefinition", deny_unknown_fields)]
 struct DefinitionFields {
     pub version: WorkflowDefinitionVersion,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub annotation: Option<String>,
     #[serde(
         default,
         deserialize_with = "deserialize_execution",
@@ -145,7 +142,7 @@ impl WorkflowDefinitionVersion {
         )
     }
 
-    pub fn supports_annotations(self) -> bool {
+    pub fn supports_flow_arguments(self) -> bool {
         matches!(self, Self::V2026_11_01)
     }
 
@@ -194,8 +191,64 @@ pub enum FlowSource {
         #[serde(default, skip_serializing_if = "Value::is_null")]
         config: Value,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        flows: BTreeMap<String, FlowSource>,
+        flows: BTreeMap<String, FlowArgument>,
     },
+    Body {
+        body: FlowBodyDefinition,
+    },
+}
+
+/// An authored injection into a configurable built-in Flow.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowArgument {
+    pub source: FlowSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, FlowParameterDescription>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowParameterDescription {
+    pub description: String,
+}
+
+/// Frozen injection passed to a provider after source resolution.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedFlowArgument {
+    pub definition: WorkflowDefinition,
+    pub description: Option<String>,
+    pub parameters: BTreeMap<String, FlowParameterDescription>,
+}
+
+/// An inline Flow inherits its enclosing version, dependencies and alias scope.
+/// Its wire form uses node-local inputs and execution edges, like a full Flow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowBodyDefinition {
+    pub nodes: Vec<NodeDefinition>,
+    pub edges: Vec<EdgeDefinition>,
+    pub control_edges: Vec<ControlEdgeDefinition>,
+    pub order_edges: Vec<OrderEdgeDefinition>,
+    pub clusters: Vec<ClusterDefinition>,
+    pub outputs: Vec<WorkflowOutputDefinition>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "FlowBodyDefinition", deny_unknown_fields)]
+struct FlowBodyFields {
+    nodes: Vec<NodeDefinition>,
+    #[serde(default)]
+    edges: Vec<EdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    control_edges: Vec<ControlEdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    order_edges: Vec<OrderEdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    clusters: Vec<ClusterDefinition>,
+    #[serde(default)]
+    outputs: Vec<WorkflowOutputDefinition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
