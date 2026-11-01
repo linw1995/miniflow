@@ -170,6 +170,11 @@ The PR coverage gate SHALL intersect current executable-line mappings with curre
 - **WHEN** a current-side changed executable line belongs to a new or renamed file
 - **THEN** its current path and line identity participate in the coverage denominator, including zero-hit lines
 
+#### Scenario: Change only test code
+
+- **WHEN** current-side changed lines belong to recognized test functions or positively evaluated `cfg(test)` items
+- **THEN** those lines are validated by executing the selected tests rather than by their own line coverage and do not enter the coverage denominator; unparseable or ambiguous test code keeps the conservative gate
+
 ### Requirement: Distinguish absent coverage from no executable change
 
 Missing, malformed, stale, or unmappable expected coverage SHALL fail validation. Missing LCOV entries SHALL NOT alone prove that changed source is non-executable. Confirmed increments without current changed executable lines SHALL report a not-applicable result rather than fabricated full coverage. Deferred-only empty selections SHALL explicitly skip Rust coverage.

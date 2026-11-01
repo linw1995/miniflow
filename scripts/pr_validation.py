@@ -198,6 +198,49 @@ def executable_items(contents):
         return None
 
 
+def test_code_lines(contents):
+    # Test bodies are validated by executing them, not by measuring their own
+    # line coverage. Parse failures prove nothing and keep the conservative gate.
+    try:
+        parsed = subprocess.run(["rust-analyzer", "parse", "--json"], input=contents,
+                                capture_output=True, text=True, timeout=30, check=True)
+        tree = json.loads(parsed.stdout)
+        source = contents.encode()
+        if tree["kind"] != "SOURCE_FILE" or tree["end"][0] != len(source):
+            return set()
+        def has_error(node):
+            return node["kind"] == "ERROR" or any(has_error(child) for child in node.get("children", []))
+        if has_error(tree):
+            return set()
+        test_attribute = re.compile(r"#\s*\[\s*(?:test|tokio\s*::\s*test|async_std\s*::\s*test)\b")
+        cfg_attribute = re.compile(r"#\s*\[\s*cfg\s*\((.*)\)\s*\]", re.DOTALL)
+        def attributes(node):
+            return [source[attr["start"][0]:attr["end"][0]].decode()
+                    for attr in node.get("children", []) if attr["kind"] == "ATTR"]
+        def test_scope(node, attrs):
+            if node["kind"] == "FN" and any(test_attribute.match(attr) for attr in attrs):
+                return True
+            for attr in attrs:
+                cfg = cfg_attribute.fullmatch(attr)
+                if cfg is None:
+                    continue
+                expression = re.sub(r'"(?:[^"\\]|\\.)*"', '""', cfg.group(1))
+                if re.search(r"\btest\b", expression) and not re.search(r"\bnot\b", expression):
+                    return True
+            return False
+        lines = set()
+        def walk(node):
+            if test_scope(node, attributes(node)):
+                lines.update(range(node["start"][1] + 1, node["end"][1] + 2))
+                return
+            for child in node.get("children", []):
+                walk(child)
+        walk(tree)
+        return lines
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
+        return set()
+
+
 def declaration_changes_only(before, after):
     previous = executable_items(before)
     return previous is not None and previous == executable_items(after)
@@ -223,10 +266,15 @@ def evaluate_coverage(root, current, comparison, plan, report):
         if changes:
             raise ValueError("Rust source changes have no selected test scope")
         mappings = {}
-    missing, uncovered, non_executable = [], {}, []
+    missing, uncovered, non_executable, test_only = [], {}, [], []
     total = covered = 0
     for path, changed in sorted(changes.items()):
         contents = command(root, "git", "show", f"{current['merge']}:{path}").splitlines()
+        test_lines = test_code_lines("\n".join(contents))
+        changed = changed - test_lines
+        if not changed:
+            test_only.append(path)
+            continue
         if path not in mappings:
             after = "\n".join(contents)
             try:
@@ -252,7 +300,7 @@ def evaluate_coverage(root, current, comparison, plan, report):
     target = current["signature"]["coverage_target"]
     return {"base": comparison["base"], "head": current["merge"], "tree": current["tree"],
             "covered": covered, "total": total, "target": target, "uncovered": uncovered,
-            "non_executable_files": non_executable,
+            "non_executable_files": non_executable, "test_only_files": test_only,
             "status": "not_applicable" if total == 0 else "passed" if covered * 100 >= target * total else "failed"}
 
 

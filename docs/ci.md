@@ -276,10 +276,13 @@ With `tests` precision (the default for local planning and enabled in PR CI), sy
 comparison first selects only added or modified test functions when all other source items
 remain unchanged. This works offline without a coverage graph. It resolves ordinary inline
 and external modules in library, binary, and integration-test targets, and recognizes
-`#[test]`, `#[tokio::test]`, and `#[async_std::test]`. Deleted or renamed tests, helper changes,
-unrecognized attributes, ambiguous module layouts (including `#[path]` and `include!`),
-and tests referenced as helpers retain the existing graph/package fallback. Exact identities
-are checked against the runnable head inventory before execution; mismatches restore the
+`#[test]`, `#[tokio::test]`, and `#[async_std::test]`. Added or modified test functions in a
+file that also changes other items still join the final exact selection, so new test bodies
+always execute even when a coverage graph narrows that file. Deleted or renamed tests, helper
+changes, unrecognized attributes, ambiguous module layouts (including `#[path]` and
+`include!`), and tests referenced as helpers retain the existing graph/package fallback;
+unproven changed test identities widen to package scope. Exact identities are checked
+against the runnable head inventory before execution; mismatches restore the
 conservative baseline. Package precision disables both source and coverage refinement.
 
 A compatible coverage graph can also narrow production changes
@@ -453,7 +456,10 @@ Changed executable items, inline modules, unknown attributes, and macro invocati
 do not qualify. The allowed built-in attributes
 cannot be shadowed by user-defined attributes; see the [Rust name-resolution rules](https://doc.rust-lang.org/reference/names/name-resolution.html). Other unmapped Rust source needs a suitable instrumented build or an
 explicit diagnosis; cumulative reruns do not automatically waive this condition.
-A confirmed zero denominator is `not_applicable`, not 100% coverage.
+Changed lines inside recognized test functions and positively evaluated `cfg(test)`
+items are validated by execution rather than by their own line coverage, so they do
+not enter the denominator; parse failures prove nothing and keep the conservative
+gate. A confirmed zero denominator is `not_applicable`, not 100% coverage.
 
 The incremental target is configured once as `PR_COVERAGE_TARGET` in CI. The
 migration sets 95%, above the verified effective 94.89% Codecov auto target on
