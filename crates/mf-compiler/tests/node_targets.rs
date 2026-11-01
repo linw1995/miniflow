@@ -1,5 +1,7 @@
 #![cfg(feature = "codegen")]
+extern crate mfn_code as _;
 extern crate mfn_core as _;
+extern crate mfn_llm as _;
 
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
 use mf_runtime::{Inputs, NodeMetadata, NodeTarget, Outputs};
@@ -163,6 +165,39 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
             .contains("unavailable unrelated resource")
     );
     assert_eq!(EXECUTIONS.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn injected_flow_bodies_follow_their_owning_node_target() {
+    let _guard = PREPARATION_LOCK.lock().unwrap();
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/chat-calculator-flow.json");
+    let resolved = mf_compiler::load_workflow(&example).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = mf_compiler::compile_resolved_definition(&resolved.definition, &registry).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(description.injected_bodies.len(), 1);
+    let artifacts = plan.generate_execution_plans(&registry).unwrap();
+    let targets: Vec<NodeTarget> = serde_json::from_str(&artifacts.node_targets_json).unwrap();
+    let owner = description.injected_bodies[0]
+        .first()
+        .expect("injected body has a root")
+        .clone();
+    assert!(targets.iter().any(|target| target.id == owner));
+    for target in &targets {
+        if target.id == owner {
+            assert_eq!(
+                target.description.injected_bodies,
+                description.injected_bodies
+            );
+        } else {
+            assert!(
+                target.description.injected_bodies.is_empty(),
+                "{}",
+                target.id
+            );
+        }
+    }
 }
 
 #[test]

@@ -690,10 +690,13 @@ Aligned ports use a straight connection when collision checks allow it, includin
 Press `c` to collapse or
 expand the selected node's cluster; collapsed clusters render as one aggregate node, remap external
 connections, and hide internal connections. On a node with a described Loop, Iteration, or Call body,
-`c` toggles that body and `l` expands it inside the parent node. Bodies start expanded (`[-]`);
-expanded bodies keep parent nodes and external connections visible and support nested expansion.
-Collapsed bodies (`[+]`) can be reopened without leaving the parent graph.
-Tab selects body nodes alongside parent nodes. `h` or Esc collapses the selected expanded body or its
+`c` cycles that body through expanded (`[-]`), summary (`[~]`), and fully collapsed (`[+]`) states;
+`l` expands it inside the parent node. Bodies start expanded, keeping parent nodes and external
+connections visible and supporting nested expansion. Summary states keep the called subgraph folded:
+a call that received injected Flows draws those injected subgraphs in place of the call body, while
+other calls list every input the parent passes in, one row per input. Fully collapsed bodies show
+neither the subgraph nor its inputs and can be reopened without leaving the parent graph.
+Tab selects body nodes alongside parent nodes. `h` or Esc fully collapses the selected visible body or its
 enclosing body; Esc closes visible Details first. `[` and `]` inspect older and newer retained pass
 frames or Iteration items for the selected node's scope, with nested bodies following their enclosing pass.
 New lifecycle and Iteration detail events focus and reveal the deepest visible node; collapsed bodies focus their owner.

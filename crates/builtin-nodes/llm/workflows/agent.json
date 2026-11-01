@@ -1,0 +1,744 @@
+{
+  "version": "2026-11-01",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "version": "=0.1.0"
+    },
+    "code": {
+      "package": "mfn-code",
+      "version": "=0.1.0"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "version": "=0.1.0"
+    }
+  },
+  "flows": {
+    "agent-turn": {
+      "builtin": "mfn-llm.agent-turn"
+    },
+    "tool-uses": {
+      "builtin": "mfn-llm.tool-uses"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string",
+            "default": ""
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "tools",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "initial_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "system": "string",
+          "history": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        }
+      }
+    },
+    {
+      "id": "initial_usages",
+      "kind": "builtin.constant",
+      "config": {
+        "value": []
+      }
+    },
+    {
+      "id": "initial_status",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "running"
+      }
+    },
+    {
+      "id": "initial_text",
+      "kind": "builtin.constant",
+      "config": {
+        "value": ""
+      }
+    },
+    {
+      "id": "initial_outcome",
+      "kind": "builtin.constant",
+      "config": {
+        "value": ""
+      }
+    },
+    {
+      "id": "initial_error",
+      "kind": "builtin.constant",
+      "config": {
+        "value": ""
+      }
+    },
+    {
+      "id": "initial_done",
+      "kind": "builtin.constant",
+      "config": {
+        "value": false
+      }
+    },
+    {
+      "id": "repeat",
+      "kind": "workflow.loop",
+      "loop": {
+        "max_iterations": 8,
+        "variables": [
+          {
+            "name": "messages",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "tools",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "model",
+            "type": "string"
+          },
+          {
+            "name": "base_url",
+            "type": "string"
+          },
+          {
+            "name": "api_key",
+            "type": "string"
+          },
+          {
+            "name": "usages",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "status",
+            "type": "string"
+          },
+          {
+            "name": "text",
+            "type": "string"
+          },
+          {
+            "name": "outcome",
+            "type": "string"
+          },
+          {
+            "name": "error",
+            "type": "string"
+          },
+          {
+            "name": "done",
+            "type": "bool"
+          }
+        ],
+        "until": {
+          "variable": "done",
+          "operator": "eq",
+          "value": true
+        },
+        "body": {
+          "nodes": [
+            {
+              "id": "turn",
+              "kind": "workflow.call",
+              "config": {
+                "flow": "agent-turn"
+              },
+              "inputs": {
+                "params.messages": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                },
+                "params.tools": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "tools"
+                  }
+                },
+                "params.model": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "model"
+                  }
+                },
+                "params.base_url": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "base_url"
+                  }
+                },
+                "params.api_key": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "api_key"
+                  }
+                }
+              }
+            },
+            {
+              "id": "collect_usages",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "left": {
+                    "list": "object"
+                  },
+                  "right": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "value": "left + right"
+                }
+              },
+              "inputs": {
+                "left": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "usages"
+                  }
+                },
+                "right": {
+                  "from": {
+                    "node": "turn",
+                    "port": "usages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "decision",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "status": "string",
+                  "outcome": "string"
+                },
+                "code": {
+                  "status": "status == 'failed' || outcome == 'failed' ? 'failed' : outcome == 'completed' ? 'succeeded' : outcome == 'tool_calls' ? 'running' : 'failed'",
+                  "done": "status == 'failed' || outcome != 'tool_calls'",
+                  "proceed": "status != 'failed' && outcome == 'tool_calls'"
+                }
+              },
+              "inputs": {
+                "status": {
+                  "from": {
+                    "node": "turn",
+                    "port": "status"
+                  }
+                },
+                "outcome": {
+                  "from": {
+                    "node": "turn",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "route",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "tool_calls",
+                    "condition": {
+                      "source": {
+                        "output": "decision.proceed",
+                        "path": ""
+                      },
+                      "operator": "eq",
+                      "value": true
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "append_assistant",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "messages": {
+                    "list": "object"
+                  },
+                  "message": "object"
+                },
+                "code": {
+                  "messages": "messages + [dyn(message)]"
+                }
+              },
+              "inputs": {
+                "messages": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                },
+                "message": {
+                  "from": {
+                    "node": "turn",
+                    "port": "message"
+                  }
+                }
+              }
+            },
+            {
+              "id": "dispatch",
+              "kind": "workflow.call",
+              "config": {
+                "flow": "tool-uses"
+              },
+              "inputs": {
+                "params.calls": {
+                  "from": {
+                    "node": "turn",
+                    "port": "tool_calls"
+                  }
+                }
+              }
+            },
+            {
+              "id": "tool_messages",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "results": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "messages": "results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
+                }
+              },
+              "inputs": {
+                "results": {
+                  "from": {
+                    "node": "dispatch",
+                    "port": "results"
+                  }
+                }
+              }
+            },
+            {
+              "id": "continued_messages",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "assistant": {
+                    "list": "object"
+                  },
+                  "tools": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "messages": "assistant + tools"
+                }
+              },
+              "inputs": {
+                "assistant": {
+                  "from": {
+                    "node": "append_assistant",
+                    "port": "messages"
+                  }
+                },
+                "tools": {
+                  "from": {
+                    "node": "tool_messages",
+                    "port": "messages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "preserve_messages",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_messages",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "messages"
+              },
+              "inputs": {
+                "value": {
+                  "exclusive": [
+                    {
+                      "node": "continued_messages",
+                      "port": "messages"
+                    },
+                    {
+                      "node": "preserve_messages",
+                      "port": "value"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "save_usages",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "usages"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "collect_usages",
+                    "port": "value"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_status",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "status"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "decision",
+                    "port": "status"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_text",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "text"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "turn",
+                    "port": "text"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_outcome",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "outcome"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "turn",
+                    "port": "outcome"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_error",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "error"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "turn",
+                    "port": "error"
+                  }
+                }
+              }
+            },
+            {
+              "id": "save_done",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "done"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "decision",
+                    "port": "done"
+                  }
+                }
+              }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "decision",
+              "from_output": "proceed",
+              "to_node": "route"
+            },
+            {
+              "from_node": "route",
+              "from_output": "tool_calls",
+              "to_node": "append_assistant"
+            },
+            {
+              "from_node": "append_assistant",
+              "to_node": "dispatch"
+            },
+            {
+              "from_node": "route",
+              "from_output": "else",
+              "to_node": "preserve_messages"
+            }
+          ]
+        },
+        "stream_outputs": {
+          "answer": {
+            "node": "turn",
+            "port": "answer"
+          }
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "initial_messages",
+            "port": "messages"
+          }
+        },
+        "tools": {
+          "from": {
+            "node": "tools",
+            "port": "value"
+          }
+        },
+        "model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "initial_usages",
+            "port": "value"
+          }
+        },
+        "status": {
+          "from": {
+            "node": "initial_status",
+            "port": "value"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "initial_text",
+            "port": "value"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "initial_outcome",
+            "port": "value"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "initial_error",
+            "port": "value"
+          }
+        },
+        "done": {
+          "from": {
+            "node": "initial_done",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "result",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "status": "string",
+          "text": "string",
+          "outcome": "string",
+          "error": "string",
+          "done": "bool",
+          "usages": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "status": "done && status == 'succeeded' && outcome == 'completed' ? 'succeeded' : 'failed'",
+          "text": "text",
+          "usages": "usages",
+          "error": "!done && outcome == 'tool_calls' ? 'Agent reached the 8-iteration limit with tool calls still pending.' : error != '' ? error : done && status == 'succeeded' && outcome == 'completed' ? '' : 'Agent stopped with outcome `' + outcome + '`.'"
+        }
+      },
+      "inputs": {
+        "status": {
+          "from": {
+            "node": "repeat",
+            "port": "status"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "repeat",
+            "port": "text"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "repeat",
+            "port": "outcome"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "repeat",
+            "port": "error"
+          }
+        },
+        "done": {
+          "from": {
+            "node": "repeat",
+            "port": "done"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "repeat",
+            "port": "usages"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "repeat",
+      "port": "answer",
+      "optional": true
+    },
+    {
+      "name": "status",
+      "node": "result",
+      "port": "status"
+    },
+    {
+      "name": "text",
+      "node": "result",
+      "port": "text"
+    },
+    {
+      "name": "usages",
+      "node": "result",
+      "port": "usages"
+    },
+    {
+      "name": "error",
+      "node": "result",
+      "port": "error",
+      "optional": true
+    }
+  ]
+}

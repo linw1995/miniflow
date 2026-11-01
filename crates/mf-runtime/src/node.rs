@@ -1338,6 +1338,7 @@ impl PreparedNode {
 
 #[derive(Clone, Copy, Debug)]
 pub enum NodeFactory {
+    Metadata(fn(Value, crate::SubgraphMetadata) -> Result<PreparedNode, NodeBuildError>),
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
     Subgraph(
         fn(&str, Value, Value, crate::PreparedSubgraph) -> Result<PreparedNode, NodeBuildError>,
@@ -1354,10 +1355,12 @@ impl NodeRegistration {
     pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
             NodeFactory::Plain(factory) => factory(config),
-            NodeFactory::Subgraph(_) => crate::NodeInvalidSubgraphSnafu {
-                message: format!("node `{}` requires a prepared body", self.kind),
+            NodeFactory::Subgraph(_) | NodeFactory::Metadata(_) => {
+                crate::NodeInvalidSubgraphSnafu {
+                    message: format!("node `{}` requires a prepared body", self.kind),
+                }
+                .fail()
             }
-            .fail(),
         }
     }
 
@@ -1370,7 +1373,7 @@ impl NodeRegistration {
     ) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
             NodeFactory::Subgraph(factory) => factory(id, config, options, body),
-            NodeFactory::Plain(_) => crate::NodeInvalidSubgraphSnafu {
+            NodeFactory::Plain(_) | NodeFactory::Metadata(_) => crate::NodeInvalidSubgraphSnafu {
                 message: format!("node `{}` does not accept a prepared body", self.kind),
             }
             .fail(),

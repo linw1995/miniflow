@@ -2,11 +2,27 @@ use crate::NodeRegistration;
 use snafu::Snafu;
 use std::collections::BTreeMap;
 
+/// Configurable provider expansion, supplied resolved, frozen injections and their metadata.
+pub type BuiltinFlowExpansion = fn(
+    serde_json::Value,
+    BTreeMap<String, crate::ResolvedFlowArgument>,
+) -> Result<crate::WorkflowDefinition, crate::NodeBuildError>;
+
+/// Pure provider expansion performed only after injected interfaces can be described.
+/// Implementations must not read environment values, perform I/O, or execute tasks.
+pub type BuiltinFlowMetadataExpansion =
+    fn(
+        serde_json::Value,
+        BTreeMap<String, crate::DescribedFlowArgument>,
+    ) -> Result<crate::WorkflowDefinition, crate::NodeBuildError>;
+
 /// Keeps application-owned Flow definitions discoverable without compiler dependencies on providers.
 pub struct BuiltinFlowRegistration {
     package: &'static str,
     name: &'static str,
     pub definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+    pub configure: Option<BuiltinFlowExpansion>,
+    pub configure_metadata: Option<BuiltinFlowMetadataExpansion>,
 }
 
 impl BuiltinFlowRegistration {
@@ -20,6 +36,37 @@ impl BuiltinFlowRegistration {
             package,
             name,
             definition,
+            configure: None,
+            configure_metadata: None,
+        }
+    }
+    pub const fn configurable(
+        package: &'static str,
+        name: &'static str,
+        definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+        configure: BuiltinFlowExpansion,
+    ) -> Self {
+        Self {
+            package,
+            name,
+            definition,
+            configure: Some(configure),
+            configure_metadata: None,
+        }
+    }
+
+    pub const fn metadata(
+        package: &'static str,
+        name: &'static str,
+        definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+        configure: BuiltinFlowMetadataExpansion,
+    ) -> Self {
+        Self {
+            package,
+            name,
+            definition,
+            configure: None,
+            configure_metadata: Some(configure),
         }
     }
 }
@@ -27,6 +74,16 @@ impl BuiltinFlowRegistration {
 /// Registers a local Flow name under the calling Cargo package's namespace.
 #[macro_export]
 macro_rules! register_builtin_flow {
+    ($name:expr, $definition:path, metadata = $configure:path $(,)?) => {
+        $crate::__submit_builtin_flow! {
+            $crate::BuiltinFlowRegistration::metadata(env!("CARGO_PKG_NAME"), $name, $definition, $configure)
+        }
+    };
+    ($name:expr, $definition:path, $configure:path $(,)?) => {
+        $crate::__submit_builtin_flow! {
+            $crate::BuiltinFlowRegistration::configurable(env!("CARGO_PKG_NAME"), $name, $definition, $configure)
+        }
+    };
     ($name:expr, $definition:path $(,)?) => {
         $crate::__submit_builtin_flow! {
             $crate::BuiltinFlowRegistration::new(env!("CARGO_PKG_NAME"), $name, $definition)

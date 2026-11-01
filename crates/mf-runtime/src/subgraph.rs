@@ -218,6 +218,60 @@ impl SubgraphInputMetadata {
     }
 }
 
+/// Compile-time interface facts. Deliberately contains no executable closure.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubgraphMetadata {
+    pub inputs: crate::WorkflowInputSchema,
+    pub outputs: Vec<PortSpec>,
+    pub stream_outputs: Vec<PortSpec>,
+}
+
+#[derive(Debug, snafu::Snafu)]
+pub enum SubgraphMetadataError {
+    #[snafu(display("invalid metadata interface: {message}"))]
+    Invalid { message: String },
+    #[snafu(display("invalid metadata input: {source}"))]
+    Input { source: crate::WorkflowInputError },
+    #[snafu(display("invalid metadata type: {source}"))]
+    TypeDepth { source: crate::TypeDepthError },
+}
+
+impl SubgraphMetadata {
+    /// Validate frozen declarations without reading environment, stdin, or executing tasks.
+    pub fn validate(&self) -> Result<(), SubgraphMetadataError> {
+        use snafu::ResultExt;
+        for (node, ports) in &self.inputs.inputs {
+            for (port, input) in ports {
+                snafu::ensure!(
+                    !node.is_empty() && !port.is_empty(),
+                    InvalidSnafu {
+                        message: "input node and port names must not be empty"
+                    }
+                );
+                input.value_type.check_depth().context(TypeDepthSnafu)?;
+                input
+                    .binding
+                    .validate(&crate::output_id(node, port), &input.value_type)
+                    .context(InputSnafu)?;
+            }
+        }
+        for ports in [&self.outputs, &self.stream_outputs] {
+            let mut names = std::collections::BTreeSet::new();
+            for port in ports {
+                snafu::ensure!(
+                    !port.name.is_empty() && names.insert(&port.name),
+                    InvalidSnafu {
+                        message: "output names must be nonempty and unique within their channel"
+                    }
+                );
+                port.value_type.check_depth().context(TypeDepthSnafu)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,

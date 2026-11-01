@@ -1,0 +1,140 @@
+{
+  "version": "2026-11-01",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "version": "=0.1.0"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "version": "=0.1.0"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            },
+            "secret": false
+          },
+          "tools": {
+            "type": {
+              "list": "object"
+            },
+            "default": [],
+            "secret": false
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "model",
+      "kind": "builtin.llm",
+      "config": {
+        "model": {
+          "$ref": "params.model"
+        },
+        "capture_errors": true,
+        "attribution": {
+          "purpose": "conversation"
+        },
+        "base_url": {
+          "$ref": "params.base_url"
+        },
+        "api_key": {
+          "$ref": "params.api_key"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "tools": {
+          "from": {
+            "node": "params",
+            "port": "tools"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "message",
+      "node": "model",
+      "port": "message",
+      "optional": true
+    },
+    {
+      "name": "text",
+      "node": "model",
+      "port": "text"
+    },
+    {
+      "name": "tool_calls",
+      "node": "model",
+      "port": "tool_calls"
+    },
+    {
+      "name": "outcome",
+      "node": "model",
+      "port": "outcome"
+    },
+    {
+      "name": "status",
+      "node": "model",
+      "port": "status"
+    },
+    {
+      "name": "usages",
+      "node": "model",
+      "port": "usages"
+    },
+    {
+      "name": "error",
+      "node": "model",
+      "port": "error",
+      "optional": true
+    },
+    {
+      "name": "metadata",
+      "node": "model",
+      "port": "metadata",
+      "optional": true
+    },
+    {
+      "name": "finish_reason",
+      "node": "model",
+      "port": "finish_reason",
+      "optional": true
+    },
+    {
+      "name": "answer",
+      "node": "model",
+      "port": "delta",
+      "optional": true
+    }
+  ]
+}

@@ -103,6 +103,18 @@ pub enum PlanError {
 }
 
 impl CompiledWorkflow {
+    /// Bind metadata-dependent expansions before computing executable identity.
+    /// Structural plans are staging artifacts, not the identity of the finalized graph.
+    pub fn finalize(
+        &self,
+        registry: &mf_runtime::NodeRegistry,
+    ) -> Result<Self, crate::WorkflowCompileError> {
+        if self.execution_order != crate::compiler::structural_order(&self.definition)? {
+            return crate::compiler::NonCanonicalPlanOrderSnafu.fail();
+        }
+        crate::compiler::compile_resolved_definition(&self.definition, registry)
+    }
+
     pub fn manifest(
         &self,
         registry: &mf_runtime::NodeRegistry,
@@ -176,6 +188,12 @@ impl CompiledWorkflow {
                 data_edges: Vec::new(), control_edges: Vec::new(),
                 execution_order: vec![id.clone()],
                 loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
+                injected_bodies: original
+                    .injected_bodies
+                    .iter()
+                    .filter(|path| path.first().map(String::as_str) == Some(id.as_str()))
+                    .cloned()
+                    .collect(),
                 clusters: Vec::new(),
             };
             if original.version.supports_clusters() {
@@ -305,7 +323,7 @@ impl CompiledWorkflow {
             pub fn prepare_stream(
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::PreparedStream, mf_compiler::PlanError> {
-                Ok(mf_compiler::instantiate_stream(&plan()?, registry)?)
+                Ok(mf_compiler::instantiate_stream(&finalized_plan(registry)?, registry)?)
             }
 
             pub fn prepare_workflow(
@@ -313,7 +331,7 @@ impl CompiledWorkflow {
                 observation: Option<&mut mf_runtime::RunObservation>,
             ) -> Result<mf_runtime::Flow, mf_compiler::PlanError> {
                 Ok(mf_compiler::instantiate_compiled_with_observation(
-                    &plan()?, registry, observation,
+                    &finalized_plan(registry)?, registry, observation,
                 )?)
             }
         };
@@ -322,10 +340,18 @@ impl CompiledWorkflow {
                 mf_compiler::CompiledWorkflow::from_json(#source)
             }
 
+            /// Finalize provider metadata before describing this workflow or starting observation.
+            /// `plan()` is a structural staging artifact and may have a different graph identity.
+            pub fn finalized_plan(
+                registry: &mf_runtime::NodeRegistry,
+            ) -> Result<mf_compiler::CompiledWorkflow, mf_compiler::PlanError> {
+                Ok(plan()?.finalize(registry)?)
+            }
+
             pub fn manifest(
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::WorkflowManifest, mf_compiler::PlanError> {
-                plan()?.manifest(registry)
+                finalized_plan(registry)?.manifest(registry)
             }
 
             #preparation
@@ -637,6 +663,18 @@ fn generate_scope(
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         let bindings = dependency_tokens(dependencies);
+        if node.kind != mf_runtime::CALL_KIND && crate::calls::is_metadata(&node.kind, None) {
+            let config = LitStr::new(
+                &serde_json::to_string(&node.config).context(SerializeSnafu)?,
+                Span::call_site(),
+            );
+            preparations.push(quote! {
+                let mut #node_ident = mf_compiler::instantiate_metadata_with_metadata(registry, #id_lit, #kind_lit, #config)?;
+                #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*]).boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id_lit })?;
+            });
+            node_idents.push(node_ident);
+            continue;
+        }
         if matches!(
             node.kind.as_str(),
             crate::LOOP_KIND | ITERATION_KIND | mf_runtime::CALL_KIND
@@ -1013,17 +1051,24 @@ impl CompiledWorkflow {
         registry: &mf_runtime::NodeRegistry,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
+        ensure!(
+            self.execution_order == crate::compiler::structural_order(&self.definition)?,
+            InvalidExecutionOrderSnafu
+        );
+        let definition = crate::flow_sources::finalize_metadata(&self.definition, registry)
+            .map_err(crate::WorkflowCompileError::from)?;
+        let finalized = crate::compiler::plan_resolved_definition(&definition)?;
         let mut body_layouts = BTreeMap::new();
         let (nodes, order) = crate::compiler::prepare_definition_with_layouts(
-            &self.definition,
+            &finalized.definition,
             registry,
             Some(&mut body_layouts),
         )?;
-        if order != self.execution_order {
+        if order != finalized.execution_order {
             return InvalidExecutionOrderSnafu.fail();
         }
         let resolved = Self {
-            definition: crate::compiler::resolve_execution(&self.definition, &nodes)?,
+            definition: crate::compiler::resolve_execution(&finalized.definition, &nodes)?,
             execution_order: order.clone(),
         };
         resolved.generate_resolved_execution_plans(nodes, order, body_layouts, standard)
@@ -1580,6 +1625,9 @@ fn collect_body_layouts(
             .iter()
             .find(|node| &node.id == id)
             .expect("validated node ID");
+        if node.kind != mf_runtime::CALL_KIND && crate::calls::is_metadata(&node.kind, None) {
+            continue;
+        }
         let mut body = if let Some(loop_definition) = &node.loop_definition {
             crate::loops::body_definition(
                 &loop_definition.body,

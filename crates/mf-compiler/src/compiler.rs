@@ -37,6 +37,11 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("invalid frozen metadata for node `{definition_id}`: {source}"))]
+    FrozenMetadata {
+        definition_id: DefinitionId,
+        source: mf_runtime::SubgraphMetadataError,
+    },
     #[snafu(transparent)]
     FlowResolution { source: crate::FlowResolutionError },
     #[snafu(
@@ -540,6 +545,81 @@ pub fn prepare_definition_with_layouts(
         None,
         false,
     )
+}
+
+/// Inspect one frozen subgraph using the caller's provider registry. No execution capability escapes.
+pub fn describe_subgraph(
+    node: &crate::NodeDefinition,
+    registry: &NodeRegistry,
+) -> Result<mf_runtime::SubgraphMetadata, WorkflowCompileError> {
+    if let Some(value) = node.config.get("subgraph_metadata") {
+        ensure!(
+            node.config.get("subgraph").is_none(),
+            InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "metadata accepts exactly one source"
+            }
+        );
+        let metadata: mf_runtime::SubgraphMetadata = serde_json::from_value(value.clone())
+            .context(CallConfigurationSnafu {
+                definition_id: node.id.clone(),
+            })?;
+        metadata.validate().context(FrozenMetadataSnafu {
+            definition_id: node.id.clone(),
+        })?;
+        return Ok(metadata);
+    }
+    let config = crate::calls::config(node)?;
+    let definition = crate::calls::body_definition(node)?;
+    if let Some(registered) = registry.flow(&config.flow) {
+        ensure!(
+            plan_resolved_definition(&definition)?.definition
+                == plan_resolved_definition(&registered.definition)?.definition,
+            InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "host Flow binding differs from the frozen metadata definition"
+            }
+        );
+        return Ok(mf_runtime::SubgraphMetadata {
+            inputs: registered.body.inputs.clone(),
+            outputs: registered.body.outputs.clone(),
+            stream_outputs: registered.body.stream_outputs.clone(),
+        });
+    }
+    crate::loops::validate_structure(&definition)?;
+    crate::validate_execution(&definition).context(StreamConstructionSnafu)?;
+    let body = prepare_subgraph_body(
+        node,
+        &mut GraphPreparation {
+            registry,
+            body_layouts: None,
+            path: Vec::new(),
+        },
+        &definition,
+        None,
+        false,
+    )?;
+    Ok(mf_runtime::SubgraphMetadata {
+        inputs: body.inputs,
+        outputs: body.outputs,
+        stream_outputs: body.stream_outputs,
+    })
+}
+
+/// Describe a resolved injected Flow using a named host binding when one exists.
+pub fn describe_flow_argument(
+    alias: &str,
+    definition: &WorkflowDefinition,
+    registry: &NodeRegistry,
+) -> Result<mf_runtime::SubgraphMetadata, WorkflowCompileError> {
+    let node: crate::NodeDefinition = serde_json::from_value(serde_json::json!({
+        "id": "metadata", "kind": mf_runtime::CALL_KIND,
+        "config": {"flow": alias, "definition": definition}
+    }))
+    .context(CallConfigurationSnafu {
+        definition_id: "metadata",
+    })?;
+    describe_subgraph(&node, registry)
 }
 
 pub type ScopeLayouts = BTreeMap<
@@ -1212,7 +1292,8 @@ pub fn compile_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let resolved = crate::resolve_flows(definition, None)?;
+    let resolved =
+        crate::flow_sources::resolve_flows_with_registry(definition, None, Some(registry))?;
     compile_resolved_definition(&resolved.definition, registry)
 }
 
@@ -1221,6 +1302,8 @@ pub fn compile_resolved_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
+    let finalized = crate::flow_sources::finalize_metadata(definition, registry)?;
+    let definition = &finalized;
     let (nodes, execution_order) = prepare_definition(definition, registry)?;
     let definition = resolve_execution(definition, &nodes)?;
     let flow = crate::FlowBuilder::prepare(
@@ -1318,11 +1401,11 @@ pub fn normalize_plan(
         if node.kind == ITERATION_KIND {
             node.config = normalize_config(definition, node)?;
         }
-        if node.kind == mf_runtime::CALL_KIND {
+        if crate::calls::is_flow(node) {
             let body = crate::calls::body_definition(node)?;
             let normalized = plan_resolved_definition(&body)?.definition;
-            node.config["definition"] =
-                serde_json::to_value(normalized).context(CallConfigurationSnafu {
+            crate::calls::config_mut(node)["definition"] = serde_json::to_value(normalized)
+                .context(CallConfigurationSnafu {
                     definition_id: node.id.clone(),
                 })?;
         }
@@ -1408,6 +1491,14 @@ pub fn prepare_compiled_plan(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<(CompiledWorkflow, crate::FlowBuilder), WorkflowCompileError> {
+    // Expansion replaces child scopes, never the caller's execution occurrences.
+    // Validate the supplied outer order rather than silently repairing a corrupt plan.
+    if plan.execution_order != structural_order(&plan.definition)? {
+        return NonCanonicalPlanOrderSnafu.fail();
+    }
+    let finalized = crate::flow_sources::finalize_metadata(&plan.definition, registry)?;
+    let finalized = plan_resolved_definition(&finalized)?;
+    let plan = &finalized;
     let (nodes, canonical_order) = prepare_definition(&plan.definition, registry)?;
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
@@ -1718,14 +1809,13 @@ fn prepare_stream_outputs(
         })
 }
 
-fn bind_subgraph_node(
+fn prepare_subgraph_body(
     node: &crate::NodeDefinition,
     preparation: &mut GraphPreparation<'_>,
     body: &WorkflowDefinition,
     enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
-    options: Value,
-) -> Result<FlowNode, WorkflowCompileError> {
+) -> Result<PreparedSubgraph, WorkflowCompileError> {
     ensure!(
         preparation.path.len() < mf_telemetry::MAX_SCOPE_DEPTH,
         InvalidCallSnafu {
@@ -1733,7 +1823,7 @@ fn bind_subgraph_node(
             message: "combined container nesting exceeds twenty scopes"
         }
     );
-    let registration = registration_for(node, preparation.registry)?;
+    let call_like = crate::calls::is_flow_with_registry(node, Some(preparation.registry));
     preparation.path.push(node.id.clone());
     let prepared = prepare_graph(body, preparation, enclosing, allow_iteration_input);
     let path = preparation
@@ -1745,7 +1835,7 @@ fn bind_subgraph_node(
         prepared.context(LoopBodySnafu {
             path: format!("{:?}", node.id),
         })?
-    } else if node.kind == mf_runtime::CALL_KIND {
+    } else if call_like {
         prepared.context(CallBodySnafu {
             definition_id: node.id.clone(),
         })?
@@ -1790,7 +1880,7 @@ fn bind_subgraph_node(
             .enumerate()
             .find(|(_, node)| node.definition_id == output.node)
             .expect("validated body output source");
-        if node.kind == mf_runtime::CALL_KIND
+        if call_like
             && let Some(port) = source
                 .metadata
                 .stream_outputs
@@ -1833,7 +1923,7 @@ fn bind_subgraph_node(
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
         .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
         .context(FlowConstructionSnafu)?;
-    let builder = if node.kind == mf_runtime::CALL_KIND {
+    let builder = if call_like {
         builder.with_workflow_inputs()?
     } else {
         builder
@@ -1872,6 +1962,19 @@ fn bind_subgraph_node(
             flow.execute_with_sink(state, sink)
         })
         .with_input_metadata(input_schema, input_metadata);
+    Ok(body)
+}
+
+fn bind_subgraph_node(
+    node: &crate::NodeDefinition,
+    preparation: &mut GraphPreparation<'_>,
+    body: &WorkflowDefinition,
+    enclosing: Option<&BTreeMap<String, ValueType>>,
+    allow_iteration_input: bool,
+    options: Value,
+) -> Result<FlowNode, WorkflowCompileError> {
+    let registration = registration_for(node, preparation.registry)?;
+    let body = prepare_subgraph_body(node, preparation, body, enclosing, allow_iteration_input)?;
     let instance = registration
         .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
         .context(NodeConstructionSnafu {
@@ -1891,15 +1994,30 @@ fn resolve_nodes_in_scope(
         .nodes
         .iter()
         .map(|node| {
-            if node.kind == mf_runtime::CALL_KIND {
+            if crate::calls::is_metadata(&node.kind, Some(preparation.registry))
+                && node.config.get("subgraph_metadata").is_some()
+            {
+                let mf_runtime::NodeFactory::Metadata(factory) = registration_for(node, preparation.registry)?.factory else { unreachable!() };
+                let metadata = describe_subgraph(node, preparation.registry)?;
+                let instance = factory(node.config.clone(), metadata).context(NodeConstructionSnafu {
+                    definition_id: node.id.clone(), kind: node.kind.clone(),
+                })?;
+                return Ok(FlowNode::new(node.id.clone(), instance));
+            }
+            if crate::calls::is_flow_with_registry(node, Some(preparation.registry)) {
                 let body = crate::calls::body_definition(node)?;
                 crate::validate_execution(&body).context(StreamConstructionSnafu)?;
-                ensure!(!allow_iteration_input || !crate::calls::contains_iteration_containers(&body)?, InvalidCallSnafu {
+                ensure!(node.kind != mf_runtime::CALL_KIND || !allow_iteration_input || !crate::calls::contains_iteration_containers(&body)?, InvalidCallSnafu {
                     definition_id: node.id.clone(), message: "calls inside Iteration cannot contain Loop or Iteration constructs"
                 });
                 crate::loops::validate_structure(&body)?;
-                let config: mf_runtime::CallConfig = serde_json::from_value(node.config.clone())
-                    .context(CallConfigurationSnafu { definition_id: node.id.clone() })?;
+                let config: mf_runtime::CallConfig = crate::calls::config(node)?;
+                if let mf_runtime::NodeFactory::Metadata(factory) = registration_for(node, preparation.registry)?.factory {
+                    // Inspection has no runtime body and must not create observation scopes.
+                    let metadata = describe_subgraph(node, preparation.registry)?;
+                    let instance = factory(node.config.clone(), metadata).context(NodeConstructionSnafu { definition_id: node.id.clone(), kind: node.kind.clone() })?;
+                    return Ok(FlowNode::new(node.id.clone(), instance));
+                }
                 let prepared = if let Some(registered) = preparation.registry.flow(&config.flow) {
                     ensure!(
                         plan_resolved_definition(&body)?.definition

@@ -1043,3 +1043,31 @@ Catalog construction validates registrations without invoking their factories. T
 to request a definition and handles its typed `DefinitionParseError`. Each provider owns its source
 and dependency declarations. Factories must not execute the Flow or perform business I/O.
 The catalog exposes definitions independently of compilation and execution.
+
+Configurable providers use `register_builtin_flow!("example", definition, expand)`. The expansion
+function receives a JSON configuration and a `BTreeMap<String, ResolvedFlowArgument>` of already
+resolved injected Flows, and returns a definition or `NodeBuildError`. Each argument retains its frozen
+`definition` and the builder-supplied optional `description` and qualified `parameters` descriptions.
+These values belong to the binding, never mutate the source Flow, and carry no runtime expression
+semantics. Inline bodies (including one-node bodies) inherit the caller's version and dependencies.
+Injection paths are resolved relative to the caller before expansion. The resolver then freezes all
+generated calls and applies the caller's provider selections. Zero-argument registrations remain
+unchanged and reject unexpected
+configuration/injections. Expansion is compile-time graph construction, not execution.
+
+Providers whose expansion depends on reflected child interfaces use
+`register_builtin_flow!("example", definition, metadata = expand)`. The pure expansion callback
+receives described Flow arguments after the selected providers are linked. It must not read
+runtime environment values, perform I/O, or execute tasks. Structural planning retains the frozen
+request until linked preparation can resolve it; final generated artifacts contain the expanded
+graph and its frozen facts, not deferred source reads. Metadata relationships do not establish
+execution prerequisites.
+
+A node that only needs a child interface can register `NodeFactory::Metadata`. Preparation supplies
+`SubgraphMetadata` containing startup inputs and terminal/stream output contracts, with **no executor**.
+Definition-backed requests remain available for ordinary metadata consumers; compiled expansions can
+instead supply precomputed interfaces without embedding another child definition. This works in
+memory and generated runners using the supplied provider registry. Such nodes do not create child
+observation scopes, but any returned task is still an ordinary runtime task: metadata-dependent
+static projection belongs in the explicit pure expansion callback, not by executing that task at build
+time. Executable containers continue to use `NodeFactory::Subgraph`.

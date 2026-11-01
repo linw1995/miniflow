@@ -285,6 +285,7 @@ fn preview_description(mut fixture: WorkflowDescription, clusters: bool) -> Work
 
 pub fn description() -> WorkflowDescription {
     WorkflowDescription {
+        injected_bodies: Vec::new(),
         order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64)))

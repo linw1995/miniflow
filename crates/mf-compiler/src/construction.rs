@@ -802,6 +802,12 @@ impl FlowBuilder {
 }
 #[derive(Debug, Snafu)]
 pub enum WorkflowBuildError {
+    #[snafu(display("could not inspect subgraph for `{definition_id}`: {source}"))]
+    MetadataInspection {
+        definition_id: DefinitionId,
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
+    },
     #[snafu(transparent)]
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(transparent)]
@@ -890,6 +896,37 @@ pub fn instantiate_node_with_metadata(
         .context(NodeConstructionSnafu {
             definition_id: DefinitionId::from(definition_id),
         })?;
+    Ok(crate::FlowNode::new(definition_id, node))
+}
+
+pub fn instantiate_metadata_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+) -> Result<crate::FlowNode, WorkflowBuildError> {
+    let registration = registry.get(kind).context(UnknownKindSnafu {
+        definition_id,
+        kind,
+    })?;
+    let config: Value =
+        serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu { definition_id })?;
+    let definition = crate::NodeDefinition {
+        id: definition_id.into(),
+        kind: kind.into(),
+        config: config.clone(),
+        loop_definition: None,
+    };
+    let metadata = crate::compiler::describe_subgraph(&definition, registry)
+        .context(MetadataInspectionSnafu { definition_id })?;
+    let mf_runtime::NodeFactory::Metadata(factory) = registration.factory else {
+        return InvalidDefinitionSnafu {
+            definition_id,
+            message: "node does not accept subgraph metadata",
+        }
+        .fail();
+    };
+    let node = factory(config, metadata).context(NodeConstructionSnafu { definition_id })?;
     Ok(crate::FlowNode::new(definition_id, node))
 }
 

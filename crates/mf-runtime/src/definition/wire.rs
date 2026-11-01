@@ -47,6 +47,68 @@ impl Serialize for WorkflowDefinition {
     }
 }
 
+impl<'de> Deserialize<'de> for FlowBodyDefinition {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = crate::workflow_inputs::UniqueValue::deserialize(deserializer)?.0;
+        decode_scope(&mut value, true, WorkflowDefinitionVersion::CURRENT, "body")
+            .map_err(de::Error::custom)?;
+        FlowBodyFields::deserialize(value).map_err(de::Error::custom)
+    }
+}
+
+impl Serialize for FlowBodyDefinition {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct Canonical<'a>(&'a FlowBodyDefinition);
+        impl Serialize for Canonical<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                FlowBodyFields::serialize(self.0, serializer)
+            }
+        }
+        let mut value = serde_json::to_value(Canonical(self)).map_err(ser::Error::custom)?;
+        encode_scope(&mut value, true, WorkflowDefinitionVersion::CURRENT, "body")
+            .map_err(ser::Error::custom)?;
+        value.serialize(serializer)
+    }
+}
+
+// Inline bodies perform their own wire conversion, but their availability (and
+// injection metadata) is controlled by the enclosing Flow's schema version.
+fn validate_flow_sources(
+    scope: &Map<String, Value>,
+    version: WorkflowDefinitionVersion,
+    path: &str,
+) -> Result<(), WireError> {
+    fn source(
+        value: &Value,
+        version: WorkflowDefinitionVersion,
+        path: &str,
+    ) -> Result<(), WireError> {
+        let arguments = value.get("flows").and_then(Value::as_object);
+        ensure!(
+            version.supports_flow_arguments()
+                || (value.get("body").is_none() && arguments.is_none_or(Map::is_empty)),
+            InvalidSnafu {
+                path,
+                message: "Flow arguments and inline bodies require version 2026-11-01"
+            }
+        );
+        if let Some(arguments) = arguments {
+            for (alias, argument) in arguments {
+                if let Some(nested) = argument.get("source") {
+                    source(nested, version, &format!("{path}/flows/{alias}/source"))?;
+                }
+            }
+        }
+        Ok(())
+    }
+    if let Some(flows) = scope.get("flows").and_then(Value::as_object) {
+        for (alias, value) in flows {
+            source(value, version, &format!("{path}/flows/{alias}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn decode_scope(
     value: &mut Value,
     modern: bool,
@@ -88,6 +150,7 @@ fn decode_scope(
             message: "nested flows require version 2026-10-25"
         }
     );
+    validate_flow_sources(scope, version, path)?;
     ensure!(
         !scope.contains_key("order_edges"),
         InvalidSnafu {
@@ -257,6 +320,7 @@ fn encode_scope(
             message: "nested flows require version 2026-10-25"
         }
     );
+    validate_flow_sources(scope, version, path)?;
     ensure!(
         scope
             .get("clusters")
@@ -376,4 +440,177 @@ fn visit_bodies(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body() -> Value {
+        json!({
+            "nodes": [
+                {"id": "source", "kind": "test.source"},
+                {"id": "sink", "kind": "test.sink", "inputs": {
+                    "value": {"from": {"node": "source", "port": "value"}}
+                }}
+            ],
+            "edges": [{"from_node": "source", "to_node": "sink"}],
+            "outputs": [{"name": "result", "node": "sink", "port": "result"}],
+            "clusters": [{"label": "work", "annotation": "body", "nodes": ["source", "sink"]}]
+        })
+    }
+
+    fn workflow(source: Value) -> Value {
+        json!({
+            "version": "2026-11-01", "dependencies": {}, "nodes": [],
+            "flows": {"child": source}
+        })
+    }
+
+    #[test]
+    fn inline_body_roundtrips_canonical_bindings_and_execution_edges() {
+        let input = workflow(json!({"builtin": "test.agent", "flows": {
+            "tool": {"source": {"body": body()}, "description": "A tool", "parameters": {
+                "source.value": {"description": "The input"}
+            }}
+        }}));
+        let definition: WorkflowDefinition = serde_json::from_value(input).unwrap();
+        let FlowSource::Builtin { flows, .. } = &definition.flows["child"] else {
+            panic!("expected builtin");
+        };
+        let FlowSource::Body { body } = &flows["tool"].source else {
+            panic!("expected inline body");
+        };
+        assert_eq!(body.edges.len(), 1);
+        assert_eq!(body.order_edges.len(), 1);
+        assert_eq!(body.clusters.len(), 1);
+        let encoded = serde_json::to_value(&definition).unwrap();
+        let encoded_body = &encoded["flows"]["child"]["flows"]["tool"]["source"]["body"];
+        assert_eq!(
+            encoded_body["nodes"][1]["inputs"]["value"]["from"]["node"],
+            "source"
+        );
+        assert_eq!(
+            encoded_body["edges"],
+            json!([{"from_node":"source", "to_node":"sink"}])
+        );
+        assert!(encoded_body.get("order_edges").is_none());
+        assert_eq!(
+            serde_json::from_value::<WorkflowDefinition>(encoded).unwrap(),
+            definition
+        );
+    }
+
+    #[test]
+    fn inline_body_preserves_nested_loop_and_iteration_bindings() {
+        let mut inline = body();
+        let nested_edges = json!([
+            {"from_node": "source", "to_node": "sink"},
+            {"from_node": "source", "from_output": "value", "to_node": "sink"}
+        ]);
+        let mut loop_body = body();
+        loop_body["edges"] = nested_edges.clone();
+        loop_body.as_object_mut().unwrap().remove("outputs");
+        inline["nodes"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "repeat", "kind": "workflow.loop", "loop": {
+                    "max_iterations": 1, "variables": [], "body": loop_body
+                }
+            }),
+            json!({
+                "id": "each", "kind": "builtin.iteration", "config": {
+                    "body": {
+                        "nodes": body()["nodes"], "edges": nested_edges,
+                        "result": {"node": "sink", "port": "result"}
+                    }
+                }
+            }),
+        ]);
+        let definition: WorkflowDefinition =
+            serde_json::from_value(workflow(json!({"body": inline}))).unwrap();
+        let encoded = serde_json::to_value(&definition).unwrap();
+        let nodes = &encoded["flows"]["child"]["body"]["nodes"];
+        for nested in [&nodes[2]["loop"]["body"], &nodes[3]["config"]["body"]] {
+            assert_eq!(
+                nested["nodes"][1]["inputs"]["value"]["from"]["node"],
+                "source"
+            );
+            let edges = nested["edges"].as_array().unwrap();
+            assert_eq!(edges.len(), 2);
+            for edge in nested_edges.as_array().unwrap() {
+                assert!(edges.contains(edge));
+            }
+            assert!(nested.get("order_edges").is_none());
+            assert!(nested.get("control_edges").is_none());
+        }
+        assert_eq!(
+            serde_json::from_value::<WorkflowDefinition>(encoded).unwrap(),
+            definition
+        );
+    }
+
+    #[test]
+    fn nested_flow_arguments_are_validated_recursively() {
+        let definition: WorkflowDefinition = serde_json::from_value(workflow(json!({
+            "builtin": "test.agent",
+            "flows": {
+                "tool": {
+                    "source": {"builtin": "test.agent", "flows": {
+                        "leaf": {"source": {"path": "leaf.json"}, "description": "Leaf"}
+                    }},
+                    "description": "Tool"
+                }
+            }
+        })))
+        .unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkflowDefinition>(
+                serde_json::to_value(&definition).unwrap()
+            )
+            .unwrap(),
+            definition
+        );
+        let missing_source = workflow(json!({"builtin": "test.agent", "flows": {"tool": {}}}));
+        assert!(serde_json::from_value::<WorkflowDefinition>(missing_source).is_err());
+    }
+
+    #[test]
+    fn flow_arguments_and_bodies_require_new_version_on_decode_and_encode() {
+        for source in [
+            json!({"body": body()}),
+            json!({"builtin": "test.agent", "flows": {
+                "tool": {"source": {"path": "tool.json"}, "description": "A tool"}
+            }}),
+        ] {
+            let mut input = workflow(source);
+            let mut definition: WorkflowDefinition = serde_json::from_value(input.clone()).unwrap();
+            input["version"] = json!("2026-10-28");
+            assert!(serde_json::from_value::<WorkflowDefinition>(input).is_err());
+            definition.version = WorkflowDefinitionVersion::V2026_10_28;
+            assert!(serde_json::to_value(definition).is_err());
+        }
+        let mut bare = workflow(json!({"builtin": "test.agent"}));
+        bare["version"] = json!("2026-10-28");
+        let definition: WorkflowDefinition = serde_json::from_value(bare).unwrap();
+        assert!(serde_json::to_value(definition).is_ok());
+    }
+
+    #[test]
+    fn injection_fields_are_strict_and_workflow_annotation_is_removed() {
+        for argument in [
+            json!({"source": {"path": "tool.json"}, "extra": true}),
+            json!({"source": {"path": "tool.json"}, "parameters": {
+                "input": {"description": "Input", "extra": true}
+            }}),
+            json!({"path": "tool.json"}),
+        ] {
+            assert!(serde_json::from_value::<FlowArgument>(argument).is_err());
+        }
+        let mut input = workflow(json!({"builtin": "test.agent"}));
+        input["annotation"] = json!("not supported");
+        assert!(serde_json::from_value::<WorkflowDefinition>(input).is_err());
+        let mut invalid_body = body();
+        invalid_body["dependencies"] = json!({});
+        assert!(serde_json::from_value::<FlowBodyDefinition>(invalid_body).is_err());
+    }
 }

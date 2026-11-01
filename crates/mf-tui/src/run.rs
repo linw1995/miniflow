@@ -2,7 +2,9 @@
 
 use crate::{
     duration::format_duration_ns,
-    graph::{ConnectionView, GraphCluster, GraphError, GraphLayout, GraphRect, GraphView},
+    graph::{
+        BodyDisplay, ConnectionView, GraphCluster, GraphError, GraphLayout, GraphRect, GraphView,
+    },
     logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
@@ -1760,8 +1762,8 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
     } else {
         "Arrows         Pan graph\nTab / Shift-Tab, j/k   Select node\n\
          d              Show / hide details\nPgUp/PgDn      Scroll visible details\n\
-         e              Cycle connection view\nc              Fold selected body / cluster\nv              Open OTEL tracing\n\
-         l              Expand selected body inline\nh              Collapse body / enclosing body\n\
+         e              Cycle connection view\nc              Cycle body: expanded / summary / collapsed\nv              Open OTEL tracing\n\
+         l              Expand selected body inline\nh              Fully collapse body / enclosing body\n\
          Esc            Close details / collapse body\n\
          [ / ]          Older / newer pass or item\nf              Reset viewport\n\
          m              Show / hide minimap\nCtrl-C         Interrupt / close\nq, Enter       Close after completion"
@@ -2494,26 +2496,30 @@ pub struct ObservationView {
     root: Arc<GraphLayout>,
     execution: GraphLayout,
     pip_layout: Arc<GraphLayout>,
-    expanded: BTreeSet<Vec<String>>,
+    body_states: BTreeMap<Vec<String>, BodyDisplay>,
     viewports: BTreeMap<ConnectionView, GraphViewport>,
     collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
     cluster_focus: BTreeMap<(Vec<String>, usize), String>,
     state: ViewState,
 }
+fn default_body_states(description: &WorkflowDescription) -> BTreeMap<Vec<String>, BodyDisplay> {
+    description
+        .loop_bodies
+        .iter()
+        .map(|body| (body.path.clone(), BodyDisplay::Expanded))
+        .collect()
+}
+
 impl ObservationView {
     pub fn new(description: &WorkflowDescription) -> Result<Self, RunError> {
-        let expanded = description
-            .loop_bodies
-            .iter()
-            .map(|body| body.path.clone())
-            .collect();
+        let body_states = default_body_states(description);
         let execution =
             GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
         let root = Arc::new(
-            GraphLayout::with_expanded_bodies(
+            GraphLayout::with_body_states(
                 description,
                 ConnectionView::Execution,
-                &expanded,
+                &body_states,
                 &BTreeMap::new(),
             )
             .context(GraphSnafu)?,
@@ -2523,7 +2529,7 @@ impl ObservationView {
             execution,
             pip_layout: Arc::clone(&root),
             root,
-            expanded,
+            body_states,
             viewports: BTreeMap::new(),
             collapsed: BTreeMap::new(),
             cluster_focus: BTreeMap::new(),
@@ -2532,10 +2538,35 @@ impl ObservationView {
     }
     fn collapse_body_path(&self) -> Option<Vec<String>> {
         self.selected_body()
-            .filter(|path| self.expanded.contains(path))
+            .filter(|path| self.body_states.get(path) != Some(&BodyDisplay::Hidden))
             .or_else(|| {
                 let path = self.root.node_path(self.state.selected);
-                (!path.is_empty()).then(|| path.to_vec())
+                if path.is_empty() {
+                    return None;
+                }
+                // A summarized ancestor inlines injected bodies directly, so the
+                // selected leaf can be visible without its original owner node and
+                // its own display state cannot control that projection. Collapse
+                // the nearest visible summary ancestor instead.
+                let injected = self
+                    .description
+                    .injected_bodies
+                    .iter()
+                    .any(|body| body.as_slice() == path);
+                if injected
+                    && let Some(summary) = (1..path.len()).rev().find_map(|len| {
+                        let ancestor = &path[..len];
+                        (self.body_states.get(ancestor) == Some(&BodyDisplay::Summary)
+                            && self
+                                .root
+                                .display_index_for_scoped_node(&path[..len - 1], &path[len - 1])
+                                .is_some())
+                        .then(|| ancestor.to_vec())
+                    })
+                {
+                    return Some(summary);
+                }
+                Some(path.to_vec())
             })
     }
 
@@ -2553,17 +2584,13 @@ impl ObservationView {
         self.description.body(&path).map(|_| path)
     }
 
-    fn fold_body(&mut self, path: Vec<String>, expand: bool) -> Result<(), RunError> {
-        let mut expanded = self.expanded.clone();
-        if expand {
-            expanded.insert(path.clone());
-        } else {
-            expanded.remove(&path);
-        }
-        let root = GraphLayout::with_expanded_bodies(
+    fn set_body_state(&mut self, path: Vec<String>, state: BodyDisplay) -> Result<(), RunError> {
+        let mut body_states = self.body_states.clone();
+        body_states.insert(path.clone(), state);
+        let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view(),
-            &expanded,
+            &body_states,
             &self.collapsed,
         )
         .context(GraphSnafu)?;
@@ -2572,11 +2599,31 @@ impl ObservationView {
             .display_index_for_scoped_node(parent, id)
             .unwrap_or_default();
         self.root = Arc::new(root);
-        self.expanded = expanded;
+        self.body_states = body_states;
         self.state.sync_scope(&self.root);
         self.state.reveal_selected = true;
         self.state.details_offset = 0;
         Ok(())
+    }
+
+    fn fold_body(&mut self, path: Vec<String>, expand: bool) -> Result<(), RunError> {
+        self.set_body_state(
+            path,
+            if expand {
+                BodyDisplay::Expanded
+            } else {
+                BodyDisplay::Hidden
+            },
+        )
+    }
+
+    fn cycle_body(&mut self, path: Vec<String>) -> Result<(), RunError> {
+        let next = match self.body_states.get(&path).copied().unwrap_or_default() {
+            BodyDisplay::Expanded => BodyDisplay::Summary,
+            BodyDisplay::Summary => BodyDisplay::Hidden,
+            BodyDisplay::Hidden => BodyDisplay::Expanded,
+        };
+        self.set_body_state(path, next)
     }
 
     fn toggle_cluster(&mut self) -> Result<(), RunError> {
@@ -2600,10 +2647,10 @@ impl ObservationView {
         } else {
             set.insert(index);
         }
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view(),
-            &self.expanded,
+            &self.body_states,
             &folded,
         )
         .context(GraphSnafu)?;
@@ -2664,10 +2711,10 @@ impl ObservationView {
     }
     fn switch_connections(&mut self) -> Result<(), RunError> {
         let anchor = selection_anchor(&self.root, self.state.selected);
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view().next(),
-            &self.expanded,
+            &self.body_states,
             &self.collapsed,
         )
         .context(GraphSnafu)?;
@@ -2677,15 +2724,10 @@ impl ObservationView {
             &self.collapsed.get(&Vec::new()).cloned().unwrap_or_default(),
         )
         .context(GraphSnafu)?;
-        let pip_layout = GraphLayout::with_expanded_bodies(
+        let pip_layout = GraphLayout::with_body_states(
             &self.description,
             root.connection_view(),
-            &self
-                .description
-                .loop_bodies
-                .iter()
-                .map(|body| body.path.clone())
-                .collect(),
+            &default_body_states(&self.description),
             &BTreeMap::new(),
         )
         .context(GraphSnafu)?;
@@ -2712,8 +2754,7 @@ impl ObservationView {
         if !self.state.traces.visible {
             let result = match key {
                 KeyCode::Char('c') => Some(if let Some(path) = self.selected_body() {
-                    let expand = !self.expanded.contains(&path);
-                    self.fold_body(path, expand)
+                    self.cycle_body(path)
                 } else {
                     self.toggle_cluster()
                 }),
@@ -3099,6 +3140,7 @@ mod tests {
 
     fn parallel_fixture(count: usize) -> WorkflowDescription {
         WorkflowDescription {
+            injected_bodies: Vec::new(),
             order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_10_23,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
@@ -3808,6 +3850,7 @@ mod tests {
     #[test]
     fn cluster_folding_rebuilds_the_layout_and_preserves_the_selected_member() {
         let description = WorkflowDescription {
+            injected_bodies: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_10_23,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "f".repeat(64))).unwrap(),
             execution: Some(ExecutionDescription {
@@ -4513,6 +4556,10 @@ mod tests {
         assert_eq!(view.state.selected, 1);
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert_eq!(view.root.nodes().len(), 8);
+        assert!(view.root.body_summary(1).is_none());
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert_eq!(view.root.nodes().len(), 5);
+        assert!(view.root.body_summary(1).is_some());
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert_eq!(view.root.nodes().len(), 5);
         assert_eq!(view.viewports.len(), 3);
@@ -5060,6 +5107,23 @@ mod tests {
         }
         let snapshot = session.snapshot();
         let mut view = ObservationView::new(&description).unwrap();
+        let owner = view
+            .root
+            .display_index_for_scoped_node(&[], "call")
+            .unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Expanded);
+        assert!(view.root.is_expanded_body(owner));
+        view.cycle_body(path.clone()).unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Summary);
+        assert!(view.root.body_summary(owner).is_some());
+        assert_eq!(view.root.nodes().len(), 1);
+        view.cycle_body(path.clone()).unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Hidden);
+        assert!(view.root.body_summary(owner).is_none());
+        assert_eq!(view.root.nodes().len(), 1);
+        view.cycle_body(path.clone()).unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Expanded);
+        assert!(view.root.is_expanded_body(owner));
         let traces = TraceSnapshot::default();
         let logs = LogSnapshot::default();
         view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
@@ -5083,8 +5147,94 @@ mod tests {
     }
 
     #[test]
+    fn injected_leaf_collapses_the_visible_summary_owner() {
+        let mut description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "d".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"source","kind":"fixture.task"},{"id":"call","kind":"workflow.call"}],
+            "execution_order":["source","call"], "data_edges":[], "control_edges":[],
+            "injected_bodies":[["call","inner"]],
+            "loop_bodies":[
+                {"path":["call"], "nodes":[{"id":"inner","kind":"workflow.call"}],
+                 "execution_order":["inner"], "data_edges":[], "control_edges":[]},
+                {"path":["call","inner"], "nodes":[{"id":"leaf","kind":"fixture.task"}],
+                 "execution_order":["leaf"], "data_edges":[], "control_edges":[]}
+            ]
+        }))
+        .unwrap();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        let call = vec!["call".to_owned()];
+        let inner = vec!["call".to_owned(), "inner".to_owned()];
+        for key in [KeyCode::Char('h'), KeyCode::Esc] {
+            let mut view = ObservationView::new(&description).unwrap();
+            view.cycle_body(call.clone()).unwrap();
+            assert_eq!(view.body_states[&call], BodyDisplay::Summary);
+            let owner = view
+                .root
+                .display_index_for_scoped_node(&[], "call")
+                .unwrap();
+            assert_ne!(owner, 0, "the summary owner is not the root node");
+            assert!(
+                view.root
+                    .display_index_for_scoped_node(&call, "inner")
+                    .is_none(),
+                "the summarized projection omits the original owner"
+            );
+            let leaf = view
+                .root
+                .display_index_for_scoped_node(&inner, "leaf")
+                .unwrap();
+            view.state.selected = leaf;
+            view.state.sync_scope(&view.root);
+            view.handle_navigation(key, &snapshot, &traces, &logs);
+            assert_eq!(view.body_states[&call], BodyDisplay::Hidden);
+            assert_eq!(view.state.selected, owner);
+            assert!(
+                view.root
+                    .display_index_for_scoped_node(&inner, "leaf")
+                    .is_none()
+            );
+        }
+
+        // Stacking the injected body under its own summarized call also keeps
+        // the owner visible, but folding the injected body alone would leave
+        // the direct summary projection in place.
+        description.injected_bodies = vec![call.clone(), inner.clone()];
+        let mut view = ObservationView::new(&description).unwrap();
+        view.cycle_body(call.clone()).unwrap();
+        let owner = view
+            .root
+            .display_index_for_scoped_node(&[], "call")
+            .unwrap();
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&call, "inner")
+                .is_some()
+        );
+        let leaf = view
+            .root
+            .display_index_for_scoped_node(&inner, "leaf")
+            .unwrap();
+        view.state.selected = leaf;
+        view.state.sync_scope(&view.root);
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert_eq!(view.body_states[&call], BodyDisplay::Hidden);
+        assert_eq!(view.state.selected, owner);
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&inner, "leaf")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn loop_views_preserve_navigation_and_compacted_stream_totals() {
         let description = WorkflowDescription {
+            injected_bodies: Vec::new(),
             order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_09_29,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64))).unwrap(),

@@ -1,0 +1,33 @@
+{
+  "version": "2026-11-01",
+  "dependencies": {
+    "code": {
+      "package": "mfn-code",
+      "path": "../../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "calculate",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "operation": "string",
+          "left": "double",
+          "right": "double"
+        },
+        "code": {
+          "content": "operation == 'divide' && right == 0.0 ? 'Error: division by zero.' : operation == 'add' ? string(left + right) : operation == 'subtract' ? string(left - right) : operation == 'multiply' ? string(left * right) : operation == 'divide' ? string(left / right) : 'Error: unsupported operation `' + operation + '`.'"
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "content",
+      "node": "calculate",
+      "port": "content"
+    }
+  ]
+}

@@ -1,0 +1,186 @@
+{
+  "version": "2026-11-01",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "version": "=0.1.0"
+    },
+    "code": {
+      "package": "mfn-code",
+      "version": "=0.1.0"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "version": "=0.1.0"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "calls": {
+            "type": {
+              "list": "object"
+            },
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "dispatch",
+      "kind": "builtin.iteration",
+      "config": {
+        "mode": "parallel",
+        "on_error": "terminate",
+        "body": {
+          "nodes": [
+            {
+              "id": "name",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "call": "object"
+                },
+                "code": {
+                  "value": "call.name"
+                }
+              },
+              "inputs": {
+                "call": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                }
+              }
+            },
+            {
+              "id": "route",
+              "kind": "builtin.router",
+              "config": {
+                "routes": [
+                  "unknown"
+                ]
+              },
+              "inputs": {
+                "route": {
+                  "from": {
+                    "node": "name",
+                    "port": "value"
+                  }
+                }
+              }
+            },
+            {
+              "id": "unknown_named",
+              "kind": "builtin.constant",
+              "config": {
+                "value": {
+                  "error": "unknown tool"
+                }
+              }
+            },
+            {
+              "id": "unknown_named_result",
+              "kind": "llm.tool_result",
+              "inputs": {
+                "call": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                },
+                "result": {
+                  "from": {
+                    "node": "unknown_named",
+                    "port": "value"
+                  }
+                }
+              }
+            },
+            {
+              "id": "unknown_else",
+              "kind": "builtin.constant",
+              "config": {
+                "value": {
+                  "error": "unknown tool"
+                }
+              }
+            },
+            {
+              "id": "unknown_else_result",
+              "kind": "llm.tool_result",
+              "inputs": {
+                "call": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                },
+                "result": {
+                  "from": {
+                    "node": "unknown_else",
+                    "port": "value"
+                  }
+                }
+              }
+            },
+            {
+              "id": "result",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "exclusive": [
+                    {
+                      "node": "unknown_named_result",
+                      "port": "result"
+                    },
+                    {
+                      "node": "unknown_else_result",
+                      "port": "result"
+                    }
+                  ]
+                }
+              }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "route",
+              "from_output": "unknown",
+              "to_node": "unknown_named"
+            },
+            {
+              "from_node": "route",
+              "from_output": "else",
+              "to_node": "unknown_else"
+            }
+          ],
+          "result": {
+            "node": "result",
+            "port": "value"
+          }
+        }
+      },
+      "inputs": {
+        "items": {
+          "from": {
+            "node": "params",
+            "port": "calls"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "results",
+      "node": "dispatch",
+      "port": "results"
+    }
+  ]
+}

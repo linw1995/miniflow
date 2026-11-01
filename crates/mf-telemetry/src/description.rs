@@ -70,6 +70,11 @@ pub struct WorkflowDescription {
     pub execution_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_bodies: Vec<LoopBodyDescription>,
+    /// Bodies that a call received as injected Flow parameters, keyed by the body path
+    /// that holds the injected subgraph. Inspection UIs can render them without the
+    /// intermediate calls that dispatch them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injected_bodies: Vec<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<ClusterDescription>,
 }
@@ -408,6 +413,7 @@ impl WorkflowDescription {
                     },
                 ),
                 loop_bodies: Vec::new(),
+                injected_bodies: Vec::new(),
                 clusters: body.clusters.clone(),
             };
             scope.validate()?;
@@ -417,6 +423,14 @@ impl WorkflowDescription {
                     .is_none(),
                 "duplicate Loop body path",
             )?;
+        }
+        let mut injected = BTreeSet::new();
+        for path in &self.injected_bodies {
+            require(
+                !path.is_empty() && scopes.contains_key(path),
+                "unknown injected Flow body path",
+            )?;
+            require(injected.insert(path), "duplicate injected Flow body path")?;
         }
         Ok(())
     }

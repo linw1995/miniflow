@@ -165,6 +165,10 @@ fn embed_workflows_at(
 
 #[cfg(test)]
 mod tests {
+    extern crate mfn_code as _;
+    extern crate mfn_core as _;
+    extern crate mfn_llm as _;
+
     use super::*;
     use serde_json::json;
 
@@ -216,6 +220,26 @@ mod tests {
 
     fn write_definition(root: &Path, value: &serde_json::Value) {
         fs::write(root.join("flow.json"), value.to_string()).unwrap();
+    }
+
+    #[test]
+    fn embedded_artifacts_keep_injected_flow_bodies() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let output = tempfile::tempdir().unwrap();
+        embed_workflows_at(
+            &[EmbedRequest::new(
+                "agent",
+                examples.join("chat-calculator-flow.json"),
+            )],
+            &examples,
+            output.path(),
+        )
+        .unwrap();
+        let module =
+            fs::read_to_string(output.path().join("mf-embedded/agent/workflow.rs")).unwrap();
+        assert!(module.contains("compiler.metadata_expansion"), "{module}");
+        assert!(module.contains(r#"\"calculator\""#), "{module}");
+        assert!(module.contains("pub fn finalized_plan"), "{module}");
     }
 
     #[test]

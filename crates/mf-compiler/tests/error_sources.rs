@@ -411,6 +411,7 @@ fn filesystem_contexts_preserve_the_failing_path_and_io_source() {
 
     let directory = root.path().join("managed");
     fs::create_dir(&directory).unwrap();
+    let directory = fs::canonicalize(directory).unwrap();
     let marker = directory.join(".mf-owner.json");
     fs::create_dir(&marker).unwrap();
     let error = mf_compiler::BuildDirectory::open(&definition, Some(&directory))
