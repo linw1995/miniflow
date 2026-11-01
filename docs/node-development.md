@@ -77,6 +77,9 @@ Use `NodeFactory::Plain` for a factory taking configuration and returning `Prepa
 Use `NodeFactory::Subgraph` when construction also needs the occurrence ID, execution options, and a
 `PreparedSubgraph`. The compiler supplies Loop, Iteration, and Call bodies through this second form. Missing
 or inappropriate body arguments fail during preparation; an executor is returned only after binding.
+Factories and retained executors can call `PreparedSubgraph::input_metadata()` to inspect startup inputs
+partitioned by independent, weakly connected Flow. Each entry lists that Flow's nodes and its input
+schema. `PreparedSubgraph::inputs` remains the complete flat schema used for runtime binding.
 
 ### Subgraph container execution
 

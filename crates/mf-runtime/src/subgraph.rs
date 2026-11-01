@@ -1,4 +1,7 @@
-use crate::{ExecutionContext, FlowOutputs, NodeIdentity, PortSpec, WorkflowRunError};
+use crate::{
+    DefinitionId, ExecutionContext, Flow, FlowOutputs, NodeIdentity, PortSpec, WorkflowInputSchema,
+    WorkflowRunError,
+};
 use snafu::{ResultExt, Snafu};
 use std::sync::{Arc, mpsc};
 
@@ -128,12 +131,100 @@ type SubgraphBody = dyn Fn(&mut ExecutionContext, &mut dyn crate::EmissionSink) 
     + Sync
     + 'static;
 
+/// Startup input metadata for one weakly connected Flow within a subgraph.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubgraphFlowInputMetadata {
+    /// Node IDs in the subgraph's canonical execution order.
+    pub nodes: Vec<DefinitionId>,
+    /// The subset of the subgraph's startup interface owned by this Flow.
+    pub inputs: WorkflowInputSchema,
+}
+
+/// Startup inputs partitioned by the independent Flows in a subgraph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubgraphInputMetadata {
+    /// Independent Flows in canonical execution order.
+    pub flows: Vec<SubgraphFlowInputMetadata>,
+}
+
+impl SubgraphInputMetadata {
+    /// Partitions a prepared Flow without changing its flat runtime input binding.
+    pub fn from_flow(flow: &Flow) -> Self {
+        let domains = flow.execution_domains().domains();
+        let mut domain_flows = vec![usize::MAX; domains.len()];
+        let mut components = Vec::<Vec<usize>>::new();
+        for start in 0..domains.len() {
+            if domain_flows[start] != usize::MAX {
+                continue;
+            }
+            let component = components.len();
+            components.push(Vec::new());
+            let mut pending = vec![start];
+            domain_flows[start] = component;
+            while let Some(domain) = pending.pop() {
+                components[component].push(domain);
+                for adjacent in domains[domain]
+                    .predecessors
+                    .iter()
+                    .chain(domains[domain].successors.iter())
+                {
+                    if domain_flows[*adjacent] == usize::MAX {
+                        domain_flows[*adjacent] = component;
+                        pending.push(*adjacent);
+                    }
+                }
+            }
+        }
+        components.sort_by_key(|component| {
+            component
+                .iter()
+                .map(|&domain| domains[domain].first_position)
+                .min()
+                .expect("a connected component contains a domain")
+        });
+
+        let mut node_flows = vec![usize::MAX; flow.nodes().len()];
+        for (component, domain_ids) in components.iter().enumerate() {
+            for &domain in domain_ids {
+                for node in domains[domain].nodes.iter() {
+                    node_flows[node.index()] = component;
+                }
+            }
+        }
+        let schema = flow.input_schema();
+        let flows = components
+            .iter()
+            .enumerate()
+            .map(|(component, _)| {
+                let nodes: Vec<_> = flow
+                    .execution_order()
+                    .iter()
+                    .filter(|node| node_flows[node.index()] == component)
+                    .map(|node| flow.nodes()[node.index()].definition_id.clone())
+                    .collect();
+                let mut inputs = WorkflowInputSchema::default();
+                for node in &nodes {
+                    if let Some(ports) = schema.inputs.get(node.as_str()) {
+                        inputs.inputs.insert(node.to_string(), ports.clone());
+                    }
+                    if let Some(requirement) = schema.stdin.get(node.as_str()) {
+                        inputs.stdin.insert(node.to_string(), requirement.clone());
+                    }
+                }
+                SubgraphFlowInputMetadata { nodes, inputs }
+            })
+            .collect();
+        Self { flows }
+    }
+}
+
 #[derive(Clone)]
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,
     pub inputs: crate::WorkflowInputSchema,
     pub outputs: Vec<PortSpec>,
     pub stream_outputs: Vec<PortSpec>,
+    input_metadata: SubgraphInputMetadata,
     body: Arc<SubgraphBody>,
 }
 
@@ -237,13 +328,39 @@ impl PreparedSubgraph {
             inputs: Default::default(),
             outputs,
             stream_outputs,
+            input_metadata: Default::default(),
             body: Arc::new(body),
         }
     }
 
+    /// Sets a manually supplied flat schema without inferring independent Flows.
     pub fn with_input_schema(mut self, inputs: crate::WorkflowInputSchema) -> Self {
         self.inputs = inputs;
+        self.input_metadata = Default::default();
         self
+    }
+
+    /// Captures both the flat runtime schema and its independent-Flow metadata.
+    pub fn with_flow_inputs(mut self, flow: &Flow) -> Self {
+        self.inputs = flow.input_schema().clone();
+        self.input_metadata = SubgraphInputMetadata::from_flow(flow);
+        self
+    }
+
+    /// Sets matching flat and partitioned views captured before moving a Flow into the body.
+    pub fn with_input_metadata(
+        mut self,
+        inputs: WorkflowInputSchema,
+        input_metadata: SubgraphInputMetadata,
+    ) -> Self {
+        self.inputs = inputs;
+        self.input_metadata = input_metadata;
+        self
+    }
+
+    /// Returns input metadata available to both subgraph factories and executors.
+    pub fn input_metadata(&self) -> &SubgraphInputMetadata {
+        &self.input_metadata
     }
 
     pub fn execute_in_context(

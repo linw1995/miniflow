@@ -815,13 +815,16 @@ fn generated_calls_match_memory_without_flow_sources() {
         .execute()
         .unwrap();
     let execution = plan.generate_runner_execution_plans(&registry).unwrap();
+    assert!(execution.rust_source.contains("with_input_metadata"));
     let frozen = mf_runtime::WorkflowManifest::from_bytes(&execution.manifest_bytes).unwrap();
     assert_eq!(frozen.definition, plan.definition);
     let targets: Vec<mf_runtime::NodeTarget> =
         serde_json::from_str(&execution.node_targets_json).unwrap();
     assert_eq!(targets[0].id, "outer");
-    let artifacts = plan.generate_runner_artifacts().unwrap();
-    assert!(!artifacts.rust_source.is_empty());
+    let artifacts = plan.generate_artifacts().unwrap();
+    assert!(artifacts.rust_source.contains("with_input_metadata"));
+    let runner_artifacts = plan.generate_runner_artifacts().unwrap();
+    assert!(!runner_artifacts.rust_source.is_empty());
     let project = root.path().join("build");
     mf_compiler::write_dependency_project(
         &project,
