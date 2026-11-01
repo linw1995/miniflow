@@ -454,6 +454,7 @@ impl IterationState {
                         };
                         node.terminal_sequence = Some(context.sequence);
                         node.terminal_elapsed_ns = Some(context.elapsed_ns);
+                        node.terminal_received_at = Some(std::time::Instant::now());
                         node.duration_ns = *duration_ns;
                         (node.produced_ports, node.omitted_port_names) =
                             bounded_ports(produced_ports);
@@ -472,6 +473,7 @@ impl IterationState {
                         node.status = NodeStatus::Skipped;
                         node.terminal_sequence = Some(context.sequence);
                         node.terminal_elapsed_ns = Some(context.elapsed_ns);
+                        node.terminal_received_at = Some(std::time::Instant::now());
                         (node.skip_causes, node.omitted_skip_causes) = bounded_causes(causes);
                         (node.skipped_ports, node.omitted_port_names) =
                             bounded_ports(skipped_ports);

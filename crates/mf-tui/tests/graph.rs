@@ -1,15 +1,21 @@
+use mf_runtime::{SnapshotOutcome, ValueRef};
 use mf_telemetry::{
     Count,
+    capture::{SNAPSHOT_VERSION, SnapshotRecord},
     description::{
         ClusterDescription, ControlEdge, DataEdge, ExecutionDescription, ExecutionMode,
         LoopBodyDescription, NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
     },
-    event::{Event, LifecycleEvent, NodeIdentity, Outcome},
+    event::{
+        Event, Failure, FailurePhase, InputSelection, LifecycleEvent, NodeIdentity, Outcome,
+        ScopePathEntry, SkipCause,
+    },
     identity::{RunId, WorkflowId},
 };
 use mf_tui::{
-    graph::{EdgeKind, GraphLayout, GraphView},
-    state::{NodeObservation, NodeStatus, SessionState},
+    graph::{ConnectionView, EdgeKind, GraphLayout, GraphView},
+    snapshots::{HistorySnapshot, SnapshotMetadata, SnapshotStore},
+    state::{NodeObservation, NodeStatus, SessionState, StateSnapshot},
 };
 use ratatui::{
     buffer::Buffer,
@@ -18,6 +24,7 @@ use ratatui::{
     widgets::Widget,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 fn description() -> WorkflowDescription {
     let nodes = ["source", "router", "left", "right", "join", "orphan"];
@@ -2368,4 +2375,1008 @@ fn graph_node_limit_rejects_oversized_descriptions_before_layout() {
     assert!(
         matches!(GraphLayout::new(&graph), Err(GraphError::TooManyNodes { limit }) if limit == MAX_SESSION_NODES)
     );
+}
+
+fn node_identity(id: &str) -> NodeIdentity {
+    NodeIdentity {
+        id: id.into(),
+        kind: id.into(),
+        path: Vec::new(),
+    }
+}
+
+struct TestSession {
+    graph: WorkflowDescription,
+    run_id: RunId,
+    state: SessionState,
+    sequence: i64,
+}
+
+impl TestSession {
+    fn new(graph: &WorkflowDescription) -> Self {
+        let run_id = RunId::new();
+        let mut state = SessionState::new(graph.clone(), run_id).unwrap();
+        state
+            .apply(LifecycleEvent {
+                workflow_id: graph.workflow_id.clone(),
+                run_id,
+                sequence: count(1),
+                event: Event::WorkflowStarted {
+                    elapsed_ns: count(0),
+                },
+            })
+            .unwrap();
+        Self {
+            graph: graph.clone(),
+            run_id,
+            state,
+            sequence: 1,
+        }
+    }
+
+    fn event(&mut self, event: Event) -> &mut Self {
+        self.sequence += 1;
+        self.state
+            .apply(LifecycleEvent {
+                workflow_id: self.graph.workflow_id.clone(),
+                run_id: self.run_id,
+                sequence: count(self.sequence),
+                event,
+            })
+            .unwrap();
+        self
+    }
+
+    fn position(&self, id: &str) -> i64 {
+        self.graph
+            .execution_order
+            .iter()
+            .position(|node| node == id)
+            .unwrap() as i64
+    }
+
+    fn start(
+        &mut self,
+        id: &str,
+        elapsed_ns: i64,
+        selected_inputs: Vec<InputSelection>,
+    ) -> &mut Self {
+        let position = count(self.position(id));
+        self.event(Event::NodeStarted {
+            selected_inputs,
+            node: node_identity(id),
+            position,
+            elapsed_ns: count(elapsed_ns),
+        })
+    }
+
+    fn finish(
+        &mut self,
+        id: &str,
+        elapsed_ns: i64,
+        outcome: Outcome,
+        produced_ports: &[&str],
+        skipped_ports: &[&str],
+        failure: Option<Failure>,
+    ) -> &mut Self {
+        let position = count(self.position(id));
+        self.event(Event::NodeFinished {
+            node: node_identity(id),
+            position,
+            elapsed_ns: count(elapsed_ns),
+            duration_ns: Some(count(0)),
+            outcome,
+            produced_ports: produced_ports
+                .iter()
+                .map(|port| (*port).to_owned())
+                .collect(),
+            skipped_ports: skipped_ports
+                .iter()
+                .map(|port| (*port).to_owned())
+                .collect(),
+            failure,
+            loop_summary: None,
+        })
+    }
+
+    fn skip(&mut self, id: &str, elapsed_ns: i64, skipped_ports: &[&str]) -> &mut Self {
+        let position = count(self.position(id));
+        self.event(Event::NodeSkipped {
+            selected_inputs: Vec::new(),
+            node: node_identity(id),
+            position,
+            elapsed_ns: count(elapsed_ns),
+            causes: vec![SkipCause::Output {
+                source_node: "router".into(),
+                source_output: "no".into(),
+            }],
+            skipped_ports: skipped_ports
+                .iter()
+                .map(|port| (*port).to_owned())
+                .collect(),
+        })
+    }
+
+    fn snapshot(&self) -> StateSnapshot {
+        self.state.snapshot()
+    }
+}
+
+fn node_index(layout: &GraphLayout, id: &str) -> usize {
+    layout.display_index_for_node_id(id).unwrap()
+}
+
+fn edge_index(layout: &GraphLayout, from: &str, to: &str, output: Option<&str>) -> usize {
+    layout
+        .edges()
+        .iter()
+        .position(|edge| {
+            layout.nodes()[edge.from].id == from
+                && layout.nodes()[edge.to].id == to
+                && output.is_none_or(|output| edge.from_output.as_deref() == Some(output))
+        })
+        .unwrap()
+}
+
+fn bottom_activity(buffer: &Buffer, layout: &GraphLayout, id: &str) -> String {
+    let rect = layout.nodes()[node_index(layout, id)].rect;
+    let y = rect.y + rect.height - 1;
+    (rect.x + 1..rect.x + rect.width - 1)
+        .map(|x| {
+            buffer
+                .cell(Position::new(x as u16, y as u16))
+                .unwrap()
+                .symbol()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn activity_density(row: &str) -> usize {
+    row.chars()
+        .filter(|symbol| matches!(symbol, '▓' | '▒' | '░' | '·'))
+        .count()
+}
+
+fn transfer_symbol(symbol: &str) -> bool {
+    matches!(symbol, "▓" | "▒" | "░" | "·")
+}
+
+fn route_transfer_cells(buffer: &Buffer, layout: &GraphLayout, edge: usize) -> Vec<Position> {
+    use mf_tui::graph::routing::Axis;
+    let mut cells = Vec::new();
+    for segment in layout.routes()[edge].segments() {
+        let low = segment.low();
+        let high = segment.high();
+        match segment.axis() {
+            Axis::Horizontal => {
+                for x in low.x..=high.x {
+                    if transfer_symbol(
+                        buffer
+                            .cell(Position::new(x as u16, low.y as u16))
+                            .unwrap()
+                            .symbol(),
+                    ) {
+                        cells.push(Position::new(x as u16, low.y as u16));
+                    }
+                }
+            }
+            Axis::Vertical => {
+                for y in low.y..=high.y {
+                    if transfer_symbol(
+                        buffer
+                            .cell(Position::new(low.x as u16, y as u16))
+                            .unwrap()
+                            .symbol(),
+                    ) {
+                        cells.push(Position::new(low.x as u16, y as u16));
+                    }
+                }
+            }
+        }
+    }
+    cells
+}
+
+fn minimap_rect(buffer: &Buffer) -> Option<Rect> {
+    for y in 0..buffer.area.height {
+        for x in 2..buffer.area.width {
+            let cell = buffer.cell(Position::new(x, y)).unwrap();
+            if cell.symbol() != "M" || cell.fg != Color::DarkGray {
+                continue;
+            }
+            let left = x - 2;
+            let right = (x..buffer.area.width).find(|candidate| {
+                let cell = buffer.cell(Position::new(*candidate, y)).unwrap();
+                cell.symbol() == "┐" && cell.fg == Color::DarkGray
+            })?;
+            let bottom = (y..buffer.area.height).find(|candidate| {
+                let cell = buffer.cell(Position::new(left, *candidate)).unwrap();
+                cell.symbol() == "└" && cell.fg == Color::DarkGray
+            })?;
+            return Some(Rect {
+                x: left,
+                y,
+                width: right - left + 1,
+                height: bottom - y + 1,
+            });
+        }
+    }
+    None
+}
+
+fn minimap_viewport(buffer: &Buffer, map: Rect) -> Option<(u16, u16, u16, u16)> {
+    let mut bounds: Option<(u16, u16, u16, u16)> = None;
+    for y in map.y + 1..map.y + map.height - 1 {
+        for x in map.x + 1..map.x + map.width - 1 {
+            let cell = buffer.cell(Position::new(x, y)).unwrap();
+            if cell.fg != Color::White
+                || !cell.modifier.contains(Modifier::BOLD)
+                || !matches!(cell.symbol(), "┌" | "┐" | "└" | "┘" | "─" | "│")
+            {
+                continue;
+            }
+            bounds = Some(bounds.map_or((x, y, x, y), |(left, top, right, bottom)| {
+                (left.min(x), top.min(y), right.max(x), bottom.max(y))
+            }));
+        }
+    }
+    bounds
+}
+
+fn minimap_marker(buffer: &Buffer, map: Rect) -> Option<Position> {
+    for y in map.y + 1..map.y + map.height - 1 {
+        for x in map.x + 1..map.x + map.width - 1 {
+            if buffer.cell(Position::new(x, y)).unwrap().symbol() == "◆" {
+                return Some(Position::new(x, y));
+            }
+        }
+    }
+    None
+}
+
+fn minimap_node_point(layout: &GraphLayout, map: Rect, index: usize) -> Position {
+    let inner = Rect {
+        x: map.x + 1,
+        y: map.y + 1,
+        width: map.width - 2,
+        height: map.height - 2,
+    };
+    let (canvas_width, canvas_height) = layout.size();
+    let rect = layout.nodes()[index].rect;
+    let x = u64::from(rect.x + rect.width / 2) * u64::from(inner.width.saturating_sub(1))
+        / u64::from(canvas_width.saturating_sub(1).max(1));
+    let y = u64::from(rect.y + rect.height / 2) * u64::from(inner.height.saturating_sub(1))
+        / u64::from(canvas_height.saturating_sub(1).max(1));
+    Position::new(inner.x + x as u16, inner.y + y as u16)
+}
+
+fn assert_outside_blank(buffer: &Buffer, area: Rect) {
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let position = Position::new(x, y);
+            if !area.contains(position) {
+                assert_eq!(buffer.cell(position).unwrap().symbol(), " ");
+            }
+        }
+    }
+}
+
+fn pending_nodes(layout: &GraphLayout) -> Vec<NodeObservation> {
+    layout
+        .all_nodes()
+        .iter()
+        .map(|node| NodeObservation::pending(&node.id, &node.kind))
+        .collect()
+}
+
+fn snapshot_store(
+    records: impl IntoIterator<Item = (Vec<ScopePathEntry>, &'static str, SnapshotOutcome, ValueRef)>,
+) -> SnapshotStore {
+    let mut store = SnapshotStore::default();
+    store
+        .apply(SnapshotRecord::Header {
+            version: SNAPSHOT_VERSION,
+        })
+        .unwrap();
+    for (scope, node, outcome, outputs) in records {
+        store
+            .apply(SnapshotRecord::Node {
+                scope,
+                node: node.into(),
+                inputs: ValueRef::object([]),
+                outputs,
+                skipped: Vec::new().into(),
+                outcome,
+                error: None,
+            })
+            .unwrap();
+    }
+    store
+}
+
+fn history_snapshot(
+    store: &SnapshotStore,
+    now: u64,
+    ages: &[(u64, Option<mf_tui::traces::SpanKey>)],
+) -> HistorySnapshot {
+    let entries = store.history().to_vec();
+    assert_eq!(entries.len(), ages.len());
+    let metadata = ages
+        .iter()
+        .enumerate()
+        .map(|(sequence, (age, correlation))| SnapshotMetadata {
+            sequence,
+            time_unix_nano: now - age,
+            received_at: None,
+            correlation: correlation.clone(),
+        })
+        .collect();
+    HistorySnapshot {
+        history_len: entries.len(),
+        selected: entries.len().saturating_sub(1),
+        first: 0,
+        entries,
+        metadata,
+        status: "Complete".into(),
+    }
+}
+
+fn value_object(output: &'static str, value: i64) -> ValueRef {
+    ValueRef::object([(output.into(), ValueRef::from(value))])
+}
+
+fn render_minimap(
+    layout: &GraphLayout,
+    area: Rect,
+    selected: Option<usize>,
+    offset: (u32, u32),
+) -> Buffer {
+    let mut buffer = Buffer::empty(area);
+    let mut view = GraphView::new(layout)
+        .minimap(true)
+        .offset(offset.0, offset.1);
+    if let Some(selected) = selected {
+        view = view.selected(selected);
+    }
+    view.render(area, &mut buffer);
+    buffer
+}
+
+fn render_snapshot(layout: &GraphLayout, snapshot: &StateSnapshot, elapsed_ns: u64) -> Buffer {
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+    GraphView::new(layout)
+        .snapshot(snapshot)
+        .elapsed_ns(elapsed_ns)
+        .render(buffer.area, &mut buffer);
+    buffer
+}
+
+fn render_stream(
+    layout: &GraphLayout,
+    nodes: &[NodeObservation],
+    history: &HistorySnapshot,
+    now: u64,
+) -> Buffer {
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+    GraphView::new(layout)
+        .nodes(nodes)
+        .data_snapshot(history)
+        .observed_at_unix_nano(now)
+        .render(buffer.area, &mut buffer);
+    buffer
+}
+
+#[test]
+fn minimap_is_opt_in_and_appears_only_when_the_canvas_overflows() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let (width, height) = layout.size();
+    assert!(width > 50 || height > 8);
+    let overflowing = Rect::new(0, 0, 50, 8);
+    for (minimap, expected) in [(false, false), (true, true)] {
+        let mut buffer = Buffer::empty(overflowing);
+        GraphView::new(&layout)
+            .minimap(minimap)
+            .render(overflowing, &mut buffer);
+        assert_eq!(minimap_rect(&buffer).is_some(), expected);
+    }
+
+    let fits = Rect::new(0, 0, width as u16 + 4, height as u16 + 4);
+    let mut buffer = Buffer::empty(fits);
+    GraphView::new(&layout)
+        .minimap(true)
+        .render(fits, &mut buffer);
+    assert!(minimap_rect(&buffer).is_none());
+
+    for area in [Rect::new(0, 0, 23, 12), Rect::new(0, 0, 40, 7)] {
+        let mut buffer = Buffer::empty(area);
+        GraphView::new(&layout)
+            .minimap(true)
+            .render(area, &mut buffer);
+        assert!(minimap_rect(&buffer).is_none(), "tiny map in {area:?}");
+    }
+}
+
+#[test]
+fn minimap_tracks_the_selected_node_and_viewport_pan() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let area = Rect::new(0, 0, 64, 10);
+    let mut visible = Vec::new();
+    for id in ["join", "right", "left", "router", "source"] {
+        let index = node_index(&layout, id);
+        let buffer = render_minimap(&layout, area, Some(index), (0, 0));
+        let Some(map) = minimap_rect(&buffer) else {
+            continue;
+        };
+        let expected = minimap_node_point(&layout, map, index);
+        if minimap_marker(&buffer, map) == Some(expected) {
+            visible.push((index, map, expected));
+            if visible.len() == 2 {
+                break;
+            }
+        }
+    }
+    assert_eq!(visible.len(), 2);
+    let (first_index, map, first_marker) = visible[0];
+    let moved = visible[1].2;
+    assert_ne!(first_marker, moved);
+
+    let first = render_minimap(&layout, area, Some(first_index), (0, 0));
+    let viewport = minimap_viewport(&first, map).expect("the minimap shows a viewport box");
+    let (width, height) = layout.size();
+    let panned = render_minimap(&layout, area, Some(first_index), (width / 2, height / 2));
+    let panned_viewport =
+        minimap_viewport(&panned, map).expect("the panned viewport remains visible");
+    assert!(
+        panned_viewport.0 > viewport.0 || panned_viewport.1 > viewport.1,
+        "viewport did not move: {viewport:?} -> {panned_viewport:?}"
+    );
+    assert!(panned_viewport.0 > map.x && panned_viewport.1 > map.y);
+    assert!(panned_viewport.2 < map.x + map.width - 1);
+    assert!(panned_viewport.3 < map.y + map.height - 1);
+}
+
+#[test]
+fn minimap_and_graph_clip_safely_for_empty_tiny_and_extreme_viewports() {
+    let mut graph = description();
+    graph.nodes.clear();
+    graph.data_edges.clear();
+    graph.control_edges.clear();
+    graph.execution_order.clear();
+    let empty = GraphLayout::new(&graph).unwrap();
+    assert_eq!(empty.size(), (4, 4));
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 20));
+    let area = Rect::new(5, 6, 30, 10);
+    GraphView::new(&empty)
+        .minimap(true)
+        .offset(u32::MAX, u32::MAX)
+        .render(area, &mut buffer);
+    assert!(minimap_rect(&buffer).is_none());
+    assert_outside_blank(&buffer, area);
+
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 30, 12));
+    let area = Rect::new(3, 2, 20, 6);
+    GraphView::new(&layout)
+        .minimap(true)
+        .offset(u32::MAX, u32::MAX)
+        .render(area, &mut buffer);
+    assert!(minimap_rect(&buffer).is_none());
+    assert_outside_blank(&buffer, area);
+
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 40));
+    let area = Rect::new(7, 5, 50, 10);
+    GraphView::new(&layout)
+        .minimap(true)
+        .offset(u32::MAX, u32::MAX)
+        .render(area, &mut buffer);
+    let map = minimap_rect(&buffer).expect("overflowing canvas keeps the minimap");
+    assert!(map.x >= area.x && map.y >= area.y);
+    assert!(map.x + map.width <= area.x + area.width);
+    assert!(map.y + map.height <= area.y + area.height);
+    assert_outside_blank(&buffer, area);
+}
+
+#[test]
+fn running_node_activity_density_changes_with_elapsed_time() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut session = TestSession::new(&graph);
+    session.start("source", 0, Vec::new());
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.nodes[0].status, NodeStatus::Running);
+
+    let render = |elapsed_ns| {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+        GraphView::new(&layout)
+            .snapshot(&snapshot)
+            .elapsed_ns(elapsed_ns)
+            .render(buffer.area, &mut buffer);
+        bottom_activity(&buffer, &layout, "source")
+    };
+    let first = render(0);
+    let later = render(300_000_000);
+    assert_ne!(first, later);
+    assert!(activity_density(&first) > 0);
+    assert!(activity_density(&later) > 0);
+    assert_ne!(activity_density(&first), activity_density(&later));
+}
+
+#[test]
+fn terminal_node_activity_settles_to_static_density_per_outcome() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut session = TestSession::new(&graph);
+    session
+        .start("source", 0, Vec::new())
+        .finish("source", 0, Outcome::Succeeded, &["value"], &[], None)
+        .start("left", 0, Vec::new())
+        .finish(
+            "left",
+            0,
+            Outcome::Failed,
+            &[],
+            &[],
+            Some(Failure {
+                phase: FailurePhase::Execution,
+                message: "boom".into(),
+            }),
+        )
+        .skip("right", 0, &["value"]);
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.nodes[0].status, NodeStatus::Succeeded);
+    assert_eq!(
+        snapshot.nodes[node_index(&layout, "left")].status,
+        NodeStatus::Failed
+    );
+    assert_eq!(
+        snapshot.nodes[node_index(&layout, "right")].status,
+        NodeStatus::Skipped
+    );
+
+    let render = |elapsed_ns| {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+        GraphView::new(&layout)
+            .snapshot(&snapshot)
+            .elapsed_ns(elapsed_ns)
+            .render(buffer.area, &mut buffer);
+        (
+            bottom_activity(&buffer, &layout, "source"),
+            bottom_activity(&buffer, &layout, "left"),
+            bottom_activity(&buffer, &layout, "right"),
+        )
+    };
+    let settled = render(1_000_000_000);
+    assert_eq!(settled, render(3_000_000_000));
+    for (row, symbol) in [(&settled.0, '▓'), (&settled.1, '▒'), (&settled.2, '░')] {
+        assert!(row.chars().all(|actual| actual == symbol), "row: {row:?}");
+        let width = layout.nodes()[node_index(&layout, "source")].rect.width;
+        assert_eq!(row.chars().count(), width as usize - 2);
+    }
+}
+
+#[test]
+fn live_terminal_activity_uses_lifecycle_receipt_time() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut session = TestSession::new(&graph);
+    session.start("source", 0, Vec::new()).finish(
+        "source",
+        0,
+        Outcome::Succeeded,
+        &["value"],
+        &[],
+        None,
+    );
+    let mut snapshot = session.snapshot();
+    let source = snapshot
+        .nodes
+        .iter()
+        .position(|node| node.id == "source")
+        .unwrap();
+    assert_eq!(snapshot.nodes[source].status, NodeStatus::Succeeded);
+    snapshot.nodes[source].terminal_received_at = Some(Instant::now());
+
+    let history = HistorySnapshot {
+        history_len: 0,
+        selected: 0,
+        first: 0,
+        entries: Vec::new(),
+        metadata: Vec::new(),
+        status: "Complete".into(),
+    };
+    let now = 10_000_000_000;
+    let render = |snapshot: &StateSnapshot| {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+        GraphView::new(&layout)
+            .snapshot(snapshot)
+            .data_snapshot(&history)
+            .observed_at_unix_nano(now)
+            .render(buffer.area, &mut buffer);
+        bottom_activity(&buffer, &layout, "source")
+    };
+
+    let sweeping = render(&snapshot);
+
+    snapshot.nodes[source].terminal_received_at = Some(Instant::now() - Duration::from_secs(2));
+    let settled = render(&snapshot);
+    assert_ne!(
+        sweeping, settled,
+        "expected lifecycle receipt time to animate the terminal sweep"
+    );
+    assert!(
+        activity_density(&sweeping) < activity_density(&settled),
+        "live sweep {sweeping:?} should be sparser than settled row {settled:?}"
+    );
+    let width = layout.nodes()[node_index(&layout, "source")].rect.width;
+    assert_eq!(settled.chars().count(), width as usize - 2);
+    assert!(
+        settled.chars().all(|symbol| symbol == '▓'),
+        "expected settled row, got {settled:?}"
+    );
+}
+
+#[test]
+fn ordinary_start_timestamp_pulses_a_task_path_and_expires_while_running() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut session = TestSession::new(&graph);
+    session.start("router", 1_000_000_000, Vec::new());
+    let snapshot = session.snapshot();
+    assert_eq!(
+        snapshot.nodes[node_index(&layout, "router")].status,
+        NodeStatus::Running
+    );
+    let edge = edge_index(&layout, "source", "router", Some("value"));
+    let pulsing = render_snapshot(&layout, &snapshot, 1_100_000_000);
+    assert!(!route_transfer_cells(&pulsing, &layout, edge).is_empty());
+    let expired = render_snapshot(&layout, &snapshot, 1_700_000_000);
+    assert!(route_transfer_cells(&expired, &layout, edge).is_empty());
+    assert!(activity_density(&bottom_activity(&expired, &layout, "router")) > 0);
+}
+
+#[test]
+fn exclusive_input_selection_pulses_only_the_chosen_data_edge() {
+    let mut graph = description();
+    graph.data_edges = vec![
+        DataEdge {
+            exclusive: true,
+            from_node: "source".into(),
+            from_output: "yes".into(),
+            to_node: "left".into(),
+            to_input: "pick".into(),
+        },
+        DataEdge {
+            exclusive: true,
+            from_node: "source".into(),
+            from_output: "no".into(),
+            to_node: "left".into(),
+            to_input: "pick".into(),
+        },
+    ];
+    graph.control_edges.clear();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut session = TestSession::new(&graph);
+    session.start(
+        "left",
+        1_000_000_000,
+        vec![InputSelection {
+            input: "pick".into(),
+            source_node: "source".into(),
+            source_output: "yes".into(),
+        }],
+    );
+    let buffer = render_snapshot(&layout, &session.snapshot(), 1_400_000_000);
+    let chosen = edge_index(&layout, "source", "left", Some("yes"));
+    let rejected = edge_index(&layout, "source", "left", Some("no"));
+    assert!(!route_transfer_cells(&buffer, &layout, chosen).is_empty());
+    assert!(route_transfer_cells(&buffer, &layout, rejected).is_empty());
+}
+
+#[test]
+fn control_edges_pulse_only_with_original_data_endpoints() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut session = TestSession::new(&graph);
+    session
+        .start("router", 1_000_000_000, Vec::new())
+        .start("left", 1_000_000_000, Vec::new());
+    let buffer = render_snapshot(&layout, &session.snapshot(), 1_100_000_000);
+    let control = edge_index(&layout, "router", "left", Some("yes"));
+    assert_eq!(layout.edges()[control].kind, EdgeKind::Control);
+    assert!(route_transfer_cells(&buffer, &layout, control).is_empty());
+
+    let mut graph = description();
+    graph.data_edges.push(DataEdge {
+        exclusive: false,
+        from_node: "router".into(),
+        from_output: "value".into(),
+        to_node: "left".into(),
+        to_input: "input".into(),
+    });
+    let layout = GraphLayout::with_view(&graph, ConnectionView::Execution).unwrap();
+    assert!(layout.hidden_data_count() > 0);
+    let mut session = TestSession::new(&graph);
+    session.start("left", 1_000_000_000, Vec::new());
+    let buffer = render_snapshot(&layout, &session.snapshot(), 1_400_000_000);
+    let control = edge_index(&layout, "router", "left", Some("yes"));
+    assert_eq!(layout.edges()[control].kind, EdgeKind::Control);
+    assert!(!route_transfer_cells(&buffer, &layout, control).is_empty());
+}
+
+fn stream_graph() -> WorkflowDescription {
+    let mut graph = description();
+    graph.nodes = ["source", "sink-a", "sink-b"]
+        .into_iter()
+        .map(|id| NodeDescription {
+            id: id.into(),
+            kind: "fixture.task".into(),
+        })
+        .collect();
+    graph.execution_order = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    graph.control_edges.clear();
+    graph.data_edges = vec![
+        DataEdge {
+            exclusive: false,
+            from_node: "source".into(),
+            from_output: "a".into(),
+            to_node: "sink-a".into(),
+            to_input: "input".into(),
+        },
+        DataEdge {
+            exclusive: false,
+            from_node: "source".into(),
+            from_output: "b".into(),
+            to_node: "sink-b".into(),
+            to_input: "input".into(),
+        },
+    ];
+    graph
+}
+
+#[test]
+fn stream_emissions_pulse_only_declared_outputs_and_keep_repeats() {
+    let graph = stream_graph();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let nodes = pending_nodes(&layout);
+    let now = 10_000_000_000;
+    let correlation = Some((vec![1; 16], vec![2; 8]));
+
+    let store = snapshot_store([
+        (
+            Vec::new(),
+            "source",
+            SnapshotOutcome::Emitted,
+            value_object("a", 1),
+        ),
+        (
+            Vec::new(),
+            "source",
+            SnapshotOutcome::Emitted,
+            value_object("b", 2),
+        ),
+        (
+            Vec::new(),
+            "source",
+            SnapshotOutcome::Emitted,
+            value_object("a", 3),
+        ),
+        (
+            Vec::new(),
+            "source",
+            SnapshotOutcome::Emitted,
+            value_object("a", 3),
+        ),
+    ]);
+    assert_eq!(store.history().len(), 4);
+    let history = history_snapshot(
+        &store,
+        now,
+        &[
+            (500_000_000, correlation.clone()),
+            (300_000_000, correlation.clone()),
+            (100_000_000, correlation.clone()),
+            (50_000_000, correlation),
+        ],
+    );
+    let buffer = render_stream(&layout, &nodes, &history, now);
+    let a = edge_index(&layout, "source", "sink-a", Some("a"));
+    let b = edge_index(&layout, "source", "sink-b", Some("b"));
+    assert!(!route_transfer_cells(&buffer, &layout, a).is_empty());
+    assert!(!route_transfer_cells(&buffer, &layout, b).is_empty());
+
+    let foreign = snapshot_store([(
+        Vec::new(),
+        "source",
+        SnapshotOutcome::Emitted,
+        value_object("other", 1),
+    )]);
+    let foreign = history_snapshot(&foreign, now, &[(100_000_000, None)]);
+    let buffer = render_stream(&layout, &nodes, &foreign, now);
+    assert!(route_transfer_cells(&buffer, &layout, a).is_empty());
+    assert!(route_transfer_cells(&buffer, &layout, b).is_empty());
+
+    let finished = snapshot_store([
+        (
+            Vec::new(),
+            "source",
+            SnapshotOutcome::Started,
+            ValueRef::object([]),
+        ),
+        (
+            Vec::new(),
+            "source",
+            SnapshotOutcome::Succeeded,
+            value_object("a", 1),
+        ),
+    ]);
+    let finished = history_snapshot(&finished, now, &[(200_000_000, None), (100_000_000, None)]);
+    let buffer = render_stream(&layout, &nodes, &finished, now);
+    assert!(route_transfer_cells(&buffer, &layout, a).is_empty());
+    assert!(route_transfer_cells(&buffer, &layout, b).is_empty());
+}
+
+#[test]
+fn streaming_layout_uses_emitted_transfers_not_task_boundaries() {
+    let mut graph = stream_graph();
+    graph.version = WorkflowDescriptionVersion::V2026_10_02;
+    assert!(graph.is_streaming());
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut nodes = pending_nodes(&layout);
+    let sink = layout
+        .all_nodes()
+        .iter()
+        .position(|node| node.id == "sink-a")
+        .unwrap();
+    nodes[sink].started_elapsed_ns = Some(count(1_000_000_000));
+    let a = edge_index(&layout, "source", "sink-a", Some("a"));
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+    GraphView::new(&layout)
+        .nodes(&nodes)
+        .elapsed_ns(1_100_000_000)
+        .render(buffer.area, &mut buffer);
+    assert!(route_transfer_cells(&buffer, &layout, a).is_empty());
+
+    let now = 10_000_000_000;
+    let store = snapshot_store([(
+        Vec::new(),
+        "source",
+        SnapshotOutcome::Emitted,
+        value_object("a", 1),
+    )]);
+    let history = history_snapshot(&store, now, &[(100_000_000, None)]);
+    let buffer = render_stream(&layout, &nodes, &history, now);
+    assert!(!route_transfer_cells(&buffer, &layout, a).is_empty());
+}
+
+#[test]
+fn task_stages_in_streaming_flows_pulse_only_captured_input_boundaries() {
+    let mut graph = stream_graph();
+    graph.version = WorkflowDescriptionVersion::V2026_10_02;
+    let layout = GraphLayout::new(&graph).unwrap();
+    let nodes = pending_nodes(&layout);
+    let now = 10_000_000_000;
+    let a = edge_index(&layout, "source", "sink-a", Some("a"));
+    for (inputs, expected) in [
+        (ValueRef::object([]), false),
+        (value_object("input", 1), true),
+    ] {
+        let mut store = snapshot_store([]);
+        store
+            .apply(SnapshotRecord::Node {
+                scope: Vec::new(),
+                node: "sink-a".into(),
+                inputs,
+                outputs: ValueRef::object([]),
+                skipped: Vec::new().into(),
+                outcome: SnapshotOutcome::Started,
+                error: None,
+            })
+            .unwrap();
+        let history = history_snapshot(&store, now, &[(300_000_000, None)]);
+        let buffer = render_stream(&layout, &nodes, &history, now);
+        assert_eq!(
+            !route_transfer_cells(&buffer, &layout, a).is_empty(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn monotonic_receipt_time_keeps_stale_source_emissions_visible() {
+    let graph = stream_graph();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let nodes = pending_nodes(&layout);
+    let now = 10_000_000_000;
+    let store = snapshot_store([(
+        Vec::new(),
+        "source",
+        SnapshotOutcome::Emitted,
+        value_object("a", 1),
+    )]);
+    let mut history = history_snapshot(&store, now, &[(5_000_000_000, None)]);
+    history.metadata[0].received_at = Some(std::time::Instant::now());
+    let a = edge_index(&layout, "source", "sink-a", Some("a"));
+    let buffer = render_stream(&layout, &nodes, &history, now);
+    assert!(!route_transfer_cells(&buffer, &layout, a).is_empty());
+}
+
+#[test]
+fn scoped_stream_history_requires_the_matching_correlation() {
+    let graph = inline_description();
+    let expanded = BTreeSet::from([vec!["box".into()]]);
+    let layout = GraphLayout::with_expanded_bodies(
+        &graph,
+        ConnectionView::Ports,
+        &expanded,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let source = layout
+        .all_nodes()
+        .iter()
+        .enumerate()
+        .find(|(source, node)| node.id == "source" && layout.source_path(*source) == ["box"])
+        .map(|(source, _)| source)
+        .unwrap();
+    let edge = layout
+        .edges()
+        .iter()
+        .position(|edge| {
+            layout.nodes()[edge.from].id == "source"
+                && layout.node_path(edge.from) == ["box"]
+                && layout.nodes()[edge.to].id == "inner"
+        })
+        .unwrap();
+    let correlation = (vec![3; 16], vec![4; 8]);
+    let scope = vec![ScopePathEntry::Loop {
+        loop_id: "box".into(),
+        index: count(0),
+    }];
+    let now = 20_000_000_000;
+    let store = snapshot_store([(
+        scope,
+        "source",
+        SnapshotOutcome::Emitted,
+        value_object("value", 1),
+    )]);
+    let history = history_snapshot(&store, now, &[(100_000_000, Some(correlation.clone()))]);
+
+    let mut nodes = pending_nodes(&layout);
+    nodes[source].correlation = Some(correlation.clone());
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+    GraphView::new(&layout)
+        .nodes(&nodes)
+        .data_snapshot(&history)
+        .observed_at_unix_nano(now)
+        .render(buffer.area, &mut buffer);
+    assert!(!route_transfer_cells(&buffer, &layout, edge).is_empty());
+
+    nodes[source].correlation = Some((vec![9; 16], vec![8; 8]));
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+    GraphView::new(&layout)
+        .nodes(&nodes)
+        .data_snapshot(&history)
+        .observed_at_unix_nano(now)
+        .render(buffer.area, &mut buffer);
+    assert!(route_transfer_cells(&buffer, &layout, edge).is_empty());
+
+    let root_store = snapshot_store([(
+        Vec::new(),
+        "source",
+        SnapshotOutcome::Emitted,
+        value_object("value", 1),
+    )]);
+    let root_history = history_snapshot(&root_store, now, &[(100_000_000, None)]);
+    nodes[source].correlation = Some(correlation);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 45));
+    GraphView::new(&layout)
+        .nodes(&nodes)
+        .data_snapshot(&root_history)
+        .observed_at_unix_nano(now)
+        .render(buffer.area, &mut buffer);
+    assert!(route_transfer_cells(&buffer, &layout, edge).is_empty());
 }

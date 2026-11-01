@@ -78,6 +78,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
     let events = scheduled_events(&description, run_id);
     let mut next_event = 0;
     let mut offset = (0u32, 0u32);
+    let mut minimap = true;
     let started = Instant::now();
     let final_elapsed = events.last().map_or(Duration::ZERO, |entry| entry.0);
     let mut frame_tick = u128::MAX;
@@ -92,7 +93,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
         }
         let complete = next_event == events.len();
         let displayed_elapsed = if complete { final_elapsed } else { elapsed };
-        let tick = displayed_elapsed.as_millis() / 200;
+        let animation_elapsed = elapsed.min(final_elapsed + Duration::from_secs(1));
+        let tick = animation_elapsed.as_millis() / 100;
         if tick != frame_tick {
             frame_tick = tick;
             redraw = true;
@@ -118,18 +120,19 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
                     GraphView::new(&layout)
                         .snapshot(&snapshot)
                         .offset(offset.0, offset.1)
-                        .elapsed_ns(displayed_elapsed.as_nanos() as u64),
+                        .elapsed_ns(animation_elapsed.as_nanos() as u64)
+                        .minimap(minimap),
                     graph,
                 );
                 frame.render_widget(
-                    Paragraph::new("Arrows: pan  |  f: origin  |  q/Esc: quit"),
+                    Paragraph::new("Arrows: pan  |  f: origin  |  m: minimap  |  q/Esc: quit"),
                     footer,
                 );
             })?;
             redraw = false;
         }
 
-        let wait = if complete {
+        let wait = if complete && elapsed > final_elapsed + Duration::from_secs(1) {
             Duration::from_secs(1)
         } else {
             Duration::from_millis(80)
@@ -145,6 +148,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
                             return Ok(());
                         }
                         KeyCode::Char('f') => offset = (0, 0),
+                        KeyCode::Char('m') => minimap = !minimap,
                         KeyCode::Left => offset.0 = offset.0.saturating_sub(4),
                         KeyCode::Right => offset.0 = offset.0.saturating_add(4),
                         KeyCode::Up => offset.1 = offset.1.saturating_sub(2),

@@ -1249,6 +1249,7 @@ mod tests {
                 metadata: vec![SnapshotMetadata {
                     sequence: 1,
                     time_unix_nano: 1,
+                    received_at: None,
                     correlation: Some((vec![1; 16], vec![1; 8])),
                 }],
                 status: "Complete".into(),
@@ -1462,16 +1463,19 @@ mod tests {
                 SnapshotMetadata {
                     sequence: 4,
                     time_unix_nano: 1,
+                    received_at: None,
                     correlation: Some((vec![1; 16], vec![1; 8])),
                 },
                 SnapshotMetadata {
                     sequence: 7,
                     time_unix_nano: 2,
+                    received_at: None,
                     correlation: Some((vec![2; 16], vec![1; 8])),
                 },
                 SnapshotMetadata {
                     sequence: 9,
                     time_unix_nano: 3,
+                    received_at: None,
                     correlation: Some((vec![1; 16], vec![2; 8])),
                 },
             ],
@@ -1504,6 +1508,7 @@ mod tests {
         snapshot.metadata.push(SnapshotMetadata {
             sequence: 12,
             time_unix_nano: 4,
+            received_at: None,
             correlation: None,
         });
         snapshot.history_len += 1;
