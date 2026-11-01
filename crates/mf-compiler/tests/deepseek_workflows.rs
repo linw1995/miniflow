@@ -103,6 +103,50 @@ fn run(executable: &Path, inputs: &Value) -> Value {
 }
 
 #[test]
+fn empty_parameter_credentials_omit_authorization() {
+    let result = json!({
+        "rerank_score":2.4,"title":"DeepSeek release","url":"https://example.com/release",
+        "snippet":"Snippet","summary":"Summary","content":"Content","site_name":null,
+        "site_icon":null,"date":null,"authority":3
+    });
+    let server = Server::start(vec![
+        Reply::search(json!([result.clone()])),
+        Reply::fetch("Example", "# Markdown"),
+        Reply::search(json!([result.clone()])),
+        Reply::fetch("Example", "# Markdown"),
+    ]);
+    let definition = definition();
+    let root = tempfile::tempdir().unwrap();
+    let executable = compile(&definition, root.path());
+    let inputs = json!({
+        "params.base_url":server.base_url,
+        "params.api_key":"",
+        "params.query":"DeepSeek",
+        "params.url":"https://example.com/article",
+        "params.timeout_ms":5000
+    });
+    let expected = json!({
+        "results":[result],
+        "title":"Example",
+        "content":"# Markdown"
+    });
+    assert_eq!(run_memory(&definition, &inputs), expected);
+    assert_eq!(run(&executable, &inputs), expected);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    for request in &requests {
+        assert!(
+            !request
+                .headers
+                .to_ascii_lowercase()
+                .contains("authorization:"),
+            "{}",
+            request.headers
+        );
+    }
+}
+
+#[test]
 fn search_and_fetch_match_memory_and_standalone_runners() {
     let result = json!({
         "rerank_score":2.4,"title":"DeepSeek release","url":"https://example.com/release",

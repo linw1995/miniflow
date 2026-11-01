@@ -18,7 +18,8 @@
         "parameters": {
           "api_key": {
             "type": "string",
-            "env": "DEEPSEEK_API_KEY"
+            "env": "DEEPSEEK_API_KEY",
+            "default": ""
           },
           "base_url": {
             "type": "string",

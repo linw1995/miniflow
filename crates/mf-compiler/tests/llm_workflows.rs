@@ -161,6 +161,34 @@ fn parameter_templates_configure_memory_and_standalone_llm_requests() {
 }
 
 #[test]
+fn empty_parameter_credentials_omit_authorization() {
+    let server = Server::start(vec![Reply::text("reply"); 2]);
+    let definition = parameter_definition();
+    let root = tempfile::tempdir().unwrap();
+    let executable = compile(&definition, root.path());
+    let inputs = json!({
+        "params.api_key": "",
+        "params.base_url": server.base_url,
+        "params.model": "example-model",
+        "params.messages": [{"role": "user", "content": "Hello"}]
+    });
+    let expected = run_memory(&definition, &inputs);
+    assert_eq!(run(&executable, &inputs), expected);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert!(
+            !request
+                .headers
+                .to_ascii_lowercase()
+                .contains("authorization:"),
+            "{}",
+            request.headers
+        );
+    }
+}
+
+#[test]
 fn config_references_require_known_explicit_predecessors() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut definition = parameter_definition();
@@ -192,7 +220,6 @@ fn invalid_dynamic_configuration_retains_safe_typed_errors() {
         ("temperature", json!("synthetic-secret-value")),
         ("base_url", json!("file:///synthetic-secret-value")),
         ("model", json!(" ")),
-        ("api_key", json!("")),
         ("max_tokens", json!(0)),
         ("timeout_ms", json!(0)),
         ("attribution", json!({"profile":"synthetic-secret-value"})),

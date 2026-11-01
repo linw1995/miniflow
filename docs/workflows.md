@@ -520,7 +520,9 @@ unknown fields, including `stream` and provider-specific request overrides. Lite
 
 `model`, `base_url`, `temperature`, `max_tokens`, and `timeout_ms` also accept configuration
 templates. Use `api_key` with a runtime reference to supply credentials from a parameter; it cannot be combined
-with `api_key_env`. The latter remains a literal environment-variable name for existing workflows.
+with `api_key_env`. The latter remains a literal environment-variable name for existing workflows. A resolved
+empty `api_key` omits the `Authorization` header, so OpenAI-compatible endpoints without authentication can be
+used; `api_key_env` still requires a nonempty environment value.
 
 ```json
 {
@@ -540,7 +542,8 @@ mf compile examples/llm-parameters.json --output ./configured-chat
 ./configured-chat --params.model your-model --params.messages '[{"role":"user","content":"Hello"}]'
 ```
 
-Set `OPENAI_API_KEY` in the execution environment. Override the endpoint with `--params.base_url` or other public
+Set `OPENAI_API_KEY` in the execution environment, or leave the `api_key` parameter empty for a keyless
+endpoint. Override the endpoint with `--params.base_url` or other public
 settings through their named arguments. Argument values take precedence over parameter environment fallbacks.
 The same prepared node can execute with different credentials, models, endpoints, and limits on subsequent runs.
 
@@ -552,6 +555,8 @@ feature disabled.
 
 Preparation and manifest inspection do not read the credential environment variable or contact the provider.
 Execution resolves templates or reads the credential variable for each invocation, so credential rotation does not require recompiling a workflow.
+An empty resolved `api_key` sends the request without an `Authorization` header; a missing or empty
+`api_key_env` value still fails before the request.
 Requests use Chat Completions at the configured prefix's `/chat/completions` route; `OPENAI_BASE_URL` does not override
 that configured endpoint. The node reuses a configured HTTP client, disables redirects and automatic retries, and
 disables idle connection pooling so prepared nodes can outlive earlier workflow-managed reactors.
@@ -613,7 +618,8 @@ positive integer and bounds provider setup and response reads. Unknown configura
 
 `base_url` and `timeout_ms` accept configuration templates. Use `api_key` with a runtime reference instead
 of `api_key_env` to supply a parameter credential; literal credentials are rejected, and the two credential
-sources cannot be combined:
+sources cannot be combined. A resolved empty `api_key` omits the `Authorization` header, while a missing or
+empty `api_key_env` value still fails before the request. For example:
 
 ```json
 {
