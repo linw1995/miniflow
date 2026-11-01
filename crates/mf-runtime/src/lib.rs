@@ -117,7 +117,9 @@ pub use stream_plan::{
     StreamEmissionBinding, StreamInputResolver, StreamMessageInitializer, StreamMessageProgram,
     StreamOutputSelector, StreamPlan, StreamProgram,
 };
-pub use subgraph::{PreparedSubgraph, SubgraphNode, SubgraphStreamOutput};
+pub use subgraph::{
+    PreparedSubgraph, SubgraphNode, SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
+};
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,
     TypedTaskStreamNode,

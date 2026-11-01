@@ -1,7 +1,7 @@
 use mf_runtime::{
     CallConfig, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
     NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, PortSpec,
-    PreparedNode, PreparedSubgraph, SubgraphNode, WorkflowArguments,
+    PreparedNode, PreparedSubgraph, SubgraphNode, SubgraphStream, WorkflowArguments,
 };
 use serde_json::Value;
 use snafu::{ResultExt, Snafu, ensure};
@@ -62,12 +62,13 @@ impl SubgraphNode for CallNode {
         context: &mut ExecutionContext,
         sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
+        let mut stream = SubgraphStream::new(self.id.as_str(), context, sink);
         let outputs = context
             .run_call(
                 &self.id,
                 WorkflowArguments(inputs),
                 &self.body.nodes,
-                |state| self.body.execute_with_sink(state, sink),
+                |state| self.body.execute_with_sink(state, &mut stream),
             )
             .context(CallFailureSnafu {
                 node: &self.id,

@@ -2,7 +2,7 @@ use mf_runtime::{
     EmissionSink, ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy,
     IterationMode, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts,
     NodeRegistration, NodeResult, NodeValue, OutputDerivation, Outputs, PreparedSubgraph,
-    StreamCancellation, StreamError, SubgraphNode, TaskNode, TypedNodeResult, TypedTaskNode,
+    SubgraphNode, SubgraphStream, SubgraphStreamSender, TaskNode, TypedNodeResult, TypedTaskNode,
     ValueKind, ValueRef, ValueType, deserialize_config, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
@@ -12,7 +12,6 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
 };
 pub const MAX_PARALLEL_ITEMS: usize = 10;
@@ -69,68 +68,6 @@ struct IterationItemFailure {
 impl From<IterationItemFailure> for NodeExecutionError {
     fn from(source: IterationItemFailure) -> Self {
         Box::<dyn std::error::Error + Send + Sync>::from(source).into()
-    }
-}
-
-#[derive(Debug, Snafu)]
-enum ForwardingError {
-    #[snafu(display("iteration stream forwarding channel closed: {source}"))]
-    Send { source: mpsc::SendError<()> },
-    #[snafu(display("iteration stream acknowledgement closed: {source}"))]
-    Acknowledge { source: mpsc::RecvError },
-    #[snafu(display("could not start iteration stream coordinator: {source}"))]
-    Coordinator { source: std::io::Error },
-}
-
-struct Emission {
-    result: NodeResult,
-    acknowledge: mpsc::SyncSender<Result<(), StreamError>>,
-}
-
-struct ItemSink {
-    id: String,
-    sender: mpsc::SyncSender<Emission>,
-    cancellation: StreamCancellation,
-}
-
-impl EmissionSink for ItemSink {
-    fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
-        let result: Result<(), NodeExecutionError> = (|| {
-            let (acknowledge, reply) = mpsc::sync_channel(0);
-            self.sender
-                .send(Emission {
-                    result,
-                    acknowledge,
-                })
-                // A disconnected channel needs no payload in its diagnostic.
-                .map_err(|_| mpsc::SendError(()))
-                .context(SendSnafu)
-                .boxed()?;
-            reply.recv().context(AcknowledgeSnafu).boxed()??;
-            Ok(())
-        })();
-        result
-            .context(mf_runtime::StreamProducerSnafu {
-                definition_id: self.id.clone(),
-            })
-            .inspect_err(|error| self.cancellation.cancel(error.clone()))
-    }
-}
-
-struct DeliverySink<'a> {
-    sink: &'a mut dyn EmissionSink,
-    cancellation: StreamCancellation,
-}
-
-impl EmissionSink for DeliverySink<'_> {
-    fn is_connected(&self) -> bool {
-        self.sink.is_connected()
-    }
-
-    fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
-        self.sink
-            .send(result)
-            .inspect_err(|error| self.cancellation.cancel(error.clone()))
     }
 }
 
@@ -225,7 +162,7 @@ impl IterationNode {
         items: ValueRef,
         observation: Option<IterationObservation>,
         parent: &mut ExecutionContext,
-        sink: &mut dyn EmissionSink,
+        sink: &mut SubgraphStream<'_>,
     ) -> Result<IterationOutputs, NodeExecutionError> {
         let items: Box<dyn ExactSizeIterator<Item = (ValueRef, ValueRef)>> =
             match items.kind() {
@@ -278,7 +215,7 @@ impl IterationNode {
                 let stopped = Arc::new(AtomicBool::new(false));
                 let observation = observation.map(Arc::new);
                 let run_workers =
-                    |parent: &mut ExecutionContext, sender: Option<mpsc::SyncSender<Emission>>| {
+                    |parent: &mut ExecutionContext, sender: Option<SubgraphStreamSender>| {
                         parent.run_parallel(worker_count, |parent| {
                             (0..worker_count)
                                 .map(|_| {
@@ -303,12 +240,7 @@ impl IterationNode {
                                         let Some((index, (key, item))) = next else {
                                             break;
                                         };
-                                        let mut forwarded =
-                                            sender.as_ref().map(|sender| ItemSink {
-                                                id: id.clone(),
-                                                sender: sender.clone(),
-                                                cancellation: parent.cancellation(),
-                                            });
+                                        let mut forwarded = sender.clone();
                                         let sink: &mut dyn EmissionSink = match &mut forwarded {
                                             Some(sink) => sink,
                                             None => &mut mf_runtime::DiscardSink,
@@ -338,20 +270,8 @@ impl IterationNode {
                         })
                     };
                 if sink.is_connected() && worker_count > 0 {
-                    std::thread::scope(|scope| -> Result<(), NodeExecutionError> {
-                        let (sender, receiver) = mpsc::sync_channel::<Emission>(0);
-                        let worker = std::thread::Builder::new()
-                            .name(format!("iteration-stream-{}", self.id))
-                            .spawn_scoped(scope, || run_workers(parent, Some(sender)))
-                            .context(CoordinatorSnafu)
-                            .boxed()?;
-                        for emission in receiver {
-                            let result = sink.send(emission.result);
-                            let _ = emission.acknowledge.send(result);
-                        }
-                        worker
-                            .join()
-                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                    sink.forward(|sender| {
+                        run_workers(parent, Some(sender))?;
                         Ok(())
                     })?;
                 } else {
@@ -395,7 +315,9 @@ impl TypedTaskNode for IterationNode {
         let observation = ctx.observation().and_then(|run| {
             run.iteration_observation(&self.id, &ctx.invocation_path(), self.body.nodes.clone())
         });
-        self.execute_items(inputs.items, observation, ctx, &mut mf_runtime::DiscardSink)
+        let mut discard = mf_runtime::DiscardSink;
+        let mut stream = SubgraphStream::new(self.id.as_str(), ctx, &mut discard);
+        self.execute_items(inputs.items, observation, ctx, &mut stream)
             .map(Into::into)
     }
 }
@@ -442,11 +364,8 @@ impl SubgraphNode for IterationNode {
                 self.body.nodes.clone(),
             )
         });
-        let mut sink = DeliverySink {
-            sink,
-            cancellation: context.cancellation(),
-        };
-        let outputs = self.execute_items(inputs.items, observation, context, &mut sink)?;
+        let mut stream = SubgraphStream::new(self.id.as_str(), context, sink);
+        let outputs = self.execute_items(inputs.items, observation, context, &mut stream)?;
         mf_runtime::encode_typed_result(outputs.into())
     }
 }
