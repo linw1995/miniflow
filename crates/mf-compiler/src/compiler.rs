@@ -1865,12 +1865,13 @@ fn bind_subgraph_node(
             kind: node.kind.clone(),
         })?;
     let input_schema = flow.input_schema().clone();
+    let input_metadata = mf_runtime::SubgraphInputMetadata::from_flow(&flow);
     let stream_ports = flow.stream_output_ports();
     let body =
         PreparedSubgraph::streaming(identities, outputs, stream_ports, move |state, sink| {
             flow.execute_with_sink(state, sink)
         })
-        .with_input_schema(input_schema);
+        .with_input_metadata(input_schema, input_metadata);
     let instance = registration
         .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
         .context(NodeConstructionSnafu {

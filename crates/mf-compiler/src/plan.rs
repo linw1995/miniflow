@@ -974,11 +974,12 @@ fn subgraph_preparation(
         })().context(mf_compiler::WorkflowSubgraphSnafu { definition_id: #outer_id })?;
         let input_schema = #body_flow.input_schema().clone();
         let stream_ports = #body_flow.stream_output_ports();
+        let input_metadata = mf_runtime::SubgraphInputMetadata::from_flow(&#body_flow);
         let #body_ident = mf_runtime::PreparedSubgraph::streaming(
             vec![#(#nodes),*], Vec::<Option<mf_runtime::PortSpec>>::from([#(#outputs),*]).into_iter().flatten().collect(), stream_ports,
             move |state, sink| { #body_flow.execute_with_sink(state, sink) },
         );
-        let #body_ident = #body_ident.with_input_schema(input_schema);
+        let #body_ident = #body_ident.with_input_metadata(input_schema, input_metadata);
         let mut #node_ident = mf_compiler::instantiate_subgraph_with_metadata(
             registry, #outer_id, #kind, #config, #options, #body_ident,
         )

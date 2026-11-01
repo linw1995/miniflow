@@ -15,7 +15,7 @@ use mf_runtime::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -173,6 +173,95 @@ fn validates_all_roots_before_execution_and_preserves_optional_and_nested_values
         assert_eq!(outputs["a"], json!({"data":[{"count":count}]}));
         assert_eq!(outputs["b"], json!({"x./~":null}));
     }
+}
+
+#[test]
+fn subgraph_input_metadata_distinguishes_independent_flows() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut definition = definition(json!([
+        echo("a", json!({"data":{"type":"string", "required":true}})),
+        echo("b", json!({"count":{"type":"int", "required":true}})),
+        echo(
+            "join",
+            json!({
+                "left":{"type":"any", "required":true},
+                "right":{"type":"any", "required":true}
+            })
+        ),
+        echo("c", json!({"item":{"type":"any", "required":true}})),
+        echo("d", json!({"optional":{"type":"string", "required":false}}))
+    ]));
+    definition.edges = serde_json::from_value(json!([
+        {"from_node":"a", "from_output":"value", "to_node":"join", "to_input":"left"},
+        {"from_node":"b", "from_output":"value", "to_node":"join", "to_input":"right"}
+    ]))
+    .unwrap();
+    definition.order_edges = serde_json::from_value(json!([
+        {"from_node":"c", "to_node":"d"}
+    ]))
+    .unwrap();
+    definition.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_25;
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let metadata = mf_runtime::SubgraphInputMetadata::from_flow(&flow);
+    assert_eq!(metadata.flows.len(), 2);
+
+    let joined = metadata
+        .flows
+        .iter()
+        .find(|flow| flow.nodes.iter().any(|node| node.as_str() == "join"))
+        .unwrap();
+    assert_eq!(
+        joined
+            .nodes
+            .iter()
+            .map(|node| node.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["a", "b", "join"])
+    );
+    assert_eq!(
+        joined
+            .inputs
+            .inputs
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert_eq!(
+        joined.inputs.inputs["a"]["data"].value_type,
+        ValueType::String
+    );
+    assert!(joined.inputs.inputs["b"]["count"].required);
+
+    let ordered = metadata
+        .flows
+        .iter()
+        .find(|flow| flow.nodes.iter().any(|node| node.as_str() == "d"))
+        .unwrap();
+    assert_eq!(
+        ordered
+            .nodes
+            .iter()
+            .map(|node| node.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["c", "d"])
+    );
+    assert_eq!(
+        ordered
+            .inputs
+            .inputs
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["c"]
+    );
+
+    let subgraph =
+        mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new()))
+            .with_flow_inputs(&flow);
+    assert_eq!(subgraph.input_metadata(), &metadata);
+    assert_eq!(&subgraph.inputs, flow.input_schema());
 }
 
 #[test]
