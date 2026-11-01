@@ -12,7 +12,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListState, Paragraph, Wrap},
 };
 use std::{
@@ -23,6 +23,24 @@ use std::{
 };
 const MAX_EDITOR_BYTES: usize = 256 * 1024;
 const LOADING_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// A role header, optionally followed by a one-cell activity indicator.
+///
+/// The indicator keeps its single separating space so the header keeps its width
+/// when the turn settles and the spinner disappears.
+fn role_label(text: &str, color: Color, indicator: Option<char>) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        text.to_owned(),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )];
+    if let Some(frame) = indicator {
+        spans.push(Span::styled(
+            format!(" {frame}"),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    Line::from(spans)
+}
 
 fn execution_areas(body: Rect) -> (Rect, Rect) {
     if body.width >= 120 && body.height >= 12 {
@@ -266,7 +284,10 @@ struct ChatView {
     sessions: Option<SessionPage>,
     sessions_after: Option<String>,
     pending: Option<Option<u64>>,
+    /// The turn being presented until its authoritative messages reload.
     active: Option<(Invocation, String)>,
+    /// Whether that turn is still executing, separate from what is presented.
+    running: bool,
     retained: bool,
     unsaved: Option<String>,
     final_reply: Option<String>,
@@ -298,6 +319,7 @@ impl ChatView {
             sessions_after: None,
             pending: None,
             active: None,
+            running: false,
             retained: false,
             unsaved: None,
             final_reply: None,
@@ -346,6 +368,8 @@ impl ChatView {
         self.session = session;
         self.transcript.get_mut().clear_images();
         self.page = None;
+        self.active = None;
+        self.running = false;
         self.preview = LivePreview::default();
         self.final_reply = None;
         self.reply_usages.clear();
@@ -368,9 +392,19 @@ impl ChatView {
             }
             ChatEvent::Loaded { session, page } => {
                 if self.session.as_ref().is_some_and(|s| s.id == session.id) {
+                    // Keep presenting the in-flight turn until the page that carries it
+                    // arrives, so previews and authoritative messages swap in one frame.
+                    let settled = self.active.as_ref().is_some_and(|(invocation, _)| {
+                        page.messages
+                            .iter()
+                            .any(|record| record.message.turn_id == invocation.turn_id)
+                    });
                     self.session = Some(session);
                     self.page = Some(page);
                     self.final_reply = None;
+                    if settled {
+                        self.active = None;
+                    }
                     self.scroll.set(0);
                 }
             }
@@ -389,6 +423,7 @@ impl ChatView {
                 self.final_reply = None;
                 self.reply_usages.clear();
                 self.active = Some((invocation, prompt));
+                self.running = true;
                 self.observation = None;
                 self.unsaved = None;
                 self.outcome.clear();
@@ -399,10 +434,11 @@ impl ChatView {
                 invocation,
                 preview,
             } => {
-                if self
-                    .active
-                    .as_ref()
-                    .is_some_and(|(active, _)| active == &invocation)
+                if self.running
+                    && self
+                        .active
+                        .as_ref()
+                        .is_some_and(|(active, _)| active == &invocation)
                 {
                     self.preview = preview;
                 }
@@ -424,7 +460,7 @@ impl ChatView {
                 }
                 self.transcript.get_mut().clear_images();
                 self.preview.incomplete = true;
-                self.active = None;
+                self.running = false;
                 self.pending = None;
                 self.retained = false;
                 self.unsaved = None;
@@ -456,11 +492,15 @@ impl ChatView {
                                     details.push(error);
                                 }
                             }
-                            CompletionState::NotBegun => self.notice = "Turn did not start".into(),
+                            CompletionState::NotBegun => {
+                                self.active = None;
+                                self.notice = "Turn did not start".into();
+                            }
                         }
                         self.outcome = details.join("\n");
                     }
                     Err(error) => {
+                        self.active = None;
                         self.retained = true;
                         self.notice = "Result needs recovery. Ctrl+P to save or discard it".into();
                         self.outcome = error.to_string();
@@ -478,6 +518,7 @@ impl ChatView {
             ChatEvent::Error { admission, source } => {
                 if admission {
                     self.pending = None;
+                    self.running = false;
                     if let Some((_, prompt)) = self.active.take()
                         && self.editor.text.is_empty()
                     {
@@ -551,10 +592,7 @@ impl ChatView {
         self.mode = Mode::Input;
         match action {
             Action::New | Action::Switch
-                if controller.busy()
-                    || self.pending.is_some()
-                    || self.active.is_some()
-                    || self.retained =>
+                if controller.busy() || self.pending.is_some() || self.running || self.retained =>
             {
                 self.notice =
                     "Cancel the current turn or recover its reply before switching".into();
@@ -818,15 +856,20 @@ impl ChatView {
         transcript.begin(body.width);
         if let Some(page) = &self.page {
             for record in &page.messages {
-                let key = format!("message:{}", record.message.id);
                 let assistant = record.message.role == "assistant";
+                // Messages and their live preview share one turn-scoped key so the
+                // authoritative text reuses the parsed preview document.
+                let key = format!(
+                    "turn:{}:{}",
+                    record.message.turn_id,
+                    if assistant { "assistant" } else { "you" }
+                );
                 transcript.plain(
                     format!("{key}:label"),
-                    vec![Line::styled(
+                    vec![role_label(
                         if assistant { "Assistant" } else { "You" },
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
+                        Color::Cyan,
+                        None,
                     )],
                 );
                 if assistant {
@@ -861,48 +904,71 @@ impl ChatView {
                 transcript.plain(format!("{key}:metadata"), metadata);
             }
         }
-        if let Some((invocation, prompt)) = &self.active {
-            let key = format!("active:{}", invocation.call_id);
+        let turn = self
+            .latest_invocation
+            .as_ref()
+            .map_or("", |invocation| invocation.turn_id.as_str());
+        if let Some((_, prompt)) = &self.active {
             transcript.plain(
-                format!("{key}:label"),
-                vec![Line::styled("You", Style::default().fg(Color::Cyan))],
+                format!("turn:{turn}:you:label"),
+                vec![role_label("You", Color::Cyan, None)],
             );
-            transcript.literal(format!("{key}:prompt"), prompt, Style::default());
+            transcript.literal(format!("turn:{turn}:you:body"), prompt, Style::default());
+            transcript.plain(format!("turn:{turn}:you:metadata"), vec![Line::default()]);
         }
-        let loading = self.pending.is_some() || self.active.is_some();
+        let loading = self.pending.is_some() || self.running;
         let has_preview = self
             .preview
             .segments
             .iter()
             .any(|segment| !segment.text.is_empty());
-        if loading || has_preview {
+        let final_reply = self.final_reply.as_deref();
+        let unsaved = self.unsaved.as_deref();
+        if loading || has_preview || final_reply.is_some() || unsaved.is_some() {
+            let indicator = loading.then(|| {
+                let frame = (self.animation_started.elapsed().as_millis() / 100
+                    % LOADING_FRAMES.len() as u128) as usize;
+                LOADING_FRAMES[frame]
+            });
+            let (label, color) = if unsaved.is_some() {
+                ("Assistant [not saved]", Color::Yellow)
+            } else {
+                ("Assistant", Color::Cyan)
+            };
             transcript.plain(
-                "preview-label".into(),
-                vec![Line::styled("Assistant", Style::default().fg(Color::Cyan))],
+                format!("turn:{turn}:assistant:label"),
+                vec![role_label(label, color, indicator)],
             );
         }
-        for segment in &self.preview.segments {
-            if segment.text.is_empty() {
-                continue;
+        let segments: Vec<_> = self
+            .preview
+            .segments
+            .iter()
+            .filter(|segment| !segment.text.is_empty())
+            .collect();
+        if !segments.is_empty() {
+            // A single streamed segment keeps the canonical body key. Distinct model
+            // calls stay separate documents, so each keeps its own call-scoped key.
+            let last = segments.len() - 1;
+            for (index, segment) in segments.iter().enumerate() {
+                let body = if last == 0 {
+                    format!("turn:{turn}:assistant:body")
+                } else {
+                    format!("turn:{turn}:assistant:body:{}", segment.model_call_id)
+                };
+                transcript.markdown(body, &segment.text);
+                if index != last {
+                    transcript.plain(
+                        format!("turn:{turn}:assistant:gap:{index}"),
+                        vec![Line::default()],
+                    );
+                }
             }
-            let invocation = self
-                .preview
-                .invocation
-                .as_ref()
-                .map_or("", |invocation| invocation.call_id.as_str());
-            let key = format!("preview:{invocation}:{}", segment.model_call_id);
-            transcript.markdown(format!("{key}:body"), &segment.text);
-            transcript.plain(format!("{key}:gap"), vec![Line::default()]);
+        } else if let Some(reply) = final_reply.or(unsaved) {
+            transcript.markdown(format!("turn:{turn}:assistant:body"), reply);
         }
         let mut status = vec![];
-        if loading {
-            let frame = (self.animation_started.elapsed().as_millis() / 100
-                % LOADING_FRAMES.len() as u128) as usize;
-            status.push(Line::styled(
-                LOADING_FRAMES[frame].to_string(),
-                Style::default().fg(Color::Cyan),
-            ));
-        } else if has_preview && self.preview.incomplete {
+        if !loading && has_preview && self.preview.incomplete {
             status.push(Line::styled(
                 "Response unfinished",
                 Style::default().fg(Color::Yellow),
@@ -914,36 +980,18 @@ impl ChatView {
                 Style::default().fg(Color::Yellow),
             ));
         }
-        transcript.plain("preview-status".into(), status);
-        let invocation = self
-            .latest_invocation
-            .as_ref()
-            .map_or("", |invocation| invocation.call_id.as_str());
-        if let Some(reply) = &self.final_reply {
-            transcript.plain(
-                "final-label".into(),
-                vec![Line::styled("Assistant", Style::default().fg(Color::Cyan))],
-            );
-            transcript.markdown(format!("final:{invocation}"), reply);
-        }
-        if let Some(reply) = &self.unsaved {
-            transcript.plain(
-                "unsaved-label".into(),
-                vec![Line::styled(
-                    "Assistant [not saved]",
-                    Style::default().fg(Color::Yellow),
-                )],
-            );
-            transcript.markdown(format!("unsaved:{invocation}"), reply);
-        }
-        if self.final_reply.is_some() || self.unsaved.is_some() {
+        transcript.plain(format!("turn:{turn}:status"), status);
+        if final_reply.is_some() || unsaved.is_some() {
             let calls = crate::performance::conversation_calls(&self.reply_usages);
             transcript.plain(
-                "reply-metrics".into(),
-                vec![Line::styled(
-                    crate::performance::footer(&calls, body.width),
-                    Style::default().fg(Color::DarkGray),
-                )],
+                format!("turn:{turn}:assistant:metadata"),
+                vec![
+                    Line::styled(
+                        crate::performance::footer(&calls, body.width),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Line::default(),
+                ],
             );
         }
         if !self.outcome.is_empty() {
@@ -986,7 +1034,7 @@ impl ChatView {
             ),
             input_area,
         );
-        let hints = if self.active.is_some() || self.pending.is_some() {
+        let hints = if self.running || self.pending.is_some() {
             "Ctrl+C cancel | Ctrl+E flow | Ctrl+P commands"
         } else if self.retained {
             "Ctrl+P recover reply | Ctrl+E flow | Ctrl+Q quit"
@@ -1060,6 +1108,12 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "{}", view.notice);
             thread::sleep(Duration::from_millis(10));
         }
+    }
+    fn row_of(screen: &str, needle: &str) -> usize {
+        screen
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} missing:\n{screen}"))
     }
     fn render(view: &ChatView, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1835,6 +1889,111 @@ mod tests {
         view.event(finish(invocation, "stale final"), &controller);
         assert_eq!(view.active.as_ref().unwrap().0, next);
         assert!(!render(&view, 100, 30).contains("stale final"));
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn previews_keep_their_rows_and_spinner_placement_across_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        view.show_execution = false;
+        let controller = ChatController::open(launch).unwrap();
+        let session = controller
+            ._database
+            .create_session("default", None, None)
+            .unwrap();
+        let begun = controller
+            ._database
+            .begin_turn(
+                &session.id,
+                "question",
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
+                None,
+            )
+            .unwrap();
+        let invocation = begun.invocation.clone();
+        view.event(
+            ChatEvent::Submitted {
+                session: session.clone(),
+                invocation: invocation.clone(),
+                prompt: "question".into(),
+            },
+            &controller,
+        );
+        let mut preview = LivePreview::default();
+        preview.begin(invocation.clone());
+        preview
+            .apply(mf_chat::PreviewEvent {
+                invocation: invocation.clone(),
+                delta: mf_chat::TextDelta {
+                    text: "streamed answer".into(),
+                    model_call_id: "model-call".into(),
+                },
+            })
+            .unwrap();
+        view.event(
+            ChatEvent::Preview {
+                invocation: invocation.clone(),
+                preview,
+            },
+            &controller,
+        );
+        let streamed = render(&view, 80, 30);
+        let label = streamed
+            .lines()
+            .find(|line| line.contains("Assistant"))
+            .unwrap()
+            .trim_end();
+        assert!(label.starts_with("Assistant "), "{label}");
+        assert!(
+            LOADING_FRAMES.contains(&label.chars().nth(10).unwrap()),
+            "{label}"
+        );
+        assert_eq!(row_of(&streamed, "question"), 2);
+        assert_eq!(row_of(&streamed, "streamed answer"), 5);
+        assert!(!streamed.contains("FTT"));
+        let completion = controller
+            ._database
+            .complete_turn(
+                invocation.clone(),
+                mf_chat::ConversationResult {
+                    text: "streamed answer".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        view.event(
+            ChatEvent::Finished {
+                invocation: invocation.clone(),
+                resolution: Ok(ReconciledCompletion {
+                    state: CompletionState::Committed(completion),
+                    diagnostics: vec![],
+                }),
+                status: None,
+                stderr: String::new(),
+                capture_error: None,
+            },
+            &controller,
+        );
+        let finished = render(&view, 80, 30);
+        assert_eq!(row_of(&finished, "question"), 2);
+        assert_eq!(row_of(&finished, "streamed answer"), 5);
+        assert!(!finished.contains(LOADING_FRAMES));
+        assert!(finished.contains("FTT"));
+        let page = controller
+            ._database
+            .messages(&session.id, 50, None)
+            .unwrap();
+        view.event(ChatEvent::Loaded { session, page }, &controller);
+        assert!(view.active.is_none());
+        let loaded = render(&view, 80, 30);
+        assert_eq!(row_of(&loaded, "question"), 2);
+        assert_eq!(row_of(&loaded, "streamed answer"), 5);
+        assert_eq!(loaded.matches("FTT").count(), 1);
         controller.close().unwrap();
     }
 
