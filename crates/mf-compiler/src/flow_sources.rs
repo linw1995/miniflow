@@ -177,6 +177,10 @@ fn needs_resolution(
         .any(|node| node.kind == METADATA_EXPANSION_KIND)
         || !definition.flows.is_empty()
         || definition
+            .flow_arguments
+            .values()
+            .any(|argument| needs_resolution(&argument.definition, registry))
+        || definition
             .nodes
             .iter()
             .any(|node| node_needs_resolution(node, registry))
@@ -399,6 +403,15 @@ impl Resolver<'_> {
                 .values()
                 .map(|value| (value.package.clone(), value.clone())),
         );
+        for (name, argument) in &mut definition.flow_arguments {
+            self.definition(
+                &mut argument.definition,
+                directory,
+                &available,
+                depth + 1,
+                name,
+            )?;
+        }
         let flows = std::mem::take(&mut definition.flows);
         for alias in flows.keys() {
             ensure!(
@@ -482,6 +495,7 @@ impl Resolver<'_> {
                     execution: None,
                     dependencies: available.clone(),
                     flows: BTreeMap::new(),
+                    flow_arguments: BTreeMap::new(),
                     nodes: body.nodes.clone(),
                     edges: body.edges.clone(),
                     control_edges: body.control_edges.clone(),
@@ -653,6 +667,20 @@ impl Resolver<'_> {
                         message: "Flow calls require version 2026-10-25"
                     }
                 );
+                if config.flow_ref.is_some() {
+                    ensure!(
+                        version.supports_flow_arguments()
+                            && config.flow.is_empty()
+                            && config.definition.is_none()
+                            && config.arguments_object
+                            && config.capture_errors,
+                        InvalidSnafu {
+                            reference: node.id.as_str(),
+                            message: "Flow parameter references require version 2026-11-01, arguments_object and capture_errors, without flow or definition"
+                        }
+                    );
+                    continue;
+                }
                 ensure!(
                     !config.flow.trim().is_empty(),
                     InvalidSnafu {

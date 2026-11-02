@@ -23,9 +23,6 @@ fn parse(value: Value) -> Result<WorkflowDefinition, NodeBuildError> {
         .map_err(NodeBuildError::from)
 }
 
-fn source(node: &str, port: &str) -> Value {
-    json!({"from": {"node": node, "port": port}})
-}
 fn subgraph(name: &str, definition: &WorkflowDefinition) -> Value {
     json!({"flow": name, "definition": definition})
 }
@@ -82,51 +79,35 @@ pub fn configure_tool_uses(
         }
     );
     validate(&flows)?;
-    if flows.is_empty() {
-        return tool_uses_definition().boxed().map_err(NodeBuildError::from);
-    }
     let mut value: Value =
         serde_json::from_str(include_str!("../workflows/tool-uses.json")).expect("builtin JSON");
-    let body = &mut value["nodes"][1]["config"]["body"];
-    let mut nodes = body["nodes"].as_array().cloned().expect("tool-uses nodes");
-    let mut edges = body["edges"].as_array().cloned().expect("tool-uses edges");
-    let route = nodes
+    let bindings = flows
         .iter()
-        .position(|node| node["id"] == "route")
-        .expect("tool-uses router");
-    // The template routes every call to its placeholder `unknown` branch. Replace that branch with
-    // one route per injected tool while retaining the shared `else` fallback.
-    nodes[route]["config"]["routes"] = json!(flows.keys().collect::<Vec<_>>());
-    nodes.retain(|node| {
-        !matches!(
-            node["id"].as_str(),
-            Some("unknown_named" | "unknown_named_result")
-        )
-    });
-    edges.retain(|edge| edge["from_node"] != "route");
-    edges.push(json!({"from_node": "route", "from_output": "else", "to_node": "unknown_else"}));
-    let mut results = vec![json!({"node": "unknown_else_result", "port": "result"})];
-    for (index, (name, binding)) in flows.iter().enumerate() {
-        let arguments = format!("arguments_{index}");
-        let invoke = format!("invoke_{index}");
-        let encode = format!("encode_{index}");
-        let (_, config) = project(name, binding)?;
-        let mut node = json!({"id": arguments, "kind": "llm.tool_arguments", "config": config});
-        node["inputs"] = json!({"call": source("%iteration", "item")});
-        nodes.push(node);
-        edges.push(json!({"from_node": "route", "from_output": name, "to_node": arguments}));
-        nodes.push(json!({"id": invoke, "kind": "workflow.call", "config": {"flow": name, "definition": binding.definition, "injected": true, "arguments_object": true, "capture_errors": true}, "inputs": {"arguments": source(&arguments, "arguments")}}));
-        nodes.push(json!({"id": encode, "kind": "llm.tool_result", "inputs": {"call": source("%iteration", "item"), "plain_content": source(&arguments, "plain_content"), "result": {"exclusive": [{"node": arguments, "port": "error"}, {"node": invoke, "port": "result"}]}}}));
-        results.push(json!({"node": encode, "port": "result"}));
-    }
-    let result = nodes
-        .iter()
-        .position(|node| node["id"] == "result")
-        .expect("tool-uses result");
-    nodes[result]["inputs"]["input"] = json!({"exclusive": results});
-    body["nodes"] = Value::Array(nodes);
-    body["edges"] = Value::Array(edges);
-    parse(value)
+        .map(|(name, binding)| {
+            project(name, binding).map(|(_, projection)| (name.clone(), projection))
+        })
+        .collect::<Result<serde_json::Map<_, _>, _>>()?;
+    value["nodes"]
+        .as_array_mut()
+        .expect("tool-uses nodes")
+        .iter_mut()
+        .find(|node| node["id"] == "bindings")
+        .expect("bindings")["config"]["value"] = Value::Object(bindings);
+    let mut definition = parse(value)?;
+    definition.flow_arguments = flows
+        .into_iter()
+        .map(|(name, binding)| {
+            (
+                name,
+                mf_runtime::ResolvedFlowArgument {
+                    definition: binding.definition,
+                    description: binding.description,
+                    parameters: binding.parameters,
+                },
+            )
+        })
+        .collect();
+    Ok(definition)
 }
 
 pub fn configure_agent(config: Value, flows: Flows) -> Result<WorkflowDefinition, NodeBuildError> {
@@ -244,15 +225,28 @@ mod tests {
         )
         .unwrap();
         let value = serde_json::to_value(uses).unwrap();
-        let body = &value["nodes"][1]["config"]["body"]["nodes"];
+        let outer = value["nodes"].as_array().unwrap();
+        let body =
+            &outer.iter().find(|node| node["id"] == "dispatch").unwrap()["config"]["body"]["nodes"];
         let nodes = body.as_array().unwrap();
-        assert!(
+        assert_eq!(
             nodes
                 .iter()
-                .any(|node| node["kind"] == "llm.tool_arguments" && node["config"] == config)
+                .filter(|node| node["kind"] == "llm.tool_arguments")
+                .count(),
+            1
         );
-        assert!(nodes.iter().any(|node| node["kind"] == "workflow.call"
-            && node["config"]["definition"] == serde_json::to_value(&binding.definition).unwrap()));
+        assert!(nodes.iter().any(
+            |node| node["kind"] == "workflow.call" && node["config"].get("flow_ref").is_some()
+        ));
+        assert_eq!(
+            value["flow_arguments"]["dispatch"]["definition"],
+            serde_json::to_value(&binding.definition).unwrap()
+        );
+        assert_eq!(
+            outer.iter().find(|node| node["id"] == "bindings").unwrap()["config"]["value"]["dispatch"],
+            config
+        );
     }
 
     #[test]

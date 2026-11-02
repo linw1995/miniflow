@@ -1,5 +1,39 @@
 ## ADDED Requirements
 
+### Requirement: Invoke passed frozen Flow parameters through a shared callsite
+
+A reference-only `workflow.call` target SHALL select a string name exclusively from its lexical
+passed frozen Flow argument environment. The same canonical environment SHALL supply prepared
+callable bodies; callers SHALL NOT author a second call-local candidate table. Selectors SHALL NOT
+load sources, fall back to global host bindings, or execute definition-shaped runtime JSON. Ordinary
+Value/ValueRef JSON serialization SHALL remain unchanged. Static calls SHALL remain compatible.
+
+Preparation SHALL validate all selectable targets. Initial reference calls SHALL require terminal
+children without stdin, object arguments and captured result envelopes. Explicit producer
+prerequisites SHALL remain necessary. Loop/Iteration bodies SHALL retain lexical bindings while
+separate child calls SHALL NOT implicitly inherit them. Generated runners SHALL construct all bodies
+from compiled plans and run after source removal. The authored tool-uses chain SHALL contain one
+arguments/call/result adapter chain independent of tool count; runtime argument adaptation SHALL
+consume selected sanitized interface data. Observation, snapshots and TUI bodies SHALL distinguish
+bindings at the same callsite without inventing executable wrapper nodes.
+
+#### Scenario: Shared authored dispatch invokes a passed binding
+
+- **WHEN** a tool-use Iteration receives calls for two passed tools
+- **THEN** the same authored arguments/call/result chain validates and invokes both bindings
+- **AND** result order follows input order in memory and in the source-free generated runner
+
+#### Scenario: A selector cannot forge executable authority
+
+- **WHEN** a selector contains an unknown name, a global-only host binding name, or definition-shaped JSON
+- **THEN** no unpassed body executes
+
+#### Scenario: Binding-aware observation preserves identical child node names
+
+- **WHEN** two passed bindings at one callsite both contain a node named `leaf`
+- **THEN** their lifecycle and snapshot paths identify the selected binding separately
+- **AND** the TUI can show both bodies under the single authored callsite
+
 ### Requirement: Describe named Flows as model tools
 
 Workflow version 2026-11-01 SHALL accept injected Flow arguments containing a source and optional

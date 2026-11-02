@@ -150,9 +150,11 @@ fn assert_runtime_catalog(definition: &WorkflowDefinition, expected_tools: usize
             let config = &node["config"];
             assert!(config.get("subgraph").is_none(), "{node}");
             assert!(config.get("definition").is_none(), "{node}");
-            let metadata: mf_runtime::SubgraphMetadata =
-                serde_json::from_value(config["metadata"].clone()).unwrap();
-            assert!(!metadata.outputs.is_empty());
+            assert!(config.as_object().unwrap().is_empty());
+            assert_eq!(
+                node["inputs"]["binding"]["from"],
+                json!({"node":"select", "port":"binding"})
+            );
         }
     }
     let catalogs = nodes
@@ -188,14 +190,16 @@ fn assert_runtime_catalog(definition: &WorkflowDefinition, expected_tools: usize
             .iter()
             .filter(|node| node["kind"] == "llm.tool_arguments")
             .count(),
-        expected_tools
+        1
     );
     assert_eq!(
         nodes
             .iter()
-            .filter(|node| node["kind"] == "workflow.call" && node["config"]["injected"] == true)
+            .filter(
+                |node| node["kind"] == "workflow.call" && node["config"].get("flow_ref").is_some()
+            )
             .count(),
-        expected_tools
+        1
     );
 }
 
@@ -234,7 +238,21 @@ fn local_named_flows_freeze_definitions_expose_schemas_and_dispatch_in_order() {
         .iter()
         .find(|node| node["id"] == "route")
         .unwrap();
-    assert_eq!(route["config"]["routes"], json!(["greet", "stats"]));
+    assert_eq!(route["config"]["routes"], json!(["known"]));
+    assert_eq!(child["flow_arguments"].as_object().unwrap().len(), 2);
+    let dispatch_nodes = dispatch["config"]["body"]["nodes"].as_array().unwrap();
+    assert_eq!(
+        dispatch_nodes
+            .iter()
+            .filter(|node| node["kind"] == "workflow.call")
+            .count(),
+        1
+    );
+    assert!(
+        dispatch_nodes
+            .iter()
+            .all(|node| !node["id"].as_str().unwrap().ends_with("_0"))
+    );
     assert!(child.to_string().contains("workflow.call"));
     assert!(!child.to_string().contains("workflow.tool_call"));
 
@@ -429,7 +447,12 @@ fn agent_builtin_without_tools_and_empty_tool_uses_are_valid() {
         mfn_llm::flows::configure_tool_uses(Value::Null, Default::default()).unwrap(),
         empty
     );
-    let body = &empty.nodes[1].config["body"];
+    let body = &empty
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "dispatch")
+        .unwrap()
+        .config["body"];
     assert!(
         body["nodes"]
             .as_array()
@@ -437,7 +460,7 @@ fn agent_builtin_without_tools_and_empty_tool_uses_are_valid() {
             .iter()
             .any(|node| node["kind"] == "builtin.router")
     );
-    assert_eq!(body["nodes"][1]["config"]["routes"], json!(["unknown"]));
+    assert_eq!(body["nodes"][1]["config"]["routes"], json!(["known"]));
     for (name, input) in [("mfn-llm.agent", "prompt"), ("mfn-llm.tool-uses", "calls")] {
         let definition = WorkflowDefinition::from_json(
             &json!({
@@ -621,7 +644,13 @@ fn injected_flow_bodies_are_marked_for_inspection() {
     let description = describe_compiled(&plan).unwrap();
     assert_eq!(description.injected_bodies.len(), 1);
     let path = &description.injected_bodies[0];
-    assert_eq!(path.last().map(String::as_str), Some("invoke_0"));
+    assert_eq!(
+        path.last(),
+        Some(&mf_telemetry::event::ScopePathEntry::binding_key(
+            "invoke",
+            "calculator"
+        ))
+    );
     let body = description.body(path).unwrap();
     assert_eq!(
         body.nodes
@@ -974,10 +1003,12 @@ fn callers_can_describe_the_same_child_differently_without_changing_it() {
     fn injected_definitions(value: &Value, definitions: &mut Vec<Value>) {
         match value {
             Value::Object(fields) => {
-                if fields.get("kind").and_then(Value::as_str) == Some("workflow.call")
-                    && value["config"]["injected"] == true
-                {
-                    definitions.push(value["config"]["definition"].clone());
+                if let Some(arguments) = fields.get("flow_arguments").and_then(Value::as_object) {
+                    definitions.extend(
+                        arguments
+                            .values()
+                            .map(|argument| argument["definition"].clone()),
+                    );
                 }
                 for value in fields.values() {
                     injected_definitions(value, definitions);
@@ -1129,14 +1160,12 @@ fn agent_binding_snapshots_are_sanitized_and_changed_overrides_fail_before_model
         .clone();
     let frozen_value = serde_json::to_value(&frozen).unwrap();
     for node in graph_nodes(&frozen_value) {
-        if node["kind"] == "llm.tool_arguments" {
-            let binding = bindings
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|binding| binding["name"] == node["config"]["name"])
-                .unwrap();
-            assert_eq!(&node["config"], binding);
+        if node["id"] == "bindings" && node["kind"] == "builtin.constant" {
+            let projected = node["config"]["value"].as_object().unwrap();
+            assert_eq!(projected.len(), bindings.as_array().unwrap().len());
+            for binding in bindings.as_array().unwrap() {
+                assert_eq!(&projected[binding["name"].as_str().unwrap()], binding);
+            }
         }
     }
     assert_eq!(

@@ -1401,7 +1401,7 @@ pub fn normalize_plan(
         if node.kind == ITERATION_KIND {
             node.config = normalize_config(definition, node)?;
         }
-        if crate::calls::is_flow(node) {
+        if crate::calls::is_flow(node) && !crate::calls::is_reference(node) {
             let body = crate::calls::body_definition(node)?;
             let normalized = plan_resolved_definition(&body)?.definition;
             crate::calls::config_mut(node)["definition"] = serde_json::to_value(normalized)
@@ -1437,6 +1437,16 @@ pub fn normalize_plan(
             version: definition.version,
             execution: definition.execution.clone(),
             flows: definition.flows.clone(),
+            flow_arguments: definition
+                .flow_arguments
+                .iter()
+                .map(|(name, argument)| {
+                    let mut argument = argument.clone();
+                    argument.definition =
+                        plan_resolved_definition(&argument.definition)?.definition;
+                    Ok((name.clone(), argument))
+                })
+                .collect::<Result<_, WorkflowCompileError>>()?,
             dependencies: definition.dependencies.clone(),
             nodes,
             edges,
@@ -1675,7 +1685,29 @@ fn collect_loop_execution_orders(
     include_iterations: bool,
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
-        let body = if let Some(loop_definition) = &node.loop_definition {
+        if crate::calls::is_reference(node) {
+            for (name, argument) in &definition.flow_arguments {
+                path.push(mf_telemetry::event::ScopePathEntry::binding_key(
+                    node.id.as_str(),
+                    name,
+                ));
+                let order = structural_order_graph(&argument.definition)
+                    .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
+                orders.push(mf_runtime::LoopExecutionOrder {
+                    path: path.clone(),
+                    execution_order: order.iter().map(ToString::to_string).collect(),
+                });
+                collect_loop_execution_orders(
+                    &argument.definition,
+                    path,
+                    orders,
+                    include_iterations,
+                )?;
+                path.pop();
+            }
+            continue;
+        }
+        let mut body = if let Some(loop_definition) = &node.loop_definition {
             crate::loops::body_definition(
                 &loop_definition.body,
                 &definition.dependencies,
@@ -1695,6 +1727,9 @@ fn collect_loop_execution_orders(
         } else {
             continue;
         };
+        if node.kind != mf_runtime::CALL_KIND {
+            body.flow_arguments = definition.flow_arguments.clone();
+        }
         path.push(node.id.to_string());
         let order = structural_order_graph(&body)
             .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
@@ -2004,6 +2039,47 @@ fn resolve_nodes_in_scope(
                 })?;
                 return Ok(FlowNode::new(node.id.clone(), instance));
             }
+            if crate::calls::is_reference(node) {
+                let mut arguments = BTreeMap::new();
+                for (name, argument) in &definition.flow_arguments {
+                    ensure!(!name.trim().is_empty(), InvalidCallSnafu { definition_id: node.id.clone(), message: "passed Flow parameter names must not be blank" });
+                    let body = &argument.definition;
+                    crate::validate_execution(body).context(StreamConstructionSnafu)?;
+                    ensure!(body.execution.is_none() && (!allow_iteration_input || !crate::calls::contains_iteration_containers(body)?), InvalidCallSnafu {
+                        definition_id: node.id.clone(), message: "Flow parameter calls require terminal children; calls inside Iteration cannot contain Loop or Iteration constructs"
+                    });
+                    crate::loops::validate_structure(body)?;
+                    // Layout keys carry binding identity, not additional executable nodes.
+                    let key = mf_telemetry::event::ScopePathEntry::binding_key(node.id.as_str(), name);
+                    ensure!(!definition.nodes.iter().any(|node| node.id.as_str() == key), InvalidCallSnafu {
+                        definition_id: node.id.clone(), message: "Flow parameter body key collides with an authored node ID"
+                    });
+                    let prepared = if let Some(registered) = preparation.registry.flow(name) {
+                        ensure!(
+                            plan_resolved_definition(body)?.definition
+                                == plan_resolved_definition(&registered.definition)?.definition,
+                            InvalidCallSnafu {
+                                definition_id: node.id.clone(),
+                                message: "host Flow binding differs from the frozen call definition"
+                            }
+                        );
+                        // Host closures are embedding capabilities, not source-free generated bodies.
+                        ensure!(preparation.body_layouts.is_none(), InvalidCallSnafu {
+                            definition_id: node.id.clone(), message: "host Flow executors cannot be emitted into generated execution plans"
+                        });
+                        registered.body.clone()
+                    } else {
+                        let mut owner = node.clone();
+                        owner.id = key.into();
+                        prepare_subgraph_body(&owner, preparation, body, None, false)?
+                    };
+                    arguments.insert(name.clone(), prepared);
+                }
+                let instance = registration_for(node, preparation.registry)?.instantiate_flow_reference(
+                    node.id.as_str(), node.config.clone(), mf_runtime::PreparedFlowArguments::new(arguments),
+                ).context(NodeConstructionSnafu { definition_id: node.id.clone(), kind: node.kind.clone() })?;
+                return Ok(FlowNode::new(node.id.clone(), instance));
+            }
             if crate::calls::is_flow_with_registry(node, Some(preparation.registry)) {
                 let body = crate::calls::body_definition(node)?;
                 crate::validate_execution(&body).context(StreamConstructionSnafu)?;
@@ -2027,6 +2103,9 @@ fn resolve_nodes_in_scope(
                             message: "host Flow binding differs from the frozen call definition"
                         }
                     );
+                    ensure!(preparation.body_layouts.is_none(), InvalidCallSnafu {
+                        definition_id: node.id.clone(), message: "host Flow executors cannot be emitted into generated execution plans"
+                    });
                     let instance = registration_for(node, preparation.registry)?
                         .instantiate_subgraph(
                             node.id.as_str(), node.config.clone(), Value::Null, registered.body.clone(),
@@ -2048,11 +2127,12 @@ fn resolve_nodes_in_scope(
                     let loop_definition = node.loop_definition.as_deref().expect("validated Loop");
                     let types = mf_runtime::loop_variable_types(&loop_definition.variables)
                         .expect("validated Loop variables");
-                    let body = crate::loops::body_definition(
+                    let mut body = crate::loops::body_definition(
                         &loop_definition.body,
                         &definition.dependencies,
                         definition.version,
                     );
+                    body.flow_arguments = definition.flow_arguments.clone();
                     let options = serde_json::json!({
                         "max_iterations": loop_definition.max_iterations,
                         "variables": loop_definition.variables,

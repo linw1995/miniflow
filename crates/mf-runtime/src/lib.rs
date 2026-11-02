@@ -44,13 +44,13 @@ pub use context::{
 pub use definition::{
     CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
     DefinitionParseError, DescribedFlowArgument, EXIT_LOOP_KIND, EdgeDefinition,
-    ExclusiveInputError, FlowArgument, FlowBodyDefinition, FlowParameterDescription, FlowSource,
-    InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
-    LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
-    MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
-    NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
-    ResolvedFlowArgument, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
-    validate_exclusive_inputs,
+    ExclusiveInputError, FlowArgument, FlowBodyDefinition, FlowParameterDescription, FlowReference,
+    FlowSource, InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID,
+    LoopBodyDefinition, LoopComparisonOperator, LoopConditionDefinition, LoopDefinition,
+    LoopVariableDefinition, MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS,
+    MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency, NodeDependencyError, OrderEdgeDefinition,
+    OutputReferenceDefinition, ResolvedFlowArgument, WorkflowDefinition, WorkflowDefinitionVersion,
+    WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{
@@ -119,8 +119,8 @@ pub use stream_plan::{
     StreamOutputSelector, StreamPlan, StreamProgram,
 };
 pub use subgraph::{
-    PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata, SubgraphMetadata,
-    SubgraphMetadataError, SubgraphNode, SubgraphStream, SubgraphStreamOutput,
+    PreparedFlowArguments, PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata,
+    SubgraphMetadata, SubgraphMetadataError, SubgraphNode, SubgraphStream, SubgraphStreamOutput,
     SubgraphStreamSender,
 };
 pub use task_stream::{

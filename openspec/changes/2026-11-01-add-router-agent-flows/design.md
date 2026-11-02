@@ -33,14 +33,24 @@ ordinary `llm.tool_definition` runtime node. Its recursive type projection share
 schema rules and never inspects raw executable JSON or resolves environment/default values.
 The Iteration is outside the conversation Loop: it runs once per invocation and passes the collected
 catalog into the Loop. Empty bindings follow the same path. The parameter has no environment binding;
-no new host API, language feature, or compile-time task evaluator is introduced. Executable definitions
-remain in dispatch calls rather than being duplicated in catalog input data.
+no compile-time task evaluator is introduced. Executable definitions remain in the canonical passed
+`flow_arguments` environment rather than being duplicated in catalog input data or call-local candidates.
 
-Runtime argument adapters consume frozen interfaces instead of duplicating executable child
-definitions. Dispatch still uses provider expansion to construct router branches and invocation calls;
-this change does not make dynamic dispatch declarative. Compile-time metadata references do not add
-scheduling edges or observation scopes. The generic runtime has no Tool types, JSON Schema conversion,
-result encoding, or LLM recovery policy.
+The authored tool-uses graph has one shared router/arguments/invoke/encode chain regardless of tool
+count. Runtime argument adapters consume the selected sanitized interface. A reference-only
+`workflow.call` target resolves the selected name solely against passed prepared bindings. The
+runtime value remains ordinary JSON; executable authority resides in `PreparedFlowArguments`, whose
+entries are `PreparedSubgraph` handles constructed during preparation. All targets are validated and
+generated before execution. No source lookup, global binding fallback, opaque Value variant, or
+runtime definition interpreter is introduced. Compile-time metadata and runtime configuration
+references do not add scheduling edges: producers still require explicit prerequisites.
+
+Loop/Iteration bodies retain lexical bindings; separately called children retain their own bindings.
+Reference calls initially require terminal children without stdin, object arguments and captured
+result envelopes. Observation paths identify callsite and binding, using distinct static body keys
+without wrapper executable nodes. Generated runners and memory execution use the same prepared
+binding contract. The generic runtime has no Tool types, JSON Schema conversion, tool-result encoding,
+or LLM recovery policy.
 
 ## Routing and invocation
 

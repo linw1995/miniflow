@@ -272,6 +272,27 @@ impl SubgraphMetadata {
     }
 }
 
+/// Executable form of the canonical passed Flow parameter environment.
+/// Only preparation creates these handles; JSON selectors cannot add entries.
+#[derive(Clone, Default)]
+pub struct PreparedFlowArguments(
+    std::sync::Arc<std::collections::BTreeMap<String, PreparedSubgraph>>,
+);
+
+impl PreparedFlowArguments {
+    pub fn new(arguments: std::collections::BTreeMap<String, PreparedSubgraph>) -> Self {
+        Self(std::sync::Arc::new(arguments))
+    }
+
+    pub fn get(&self, name: &str) -> Option<&PreparedSubgraph> {
+        self.0.get(name)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &PreparedSubgraph> {
+        self.0.values()
+    }
+}
+
 #[derive(Clone)]
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,
@@ -354,6 +375,37 @@ impl<N: SubgraphNode> crate::TaskStreamNode for SubgraphTask<N> {
 }
 
 impl PreparedSubgraph {
+    /// Wraps an already prepared terminal callable without inspecting source definitions.
+    pub fn from_flow(flow: Flow, nodes: Vec<NodeIdentity>) -> Self {
+        let outputs = flow
+            .plan()
+            .outputs
+            .iter()
+            .map(|output| {
+                let port = flow
+                    .node_metadata(&output.node_id)
+                    .expect("validated output node")
+                    .ports
+                    .outputs
+                    .iter()
+                    .find(|port| port.name == output.port)
+                    .expect("validated output port");
+                PortSpec::owned(
+                    output.name.as_ref(),
+                    port.value_type.clone(),
+                    !output.optional,
+                )
+            })
+            .collect();
+        let inputs = flow.input_schema().clone();
+        let input_metadata = SubgraphInputMetadata::from_flow(&flow);
+        let stream_outputs = flow.stream_output_ports();
+        Self::streaming(nodes, outputs, stream_outputs, move |state, sink| {
+            flow.execute_with_sink(state, sink)
+        })
+        .with_input_metadata(inputs, input_metadata)
+    }
+
     pub fn new(
         nodes: Vec<NodeIdentity>,
         outputs: Vec<PortSpec>,

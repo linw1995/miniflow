@@ -153,10 +153,16 @@ impl CompiledWorkflow {
             InvalidExecutionOrderSnafu
         );
         let original = crate::describe_compiled(self)?;
-        let mut bodies = BTreeMap::<&str, Vec<_>>::new();
+        let mut bodies = BTreeMap::<String, Vec<_>>::new();
         for body in &original.loop_bodies {
             if let Some(root) = body.path.first() {
-                bodies.entry(root.as_str()).or_default().push(body.clone());
+                let owner = if original.nodes.iter().any(|node| node.id == *root) {
+                    root.clone()
+                } else {
+                    mf_telemetry::event::ScopePathEntry::binding_owner(root)
+                        .unwrap_or_else(|| root.clone())
+                };
+                bodies.entry(owner).or_default().push(body.clone());
             }
         }
         let output_types: BTreeMap<_, _> = nodes
@@ -191,7 +197,7 @@ impl CompiledWorkflow {
                 injected_bodies: original
                     .injected_bodies
                     .iter()
-                    .filter(|path| path.first().map(String::as_str) == Some(id.as_str()))
+                    .filter(|path| path.first().is_some_and(|root| root == &id || mf_telemetry::event::ScopePathEntry::binding_owner(root).as_deref() == Some(id.as_str())))
                     .cloned()
                     .collect(),
                 clusters: Vec::new(),
@@ -679,14 +685,11 @@ fn generate_scope(
             node.kind.as_str(),
             crate::LOOP_KIND | ITERATION_KIND | mf_runtime::CALL_KIND
         ) {
-            preparations.push(subgraph_preparation(
-                definition,
-                node,
-                scope,
-                index,
-                static_scope,
-                &bindings,
-            )?);
+            preparations.push(if crate::calls::is_reference(node) {
+                reference_preparation(definition, node, scope, index, static_scope, &bindings)?
+            } else {
+                subgraph_preparation(definition, node, scope, index, static_scope, &bindings)?
+            });
             node_idents.push(node_ident);
             continue;
         }
@@ -852,6 +855,64 @@ fn dependency_tokens(dependencies: &[crate::ExecutionDependency<'_>]) -> Vec<Tok
 }
 
 #[cfg(feature = "codegen")]
+fn reference_preparation(
+    parent: &WorkflowDefinition,
+    node: &crate::NodeDefinition,
+    scope: &str,
+    index: usize,
+    static_scope: &[String],
+    bindings: &[TokenStream],
+) -> Result<TokenStream, PlanError> {
+    let node_ident = format_ident!("node_{scope}_{index}");
+    let inference_ident = format_ident!("inference_{scope}");
+    let id = LitStr::new(node.id.as_str(), Span::call_site());
+    let config = LitStr::new(
+        &serde_json::to_string(&node.config).context(SerializeSnafu)?,
+        Span::call_site(),
+    );
+    let mut prepared = Vec::new();
+    let mut entries = Vec::new();
+    for (binding_index, (name, argument)) in parent.flow_arguments.iter().enumerate() {
+        let body = &argument.definition;
+        let body_scope = format!("{scope}_{index}_binding_{binding_index}");
+        let mut path = static_scope.to_vec();
+        path.push(mf_telemetry::event::ScopePathEntry::binding_key(
+            node.id.as_str(),
+            name,
+        ));
+        let order = crate::compiler::structural_order_graph(body)?;
+        let (preparations, _, flow) = generate_scope(
+            body,
+            &order,
+            &body_scope,
+            &path,
+            None,
+            None,
+            ScopeBuild::Call,
+        )?;
+        let body_ident = format_ident!("argument_{body_scope}");
+        let identities = body.nodes.iter().map(|node| {
+            let id = LitStr::new(node.id.as_str(), Span::call_site());
+            let kind = LitStr::new(&node.kind, Span::call_site());
+            quote! { mf_runtime::NodeIdentity { id: #id.into(), kind: #kind.into(), path: Vec::new() } }
+        });
+        prepared.push(quote! {
+            #(#preparations)*
+            let #body_ident = mf_runtime::PreparedSubgraph::from_flow(#flow, vec![#(#identities),*]);
+        });
+        let name = LitStr::new(name, Span::call_site());
+        entries.push(quote! { (#name.into(), #body_ident) });
+    }
+    Ok(quote! {
+        #(#prepared)*
+        let arguments = mf_runtime::PreparedFlowArguments::new(std::collections::BTreeMap::from([#(#entries),*]));
+        let mut #node_ident = mf_compiler::instantiate_flow_reference_with_metadata(registry, #id, #config, arguments)?;
+        #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
+            .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id })?;
+    })
+}
+
+#[cfg(feature = "codegen")]
 fn subgraph_preparation(
     parent: &WorkflowDefinition,
     node: &crate::NodeDefinition,
@@ -870,7 +931,7 @@ fn subgraph_preparation(
         Span::call_site(),
     );
     let mut body_static_scope = static_scope.to_vec();
-    let (body, options, enclosing, preparation_error) = if node.kind == crate::LOOP_KIND {
+    let (mut body, options, enclosing, preparation_error) = if node.kind == crate::LOOP_KIND {
         let definition =
             node.loop_definition
                 .as_deref()
@@ -910,6 +971,9 @@ fn subgraph_preparation(
         };
         (body, serde_json::Value::Null, None, Some(error))
     };
+    if node.kind != mf_runtime::CALL_KIND {
+        body.flow_arguments = parent.flow_arguments.clone();
+    }
     let order = crate::compiler::structural_order_graph(&body);
     let order = if node.kind == crate::LOOP_KIND {
         order.context(crate::compiler::LoopBodySnafu {
@@ -1628,6 +1692,22 @@ fn collect_body_layouts(
         if node.kind != mf_runtime::CALL_KIND && crate::calls::is_metadata(&node.kind, None) {
             continue;
         }
+        if crate::calls::is_reference(node) {
+            for (binding_index, (name, argument)) in definition.flow_arguments.iter().enumerate() {
+                let body = &argument.definition;
+                let order = crate::compiler::structural_order_graph(body)?;
+                path.push(
+                    mf_telemetry::event::ScopePathEntry::binding_key(node.id.as_str(), name).into(),
+                );
+                let (domains, streams) = &body_layouts[path.as_slice()];
+                let body_scope = format!("{scope}_{index}_binding_{binding_index}");
+                layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
+                layouts.push(task_layout_tokens(body, &order, &body_scope, domains));
+                collect_body_layouts(body, &order, &body_scope, path, body_layouts, layouts)?;
+                path.pop();
+            }
+            continue;
+        }
         let mut body = if let Some(loop_definition) = &node.loop_definition {
             crate::loops::body_definition(
                 &loop_definition.body,
@@ -1644,6 +1724,9 @@ fn collect_body_layouts(
         } else {
             continue;
         };
+        if node.kind != mf_runtime::CALL_KIND {
+            body.flow_arguments = definition.flow_arguments.clone();
+        }
         let body_order = crate::compiler::structural_order_graph(&body)?;
         path.push(id.clone());
         let (domains, streams) = &body_layouts[path.as_slice()];

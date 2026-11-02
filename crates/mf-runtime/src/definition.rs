@@ -48,6 +48,8 @@ pub struct WorkflowDefinition {
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub flows: BTreeMap<String, FlowSource>,
+    /// Canonical passed Flow parameters, frozen before preparation. Not runtime JSON capabilities.
+    pub flow_arguments: BTreeMap<String, ResolvedFlowArgument>,
     pub nodes: Vec<NodeDefinition>,
     pub edges: Vec<EdgeDefinition>,
     pub control_edges: Vec<ControlEdgeDefinition>,
@@ -72,6 +74,9 @@ struct DefinitionFields {
     pub dependencies: BTreeMap<String, NodeDependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flows: BTreeMap<String, FlowSource>,
+    /// Canonical passed Flow parameters, frozen before preparation. Not runtime JSON capabilities.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub flow_arguments: BTreeMap<String, ResolvedFlowArgument>,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -261,10 +266,30 @@ struct FlowBodyFields {
     outputs: Vec<WorkflowOutputDefinition>,
 }
 
+/// A reference-only selector. Its JSON value is a name, never executable authority.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowReference {
+    #[serde(rename = "$ref")]
+    pub output: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+}
+
+impl FlowReference {
+    pub fn template(&self) -> Result<crate::ConfigTemplate, crate::ConfigTemplateError> {
+        crate::ConfigTemplate::parse(serde_json::json!({"$ref": self.output, "path": self.path}))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CallConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub flow: String,
+    /// Select only from passed, frozen Flow parameters in this lexical scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_ref: Option<FlowReference>,
     /// Observation provenance: this call body was supplied as an injected Flow parameter.
     /// Does not change execution behavior or imply tool semantics.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

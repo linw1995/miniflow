@@ -9,4 +9,8 @@
 - [x] Make the calculator example inject its tool into the built-in agent.
 - [x] Cover schemas, errors, concurrency, source-free runners, and the complete example.
 - [x] Update workflow, chat, and embedding documentation.
-- [x] Run repository checks and the affected-test Flow on the final cleaned-up snapshot before submission.
+- [x] Retain canonical frozen Flow parameters and add reference-only calls through prepared bindings.
+- [x] Replace generated per-tool dispatch graphs with one authored arguments/invoke/encode chain.
+- [x] Preserve source-free generation, lexical isolation and binding-aware observations/TUI bodies.
+- [x] Pass repository checks and focused compiler/core/LLM/telemetry/TUI regressions (335 tests, including source-free generated runners).
+- [ ] Complete the broad affected-test run: planning selected 11 packages, but snapshot compilation exhausted disk space before tests could start. Diagnostic retained locally at `target/test-affected-execution.stderr`; only that run's generated snapshot build directory was removed.

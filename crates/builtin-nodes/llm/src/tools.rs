@@ -233,16 +233,25 @@ impl TaskNode for ArgumentsNode {
             error = Some("arguments must be a JSON object".into());
         }
         let (name, value, skipped) = match error {
-            Some(error) => ("error", json!({"error": error}), "arguments"),
+            Some(error) => (
+                "error",
+                ValueRef::from(json!({"error": error})),
+                "arguments",
+            ),
             None => (
                 "arguments",
-                serde_json::to_value(arguments.0).expect("values serialize"),
+                ValueRef::object(
+                    arguments
+                        .0
+                        .into_iter()
+                        .map(|(name, value)| (name.into(), value)),
+                ),
                 "error",
             ),
         };
         Ok(NodeResult {
             outputs: Outputs::from([
-                (name.into(), value.into()),
+                (name.into(), value),
                 ("plain_content".into(), self.0.plain_content.into()),
             ]),
             skipped: [skipped.into()].into_iter().collect(),
@@ -355,7 +364,49 @@ fn project_definition(config: Value) -> Result<ToolDefinition, NodeBuildError> {
     ))
 }
 
+struct RuntimeArgumentsNode;
+
+impl NodePortContract for RuntimeArgumentsNode {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: vec![
+                PortSpec::new("call", ValueType::Object, true),
+                PortSpec::new("binding", ValueType::Object, true),
+            ],
+            outputs: vec![
+                PortSpec::new("arguments", ValueType::Object, false),
+                PortSpec::new("error", ValueType::Object, false),
+                PortSpec::new("plain_content", ValueType::Boolean, true),
+            ],
+        }
+    }
+}
+
+impl TaskNode for RuntimeArgumentsNode {
+    fn execute(
+        &self,
+        mut inputs: Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        let binding = inputs.remove("binding").expect("validated binding");
+        let config: Config =
+            serde_json::from_value(serde_json::to_value(binding).boxed()?).boxed()?;
+        let interface = prepare_tool_interface(&config.name, config.metadata.clone()).boxed()?;
+        validate_binding(&config, &interface).boxed()?;
+        ArgumentsNode(interface).execute(inputs, context)
+    }
+}
+
 fn arguments_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    if config.is_null() || config.as_object().is_some_and(serde_json::Map::is_empty) {
+        return PreparedNode::new(
+            RuntimeArgumentsNode,
+            NodeMetadata {
+                exclusive_outputs: vec!["arguments".into(), "error".into()],
+                ..Default::default()
+            },
+        );
+    }
     let config: Config = deserialize_config(config)?;
     let interface = prepare_tool_interface(&config.name, config.metadata.clone())?;
     validate_binding(&config, &interface)?;

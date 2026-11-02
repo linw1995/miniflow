@@ -1078,7 +1078,7 @@ impl ViewState {
             .node
             .path
             .iter()
-            .map(|entry| entry.node_id().to_owned())
+            .map(mf_telemetry::event::ScopePathEntry::body_key)
             .collect();
         let offsets = self.history_offsets();
         if (1..=path.len()).any(|depth| {
@@ -1825,8 +1825,8 @@ fn scope_passes<'a>(
         .filter(|pass| {
             pass.path
                 .iter()
-                .map(|entry| entry.node_id())
-                .eq(path.iter())
+                .map(mf_telemetry::event::ScopePathEntry::body_key)
+                .eq(path.iter().cloned())
                 && parent.is_none_or(|parent| {
                     pass.path.starts_with(&parent.path)
                         && (pass.stream_invocation == parent.stream_invocation
@@ -2576,14 +2576,25 @@ impl ObservationView {
             return None;
         }
         let node = self.root.nodes().get(self.state.selected)?;
-        let mut path = self.root.node_path(self.state.selected).to_vec();
-        path.push(node.id.clone());
-        self.description.body(&path).map(|_| path)
+        self.description
+            .body_paths_for_node(self.root.node_path(self.state.selected), &node.id)
+            .first()
+            .map(|path| (*path).clone())
     }
 
     fn set_body_state(&mut self, path: Vec<String>, state: BodyDisplay) -> Result<(), RunError> {
         let mut body_states = self.body_states.clone();
-        body_states.insert(path.clone(), state.normalized(&self.description, &path));
+        let (key, parent) = path.split_last().expect("body path is nonempty");
+        let owner = mf_telemetry::event::ScopePathEntry::binding_owner(key);
+        for sibling in self
+            .description
+            .body_paths_for_node(parent, owner.as_deref().unwrap_or(key))
+        {
+            body_states.insert(
+                sibling.clone(),
+                state.normalized(&self.description, sibling),
+            );
+        }
         let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view(),

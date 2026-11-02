@@ -75,6 +75,18 @@ impl SubgraphNode for CallNode {
         context: &mut ExecutionContext,
         sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_target(inputs, context, sink, None)
+    }
+}
+
+impl CallNode {
+    fn execute_target(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn mf_runtime::EmissionSink,
+        binding: Option<&str>,
+    ) -> Result<NodeResult, NodeExecutionError> {
         let mut stream = SubgraphStream::new(self.id.as_str(), context, sink);
         let inputs = if self.arguments_object {
             let arguments = inputs["arguments"]
@@ -87,23 +99,34 @@ impl SubgraphNode for CallNode {
         } else {
             inputs
         };
-        let result = context
-            .run_call(
+        let run = |state: &mut ExecutionContext| self.body.execute_with_sink(state, &mut stream);
+        let result = match binding {
+            Some(binding) => context.run_call_binding(
                 &self.id,
+                binding,
                 WorkflowArguments(inputs),
                 &self.body.nodes,
-                |state| self.body.execute_with_sink(state, &mut stream),
-            )
-            .context(CallFailureSnafu {
-                node: &self.id,
-                flow: &self.flow,
-            });
+                run,
+            ),
+            None => context.run_call(&self.id, WorkflowArguments(inputs), &self.body.nodes, run),
+        }
+        .context(CallFailureSnafu {
+            node: &self.id,
+            flow: &self.flow,
+        });
         let outputs = if self.capture_errors {
             if let Some(error) = context.cancellation().failure() {
                 return Err(error.into());
             }
             let value = match result {
-                Ok(outputs) => serde_json::json!({"outputs": outputs}),
+                Ok(outputs) => mf_runtime::ValueRef::object([(
+                    "outputs".into(),
+                    mf_runtime::ValueRef::object(
+                        outputs
+                            .into_iter()
+                            .map(|(name, value)| (name.into(), value)),
+                    ),
+                )]),
                 Err(error) => {
                     // Infrastructure failure must never be mistaken for a recoverable child result.
                     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
@@ -123,11 +146,11 @@ impl SubgraphNode for CallNode {
                     if infrastructure {
                         return Err(error.into());
                     }
-                    serde_json::json!({"error": error.to_string()})
+                    mf_runtime::ValueRef::from(serde_json::json!({"error": error.to_string()}))
                 }
             };
             return Ok(NodeResult {
-                outputs: mf_runtime::Outputs::from([("result".into(), value.into())]),
+                outputs: mf_runtime::Outputs::from([("result".into(), value)]),
                 ..Default::default()
             });
         } else {
@@ -155,6 +178,12 @@ fn factory(
     body: PreparedSubgraph,
 ) -> Result<PreparedNode, NodeBuildError> {
     let config: CallConfig = mf_runtime::deserialize_config(config)?;
+    ensure!(
+        config.flow_ref.is_none(),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "static calls cannot specify flow_ref",
+        }
+    );
     ensure!(
         !config.flow.trim().is_empty(),
         mf_runtime::NodeInvalidSubgraphSnafu {
@@ -213,8 +242,121 @@ fn factory(
     PreparedNode::subgraph(node, metadata)
 }
 
+struct ReferenceCallNode {
+    id: String,
+    selector: mf_runtime::ConfigTemplate,
+    arguments: mf_runtime::PreparedFlowArguments,
+}
+
+impl NodePortContract for ReferenceCallNode {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: vec![PortSpec::new(
+                "arguments",
+                mf_runtime::ValueType::Object,
+                true,
+            )],
+            outputs: vec![PortSpec::new("result", mf_runtime::ValueType::Object, true)],
+        }
+    }
+}
+
+impl mf_runtime::TaskNode for ReferenceCallNode {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        use snafu::OptionExt;
+        let selected = self.selector.resolve(context).boxed()?;
+        let name = selected
+            .as_str()
+            .context(mf_runtime::NodeExecutionFailedSnafu {
+                message: "Flow parameter reference must select a string name",
+            })?;
+        let body = self
+            .arguments
+            .get(name)
+            .context(mf_runtime::NodeExecutionFailedSnafu {
+                message: format!("unknown passed Flow parameter `{name}`"),
+            })?;
+        CallNode {
+            id: self.id.clone(),
+            flow: name.into(),
+            body: body.clone(),
+            arguments_object: true,
+            capture_errors: true,
+        }
+        .execute_target(inputs, context, &mut mf_runtime::DiscardSink, Some(name))
+    }
+}
+
+fn reference_factory(
+    id: &str,
+    config: Value,
+    arguments: mf_runtime::PreparedFlowArguments,
+) -> Result<PreparedNode, NodeBuildError> {
+    use snafu::OptionExt;
+    let config: CallConfig = mf_runtime::deserialize_config(config)?;
+    ensure!(
+        config.flow.is_empty()
+            && config.definition.is_none()
+            && config.arguments_object
+            && config.capture_errors,
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "reference calls require arguments_object and capture_errors, and cannot specify flow or definition"
+        }
+    );
+    for body in arguments.values() {
+        ensure!(
+            body.stream_outputs.is_empty() && body.inputs.stdin.is_empty(),
+            mf_runtime::NodeInvalidSubgraphSnafu {
+                message: "Flow parameter calls require terminal children without stdin"
+            }
+        );
+    }
+    let selector = config
+        .flow_ref
+        .context(mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "reference calls require flow_ref",
+        })?
+        .template()
+        .boxed()
+        .map_err(NodeBuildError::from)?;
+    let sensitive = arguments.values().any(|body| {
+        body.inputs
+            .inputs
+            .values()
+            .any(|ports| ports.values().any(|input| input.binding.secret))
+    });
+    let metadata = NodeMetadata {
+        context_references: selector.references("flow_ref"),
+        input_bindings: if sensitive {
+            [(
+                "arguments".into(),
+                mf_runtime::InputBinding {
+                    secret: true,
+                    ..Default::default()
+                },
+            )]
+            .into()
+        } else {
+            Default::default()
+        },
+        ..Default::default()
+    };
+    PreparedNode::new(
+        ReferenceCallNode {
+            id: id.into(),
+            selector,
+            arguments,
+        },
+        metadata,
+    )
+}
+
 inventory::submit! {
-    NodeRegistration { kind: mf_runtime::CALL_KIND, factory: NodeFactory::Subgraph(factory) }
+    NodeRegistration { kind: mf_runtime::CALL_KIND, factory: NodeFactory::Call { fixed: factory, reference: reference_factory } }
 }
 
 #[cfg(test)]

@@ -150,6 +150,16 @@ fn decode_scope(
             message: "nested flows require version 2026-10-25"
         }
     );
+    ensure!(
+        version.supports_flow_arguments()
+            || scope
+                .get("flow_arguments")
+                .is_none_or(|value| value.as_object().is_some_and(Map::is_empty)),
+        InvalidSnafu {
+            path,
+            message: "frozen Flow parameters require version 2026-11-01"
+        }
+    );
     validate_flow_sources(scope, version, path)?;
     ensure!(
         !scope.contains_key("order_edges"),
@@ -318,6 +328,16 @@ fn encode_scope(
         InvalidSnafu {
             path,
             message: "nested flows require version 2026-10-25"
+        }
+    );
+    ensure!(
+        version.supports_flow_arguments()
+            || scope
+                .get("flow_arguments")
+                .is_none_or(|value| value.as_object().is_some_and(Map::is_empty)),
+        InvalidSnafu {
+            path,
+            message: "frozen Flow parameters require version 2026-11-01"
         }
     );
     validate_flow_sources(scope, version, path)?;

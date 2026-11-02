@@ -281,17 +281,18 @@ has no environment binding and introduces no new host or CLI mechanism. An autho
 `builtin.assert` success gate reject changed parameter overrides before catalog projection or any
 model call. An ordinary `builtin.identity` forwards the bindings only after assertion success, then
 supplies the Iteration's items through a data edge. Equal overrides are accepted. This keeps the advertised catalog consistent with frozen
-dispatch, including when there are no tools. Executable tool definitions remain in dispatch calls,
-not duplicated in the catalog data. The argument adapters receive the same sanitized metadata.
-Metadata requests themselves are compile-time relationships, not execution edges.
+dispatch, including when there are no tools. Executable tool definitions remain in the dispatch Flow's
+canonical frozen `flow_arguments` environment, not in catalog data. The argument adapter receives
+the selected sanitized metadata. Metadata requests themselves are compile-time relationships, not
+execution edges.
 
-Expansion creates ordinary router gates, `workflow.call` nodes, and provider-owned
-`llm.tool_arguments` and `llm.tool_result` adapters. The argument adapter receives a frozen interface,
-not another embedded executable child definition. Its runtime job is still to validate each model
-call and map short parameter names. Metadata consumers never receive child execution closures.
-`mfn-llm.tool-uses` declares its `builtin.router` in the provider-owned JSON body; expansion replaces
-the placeholder route, branch edges, and fallback result selection with the injected tools. The
-runtime knows no Tool types or LLM schema policy.
+`mfn-llm.tool-uses` declares one shared router/arguments/invoke/encode chain in its provider-owned
+JSON. Expansion binds only the passed frozen Flow environment and sanitized interface data; it does
+not generate per-tool graph branches. The router distinguishes known and unknown names. The shared
+`llm.tool_arguments` reads the selected sanitized `binding` input, validates each model call, and maps
+short parameter names. The shared `workflow.call` invokes the corresponding prepared passed binding.
+Metadata consumers never receive child execution closures. The runtime knows no Tool types or LLM
+schema policy.
 
 `workflow.call` optionally accepts `arguments_object: true` to bind one object of qualified startup
 input names and `capture_errors: true` to return a `result` envelope (`outputs` or `error`). These are
@@ -304,6 +305,46 @@ error content so a subsequent model turn can recover. The native Iteration owns 
 concurrency and result ordering; the native Loop owns all agent repetition. The existing restriction
 on calls inside Iteration still applies: injected tools cannot themselves contain Loop or Iteration
 constructs.
+
+### Calling a passed Flow parameter by reference
+
+Version `2026-11-01` also supports a reference-only call target:
+
+```json
+{
+  "id": "invoke",
+  "kind": "workflow.call",
+  "config": {
+    "flow_ref": { "$ref": "select.name", "path": "" },
+    "arguments_object": true,
+    "capture_errors": true
+  },
+  "inputs": {
+    "arguments": { "from": { "node": "arguments", "port": "arguments" } }
+  }
+}
+```
+
+`flow_ref` selects a string name only from that Flow's passed frozen `flow_arguments` environment.
+It cannot be combined with `flow` or `definition`, and does not accept interpolation. As with other
+configuration references, the producer requires an explicit execution prerequisite; the selector
+alone does not establish ordering. Loop and Iteration bodies retain their enclosing lexical
+bindings. A separately called child has its own environment and does not inherit the caller's.
+
+The environment stores `ResolvedFlowArgument` records (frozen definition, description, parameter
+descriptions) once, not a second call-local candidates table. Preparation validates every selectable
+body and turns it into a `PreparedSubgraph`. Reference calls currently require `arguments_object`
+and `capture_errors`, terminal children, and no stdin. The JSON selector is ordinary data, not an
+unforgeable callable value: the captured prepared environment supplies execution authority. Unknown
+names and definition-shaped JSON cannot load a Flow, invoke a global host binding, or execute source
+JSON. These invalid selectors fail the call; the tool-uses graph routes unknown names to its recovery
+result before invocation. Static `flow` calls keep their existing behavior.
+
+Generated runners construct all callable bodies from compiled plans; they never resolve files or
+interpret workflow JSON at execution time. Call observations include both `call_id` and `binding`.
+Static description body paths encode that pair as `%flow:["callsite","binding"]`; this is a body key,
+not an additional executable wrapper node. Snapshots and TUI body selection keep same-named nodes
+from different bindings distinct.
 
 The [calculator example](../examples/chat-calculator-flow.json) only invokes the built-in agent and
 injects its [calculator Flow](../examples/agent-calculator/calculator.json). Compiled descriptions

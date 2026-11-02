@@ -1045,71 +1045,77 @@ impl GraphLayout {
             .filter(|(index, _)| folded.contains(index))
             .flat_map(|(_, cluster)| cluster.nodes.iter().map(String::as_str))
             .collect();
-        let mut children = BTreeMap::new();
+        let mut children: BTreeMap<String, Self> = BTreeMap::new();
         let mut injected_owners = BTreeSet::new();
         for node in &scope.nodes {
-            let mut child_path = path.to_vec();
-            child_path.push(node.id.clone());
             if hidden.contains(node.id.as_str()) {
                 continue;
             }
-            match states
-                .get(&child_path)
-                .copied()
-                .unwrap_or_default()
-                .normalized(description, &child_path)
-            {
-                BodyDisplay::Expanded if description.body(&child_path).is_some() => {
-                    children.insert(
-                        node.id.clone(),
-                        Self::inline_scope(
+            for child_path in description.body_paths_for_node(path, &node.id) {
+                match states
+                    .get(child_path)
+                    .copied()
+                    .unwrap_or_default()
+                    .normalized(description, child_path)
+                {
+                    BodyDisplay::Expanded if description.body(child_path).is_some() => {
+                        let child = Self::inline_scope(
                             description,
-                            &child_path,
-                            view,
-                            states,
-                            collapsed,
-                            remaining,
-                        )?,
-                    );
-                }
-                BodyDisplay::Summary if description.body(&child_path).is_some() => {
-                    let injected: Vec<_> = description
-                        .injected_bodies
-                        .iter()
-                        .filter(|body| {
-                            body.starts_with(&child_path)
-                                && !description.injected_bodies.iter().any(|ancestor| {
-                                    ancestor.starts_with(&child_path)
-                                        && ancestor.len() < body.len()
-                                        && body.starts_with(ancestor)
-                                })
-                        })
-                        .cloned()
-                        .collect();
-                    let mut combined: Option<Self> = None;
-                    for body in &injected {
-                        let layout = Self::inline_scope(
-                            description,
-                            body,
+                            child_path,
                             view,
                             states,
                             collapsed,
                             remaining,
                         )?;
-                        combined = Some(match combined {
-                            Some(mut existing) => {
+                        if let Some(existing) = children.get_mut(&node.id) {
+                            existing.stack_below(child);
+                        } else {
+                            children.insert(node.id.clone(), child);
+                        }
+                    }
+                    BodyDisplay::Summary if description.body(child_path).is_some() => {
+                        let injected: Vec<_> = description
+                            .injected_bodies
+                            .iter()
+                            .filter(|body| {
+                                body.starts_with(child_path)
+                                    && !description.injected_bodies.iter().any(|ancestor| {
+                                        ancestor.starts_with(child_path)
+                                            && ancestor.len() < body.len()
+                                            && body.starts_with(ancestor)
+                                    })
+                            })
+                            .cloned()
+                            .collect();
+                        let mut combined: Option<Self> = None;
+                        for body in &injected {
+                            let layout = Self::inline_scope(
+                                description,
+                                body,
+                                view,
+                                states,
+                                collapsed,
+                                remaining,
+                            )?;
+                            combined = Some(match combined {
+                                Some(mut existing) => {
+                                    existing.stack_below(layout);
+                                    existing
+                                }
+                                None => layout,
+                            });
+                        }
+                        if let Some(layout) = combined {
+                            if let Some(existing) = children.get_mut(&node.id) {
                                 existing.stack_below(layout);
-                                existing
+                            } else {
+                                children.insert(node.id.clone(), layout);
                             }
-                            None => layout,
-                        });
+                            injected_owners.insert(node.id.clone());
+                        }
                     }
-                    if let Some(layout) = combined {
-                        children.insert(node.id.clone(), layout);
-                        injected_owners.insert(node.id.clone());
-                    }
+                    BodyDisplay::Expanded | BodyDisplay::Summary | BodyDisplay::Hidden => {}
                 }
-                BodyDisplay::Expanded | BodyDisplay::Summary | BodyDisplay::Hidden => {}
             }
         }
         let mut layout = Self::with_children(
@@ -1126,9 +1132,9 @@ impl GraphLayout {
             .iter()
             .enumerate()
             .filter_map(|(index, node)| {
-                let mut child = path.to_vec();
-                child.push(node.id.clone());
-                (node.kind != CLUSTER_KIND && description.body(&child).is_some()).then_some(index)
+                (node.kind != CLUSTER_KIND
+                    && !description.body_paths_for_node(path, &node.id).is_empty())
+                .then_some(index)
             })
             .collect();
         for id in injected_owners {
@@ -1269,11 +1275,22 @@ impl GraphLayout {
     }
 
     pub fn display_index_for_scoped_node(&self, path: &[String], id: &str) -> Option<usize> {
+        let owner = mf_telemetry::event::ScopePathEntry::binding_owner(id);
         let source = self
             .all_nodes
             .iter()
             .enumerate()
-            .position(|(source, node)| node.id == id && self.source_path(source) == path)?;
+            .position(|(source, node)| node.id == id && self.source_path(source) == path)
+            .or_else(|| {
+                owner.and_then(|owner| {
+                    self.all_nodes
+                        .iter()
+                        .enumerate()
+                        .position(|(source, node)| {
+                            node.id == owner && self.source_path(source) == path
+                        })
+                })
+            })?;
         self.display_index_for_source(source)
     }
 

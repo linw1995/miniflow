@@ -1063,6 +1063,17 @@ request until linked preparation can resolve it; final generated artifacts conta
 graph and its frozen facts, not deferred source reads. Metadata relationships do not establish
 execution prerequisites.
 
+A configurable Flow can retain passed arguments in its returned definition's `flow_arguments`
+field and author a shared `workflow.call` with `flow_ref: {"$ref":"select.name"}`. Retain the original
+frozen `ResolvedFlowArgument` records; do not generate per-binding call nodes or expose executable
+JSON as runtime data. Described arguments can be converted by retaining their definition, description
+and parameter descriptions; public interface projections remain ordinary sanitized data. The compiler
+prepares every binding into `PreparedFlowArguments` and passes those handles through
+`NodeFactory::Call`'s reference factory. Reference-only selectors require explicit producer
+prerequisites, do not support interpolation, and can only select from this environment. No callable
+variant is added to `ValueRef`. Scope isolation, cancellation, work budgets and binding-aware
+observation use the normal call machinery.
+
 A node that only needs a child interface can register `NodeFactory::Metadata`. Preparation supplies
 `SubgraphMetadata` containing startup inputs and terminal/stream output contracts, with **no executor**.
 Definition-backed requests remain available for ordinary metadata consumers; compiled expansions can

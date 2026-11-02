@@ -930,6 +930,29 @@ pub fn instantiate_metadata_with_metadata(
     Ok(crate::FlowNode::new(definition_id, node))
 }
 
+pub fn instantiate_flow_reference_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    config_json: &str,
+    arguments: mf_runtime::PreparedFlowArguments,
+) -> Result<crate::FlowNode, WorkflowBuildError> {
+    let registration = registry
+        .get(mf_runtime::CALL_KIND)
+        .with_context(|| UnknownKindSnafu {
+            definition_id: DefinitionId::from(definition_id),
+            kind: mf_runtime::CALL_KIND.to_owned(),
+        })?;
+    let config = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
+        definition_id: DefinitionId::from(definition_id),
+    })?;
+    let prepared = registration
+        .instantiate_flow_reference(definition_id, config, arguments)
+        .context(NodeConstructionSnafu {
+            definition_id: DefinitionId::from(definition_id),
+        })?;
+    Ok(crate::FlowNode::new(definition_id, prepared))
+}
+
 pub fn instantiate_subgraph_with_metadata(
     registry: &NodeRegistry,
     definition_id: &str,

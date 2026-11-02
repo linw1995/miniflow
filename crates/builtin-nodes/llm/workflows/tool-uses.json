@@ -30,6 +30,43 @@
       }
     },
     {
+      "id": "bindings",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {}
+      }
+    },
+    {
+      "id": "items",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "calls": {
+            "list": "object"
+          },
+          "bindings": "object"
+        },
+        "code": {
+          "items": "calls.map(c, {'call': c, 'binding': c.name in bindings ? bindings[c.name] : null})"
+        }
+      },
+      "inputs": {
+        "calls": {
+          "from": {
+            "node": "params",
+            "port": "calls"
+          }
+        },
+        "bindings": {
+          "from": {
+            "node": "bindings",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
       "id": "dispatch",
       "kind": "builtin.iteration",
       "config": {
@@ -38,19 +75,22 @@
         "body": {
           "nodes": [
             {
-              "id": "name",
+              "id": "select",
               "kind": "builtin.code",
               "config": {
                 "language": "cel",
                 "inputs": {
-                  "call": "object"
+                  "item": "object"
                 },
                 "code": {
-                  "value": "call.name"
+                  "call": "item.call",
+                  "binding": "item.binding",
+                  "name": "item.call.name",
+                  "route": "item.binding == null ? 'unknown' : 'known'"
                 }
               },
               "inputs": {
-                "call": {
+                "item": {
                   "from": {
                     "node": "%iteration",
                     "port": "item"
@@ -63,20 +103,87 @@
               "kind": "builtin.router",
               "config": {
                 "routes": [
-                  "unknown"
+                  "known"
                 ]
               },
               "inputs": {
                 "route": {
                   "from": {
-                    "node": "name",
-                    "port": "value"
+                    "node": "select",
+                    "port": "route"
                   }
                 }
               }
             },
             {
-              "id": "unknown_named",
+              "id": "arguments",
+              "kind": "llm.tool_arguments",
+              "inputs": {
+                "call": {
+                  "from": {
+                    "node": "select",
+                    "port": "call"
+                  }
+                },
+                "binding": {
+                  "from": {
+                    "node": "select",
+                    "port": "binding"
+                  }
+                }
+              }
+            },
+            {
+              "id": "invoke",
+              "kind": "workflow.call",
+              "config": {
+                "flow_ref": {
+                  "$ref": "select.name"
+                },
+                "arguments_object": true,
+                "capture_errors": true
+              },
+              "inputs": {
+                "arguments": {
+                  "from": {
+                    "node": "arguments",
+                    "port": "arguments"
+                  }
+                }
+              }
+            },
+            {
+              "id": "encode",
+              "kind": "llm.tool_result",
+              "inputs": {
+                "call": {
+                  "from": {
+                    "node": "select",
+                    "port": "call"
+                  }
+                },
+                "plain_content": {
+                  "from": {
+                    "node": "arguments",
+                    "port": "plain_content"
+                  }
+                },
+                "result": {
+                  "exclusive": [
+                    {
+                      "node": "arguments",
+                      "port": "error"
+                    },
+                    {
+                      "node": "invoke",
+                      "port": "result"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "unknown",
               "kind": "builtin.constant",
               "config": {
                 "value": {
@@ -85,45 +192,18 @@
               }
             },
             {
-              "id": "unknown_named_result",
+              "id": "unknown_result",
               "kind": "llm.tool_result",
               "inputs": {
                 "call": {
                   "from": {
-                    "node": "%iteration",
-                    "port": "item"
+                    "node": "select",
+                    "port": "call"
                   }
                 },
                 "result": {
                   "from": {
-                    "node": "unknown_named",
-                    "port": "value"
-                  }
-                }
-              }
-            },
-            {
-              "id": "unknown_else",
-              "kind": "builtin.constant",
-              "config": {
-                "value": {
-                  "error": "unknown tool"
-                }
-              }
-            },
-            {
-              "id": "unknown_else_result",
-              "kind": "llm.tool_result",
-              "inputs": {
-                "call": {
-                  "from": {
-                    "node": "%iteration",
-                    "port": "item"
-                  }
-                },
-                "result": {
-                  "from": {
-                    "node": "unknown_else",
+                    "node": "unknown",
                     "port": "value"
                   }
                 }
@@ -136,11 +216,11 @@
                 "input": {
                   "exclusive": [
                     {
-                      "node": "unknown_named_result",
+                      "node": "encode",
                       "port": "result"
                     },
                     {
-                      "node": "unknown_else_result",
+                      "node": "unknown_result",
                       "port": "result"
                     }
                   ]
@@ -151,13 +231,13 @@
           "edges": [
             {
               "from_node": "route",
-              "from_output": "unknown",
-              "to_node": "unknown_named"
+              "from_output": "known",
+              "to_node": "arguments"
             },
             {
               "from_node": "route",
               "from_output": "else",
-              "to_node": "unknown_else"
+              "to_node": "unknown"
             }
           ],
           "result": {
@@ -169,8 +249,8 @@
       "inputs": {
         "items": {
           "from": {
-            "node": "params",
-            "port": "calls"
+            "node": "items",
+            "port": "items"
           }
         }
       }

@@ -107,11 +107,11 @@ pub use construction::{
     MetadataSnafu as WorkflowMetadataSnafu, NodeConstructionSnafu as WorkflowNodeConstructionSnafu,
     StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
     UnknownKindSnafu as WorkflowUnknownKindSnafu, WorkflowBuildError, bind_workflow_inputs,
-    build_flow, build_stream_program, instantiate_metadata_with_metadata,
-    instantiate_node_with_metadata, instantiate_subgraph_with_metadata, into_task,
-    partition_execution_domains, prepare_stream, prepared_loop_assign_from_json,
-    prepared_loop_source_from_json, stream_workflow_inputs, validate_execution,
-    validate_stream_limits, validate_success_connection, workflow_input_schema,
+    build_flow, build_stream_program, instantiate_flow_reference_with_metadata,
+    instantiate_metadata_with_metadata, instantiate_node_with_metadata,
+    instantiate_subgraph_with_metadata, into_task, partition_execution_domains, prepare_stream,
+    prepared_loop_assign_from_json, prepared_loop_source_from_json, stream_workflow_inputs,
+    validate_execution, validate_stream_limits, validate_success_connection, workflow_input_schema,
 };
 pub use mf_runtime::{
     FlowRuntime, RuntimeOptions, TaskFlowNode, WorkflowInputError, WorkflowInputSchema,

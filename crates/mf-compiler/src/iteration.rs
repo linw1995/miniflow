@@ -76,6 +76,7 @@ pub fn body_definition(
         version: parent.version,
         execution: None,
         flows: Default::default(),
+        flow_arguments: parent.flow_arguments.clone(),
         dependencies: parent.dependencies.clone(),
         nodes,
         edges: config.body.edges.clone(),
@@ -100,7 +101,7 @@ pub fn normalize_config(
         .body
         .nodes
         .iter()
-        .filter(|node| node.kind == mf_runtime::CALL_KIND)
+        .filter(|node| node.kind == mf_runtime::CALL_KIND && !crate::calls::is_reference(node))
     {
         let child = crate::calls::body_definition(call)?;
         snafu::ensure!(

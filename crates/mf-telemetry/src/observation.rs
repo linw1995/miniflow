@@ -344,7 +344,7 @@ impl RunObservation {
         } else {
             let static_path: Vec<_> = path
                 .iter()
-                .map(|entry| entry.node_id().to_owned())
+                .map(crate::event::ScopePathEntry::body_key)
                 .collect();
             self.description
                 .as_ref()?
@@ -355,7 +355,7 @@ impl RunObservation {
         }
         let mut body_path: Vec<_> = path
             .iter()
-            .map(|entry| entry.node_id().to_owned())
+            .map(crate::event::ScopePathEntry::body_key)
             .collect();
         body_path.push(id.to_owned());
         IterationObservation::new(
@@ -422,7 +422,7 @@ impl RunObservation {
         let description = self.description.as_ref()?;
         let static_path: Vec<_> = path
             .iter()
-            .map(|entry| entry.node_id().to_owned())
+            .map(crate::event::ScopePathEntry::body_key)
             .collect();
         let body = description.loop_body(&static_path)?;
         let position = body.execution_order.iter().position(|node| node == id)?;

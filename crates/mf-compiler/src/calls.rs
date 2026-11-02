@@ -2,6 +2,14 @@ use crate::{NodeDefinition, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::CallConfig;
 use snafu::{ResultExt, ensure};
 
+pub fn is_reference(node: &NodeDefinition) -> bool {
+    node.kind == mf_runtime::CALL_KIND
+        && node
+            .config
+            .get("flow_ref")
+            .is_some_and(|value| !value.is_null())
+}
+
 pub fn body_definition(node: &NodeDefinition) -> Result<WorkflowDefinition, WorkflowCompileError> {
     let config = config(node)?;
     ensure!(
@@ -24,7 +32,13 @@ pub fn contains_iteration_containers(
         ) {
             return Ok(true);
         }
-        if node.kind == mf_runtime::CALL_KIND
+        if is_reference(node) {
+            for argument in definition.flow_arguments.values() {
+                if contains_iteration_containers(&argument.definition)? {
+                    return Ok(true);
+                }
+            }
+        } else if node.kind == mf_runtime::CALL_KIND
             && contains_iteration_containers(&body_definition(node)?)?
         {
             return Ok(true);

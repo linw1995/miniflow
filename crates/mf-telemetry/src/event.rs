@@ -42,25 +42,47 @@ pub struct NodeIdentity {
 pub enum ScopePathEntry {
     Loop { loop_id: String, index: Count },
     Call { call_id: String },
+    CallBinding { call_id: String, binding: String },
 }
 
 impl ScopePathEntry {
     pub fn node_id(&self) -> &str {
         match self {
             Self::Loop { loop_id, .. } => loop_id,
-            Self::Call { call_id } => call_id,
+            Self::Call { call_id } | Self::CallBinding { call_id, .. } => call_id,
         }
     }
 
     pub fn index(&self) -> Count {
         match self {
             Self::Loop { index, .. } => *index,
-            Self::Call { .. } => Count::ZERO,
+            Self::Call { .. } | Self::CallBinding { .. } => Count::ZERO,
         }
     }
 
     pub fn is_call(&self) -> bool {
-        matches!(self, Self::Call { .. })
+        matches!(self, Self::Call { .. } | Self::CallBinding { .. })
+    }
+
+    /// A collision-free body key; binding identity is not an executable wrapper node.
+    pub fn body_key(&self) -> String {
+        match self {
+            Self::CallBinding { call_id, binding } => Self::binding_key(call_id, binding),
+            _ => self.node_id().to_owned(),
+        }
+    }
+
+    pub fn binding_key(call_id: &str, binding: &str) -> String {
+        format!(
+            "%flow:{}",
+            serde_json::to_string(&(call_id, binding)).expect("strings serialize")
+        )
+    }
+
+    pub fn binding_owner(key: &str) -> Option<String> {
+        let (owner, _): (String, String) =
+            serde_json::from_str(key.strip_prefix("%flow:")?).ok()?;
+        Some(owner)
     }
 }
 
@@ -411,7 +433,8 @@ fn validate_path(path: &[LoopPathEntry]) -> Result<(), ContractError> {
     )?;
     for entry in path {
         require(
-            !entry.node_id().trim().is_empty()
+            !matches!(entry, ScopePathEntry::CallBinding { binding, .. } if binding.trim().is_empty())
+                && !entry.node_id().trim().is_empty()
                 && entry.index().get() < i64::from(crate::MAX_LOOP_ITERATIONS),
             "invalid Loop path entry",
         )?;
@@ -491,11 +514,7 @@ impl LifecycleEvent {
                 loop_schema || identity.path.is_empty(),
                 "old event has a Loop path",
             )?;
-            let static_path: Vec<_> = identity
-                .path
-                .iter()
-                .map(|entry| entry.node_id().to_owned())
-                .collect();
+            let static_path: Vec<_> = identity.path.iter().map(ScopePathEntry::body_key).collect();
             let (nodes, data_edges, control_edges, order_edges, order) = if static_path.is_empty() {
                 (
                     &graph.nodes,
