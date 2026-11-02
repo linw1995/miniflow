@@ -296,6 +296,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn configurable_builtin_registrations_preserve_their_expansion_mode() {
+        fn configure(
+            config: Value,
+            injections: BTreeMap<String, crate::ResolvedFlowArgument>,
+        ) -> Result<crate::WorkflowDefinition, NodeBuildError> {
+            assert_eq!(config, serde_json::json!({"mode": "runtime"}));
+            assert!(injections.is_empty());
+            Ok(builtin_definition().unwrap())
+        }
+
+        fn configure_metadata(
+            config: Value,
+            injections: BTreeMap<String, crate::DescribedFlowArgument>,
+        ) -> Result<crate::WorkflowDefinition, NodeBuildError> {
+            assert_eq!(config, serde_json::json!({"mode": "metadata"}));
+            assert!(injections.is_empty());
+            Ok(builtin_definition().unwrap())
+        }
+
+        static RUNTIME: BuiltinFlowRegistration = BuiltinFlowRegistration::configurable(
+            "test-package",
+            "runtime",
+            builtin_definition,
+            configure,
+        );
+        static METADATA: BuiltinFlowRegistration = BuiltinFlowRegistration::metadata(
+            "test-package",
+            "metadata",
+            builtin_definition,
+            configure_metadata,
+        );
+        let registry = BuiltinFlowRegistry::from_registrations([&RUNTIME, &METADATA]).unwrap();
+        let runtime = registry.get("test-package.runtime").unwrap();
+        assert!(runtime.configure_metadata.is_none());
+        assert!((runtime.definition)().unwrap().nodes.is_empty());
+        assert!(
+            (runtime.configure.unwrap())(serde_json::json!({"mode": "runtime"}), BTreeMap::new(),)
+                .unwrap()
+                .nodes
+                .is_empty()
+        );
+
+        let metadata = registry.get("test-package.metadata").unwrap();
+        assert!(metadata.configure.is_none());
+        assert!((metadata.definition)().unwrap().nodes.is_empty());
+        assert!(
+            (metadata.configure_metadata.unwrap())(
+                serde_json::json!({"mode": "metadata"}),
+                BTreeMap::new(),
+            )
+            .unwrap()
+            .nodes
+            .is_empty()
+        );
+    }
+
     impl TaskNode for FirstTestNode {
         fn execute(
             &self,

@@ -138,6 +138,54 @@ fn ordinary_metadata_definition_references_use_host_bound_interfaces() {
 }
 
 #[test]
+fn metadata_references_reject_host_bindings_with_different_frozen_definitions() {
+    let child = definition(
+        json!([{"id": "constant", "kind": "builtin.constant", "config": {"value": 42}}]),
+        json!([{"name": "value", "node": "constant", "port": "value"}]),
+    );
+    let mut registry = NodeRegistry::from_inventory().unwrap();
+    registry
+        .register_flow(
+            "host.child",
+            child.clone(),
+            mf_runtime::PreparedSubgraph::new(
+                vec![],
+                vec![mf_runtime::PortSpec::new(
+                    "value",
+                    mf_runtime::ValueType::Int64,
+                    true,
+                )],
+                |_| panic!("metadata inspection must not execute the host Flow"),
+            ),
+        )
+        .unwrap();
+    let mut node = serde_json::from_value(json!({
+        "id": "inspect", "kind": "test.metadata_reference", "config": {
+            "subgraph": {"flow": "host.child", "definition": child}
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        mf_compiler::describe_subgraph(&node, &registry)
+            .unwrap()
+            .outputs[0]
+            .value_type,
+        mf_runtime::ValueType::Int64
+    );
+
+    // Identical interfaces do not make a different frozen implementation interchangeable.
+    node.config["subgraph"]["definition"]["nodes"][0]["config"]["value"] = json!(43);
+    let error = mf_compiler::describe_subgraph(&node, &registry).unwrap_err();
+    assert!(
+        matches!(error, mf_compiler::WorkflowCompileError::InvalidCall {
+            ref definition_id, ref message,
+        } if definition_id.as_str() == "inspect"
+            && message == "host Flow binding differs from the frozen metadata definition"),
+        "{error}"
+    );
+}
+
+#[test]
 fn review_iteration_metadata_references_do_not_nest_executable_containers() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for child in container_definitions() {

@@ -1,5 +1,7 @@
 #![cfg(feature = "codegen")]
 
+extern crate mfn_core as _;
+
 use mf_compiler::{NodeRegistry, WorkflowDefinition, describe_workflow_inputs, plan_definition};
 use mf_runtime::{
     ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
@@ -60,6 +62,48 @@ fn prepare(config: Value) -> Result<PreparedNode, NodeBuildError> {
 
 inventory::submit! {
     NodeRegistration { kind: "fixture.manifest", factory: NodeFactory::Plain(prepare) }
+}
+
+#[test]
+fn execution_plan_generation_rejects_corrupted_canonical_orders() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-11-01",
+        "dependencies": {},
+        "nodes": [
+            {"id": "first", "kind": "builtin.constant", "config": {"value": 1}},
+            {"id": "second", "kind": "builtin.constant", "config": {"value": 2}}
+        ],
+        "outputs": [{"name": "value", "node": "second", "port": "value"}]
+    }))
+    .unwrap();
+    let plan = plan_definition(&definition).unwrap();
+    assert_eq!(plan.execution_order, vec!["first".into(), "second".into()]);
+    plan.generate_execution_plans(&registry).unwrap();
+    plan.generate_runner_execution_plans(&registry).unwrap();
+
+    for order in [
+        vec![],
+        vec!["first"],
+        vec!["first", "first"],
+        vec!["first", "unknown"],
+        vec!["first", "second", "second"],
+        // Even a valid topological ordering of independent nodes must remain canonical.
+        vec!["second", "first"],
+    ] {
+        let mut corrupted = plan.clone();
+        corrupted.execution_order = order.iter().map(|id| (*id).into()).collect();
+        for result in [
+            corrupted.generate_execution_plans(&registry),
+            corrupted.generate_runner_execution_plans(&registry),
+        ] {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error, mf_compiler::PlanError::InvalidExecutionOrder),
+                "order {order:?}: {error}"
+            );
+        }
+    }
 }
 
 #[test]

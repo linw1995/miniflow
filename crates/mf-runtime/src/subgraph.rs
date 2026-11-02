@@ -489,6 +489,53 @@ mod tests {
     use super::*;
     use crate::{EmissionSink, NodeId, NodeResult, ValueRef, ValueType};
 
+    fn input_metadata(node: &str, port: &str) -> SubgraphMetadata {
+        SubgraphMetadata {
+            inputs: WorkflowInputSchema {
+                inputs: std::collections::BTreeMap::from([(
+                    node.into(),
+                    std::collections::BTreeMap::from([(
+                        port.into(),
+                        crate::WorkflowInput {
+                            value_type: ValueType::String,
+                            required: true,
+                            binding: crate::InputBinding {
+                                env: Some("MF_METADATA_TEST_INPUT".into()),
+                                default: Some(serde_json::json!("fallback")),
+                                secret: true,
+                            },
+                        },
+                    )]),
+                )]),
+                stdin: Default::default(),
+            },
+            outputs: vec![PortSpec::new("value", ValueType::String, true)],
+            stream_outputs: vec![PortSpec::new("value", ValueType::String, true)],
+        }
+    }
+
+    #[test]
+    fn metadata_rejects_empty_input_node_or_port_names() {
+        for (node, port) in [("", "value"), ("source", ""), ("", "")] {
+            let error = input_metadata(node, port).validate().unwrap_err();
+            assert!(matches!(
+                error,
+                SubgraphMetadataError::Invalid { ref message }
+                    if message == "input node and port names must not be empty"
+            ));
+            assert_eq!(
+                error.to_string(),
+                "invalid metadata interface: input node and port names must not be empty"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_accepts_bound_inputs_and_matching_names_in_separate_output_channels() {
+        // Validation checks declarations only; it must not resolve the environment binding.
+        input_metadata("source", "value").validate().unwrap();
+    }
+
     #[test]
     fn projection_preserves_nested_sensitivity_and_marks_other_children_skipped() {
         struct Collect(Option<NodeResult>);
