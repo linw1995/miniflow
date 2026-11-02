@@ -986,6 +986,34 @@ differs or is incomplete.
 - **WHEN** members of a data bundle have different or incomplete observations
 - **THEN** the bundle does not falsely display uniform success or a single selected source
 
+### Requirement: Limit body summaries to injected Flows
+
+Described Loop, Iteration, and Call bodies SHALL start expanded (`[-]`) and support fully collapsed
+(`[+]`) display. The `c` key SHALL cycle between those two states unless the body's path contains an
+injected Flow at that path or a descendant path. Only such bodies SHALL offer an intermediate summary
+(`[~]`) state that draws the outermost injected subgraphs instead of the enclosing body. Summary
+rendering SHALL NOT fall back to listing passed inputs. An explicitly supplied summary state for a
+body without injected Flows SHALL render and be stored by view updates as fully collapsed; its next
+keyboard cycle SHALL expand it. Nested body state and Iteration item observation SHALL remain independent.
+
+#### Scenario: Toggle a body without injected Flows
+
+- **WHEN** the user presses `c` on an expanded body without injected Flows
+- **THEN** it becomes fully collapsed without displaying an intermediate summary or passed inputs
+- **AND** another press expands it, including for nested Loop, Iteration, and Call bodies
+
+#### Scenario: Toggle a body containing injected Flows
+
+- **WHEN** the user repeatedly presses `c` on an expanded body containing injected Flows
+- **THEN** it cycles through summary, fully collapsed, and expanded states
+- **AND** summary draws the injected subgraphs without duplicating nested injections
+
+#### Scenario: Supply an unsupported summary state
+
+- **WHEN** a caller supplies a summary state for a nested or root body without injected Flows
+- **THEN** every connection view displays that body as fully collapsed with `[+]`, not `[~]`
+- **AND** the next `c` expands the body
+
 ### Requirement: Inspect static bodies without inventing lifecycle states
 
 When a description exposes an Iteration body, the UI SHALL permit static connection inspection and clearly identify its span-based item observation. It SHALL display unknown item-node states instead of inventing Loop lifecycle outcomes or deriving them from the outer node. An explicitly observed all-skipped input group SHALL be distinguished from missing selection evidence.

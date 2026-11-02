@@ -78,6 +78,22 @@ pub enum BodyDisplay {
     Expanded,
 }
 
+impl BodyDisplay {
+    /// Unsupported summary states behave as fully collapsed bodies.
+    pub fn normalized(self, description: &WorkflowDescription, path: &[String]) -> Self {
+        if self == Self::Summary
+            && !description
+                .injected_bodies
+                .iter()
+                .any(|body| body.starts_with(path))
+        {
+            Self::Hidden
+        } else {
+            self
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConnectionView {
     #[default]
@@ -1030,7 +1046,6 @@ impl GraphLayout {
             .flat_map(|(_, cluster)| cluster.nodes.iter().map(String::as_str))
             .collect();
         let mut children = BTreeMap::new();
-        let mut summaries = Vec::new();
         let mut injected_owners = BTreeSet::new();
         for node in &scope.nodes {
             let mut child_path = path.to_vec();
@@ -1038,7 +1053,12 @@ impl GraphLayout {
             if hidden.contains(node.id.as_str()) {
                 continue;
             }
-            match states.get(&child_path).copied().unwrap_or_default() {
+            match states
+                .get(&child_path)
+                .copied()
+                .unwrap_or_default()
+                .normalized(description, &child_path)
+            {
                 BodyDisplay::Expanded if description.body(&child_path).is_some() => {
                     children.insert(
                         node.id.clone(),
@@ -1066,44 +1086,39 @@ impl GraphLayout {
                         })
                         .cloned()
                         .collect();
-                    if injected.is_empty() {
-                        summaries.push((node.id.clone(), input_summary(scope, &node.id)));
-                    } else {
-                        let mut combined: Option<Self> = None;
-                        for body in &injected {
-                            let layout = Self::inline_scope(
-                                description,
-                                body,
-                                view,
-                                states,
-                                collapsed,
-                                remaining,
-                            )?;
-                            combined = Some(match combined {
-                                Some(mut existing) => {
-                                    existing.stack_below(layout);
-                                    existing
-                                }
-                                None => layout,
-                            });
-                        }
-                        if let Some(layout) = combined {
-                            children.insert(node.id.clone(), layout);
-                            injected_owners.insert(node.id.clone());
-                        }
+                    let mut combined: Option<Self> = None;
+                    for body in &injected {
+                        let layout = Self::inline_scope(
+                            description,
+                            body,
+                            view,
+                            states,
+                            collapsed,
+                            remaining,
+                        )?;
+                        combined = Some(match combined {
+                            Some(mut existing) => {
+                                existing.stack_below(layout);
+                                existing
+                            }
+                            None => layout,
+                        });
+                    }
+                    if let Some(layout) = combined {
+                        children.insert(node.id.clone(), layout);
+                        injected_owners.insert(node.id.clone());
                     }
                 }
                 BodyDisplay::Expanded | BodyDisplay::Summary | BodyDisplay::Hidden => {}
             }
         }
-        let summary_rows: BTreeMap<_, _> = summaries.iter().cloned().collect();
         let mut layout = Self::with_children(
             scope,
             view,
             routing::RoutingLimits::default(),
             &folded,
             &children,
-            &summary_rows,
+            &BTreeMap::new(),
         )?;
         layout.source_paths.fill(path.to_vec());
         layout.body_nodes = layout
@@ -1116,11 +1131,6 @@ impl GraphLayout {
                 (node.kind != CLUSTER_KIND && description.body(&child).is_some()).then_some(index)
             })
             .collect();
-        for (id, summary) in summaries {
-            if let Some(owner) = layout.display_index_for_scoped_node(path, &id) {
-                layout.body_summaries.insert(owner, summary);
-            }
-        }
         for id in injected_owners {
             if let Some(owner) = layout.display_index_for_scoped_node(path, &id) {
                 layout.body_summaries.insert(owner, Vec::new());
@@ -2318,27 +2328,6 @@ fn status_name(status: NodeStatus) -> &'static str {
         NodeStatus::Unknown => "unknown",
         NodeStatus::Interrupted => "interrupted",
     }
-}
-
-fn input_summary(scope: &WorkflowDescription, id: &str) -> Vec<String> {
-    let mut inputs: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for edge in scope.data_edges.iter().filter(|edge| edge.to_node == id) {
-        inputs
-            .entry(edge.to_input.as_str())
-            .or_default()
-            .push(edge.from_node.as_str());
-    }
-    if inputs.is_empty() {
-        return vec!["no inputs".into()];
-    }
-    inputs
-        .into_iter()
-        .map(|(input, mut sources)| {
-            sources.sort_unstable();
-            sources.dedup();
-            format!("{input} ← {}", sources.join("|"))
-        })
-        .collect()
 }
 
 fn display_line(value: &str) -> String {

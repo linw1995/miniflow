@@ -1759,7 +1759,7 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
     } else {
         "Arrows         Pan graph\nTab / Shift-Tab, j/k   Select node\n\
          d              Show / hide details\nPgUp/PgDn      Scroll visible details\n\
-         e              Cycle connection view\nc              Cycle body: expanded / summary / collapsed\nv              Open OTEL tracing\n\
+         e              Cycle connection view\nc              Cycle body: expanded / collapsed (summary with injected Flows)\nv              Open OTEL tracing\n\
          l              Expand selected body inline\nh              Fully collapse body / enclosing body\n\
          Esc            Close details / collapse body\n\
          [ / ]          Older / newer pass or item\nf              Reset viewport\n\
@@ -2583,7 +2583,7 @@ impl ObservationView {
 
     fn set_body_state(&mut self, path: Vec<String>, state: BodyDisplay) -> Result<(), RunError> {
         let mut body_states = self.body_states.clone();
-        body_states.insert(path.clone(), state);
+        body_states.insert(path.clone(), state.normalized(&self.description, &path));
         let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view(),
@@ -2615,8 +2615,14 @@ impl ObservationView {
     }
 
     fn cycle_body(&mut self, path: Vec<String>) -> Result<(), RunError> {
-        let next = match self.body_states.get(&path).copied().unwrap_or_default() {
-            BodyDisplay::Expanded => BodyDisplay::Summary,
+        let next = match self
+            .body_states
+            .get(&path)
+            .copied()
+            .unwrap_or_default()
+            .normalized(&self.description, &path)
+        {
+            BodyDisplay::Expanded => BodyDisplay::Summary.normalized(&self.description, &path),
             BodyDisplay::Summary => BodyDisplay::Hidden,
             BodyDisplay::Hidden => BodyDisplay::Expanded,
         };
@@ -4530,9 +4536,9 @@ mod tests {
         assert!(view.root.body_summary(1).is_none());
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert_eq!(view.root.nodes().len(), 5);
-        assert!(view.root.body_summary(1).is_some());
+        assert!(view.root.body_summary(1).is_none());
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
-        assert_eq!(view.root.nodes().len(), 5);
+        assert_eq!(view.root.nodes().len(), 8);
         assert_eq!(view.viewports.len(), 3);
         view.state.traces.visible = true;
         let mode = view.root.connection_view();
@@ -5085,10 +5091,6 @@ mod tests {
         assert_eq!(view.body_states[&path], BodyDisplay::Expanded);
         assert!(view.root.is_expanded_body(owner));
         view.cycle_body(path.clone()).unwrap();
-        assert_eq!(view.body_states[&path], BodyDisplay::Summary);
-        assert!(view.root.body_summary(owner).is_some());
-        assert_eq!(view.root.nodes().len(), 1);
-        view.cycle_body(path.clone()).unwrap();
         assert_eq!(view.body_states[&path], BodyDisplay::Hidden);
         assert!(view.root.body_summary(owner).is_none());
         assert_eq!(view.root.nodes().len(), 1);
@@ -5115,6 +5117,92 @@ mod tests {
         view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
         assert!(view.state.path.is_empty());
         assert_eq!(view.root.nodes().len(), 1);
+    }
+
+    #[test]
+    fn body_keyboard_cycles_depend_on_injected_flows_and_normalize_stored_summaries() {
+        for kind in ["workflow.call", "workflow.loop", "builtin.iteration"] {
+            for injected in [false, true] {
+                let mut description: WorkflowDescription =
+                    serde_json::from_value(serde_json::json!({
+                        "version":"2026-10-23",
+                        "workflow_id":format!("sha256:{}", "d".repeat(64)),
+                        "execution":{"mode":"single"},
+                        "nodes":[{"id":"outer", "kind":kind}],
+                        "execution_order":["outer"], "data_edges":[], "control_edges":[],
+                        "loop_bodies":[
+                            {"path":["outer"], "nodes":[{"id":"inner", "kind":kind}],
+                             "execution_order":["inner"], "data_edges":[], "control_edges":[]},
+                            {"path":["outer","inner"],
+                             "nodes":[{"id":"leaf", "kind":"fixture.task"}],
+                             "execution_order":["leaf"], "data_edges":[], "control_edges":[]}
+                        ]
+                    }))
+                    .unwrap();
+                if kind != "workflow.call" {
+                    let (id, source_kind) = if kind == "builtin.iteration" {
+                        ("%iteration", "builtin.iteration_input")
+                    } else {
+                        ("%loop", "%loop")
+                    };
+                    for body in &mut description.loop_bodies {
+                        body.nodes.insert(
+                            0,
+                            NodeDescription {
+                                id: id.into(),
+                                kind: source_kind.into(),
+                            },
+                        );
+                        body.execution_order.insert(0, id.into());
+                    }
+                }
+                let outer = vec!["outer".to_owned()];
+                let inner = vec!["outer".to_owned(), "inner".to_owned()];
+                if injected {
+                    description.injected_bodies.push(inner.clone());
+                }
+                let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+                    .unwrap()
+                    .snapshot();
+                let traces = TraceSnapshot::default();
+                let logs = LogSnapshot::default();
+                let mut view = ObservationView::new(&description).unwrap();
+                // Exercise both nested and root owners through the actual keyboard handler.
+                for path in [&inner, &outer] {
+                    let (id, parent) = path.split_last().unwrap();
+                    view.state.selected =
+                        view.root.display_index_for_scoped_node(parent, id).unwrap();
+                    let expected = if injected {
+                        vec![
+                            BodyDisplay::Summary,
+                            BodyDisplay::Hidden,
+                            BodyDisplay::Expanded,
+                        ]
+                    } else {
+                        vec![BodyDisplay::Hidden, BodyDisplay::Expanded]
+                    };
+                    for state in expected {
+                        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+                        assert_eq!(view.body_states[path], state, "{kind}, {path:?}");
+                        assert!(view.state.graph_notice.is_none());
+                        assert_eq!(
+                            view.root.body_summary(view.state.selected).is_some(),
+                            state == BodyDisplay::Summary
+                        );
+                    }
+                }
+                if !injected {
+                    view.set_body_state(inner.clone(), BodyDisplay::Summary)
+                        .unwrap();
+                    assert_eq!(view.body_states[&inner], BodyDisplay::Hidden);
+                    // Also tolerate callers supplying an unnormalized state map directly.
+                    view.body_states.insert(inner.clone(), BodyDisplay::Summary);
+                    view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+                    assert_eq!(view.body_states[&inner], BodyDisplay::Expanded);
+                    assert!(view.root.body_summary(view.state.selected).is_none());
+                }
+            }
+        }
     }
 
     #[test]

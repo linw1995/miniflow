@@ -175,7 +175,7 @@ fn inline_bodies_keep_nested_geometry_and_routes_inside_their_owners() {
 }
 
 #[test]
-fn summary_bodies_show_passed_inputs_without_inlining() {
+fn summary_bodies_without_injected_flows_are_collapsed() {
     use mf_tui::graph::{BodyDisplay, ConnectionView};
     let description = inline_description();
     let outer = vec!["box".into()];
@@ -188,17 +188,15 @@ fn summary_bodies_show_passed_inputs_without_inlining() {
     )
     .unwrap();
     let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
-    assert_eq!(
-        layout.body_summary(owner),
-        Some(&["input ← source".to_owned()][..])
-    );
+    assert_eq!(layout.body_summary(owner), None);
     assert!(!layout.is_expanded_body(owner));
     assert_eq!(layout.nodes().len(), 3);
     let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 30));
     GraphView::new(&layout).render(buffer.area, &mut buffer);
     let text = buffer_text(&buffer);
-    assert!(text.contains("box [~]"));
-    assert!(text.contains("input ← source"));
+    assert!(text.contains("box [+]"));
+    assert!(!text.contains("[~]"));
+    assert!(!text.contains("input ← source"));
     assert!(!text.contains("subgraph:"));
 
     let states = BTreeMap::from([(outer, BodyDisplay::Hidden)]);
@@ -214,10 +212,11 @@ fn summary_bodies_show_passed_inputs_without_inlining() {
     let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 30));
     GraphView::new(&hidden).render(buffer.area, &mut buffer);
     assert!(buffer_text(&buffer).contains("box [+]"));
+    assert_eq!(layout.nodes(), hidden.nodes());
 }
 
 #[test]
-fn summary_bodies_list_every_passed_input() {
+fn unsupported_summary_bodies_do_not_list_passed_inputs() {
     use mf_tui::graph::{BodyDisplay, ConnectionView};
     let mut description = inline_description();
     let edge = |from_node: &str, to_input: &str, exclusive: bool| DataEdge {
@@ -271,17 +270,14 @@ fn summary_bodies_list_every_passed_input() {
     )
     .unwrap();
     let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
-    assert_eq!(
-        layout.body_summary(owner),
-        Some(&["a ← x|y".to_owned(), "b ← z".to_owned()][..])
-    );
-    let rect = layout.nodes()[owner].rect;
-    assert!(rect.height >= 5, "each input gets its own row");
+    assert_eq!(layout.body_summary(owner), None);
+    assert!(!layout.is_expanded_body(owner));
     let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
     GraphView::new(&layout).render(buffer.area, &mut buffer);
     let text = buffer_text(&buffer);
-    assert!(text.contains("a ← x|y"));
-    assert!(text.contains("b ← z"));
+    assert!(text.contains("box [+]"));
+    assert!(!text.contains("a ← x|y"));
+    assert!(!text.contains("b ← z"));
 
     let upstream: Vec<String> = (0..4)
         .map(|index| format!("upstream_source_{index}"))
@@ -300,12 +296,12 @@ fn summary_bodies_list_every_passed_input() {
     )
     .unwrap();
     let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
-    let summary = layout.body_summary(owner).unwrap();
-    assert_eq!(summary.len(), 1);
-    assert!(summary[0].starts_with("input.wide_parameter ← upstream_source_0|"));
-    assert!(summary[0].ends_with("upstream_source_3"), "{}", summary[0]);
-    assert!(!summary[0].contains('…'));
-    assert!(layout.nodes()[owner].rect.width >= summary[0].chars().count() as u32 + 2);
+    assert_eq!(layout.body_summary(owner), None);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("box [+]"));
+    assert!(!text.contains("input.wide_parameter"));
 }
 
 #[test]
@@ -396,7 +392,7 @@ fn summary_bodies_draw_injected_flows_instead_of_inputs() {
 }
 
 #[test]
-fn nested_summary_bodies_show_inputs_across_connection_views() {
+fn nested_summary_bodies_without_injected_flows_collapse_across_connection_views() {
     use mf_tui::graph::{BodyDisplay, ConnectionView};
     let description = inline_description();
     let outer = vec!["box".into()];
@@ -415,17 +411,16 @@ fn nested_summary_bodies_show_inputs_across_connection_views() {
         let owner = layout
             .display_index_for_scoped_node(&["box".into()], "inner")
             .unwrap();
-        assert_eq!(
-            layout.body_summary(owner),
-            Some(&["input ← source".to_owned()][..])
-        );
+        assert_eq!(layout.body_summary(owner), None);
         assert!(!layout.is_expanded_body(owner));
         assert_eq!(layout.nodes().len(), 6);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
         GraphView::new(&layout).render(buffer.area, &mut buffer);
         let text = buffer_text(&buffer);
-        assert!(text.contains("inner [~]"));
-        assert!(text.contains("input ← source"));
+        assert!(text.contains("box [-]"));
+        assert!(text.contains("inner [+]"));
+        assert!(!text.contains("[~]"));
+        assert!(!text.contains("input ← source"));
     }
 }
 
