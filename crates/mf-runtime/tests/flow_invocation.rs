@@ -605,6 +605,81 @@ fn event_frames_inherit_call_scope_worker_limit_and_snapshots() {
 }
 
 #[test]
+fn step_observations_enter_captured_contexts_and_restore_the_receiver_context() {
+    use mf_telemetry::{
+        event::NodeIdentity,
+        identity::{RunId, WorkflowId},
+        observation::Observer,
+    };
+    use opentelemetry::Context;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Marker(&'static str);
+
+    let observer = Observer::stderr(0);
+    let mut run = observer
+        .start(
+            WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            RunId::new(),
+            vec![NodeIdentity {
+                id: "outer".into(),
+                kind: "fixture.outer".into(),
+                path: vec![],
+            }],
+        )
+        .unwrap();
+    let (mut root_context, mut root_step) = {
+        let _captured = Context::new().with_value(Marker("root")).attach();
+        let mut context =
+            ExecutionContext::default().fork_domain_with_observation(Some(run.clone()));
+        let step = context.begin_step_observation("outer").unwrap();
+        (context, step)
+    };
+    let (iteration, mut item, mut body_context, mut body_step) = {
+        let _captured = Context::new().with_value(Marker("body")).attach();
+        let iteration = run
+            .iteration_observation(
+                "outer",
+                &[],
+                vec![NodeIdentity {
+                    id: "inner".into(),
+                    kind: "fixture.inner".into(),
+                    path: vec![],
+                }],
+            )
+            .unwrap();
+        let item = iteration.begin_item(0).unwrap();
+        let mut context = ExecutionContext::for_body(Some(item.body_observation()));
+        let step = context.begin_step_observation("inner").unwrap();
+        (iteration, item, context, step)
+    };
+    let _receiver = Context::new().with_value(Marker("receiver")).attach();
+    for (step, context, expected) in [
+        (&mut root_step, &mut root_context, "root"),
+        (&mut body_step, &mut body_context, "body"),
+    ] {
+        assert_eq!(
+            Context::current().get::<Marker>(),
+            Some(&Marker("receiver"))
+        );
+        {
+            let _entered = step.enter();
+            assert_eq!(Context::current().get::<Marker>(), Some(&Marker(expected)));
+            step.started(context);
+        }
+        assert_eq!(
+            Context::current().get::<Marker>(),
+            Some(&Marker("receiver"))
+        );
+    }
+    root_step.succeeded(&mut root_context, vec![], vec![], None);
+    body_step.succeeded(&mut body_context, vec![], vec![], None);
+    item.finish(None);
+    drop(iteration);
+    run.finish(None);
+}
+
+#[test]
 fn top_level_messages_keep_fresh_budgets_while_nested_messages_share_the_caller_budget() {
     let exhaust_startup: Check = Arc::new(|context| {
         if context.current_node().is_none() {
