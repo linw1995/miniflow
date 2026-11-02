@@ -206,6 +206,37 @@ mod tests {
     }
 
     #[test]
+    fn prepared_router_validates_capture_contract_and_parameter_names() {
+        for config in [
+            json!({"subgraphs":{}, "arguments_object":true, "capture_errors":false}),
+            json!({"subgraphs":{}, "arguments_object":false, "capture_errors":true}),
+        ] {
+            let error = subgraph_factory("router", config, Default::default())
+                .err()
+                .unwrap();
+            assert!(matches!(error, NodeBuildError::InvalidSubgraph { .. }));
+            assert!(
+                error
+                    .to_string()
+                    .contains("subgraph routers require arguments_object and capture_errors")
+            );
+        }
+        for (branch, parameter) in [(" ", "target"), ("else", "target"), ("tool", " ")] {
+            let error = subgraph_factory(
+                "router",
+                json!({"subgraphs":{(branch):{"parameter":parameter}}, "arguments_object":true, "capture_errors":true}),
+                Default::default(),
+            ).err().unwrap();
+            assert!(matches!(error, NodeBuildError::InvalidSubgraph { .. }));
+            assert!(
+                error
+                    .to_string()
+                    .contains("branch and parameter names must be nonblank; `else` is reserved")
+            );
+        }
+    }
+
+    #[test]
     fn prepared_router_rejects_extra_missing_and_nonterminal_bodies() {
         use mf_runtime::{
             PortSpec, PreparedFlowArguments, PreparedSubgraph, StdinRequirement,

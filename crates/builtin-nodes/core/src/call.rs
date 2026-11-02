@@ -509,6 +509,41 @@ mod tests {
     }
 
     #[test]
+    fn call_factories_reject_mixing_static_and_reference_configuration() {
+        let error = factory(
+            "invoke",
+            json!({"flow":"child", "flow_ref":{"$ref":"params.target"}}),
+            Value::Null,
+            body(),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(error, NodeBuildError::InvalidSubgraph { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("static calls cannot specify flow_ref")
+        );
+
+        for config in [
+            json!({"flow_ref":{"$ref":"params.target"}, "capture_errors":true}),
+            json!({"flow_ref":{"$ref":"params.target"}, "arguments_object":true}),
+            json!({"flow":"child", "flow_ref":{"$ref":"params.target"}, "arguments_object":true, "capture_errors":true}),
+            json!({"definition":{"version":"2026-11-01", "dependencies":{}, "nodes":[]}, "flow_ref":{"$ref":"params.target"}, "arguments_object":true, "capture_errors":true}),
+        ] {
+            let error = reference_factory("invoke", config, Default::default())
+                .err()
+                .unwrap();
+            assert!(matches!(error, NodeBuildError::InvalidSubgraph { .. }));
+            assert!(
+                error
+                    .to_string()
+                    .contains("reference calls require arguments_object and capture_errors")
+            );
+        }
+    }
+
+    #[test]
     fn direct_call_factories_reject_blank_names_and_stdin_before_execution() {
         assert!(
             factory("invoke", json!({"flow":" "}), Value::Null, body())

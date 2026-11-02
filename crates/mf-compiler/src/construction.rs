@@ -1816,6 +1816,80 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    #[test]
+    fn embedded_flow_reference_construction_preserves_validation_errors() {
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let arguments = mf_runtime::PreparedFlowArguments::default;
+        let error = instantiate_flow_arguments_with_metadata(
+            &registry,
+            "invoke",
+            "missing.flow",
+            "{}",
+            arguments(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            matches!(error, WorkflowBuildError::UnknownKind { ref definition_id, ref kind }
+            if definition_id.as_str() == "invoke" && kind == "missing.flow")
+        );
+
+        let error = instantiate_flow_reference_with_metadata(&registry, "invoke", "{", arguments())
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, WorkflowBuildError::InvalidEmbeddedConfig { ref definition_id, .. }
+            if definition_id.as_str() == "invoke")
+        );
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .is::<serde_json::Error>()
+        );
+
+        let error = instantiate_flow_arguments_with_metadata(
+            &registry,
+            "invoke",
+            mfn_core::CONSTANT_KIND,
+            "{\"value\":1}",
+            arguments(),
+        )
+        .err()
+        .unwrap();
+        let WorkflowBuildError::NodeConstruction {
+            definition_id,
+            source,
+        } = error
+        else {
+            panic!("expected node construction context");
+        };
+        assert_eq!(definition_id.as_str(), "invoke");
+        assert!(matches!(
+            source,
+            mf_runtime::NodeBuildError::InvalidSubgraph { .. }
+        ));
+        assert!(
+            source
+                .to_string()
+                .contains("does not accept Flow parameter references")
+        );
+
+        let node = instantiate_flow_reference_with_metadata(
+            &registry,
+            "invoke",
+            r#"{"flow_ref":{"$ref":"params.target"},"arguments_object":true,"capture_errors":true}"#,
+            arguments(),
+        ).unwrap();
+        assert_eq!(node.definition_id.as_str(), "invoke");
+        assert_eq!(
+            node.metadata.context_references,
+            vec![mf_runtime::ContextReference::new(
+                "params.target",
+                "flow_ref"
+            )]
+        );
+    }
+
     struct EmptyNode;
 
     impl TaskNode for EmptyNode {

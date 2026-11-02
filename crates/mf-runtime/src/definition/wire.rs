@@ -616,6 +616,52 @@ mod tests {
     }
 
     #[test]
+    fn frozen_flow_arguments_require_new_version_in_both_wire_directions() {
+        // No Flow sources: the frozen arguments themselves must enforce the version gate.
+        let input = json!({
+            "version":"2026-11-01", "dependencies":{}, "nodes":[],
+            "flow_arguments":{"tool":{
+                "definition":{"version":"2026-11-01", "dependencies":{}, "nodes":[]},
+                "description":"Frozen tool", "parameters":{}
+            }}
+        });
+        let mut definition: WorkflowDefinition = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(
+            definition.flow_arguments["tool"].description.as_deref(),
+            Some("Frozen tool")
+        );
+        assert_eq!(
+            serde_json::from_value::<WorkflowDefinition>(
+                serde_json::to_value(&definition).unwrap()
+            )
+            .unwrap(),
+            definition
+        );
+        let mut legacy = input;
+        legacy["version"] = json!("2026-10-28");
+        let error = serde_json::from_value::<WorkflowDefinition>(legacy).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("frozen Flow parameters require version 2026-11-01")
+        );
+        definition.version = WorkflowDefinitionVersion::V2026_10_28;
+        let error = serde_json::to_value(&definition).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("frozen Flow parameters require version 2026-11-01")
+        );
+
+        definition.flow_arguments.clear();
+        let encoded = serde_json::to_value(&definition).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkflowDefinition>(encoded).unwrap(),
+            definition
+        );
+    }
+
+    #[test]
     fn injection_fields_are_strict_and_workflow_annotation_is_removed() {
         for argument in [
             json!({"source": {"path": "tool.json"}, "extra": true}),
