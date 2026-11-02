@@ -243,7 +243,7 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
-    pub(super) fn begin_step_observation(&mut self, id: &str) -> Option<StepObservation> {
+    pub fn begin_step_observation(&mut self, id: &str) -> Option<StepObservation> {
         let path = self.invocation_path();
         if let Some(run) = self.observation.as_mut() {
             if path.is_empty() {
@@ -337,7 +337,7 @@ impl ExecutionContext {
     /// Attaches invocation services to a freshly initialized message frame without
     /// replacing its published values or message-specific input bindings. Nested
     /// invocations share the caller budget; top-level messages retain fresh budgets.
-    pub(super) fn inherit_invocation(&mut self, source: &Self, inherit_budget: bool) {
+    pub fn inherit_invocation(&mut self, source: &Self, inherit_budget: bool) {
         if inherit_budget {
             self.remaining_steps = source.remaining_steps.clone();
         }
@@ -444,7 +444,7 @@ impl ExecutionContext {
             .or_else(|| self.execution_workers.upgrade()?.handle())
     }
 
-    pub(super) fn existing_worker_scope(&self) -> Option<Arc<ExecutionWorkers>> {
+    pub fn existing_worker_scope(&self) -> Option<Arc<ExecutionWorkers>> {
         self.execution_workers.upgrade()
     }
 
@@ -1113,36 +1113,33 @@ pub struct ExecutionDependency<'a> {
     pub source_key: std::borrow::Cow<'a, str>,
 }
 
-pub(super) enum StepObservation {
+pub enum StepObservation {
     Root(NodeObservation),
     Body(BodyNodeObservation),
 }
 
 impl StepObservation {
-    pub(super) fn enter(&self) -> opentelemetry::ContextGuard {
+    pub fn enter(&self) -> opentelemetry::ContextGuard {
         match self {
             Self::Root(step) => step.enter(),
             Self::Body(step) => step.enter(),
         }
     }
 
-    pub(super) fn set_input_selections(
-        &mut self,
-        selected: Vec<mf_telemetry::event::InputSelection>,
-    ) {
+    pub fn set_input_selections(&mut self, selected: Vec<mf_telemetry::event::InputSelection>) {
         match self {
             Self::Root(step) => step.set_input_selections(selected),
             Self::Body(step) => step.set_input_selections(selected),
         }
     }
-    pub(super) fn started(&mut self, ctx: &mut ExecutionContext) {
+    pub fn started(&mut self, ctx: &mut ExecutionContext) {
         match self {
             Self::Root(step) => ctx.observation.as_mut().unwrap().node_started(step),
             Self::Body(step) => step.started(),
         }
     }
 
-    pub(super) fn failed(self, ctx: &mut ExecutionContext, phase: FailurePhase, message: String) {
+    pub fn failed(self, ctx: &mut ExecutionContext, phase: FailurePhase, message: String) {
         match self {
             Self::Root(step) => ctx
                 .observation
@@ -1153,7 +1150,7 @@ impl StepObservation {
         }
     }
 
-    pub(super) fn succeeded(
+    pub fn succeeded(
         self,
         ctx: &mut ExecutionContext,
         produced_ports: Vec<String>,
@@ -1175,7 +1172,7 @@ impl StepObservation {
         }
     }
 
-    pub(super) fn skipped(
+    pub fn skipped(
         self,
         ctx: &mut ExecutionContext,
         causes: Vec<SkipCause>,

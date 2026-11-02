@@ -126,7 +126,7 @@ impl crate::EmissionSink for SubgraphStream<'_> {
     }
 }
 
-pub(super) type SubgraphBody = dyn Fn(&mut ExecutionContext, &mut dyn crate::EmissionSink) -> Result<FlowOutputs, WorkflowRunError>
+pub type SubgraphBody = dyn Fn(&mut ExecutionContext, &mut dyn crate::EmissionSink) -> Result<FlowOutputs, WorkflowRunError>
     + Send
     + Sync
     + 'static;

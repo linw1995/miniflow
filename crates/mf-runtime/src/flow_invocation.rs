@@ -122,16 +122,17 @@ impl EmissionSink for InvocationSink {
 }
 
 /// Keeps the typed stream/runtime source in the standard workflow error chain.
-pub(super) fn workflow_result<T>(result: Result<T, StreamError>) -> Result<T, WorkflowRunError> {
+pub fn workflow_result<T>(result: Result<T, StreamError>) -> Result<T, WorkflowRunError> {
     result
-        .map_err(crate::NodeExecutionError::from)
+        .boxed()
+        .context(crate::NodePluginFailedSnafu)
         .context(crate::NodeExecutionSnafu {
             definition_id: "<flow>",
         })
 }
 
 impl FlowInvocation {
-    pub(super) fn start_body(
+    pub fn start_body(
         body: Arc<crate::subgraph::SubgraphBody>,
         mut context: ExecutionContext,
     ) -> Result<Self, WorkflowRunError> {
@@ -179,7 +180,7 @@ impl FlowInvocation {
         })
     }
 
-    pub(super) fn from_stream(instance: StreamInstance) -> Self {
+    pub fn from_stream(instance: StreamInstance) -> Self {
         Self {
             backend: InvocationBackend::Event(Some(instance)),
         }
