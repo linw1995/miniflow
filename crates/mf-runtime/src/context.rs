@@ -243,6 +243,22 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
+    pub(super) fn begin_step_observation(&mut self, id: &str) -> Option<StepObservation> {
+        let path = self.invocation_path();
+        if let Some(run) = self.observation.as_mut() {
+            if path.is_empty() {
+                run.begin_node(id).map(StepObservation::Root)
+            } else {
+                run.begin_invocation(path, id).map(StepObservation::Root)
+            }
+        } else {
+            self.body_observation
+                .as_ref()
+                .and_then(|body| body.begin_node(id))
+                .map(StepObservation::Body)
+        }
+    }
+
     /// Identifies the executing node independently of optional observation.
     pub fn current_node(&self) -> Option<&str> {
         self.current_node.as_ref().map(crate::DefinitionId::as_str)
@@ -284,14 +300,6 @@ impl ExecutionContext {
         self.cancellation.clone()
     }
 
-    #[cfg(feature = "async")]
-    pub(super) fn set_future_executor(
-        &mut self,
-        executor: Arc<crate::future_execution::FutureExecutor>,
-    ) {
-        self.future_executor = executor;
-    }
-
     pub fn stdin_line(&self) -> Result<Option<String>, crate::StreamError> {
         let input = self.stdin.as_ref().ok_or_else(|| {
             crate::stream_instance::ExecutionSnafu {
@@ -323,6 +331,30 @@ impl ExecutionContext {
             worker_limit: self.worker_limit,
             #[cfg(feature = "async")]
             future_executor: self.future_executor.clone(),
+        }
+    }
+
+    /// Attaches invocation services to a freshly initialized message frame without
+    /// replacing its published values or message-specific input bindings. Nested
+    /// invocations share the caller budget; top-level messages retain fresh budgets.
+    pub(super) fn inherit_invocation(&mut self, source: &Self, inherit_budget: bool) {
+        if inherit_budget {
+            self.remaining_steps = source.remaining_steps.clone();
+        }
+        self.observation = source.observation.clone();
+        self.body_observation = source.body_observation.clone();
+        self.scopes = source.scopes.clone();
+        self.scope_prefix = source.scope_prefix.clone();
+        self.scope_exit_cutoff = source.scope_exit_cutoff.clone();
+        self.snapshots = source.snapshots.clone();
+        self.stdin = source.stdin.clone();
+        self.cancellation = source.cancellation.clone();
+        self.worker_handle = source.worker_handle.clone();
+        self.execution_workers = source.execution_workers.clone();
+        self.worker_limit = source.worker_limit;
+        #[cfg(feature = "async")]
+        {
+            self.future_executor = source.future_executor.clone();
         }
     }
 
@@ -410,6 +442,10 @@ impl ExecutionContext {
             .filter(|handle| handle.worker_count() > 0 && handle.is_active())
             .cloned()
             .or_else(|| self.execution_workers.upgrade()?.handle())
+    }
+
+    pub(super) fn existing_worker_scope(&self) -> Option<Arc<ExecutionWorkers>> {
+        self.execution_workers.upgrade()
     }
 
     /// Keeps this execution's lazy worker pool alive across related contexts.
@@ -1050,26 +1086,36 @@ pub struct ExecutionDependency<'a> {
     pub source_key: std::borrow::Cow<'a, str>,
 }
 
-enum StepObservation {
+pub(super) enum StepObservation {
     Root(NodeObservation),
     Body(BodyNodeObservation),
 }
 
 impl StepObservation {
-    fn set_input_selections(&mut self, selected: Vec<mf_telemetry::event::InputSelection>) {
+    pub(super) fn enter(&self) -> opentelemetry::ContextGuard {
+        match self {
+            Self::Root(step) => step.enter(),
+            Self::Body(step) => step.enter(),
+        }
+    }
+
+    pub(super) fn set_input_selections(
+        &mut self,
+        selected: Vec<mf_telemetry::event::InputSelection>,
+    ) {
         match self {
             Self::Root(step) => step.set_input_selections(selected),
             Self::Body(step) => step.set_input_selections(selected),
         }
     }
-    fn started(&mut self, ctx: &mut ExecutionContext) {
+    pub(super) fn started(&mut self, ctx: &mut ExecutionContext) {
         match self {
             Self::Root(step) => ctx.observation.as_mut().unwrap().node_started(step),
             Self::Body(step) => step.started(),
         }
     }
 
-    fn failed(self, ctx: &mut ExecutionContext, phase: FailurePhase, message: String) {
+    pub(super) fn failed(self, ctx: &mut ExecutionContext, phase: FailurePhase, message: String) {
         match self {
             Self::Root(step) => ctx
                 .observation
@@ -1080,7 +1126,7 @@ impl StepObservation {
         }
     }
 
-    fn succeeded(
+    pub(super) fn succeeded(
         self,
         ctx: &mut ExecutionContext,
         produced_ports: Vec<String>,
@@ -1102,7 +1148,7 @@ impl StepObservation {
         }
     }
 
-    fn skipped(
+    pub(super) fn skipped(
         self,
         ctx: &mut ExecutionContext,
         causes: Vec<SkipCause>,
@@ -1190,20 +1236,7 @@ pub fn execute_resolved_node_in_context<N>(
     let id = node.definition_id.as_str();
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
-    let path = ctx.observation.as_ref().map(|_| ctx.invocation_path());
-    let mut step = if let Some(run) = ctx.observation.as_mut() {
-        let path = path.expect("observation has a scope path");
-        if path.is_empty() {
-            run.begin_node(id).map(StepObservation::Root)
-        } else {
-            run.begin_invocation(path, id).map(StepObservation::Root)
-        }
-    } else {
-        ctx.body_observation
-            .as_ref()
-            .and_then(|body| body.begin_node(id))
-            .map(StepObservation::Body)
-    };
+    let mut step = ctx.begin_step_observation(id);
     let _root_context = match &step {
         Some(StepObservation::Root(step)) => Some(step.enter()),
         _ => None,
@@ -1558,7 +1591,7 @@ mod tests {
                 Outputs::from([("value".into(), json!(value).into())]).into(),
             )
             .unwrap();
-            context.set_future_executor(Arc::clone(&executor));
+            context.future_executor = Arc::clone(&executor);
             context
         });
         contexts[0].remaining_steps.0.store(0, Ordering::Release);
@@ -1575,6 +1608,80 @@ mod tests {
         for (index, context) in contexts.iter().enumerate() {
             assert_eq!(
                 context.output("source.value").unwrap(),
+                ContextValue::Value(&json!(index + 1).into())
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_message_services_preserve_fresh_independent_frame_budgets() {
+        let source = FlowNode {
+            definition_id: "source".into(),
+            node: (),
+            metadata: NodePorts {
+                inputs: vec![],
+                outputs: vec![port("value", ValueType::Int64, true)],
+            }
+            .into(),
+            output_keys: Default::default(),
+        };
+        let startup = ExecutionContext {
+            remaining_steps: StepBudget::new(0),
+            ..ExecutionContext::default()
+        };
+        let mut frames = [1, 2].map(|value| {
+            let mut context = ExecutionContext::for_message(
+                &source,
+                Outputs::from([("value".into(), json!(value).into())]).into(),
+            )
+            .unwrap();
+            context.inherit_invocation(&startup, false);
+            context
+        });
+        for (index, frame) in frames.iter_mut().enumerate() {
+            // Even an exhausted startup or previous message must not charge this
+            // frame. Each emitted message retains its complete original budget.
+            for _ in 0..crate::MAX_SCHEDULED_STEPS {
+                frame.reserve_step("task").unwrap();
+            }
+            assert!(frame.reserve_step("exhausted").is_err());
+            assert_eq!(
+                frame.output("source.value").unwrap(),
+                ContextValue::Value(&json!(index + 1).into())
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_message_services_share_budget_without_overwriting_message_values() {
+        let source = FlowNode {
+            definition_id: "source".into(),
+            node: (),
+            metadata: NodePorts {
+                inputs: vec![],
+                outputs: vec![port("value", ValueType::Int64, true)],
+            }
+            .into(),
+            output_keys: Default::default(),
+        };
+        let parent = ExecutionContext {
+            remaining_steps: StepBudget::new(1),
+            ..ExecutionContext::default()
+        };
+        let mut frames = [1, 2].map(|value| {
+            let mut context = ExecutionContext::for_message(
+                &source,
+                Outputs::from([("value".into(), json!(value).into())]).into(),
+            )
+            .unwrap();
+            context.inherit_invocation(&parent, true);
+            context
+        });
+        frames[0].reserve_step("first").unwrap();
+        assert!(frames[1].reserve_step("second").is_err());
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(
+                frame.output("source.value").unwrap(),
                 ContextValue::Value(&json!(index + 1).into())
             );
         }

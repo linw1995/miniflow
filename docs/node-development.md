@@ -144,6 +144,35 @@ streams. A delivery failure is returned to its producer and cancels the enclosin
 so container-specific failure policies cannot accidentally continue after an output can no longer be
 delivered.
 
+### Passed Flow lifecycle
+
+`PreparedSubgraph` is a reusable Flow handle, not a running Event state. Its common lifecycle covers
+Task, TaskStream, and Event bodies without merging their provider traits. A receiving Node chooses
+invocation count, concurrency, output forwarding or discard, aggregation, and when to cancel.
+
+- `start_in_context(context)` takes an owned, already scoped `ExecutionContext` and returns a
+  `FlowInvocation`. Each Event invocation constructs fresh operator state through
+  `PreparedSubgraph::from_stream_factory`.
+- `recv()` returns a `FlowEmission` containing a `NodeResult`; Event emissions also retain their
+  `MessageId`. Incremental output never doubles as the final business result.
+- `cancellation()` exposes cooperative cancellation and wakes blocked runtime delivery. Dropping an
+  unfinished invocation cancels it and joins its execution; custom synchronous bodies must cooperate.
+- `join()` discards any unconsumed emissions before waiting, avoiding an unread bounded-output deadlock.
+  It returns `Some(FlowOutputs)` for finite Task/TaskStream bodies and `None` for Event bodies. Always
+  join to obtain the authoritative completion or failure, including after `recv()` returns `None`.
+
+Invocation inputs are fixed at startup; this protocol does not add an externally writable Event input
+channel or a `close_input` method. Cancellation of a running handle is invocation-local, while parent
+cancellation propagates downward. A child business failure remains a completion error for its receiver
+to handle; output-delivery failure still aborts the enclosing execution.
+
+The borrowed `execute_with_sink` convenience retains synchronous execution for finite bodies. For an
+Event body it drives a fresh instance, forwards selected emissions, and returns an empty terminal map
+only after completion. This compatibility map is not a terminal Event business value. Sources closing
+normally allow Event flush; cancellation interrupts execution instead and is never translated into
+`UpstreamClosed`. Loop and Iteration can retain their finite-terminal-body requirements as consumer
+policies, rather than imposing that restriction on every passed Flow handle.
+
 ## Select dependencies in a Flow
 
 Declare plugin crates in the Flow's top-level `dependencies` object. The CLI generates imports for those packages and compiles a runner that validates and executes against the same registry. No predefined bundle or CLI rebuild is needed. See [workflow definitions](workflows.md) for registry, pinned Git, local-path, and feature syntax.
