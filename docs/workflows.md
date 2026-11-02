@@ -75,10 +75,12 @@ environment bindings and defaults. A connected skipped producer skips the call, 
 has a default. Child optional outputs retain normal skipped-port semantics. Shared values and secret
 markers cross the boundary without JSON conversion. Configuration references stay local to each graph.
 
-Calls have isolated input bindings, outputs, and Loop state. They share cancellation, bounded workers,
-future driving, and the caller's remaining step budget. Provider failures retain their typed error
-chains with call context. Children cannot consume stdin. Calls inside an Iteration body may expose
-finite TaskStream ports, but cannot hide another Loop or Iteration.
+Calls have isolated input bindings, outputs, and Loop state. They inherit parent cancellation and share
+bounded workers, future driving, and the caller's remaining step budget. Nested instances reuse the
+parent's active or lazy worker pool, including when only one worker is available. Provider failures retain
+their typed error chains with call context. A receiving call can capture a child business failure without
+cancelling its parent; parent cancellation and output-delivery failures remain fatal. Children cannot consume stdin. Calls inside an
+Iteration body cannot hide another Loop or Iteration.
 
 With parent version `2026-10-28`, a call also exposes the child's selected TaskStream outputs under
 their public names. Ordinary outputs remain terminal ports; incremental outputs remain separate
@@ -86,12 +88,18 @@ stream ports. Nested calls and exported Loop streams compose through these same 
 without an additional export map on the call. A child may declare its stream interface using an
 earlier workflow version; the caller must support child streams.
 
-Connected calls forward increments synchronously with the normal backpressure, cancellation,
-guards, snapshots, and typed error chains. Without a stream consumer, the child runs terminal-only.
-Each source keeps its emission packets; multiple sources produce sparse packets and their selected
-workflow outputs require `optional: true` where appropriate. Child Event/Stream producers and internal
-stream dataflow edges remain unsupported in these finite bodies. The parent owns stream scheduling
-and limits; a child's explicit `execution` configuration does not create a nested stream runtime.
+Connected calls forward increments with backpressure and cancellation. Finite Task/TaskStream bodies
+keep their authoritative terminal results; without a stream consumer they use a discard sink rather
+than creating an unread subscription. Each source keeps its emission packets; multiple sources produce
+sparse packets and their selected workflow outputs require `optional: true` where appropriate.
+
+A child with Event/Stream operators or internal stream dataflow uses an independent running instance
+of the same Flow handle. Every exported value is an emission, including Task outputs downstream of an
+Event; normal completion does not invent a terminal business value or return the last emission. Each
+invocation creates fresh operator state. Its sources finish and Event operators receive `UpstreamClosed`
+to flush before completion. Cancellation instead interrupts the instance and propagates to blocked
+producers. The child's validated stream limits apply to its scheduler. Loop and Iteration themselves
+still require finite terminal bodies; an Event Flow is passed to a consumer that can drive it.
 
 All referenced providers join the root dependency build and adjacent lock. Each child's provider paths
 resolve against its own file. Compatible declarations of the same package combine features and default
@@ -364,8 +372,12 @@ bindings. A separately called child has its own environment and does not inherit
 
 The environment stores `ResolvedFlowArgument` records (frozen definition, description, parameter
 descriptions) once, not a second call-local candidates table. Preparation validates every selectable
-body and turns it into a `PreparedSubgraph`. Reference calls currently require `arguments_object`
-and `capture_errors`, terminal children, and no stdin. The JSON selector is ordinary data, not an
+body and turns it into a `PreparedSubgraph`. Reference calls require `arguments_object`, `capture_errors`,
+and no stdin. Task, TaskStream, and Event Flows use the same handle. The receiver forwards selected
+incremental outputs and returns a separate `result` envelope on completion; Event completion has an
+empty `outputs` object rather than a collected or last-emission value. Selectable stream outputs share
+one name/type contract; outputs absent from some choices are optional, and conflicting types fail
+preparation. The JSON selector is ordinary data, not an
 unforgeable callable value: the captured prepared environment supplies execution authority. Unknown
 names and definition-shaped JSON cannot load a Flow, invoke a global host binding, or execute source
 JSON. These invalid selectors fail the call; the tool-uses graph routes unknown names to its recovery

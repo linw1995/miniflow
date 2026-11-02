@@ -126,7 +126,7 @@ impl crate::EmissionSink for SubgraphStream<'_> {
     }
 }
 
-type SubgraphBody = dyn Fn(&mut ExecutionContext, &mut dyn crate::EmissionSink) -> Result<FlowOutputs, WorkflowRunError>
+pub(super) type SubgraphBody = dyn Fn(&mut ExecutionContext, &mut dyn crate::EmissionSink) -> Result<FlowOutputs, WorkflowRunError>
     + Send
     + Sync
     + 'static;
@@ -304,7 +304,13 @@ pub struct PreparedSubgraph {
     pub outputs: Vec<PortSpec>,
     pub stream_outputs: Vec<PortSpec>,
     input_metadata: SubgraphInputMetadata,
-    body: Arc<SubgraphBody>,
+    body: PreparedSubgraphBody,
+}
+
+#[derive(Clone)]
+enum PreparedSubgraphBody {
+    Finite(Arc<SubgraphBody>),
+    Event(Arc<dyn Fn() -> Result<crate::PreparedStream, WorkflowRunError> + Send + Sync>),
 }
 
 /// A dynamic container that executes one prepared body with optional stream forwarding.
@@ -439,7 +445,50 @@ impl PreparedSubgraph {
             outputs,
             stream_outputs,
             input_metadata: Default::default(),
-            body: Arc::new(body),
+            body: PreparedSubgraphBody::Finite(Arc::new(body)),
+        }
+    }
+
+    /// Prepares a reusable Event Flow. The factory must instantiate fresh operator state.
+    ///
+    /// Selected outputs (including startup selections) are emissions. Event completion
+    /// never manufactures terminal outputs. The legacy synchronous execution methods
+    /// drain those emissions and return an empty map after successful completion.
+    pub fn from_stream_factory(
+        nodes: Vec<NodeIdentity>,
+        inputs: WorkflowInputSchema,
+        stream_outputs: Vec<PortSpec>,
+        factory: impl Fn() -> Result<crate::PreparedStream, WorkflowRunError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            nodes,
+            inputs,
+            outputs: Vec::new(),
+            stream_outputs,
+            input_metadata: Default::default(),
+            body: PreparedSubgraphBody::Event(Arc::new(factory)),
+        }
+    }
+
+    pub fn is_event_stream(&self) -> bool {
+        matches!(self.body, PreparedSubgraphBody::Event(_))
+    }
+
+    /// Starts an owned invocation without choosing the receiver's driving strategy.
+    /// Synchronous execution methods keep finite bodies on the calling thread.
+    pub fn start_in_context(
+        &self,
+        context: ExecutionContext,
+    ) -> Result<crate::FlowInvocation, WorkflowRunError> {
+        match &self.body {
+            PreparedSubgraphBody::Finite(body) => {
+                crate::FlowInvocation::start_body(body.clone(), context)
+            }
+            PreparedSubgraphBody::Event(factory) => {
+                let instance = factory()?.start_in_context(context);
+                crate::flow_invocation::workflow_result(instance)
+                    .map(crate::FlowInvocation::from_stream)
+            }
         }
     }
 
@@ -485,7 +534,23 @@ impl PreparedSubgraph {
         state: &mut ExecutionContext,
         sink: &mut dyn crate::EmissionSink,
     ) -> Result<FlowOutputs, WorkflowRunError> {
-        (self.body)(state, sink)
+        match &self.body {
+            PreparedSubgraphBody::Finite(body) => body(state, sink),
+            PreparedSubgraphBody::Event(_) => {
+                let context = state.fork_domain_with_observation(state.observation().cloned());
+                let invocation = self.start_in_context(context)?;
+                while let Some(emission) = invocation.recv()? {
+                    if let Err(error) = sink.send(emission.result) {
+                        // Delivery belongs to the receiving execution, not merely
+                        // this invocation's body/error-capture policy.
+                        state.cancellation().cancel(error.clone());
+                        return crate::flow_invocation::workflow_result(Err(error));
+                    }
+                }
+                invocation.join()?;
+                Ok(FlowOutputs::new())
+            }
+        }
     }
 }
 

@@ -40,6 +40,12 @@ fn factory(
     let _: Config = deserialize_config(config)?;
     let config: ExecutionConfig = deserialize_config(options)?;
     ensure!(
+        !body.is_event_stream(),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "Loop requires a finite terminal body"
+        }
+    );
+    ensure!(
         (1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&config.max_iterations),
         mf_runtime::NodeInvalidSubgraphSnafu {
             message: "max_iterations must be in 1..=1000",
@@ -73,6 +79,23 @@ mod tests {
     use super::*;
     use mf_runtime::NodeRegistry;
     use serde_json::json;
+
+    #[test]
+    fn loop_owns_the_finite_terminal_body_requirement() {
+        let body =
+            PreparedSubgraph::from_stream_factory(vec![], Default::default(), vec![], || {
+                panic!("a rejected body must never start")
+            });
+        let error = factory(
+            "repeat",
+            json!({}),
+            json!({"max_iterations":1, "variables":[{"name":"x", "type":"int"}]}),
+            body,
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("finite terminal body"));
+    }
 
     #[test]
     fn registers_loop_factory_and_requires_a_body_and_empty_config() {

@@ -159,6 +159,7 @@ pub enum NodeRegistryError {
 }
 
 /// A frozen Flow whose execution is supplied by the application host.
+#[derive(Clone)]
 pub struct RegisteredFlow {
     pub definition: crate::WorkflowDefinition,
     pub body: crate::PreparedSubgraph,
@@ -173,7 +174,7 @@ impl std::fmt::Debug for RegisteredFlow {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NodeRegistry {
     registrations: BTreeMap<&'static str, &'static NodeRegistration>,
     flows: BTreeMap<String, RegisteredFlow>,

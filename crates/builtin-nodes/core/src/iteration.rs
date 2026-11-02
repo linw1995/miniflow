@@ -79,6 +79,12 @@ impl IterationNode {
         body: PreparedSubgraph,
     ) -> Result<Self, NodeBuildError> {
         ensure!(
+            !body.is_event_stream(),
+            mf_runtime::NodeInvalidSubgraphSnafu {
+                message: "Iteration requires a finite terminal body"
+            }
+        );
+        ensure!(
             body.stream_outputs
                 .iter()
                 .all(|port| port.name != "results"),
@@ -377,6 +383,23 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, atomic::AtomicUsize};
     use std::time::Duration;
+
+    #[test]
+    fn iteration_owns_the_finite_terminal_body_requirement() {
+        let body =
+            PreparedSubgraph::from_stream_factory(vec![], Default::default(), vec![], || {
+                panic!("a rejected body must never start")
+            });
+        let error = IterationNode::new(
+            "each",
+            IterationMode::Sequential,
+            IterationErrorPolicy::Terminate,
+            body,
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("finite terminal body"));
+    }
 
     #[test]
     fn parallel_mode_is_bounded_and_returns_input_order() {

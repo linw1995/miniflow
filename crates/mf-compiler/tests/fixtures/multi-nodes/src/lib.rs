@@ -81,6 +81,7 @@ inventory::submit! {
 }
 
 mod context_fixture;
+mod event_flow;
 mod interface_fixture;
 mod line_producer;
 mod signal_fixture;

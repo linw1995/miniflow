@@ -327,7 +327,7 @@ fn sources_are_explicit_and_independent_initial_tasks_need_no_trigger() {
 }
 
 #[test]
-fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
+fn infers_streaming_at_the_root_and_preserves_terminal_container_requirements() {
     let mut value = graph(
         json!([
             {"id":"source", "kind":"builtin.constant", "config":{"value":1}},
@@ -358,7 +358,7 @@ fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
         json!("array");
     let error = prepare(value).unwrap_err().to_string();
     assert!(
-        error.contains("iterate") && error.contains("synchronous scope"),
+        error.contains("iterate") && error.contains("finite terminal body"),
         "{error}"
     );
 
@@ -374,7 +374,7 @@ fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
     .unwrap_err()
     .to_string();
     assert!(
-        error.contains("repeat") && error.contains("synchronous scope"),
+        error.contains("repeat") && error.contains("finite terminal body"),
         "{error}"
     );
 }

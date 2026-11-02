@@ -139,7 +139,10 @@ impl CallNode {
                             )
                             || matches!(
                                 cause.downcast_ref::<mf_runtime::StreamError>(),
-                                Some(mf_runtime::StreamError::WorkerStartup { .. })
+                                Some(
+                                    mf_runtime::StreamError::WorkerStartup { .. }
+                                        | mf_runtime::StreamError::ThreadSpawn { .. }
+                                )
                             );
                         source = cause.source();
                     }
@@ -246,6 +249,7 @@ struct ReferenceCallNode {
     id: String,
     selector: mf_runtime::ConfigTemplate,
     arguments: mf_runtime::PreparedFlowArguments,
+    stream_outputs: Vec<PortSpec>,
 }
 
 impl NodePortContract for ReferenceCallNode {
@@ -259,6 +263,10 @@ impl NodePortContract for ReferenceCallNode {
             outputs: vec![PortSpec::new("result", mf_runtime::ValueType::Object, true)],
         }
     }
+
+    fn stream_outputs(&self) -> Vec<PortSpec> {
+        self.stream_outputs.clone()
+    }
 }
 
 impl mf_runtime::TaskNode for ReferenceCallNode {
@@ -266,6 +274,28 @@ impl mf_runtime::TaskNode for ReferenceCallNode {
         &self,
         inputs: Inputs,
         context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_target(inputs, context, &mut mf_runtime::DiscardSink)
+    }
+}
+
+impl mf_runtime::TaskStreamNode for ReferenceCallNode {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        emitter: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_target(inputs, context, emitter)
+    }
+}
+
+impl ReferenceCallNode {
+    fn execute_target(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
         use snafu::OptionExt;
         let selected = self.selector.resolve(context).boxed()?;
@@ -280,16 +310,19 @@ impl mf_runtime::TaskNode for ReferenceCallNode {
             .context(mf_runtime::NodeExecutionFailedSnafu {
                 message: format!("unknown passed Flow parameter `{name}`"),
             })?;
-        execute_passed_flow(&self.id, name, body, inputs, context)
+        execute_passed_flow(&self.id, name, body, inputs, context, sink)
     }
 }
 
+/// Runs a passed Flow to completion with the receiving node's delivery policy.
+/// Stream emissions are incremental; only the returned result envelope is terminal.
 pub(super) fn execute_passed_flow(
     id: &str,
     binding: &str,
     body: &PreparedSubgraph,
     inputs: Inputs,
     context: &mut ExecutionContext,
+    sink: &mut dyn mf_runtime::EmissionSink,
 ) -> Result<NodeResult, NodeExecutionError> {
     CallNode {
         id: id.into(),
@@ -298,7 +331,7 @@ pub(super) fn execute_passed_flow(
         arguments_object: true,
         capture_errors: true,
     }
-    .execute_target(inputs, context, &mut mf_runtime::DiscardSink, Some(binding))
+    .execute_target(inputs, context, sink, Some(binding))
 }
 
 pub(super) fn passed_flow_metadata(
@@ -306,9 +339,9 @@ pub(super) fn passed_flow_metadata(
 ) -> Result<NodeMetadata, NodeBuildError> {
     for body in arguments.values() {
         ensure!(
-            body.stream_outputs.is_empty() && body.inputs.stdin.is_empty(),
+            body.inputs.stdin.is_empty(),
             mf_runtime::NodeInvalidSubgraphSnafu {
-                message: "Flow parameter calls require terminal children without stdin"
+                message: "Flow parameter calls cannot read stdin"
             }
         );
     }
@@ -333,6 +366,39 @@ pub(super) fn passed_flow_metadata(
         },
         ..Default::default()
     })
+}
+
+/// Dynamic choices share emission names, but may omit each other's outputs.
+/// A name has one exact type across all choices; requiredness is their intersection.
+fn passed_flow_stream_outputs(
+    arguments: &mf_runtime::PreparedFlowArguments,
+) -> Result<Vec<PortSpec>, NodeBuildError> {
+    let mut outputs = std::collections::BTreeMap::<String, PortSpec>::new();
+    for body in arguments.values() {
+        for port in &body.stream_outputs {
+            if let Some(previous) = outputs.get(port.name.as_ref()) {
+                ensure!(
+                    previous.value_type == port.value_type,
+                    mf_runtime::NodeInvalidSubgraphSnafu {
+                        message: format!(
+                            "passed Flow stream output `{}` has conflicting types",
+                            port.name
+                        )
+                    }
+                );
+            } else {
+                outputs.insert(port.name.to_string(), port.clone());
+            }
+        }
+    }
+    for port in outputs.values_mut() {
+        port.required = arguments.values().all(|body| {
+            body.stream_outputs
+                .iter()
+                .any(|candidate| candidate.name == port.name && candidate.required)
+        });
+    }
+    Ok(outputs.into_values().collect())
 }
 
 fn reference_factory(
@@ -361,14 +427,18 @@ fn reference_factory(
         .boxed()
         .map_err(NodeBuildError::from)?;
     metadata.context_references = selector.references("flow_ref");
-    PreparedNode::new(
-        ReferenceCallNode {
-            id: id.into(),
-            selector,
-            arguments,
-        },
-        metadata,
-    )
+    let stream_outputs = passed_flow_stream_outputs(&arguments)?;
+    let node = ReferenceCallNode {
+        id: id.into(),
+        selector,
+        arguments,
+        stream_outputs,
+    };
+    if node.stream_outputs.is_empty() {
+        PreparedNode::new(node, metadata)
+    } else {
+        PreparedNode::task_stream(node, metadata)
+    }
 }
 
 inventory::submit! {
@@ -382,6 +452,221 @@ mod tests {
 
     fn body() -> PreparedSubgraph {
         PreparedSubgraph::new(vec![], vec![], |_| Ok(Default::default()))
+    }
+
+    fn reference_config() -> Value {
+        json!({
+            "flow_ref": {"$ref": "params.target"},
+            "arguments_object": true,
+            "capture_errors": true
+        })
+    }
+
+    #[derive(Default)]
+    struct CollectSink(Vec<NodeResult>);
+
+    impl mf_runtime::EmissionSink for CollectSink {
+        fn send(&mut self, result: NodeResult) -> Result<(), mf_runtime::StreamError> {
+            self.0.push(result);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reference_calls_reflect_union_stream_contract_and_keep_terminal_choices_as_tasks() {
+        use mf_runtime::{PreparedFlowArguments, ValueType};
+        let first = PreparedSubgraph::streaming(
+            vec![],
+            vec![],
+            vec![
+                PortSpec::new("shared", ValueType::String, true),
+                PortSpec::new("first", ValueType::Int64, true),
+            ],
+            |_, _| Ok(Default::default()),
+        );
+        let second = PreparedSubgraph::streaming(
+            vec![],
+            vec![],
+            vec![PortSpec::new("shared", ValueType::String, true)],
+            |_, _| Ok(Default::default()),
+        );
+        let arguments =
+            PreparedFlowArguments::new([("first".into(), first), ("second".into(), second)].into());
+        let prepared = reference_factory("invoke", reference_config(), arguments).unwrap();
+        assert!(matches!(
+            prepared.execution,
+            mf_runtime::NodeExecution::TaskStream(_)
+        ));
+        assert_eq!(
+            prepared.metadata.stream_outputs,
+            vec![
+                PortSpec::new("first", ValueType::Int64, false),
+                PortSpec::new("shared", ValueType::String, true),
+            ]
+        );
+        assert_eq!(prepared.metadata.ports.outputs[0].name, "result");
+
+        let arguments = PreparedFlowArguments::new([("terminal".into(), body())].into());
+        let prepared = reference_factory("invoke", reference_config(), arguments).unwrap();
+        assert!(matches!(
+            prepared.execution,
+            mf_runtime::NodeExecution::Task(_)
+        ));
+    }
+
+    #[test]
+    fn reference_calls_reject_conflicting_stream_types_but_accept_mixed_lifecycles() {
+        use mf_runtime::{PreparedFlowArguments, ValueType};
+        let streaming = |value_type| {
+            PreparedSubgraph::streaming(
+                vec![],
+                vec![],
+                vec![PortSpec::new("value", value_type, true)],
+                |_, _| Ok(Default::default()),
+            )
+        };
+        let arguments = PreparedFlowArguments::new(
+            [
+                ("first".into(), streaming(ValueType::String)),
+                ("second".into(), streaming(ValueType::Int64)),
+            ]
+            .into(),
+        );
+        let error = reference_factory("invoke", reference_config(), arguments)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("`value` has conflicting types"));
+
+        let arguments = PreparedFlowArguments::new(
+            [
+                ("terminal".into(), body()),
+                ("stream".into(), streaming(ValueType::String)),
+            ]
+            .into(),
+        );
+        let prepared = reference_factory("invoke", reference_config(), arguments).unwrap();
+        assert!(!prepared.metadata.stream_outputs[0].required);
+    }
+
+    #[test]
+    fn reference_calls_forward_incremental_values_and_return_authoritative_envelopes() {
+        for fail in [false, true] {
+            let body = PreparedSubgraph::streaming(
+                vec![],
+                vec![],
+                vec![PortSpec::new("chunk", mf_runtime::ValueType::String, true)],
+                move |state, sink| {
+                    assert_eq!(state.workflow_arguments().0["params.value"], json!("input"));
+                    for chunk in ["one", "two"] {
+                        sink.send(NodeResult {
+                            outputs: mf_runtime::Outputs::from([("chunk".into(), chunk.into())]),
+                            ..Default::default()
+                        })
+                        .map_err(NodeExecutionError::from)
+                        .context(mf_runtime::NodeExecutionSnafu {
+                            definition_id: "child",
+                        })?;
+                    }
+                    if fail {
+                        Err(mf_runtime::WorkflowRunError::Context {
+                            definition_id: "child".into(),
+                            message: "domain failure after emissions".into(),
+                        })
+                    } else {
+                        Ok(mf_runtime::Outputs::from([(
+                            "answer".into(),
+                            "final".into(),
+                        )]))
+                    }
+                },
+            );
+            let arguments = mf_runtime::PreparedFlowArguments::new([("child".into(), body)].into());
+            let node = ReferenceCallNode {
+                id: "invoke".into(),
+                selector: mf_runtime::ConfigTemplate::parse(json!("child")).unwrap(),
+                stream_outputs: passed_flow_stream_outputs(&arguments).unwrap(),
+                arguments,
+            };
+            let prepared = PreparedNode::task_stream(node, NodeMetadata::default()).unwrap();
+            let mut sink = CollectSink::default();
+            let result = prepared
+                .execution
+                .as_task_node()
+                .unwrap()
+                .execute_with_sink(
+                    Inputs::from([("arguments".into(), json!({"params.value": "input"}).into())]),
+                    &mut ExecutionContext::default(),
+                    &mut sink,
+                )
+                .unwrap();
+            assert_eq!(sink.0.len(), 2);
+            assert_eq!(sink.0[0].outputs["chunk"], json!("one"));
+            assert_eq!(sink.0[1].outputs["chunk"], json!("two"));
+            assert_eq!(result.outputs["result"].get("error").is_some(), fail);
+            if !fail {
+                assert_eq!(
+                    result.outputs["result"]["outputs"]["answer"],
+                    json!("final")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn passed_flow_sink_failures_cancel_instead_of_becoming_result_envelopes() {
+        struct RejectSink;
+        impl mf_runtime::EmissionSink for RejectSink {
+            fn send(&mut self, _: NodeResult) -> Result<(), mf_runtime::StreamError> {
+                Err(mf_runtime::StreamError::InputFailure {
+                    message: "receiver rejected emission".into(),
+                })
+            }
+        }
+        let body = PreparedSubgraph::streaming(
+            vec![],
+            vec![],
+            vec![PortSpec::new("chunk", mf_runtime::ValueType::String, true)],
+            |_, sink| {
+                sink.send(NodeResult {
+                    outputs: mf_runtime::Outputs::from([("chunk".into(), "one".into())]),
+                    ..Default::default()
+                })
+                .map_err(NodeExecutionError::from)
+                .context(mf_runtime::NodeExecutionSnafu {
+                    definition_id: "child",
+                })?;
+                Ok(Default::default())
+            },
+        );
+        let mut context = ExecutionContext::default();
+        let result = execute_passed_flow(
+            "invoke",
+            "child",
+            &body,
+            Inputs::from([("arguments".into(), json!({}).into())]),
+            &mut context,
+            &mut RejectSink,
+        );
+        assert!(result.is_err());
+        assert!(context.cancellation().failure().is_some());
+    }
+
+    #[test]
+    fn passed_flows_reject_stdin_even_when_the_receiver_accepts_streams() {
+        let mut schema = mf_runtime::WorkflowInputSchema::default();
+        schema
+            .stdin
+            .insert("read".into(), mf_runtime::StdinRequirement::Always);
+        let arguments = mf_runtime::PreparedFlowArguments::new(
+            [("child".into(), body().with_input_schema(schema))].into(),
+        );
+        assert!(
+            reference_factory("invoke", reference_config(), arguments)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("cannot read stdin")
+        );
     }
 
     #[test]
@@ -506,6 +791,52 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("synthetic worker failure"));
+    }
+
+    #[test]
+    fn captured_calls_preserve_invocation_startup_failure_sources() {
+        let body =
+            PreparedSubgraph::from_stream_factory(vec![], Default::default(), vec![], || {
+                Err(NodeExecutionError::from(
+                    mf_runtime::StreamError::ThreadSpawn {
+                        thread: "workflow-stream".into(),
+                        source: std::sync::Arc::new(std::io::Error::other(
+                            "synthetic invocation startup failure",
+                        )),
+                    },
+                ))
+                .context(mf_runtime::NodeExecutionSnafu {
+                    definition_id: "child",
+                })
+            });
+        let node = CallNode {
+            id: "invoke".into(),
+            flow: "child".into(),
+            body,
+            arguments_object: false,
+            capture_errors: true,
+        };
+        let error = SubgraphNode::execute(
+            &node,
+            Inputs::default(),
+            &mut ExecutionContext::default(),
+            &mut mf_runtime::DiscardSink,
+        )
+        .unwrap_err();
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        let mut found = false;
+        while let Some(cause) = source {
+            found |= cause
+                .downcast_ref::<std::io::Error>()
+                .or_else(|| {
+                    cause
+                        .downcast_ref::<std::sync::Arc<std::io::Error>>()
+                        .map(AsRef::as_ref)
+                })
+                .is_some_and(|cause| cause.to_string() == "synthetic invocation startup failure");
+            source = cause.source();
+        }
+        assert!(found, "startup failure source was lost: {error}");
     }
 
     #[test]

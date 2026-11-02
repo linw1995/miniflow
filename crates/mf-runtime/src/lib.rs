@@ -6,6 +6,7 @@ mod execution_domains;
 mod execution_inputs;
 mod execution_outputs;
 mod flow;
+mod flow_invocation;
 #[cfg(feature = "async")]
 mod future_execution;
 mod iteration;
@@ -62,6 +63,7 @@ pub use flow::{
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
 };
+pub use flow_invocation::{FlowEmission, FlowInvocation};
 #[cfg(feature = "async")]
 pub use future_execution::FutureExecutionError;
 #[doc(hidden)]

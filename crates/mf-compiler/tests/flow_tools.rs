@@ -394,7 +394,7 @@ fn flow_tool_bodies_reject_multiple_startups_stdin_and_streaming_interfaces() {
                 "nodes": [{"id": "read", "kind": "builtin.readline"}],
                 "outputs": [{"name": "content", "node": "read", "port": "line"}]
             }),
-            "requires streaming execution",
+            "cannot expose stream outputs",
         ),
     ] {
         let root = tempfile::tempdir().unwrap();

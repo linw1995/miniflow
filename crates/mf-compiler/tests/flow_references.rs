@@ -295,7 +295,7 @@ fn passed_host_definition_drift_is_rejected_for_selected_and_unselected_bindings
 }
 
 #[test]
-fn passed_host_executors_still_obey_terminal_reference_call_contracts() {
+fn passed_host_executors_forward_streams_without_fabricating_terminal_values() {
     for name in ["first", "second"] {
         let mut registry = NodeRegistry::from_inventory().unwrap();
         registry
@@ -310,23 +310,71 @@ fn passed_host_executors_still_obey_terminal_reference_call_contracts() {
                         mf_runtime::ValueType::String,
                         true,
                     )],
-                    |_, _| panic!("invalid host body must not execute"),
+                    |_, sink| {
+                        use snafu::ResultExt;
+                        sink.send(
+                            mf_runtime::Outputs::from([("value".into(), "increment".into())])
+                                .into(),
+                        )
+                        .map_err(mf_runtime::NodeExecutionError::from)
+                        .context(mf_runtime::NodeExecutionSnafu {
+                            definition_id: "remote",
+                        })?;
+                        Ok(Default::default())
+                    },
                 ),
             )
             .unwrap();
         let mut value = caller();
-        value["nodes"][0]["config"]["parameters"]["target"]["default"] = json!("first");
+        value["nodes"][0]["config"]["parameters"]["target"]["default"] = json!(name);
         value["flow_arguments"][name]["definition"] =
             serde_json::to_value(host_definition()).unwrap();
-        let error =
-            compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("terminal children without stdin"),
-            "{error}"
-        );
+        value["outputs"].as_array_mut().unwrap().push(json!({
+            "name":"increment", "node":"invoke", "port":"value", "optional":true
+        }));
+        let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
+        let instance = mf_compiler::instantiate_stream(&plan, &registry)
+            .unwrap()
+            .start()
+            .unwrap();
+        let mut values = Vec::new();
+        while let Some(output) = instance.recv().unwrap() {
+            values.push(serde_json::to_value(output.outputs).unwrap());
+        }
+        instance.join().unwrap();
+        assert!(values.contains(&json!({"increment":"increment"})));
+        assert!(values.contains(&json!({"result":{"outputs":{}}})));
     }
+}
+
+#[test]
+fn router_freezes_selected_parameter_identity_without_preparing_unused_arguments() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let value = json!({
+        "version":"2026-11-01", "dependencies":{},
+        "flow_arguments":{
+            "used":{"definition":child("selected"), "description":null, "parameters":{}},
+            "unused":{"definition":host_definition(), "description":null, "parameters":{}}
+        },
+        "nodes":[
+            {"id":"route", "kind":"builtin.constant", "config":{"value":"branch"}},
+            {"id":"args", "kind":"builtin.constant", "config":{"value":{}}},
+            {"id":"invoke", "kind":"builtin.router", "config":{
+                "subgraphs":{"branch":{"parameter":"used"}},
+                "arguments_object":true, "capture_errors":true
+            }, "inputs":{
+                "route":{"from":{"node":"route", "port":"value"}},
+                "arguments":{"from":{"node":"args", "port":"value"}}
+            }}
+        ],
+        "outputs":[{"name":"result", "node":"invoke", "port":"result"}]
+    });
+    let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
+    let result = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap();
+    assert_eq!(result["result"]["outputs"]["content"], json!("selected"));
 }
 
 #[test]

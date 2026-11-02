@@ -126,7 +126,16 @@ impl TaskNode for SubgraphRouter {
                 .with_context(|| mf_runtime::NodeExecutionFailedSnafu {
                     message: format!("unknown passed router subgraph `{name}`"),
                 })?;
-        super::call::execute_passed_flow(&self.id, name, body, inputs, context)
+        // This receiver intentionally exposes only a terminal result envelope.
+        // Drive the selected Flow to completion, discarding incremental emissions.
+        super::call::execute_passed_flow(
+            &self.id,
+            name,
+            body,
+            inputs,
+            context,
+            &mut mf_runtime::DiscardSink,
+        )
     }
 }
 
@@ -237,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_router_rejects_extra_missing_and_nonterminal_bodies() {
+    fn prepared_router_rejects_extra_missing_and_stdin_bodies() {
         use mf_runtime::{
             PortSpec, PreparedFlowArguments, PreparedSubgraph, StdinRequirement,
             WorkflowInputSchema,
@@ -275,15 +284,38 @@ mod tests {
             vec![],
             vec![],
             vec![PortSpec::new("value", ValueType::String, true)],
-            |_, _| Ok(Default::default()),
+            |_, sink| {
+                assert!(!sink.is_connected());
+                sink.send(NodeResult {
+                    outputs: Outputs::from([("value".into(), "incremental".into())]),
+                    ..Default::default()
+                })
+                .unwrap();
+                Ok(Outputs::from([("final".into(), "complete".into())]))
+            },
         );
-        assert!(
-            subgraph_factory(
-                "router",
-                config,
-                PreparedFlowArguments::new([("a".into(), body)].into())
+        let router = subgraph_factory(
+            "router",
+            config,
+            PreparedFlowArguments::new([("a".into(), body)].into()),
+        )
+        .unwrap();
+        assert!(router.metadata.stream_outputs.is_empty());
+        let result = router
+            .execution
+            .as_task_node()
+            .unwrap()
+            .execute(
+                Inputs::from([
+                    ("route".into(), "a".into()),
+                    ("arguments".into(), json!({}).into()),
+                ]),
+                &mut ExecutionContext::default(),
             )
-            .is_err()
+            .unwrap();
+        assert_eq!(
+            result.outputs["result"]["outputs"]["final"],
+            json!("complete")
         );
         let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
         assert!(

@@ -302,13 +302,88 @@ enum ProducerNode {
     TaskStream(Box<crate::TaskStreamExecutor>),
 }
 
+enum InvocationCallback {
+    Stream(StreamCallback),
+    Inherited {
+        context: Box<ExecutionContext>,
+        step: crate::context::StepObservation,
+    },
+}
+
+impl InvocationCallback {
+    fn enter(&self) -> opentelemetry::ContextGuard {
+        match self {
+            Self::Stream(callback) => callback.enter(),
+            Self::Inherited { step, .. } => step.enter(),
+        }
+    }
+
+    fn set_input_selections(&mut self, selected: Vec<mf_telemetry::event::InputSelection>) {
+        match self {
+            Self::Stream(callback) => callback.set_input_selections(selected),
+            Self::Inherited { step, .. } => step.set_input_selections(selected),
+        }
+    }
+
+    fn started(&mut self) {
+        match self {
+            Self::Stream(callback) => callback.started(),
+            Self::Inherited { context, step } => step.started(context),
+        }
+    }
+
+    fn succeeded(self, count: usize, ports: Vec<String>) {
+        self.succeeded_with_loop_summary(count, ports, None);
+    }
+
+    fn succeeded_with_loop_summary(
+        self,
+        count: usize,
+        ports: Vec<String>,
+        summary: Option<mf_telemetry::event::LoopSummary>,
+    ) {
+        match self {
+            Self::Stream(callback) => callback.succeeded_with_loop_summary(count, ports, summary),
+            Self::Inherited { mut context, step } => {
+                step.succeeded(&mut context, ports, Vec::new(), summary)
+            }
+        }
+    }
+
+    fn failed(self, phase: FailurePhase, message: String) {
+        match self {
+            Self::Stream(callback) => callback.failed(phase, message),
+            Self::Inherited { mut context, step } => step.failed(&mut context, phase, message),
+        }
+    }
+
+    fn skipped(self, causes: Vec<mf_telemetry::event::SkipCause>) {
+        match self {
+            Self::Stream(callback) => callback.skipped(causes),
+            Self::Inherited { mut context, step } => step.skipped(&mut context, causes, Vec::new()),
+        }
+    }
+
+    fn buffered(&self, items: usize) {
+        if let Self::Stream(callback) = self {
+            callback.buffered(items);
+        }
+    }
+
+    fn flushed(&self, message: StreamMessage, count: usize, reason: &'static str) {
+        if let Self::Stream(callback) = self {
+            callback.flushed(message, count, reason);
+        }
+    }
+}
+
 struct ProducerJob {
     message: MessageId,
     execution_domain: usize,
     context: ExecutionContext,
     detached: bool,
     inputs: Inputs,
-    callback: Option<StreamCallback>,
+    callback: Option<InvocationCallback>,
 }
 
 struct DomainJob {
@@ -336,6 +411,7 @@ struct State {
     operators: Vec<Option<Operator>>,
     sequences: Vec<u64>,
     active_workers: usize,
+    worker_queue_full: bool,
     failure: Option<StreamError>,
     failure_node: Option<String>,
     done: bool,
@@ -349,7 +425,10 @@ struct Shared {
     observation: Option<StreamObservation>,
     snapshots: Option<crate::SnapshotRecorder>,
     cancellation: crate::StreamCancellation,
-    worker_limit: std::num::NonZeroUsize,
+    invocation: Mutex<ExecutionContext>,
+    inherit_budget: bool,
+    workers: crate::RuntimeWorkerHandle,
+    max_parallel_domains: usize,
 }
 
 impl Shared {
@@ -387,7 +466,7 @@ fn capture_snapshot(
 ) {
     if let Some(recorder) = &shared.snapshots {
         recorder.record(crate::SnapshotEvent {
-            scope: Vec::new(),
+            scope: shared.invocation.lock().unwrap().invocation_path(),
             node: node.into(),
             snapshot: crate::NodeSnapshot {
                 inputs: crate::snapshot::ports_snapshot(inputs),
@@ -489,7 +568,7 @@ fn run_producer(
     plan: &Arc<StreamPlan>,
 ) {
     let index = plan.execution_domain(job.execution_domain).nodes[0].index();
-    let _span = job.callback.as_ref().map(StreamCallback::enter);
+    let _span = job.callback.as_ref().map(InvocationCallback::enter);
     let mut sink = ProducerEmitter {
         shared,
         plan,
@@ -710,7 +789,9 @@ impl PreparedStream {
         runtime_options: crate::RuntimeOptions,
     ) -> Result<StreamInstance, StreamError> {
         let observation = options.observation.clone();
-        let result = self.start_inner(options, runtime_options);
+        let mut context = ExecutionContext::default();
+        context.configure_worker_limit(runtime_options.max_parallel_domains);
+        let result = self.start_inner(options, runtime_options, context, false);
         if let (Err(error), Some(observation)) = (&result, observation) {
             observation.finish(
                 StreamCounts::default(),
@@ -724,10 +805,32 @@ impl PreparedStream {
         result
     }
 
+    /// Starts a nested stream with the caller-owned invocation environment.
+    /// Scope, step budget, snapshots and future resources are retained. Cancellation
+    /// uses an invocation-local child token: the caller can cancel this stream, but
+    /// ordinary stream failures and explicit child cancellation do not cancel callers.
+    pub fn start_in_context(
+        self,
+        mut context: ExecutionContext,
+    ) -> Result<StreamInstance, StreamError> {
+        context.set_cancellation(context.cancellation().child());
+        let options = StreamOptions {
+            arguments: context.workflow_arguments().clone(),
+            snapshots: context.snapshot_recorder().cloned(),
+            ..StreamOptions::default()
+        };
+        let runtime_options = crate::RuntimeOptions {
+            max_parallel_domains: context.worker_limit(),
+        };
+        self.start_inner(options, runtime_options, context, true)
+    }
+
     fn start_inner(
         self,
         options: StreamOptions,
         runtime_options: crate::RuntimeOptions,
+        mut context: ExecutionContext,
+        inherit_budget: bool,
     ) -> Result<StreamInstance, StreamError> {
         let (prepared, operator_states) = self.into_parts();
         let domain_limit = prepared
@@ -737,7 +840,6 @@ impl PreparedStream {
             .min(runtime_options.max_parallel_domains.get());
         let worker_limit = std::num::NonZeroUsize::new(domain_limit)
             .expect("validated stream worker limit is positive");
-        let mut context = ExecutionContext::default();
         if let Some(capture) = &options.snapshots {
             context.set_snapshot_recorder(capture.clone());
         }
@@ -753,6 +855,27 @@ impl PreparedStream {
         if let Some(observation) = &options.observation {
             context.set_frame_observation(observation.startup_frame());
         }
+        let inherited_workers = context.existing_worker_scope();
+        let execution_workers = context.worker_scope();
+        if context.worker_handle().is_none()
+            && let Some(workers) = inherited_workers
+            && prepared.nodes().iter().any(|node| node.node.is_some())
+        {
+            context.set_worker_handle(workers.initialize().context(WorkerStartupSnafu)?);
+        }
+        let owned_workers = if context.worker_handle().is_none() {
+            Some(start_workers(&prepared, runtime_options)?)
+        } else {
+            None
+        };
+        let workers = context.worker_handle().unwrap_or_else(|| {
+            owned_workers
+                .as_ref()
+                .expect("stream owns its workers")
+                .handle()
+        });
+        context.set_worker_handle(workers.clone());
+        let invocation = context.fork_domain_with_observation(context.observation().cloned());
         let domain_count = prepared.message_sources().len();
         let mut domains: Vec<_> = (0..domain_count).map(|_| Domain::default()).collect();
         domains[0].frame = Some(Frame::new(
@@ -803,6 +926,7 @@ impl PreparedStream {
                 operators,
                 sequences: vec![0; domain_count],
                 active_workers: 0,
+                worker_queue_full: false,
                 failure: None,
                 failure_node: None,
                 done: false,
@@ -816,7 +940,10 @@ impl PreparedStream {
             observation: options.observation,
             snapshots: options.snapshots,
             cancellation,
-            worker_limit,
+            invocation: Mutex::new(invocation),
+            inherit_budget,
+            workers: workers.clone(),
+            max_parallel_domains: worker_limit.get(),
         });
         shared
             .cancellation
@@ -825,25 +952,11 @@ impl PreparedStream {
             .clock
             .register_waker(Waker::from(Arc::new(ClockWake(Arc::downgrade(&shared)))));
         let coordinator_shared = Arc::clone(&shared);
-        let workers = start_workers(&plan, runtime_options)?;
-        if let Some(frame) = shared.state.lock().unwrap().domains[0].frame.as_mut() {
-            frame.context.set_worker_handle(workers.handle());
-        }
         let coordinator = thread::Builder::new()
             .name("workflow-stream".into())
             .spawn(move || {
-                // Release the lazy backend on this blocking thread, after frames and workers.
-                #[cfg(feature = "async")]
-                let future_executor = Arc::new(crate::future_execution::FutureExecutor::default());
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    coordinate(
-                        &coordinator_shared,
-                        &plan,
-                        options.clock.as_ref(),
-                        &workers,
-                        #[cfg(feature = "async")]
-                        &future_executor,
-                    )
+                    coordinate(&coordinator_shared, &plan, options.clock.as_ref(), &workers)
                 }));
                 if let Err(payload) = result {
                     let mut state = coordinator_shared
@@ -859,7 +972,9 @@ impl PreparedStream {
                     coordinator_shared.cancellation.cancel(failure);
                     coordinator_shared.changed.notify_all();
                 }
-                drop(workers);
+                wait_for_domain_workers(&coordinator_shared);
+                drop(owned_workers);
+                drop(execution_workers);
                 finish_instance(&coordinator_shared);
             })
             .context(ThreadSpawnSnafu {
@@ -904,7 +1019,34 @@ impl StreamInstance {
             if state.done {
                 return Ok(None);
             }
-            state = self.shared.changed.wait(state).unwrap();
+            state = self.wait_for_progress(state);
+        }
+    }
+
+    fn wait_for_progress<'a>(&'a self, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
+        if self.shared.workers.is_current_worker() {
+            // A receiver may itself occupy the only inherited worker. Release
+            // scheduler state before helping jobs submitted by the coordinator.
+            drop(state);
+            let helped = self.shared.workers.help_one();
+            let state = self.shared.state.lock().unwrap();
+            if helped {
+                return state;
+            }
+            self.shared
+                .changed
+                .wait_timeout(state, Duration::from_millis(1))
+                .unwrap()
+                .0
+        } else {
+            self.shared.changed.wait(state).unwrap()
+        }
+    }
+
+    fn wait_until_done(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        while !state.done {
+            state = self.wait_for_progress(state);
         }
     }
 
@@ -936,6 +1078,7 @@ impl StreamInstance {
     }
 
     pub fn join(mut self) -> Result<StreamSummary, StreamError> {
+        self.wait_until_done();
         if let Some(coordinator) = self.coordinator.take() {
             coordinator.join().map_err(panic_error)?;
         }
@@ -956,13 +1099,29 @@ impl Drop for StreamInstance {
                 }
                 .build(),
             );
+            self.wait_until_done();
             let _ = coordinator.join();
         }
     }
 }
 
+fn wait_for_domain_workers(shared: &Shared) {
+    let mut state = shared.state.lock().unwrap();
+    loop {
+        while let Some(completion) = state.completions.pop_front() {
+            if !completion.producer {
+                state.active_workers -= 1;
+            }
+        }
+        if state.active_workers == 0 {
+            return;
+        }
+        state = shared.changed.wait(state).unwrap();
+    }
+}
+
 fn start_workers(
-    plan: &Arc<StreamPlan>,
+    plan: &StreamPlan,
     runtime_options: crate::RuntimeOptions,
 ) -> Result<WorkerPool<crate::worker::WorkerJob>, StreamError> {
     let active_domains = plan
@@ -1034,14 +1193,9 @@ fn coordinate(
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
     clock: &dyn StreamClock,
-    workers: &WorkerPool<crate::worker::WorkerJob>,
-    #[cfg(feature = "async")] future_executor: &Arc<crate::future_execution::FutureExecutor>,
+    workers: &crate::RuntimeWorkerHandle,
 ) {
     let mut guard = shared.state.lock().unwrap();
-    #[cfg(feature = "async")]
-    if let Some(frame) = guard.domains[0].frame.as_mut() {
-        frame.context.set_future_executor(future_executor.clone());
-    }
     loop {
         while let Some(completion) = guard.completions.pop_front() {
             if !completion.producer {
@@ -1092,15 +1246,7 @@ fn coordinate(
         if let Some(domain) = guard.delivered.take() {
             release_domain(&mut guard, domain);
         }
-        match tick(
-            guard,
-            plan,
-            workers,
-            clock,
-            shared,
-            #[cfg(feature = "async")]
-            future_executor,
-        ) {
+        match tick(guard, plan, workers, clock, shared) {
             Ok((next_guard, progress)) => {
                 guard = next_guard;
                 shared.changed.notify_all();
@@ -1133,7 +1279,12 @@ fn coordinate(
                     .deadline
                     .map(|deadline| deadline.saturating_sub(clock.now()))
             })
+            .chain(guard.worker_queue_full.then_some(Duration::from_millis(10)))
             .min();
+        // A shared pool can be full of unrelated jobs. Its capacity notifications
+        // do not use this invocation's condition variable, and this invocation may
+        // have no accepted jobs that could wake it. Retry only while a submission
+        // was rejected; ordinary idle/timer waits retain their normal behavior.
         guard = match wait {
             Some(wait) => shared.changed.wait_timeout(guard, wait).unwrap().0,
             None => shared.changed.wait(guard).unwrap(),
@@ -1144,12 +1295,12 @@ fn coordinate(
 fn tick<'a>(
     mut guard: MutexGuard<'a, State>,
     plan: &Arc<StreamPlan>,
-    workers: &WorkerPool<crate::worker::WorkerJob>,
+    workers: &crate::RuntimeWorkerHandle,
     clock: &dyn StreamClock,
     shared: &'a Arc<Shared>,
-    #[cfg(feature = "async")] future_executor: &Arc<crate::future_execution::FutureExecutor>,
 ) -> Result<(MutexGuard<'a, State>, bool), StreamError> {
     let mut progress = false;
+    guard.worker_queue_full = false;
     for source in plan.message_sources().skip(1) {
         let index = source.expect("emission domain");
         let due = guard.operators[index]
@@ -1206,14 +1357,7 @@ fn tick<'a>(
         .context(WorkflowSnafu {
             message: queued.message,
         })?;
-        #[cfg(feature = "async")]
-        context.set_future_executor(future_executor.clone());
-        if let Some(capture) = &shared.snapshots {
-            context.set_snapshot_recorder(capture.clone());
-        }
-        context.set_cancellation(shared.cancellation.clone());
-        context.configure_worker_limit(shared.worker_limit);
-        context.set_worker_handle(workers.handle());
+        context.inherit_invocation(&shared.invocation.lock().unwrap(), shared.inherit_budget);
         if let Some(observation) = &shared.observation {
             context.set_frame_observation(observation.frame(stream_message(queued.message)));
         }
@@ -1293,7 +1437,7 @@ fn tick<'a>(
                         StreamTrigger::Input
                     },
                 )?;
-                let _context = callback.as_ref().map(StreamCallback::enter);
+                let _context = callback.as_ref().map(InvocationCallback::enter);
                 let (inputs, resolution) = match plan
                     .resolve_event_inputs(index, &mut frame.context)
                 {
@@ -1323,7 +1467,9 @@ fn tick<'a>(
                                 observation.frame(stream_message(frame.message))
                             }
                         });
-                        let context = frame.context.fork_stream(observation);
+                        let observation =
+                            observation.or_else(|| frame.context.observation().cloned());
+                        let context = frame.context.fork_domain_with_observation(observation);
                         let detached = message_domain == 0 && !returns_terminal;
                         let operator = guard.operators[index].as_mut().unwrap();
                         let OperatorExecutor::Producer(producer) = &mut operator.executor else {
@@ -1372,7 +1518,8 @@ fn tick<'a>(
                 }
                 frame.domain_completed(schedule, execution_domain);
                 progress = true;
-            } else if guard.active_workers < workers.worker_count() {
+            } else if guard.active_workers < workers.worker_count().min(shared.max_parallel_domains)
+            {
                 let observation = shared.observation.as_ref().map(|observation| {
                     if frame.message.domain == 0 {
                         observation.startup_frame()
@@ -1380,6 +1527,7 @@ fn tick<'a>(
                         observation.frame(stream_message(frame.message))
                     }
                 });
+                let observation = observation.or_else(|| frame.context.observation().cloned());
                 let context = frame
                     .context
                     .fork_domain_snapshot(observation, execution.snapshot_visibility.clone());
@@ -1399,6 +1547,7 @@ fn tick<'a>(
                         progress = true;
                     }
                     Err(mpsc::TrySendError::Full(_)) => {
+                        guard.worker_queue_full = true;
                         deferred.push(rank);
                     }
                     Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -1508,17 +1657,26 @@ fn event_callback<'a>(
     index: usize,
     message: Option<MessageId>,
     trigger: StreamTrigger,
-) -> Result<(MutexGuard<'a, State>, Option<StreamCallback>), StreamError> {
-    let Some(observation) = &shared.observation else {
-        return Ok((guard, None));
-    };
+) -> Result<(MutexGuard<'a, State>, Option<InvocationCallback>), StreamError> {
     // Span creation synchronously invokes processors that may reenter cancellation.
     drop(guard);
-    let callback = observation.callback(
-        plan.nodes()[index].definition_id.as_str(),
-        message.map(stream_message),
-        trigger,
-    );
+    let id = plan.nodes()[index].definition_id.as_str();
+    let callback = if let Some(observation) = &shared.observation {
+        observation
+            .callback(id, message.map(stream_message), trigger)
+            .map(InvocationCallback::Stream)
+    } else {
+        let mut context = {
+            let invocation = shared.invocation.lock().unwrap();
+            invocation.fork_domain_with_observation(invocation.observation().cloned())
+        };
+        context
+            .begin_step_observation(id)
+            .map(|step| InvocationCallback::Inherited {
+                context: Box::new(context),
+                step,
+            })
+    };
     let mut guard = shared.state.lock().unwrap();
     if let Err(error) = check_failure(&mut guard, shared) {
         drop(guard);
@@ -1550,9 +1708,9 @@ fn invoke_event<'a>(
     index: usize,
     event: NodeEvent,
     context: EventContext<'_>,
-    mut callback: Option<StreamCallback>,
+    mut callback: Option<InvocationCallback>,
 ) -> Result<MutexGuard<'a, State>, StreamError> {
-    let _span = callback.as_ref().map(StreamCallback::enter);
+    let _span = callback.as_ref().map(InvocationCallback::enter);
     // Only the coordinator accesses event operators; workers retain their own producer slots.
     let mut operator = guard.operators[index].take().unwrap();
     drop(guard);
@@ -1827,6 +1985,9 @@ fn finish_instance(shared: &Shared) {
     let failure = state.failure.clone();
     let node = state.failure_node.clone();
     drop(state);
+    // Release the invocation's lazy future backend on this blocking thread, after
+    // producer workers, frame contexts, and their destructors have completed.
+    *shared.invocation.lock().unwrap() = ExecutionContext::default();
     finish_observation(shared, summary, failure, node);
     shared.changed.notify_all();
 }
@@ -1839,7 +2000,7 @@ fn take_sequence(sequence: &mut u64) -> Result<u64, StreamError> {
     Ok(current)
 }
 
-fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
+pub(super) fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
     let message = payload
         .downcast_ref::<String>()
         .cloned()
@@ -1962,6 +2123,102 @@ mod tests {
         }
     }
     use super::*;
+    #[test]
+    fn a_full_inherited_pool_retries_after_unrelated_work_releases_capacity() {
+        struct Task;
+        impl crate::TaskNode for Task {
+            fn execute(
+                &self,
+                _: Inputs,
+                _: &mut ExecutionContext,
+            ) -> Result<NodeResult, NodeExecutionError> {
+                Ok(NodeResult::default())
+            }
+        }
+        let pool = WorkerPool::new(1, crate::WorkerJob::run).unwrap();
+        let (started, running) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        assert!(
+            pool.try_submit(crate::WorkerJob::new(move || {
+                started.send(()).unwrap();
+                let _ = blocked.recv();
+            }))
+            .is_ok()
+        );
+        running.recv_timeout(Duration::from_secs(5)).unwrap();
+        // One unrelated job occupies the worker; another fills its only queue slot.
+        assert!(pool.try_submit(crate::WorkerJob::new(|| {})).is_ok());
+        let mut context = ExecutionContext::default();
+        context.set_worker_handle(pool.handle());
+        let instance = PreparedStream::from_plan(
+            StreamExecution::default(),
+            vec![crate::FlowNode::new(
+                "task",
+                crate::PreparedNode::from_parts(
+                    NodeExecution::Task(Box::new(Task)),
+                    crate::NodeMetadata::default(),
+                ),
+            )],
+            program(
+                vec![None].into(),
+                1,
+                vec![].into(),
+                crate::ExecutionDomains::from_parts(
+                    vec![crate::ExecutionDomain {
+                        id: 0,
+                        nodes: vec![crate::NodeId::new(0)].into(),
+                        positions: vec![0].into(),
+                        predecessors: vec![].into(),
+                        successors: vec![].into(),
+                        first_position: 0,
+                        snapshot_visibility: crate::OutputVisibility::Borrowed(&[]),
+                    }]
+                    .into(),
+                    vec![std::borrow::Cow::Owned(vec![])].into(),
+                ),
+                vec![std::borrow::Cow::Owned(vec![0])].into(),
+                vec![std::borrow::Cow::Owned(vec![])].into(),
+            ),
+            Default::default(),
+        )
+        .start_in_context(context)
+        .unwrap();
+        let mut state = instance.shared.state.lock().unwrap();
+        while !state.worker_queue_full {
+            let wait = instance
+                .shared
+                .changed
+                .wait_timeout(state, Duration::from_secs(5))
+                .unwrap();
+            state = wait.0;
+            assert!(
+                !wait.1.timed_out(),
+                "coordinator never attempted the saturated pool"
+            );
+        }
+        assert_eq!(state.active_workers, 0);
+        drop(state);
+        release.send(()).unwrap();
+        // No accepted job or timer belongs to this instance, so only its bounded
+        // Full retry can make progress after the unrelated queue drains.
+        let mut state = instance.shared.state.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !state.done {
+            let wait = instance
+                .shared
+                .changed
+                .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            state = wait.0;
+            assert!(
+                !wait.1.timed_out() || state.done,
+                "stream stalled after shared queue capacity was released"
+            );
+        }
+        drop(state);
+        assert_eq!(instance.join().unwrap().completed_frames, 1);
+    }
+
     #[test]
     fn identities_fail_before_wraparound() {
         let mut sequence = u64::MAX;
