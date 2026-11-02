@@ -74,8 +74,14 @@ binary_id(=mfn-test-affected::process) |
     test(=llm_workflows_match_memory_and_standalone_runners) |
     test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
     test(=parameter_templates_configure_memory_and_standalone_llm_requests) |
-    test(=tool_calls_match_memory_and_standalone_runners)
+    test(=tool_calls_and_results_round_trip_in_memory_and_standalone_runners)
 )) |
+(binary_id(=mf-compiler::router) & (
+    test(=standalone_runner_uses_only_core_and_matches_runtime_route_selection) |
+    test(=source_free_generated_router_executes_owned_aliased_tool_bodies)
+)) |
+(binary_id(=mf-compiler::flow_tools) &
+    test(=generated_runner_matches_memory_after_all_flow_sources_and_build_are_removed)) |
 (binary_id(=mf-compiler::success_dependencies) &
     test(=standalone_success_dependencies_match_memory_and_preserve_manifests)) |
 (binary_id(=mf-compiler::runner_validation) &
@@ -181,8 +187,14 @@ binary_id(=mfn-test-affected::process) |
     test(=llm_workflows_match_memory_and_standalone_runners) |
     test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
     test(=parameter_templates_configure_memory_and_standalone_llm_requests) |
-    test(=tool_calls_match_memory_and_standalone_runners)
+    test(=tool_calls_and_results_round_trip_in_memory_and_standalone_runners)
 )) |
+(binary_id(=mf-compiler::router) & (
+    test(=standalone_runner_uses_only_core_and_matches_runtime_route_selection) |
+    test(=source_free_generated_router_executes_owned_aliased_tool_bodies)
+)) |
+(binary_id(=mf-compiler::flow_tools) &
+    test(=generated_runner_matches_memory_after_all_flow_sources_and_build_are_removed)) |
 (binary_id(=mf-compiler::success_dependencies) &
     test(=standalone_success_dependencies_match_memory_and_preserve_manifests)) |
 (binary_id(=mf-compiler::runner_validation) &

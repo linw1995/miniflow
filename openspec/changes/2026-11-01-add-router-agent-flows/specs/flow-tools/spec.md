@@ -13,14 +13,15 @@ children without stdin, object arguments and captured result envelopes. Explicit
 prerequisites SHALL remain necessary. Loop/Iteration bodies SHALL retain lexical bindings while
 separate child calls SHALL NOT implicitly inherit them. Generated runners SHALL construct all bodies
 from compiled plans and run after source removal. The authored tool-uses chain SHALL contain one
-arguments/call/result adapter chain independent of tool count; runtime argument adaptation SHALL
-consume selected sanitized interface data. Observation, snapshots and TUI bodies SHALL distinguish
+arguments/executable-router/result adapter chain independent of tool count; runtime argument adaptation
+SHALL consume selected sanitized interface data. The tool dispatcher SHALL NOT use a separate
+reference-call invocation node. Observation, snapshots and TUI bodies SHALL distinguish
 bindings at the same callsite without inventing executable wrapper nodes.
 
 #### Scenario: Shared authored dispatch invokes a passed binding
 
 - **WHEN** a tool-use Iteration receives calls for two passed tools
-- **THEN** the same authored arguments/call/result chain validates and invokes both bindings
+- **THEN** the same authored arguments/executable-router/result chain validates and invokes both bindings
 - **AND** result order follows input order in memory and in the source-free generated runner
 
 #### Scenario: A selector cannot forge executable authority
@@ -94,7 +95,32 @@ Metadata references SHALL NOT create execution dependencies or observation scope
 Flows without compiler rewriting or LLM tool expansion. It SHALL accept nonempty configured `routes`
 and a required string `route` input, emit exactly one exclusive boolean gate for the matching route or
 `else` for an unknown route, and skip all unselected outputs. Downstream execution SHALL use ordinary
-edges rather than router-owned invocation.
+edges rather than router-owned invocation in this legacy gate mode.
+
+### Requirement: Routers own explicitly passed executable subgraphs
+
+Version 2026-11-01 SHALL support a distinct `builtin.router` mode with an explicit `subgraphs` mapping
+from branch names to lexical Flow parameter references. Preparation SHALL resolve only those passed
+parameters, validate every owned body and host definition, and pass prepared handles to the router.
+The router SHALL select and execute its owned child using ordinary call machinery, receiving a string
+`route` and qualified `arguments` object and publishing a captured `result` envelope. It SHALL NOT
+merely emit a name for another invocation node. Secret input propagation, cancellation and
+infrastructure failures SHALL retain existing call semantics. Child bodies SHALL be terminal and
+stdin-free. Empty mappings SHALL be valid; mixed gate/subgraph configurations, invalid names and
+missing parameters SHALL fail preparation. Unknown runtime branches SHALL execute no body.
+
+Branch aliases SHALL identify their own router-owned observation bodies while host executor lookup
+SHALL use the referenced parameter name. Interpreted execution, generated source-free runners and
+manifest descriptions SHALL resolve the same selected mapping. Definitions SHALL remain stored once
+in the canonical `flow_arguments`, not duplicated in router configuration or runtime values.
+
+#### Scenario: Router executes an aliased passed parameter
+
+- **GIVEN** a router maps branch `search` to passed parameter `search-web`
+- **WHEN** its route is `search`
+- **THEN** the router executes the prepared `search-web` body under its own `search` binding scope
+- **AND** unowned lexical parameters and global-only host bindings remain inaccessible
+- **AND** interpreted and source-free generated execution return the same result
 
 #### Scenario: Route a user Flow without tool expansion
 
@@ -106,8 +132,9 @@ edges rather than router-owned invocation.
 
 ### Requirement: Dispatch tool calls concurrently and deterministically
 
-`mfn-llm.tool-uses` SHALL compose routing, argument adaptation, ordinary Flow calls, and result
-encoding. `builtin.router` SHALL only emit exclusive/skipped downstream gates. The runtime SHALL
+`mfn-llm.tool-uses` SHALL compose known/unknown gate routing, argument adaptation, router-owned
+passed-subgraph execution, and result encoding. The executable router SHALL own the passed tools and
+execute the selected child itself. The runtime SHALL
 expose unbiased metadata without Tool types or tool policy. Concurrent dispatch SHALL reuse parallel `builtin.iteration`, including its bounded worker queue, ordered result collection,
 item isolation, and termination policy. Each invocation SHALL isolate Flow inputs, outputs, and loop
 state while sharing cancellation. Unknown tools, invalid arguments,

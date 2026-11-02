@@ -280,15 +280,59 @@ impl mf_runtime::TaskNode for ReferenceCallNode {
             .context(mf_runtime::NodeExecutionFailedSnafu {
                 message: format!("unknown passed Flow parameter `{name}`"),
             })?;
-        CallNode {
-            id: self.id.clone(),
-            flow: name.into(),
-            body: body.clone(),
-            arguments_object: true,
-            capture_errors: true,
-        }
-        .execute_target(inputs, context, &mut mf_runtime::DiscardSink, Some(name))
+        execute_passed_flow(&self.id, name, body, inputs, context)
     }
+}
+
+pub(super) fn execute_passed_flow(
+    id: &str,
+    binding: &str,
+    body: &PreparedSubgraph,
+    inputs: Inputs,
+    context: &mut ExecutionContext,
+) -> Result<NodeResult, NodeExecutionError> {
+    CallNode {
+        id: id.into(),
+        flow: binding.into(),
+        body: body.clone(),
+        arguments_object: true,
+        capture_errors: true,
+    }
+    .execute_target(inputs, context, &mut mf_runtime::DiscardSink, Some(binding))
+}
+
+pub(super) fn passed_flow_metadata(
+    arguments: &mf_runtime::PreparedFlowArguments,
+) -> Result<NodeMetadata, NodeBuildError> {
+    for body in arguments.values() {
+        ensure!(
+            body.stream_outputs.is_empty() && body.inputs.stdin.is_empty(),
+            mf_runtime::NodeInvalidSubgraphSnafu {
+                message: "Flow parameter calls require terminal children without stdin"
+            }
+        );
+    }
+    let sensitive = arguments.values().any(|body| {
+        body.inputs
+            .inputs
+            .values()
+            .any(|ports| ports.values().any(|input| input.binding.secret))
+    });
+    Ok(NodeMetadata {
+        input_bindings: if sensitive {
+            [(
+                "arguments".into(),
+                mf_runtime::InputBinding {
+                    secret: true,
+                    ..Default::default()
+                },
+            )]
+            .into()
+        } else {
+            Default::default()
+        },
+        ..Default::default()
+    })
 }
 
 fn reference_factory(
@@ -307,14 +351,7 @@ fn reference_factory(
             message: "reference calls require arguments_object and capture_errors, and cannot specify flow or definition"
         }
     );
-    for body in arguments.values() {
-        ensure!(
-            body.stream_outputs.is_empty() && body.inputs.stdin.is_empty(),
-            mf_runtime::NodeInvalidSubgraphSnafu {
-                message: "Flow parameter calls require terminal children without stdin"
-            }
-        );
-    }
+    let mut metadata = passed_flow_metadata(&arguments)?;
     let selector = config
         .flow_ref
         .context(mf_runtime::NodeInvalidSubgraphSnafu {
@@ -323,28 +360,7 @@ fn reference_factory(
         .template()
         .boxed()
         .map_err(NodeBuildError::from)?;
-    let sensitive = arguments.values().any(|body| {
-        body.inputs
-            .inputs
-            .values()
-            .any(|ports| ports.values().any(|input| input.binding.secret))
-    });
-    let metadata = NodeMetadata {
-        context_references: selector.references("flow_ref"),
-        input_bindings: if sensitive {
-            [(
-                "arguments".into(),
-                mf_runtime::InputBinding {
-                    secret: true,
-                    ..Default::default()
-                },
-            )]
-            .into()
-        } else {
-            Default::default()
-        },
-        ..Default::default()
-    };
+    metadata.context_references = selector.references("flow_ref");
     PreparedNode::new(
         ReferenceCallNode {
             id: id.into(),

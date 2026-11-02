@@ -191,6 +191,7 @@ fn wire_node_needs_resolution(
     registry: Option<&mf_runtime::NodeRegistry>,
 ) -> bool {
     matches!(node["kind"].as_str(), Some(CALL_KIND))
+        || (node["kind"] == mf_runtime::ROUTER_KIND && node["config"].get("subgraphs").is_some())
         || node["kind"]
             .as_str()
             .is_some_and(|kind| crate::calls::is_metadata(kind, registry))
@@ -210,6 +211,7 @@ fn node_needs_resolution(
     registry: Option<&mf_runtime::NodeRegistry>,
 ) -> bool {
     crate::calls::is_flow_with_registry(node, registry)
+        || node.accepts_flow_arguments()
         || node.loop_definition.as_ref().is_some_and(|body| {
             body.body
                 .nodes
@@ -653,6 +655,15 @@ impl Resolver<'_> {
         version: mf_runtime::WorkflowDefinitionVersion,
     ) -> Result<(), FlowResolutionError> {
         for node in nodes {
+            if node.kind == mf_runtime::ROUTER_KIND && node.accepts_flow_arguments() {
+                ensure!(
+                    version.supports_flow_arguments(),
+                    InvalidSnafu {
+                        reference: node.id.as_str(),
+                        message: "router Flow parameters require version 2026-11-01"
+                    }
+                );
+            }
             if crate::calls::is_flow_with_registry(node, self.registry) {
                 let mut config: CallConfig = serde_json::from_value(
                     crate::calls::config_mut(node).clone(),

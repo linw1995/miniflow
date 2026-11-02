@@ -2,12 +2,19 @@ use crate::{NodeDefinition, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::CallConfig;
 use snafu::{ResultExt, ensure};
 
-pub fn is_reference(node: &NodeDefinition) -> bool {
-    node.kind == mf_runtime::CALL_KIND
-        && node
-            .config
-            .get("flow_ref")
-            .is_some_and(|value| !value.is_null())
+pub fn is_flow_argument_consumer(node: &NodeDefinition) -> bool {
+    node.accepts_flow_arguments()
+}
+
+pub fn selected_arguments<'a>(
+    node: &'a NodeDefinition,
+    arguments: &'a std::collections::BTreeMap<String, mf_runtime::ResolvedFlowArgument>,
+) -> Result<
+    std::collections::BTreeMap<String, (&'a str, &'a mf_runtime::ResolvedFlowArgument)>,
+    crate::DescriptionError,
+> {
+    node.selected_flow_arguments(arguments)
+        .context(crate::compiler::ContractSnafu)
 }
 
 pub fn body_definition(node: &NodeDefinition) -> Result<WorkflowDefinition, WorkflowCompileError> {
@@ -32,8 +39,8 @@ pub fn contains_iteration_containers(
         ) {
             return Ok(true);
         }
-        if is_reference(node) {
-            for argument in definition.flow_arguments.values() {
+        if is_flow_argument_consumer(node) {
+            for (_, argument) in selected_arguments(node, &definition.flow_arguments)?.values() {
                 if contains_iteration_containers(&argument.definition)? {
                     return Ok(true);
                 }

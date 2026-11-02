@@ -315,7 +315,77 @@ pub struct NodeDefinition {
     pub loop_definition: Option<Box<LoopDefinition>>,
 }
 
+/// A compile-time reference to a passed Flow parameter, not a registry alias or JSON body.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowParameterReference {
+    pub parameter: String,
+}
+
+/// Executable router mode. Legacy gate routing continues to use `routes` instead.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouterSubgraphConfig {
+    pub subgraphs: BTreeMap<String, FlowParameterReference>,
+    pub arguments_object: bool,
+    pub capture_errors: bool,
+}
+
 impl NodeDefinition {
+    pub fn accepts_flow_arguments(&self) -> bool {
+        (self.kind == CALL_KIND
+            && self
+                .config
+                .get("flow_ref")
+                .is_some_and(|value| !value.is_null()))
+            || (self.kind == ROUTER_KIND && self.config.get("subgraphs").is_some())
+    }
+
+    /// Resolve executable authority once from the lexical environment. Keys are owner-local
+    /// branch identities; values retain the parameter name for host executor lookup.
+    pub fn selected_flow_arguments<'a>(
+        &'a self,
+        arguments: &'a BTreeMap<String, ResolvedFlowArgument>,
+    ) -> Result<BTreeMap<String, (&'a str, &'a ResolvedFlowArgument)>, mf_telemetry::ContractError>
+    {
+        use snafu::{OptionExt, ensure};
+        if self.kind == ROUTER_KIND && self.accepts_flow_arguments() {
+            let config: RouterSubgraphConfig = serde_json::from_value(self.config.clone())?;
+            ensure!(
+                config.arguments_object && config.capture_errors,
+                mf_telemetry::InvalidSnafu {
+                    message: "subgraph routers require arguments_object and capture_errors"
+                }
+            );
+            let mut selected = BTreeMap::new();
+            for (branch, reference) in config.subgraphs {
+                ensure!(
+                    !branch.trim().is_empty()
+                        && branch != "else"
+                        && !reference.parameter.trim().is_empty(),
+                    mf_telemetry::InvalidSnafu {
+                        message: "subgraph router branch and parameter names must be nonblank; `else` is reserved"
+                    }
+                );
+                let (parameter, argument) = arguments
+                    .get_key_value(&reference.parameter)
+                    .with_context(|| mf_telemetry::InvalidSnafu {
+                        message: format!(
+                            "router `{}` references unknown passed Flow parameter `{}`",
+                            self.id, reference.parameter
+                        ),
+                    })?;
+                selected.insert(branch, (parameter.as_str(), argument));
+            }
+            Ok(selected)
+        } else {
+            Ok(arguments
+                .iter()
+                .map(|(name, argument)| (name.clone(), (name.as_str(), argument)))
+                .collect())
+        }
+    }
+
     pub fn has_order_edges(&self) -> bool {
         self.loop_definition
             .as_ref()
@@ -333,6 +403,7 @@ impl LoopBodyDefinition {
     }
 }
 
+pub const ROUTER_KIND: &str = "builtin.router";
 pub const LOOP_KIND: &str = "workflow.loop";
 pub const LOOP_ASSIGN_KIND: &str = "workflow.loop_assign";
 pub const EXIT_LOOP_KIND: &str = "workflow.exit_loop";

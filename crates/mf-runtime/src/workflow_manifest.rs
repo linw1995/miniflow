@@ -409,17 +409,12 @@ fn describe_loops(
     include_iterations: bool,
 ) -> Result<(), ContractError> {
     for node in nodes {
-        if node.kind == crate::CALL_KIND
-            && node
-                .config
-                .get("flow_ref")
-                .is_some_and(|value| !value.is_null())
-        {
-            for (name, argument) in arguments {
+        if node.accepts_flow_arguments() {
+            for (name, (_, argument)) in node.selected_flow_arguments(arguments)? {
                 let body = &argument.definition;
                 path.push(mf_telemetry::event::ScopePathEntry::binding_key(
                     node.id.as_str(),
-                    name,
+                    &name,
                 ));
                 injected_paths.push(path.clone());
                 let order = orders

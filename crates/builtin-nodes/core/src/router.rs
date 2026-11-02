@@ -94,7 +94,86 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     PreparedNode::new(node, metadata)
 }
 
-inventory::submit! { NodeRegistration { kind: KIND, factory: NodeFactory::Plain(factory) } }
+struct SubgraphRouter {
+    id: String,
+    subgraphs: mf_runtime::PreparedFlowArguments,
+}
+
+impl NodePortContract for SubgraphRouter {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: vec![
+                PortSpec::new("route", ValueType::String, true),
+                PortSpec::new("arguments", ValueType::Object, true),
+            ],
+            outputs: vec![PortSpec::new("result", ValueType::Object, true)],
+        }
+    }
+}
+
+impl TaskNode for SubgraphRouter {
+    fn execute(
+        &self,
+        mut inputs: Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        use snafu::OptionExt;
+        let route = inputs.remove("route").expect("validated route");
+        let name = route.as_str().expect("validated route string");
+        let body =
+            self.subgraphs
+                .get(name)
+                .with_context(|| mf_runtime::NodeExecutionFailedSnafu {
+                    message: format!("unknown passed router subgraph `{name}`"),
+                })?;
+        super::call::execute_passed_flow(&self.id, name, body, inputs, context)
+    }
+}
+
+fn subgraph_factory(
+    id: &str,
+    config: Value,
+    subgraphs: mf_runtime::PreparedFlowArguments,
+) -> Result<PreparedNode, NodeBuildError> {
+    let config: mf_runtime::RouterSubgraphConfig = deserialize_config(config)?;
+    ensure!(
+        config.arguments_object && config.capture_errors,
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "subgraph routers require arguments_object and capture_errors"
+        }
+    );
+    ensure!(
+        config
+            .subgraphs
+            .iter()
+            .all(|(branch, reference)| !branch.trim().is_empty()
+                && branch != "else"
+                && !reference.parameter.trim().is_empty()),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "subgraph router branch and parameter names must be nonblank; `else` is reserved"
+        }
+    );
+    ensure!(
+        config
+            .subgraphs
+            .keys()
+            .map(String::as_str)
+            .eq(subgraphs.names()),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "prepared router subgraphs must exactly match its passed parameter mapping"
+        }
+    );
+    let metadata = super::call::passed_flow_metadata(&subgraphs)?;
+    PreparedNode::new(
+        SubgraphRouter {
+            id: id.into(),
+            subgraphs,
+        },
+        metadata,
+    )
+}
+
+inventory::submit! { NodeRegistration { kind: KIND, factory: NodeFactory::FlowArguments { plain: factory, prepared: subgraph_factory } } }
 
 #[cfg(test)]
 mod tests {
@@ -124,6 +203,65 @@ mod tests {
             assert_eq!(result.skipped.len(), 2);
             assert!(!result.skipped.contains(selected));
         }
+    }
+
+    #[test]
+    fn prepared_router_rejects_extra_missing_and_nonterminal_bodies() {
+        use mf_runtime::{
+            PortSpec, PreparedFlowArguments, PreparedSubgraph, StdinRequirement,
+            WorkflowInputSchema,
+        };
+        let config = json!({"subgraphs":{"a":{"parameter":"target"}}, "arguments_object":true,"capture_errors":true});
+        let body = PreparedSubgraph::new(vec![], vec![], |_| Ok(Default::default()));
+        assert!(
+            subgraph_factory("router", config.clone(), PreparedFlowArguments::default()).is_err()
+        );
+        assert!(
+            subgraph_factory(
+                "router",
+                config.clone(),
+                PreparedFlowArguments::new(
+                    [
+                        ("a".into(), body.clone()),
+                        ("unauthorized".into(), body.clone())
+                    ]
+                    .into()
+                )
+            )
+            .is_err()
+        );
+        let mut schema = WorkflowInputSchema::default();
+        schema.stdin.insert("read".into(), StdinRequirement::Always);
+        assert!(
+            subgraph_factory(
+                "router",
+                config.clone(),
+                PreparedFlowArguments::new([("a".into(), body.with_input_schema(schema))].into())
+            )
+            .is_err()
+        );
+        let body = PreparedSubgraph::streaming(
+            vec![],
+            vec![],
+            vec![PortSpec::new("value", ValueType::String, true)],
+            |_, _| Ok(Default::default()),
+        );
+        assert!(
+            subgraph_factory(
+                "router",
+                config,
+                PreparedFlowArguments::new([("a".into(), body)].into())
+            )
+            .is_err()
+        );
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        assert!(
+            registry
+                .get(KIND)
+                .unwrap()
+                .instantiate(json!({"subgraphs":{},"arguments_object":true,"capture_errors":true}))
+                .is_err()
+        );
     }
 
     #[test]

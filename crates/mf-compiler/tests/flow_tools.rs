@@ -195,9 +195,8 @@ fn assert_runtime_catalog(definition: &WorkflowDefinition, expected_tools: usize
     assert_eq!(
         nodes
             .iter()
-            .filter(
-                |node| node["kind"] == "workflow.call" && node["config"].get("flow_ref").is_some()
-            )
+            .filter(|node| node["kind"] == "builtin.router"
+                && node["config"].get("subgraphs").is_some())
             .count(),
         1
     );
@@ -246,14 +245,25 @@ fn local_named_flows_freeze_definitions_expose_schemas_and_dispatch_in_order() {
             .iter()
             .filter(|node| node["kind"] == "workflow.call")
             .count(),
-        1
+        0
+    );
+    let execute = dispatch_nodes
+        .iter()
+        .find(|node| node["id"] == "execute")
+        .unwrap();
+    assert_eq!(execute["kind"], "builtin.router");
+    assert_eq!(
+        execute["config"]["subgraphs"],
+        json!({
+            "greet": {"parameter": "greet"}, "stats": {"parameter": "stats"}
+        })
     );
     assert!(
         dispatch_nodes
             .iter()
             .all(|node| !node["id"].as_str().unwrap().ends_with("_0"))
     );
-    assert!(child.to_string().contains("workflow.call"));
+    assert!(!child.to_string().contains("flow_ref"));
     assert!(!child.to_string().contains("workflow.tool_call"));
 
     let results = outputs["results"].as_array().unwrap();
@@ -647,7 +657,7 @@ fn injected_flow_bodies_are_marked_for_inspection() {
     assert_eq!(
         path.last(),
         Some(&mf_telemetry::event::ScopePathEntry::binding_key(
-            "invoke",
+            "execute",
             "calculator"
         ))
     );

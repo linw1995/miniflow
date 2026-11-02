@@ -1401,7 +1401,7 @@ pub fn normalize_plan(
         if node.kind == ITERATION_KIND {
             node.config = normalize_config(definition, node)?;
         }
-        if crate::calls::is_flow(node) && !crate::calls::is_reference(node) {
+        if crate::calls::is_flow(node) && !crate::calls::is_flow_argument_consumer(node) {
             let body = crate::calls::body_definition(node)?;
             let normalized = plan_resolved_definition(&body)?.definition;
             crate::calls::config_mut(node)["definition"] = serde_json::to_value(normalized)
@@ -1685,11 +1685,13 @@ fn collect_loop_execution_orders(
     include_iterations: bool,
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
-        if crate::calls::is_reference(node) {
-            for (name, argument) in &definition.flow_arguments {
+        if crate::calls::is_flow_argument_consumer(node) {
+            for (name, (_, argument)) in
+                crate::calls::selected_arguments(node, &definition.flow_arguments)?
+            {
                 path.push(mf_telemetry::event::ScopePathEntry::binding_key(
                     node.id.as_str(),
-                    name,
+                    &name,
                 ));
                 let order = structural_order_graph(&argument.definition)
                     .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
@@ -1858,7 +1860,8 @@ fn prepare_subgraph_body(
             message: "combined container nesting exceeds twenty scopes"
         }
     );
-    let call_like = crate::calls::is_flow_with_registry(node, Some(preparation.registry));
+    let call_like = crate::calls::is_flow_with_registry(node, Some(preparation.registry))
+        || crate::calls::is_flow_argument_consumer(node);
     preparation.path.push(node.id.clone());
     let prepared = prepare_graph(body, preparation, enclosing, allow_iteration_input);
     let path = preparation
@@ -2039,9 +2042,9 @@ fn resolve_nodes_in_scope(
                 })?;
                 return Ok(FlowNode::new(node.id.clone(), instance));
             }
-            if crate::calls::is_reference(node) {
+            if crate::calls::is_flow_argument_consumer(node) {
                 let mut arguments = BTreeMap::new();
-                for (name, argument) in &definition.flow_arguments {
+                for (name, (parameter, argument)) in crate::calls::selected_arguments(node, &definition.flow_arguments)? {
                     ensure!(!name.trim().is_empty(), InvalidCallSnafu { definition_id: node.id.clone(), message: "passed Flow parameter names must not be blank" });
                     let body = &argument.definition;
                     crate::validate_execution(body).context(StreamConstructionSnafu)?;
@@ -2050,11 +2053,11 @@ fn resolve_nodes_in_scope(
                     });
                     crate::loops::validate_structure(body)?;
                     // Layout keys carry binding identity, not additional executable nodes.
-                    let key = mf_telemetry::event::ScopePathEntry::binding_key(node.id.as_str(), name);
+                    let key = mf_telemetry::event::ScopePathEntry::binding_key(node.id.as_str(), &name);
                     ensure!(!definition.nodes.iter().any(|node| node.id.as_str() == key), InvalidCallSnafu {
                         definition_id: node.id.clone(), message: "Flow parameter body key collides with an authored node ID"
                     });
-                    let prepared = if let Some(registered) = preparation.registry.flow(name) {
+                    let prepared = if let Some(registered) = preparation.registry.flow(parameter) {
                         ensure!(
                             plan_resolved_definition(body)?.definition
                                 == plan_resolved_definition(&registered.definition)?.definition,

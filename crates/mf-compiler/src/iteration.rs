@@ -97,12 +97,9 @@ pub fn normalize_config(
     node: &NodeDefinition,
 ) -> Result<serde_json::Value, WorkflowCompileError> {
     let mut config = parse_config(node)?;
-    for call in config
-        .body
-        .nodes
-        .iter()
-        .filter(|node| node.kind == mf_runtime::CALL_KIND && !crate::calls::is_reference(node))
-    {
+    for call in config.body.nodes.iter().filter(|node| {
+        node.kind == mf_runtime::CALL_KIND && !crate::calls::is_flow_argument_consumer(node)
+    }) {
         let child = crate::calls::body_definition(call)?;
         snafu::ensure!(
             !crate::calls::contains_iteration_containers(&child)?,

@@ -936,12 +936,26 @@ pub fn instantiate_flow_reference_with_metadata(
     config_json: &str,
     arguments: mf_runtime::PreparedFlowArguments,
 ) -> Result<crate::FlowNode, WorkflowBuildError> {
-    let registration = registry
-        .get(mf_runtime::CALL_KIND)
-        .with_context(|| UnknownKindSnafu {
-            definition_id: DefinitionId::from(definition_id),
-            kind: mf_runtime::CALL_KIND.to_owned(),
-        })?;
+    instantiate_flow_arguments_with_metadata(
+        registry,
+        definition_id,
+        mf_runtime::CALL_KIND,
+        config_json,
+        arguments,
+    )
+}
+
+pub fn instantiate_flow_arguments_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+    arguments: mf_runtime::PreparedFlowArguments,
+) -> Result<crate::FlowNode, WorkflowBuildError> {
+    let registration = registry.get(kind).with_context(|| UnknownKindSnafu {
+        definition_id: DefinitionId::from(definition_id),
+        kind: kind.to_owned(),
+    })?;
     let config = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
         definition_id: DefinitionId::from(definition_id),
     })?;

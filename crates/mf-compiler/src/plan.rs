@@ -684,8 +684,9 @@ fn generate_scope(
         if matches!(
             node.kind.as_str(),
             crate::LOOP_KIND | ITERATION_KIND | mf_runtime::CALL_KIND
-        ) {
-            preparations.push(if crate::calls::is_reference(node) {
+        ) || crate::calls::is_flow_argument_consumer(node)
+        {
+            preparations.push(if crate::calls::is_flow_argument_consumer(node) {
                 reference_preparation(definition, node, scope, index, static_scope, &bindings)?
             } else {
                 subgraph_preparation(definition, node, scope, index, static_scope, &bindings)?
@@ -870,9 +871,14 @@ fn reference_preparation(
         &serde_json::to_string(&node.config).context(SerializeSnafu)?,
         Span::call_site(),
     );
+    let kind = LitStr::new(&node.kind, Span::call_site());
     let mut prepared = Vec::new();
     let mut entries = Vec::new();
-    for (binding_index, (name, argument)) in parent.flow_arguments.iter().enumerate() {
+    for (binding_index, (name, (_, argument))) in
+        crate::calls::selected_arguments(node, &parent.flow_arguments)?
+            .iter()
+            .enumerate()
+    {
         let body = &argument.definition;
         let body_scope = format!("{scope}_{index}_binding_{binding_index}");
         let mut path = static_scope.to_vec();
@@ -906,7 +912,7 @@ fn reference_preparation(
     Ok(quote! {
         #(#prepared)*
         let arguments = mf_runtime::PreparedFlowArguments::new(std::collections::BTreeMap::from([#(#entries),*]));
-        let mut #node_ident = mf_compiler::instantiate_flow_reference_with_metadata(registry, #id, #config, arguments)?;
+        let mut #node_ident = mf_compiler::instantiate_flow_arguments_with_metadata(registry, #id, #kind, #config, arguments)?;
         #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
             .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id })?;
     })
@@ -1692,8 +1698,12 @@ fn collect_body_layouts(
         if node.kind != mf_runtime::CALL_KIND && crate::calls::is_metadata(&node.kind, None) {
             continue;
         }
-        if crate::calls::is_reference(node) {
-            for (binding_index, (name, argument)) in definition.flow_arguments.iter().enumerate() {
+        if crate::calls::is_flow_argument_consumer(node) {
+            for (binding_index, (name, (_, argument))) in
+                crate::calls::selected_arguments(node, &definition.flow_arguments)?
+                    .iter()
+                    .enumerate()
+            {
                 let body = &argument.definition;
                 let order = crate::compiler::structural_order_graph(body)?;
                 path.push(

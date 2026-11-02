@@ -231,6 +231,8 @@ impl WorkflowDescription {
             require(
                 if entry.is_call() {
                     container.kind == "workflow.call"
+                        || (container.kind == "builtin.router"
+                            && matches!(entry, crate::event::ScopePathEntry::CallBinding { .. }))
                 } else {
                     container.kind == "workflow.loop"
                 },
@@ -262,6 +264,7 @@ impl WorkflowDescription {
             })?;
             match container.kind.as_str() {
                 "workflow.call" => has_call = true,
+                "builtin.router" if owner.is_some() => has_call = true,
                 "workflow.loop" => {}
                 _ => return None,
             }
@@ -410,7 +413,8 @@ impl WorkflowDescription {
                 .ok_or_else(|| crate::invalid("unknown body container"))?;
             let iteration =
                 self.version.supports_iteration_bodies() && container.kind == "builtin.iteration";
-            let call = container.kind == "workflow.call";
+            let call = container.kind == "workflow.call"
+                || (container.kind == "builtin.router" && owner.is_some());
             let has_call = *parent_has_call || call;
             require(
                 has_call || body.path.len() <= crate::MAX_LOOP_DEPTH,

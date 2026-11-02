@@ -93,6 +93,23 @@ pub fn configure_tool_uses(
         .iter_mut()
         .find(|node| node["id"] == "bindings")
         .expect("bindings")["config"]["value"] = Value::Object(bindings);
+    let dispatch = value["nodes"]
+        .as_array_mut()
+        .expect("tool-uses nodes")
+        .iter_mut()
+        .find(|node| node["id"] == "dispatch")
+        .expect("dispatch");
+    dispatch["config"]["body"]["nodes"]
+        .as_array_mut()
+        .expect("dispatch nodes")
+        .iter_mut()
+        .find(|node| node["id"] == "execute")
+        .expect("execute")["config"]["subgraphs"] = Value::Object(
+        flows
+            .keys()
+            .map(|name| (name.clone(), json!({"parameter": name})))
+            .collect(),
+    );
     let mut definition = parse(value)?;
     definition.flow_arguments = flows
         .into_iter()
@@ -236,9 +253,9 @@ mod tests {
                 .count(),
             1
         );
-        assert!(nodes.iter().any(
-            |node| node["kind"] == "workflow.call" && node["config"].get("flow_ref").is_some()
-        ));
+        assert!(!nodes.iter().any(|node| node["kind"] == "workflow.call"));
+        assert!(nodes.iter().any(|node| node["kind"] == "builtin.router"
+            && node["config"]["subgraphs"] == json!({"dispatch": {"parameter": "dispatch"}})));
         assert_eq!(
             value["flow_arguments"]["dispatch"]["definition"],
             serde_json::to_value(&binding.definition).unwrap()

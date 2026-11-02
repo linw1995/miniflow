@@ -139,8 +139,37 @@ user-authored Flow without compiler rewriting or LLM tool expansion. It is a too
 configure `routes: ["first", "second"]` and connect its required string `route` input. It emits a boolean
 gate on exactly one named output (or `else` for an unknown route), skips the other outputs, and declares
 them mutually exclusive. Connect these gates to downstream nodes or `workflow.call` nodes using ordinary
-edges; downstream nodes gated by unselected outputs do not run. The router never describes tools,
-parses arguments, invokes a child, encodes results, or recovers errors.
+edges; downstream nodes gated by unselected outputs do not run. This legacy gate mode is unchanged.
+
+Version `2026-11-01` also supports router-owned passed subgraphs:
+
+```json
+{
+  "id": "execute",
+  "kind": "builtin.router",
+  "config": {
+    "subgraphs": { "search": { "parameter": "search-web" } },
+    "arguments_object": true,
+    "capture_errors": true
+  },
+  "inputs": {
+    "route": { "from": { "node": "select", "port": "name" } },
+    "arguments": { "from": { "node": "arguments", "port": "arguments" } }
+  }
+}
+```
+
+`subgraphs` explicitly passes lexical `flow_arguments` to this router. Keys are router-local branch
+names; `parameter` names the frozen passed Flow, not a global registry alias. Preparation validates
+all mapped children and supplies only those prepared bodies to the router. The required string
+`route` selects and executes one owned child; `arguments` contains qualified startup input names.
+The required `result` output envelopes child `outputs` or a recoverable `error`. Cancellation and
+worker infrastructure failures still fail execution. Children must be terminal and cannot read stdin.
+Unknown branches fail without invoking a child. Empty mappings are valid but authorize no execution.
+`routes` and `subgraphs` cannot be combined. Both flags shown above are currently required and true.
+The router remains tool-independent: it neither describes tools nor parses model arguments or encodes
+provider results. Executed children use binding-aware call scopes owned by the router, including when
+a branch aliases a differently named parameter.
 
 The [standalone router example](../examples/router-flow.json) declares `mfn-core` with the local path
 `../crates/builtin-nodes/core`. Its required string startup parameter `params.route` defaults to `first`
@@ -288,9 +317,11 @@ execution edges.
 
 `mfn-llm.tool-uses` declares one shared router/arguments/invoke/encode chain in its provider-owned
 JSON. Expansion binds only the passed frozen Flow environment and sanitized interface data; it does
-not generate per-tool graph branches. The router distinguishes known and unknown names. The shared
-`llm.tool_arguments` reads the selected sanitized `binding` input, validates each model call, and maps
-short parameter names. The shared `workflow.call` invokes the corresponding prepared passed binding.
+not generate per-tool graph branches. A gate-mode router distinguishes known and unknown names. The
+shared `llm.tool_arguments` reads the selected sanitized `binding` input, validates each model call,
+and maps short parameter names. An executable `builtin.router` explicitly receives the injected
+Flow parameters as its owned `subgraphs`, selects the requested name and executes that prepared body.
+There is no separate name-selector-to-invoker dispatch node.
 Metadata consumers never receive child execution closures. The runtime knows no Tool types or LLM
 schema policy.
 
@@ -455,7 +486,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by execution prerequisites | One boolean activation output per branch, plus `else` |
 | `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
-| `mfn-core` | [`builtin.router`](#router-and-llm-agent-flows) | Nonempty `routes` | Required `route`: string | Exclusive named boolean gates and `else` |
+| `mfn-core` | [`builtin.router`](#router-and-llm-agent-flows) | Nonempty `routes`, or explicit `subgraphs` with true `arguments_object` and `capture_errors` | Required `route`: string; subgraph mode also requires `arguments`: object | Gate mode: exclusive named boolean gates and `else`; subgraph mode: child `result` envelope |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |

@@ -288,6 +288,10 @@ impl PreparedFlowArguments {
         self.0.get(name)
     }
 
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
     pub fn values(&self) -> impl Iterator<Item = &PreparedSubgraph> {
         self.0.values()
     }

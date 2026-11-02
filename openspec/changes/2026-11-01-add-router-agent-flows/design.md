@@ -36,14 +36,18 @@ catalog into the Loop. Empty bindings follow the same path. The parameter has no
 no compile-time task evaluator is introduced. Executable definitions remain in the canonical passed
 `flow_arguments` environment rather than being duplicated in catalog input data or call-local candidates.
 
-The authored tool-uses graph has one shared router/arguments/invoke/encode chain regardless of tool
-count. Runtime argument adapters consume the selected sanitized interface. A reference-only
-`workflow.call` target resolves the selected name solely against passed prepared bindings. The
-runtime value remains ordinary JSON; executable authority resides in `PreparedFlowArguments`, whose
-entries are `PreparedSubgraph` handles constructed during preparation. All targets are validated and
-generated before execution. No source lookup, global binding fallback, opaque Value variant, or
-runtime definition interpreter is introduced. Compile-time metadata and runtime configuration
-references do not add scheduling edges: producers still require explicit prerequisites.
+The authored tool-uses graph has one shared arguments/executable-router/encode chain regardless of
+tool count, with a legacy gate router guarding known/unknown input validation. Runtime argument
+adapters consume the selected sanitized interface. The executable router explicitly receives its
+owned subgraphs through `subgraphs: {"branch": {"parameter": "passed-name"}}`; preparation resolves
+only these bindings from the canonical lexical environment. Branch names may alias parameter names.
+The router selects and executes its prepared child itself, with no separate invocation node. A generic
+reference-only `workflow.call` remains independently available. Runtime values remain ordinary JSON;
+executable authority resides in `PreparedFlowArguments`, whose entries are `PreparedSubgraph` handles
+constructed during preparation. All selectable targets are validated and generated before execution.
+No source lookup, global binding fallback, opaque Value variant, or runtime definition interpreter is
+introduced. Compile-time metadata and runtime configuration references do not add scheduling edges:
+producers still require explicit prerequisites.
 
 Loop/Iteration bodies retain lexical bindings; separately called children retain their own bindings.
 Reference calls initially require terminal children without stdin, object arguments and captured
@@ -58,9 +62,14 @@ or LLM recovery policy.
 user-authored Flow without compiler rewriting or LLM tool expansion. It accepts a required string
 `route` input, emits one exclusive boolean gate for a configured route (or `else` for an unknown
 route), and skips the others. It performs no downstream execution; ordinary edges gate downstream
-nodes, and consumers of unselected gates do not run. Provider expansion creates ordinary downstream
-`workflow.call` nodes. Calls support generic object arguments and captured output/error envelopes;
-cancellation and worker infrastructure failures remain failures.
+nodes, and consumers of unselected gates do not run. This legacy `routes` mode remains compatible
+with plain factory instantiation. A separate `subgraphs` mode owns explicitly passed prepared children
+and executes one using the shared call executor with object arguments and captured output/error
+envelopes. Empty mappings are valid; mixed modes, invalid names and missing parameters fail
+preparation. Host executors are looked up by parameter name and checked against every owned frozen
+definition, including currently unselected branches. Branch aliases own their binding observation
+paths. Interpreted preparation, kind-aware generated construction and manifests share the same selected
+mapping. Cancellation and worker infrastructure failures remain failures.
 
 The LLM provider owns canonical ToolDefinition/ToolCall/ToolResult values and the metadata adapters
 that derive schemas, validate and map arguments, hide secret ports, and encode results. One startup

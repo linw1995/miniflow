@@ -134,16 +134,20 @@
               }
             },
             {
-              "id": "invoke",
-              "kind": "workflow.call",
+              "id": "execute",
+              "kind": "builtin.router",
               "config": {
-                "flow_ref": {
-                  "$ref": "select.name"
-                },
+                "subgraphs": {},
                 "arguments_object": true,
                 "capture_errors": true
               },
               "inputs": {
+                "route": {
+                  "from": {
+                    "node": "select",
+                    "port": "name"
+                  }
+                },
                 "arguments": {
                   "from": {
                     "node": "arguments",
@@ -175,7 +179,7 @@
                       "port": "error"
                     },
                     {
-                      "node": "invoke",
+                      "node": "execute",
                       "port": "result"
                     }
                   ]
