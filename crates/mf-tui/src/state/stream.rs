@@ -409,6 +409,7 @@ impl StreamState {
                     invocation.loop_summary = loop_summary.clone();
                     observed.terminal_sequence = Some(record.sequence);
                     observed.terminal_elapsed_ns = Some(*elapsed_ns);
+                    observed.terminal_received_at = Some(std::time::Instant::now());
                     observed.duration_ns = *duration_ns;
                     observed.status = if *outcome == Outcome::Succeeded {
                         NodeStatus::Succeeded
@@ -438,6 +439,7 @@ impl StreamState {
                     observed.set_selections(event.selected_inputs());
                     observed.terminal_sequence = Some(record.sequence);
                     observed.terminal_elapsed_ns = Some(*elapsed_ns);
+                    observed.terminal_received_at = Some(std::time::Instant::now());
                     (observed.skip_causes, observed.omitted_skip_causes) = bounded_causes(causes);
                     (observed.skipped_ports, observed.omitted_port_names) =
                         bounded_ports(skipped_ports);

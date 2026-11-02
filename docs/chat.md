@@ -128,8 +128,8 @@ Configure the model and endpoint in the supplied workflow. The example prints co
 ## Session title summaries
 
 `ChatHost` and `mf run --chat` enable the built-in title Flow when the chat workflow exposes exactly
-one string input for each of `model`, `base_url`, and `api_key`, with nonblank resolved values.
-Defaults, environment bindings, and secret markers are preserved. Missing or ambiguous inputs skip
+one string input for each of `model`, `base_url`, and `api_key`, with resolved values. An empty `api_key`
+is allowed for keyless endpoints. Defaults, environment bindings, and secret markers are preserved. Missing or ambiguous inputs skip
 this feature; a declared `title` output leaves title generation to the user workflow. A returned title
 or usage attributed to `title` also prevents a duplicate call.
 

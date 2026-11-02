@@ -1024,6 +1024,7 @@ fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
 #[derive(Default)]
 struct ViewState {
     graph_notice: Option<String>,
+    minimap_hidden: bool,
     latest_node_sequence: Option<mf_telemetry::Count>,
     latest_iteration_revision: u64,
     iteration_items: BTreeMap<Vec<String>, ItemIdentity>,
@@ -1186,6 +1187,7 @@ impl ViewState {
         }
         match key {
             KeyCode::Char('d') => self.details_visible = !self.details_visible,
+            KeyCode::Char('m') => self.minimap_hidden = !self.minimap_hidden,
             KeyCode::Esc if self.details_visible => self.details_visible = false,
             KeyCode::PageDown if self.details_visible => {
                 self.details_offset = self
@@ -1737,8 +1739,10 @@ fn draw(
             .reader(receiver)
             .selected(view_state.selected)
             .offset(view_state.offset.0, view_state.offset.1)
-            .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64);
+            .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64)
+            .minimap(!view_state.minimap_hidden);
         graph_view = graph_view.nodes(&display_nodes);
+        let minimap_area = graph_view.minimap_area(graph);
         frame.render_widget(graph_view, graph);
         let observations = display_nodes.as_slice();
         let pip_nodes = inline_observations_with_items(
@@ -1751,6 +1755,7 @@ fn draw(
         view_state.mouse_overlays = parallel_pip_areas(
             execution_pips(pip_layout, &pip_nodes, Some(&snapshot.iterations)).len(), graph,
         ).0;
+        view_state.mouse_overlays.extend(minimap_area);
         draw_parallel_pips(
             frame,
             graph,
@@ -1804,7 +1809,7 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows/wheel pan | Tab/click select | d details | ? help | {controls}",
+            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows/wheel pan | Tab/click select | m minimap | d details | ? help | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
@@ -1830,7 +1835,7 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
          l              Expand selected body inline\nh              Fully collapse body / enclosing body\n\
          Esc            Close details / collapse body\n\
          [ / ]          Older / newer pass or item\nf              Reset viewport\n\
-         Ctrl-C         Interrupt / close\nq, Enter       Close after completion"
+         m              Show / hide minimap\nCtrl-C         Interrupt / close\nq, Enter       Close after completion"
     };
     let [_, horizontal, _] = Layout::horizontal([
         Constraint::Fill(1),
@@ -4076,6 +4081,79 @@ mod tests {
     }
 
     #[test]
+    fn mouse_minimap_blocks_canvas_input_only_while_visible() {
+        let description = scope_fixture();
+        let receiver = LoopbackReceiver::bind(description.clone(), RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let snapshot = reader.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(Box::new(io::sink()) as Box<dyn Write>),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(7, 3, 24, 11)),
+            },
+        )
+        .unwrap();
+        let capture = CaptureView {
+            stdout_open: false,
+            stderr_open: false,
+            stderr_tail: String::new(),
+            stderr_dropped: 0,
+            error: None,
+        };
+        let render = |view: &mut ObservationView, terminal: &mut Terminal<_>| {
+            draw(
+                terminal,
+                &view.root,
+                &view.pip_layout,
+                &description,
+                &snapshot,
+                &capture,
+                Duration::ZERO,
+                &mut view.state,
+                &reader,
+                None,
+            )
+            .unwrap();
+        };
+        render(&mut view, &mut terminal);
+        let map = GraphView::new(&view.root)
+            .minimap(true)
+            .minimap_area(view.state.mouse_graph)
+            .expect("the graph overflows this small canvas");
+        let selected = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "target")
+            .unwrap();
+        let rect = view.root.nodes()[selected].rect;
+        // Place the target's bottom-right cell under the minimap's top-left cell.
+        view.state.offset = (
+            rect.x + rect.width - 1 - u32::from(map.x - view.state.mouse_graph.x),
+            rect.y + rect.height - 1 - u32::from(map.y - view.state.mouse_graph.y),
+        );
+        view.state.selected = (selected + 1) % view.root.nodes().len();
+        view.state.reveal_selected = false;
+        render(&mut view, &mut terminal);
+        assert!(view.state.mouse_overlays.contains(&map));
+        let previous = view.state.selected;
+        let offset = view.state.offset;
+        let click = mouse(MouseEventKind::Down(MouseButton::Left), map.x, map.y);
+        let wheel = mouse(MouseEventKind::ScrollDown, map.x, map.y);
+        view.handle_mouse(click);
+        view.handle_mouse(wheel);
+        assert_eq!(view.state.selected, previous);
+        assert_eq!(view.state.offset, offset);
+
+        view.state.minimap_hidden = true;
+        render(&mut view, &mut terminal);
+        assert!(!view.state.mouse_overlays.contains(&map));
+        view.handle_mouse(click);
+        assert_eq!(view.state.selected, selected);
+        view.handle_mouse(wheel);
+        assert_eq!(view.state.offset, (offset.0, offset.1 + 2));
+    }
+
+    #[test]
     fn mouse_selects_clipped_inline_node_and_syncs_history_scope() {
         let mut view = ObservationView::new(&scope_fixture()).unwrap();
         let selected = view
@@ -4194,6 +4272,32 @@ mod tests {
         expected.clear();
         execute!(expected, Show, LeaveAlternateScreen).unwrap();
         assert_eq!(failing.bytes, expected);
+    }
+
+    #[test]
+    fn minimap_toggle_preserves_navigation_and_is_consumed_by_help() {
+        let description = scope_fixture();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.state.offset = (12, 8);
+        let selected = view.state.selected;
+        assert!(!view.state.minimap_hidden);
+        view.handle_navigation(KeyCode::Char('m'), &snapshot, &traces, &logs);
+        assert!(view.state.minimap_hidden);
+        assert_eq!(view.state.offset, (12, 8));
+        assert_eq!(view.state.selected, selected);
+        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+        assert!(view.state.minimap_hidden);
+        view.state.handle_help(KeyCode::Char('?'));
+        assert!(view.state.handle_help(KeyCode::Char('m')));
+        assert!(view.state.minimap_hidden);
+        view.state.handle_help(KeyCode::Esc);
+        view.handle_navigation(KeyCode::Char('m'), &snapshot, &traces, &logs);
+        assert!(!view.state.minimap_hidden);
     }
 
     #[test]
