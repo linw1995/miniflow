@@ -29,23 +29,30 @@ terminal interfaces without stdin or stream outputs.
 - **THEN** the tool schema exposes required integer properties `left` and `right` with the supplied descriptions
 - **AND** model arguments are qualified as `calculate.left` and `calculate.right` before invocation, returning the JSON result `{"sum":5}` for inputs 2 and 3
 
-### Requirement: Precompute metadata-dependent provider expansion
+### Requirement: Bind linked interfaces and explicitly project the catalog at runtime
 
 The compiler SHALL retain metadata-dependent expansion requests through structural planning and
 resolve them only where selected node providers are linked. Provider callbacks SHALL receive frozen
 interface facts without executable child closures. Final generated artifacts SHALL contain expanded
-graphs and frozen metadata, with no source-path reads or schema-reflection tasks at startup.
+graphs and frozen metadata, with no source-path reads or provider-interface reflection at startup.
 
-The LLM provider SHALL generate a constant tool catalog during expansion rather than executable
-per-tool schema adapters and a CEL collector. Runtime argument validation SHALL retain only the
-required frozen interface, without embedding another copy of the executable child definition.
+The LLM provider SHALL bind names, descriptions, qualified parameter descriptions, and real linked
+interface definitions as an ordinary Flow parameter default, without an environment binding.
+The original authored agent Flow SHALL explicitly map these bindings through ordinary runtime
+schema-projection nodes in a native Iteration before its conversation Loop. Projection SHALL run
+once per agent invocation, including for an empty catalog, and the Loop SHALL reuse its result.
+Expansion SHALL NOT replace a placeholder with a final catalog constant. Projection SHALL preserve
+secret/default/environment semantics without resolving their values or guessing types from raw JSON.
+Runtime argument validation SHALL retain only the required frozen interface, without embedding
+another copy of the executable child definition. Dispatch MAY retain its existing provider expansion.
 Metadata references SHALL NOT create execution dependencies or observation scopes.
 
-#### Scenario: Compile a source-free agent without schema tasks
+#### Scenario: Compile a source-free agent with explicit catalog logic
 
 - **WHEN** an agent is built with described injected tools
-- **THEN** its final graph contains the precomputed tool catalog and actual tool invocation calls, but no per-tool schema-generation tasks
+- **THEN** its final graph retains the authored catalog Iteration and projection node, supplied with linked interface data, alongside actual tool invocation calls
 - **AND** arguments are validated against frozen interfaces and execution remains valid after source files are removed
+- **AND** the source-free generated runner produces the same catalog and results as in-memory execution
 
 ### Requirement: Route user Flows with an ordinary runtime task
 

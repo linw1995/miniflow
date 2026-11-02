@@ -13,7 +13,7 @@ Flow contract and makes a multi-turn agent difficult to express and validate.
   usable in user Flows without compiler rewriting; downstream nodes perform all work through
   exclusive/skipped gates.
 - Add generic configurable built-in Flow expansion and metadata-only subgraph inspection.
-- Defer metadata-dependent expansion until provider-linked preparation; precompute tool catalogs and freeze argument interfaces without schema tasks or duplicate adapter child definitions.
+- Defer metadata-dependent expansion until provider-linked preparation; bind linked tool interfaces and descriptions as ordinary Flow parameter data. The authored agent Flow projects the catalog once at runtime before its Loop, while argument adapters retain frozen interfaces without duplicate executable child definitions.
 - Add `mfn-llm.tool-uses`, composing router, adapters, ordinary calls, and native parallel Iteration.
 - Add LLM-owned `agent-turn` and `agent` built-in Flows, reusing native Loop for model turns.
 - Make the calculator example invoke the built-in agent with an injected calculator Flow.

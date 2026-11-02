@@ -266,9 +266,24 @@ Arguments `{"left":2,"right":3}` become `{"calculate.left":2,"calculate.right":3
 boundary. The tool result is JSON text `{"sum":5}`; `sum` is not an input-schema property.
 
 Tool expansion runs after the selected node providers are linked and their interfaces can be
-inspected. The LLM provider precomputes a single constant tool catalog from these interfaces and
-binding descriptions; schema generation is not a runtime task and needs no per-tool schema nodes
-or CEL catalog collector. Metadata requests are compile-time relationships, not execution edges.
+inspected. The LLM provider validates the original interfaces, then binds sanitized interface data
+(name, description, qualified parameter descriptions, and linked metadata) to the ordinary
+`params.tool_bindings` Flow parameter's default. Secret input ports and their parameter descriptions
+are omitted entirely. Nonsecret environment names and literal defaults are replaced with a fixed
+presence-only environment marker: catalog projection and argument validation need only know whether
+a fallback exists. Actual bindings remain in the executable child, where they are resolved normally.
+It does not generate a final catalog constant or infer types from executable JSON. The authored
+`agent.json` explicitly maps this data through `llm.tool_definition` using a native Iteration outside
+`repeat`. That runtime projection runs once per agent invocation, and its collected catalog becomes
+a Loop input reused by every model turn. The empty binding list uses the same path. This parameter
+has no environment binding and introduces no new host or CLI mechanism. An authored
+`builtin.constant` holds the expected sanitized bindings; a CEL equality comparison and
+`builtin.assert` success gate reject changed parameter overrides before catalog projection or any
+model call. An ordinary `builtin.identity` forwards the bindings only after assertion success, then
+supplies the Iteration's items through a data edge. Equal overrides are accepted. This keeps the advertised catalog consistent with frozen
+dispatch, including when there are no tools. Executable tool definitions remain in dispatch calls,
+not duplicated in the catalog data. The argument adapters receive the same sanitized metadata.
+Metadata requests themselves are compile-time relationships, not execution edges.
 
 Expansion creates ordinary router gates, `workflow.call` nodes, and provider-owned
 `llm.tool_arguments` and `llm.tool_result` adapters. The argument adapter receives a frozen interface,

@@ -71,22 +71,6 @@ fn validate(flows: &Flows) -> Result<(), NodeBuildError> {
     Ok(())
 }
 
-fn catalog(flows: &Flows) -> Result<Value, NodeBuildError> {
-    let tools = flows
-        .iter()
-        .map(|(name, binding)| {
-            project(name, binding).map(|(definition, _)| {
-                json!({
-                    "name": definition.name,
-                    "description": definition.description,
-                    "input_schema": definition.input_schema,
-                })
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({"id": "tools", "kind": "builtin.constant", "config": {"value": tools}}))
-}
-
 pub fn configure_tool_uses(
     config: Value,
     flows: Flows,
@@ -155,12 +139,22 @@ pub fn configure_agent(config: Value, flows: Flows) -> Result<WorkflowDefinition
     validate(&flows)?;
     let mut value: Value =
         serde_json::from_str(include_str!("../workflows/agent.json")).expect("builtin JSON");
-    let nodes = value["nodes"].as_array_mut().expect("nodes");
-    let position = nodes
+    // Bind validated, sanitized interfaces as ordinary Flow data, not a projected catalog.
+    // The authored Iteration projects these once before entering the conversation Loop.
+    let bindings = flows
         .iter()
-        .position(|node| node["id"] == "tools")
-        .expect("catalog placeholder");
-    nodes[position] = catalog(&flows)?;
+        .map(|(name, binding)| project(name, binding).map(|(_, config)| config))
+        .collect::<Result<Vec<_>, _>>()?;
+    let nodes = value["nodes"].as_array_mut().expect("nodes");
+    let params = nodes
+        .iter_mut()
+        .find(|node| node["id"] == "params")
+        .expect("parameters");
+    params["config"]["parameters"]["tool_bindings"]["default"] = json!(bindings);
+    nodes
+        .iter_mut()
+        .find(|node| node["id"] == "expected_tool_bindings")
+        .expect("expected tool bindings")["config"]["value"] = json!(bindings);
     let mut uses = configure_tool_uses(config.clone(), flows)?;
     // The enclosing agent supplies these providers; don't re-select registry sources in a frozen child.
     uses.dependencies.clear();
@@ -262,29 +256,41 @@ mod tests {
     }
 
     #[test]
-    fn catalog_is_one_constant_even_for_non_cel_identifiers() {
+    fn authored_catalog_logic_is_unchanged_by_binding_non_cel_identifiers() {
         let flows = BTreeMap::from([
             ("search-web".into(), binding(Some("Search the web."))),
             ("9lookup".into(), binding(Some("Look up a value."))),
         ]);
+        let authored = serde_json::to_value(agent_definition().unwrap()).unwrap();
         let agent = serde_json::to_value(configure_agent(Value::Null, flows).unwrap()).unwrap();
-        let nodes = agent["nodes"].as_array().unwrap();
-        let tools = nodes.iter().find(|node| node["id"] == "tools").unwrap();
-        assert_eq!(tools["kind"], "builtin.constant");
-        assert_eq!(tools["config"]["value"][0]["name"], "9lookup");
-        assert_eq!(tools["config"]["value"][1]["name"], "search-web");
-        assert!(
-            !nodes
+        let tools = |value: &Value| {
+            value["nodes"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .any(|node| node["kind"] == "llm.tool_definition")
+                .find(|node| node["id"] == "tools")
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(tools(&agent), tools(&authored));
+        assert_eq!(tools(&authored)["kind"], "builtin.iteration");
+        assert_eq!(
+            tools(&authored)["config"]["body"]["nodes"][0]["kind"],
+            "llm.tool_definition"
         );
-        assert!(
-            !nodes
-                .iter()
-                .any(|node| node["id"].as_str().unwrap_or_default().starts_with("tool_"))
+        let parameter = &agent["nodes"][0]["config"]["parameters"]["tool_bindings"];
+        assert_eq!(parameter["secret"], false);
+        assert!(parameter.get("env").is_none());
+        let bindings = parameter["default"].as_array().unwrap();
+        assert_eq!(bindings[0]["name"], "9lookup");
+        assert_eq!(bindings[1]["name"], "search-web");
+        assert!(bindings[0].get("input_schema").is_none());
+        assert_eq!(
+            bindings[0]["metadata"],
+            serde_json::to_value(binding(Some("Look up a value.")).metadata).unwrap()
         );
         assert_eq!(
-            catalog(&Flows::new()).unwrap()["config"]["value"],
+            authored["nodes"][0]["config"]["parameters"]["tool_bindings"]["default"],
             json!([])
         );
     }

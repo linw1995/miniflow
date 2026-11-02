@@ -3,6 +3,8 @@ extern crate mfn_core as _;
 extern crate mfn_llm as _;
 
 mod common;
+#[path = "common/snapshots.rs"]
+mod snapshots;
 
 use mf_compiler::{
     CompileRequest, NodeRegistry, SupportPackages, WorkflowDefinition, compile_definition,
@@ -138,17 +140,12 @@ fn graph_nodes(value: &Value) -> Vec<&Value> {
     nodes
 }
 
-fn assert_precomputed_tools(definition: &WorkflowDefinition, expected_tools: usize) {
+fn assert_runtime_catalog(definition: &WorkflowDefinition, expected_tools: usize) {
     let value = serde_json::to_value(definition).unwrap();
     let nodes = graph_nodes(&value);
     for node in &nodes {
         let kind = node["kind"].as_str().unwrap();
         assert_ne!(kind, "compiler.metadata_expansion", "{node}");
-        assert_ne!(kind, "llm.tool_definition", "{node}");
-        assert!(
-            !node["id"].as_str().unwrap().starts_with("tool_") || node["id"] == "tool_messages",
-            "unexpected schema task: {node}"
-        );
         if kind == "llm.tool_arguments" {
             let config = &node["config"];
             assert!(config.get("subgraph").is_none(), "{node}");
@@ -163,11 +160,29 @@ fn assert_precomputed_tools(definition: &WorkflowDefinition, expected_tools: usi
         .filter(|node| node["id"] == "tools")
         .collect::<Vec<_>>();
     assert_eq!(catalogs.len(), 1);
-    assert_eq!(catalogs[0]["kind"], "builtin.constant");
+    assert_eq!(catalogs[0]["kind"], "builtin.iteration");
     assert_eq!(
-        catalogs[0]["config"]["value"].as_array().unwrap().len(),
-        expected_tools
+        catalogs[0]["inputs"]["items"]["from"],
+        json!({"node": "validated_tool_bindings", "port": "value"})
     );
+    assert_eq!(
+        catalogs[0]["config"]["body"]["nodes"][0]["kind"],
+        "llm.tool_definition"
+    );
+    let bindings = nodes
+        .iter()
+        .find_map(|node| node["config"]["parameters"]["tool_bindings"]["default"].as_array())
+        .unwrap();
+    assert_eq!(bindings.len(), expected_tools);
+    for binding in bindings {
+        assert!(
+            binding.get("input_schema").is_none(),
+            "catalog must be projected at runtime"
+        );
+        let metadata: mf_runtime::SubgraphMetadata =
+            serde_json::from_value(binding["metadata"].clone()).unwrap();
+        assert!(!metadata.outputs.is_empty());
+    }
     assert_eq!(
         nodes
             .iter()
@@ -468,6 +483,11 @@ fn empty_tool_uses_routes_every_call_to_the_unknown_fallback() {
 
 #[test]
 fn generated_runner_matches_memory_after_all_flow_sources_and_build_are_removed() {
+    use mfn_llm::test_support::{Reply, Server};
+    let server = Server::start(vec![
+        Reply::text("Same catalog"),
+        Reply::text("Same catalog"),
+    ]);
     let root = tempfile::tempdir().unwrap();
     let mut requests = calls();
     requests.as_array_mut().unwrap().push(json!({
@@ -478,8 +498,41 @@ fn generated_runner_matches_memory_after_all_flow_sources_and_build_are_removed(
         "source": {"body": addition_body()}, "description": "Add two integers.",
         "parameters": {"add.left": {"description": "First operand."}}
     });
+    // Exercise the actual authored agent catalog path as well as dispatch in the same artifact.
+    caller["flows"]["agent"] = caller["flows"]["uses"].clone();
+    caller["flows"]["agent"]["builtin"] = json!("mfn-llm.agent");
+    let nodes = caller["nodes"].as_array_mut().unwrap();
+    let mut inputs = serde_json::Map::new();
+    for (name, value) in [
+        ("prompt", "Hello"),
+        ("model", "example-model"),
+        ("base_url", server.base_url.as_str()),
+        ("api_key", "synthetic"),
+    ] {
+        let id = format!("agent_{name}");
+        nodes.push(json!({"id": id, "kind": "builtin.constant", "config": {"value": value}}));
+        inputs.insert(
+            format!("params.{name}"),
+            json!({"from": {"node": id, "port": "value"}}),
+        );
+    }
+    nodes.push(json!({"id": "agent", "kind": "workflow.call", "config": {"flow": "agent"}, "inputs": inputs}));
+    caller["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "text", "node": "agent", "port": "text"}));
     let definition = write_fixture(root.path(), caller);
-    let (_plan, _resolved, expected) = execute_source(&definition);
+    let (plan, _resolved, expected) = execute_source(&definition);
+    // There are two sets of dispatch calls, but just one catalog Iteration.
+    let agent = plan
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id == "agent".into())
+        .unwrap();
+    let agent: WorkflowDefinition =
+        serde_json::from_value(agent.config["definition"].clone()).unwrap();
+    assert_runtime_catalog(&agent, 3);
     let output = root.path().join("runner");
     let build = root.path().join("build");
     compile_project(&CompileRequest {
@@ -516,6 +569,10 @@ fn generated_runner_matches_memory_after_all_flow_sources_and_build_are_removed(
         serde_json::from_slice::<Value>(&result.stdout).unwrap(),
         expected
     );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["tools"], requests[1].body["tools"]);
+    assert_eq!(requests[0].body["tools"].as_array().unwrap().len(), 3);
 }
 
 #[test]
@@ -757,7 +814,7 @@ fn inline_single_code_tool_exposes_exact_schema_and_maps_short_arguments() {
     .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    assert_precomputed_tools(&plan.definition, 1);
+    assert_runtime_catalog(&plan.definition, 1);
     let outputs = instantiate_compiled(&plan, &registry)
         .unwrap()
         .execute_with_inputs(
@@ -772,6 +829,7 @@ fn inline_single_code_tool_exposes_exact_schema_and_maps_short_arguments() {
     assert_eq!(outputs["status"].as_str(), Some("succeeded"));
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["tools"], requests[1].body["tools"]);
     assert_eq!(
         requests[0].body["tools"],
         json!([{
@@ -907,12 +965,12 @@ fn callers_can_describe_the_same_child_differently_without_changing_it() {
     let resolved = load_workflow(&path).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_resolved_definition(&resolved.definition, &registry).unwrap();
-    assert_precomputed_tools(&plan.definition, 2);
+    assert_runtime_catalog(&plan.definition, 2);
     let frozen =
         WorkflowDefinition::from_json(&serde_json::to_string(&plan.definition).unwrap()).unwrap();
     let frozen_plan = compile_resolved_definition(&frozen, &registry).unwrap();
     assert_eq!(frozen_plan.definition, plan.definition);
-    assert_precomputed_tools(&frozen_plan.definition, 2);
+    assert_runtime_catalog(&frozen_plan.definition, 2);
     fn injected_definitions(value: &Value, definitions: &mut Vec<Value>) {
         match value {
             Value::Object(fields) => {
@@ -995,7 +1053,7 @@ fn compiled_agent_roundtrips_without_sources_or_pending_expansions() {
     let resolved = load_workflow(&path).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_resolved_definition(&resolved.definition, &registry).unwrap();
-    assert_precomputed_tools(&plan.definition, 2);
+    assert_runtime_catalog(&plan.definition, 2);
     let description = describe_compiled(&plan).unwrap();
     assert_eq!(description.injected_bodies.len(), 2);
     fs::remove_file(path).unwrap();
@@ -1004,7 +1062,7 @@ fn compiled_agent_roundtrips_without_sources_or_pending_expansions() {
         WorkflowDefinition::from_json(&serde_json::to_string(&plan.definition).unwrap()).unwrap();
     let rebuilt = compile_resolved_definition(&frozen, &registry).unwrap();
     assert_eq!(rebuilt.definition, plan.definition);
-    assert_precomputed_tools(&rebuilt.definition, 2);
+    assert_runtime_catalog(&rebuilt.definition, 2);
     assert_eq!(
         describe_compiled(&rebuilt).unwrap().injected_bodies,
         description.injected_bodies
@@ -1027,6 +1085,159 @@ fn compiled_agent_roundtrips_without_sources_or_pending_expansions() {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].body["tools"].as_array().unwrap().len(), 2);
     }
+}
+
+#[test]
+fn agent_binding_snapshots_are_sanitized_and_changed_overrides_fail_before_model() {
+    use mf_runtime::{ExecutionContext, WorkflowArguments};
+    use mfn_llm::test_support::{Reply, Server};
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition = WorkflowDefinition::from_json(&agent_parent(json!({
+        "private": {
+            "source": {"body": {
+                "nodes": [{"id": "input", "kind": "builtin.parameters", "config": {"parameters": {
+                    "credential": {"type": "string", "secret": true, "default": "SECRET_LITERAL_SENTINEL"},
+                    "count": {"type": "int", "secret": false, "default": 197531},
+                    "endpoint": {"type": "string", "secret": false, "env": "PRIVATE_ENDPOINT_ENV"}
+                }}}],
+                "outputs": []
+            }},
+            "description": "A private tool.",
+            "parameters": {"input.credential": {"description": "SECRET_DESCRIPTION_SENTINEL"}}
+        },
+        "add": {"source": {"body": addition_body()}, "description": "Add numbers."}
+    })).to_string()).unwrap();
+    let parent = compile_definition(&definition, &registry).unwrap();
+    // Read the frozen default, but observe execution through the real enclosing call.
+    let frozen: WorkflowDefinition = serde_json::from_value(
+        parent
+            .definition
+            .nodes
+            .iter()
+            .find(|node| node.id == "agent".into())
+            .unwrap()
+            .config["definition"]
+            .clone(),
+    )
+    .unwrap();
+    let bindings = frozen
+        .nodes
+        .iter()
+        .find(|node| node.id == "params".into())
+        .unwrap()
+        .config["parameters"]["tool_bindings"]["default"]
+        .clone();
+    let frozen_value = serde_json::to_value(&frozen).unwrap();
+    for node in graph_nodes(&frozen_value) {
+        if node["kind"] == "llm.tool_arguments" {
+            let binding = bindings
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|binding| binding["name"] == node["config"]["name"])
+                .unwrap();
+            assert_eq!(&node["config"], binding);
+        }
+    }
+    assert_eq!(
+        frozen
+            .nodes
+            .iter()
+            .find(|node| node.id == "expected_tool_bindings".into())
+            .unwrap()
+            .config["value"],
+        bindings
+    );
+    let plan = parent;
+    let mut changed = bindings.clone();
+    changed[0]["description"] = json!("Different advertisement");
+    let mut reversed = bindings.clone();
+    reversed.as_array_mut().unwrap().reverse();
+    let mut added = bindings.clone();
+    added.as_array_mut().unwrap().push(bindings[0].clone());
+    let removed = json!([bindings[0]]);
+    for override_value in [json!([]), changed, reversed, added, removed] {
+        let server = Server::start(vec![Reply::text("Must not be called")]);
+        let recording = snapshots::Snapshots::memory();
+        let mut context = ExecutionContext::default();
+        context.set_snapshot_recorder(recording.recorder());
+        context.set_workflow_arguments(
+            WorkflowArguments::try_from(json!({
+                "agent.params.prompt": "Hello", "agent.params.api_key": "synthetic",
+                "agent.params.base_url": server.base_url, "agent.params.tool_bindings": override_value
+            }))
+            .unwrap(),
+        );
+        let error = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_in_context(&mut context)
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("tool_bindings must match the linked tool dispatch"));
+        assert!(server.requests().is_empty());
+        assert!(
+            recording
+                .history()
+                .iter()
+                .all(|entry| entry.node.as_ref() != "definition")
+        );
+    }
+    // Both the ordinary default and an explicitly equal override are accepted.
+    for equal_override in [false, true] {
+        let server = Server::start(vec![Reply::text("Safe catalog")]);
+        let recording = snapshots::Snapshots::memory();
+        let mut context = ExecutionContext::default();
+        context.set_snapshot_recorder(recording.recorder());
+        let mut arguments = json!({"agent.params.prompt": "Hello", "agent.params.api_key": "synthetic",
+            "agent.params.base_url": server.base_url});
+        if equal_override {
+            arguments["agent.params.tool_bindings"] = bindings.clone();
+        }
+        context.set_workflow_arguments(WorkflowArguments::try_from(arguments).unwrap());
+        let outputs = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_in_context(&mut context)
+            .unwrap();
+        assert_eq!(outputs["text"].as_str(), Some("Safe catalog"));
+        assert_eq!(server.requests().len(), 1);
+        assert!(recording.history().iter().any(|entry| {
+            entry.node.as_ref() == "params"
+                && entry
+                    .snapshot
+                    .node(&entry.scope, &entry.node)
+                    .unwrap()
+                    .outputs["tool_bindings"]
+                    == bindings
+        }));
+        for entry in recording.history() {
+            let snapshot = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+            let observed = format!("{:?}{:?}", snapshot.inputs, snapshot.outputs);
+            for literal in [
+                "SECRET_LITERAL_SENTINEL",
+                "credential",
+                "SECRET_DESCRIPTION_SENTINEL",
+                "PRIVATE_ENDPOINT_ENV",
+                "197531",
+            ] {
+                assert!(!observed.contains(literal), "{observed}");
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_agent_rejects_advertising_unlinked_tools_before_model() {
+    use mfn_llm::test_support::{Reply, Server};
+    let server = Server::start(vec![Reply::text("Must not be called")]);
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition = WorkflowDefinition::from_json(&agent_parent(json!({})).to_string()).unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let result = instantiate_compiled(&plan, &registry).unwrap().execute_with_inputs(
+        mf_runtime::WorkflowArguments::try_from(json!({
+            "agent.params.prompt": "Hello", "agent.params.api_key": "synthetic",
+            "agent.params.base_url": server.base_url, "agent.params.tool_bindings": [{"name": "unlinked"}]
+        })).unwrap());
+    assert!(result.is_err());
+    assert!(server.requests().is_empty());
 }
 
 #[test]

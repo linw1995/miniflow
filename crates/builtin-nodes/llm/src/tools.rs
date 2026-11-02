@@ -150,6 +150,31 @@ fn tool_definition(
     }
 }
 
+/// Runtime projection of linked interface data; no source lookup or environment resolution.
+struct DefinitionNode;
+#[derive(NodeValue)]
+struct DefinitionInputs {
+    binding: ValueRef,
+}
+#[derive(NodeValue)]
+struct DefinitionOutputs {
+    definition: ToolDefinition,
+}
+impl TypedTaskNode for DefinitionNode {
+    type Input = DefinitionInputs;
+    type Output = DefinitionOutputs;
+
+    fn execute(
+        &self,
+        input: DefinitionInputs,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<DefinitionOutputs>, NodeExecutionError> {
+        let definition =
+            project_definition(serde_json::to_value(&input.binding).boxed()?).boxed()?;
+        Ok(DefinitionOutputs { definition }.into())
+    }
+}
+
 struct ArgumentsNode(ToolInterface);
 impl NodePortContract for ArgumentsNode {
     fn ports(&self) -> NodePorts {
@@ -278,21 +303,43 @@ impl TypedTaskNode for EncodeNode {
     }
 }
 
-/// Pure projection of a linked interface into the LLM catalog and adapter configuration.
-/// This inspects binding declarations only: defaults and environment variables remain unresolved.
+/// Validate a linked interface and project it into the catalog and public adapter metadata.
+/// Real bindings remain exclusively in the executable child definition. The adapter needs only
+/// fallback presence, not environment names or literal defaults.
 pub fn project_tool(
     name: &str,
     description: &str,
     parameters: &BTreeMap<String, mf_runtime::FlowParameterDescription>,
     metadata: &mf_runtime::SubgraphMetadata,
 ) -> Result<(ToolDefinition, Value), NodeBuildError> {
+    let original = json!({
+        "name": name,
+        "description": description,
+        "parameters": parameters,
+        "metadata": metadata,
+    });
+    // Validate before redaction so malformed defaults, unbound secrets, and unknown
+    // description keys cannot disappear unnoticed.
+    let definition = project_definition(original)?;
+    let mut metadata = metadata.clone();
+    for ports in metadata.inputs.inputs.values_mut() {
+        ports.retain(|_, input| !input.binding.secret);
+        for input in ports.values_mut() {
+            let has_source = input.binding.env.is_some() || input.binding.default.is_some();
+            input.binding.env = has_source.then(|| "MF_TOOL_BINDING_SOURCE_PRESENT".into());
+            input.binding.default = None;
+        }
+    }
+    let parameters: BTreeMap<_, _> = parameters
+        .iter()
+        .filter(|(name, _)| metadata.inputs.parameter(name).is_some())
+        .collect();
     let config = json!({
         "name": name,
         "description": description,
         "parameters": parameters,
         "metadata": metadata,
     });
-    let definition = project_definition(config.clone())?;
     Ok((definition, config))
 }
 
@@ -321,6 +368,13 @@ fn arguments_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
         },
     )
 }
+fn definition_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Config {}
+    let _: Config = deserialize_config(config)?;
+    PreparedNode::typed_task(DefinitionNode, NodeMetadata::default())
+}
 fn encode_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -328,6 +382,7 @@ fn encode_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let _: Config = deserialize_config(config)?;
     PreparedNode::typed_task(EncodeNode, NodeMetadata::default())
 }
+inventory::submit! { NodeRegistration { kind: "llm.tool_definition", factory: NodeFactory::Plain(definition_factory) } }
 inventory::submit! { NodeRegistration { kind: "llm.tool_arguments", factory: NodeFactory::Plain(arguments_factory) } }
 inventory::submit! { NodeRegistration { kind: "llm.tool_result", factory: NodeFactory::Plain(encode_factory) } }
 
@@ -654,6 +709,147 @@ mod tests {
         let config = json!({"name":"x", "description":"x", "subgraph":{}});
         assert!(definition_projection(config.clone(), body.clone()).is_err());
         assert!(arguments_adapter(config, body).is_err());
+    }
+
+    #[test]
+    fn runtime_projection_reads_supplied_binding_data_and_preserves_schema_rules() {
+        assert!(definition_factory(json!({})).is_ok());
+        assert!(definition_factory(json!({"binding": {}})).is_err());
+        let mut body = metadata();
+        let ports = body.inputs.inputs.get_mut("params").unwrap();
+        ports.get_mut("visible").unwrap().value_type = ValueType::Map(Box::new(ValueType::List(
+            Box::new(ValueType::Nullable(Box::new(ValueType::Int64))),
+        )));
+        ports.insert(
+            "environment".into(),
+            WorkflowInput {
+                value_type: ValueType::String,
+                required: true,
+                binding: InputBinding {
+                    env: Some("MF_RUNTIME_CATALOG_UNRESOLVED".into()),
+                    ..Default::default()
+                },
+            },
+        );
+        for name in ["search-web", "9lookup"] {
+            let binding = json!({
+                "name": name, "description": "Runtime supplied description.",
+                "parameters": {"params.visible": {"description": "Nested values."}},
+                "metadata": body,
+            });
+            let expected = project_definition(binding.clone()).unwrap();
+            let result = DefinitionNode
+                .execute(
+                    DefinitionInputs {
+                        binding: binding.into(),
+                    },
+                    &mut ExecutionContext::default(),
+                )
+                .unwrap()
+                .outputs
+                .definition;
+            assert_eq!(result.name, expected.name);
+            assert_eq!(result.description, expected.description);
+            assert_eq!(result.input_schema, expected.input_schema);
+            let schema = serde_json::to_value(result.input_schema).unwrap();
+            assert!(schema["properties"].get("secret").is_none());
+            assert_eq!(schema["required"], json!(["visible"]));
+            assert_eq!(
+                schema["properties"]["visible"]["additionalProperties"]["items"]["anyOf"],
+                json!([{"type": "integer"}, {"type": "null"}])
+            );
+        }
+        for binding in [
+            json!({}),
+            json!({"name": "x", "description": "x", "metadata": body,
+                "parameters": {"params.missing": {"description": "Unknown"}}}),
+        ] {
+            let error = DefinitionNode
+                .execute(
+                    DefinitionInputs {
+                        binding: binding.into(),
+                    },
+                    &mut ExecutionContext::default(),
+                )
+                .err()
+                .unwrap();
+            assert!(std::error::Error::source(&error).is_some());
+        }
+    }
+
+    #[test]
+    fn public_binding_projection_removes_secrets_and_preserves_fallback_semantics() {
+        let mut body = metadata();
+        let ports = body.inputs.inputs.get_mut("params").unwrap();
+        ports.get_mut("visible").unwrap().binding.env = Some("PRIVATE_ENV_NAME".into());
+        ports.insert(
+            "defaulted".into(),
+            WorkflowInput {
+                value_type: ValueType::Int64,
+                required: true,
+                binding: InputBinding {
+                    default: Some(json!(197531)),
+                    ..Default::default()
+                },
+            },
+        );
+        let parameters = BTreeMap::from([(
+            "params.secret".into(),
+            mf_runtime::FlowParameterDescription {
+                description: "PRIVATE_SECRET_DESCRIPTION".into(),
+            },
+        )]);
+        let (definition, binding) = project_tool("x", "Description", &parameters, &body).unwrap();
+        for literal in [
+            "hidden",
+            "PRIVATE_ENV_NAME",
+            "197531",
+            "secret",
+            "PRIVATE_SECRET_DESCRIPTION",
+        ] {
+            assert!(!binding.to_string().contains(literal), "{binding}");
+        }
+        let projected = project_definition(binding.clone()).unwrap();
+        assert_eq!(definition.input_schema, projected.input_schema);
+        assert_eq!(definition.input_schema["required"], json!([]));
+        let config: Config = deserialize_config(binding).unwrap();
+        let interface = prepare_tool_interface("x", config.metadata).unwrap();
+        let node = ArgumentsNode(interface);
+        for (arguments, output) in [
+            (json!({}), "arguments"),
+            (json!({"secret": "override"}), "error"),
+        ] {
+            let result = node
+                .execute(
+                    Inputs::from([(
+                        "call".into(),
+                        json!({"id": "id", "name": "x", "arguments": arguments}).into(),
+                    )]),
+                    &mut ExecutionContext::default(),
+                )
+                .unwrap();
+            assert!(result.outputs.contains_key(output));
+        }
+
+        // Removing the final secret port must not remove the sole startup node.
+        body.inputs
+            .inputs
+            .get_mut("params")
+            .unwrap()
+            .retain(|port, _| port == "secret");
+        let (_, binding) = project_tool("x", "Description", &parameters, &body).unwrap();
+        assert_eq!(binding["metadata"]["inputs"]["inputs"]["params"], json!({}));
+        assert!(project_definition(binding.clone()).is_ok());
+        assert!(arguments_factory(binding).is_ok());
+        body.inputs
+            .inputs
+            .get_mut("params")
+            .unwrap()
+            .get_mut("secret")
+            .unwrap()
+            .binding
+            .default = None;
+        assert!(project_tool("x", "Description", &parameters, &body).is_err());
     }
 
     #[test]

@@ -26,11 +26,21 @@ providers are linked. Structural source resolution freezes requests and source d
 requiring every node factory. Linked preparation derives interface facts and invokes an explicitly
 pure provider expansion callback before final graph normalization and artifact generation.
 
-The LLM provider uses that callback to emit one constant catalog, without per-tool schema tasks or
-a CEL catalog collector. Runtime argument adapters consume frozen interfaces instead of duplicating
-executable child definitions. Compile-time metadata references do not add scheduling edges or
-observation scopes. Runtime metadata has no Tool types, JSON Schema conversion, result encoding,
-or LLM recovery policy.
+The LLM provider uses that callback to bind linked interface definitions and builder descriptions
+as the ordinary `params.tool_bindings` Flow parameter default, not to emit a final catalog constant.
+The original authored `agent.json` contains a native Iteration mapping each binding through the
+ordinary `llm.tool_definition` runtime node. Its recursive type projection shares the LLM adapter's
+schema rules and never inspects raw executable JSON or resolves environment/default values.
+The Iteration is outside the conversation Loop: it runs once per invocation and passes the collected
+catalog into the Loop. Empty bindings follow the same path. The parameter has no environment binding;
+no new host API, language feature, or compile-time task evaluator is introduced. Executable definitions
+remain in dispatch calls rather than being duplicated in catalog input data.
+
+Runtime argument adapters consume frozen interfaces instead of duplicating executable child
+definitions. Dispatch still uses provider expansion to construct router branches and invocation calls;
+this change does not make dynamic dispatch declarative. Compile-time metadata references do not add
+scheduling edges or observation scopes. The generic runtime has no Tool types, JSON Schema conversion,
+result encoding, or LLM recovery policy.
 
 ## Routing and invocation
 

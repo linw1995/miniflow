@@ -28,6 +28,13 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
+          "tool_bindings": {
+            "type": {
+              "list": "object"
+            },
+            "default": [],
+            "secret": false
+          },
           "prompt": {
             "type": "string"
           },
@@ -59,10 +66,105 @@
       }
     },
     {
-      "id": "tools",
+      "id": "expected_tool_bindings",
       "kind": "builtin.constant",
       "config": {
         "value": []
+      }
+    },
+    {
+      "id": "tool_bindings_match",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "actual": {
+            "list": "object"
+          },
+          "expected": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "valid": "actual == expected"
+        }
+      },
+      "inputs": {
+        "actual": {
+          "from": {
+            "node": "params",
+            "port": "tool_bindings"
+          }
+        },
+        "expected": {
+          "from": {
+            "node": "expected_tool_bindings",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "require_tool_bindings",
+      "kind": "builtin.assert",
+      "config": {
+        "condition": {
+          "source": {
+            "output": "tool_bindings_match.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        },
+        "message": "tool_bindings must match the linked tool dispatch"
+      }
+    },
+    {
+      "id": "validated_tool_bindings",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "params",
+            "port": "tool_bindings"
+          }
+        }
+      }
+    },
+    {
+      "id": "tools",
+      "kind": "builtin.iteration",
+      "config": {
+        "mode": "parallel",
+        "on_error": "terminate",
+        "body": {
+          "nodes": [
+            {
+              "id": "definition",
+              "kind": "llm.tool_definition",
+              "inputs": {
+                "binding": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                }
+              }
+            }
+          ],
+          "result": {
+            "node": "definition",
+            "port": "definition"
+          }
+        }
+      },
+      "inputs": {
+        "items": {
+          "from": {
+            "node": "validated_tool_bindings",
+            "port": "value"
+          }
+        }
       }
     },
     {
@@ -591,7 +693,7 @@
         "tools": {
           "from": {
             "node": "tools",
-            "port": "value"
+            "port": "results"
           }
         },
         "model": {
@@ -710,6 +812,16 @@
           }
         }
       }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "tool_bindings_match",
+      "to_node": "require_tool_bindings"
+    },
+    {
+      "from_node": "require_tool_bindings",
+      "to_node": "validated_tool_bindings"
     }
   ],
   "outputs": [

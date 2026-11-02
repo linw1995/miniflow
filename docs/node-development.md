@@ -1068,6 +1068,9 @@ A node that only needs a child interface can register `NodeFactory::Metadata`. P
 Definition-backed requests remain available for ordinary metadata consumers; compiled expansions can
 instead supply precomputed interfaces without embedding another child definition. This works in
 memory and generated runners using the supplied provider registry. Such nodes do not create child
-observation scopes, but any returned task is still an ordinary runtime task: metadata-dependent
-static projection belongs in the explicit pure expansion callback, not by executing that task at build
-time. Executable containers continue to use `NodeFactory::Subgraph`.
+observation scopes, but any returned task is still an ordinary runtime task; preparation must not
+execute that task at build time. Providers can bind frozen interface data as ordinary Flow parameter
+defaults and author explicit runtime processing. For example, `mfn-llm.agent` maps linked tool bindings
+through `llm.tool_definition` in an authored Iteration before its conversation Loop, instead of having
+its expansion callback replace a catalog placeholder. Executable containers continue to use
+`NodeFactory::Subgraph`.
