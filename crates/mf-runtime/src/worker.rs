@@ -230,7 +230,7 @@ impl<Job: Send + 'static> WorkerHandle<Job> {
         }
     }
 
-    fn is_current_worker(&self) -> bool {
+    pub fn is_current_worker(&self) -> bool {
         let Some(state) = self.state.upgrade() else {
             return false;
         };
