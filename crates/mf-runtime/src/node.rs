@@ -679,7 +679,7 @@ pub enum NodeBuildError {
     #[snafu(display("invalid node configuration: {source}"), context(false))]
     InvalidConfiguration { source: serde_json::Error },
     #[snafu(display("invalid Flow parameters: {source}"))]
-    FlowParameters { source: mf_telemetry::ContractError },
+    FlowParameters { source: crate::FlowParameterError },
     #[snafu(display("node factory failed: {source}"), visibility(pub))]
     FactoryFailed {
         source: Box<dyn Error + Send + Sync + 'static>,

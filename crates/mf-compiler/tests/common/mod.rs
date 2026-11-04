@@ -1,4 +1,8 @@
 #![allow(dead_code)]
+
+#[cfg(feature = "codegen")]
+pub mod embedding_coverage;
+
 use mf_compiler::{CompiledWorkflow, WorkflowDefinition};
 use std::path::{Path, PathBuf};
 

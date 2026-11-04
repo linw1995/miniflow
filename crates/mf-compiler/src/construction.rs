@@ -878,6 +878,17 @@ pub fn validate_node_flow_parameters(
     config_json: &str,
     expected: &[&str],
 ) -> Result<(), WorkflowBuildError> {
+    validated_node_config(registry, definition_id, kind, config_json, expected)?;
+    Ok(())
+}
+
+fn validated_node_config(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+    expected: &[&str],
+) -> Result<(&'static mf_runtime::NodeRegistration, Value), WorkflowBuildError> {
     let registration = registry.get(kind).with_context(|| UnknownKindSnafu {
         definition_id: DefinitionId::from(definition_id),
         kind: kind.to_owned(),
@@ -904,7 +915,7 @@ pub fn validate_node_flow_parameters(
             message: "receiving Flow parameter declarations differ from the compiled binding set",
         }
     );
-    Ok(())
+    Ok((registration, node.config))
 }
 
 pub fn instantiate_node_with_metadata(
@@ -913,17 +924,8 @@ pub fn instantiate_node_with_metadata(
     kind: &str,
     config_json: &str,
 ) -> Result<crate::FlowNode, WorkflowBuildError> {
-    validate_node_flow_parameters(registry, definition_id, kind, config_json, &[])?;
-    let Some(registration) = registry.get(kind) else {
-        return UnknownKindSnafu {
-            definition_id: DefinitionId::from(definition_id),
-            kind: kind.to_owned(),
-        }
-        .fail();
-    };
-    let config: Value = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
-        definition_id: DefinitionId::from(definition_id),
-    })?;
+    let (registration, config) =
+        validated_node_config(registry, definition_id, kind, config_json, &[])?;
     let node = registration
         .instantiate(config)
         .context(NodeConstructionSnafu {

@@ -63,6 +63,14 @@ pub enum WorkflowCompileError {
         #[snafu(source(from(WorkflowCompileError, Box::new)))]
         source: Box<WorkflowCompileError>,
     },
+    #[snafu(
+        display("invalid Flow parameters on node `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    FlowParameters {
+        definition_id: DefinitionId,
+        source: mf_runtime::FlowParameterError,
+    },
     #[snafu(display("invalid node-success dependency: {message}"))]
     InvalidSuccessDependency { message: String },
     #[snafu(transparent)]
@@ -1403,7 +1411,12 @@ fn normalize_scope(
                 message: "blank or duplicate receiving Flow parameter declaration",
             }
         );
-        for (name, mut body) in node.flow_parameters(&parameters).context(ContractSnafu)? {
+        for (name, mut body) in node
+            .flow_parameters(&parameters)
+            .context(FlowParametersSnafu {
+                definition_id: node.id.clone(),
+            })?
+        {
             crate::calls::validate_child(
                 node,
                 &body,
@@ -1434,7 +1447,9 @@ fn normalize_scope(
                 normalize_scope(&body, &order, Some(&node.kind), contracts),
             )?;
             node.set_node_flow(&name, normalized)
-                .context(ContractSnafu)?;
+                .context(FlowParametersSnafu {
+                    definition_id: node.id.clone(),
+                })?;
         }
     }
     let mut edges = definition.edges.clone();
@@ -1714,8 +1729,9 @@ fn collect_loop_execution_orders(
             .collect::<Vec<_>>();
         let flows = node
             .flow_parameters(&parameters)
-            .context(ContractSnafu)
-            .map_err(WorkflowCompileError::from)
+            .context(FlowParametersSnafu {
+                definition_id: node.id.clone(),
+            })
             .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
         for (name, body) in flows {
             path.push(node.flow_scope_key(&name));
@@ -2143,15 +2159,12 @@ fn resolve_nodes_in_scope(
                 _ => {}
             }
             let registration = registration_for(node, preparation.registry)?;
-            let parameters = registration
-                .flow_parameters()
-                .iter()
-                .map(|name| (*name).to_owned())
-                .collect::<Vec<_>>();
             crate::calls::validate_owner(definition, node)?;
             let flows = node
-                .flow_parameters(&parameters.iter().map(String::as_str).collect::<Vec<_>>())
-                .context(ContractSnafu)?;
+                .flow_parameters(registration.flow_parameters())
+                .context(FlowParametersSnafu {
+                    definition_id: node.id.clone(),
+                })?;
             if !flows.is_empty() {
                 return prepare_node_subgraphs(
                     definition,

@@ -90,128 +90,6 @@ fn build(root: &Path) -> Output {
     command.output().unwrap()
 }
 
-fn preserve_coverage(root: &Path, output: &Output) {
-    let Some(coverage) = std::env::var_os("MF_COVERAGE_BINARIES_DIR") else {
-        return;
-    };
-    assert!(output.status.success());
-    let coverage = Path::new(&coverage);
-    let build_script = root.join("build.rs").canonicalize().unwrap();
-    // Cargo identifies the exact build-script executable, including fresh artifacts.
-    // Scanning the shared target directory could retain a stale script instead.
-    let artifacts: Vec<Value> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|message| {
-            message["reason"] == "compiler-artifact"
-                && message["target"]["kind"] == json!(["custom-build"])
-                && message["target"]["src_path"]
-                    .as_str()
-                    .is_some_and(|source| root.join(source).canonicalize().unwrap() == build_script)
-        })
-        .collect();
-    assert_eq!(artifacts.len(), 1, "missing host build-script artifact");
-    let artifact = &artifacts[0];
-    let script_binary = artifact["executable"].as_str().unwrap_or_else(|| {
-        let filenames = artifact["filenames"].as_array().unwrap();
-        assert_eq!(filenames.len(), 1, "ambiguous build-script artifact");
-        filenames[0].as_str().unwrap()
-    });
-    let script_binary = Path::new(script_binary);
-    let script_directory = script_binary.parent().unwrap();
-    let launcher = script_directory.join(".kache-launch");
-    // Ignore a stale record if this artifact is no longer a Kache launcher.
-    let launcher_marker = b"KACHE_BUILD_SCRIPT_PATH=";
-    let is_launcher = launcher.is_file()
-        && fs::read(script_binary)
-            .unwrap()
-            .windows(launcher_marker.len())
-            .any(|window| window == launcher_marker);
-    let script_binary = if is_launcher {
-        // Kache publishes a launcher at Cargo's artifact path. Its NUL-delimited
-        // record names the preserved Rust executable that owns the coverage maps.
-        let record = fs::read(launcher).unwrap();
-        let preserved = record.split(|byte| *byte == 0).next().unwrap();
-        script_directory.join(std::str::from_utf8(preserved).unwrap())
-    } else {
-        script_binary.to_owned()
-    };
-    fs::copy(
-        script_binary,
-        coverage.join("mf-embedding-host-build-script"),
-    )
-    .unwrap();
-    fs::copy(executable(root), coverage.join("mf-embedding-host")).unwrap();
-
-    let repository = common::crates_dir().parent().unwrap().to_owned();
-    let mappings = [
-        (
-            "src/main.rs",
-            "crates/mf-compiler/tests/fixtures/embedding-host/src/main.rs",
-        ),
-        (
-            "build.rs",
-            "crates/mf-compiler/tests/fixtures/embedding-host/build.rs",
-        ),
-    ]
-    .map(|(source, fixture)| {
-        let source = root.join(source).canonicalize().unwrap();
-        // Remaps are only valid when the compiled and tracked sources share lines.
-        assert_eq!(
-            fs::read(&source).unwrap(),
-            fs::read(repository.join(fixture)).unwrap()
-        );
-        (source.to_str().unwrap().to_owned(), fixture)
-    });
-    let mut mappings = std::collections::BTreeMap::from(mappings);
-    // A reused script can still name its original, now-deleted source root.
-    // Ask its coverage map rather than guessing a cache-wide source alias.
-    let output = Command::new("rustc")
-        .args(["--print", "target-libdir"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let libdir = String::from_utf8(output.stdout).unwrap();
-    let llvm_cov = Path::new(libdir.trim())
-        .parent()
-        .unwrap()
-        .join("bin")
-        .join(format!("llvm-cov{}", std::env::consts::EXE_SUFFIX));
-    let output = Command::new(llvm_cov)
-        .args(["export", "--empty-profile", "--summary-only"])
-        .arg(coverage.join("mf-embedding-host-build-script"))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let sources: Vec<&str> = report["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|data| data["files"].as_array().unwrap())
-        .filter_map(|file| file["filename"].as_str())
-        .filter(|source| {
-            Path::new(source)
-                .file_name()
-                .is_some_and(|name| name == "build.rs")
-        })
-        .collect();
-    assert_eq!(sources.len(), 1, "ambiguous build-script coverage source");
-    mappings.insert(
-        sources[0].to_owned(),
-        "crates/mf-compiler/tests/fixtures/embedding-host/build.rs",
-    );
-    fs::write(
-        coverage.join("mf-embedding-host.paths.json"),
-        serde_json::to_vec(&mappings).unwrap(),
-    )
-    .unwrap();
-}
-
 fn executable(root: &Path) -> PathBuf {
     std::env::var_os("MF_TEST_TARGET_DIR")
         .map(PathBuf::from)
@@ -330,7 +208,13 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     )
     .unwrap();
     let output = assert_build_success(root.path());
-    preserve_coverage(root.path(), &output);
+    common::embedding_coverage::preserve(
+        root.path(),
+        &output,
+        &executable,
+        "embedding-host",
+        "src/main.rs",
+    );
     let described = Command::new(&executable)
         .env("MF_EMBEDDING_DESCRIBE", "1")
         .output()

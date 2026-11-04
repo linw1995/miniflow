@@ -37,74 +37,49 @@ fn definition(version: &str) -> WorkflowDefinition {
 }
 
 #[test]
-fn older_provider_subgraphs_configuration_remains_opaque() {
+fn plain_provider_configuration_remains_opaque() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    let authored = definition("2026-10-28");
-    let resolved = mf_compiler::resolve_flows(&authored, None).unwrap();
-    assert_eq!(resolved.definition, authored);
-    let plan = compile_definition(&authored, &registry).unwrap();
-    assert_eq!(plan.definition.nodes[0].config, authored.nodes[0].config);
-    assert!(
-        mf_compiler::describe_compiled(&plan)
-            .unwrap()
-            .loop_bodies
-            .is_empty()
-    );
-    let outputs = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute()
-        .unwrap();
-    assert_eq!(outputs["value"].as_i64(), Some(42));
-    #[cfg(feature = "codegen")]
-    {
-        let generated = plan.generate_artifacts().unwrap();
-        syn::parse_file(&generated.rust_source).unwrap();
+    for marker_shaped in [false, true] {
+        let mut authored = definition("2026-10-28");
+        if marker_shaped {
+            authored.nodes[0].config["body"] = json!({"$flow":{
+                "version":"2026-10-28", "dependencies":{}, "nodes":[]
+            }});
+        }
+        let resolved = mf_compiler::resolve_flows(&authored, None).unwrap();
+        assert_eq!(resolved.definition, authored);
+        let plan = compile_definition(&authored, &registry).unwrap();
+        assert_eq!(plan.definition.nodes[0].config, authored.nodes[0].config);
         assert!(
-            !generated
-                .rust_source
-                .contains("instantiate_subgraphs_with_metadata")
+            mf_compiler::describe_compiled(&plan)
+                .unwrap()
+                .loop_bodies
+                .is_empty()
         );
-        let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
-        let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
-        assert_eq!(
-            manifest.node_definition("provider").unwrap().config,
-            authored.nodes[0].config
-        );
-        assert!(manifest.description().unwrap().loop_bodies.is_empty());
-    }
-}
-
-#[test]
-fn latest_schema_keeps_provider_subgraphs_opaque() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let authored = definition("2026-10-28");
-    let plan = compile_definition(&authored, &registry).unwrap();
-    assert_eq!(plan.definition.nodes[0].config, authored.nodes[0].config);
-    assert_eq!(
-        instantiate_compiled(&plan, &registry)
+        let outputs = instantiate_compiled(&plan, &registry)
             .unwrap()
             .execute()
-            .unwrap()["value"]
-            .as_i64(),
-        Some(42)
-    );
-}
-
-#[test]
-fn marker_shaped_plain_provider_json_remains_opaque() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let mut authored = definition("2026-10-28");
-    authored.nodes[0].config["body"] = json!({"$flow":{
-        "version":"2026-10-28", "dependencies":{}, "nodes":[]
-    }});
-    let plan = compile_definition(&authored, &registry).unwrap();
-    assert_eq!(plan.definition.nodes[0].config, authored.nodes[0].config);
-    assert!(
-        mf_compiler::describe_compiled(&plan)
-            .unwrap()
-            .loop_bodies
-            .is_empty()
-    );
+            .unwrap();
+        assert_eq!(outputs["value"].as_i64(), Some(42));
+        #[cfg(feature = "codegen")]
+        {
+            let generated = plan.generate_artifacts().unwrap();
+            syn::parse_file(&generated.rust_source).unwrap();
+            assert!(
+                !generated
+                    .rust_source
+                    .contains("instantiate_subgraphs_with_metadata")
+            );
+            let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
+            let manifest =
+                mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+            assert_eq!(
+                manifest.node_definition("provider").unwrap().config,
+                authored.nodes[0].config
+            );
+            assert!(manifest.description().unwrap().loop_bodies.is_empty());
+        }
+    }
 }
 
 #[test]
@@ -287,6 +262,8 @@ fn same_json_only_prepares_children_for_the_declared_receiver_on_the_same_versio
 
 #[test]
 fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() {
+    use std::error::Error;
+
     let registry = NodeRegistry::from_inventory().unwrap();
     assert_eq!(
         registry
@@ -346,6 +323,22 @@ fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() 
                 .contains("instantiate_subgraphs_with_metadata")
         );
     }
+    let mut malformed = authored;
+    malformed.nodes[0].config["body"] = json!("not a workflow");
+    let error = mf_compiler::compile_resolved_definition(&malformed, &registry).unwrap_err();
+    assert!(matches!(
+        &error,
+        mf_compiler::WorkflowCompileError::FlowParameters {
+            definition_id,
+            source: mf_runtime::FlowParameterError::Json { parameter, source },
+        } if definition_id.as_str() == "owner" && parameter == "body" && source.is_data()
+    ));
+    // The exact chain excludes description/telemetry contract wrappers.
+    let parameter_error = error.source().unwrap();
+    assert!(parameter_error.is::<mf_runtime::FlowParameterError>());
+    let json_error = parameter_error.source().unwrap();
+    assert!(json_error.is::<serde_json::Error>());
+    assert!(json_error.source().is_none());
 }
 
 #[test]

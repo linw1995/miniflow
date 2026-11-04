@@ -481,20 +481,18 @@ fn describe_loops(
         // Scope paths are the compiler's authority for ordinary configuration.
         // Without receiving metadata, an omitted outer typed scope is intentionally
         // indistinguishable from opaque JSON; never infer it from object contents.
-        let parameters = node
-            .config
-            .as_object()
-            .into_iter()
-            .flat_map(|config| config.keys())
-            .filter(|field| {
-                let key = node.flow_scope_key(field);
-                orders.keys().any(|order| {
-                    order.len() > path.len() && order.starts_with(path) && order[path.len()] == key
-                })
-            })
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        for (name, body) in node.flow_parameters(&parameters)? {
+        let parameters = node.compiled_flow_fields(path, orders.keys().map(Vec::as_slice));
+        // Translate definition errors only at the observation projection boundary.
+        // Keep the original JSON source rather than stringifying it.
+        let flows = node
+            .flow_parameters(&parameters)
+            .or_else(|error| match error {
+                crate::FlowParameterError::Invalid { message } => {
+                    mf_telemetry::InvalidSnafu { message }.fail()
+                }
+                crate::FlowParameterError::Json { source, .. } => Err(ContractError::from(source)),
+            })?;
+        for (name, body) in flows {
             path.push(node.flow_scope_key(&name));
             let order = orders
                 .remove(path)

@@ -219,14 +219,14 @@ fn malformed_declared_frozen_fields_preserve_the_typed_error_chain() {
             .unwrap();
         for error in [validation_error, preparation_error] {
             assert!(matches!(&error, NodeBuildError::FlowParameters {
-                source: mf_telemetry::ContractError::Json { source }
-            } if source.is_data()));
-            let contract = error
+                source: mf_runtime::FlowParameterError::Json { parameter, source }
+            } if parameter == "selected" && source.is_data()));
+            let parameters = error
                 .source()
                 .unwrap()
-                .downcast_ref::<mf_telemetry::ContractError>()
+                .downcast_ref::<mf_runtime::FlowParameterError>()
                 .unwrap();
-            let json = contract
+            let json = parameters
                 .source()
                 .unwrap()
                 .downcast_ref::<serde_json::Error>()

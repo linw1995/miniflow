@@ -202,7 +202,7 @@ fn invalid_field_names_leave_existing_configuration_unchanged() {
         let mut node = original.clone();
         let error = node.set_node_flow(name, body.clone()).unwrap_err();
         assert!(
-            matches!(error, mf_telemetry::ContractError::Invalid { message }
+            matches!(error, mf_runtime::FlowParameterError::Invalid { message }
             if message == "Flow parameter field names must be nonblank")
         );
         assert_eq!(node, original);
@@ -228,7 +228,7 @@ fn nonobject_provider_configs_are_opaque_but_cannot_receive_flow_fields() {
             .set_node_flow("selected", definition("2026-10-28"))
             .unwrap_err();
         assert!(
-            matches!(error, mf_telemetry::ContractError::Invalid { message }
+            matches!(error, mf_runtime::FlowParameterError::Invalid { message }
             if message == "Flow parameters require an object configuration")
         );
         assert_eq!(node, original);
@@ -249,7 +249,8 @@ fn malformed_declared_fields_preserve_json_sources_without_mutation() {
             let original = node.clone();
             let error = node.flow_parameters(&[name]).unwrap_err();
             assert!(
-                matches!(&error, mf_telemetry::ContractError::Json { source } if source.is_data())
+                matches!(&error, mf_runtime::FlowParameterError::Json { parameter, source }
+                    if parameter == name && source.is_data())
             );
             assert!(
                 error
@@ -277,8 +278,8 @@ fn unencodable_children_do_not_partially_replace_configuration_fields() {
         let original = node.clone();
         let error = node.set_node_flow(name, body.clone()).unwrap_err();
         assert!(
-            matches!(&error, mf_telemetry::ContractError::Json { source }
-            if source.to_string().contains("data binding targets an unknown node"))
+            matches!(&error, mf_runtime::FlowParameterError::Json { parameter, source }
+            if parameter == name && source.to_string().contains("data binding targets an unknown node"))
         );
         assert!(
             error
@@ -311,7 +312,8 @@ fn marker_and_definition_shaped_json_is_opaque_without_field_authority() {
             parent
         );
         assert!(matches!(node.flow_parameters(&["selected"]).unwrap_err(),
-            mf_telemetry::ContractError::Json { source } if source.is_data()));
+            mf_runtime::FlowParameterError::Json { parameter, source }
+                if parameter == "selected" && source.is_data()));
         assert_eq!(node, original);
     }
 }

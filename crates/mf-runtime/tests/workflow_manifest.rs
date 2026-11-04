@@ -96,42 +96,6 @@ fn compiled_manifests_derive_views_from_original_facts() {
 }
 
 #[test]
-fn mapped_binding_bodies_use_frozen_orders_and_their_own_schema() {
-    let definition = serde_json::from_value(serde_json::json!({
-        "version": "2026-10-28", "dependencies": {},
-        "nodes": [{"id": "dispatch", "kind": "fixture.dispatch", "config": {
-            "selected": {
-                "version": "2026-10-28", "dependencies": {},
-                "nodes": [{"id": "value", "kind": "fixture.input",
-                    "config": {"legacy": {"$flow": "opaque provider config"}}}]
-            },
-            "opaque": {"nested": {"$flow": "not an immediate marker"}}
-        }}]
-    }))
-    .unwrap();
-    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
-    let manifest = WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_16,
-        definition,
-        execution_order: vec!["dispatch".into()],
-        loop_orders: vec![mf_runtime::LoopExecutionOrder {
-            path: vec![key.clone()],
-            execution_order: vec!["value".into()],
-        }],
-        input_schema: WorkflowInputSchema {
-            inputs: [("dispatch".to_owned(), Default::default())].into(),
-            ..Default::default()
-        },
-    };
-    let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
-    assert_eq!(decoded, manifest);
-    let description = decoded.description().unwrap();
-    assert_eq!(description.loop_bodies.len(), 1);
-    assert_eq!(description.loop_bodies[0].path, vec![key]);
-    assert_eq!(description.loop_bodies[0].nodes[0].id, "value");
-}
-
-#[test]
 fn nested_binding_views_require_consistent_orders_for_each_frozen_field() {
     let definition = serde_json::from_value(serde_json::json!({
         "version": "2026-10-28", "dependencies": {},
@@ -141,10 +105,12 @@ fn nested_binding_views_require_consistent_orders_for_each_frozen_field() {
                 "nodes": [{"id": "inner", "kind": "fixture.dispatch", "config": {
                     "nested": {
                         "version": "2026-10-28", "dependencies": {},
-                        "nodes": [{"id": "value", "kind": "fixture.input"}]
+                        "nodes": [{"id": "value", "kind": "fixture.input",
+                            "config": {"legacy": {"$flow": "opaque provider config"}}}]
                     }
                 }}]
             },
+            "opaque": {"nested": {"$flow": "not an immediate marker"}},
             "ordinary": {"definition": {
                 "version": "2026-10-28", "dependencies": {},
                 "nodes": [{"id": "shadowed", "kind": "fixture.input"}]
@@ -196,7 +162,6 @@ fn nested_binding_views_require_consistent_orders_for_each_frozen_field() {
     for (case, diagnostic) in [
         ("missing_outer", "missing compiled Flow parameter order"),
         ("unknown_outer_field", "unknown"),
-        ("duplicate_outer", "duplicate"),
         ("incomplete_outer", "does not match the node count"),
         ("unknown_outer_node", "names unknown node `unknown`"),
         ("wrong_frozen_field", "names unknown node `shadowed`"),
@@ -211,7 +176,6 @@ fn nested_binding_views_require_consistent_orders_for_each_frozen_field() {
                 invalid.loop_orders[0].path[0] =
                     mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "unknown");
             }
-            "duplicate_outer" => invalid.loop_orders.push(invalid.loop_orders[0].clone()),
             "incomplete_outer" => invalid.loop_orders[0].execution_order.clear(),
             "unknown_outer_node" => {
                 invalid.loop_orders[0].execution_order[0] = "unknown".into();

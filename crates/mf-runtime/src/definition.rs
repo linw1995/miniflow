@@ -190,6 +190,18 @@ pub struct NodeDefinition {
     pub config: Value,
 }
 
+/// Errors reading or replacing declared executable configuration fields.
+#[derive(Debug, Snafu)]
+pub enum FlowParameterError {
+    #[snafu(display("invalid Flow parameters: {message}"))]
+    Invalid { message: &'static str },
+    #[snafu(display("invalid Flow parameter `{parameter}`: {source}"))]
+    Json {
+        parameter: String,
+        source: serde_json::Error,
+    },
+}
+
 impl NodeDefinition {
     /// Stable observation/compilation scope for an executable child field.
     pub fn flow_scope_key(&self, name: &str) -> String {
@@ -205,25 +217,48 @@ impl NodeDefinition {
         }
     }
 
+    /// Selects immediate fields from compiled scope paths, not from JSON shapes.
+    /// Descendant facts also select their parent so missing parent orders are diagnosed.
+    pub fn compiled_flow_fields<'a>(
+        &self,
+        prefix: &[String],
+        paths: impl IntoIterator<Item = &'a [String]>,
+    ) -> Vec<&str> {
+        let scopes = paths
+            .into_iter()
+            .filter(|path| path.starts_with(prefix))
+            .filter_map(|path| path.get(prefix.len()))
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        self.config
+            .as_object()
+            .into_iter()
+            .flat_map(|config| config.keys())
+            .filter(|field| scopes.contains(self.flow_scope_key(field).as_str()))
+            .map(String::as_str)
+            .collect()
+    }
+
     /// Writes a normalized child into its declared configuration field.
     pub fn set_node_flow(
         &mut self,
         name: &str,
         body: WorkflowDefinition,
-    ) -> Result<(), mf_telemetry::ContractError> {
+    ) -> Result<(), FlowParameterError> {
         ensure!(
             !name.trim().is_empty(),
-            mf_telemetry::InvalidSnafu {
+            InvalidSnafu {
                 message: "Flow parameter field names must be nonblank"
             }
         );
         let config = self.config.as_object_mut().ok_or_else(|| {
-            mf_telemetry::InvalidSnafu {
+            InvalidSnafu {
                 message: "Flow parameters require an object configuration",
             }
             .build()
         })?;
-        config.insert(name.into(), serde_json::to_value(body)?);
+        let value = serde_json::to_value(body).context(JsonSnafu { parameter: name })?;
+        config.insert(name.into(), value);
         Ok(())
     }
 
@@ -233,17 +268,19 @@ impl NodeDefinition {
     pub fn flow_parameters(
         &self,
         parameters: &[&str],
-    ) -> Result<BTreeMap<String, WorkflowDefinition>, mf_telemetry::ContractError> {
+    ) -> Result<BTreeMap<String, WorkflowDefinition>, FlowParameterError> {
         let mut flows = BTreeMap::new();
         for &name in parameters {
             ensure!(
                 !name.trim().is_empty(),
-                mf_telemetry::InvalidSnafu {
+                InvalidSnafu {
                     message: "Flow parameter field names must be nonblank"
                 }
             );
             if let Some(value) = self.config.get(name).filter(|value| !value.is_null()) {
-                flows.insert(name.to_owned(), serde_json::from_value(value.clone())?);
+                let body =
+                    serde_json::from_value(value.clone()).context(JsonSnafu { parameter: name })?;
+                flows.insert(name.to_owned(), body);
             }
         }
         Ok(flows)

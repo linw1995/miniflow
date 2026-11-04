@@ -32,25 +32,13 @@ pub fn compiled_node_flows(
     orders: &[mf_runtime::LoopExecutionOrder],
     prefix: &[String],
 ) -> Result<BTreeMap<String, WorkflowDefinition>, WorkflowCompileError> {
-    let parameters = node
-        .config
-        .as_object()
-        .into_iter()
-        .flat_map(|config| config.keys())
-        .filter(|name| {
-            let key = node.flow_scope_key(name);
-            orders.iter().any(|order| {
-                order.path.len() > prefix.len()
-                    && order.path.starts_with(prefix)
-                    && order.path[prefix.len()] == key
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let parameters =
+        node.compiled_flow_fields(prefix, orders.iter().map(|order| order.path.as_slice()));
     validate_owner(parent, node)?;
-    node.flow_parameters(&parameters.iter().map(String::as_str).collect::<Vec<_>>())
-        .context(crate::compiler::ContractSnafu)
-        .map_err(Into::into)
+    node.flow_parameters(&parameters)
+        .context(crate::compiler::FlowParametersSnafu {
+            definition_id: node.id.clone(),
+        })
 }
 
 /// Ordinary Flow arguments and Calls bind startup inputs and project selected
@@ -138,7 +126,9 @@ pub fn contains_iteration_containers(
             .collect::<Vec<_>>();
         for body in node
             .flow_parameters(&parameters)
-            .context(crate::compiler::ContractSnafu)?
+            .context(crate::compiler::FlowParametersSnafu {
+                definition_id: node.id.clone(),
+            })?
             .values()
         {
             if contains_iteration_containers(body, contracts)? {
