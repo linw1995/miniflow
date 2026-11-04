@@ -4,16 +4,19 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
-pub fn preserve(root: &Path, output: &Output, executable: &Path, fixture: &str, main_source: &str) {
-    let Some(coverage) = std::env::var_os("MF_COVERAGE_BINARIES_DIR") else {
-        return;
-    };
+pub fn preserve(
+    coverage: &Path,
+    root: &Path,
+    output: &Output,
+    executable: &Path,
+    fixture: &str,
+    main_source: &str,
+) {
     assert_success(output);
-    let coverage = Path::new(&coverage);
     let name = format!("mf-{fixture}");
     let build_script = root.join("build.rs").canonicalize().unwrap();
     // Cargo identifies the exact build-script executable, including fresh artifacts.
@@ -36,25 +39,7 @@ pub fn preserve(root: &Path, output: &Output, executable: &Path, fixture: &str, 
         assert_eq!(filenames.len(), 1, "ambiguous build-script artifact");
         filenames[0].as_str().unwrap()
     });
-    let script_binary = Path::new(script_binary);
-    let script_directory = script_binary.parent().unwrap();
-    let launcher = script_directory.join(".kache-launch");
-    // Ignore a stale record if this artifact is no longer a Kache launcher.
-    let launcher_marker = b"KACHE_BUILD_SCRIPT_PATH=";
-    let is_launcher = launcher.is_file()
-        && fs::read(script_binary)
-            .unwrap()
-            .windows(launcher_marker.len())
-            .any(|window| window == launcher_marker);
-    let script_binary = if is_launcher {
-        // Kache publishes a launcher at Cargo's artifact path. Its NUL-delimited
-        // record names the preserved Rust executable that owns the coverage maps.
-        let record = fs::read(launcher).unwrap();
-        let preserved = record.split(|byte| *byte == 0).next().unwrap();
-        script_directory.join(std::str::from_utf8(preserved).unwrap())
-    } else {
-        script_binary.to_owned()
-    };
+    let script_binary = build_script_executable(Path::new(script_binary));
     let retained_script = coverage.join(format!("{name}-build-script"));
     fs::copy(script_binary, &retained_script).unwrap();
     fs::copy(executable, coverage.join(&name)).unwrap();
@@ -119,7 +104,29 @@ pub fn preserve(root: &Path, output: &Output, executable: &Path, fixture: &str, 
     .unwrap();
 }
 
-fn assert_success(output: &Output) {
+/// Select the coverage-bearing executable only for a verified Kache launcher.
+pub fn build_script_executable(script_binary: &Path) -> PathBuf {
+    let script_directory = script_binary.parent().unwrap();
+    let launcher = script_directory.join(".kache-launch");
+    // Ignore a stale record if this artifact is no longer a Kache launcher.
+    let launcher_marker = b"KACHE_BUILD_SCRIPT_PATH=";
+    let is_launcher = launcher.is_file()
+        && fs::read(script_binary)
+            .unwrap()
+            .windows(launcher_marker.len())
+            .any(|window| window == launcher_marker);
+    if is_launcher {
+        // Kache publishes a launcher at Cargo's artifact path. Its NUL-delimited
+        // record names the preserved Rust executable that owns the coverage maps.
+        let record = fs::read(launcher).unwrap();
+        let preserved = record.split(|byte| *byte == 0).next().unwrap();
+        script_directory.join(std::str::from_utf8(preserved).unwrap())
+    } else {
+        script_binary.to_owned()
+    }
+}
+
+pub fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
         "stdout:\n{}\nstderr:\n{}",

@@ -2,6 +2,7 @@
 
 mod common;
 
+use common::embedding_coverage::assert_success;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -151,15 +152,6 @@ fn build(root: &Path, extra: Option<&Path>) -> Output {
     command.output().unwrap()
 }
 
-fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 fn executable(root: &Path) -> PathBuf {
     std::env::var_os("MF_TEST_TARGET_DIR")
         .map(PathBuf::from)
@@ -258,13 +250,16 @@ fn resources_are_packed_without_providers_and_resolved_only_by_the_runtime_host(
     }
     let output = build(root.path(), None);
     assert_success(&output);
-    common::embedding_coverage::preserve(
-        root.path(),
-        &output,
-        &executable,
-        "embedding-resources",
-        "main.rs",
-    );
+    if let Some(coverage) = std::env::var_os("MF_COVERAGE_BINARIES_DIR") {
+        common::embedding_coverage::preserve(
+            Path::new(&coverage),
+            root.path(),
+            &output,
+            &executable,
+            "embedding-resources",
+            "main.rs",
+        );
+    }
 
     let output = Command::new(&executable)
         .arg("output-directory")

@@ -99,6 +99,61 @@ fn executable(root: &Path) -> PathBuf {
 }
 
 #[test]
+fn build_script_coverage_requires_both_launcher_marker_and_record() {
+    use common::embedding_coverage::build_script_executable;
+
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("build-script");
+    let record = root.path().join(".kache-launch");
+    let preserved = root.path().join("preserved build script");
+    fs::write(&preserved, b"coverage-bearing Rust executable").unwrap();
+    let launcher = b"launcher prefix\nKACHE_BUILD_SCRIPT_PATH=launcher suffix";
+
+    // A marker alone does not supply a preserved executable's path.
+    fs::write(&script, launcher).unwrap();
+    assert_eq!(build_script_executable(&script), script);
+
+    // A stale record must not redirect an ordinary Cargo build-script artifact.
+    fs::write(
+        &record,
+        b"preserved build script\0ignored launcher metadata\0",
+    )
+    .unwrap();
+    fs::write(&script, b"ordinary Cargo build-script executable").unwrap();
+    assert_eq!(build_script_executable(&script), script);
+
+    // Only the exact marker plus the first NUL-delimited record field authorize it.
+    fs::write(&script, launcher).unwrap();
+    let selected = build_script_executable(&script);
+    assert_eq!(selected, preserved);
+    assert_eq!(
+        fs::read(selected).unwrap(),
+        b"coverage-bearing Rust executable"
+    );
+}
+
+#[test]
+fn coverage_command_failures_report_captured_stdout_and_stderr() {
+    let output = Command::new("rustc")
+        .arg("--not-a-real-embedding-coverage-flag")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not-a-real-embedding-coverage-flag"));
+    let panic = std::panic::catch_unwind(|| common::embedding_coverage::assert_success(&output))
+        .expect_err("failed coverage commands must not be silently accepted");
+    let diagnostic = panic.downcast_ref::<String>().unwrap();
+    assert_eq!(
+        diagnostic,
+        &format!(
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    );
+}
+
+#[test]
 fn embedded_host_preserves_execution_and_build_contracts() {
     let root = tempfile::tempdir().unwrap();
     host(root.path());
@@ -208,13 +263,16 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     )
     .unwrap();
     let output = assert_build_success(root.path());
-    common::embedding_coverage::preserve(
-        root.path(),
-        &output,
-        &executable,
-        "embedding-host",
-        "src/main.rs",
-    );
+    if let Some(coverage) = std::env::var_os("MF_COVERAGE_BINARIES_DIR") {
+        common::embedding_coverage::preserve(
+            Path::new(&coverage),
+            root.path(),
+            &output,
+            &executable,
+            "embedding-host",
+            "src/main.rs",
+        );
+    }
     let described = Command::new(&executable)
         .env("MF_EMBEDDING_DESCRIBE", "1")
         .output()
