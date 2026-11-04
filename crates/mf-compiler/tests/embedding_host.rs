@@ -221,7 +221,7 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     assert_build_success(root.path());
     assert_eq!(run(&executable, &input)["answer"]["answer"], 43);
     for (mutation, expected) in [
-        ("kind", "UnknownNodeKind"),
+        ("kind", "UnknownParameterKind { kind: \"missing.kind\" }"),
         ("config", "NodeConstruction"),
         ("port", "UnknownOutputPort"),
     ] {
