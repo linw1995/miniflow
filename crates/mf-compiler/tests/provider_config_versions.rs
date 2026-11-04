@@ -211,7 +211,7 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
             }
             let error = mf_compiler::validate_parameter_types(&registry, &expected).unwrap_err();
             assert!(
-                matches!(error, mf_compiler::WorkflowBuildError::ParameterTypeDrift { kind }
+                matches!(error, mf_compiler::ParameterTypeError::ParameterTypeDrift { kind }
                 if kind == "test.versioned_optional_flow"),
                 "{change}"
             );
@@ -219,7 +219,7 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
         let unknown = BTreeMap::from([("missing.receiver".into(), BTreeMap::new())]);
         assert!(matches!(
             mf_compiler::validate_parameter_types(&registry, &unknown).unwrap_err(),
-            mf_compiler::WorkflowBuildError::UnknownParameterKind { kind } if kind == "missing.receiver"
+            mf_compiler::ParameterTypeError::UnknownParameterKind { kind } if kind == "missing.receiver"
         ));
         let outputs = instantiate_compiled(&saved, &registry)
             .unwrap()
@@ -554,15 +554,50 @@ fn generated_receiving_contracts_reject_stale_binding_sets_before_factories() {
             let expected = [(kind.into(), [("unexpected".into(), parameter_type)].into())].into();
             assert!(matches!(
                 validate_parameter_types(&registry, &expected).unwrap_err(),
-                WorkflowBuildError::ParameterTypeDrift { kind: actual } if actual == kind
+                mf_compiler::ParameterTypeError::ParameterTypeDrift { kind: actual } if actual == kind
             ));
         }
     }
     let unknown = [("%not-a-compiler-kind".into(), BTreeMap::new())].into();
     assert!(matches!(
         validate_parameter_types(&registry, &unknown).unwrap_err(),
-        WorkflowBuildError::UnknownParameterKind { kind } if kind == "%not-a-compiler-kind"
+        mf_compiler::ParameterTypeError::UnknownParameterKind { kind } if kind == "%not-a-compiler-kind"
     ));
+    // Structural planning freezes an unlinked kind as an empty map, but preparing
+    // a saved plan must reject it before the earlier optional receiver's factory.
+    for nested in [false, true] {
+        let missing = json!({"id": "z_missing", "kind": "test.missing_receiver"});
+        let later = if nested {
+            json!({"id": "z_owner", "kind": "test.declared_flow_owner", "config": {
+                "body": {"version": "2026-10-28", "dependencies": {}, "nodes": [missing]}
+            }})
+        } else {
+            missing
+        };
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version": "2026-10-28", "dependencies": {}, "nodes": [
+                {"id": "a_before", "kind": "test.versioned_optional_flow", "config": {
+                    "panic_if_constructed": true
+                }},
+                later
+            ]
+        }))
+        .unwrap();
+        let plan = mf_compiler::plan_resolved_definition(&definition, &registry.parameter_types())
+            .unwrap();
+        let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+        assert_eq!(saved.execution_order[0].as_str(), "a_before");
+        assert!(saved.parameter_types["test.missing_receiver"].is_empty());
+        assert!(
+            matches!(
+                instantiate_compiled(&saved, &registry).err().unwrap(),
+                mf_compiler::WorkflowCompileError::ParameterTypes {
+                    source: mf_compiler::ParameterTypeError::UnknownParameterKind { kind }
+                } if kind == "test.missing_receiver"
+            ),
+            "nested={nested}"
+        );
+    }
     let kind = "test.versioned_optional_flow";
     let config = json!({"body": {
         "version": "2026-10-28", "dependencies": {}, "nodes": []

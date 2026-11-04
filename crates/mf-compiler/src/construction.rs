@@ -832,12 +832,8 @@ pub enum WorkflowBuildError {
         source: NodeBuildError,
         definition_id: DefinitionId,
     },
-    #[snafu(display("compiled parameter types reference unknown node kind `{kind}`"))]
-    UnknownParameterKind { kind: String },
-    #[snafu(display(
-        "configuration parameter types for node kind `{kind}` differ from the compiled contract"
-    ))]
-    ParameterTypeDrift { kind: String },
+    #[snafu(transparent)]
+    ParameterTypes { source: ParameterTypeError },
     #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
     LoopVariables {
         definition_id: DefinitionId,
@@ -875,11 +871,21 @@ pub enum WorkflowBuildError {
     },
 }
 
+#[derive(Debug, Snafu)]
+pub enum ParameterTypeError {
+    #[snafu(display("compiled parameter types reference unknown node kind `{kind}`"))]
+    UnknownParameterKind { kind: String },
+    #[snafu(display(
+        "configuration parameter types for node kind `{kind}` differ from the compiled contract"
+    ))]
+    ParameterTypeDrift { kind: String },
+}
+
 /// Preflight the complete typed configuration contract without invoking factories.
 pub fn validate_parameter_types(
     registry: &NodeRegistry,
     expected: &mf_runtime::NodeParameterTypes,
-) -> Result<(), WorkflowBuildError> {
+) -> Result<(), ParameterTypeError> {
     for (kind, parameter_types) in expected {
         // These nodes are lowered and constructed by the compiler, not providers.
         if matches!(

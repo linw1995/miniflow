@@ -80,6 +80,8 @@ pub enum WorkflowCompileError {
     #[snafu(transparent)]
     InterfaceDescription { source: DescriptionError },
     #[snafu(transparent)]
+    ParameterTypes { source: crate::ParameterTypeError },
+    #[snafu(transparent)]
     WorkflowInputs {
         source: mf_runtime::WorkflowInputError,
     },
@@ -1518,6 +1520,50 @@ pub fn validate_compiled_scope_orders(
         selected_orders == plan.loop_orders,
         NonCanonicalPlanOrderSnafu
     );
+    let mut required = BTreeMap::new();
+    collect_required_parameter_types(
+        &plan.definition,
+        &plan.parameter_types,
+        registry,
+        &mut required,
+    )?;
+    crate::validate_parameter_types(registry, &required)?;
+    Ok(())
+}
+
+/// Host executors supply their own bodies, so only construction-reachable kinds
+/// require providers. Frozen metadata and order validation still cover the full plan.
+fn collect_required_parameter_types(
+    definition: &WorkflowDefinition,
+    parameter_types: &mf_runtime::NodeParameterTypes,
+    registry: &NodeRegistry,
+    required: &mut mf_runtime::NodeParameterTypes,
+) -> Result<(), WorkflowCompileError> {
+    for node in &definition.nodes {
+        let flows = node
+            .declared_flows(parameter_types)
+            .context(FlowParametersSnafu {
+                definition_id: node.id.clone(),
+            })?;
+        required
+            .entry(node.kind.clone())
+            .or_insert_with(|| parameter_types[&node.kind].clone());
+        if node.kind == mf_runtime::CALL_KIND {
+            let config: mf_runtime::CallConfig = serde_json::from_value(node.config.clone())
+                .context(CallConfigurationSnafu {
+                    definition_id: node.id.clone(),
+                })?;
+            if registry.flow(&config.flow).is_some() {
+                continue;
+            }
+        }
+        for body in flows.values() {
+            crate::calls::child_result(
+                node,
+                collect_required_parameter_types(body, parameter_types, registry, required),
+            )?;
+        }
+    }
     Ok(())
 }
 

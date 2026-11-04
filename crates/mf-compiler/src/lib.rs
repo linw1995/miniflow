@@ -108,7 +108,7 @@ pub use construction::{
     FlowBuildError, FlowBuilder, InvalidDefinitionSnafu as WorkflowInvalidDefinitionSnafu,
     InvalidEmbeddedConfigSnafu as WorkflowInvalidEmbeddedConfigSnafu,
     MetadataSnafu as WorkflowMetadataSnafu, NodeConstructionSnafu as WorkflowNodeConstructionSnafu,
-    StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
+    ParameterTypeError, StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
     UnknownKindSnafu as WorkflowUnknownKindSnafu, WorkflowBuildError, bind_workflow_inputs,
     build_flow, build_stream_program, instantiate_node_with_metadata,
     instantiate_subgraphs_with_metadata, into_task, partition_execution_domains, prepare_stream,

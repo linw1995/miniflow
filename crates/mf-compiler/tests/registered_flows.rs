@@ -72,6 +72,35 @@ fn registered_calls_use_host_execution_without_loading_child_providers() {
             mf_compiler::execute_compiled_with_inputs(&plan, &registry, arguments, None).unwrap();
         assert_eq!(result["value"].as_str(), Some(prompt));
     }
+
+    // A host body does not grant a global exemption for its unlinked node kinds.
+    // The same kind outside that body needs a provider before any factory runs.
+    let mut outside = definition;
+    outside.nodes.insert(
+        0,
+        serde_json::from_value(json!({
+            "id": "a_before", "kind": "builtin.constant", "config": {}
+        }))
+        .unwrap(),
+    );
+    outside.nodes.push(
+        serde_json::from_value(json!({
+            "id": "z_missing", "kind": "unlinked.provider"
+        }))
+        .unwrap(),
+    );
+    let plan =
+        mf_compiler::plan_resolved_definition(&outside, &registry.parameter_types()).unwrap();
+    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    assert_eq!(saved.execution_order[0].as_str(), "a_before");
+    // Constructing the earlier constant would fail on its missing value; instead
+    // availability preflight must report the later unlinked provider first.
+    assert!(matches!(
+        mf_compiler::instantiate_compiled(&saved, &registry).err().unwrap(),
+        mf_compiler::WorkflowCompileError::ParameterTypes {
+            source: mf_compiler::ParameterTypeError::UnknownParameterKind { kind }
+        } if kind == "unlinked.provider"
+    ));
 }
 
 #[cfg(feature = "codegen")]
