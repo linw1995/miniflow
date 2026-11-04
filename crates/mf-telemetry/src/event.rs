@@ -62,6 +62,19 @@ impl ScopePathEntry {
     pub fn is_call(&self) -> bool {
         matches!(self, Self::Call { .. })
     }
+
+    pub fn binding_key(call_id: &str, binding: &str) -> String {
+        format!(
+            "%flow:{}",
+            serde_json::to_string(&(call_id, binding)).expect("strings serialize")
+        )
+    }
+
+    pub fn binding_owner(key: &str) -> Option<String> {
+        let (owner, _): (String, String) =
+            serde_json::from_str(key.strip_prefix("%flow:")?).ok()?;
+        Some(owner)
+    }
 }
 
 pub type LoopPathEntry = ScopePathEntry;

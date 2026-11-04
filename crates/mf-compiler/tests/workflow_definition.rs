@@ -1,3 +1,5 @@
+extern crate mfn_core as _;
+
 use mf_compiler::{
     DefinitionParseError, WorkflowDefinition, WorkflowDefinitionVersion, plan_definition,
 };
@@ -120,10 +122,10 @@ fn loop_body_clusters_are_preserved_in_descriptions() {
             "nodes": [{
                 "id": "repeat",
                 "kind": "workflow.loop",
-                "loop": {
+                "config": {
                     "max_iterations": 1,
                     "variables": [{"name": "count", "type": "int"}],
-                    "body": {
+                    "body": {"version":"2026-10-23", "dependencies":{},
                         "nodes": [{"id": "step", "kind": "fixture.task"}],
                         "clusters": [{
                             "label": "Body step",
@@ -147,14 +149,22 @@ fn loop_body_clusters_are_preserved_in_descriptions() {
         vec!["step".to_owned()]
     );
     let mut legacy = definition;
-    legacy.version = WorkflowDefinitionVersion::V2026_10_19;
-    let error = plan_definition(&legacy).unwrap_err().to_string();
+    legacy.nodes[0].config["body"]["version"] = serde_json::json!("2026-10-19");
+    let error = mf_compiler::plan_resolved_definition(
+        &legacy,
+        &mf_compiler::NodeRegistry::from_inventory()
+            .unwrap()
+            .flow_parameter_contracts(),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         error.contains("node clusters require version 2026-10-23"),
         "{error}"
     );
     assert!(
-        serde_json::to_string(&legacy)
+        legacy.nodes[0]
+            .flow_parameters(&["body"])
             .unwrap_err()
             .to_string()
             .contains("node clusters require version 2026-10-23")
@@ -171,9 +181,9 @@ fn iteration_body_clusters_are_preserved_in_descriptions() {
                 "id": "iterate",
                 "kind": "builtin.iteration",
                 "config": {
-                    "body": {
+                    "body": {"version":"2026-10-23", "dependencies":{},
                         "nodes": [{"id": "step", "kind": "fixture.task"}],
-                        "result": {"node": "step", "port": "value"},
+                        "outputs": [{"name":"result", "node": "step", "port": "value"}],
                         "clusters": [{
                             "label": "Item step",
                             "annotation": "The body executed for every item.",
@@ -196,20 +206,20 @@ fn iteration_body_clusters_are_preserved_in_descriptions() {
     );
 }
 #[test]
-fn nested_iteration_clusters_inherit_the_root_definition_version() {
+fn nested_iteration_clusters_preserve_their_own_definition_version() {
     use serde_json::json;
     let mut node = json!({
-        "id":"iterate", "kind":"builtin.iteration", "config":{"body":{
+        "id":"iterate", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-23", "dependencies":{},
             "nodes":[{"id":"step","kind":"fixture.task"}],
-            "result":{"node":"step","port":"value"},
+            "outputs": [{"name":"result", "node":"step","port":"value"}],
             "clusters":[{"label":"Nested item","annotation":"Transform every nested item.","nodes":["step"]}]
         }}
     });
     for id in ["inner", "outer"] {
         node = json!({
-            "id":id,"kind":"workflow.loop","loop":{
+            "id":id,"kind":"workflow.loop","config":{
                 "max_iterations":1,"variables":[{"name":"count","type":"int"}],
-                "body":{"nodes":[node]}
+                "body":{"version":"2026-10-23", "dependencies":{}, "nodes":[node]}
             }
         });
     }

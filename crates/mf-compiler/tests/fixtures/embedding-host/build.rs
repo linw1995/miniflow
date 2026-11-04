@@ -1,3 +1,5 @@
+extern crate core_nodes as _;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     compiler::embed_workflows(&[

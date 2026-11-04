@@ -45,12 +45,11 @@ pub use context::{
 pub use definition::{
     CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
     DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, FlowSource,
-    InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
-    LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
-    MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
-    NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
-    validate_exclusive_inputs,
+    InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopComparisonOperator,
+    LoopConditionDefinition, LoopDefinition, LoopVariableDefinition, MAX_CALL_DEPTH,
+    MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency,
+    NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition, WorkflowDefinition,
+    WorkflowDefinitionVersion, WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{
@@ -67,22 +66,21 @@ pub use future_execution::FutureExecutionError;
 #[doc(hidden)]
 pub use inventory::submit as __submit_builtin_flow;
 pub use iteration::{
-    ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
-    IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
-    iteration_input_flow_node,
+    ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationConfig,
+    IterationErrorPolicy, IterationMode, iteration_input_flow_node,
 };
 pub use loop_node::{
     LoopVariableError, loop_variable_types, prepared_loop_assign, prepared_loop_exit,
     prepared_loop_source_types, prepared_scope_source,
 };
-pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
+pub use mf_runtime_derive::{NodeConfig, NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{NodeIdentity, ScopePathEntry, SkipCause};
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
     ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
     FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs,
-    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeExecution,
+    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeConfig, NodeExecution,
     NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
     NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,

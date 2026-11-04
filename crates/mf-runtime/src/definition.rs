@@ -93,7 +93,7 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 
 impl WorkflowDefinition {
     pub fn has_order_edges(&self) -> bool {
-        !self.order_edges.is_empty() || self.nodes.iter().any(NodeDefinition::has_order_edges)
+        !self.order_edges.is_empty()
     }
 
     pub fn from_json(input: &str) -> Result<Self, DefinitionParseError> {
@@ -178,7 +178,7 @@ pub enum FlowSource {
 pub struct CallConfig {
     pub flow: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition: Option<Box<WorkflowDefinition>>,
+    pub body: Option<Box<WorkflowDefinition>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -188,25 +188,65 @@ pub struct NodeDefinition {
     pub kind: String,
     #[serde(default = "empty_object")]
     pub config: Value,
-    #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
-    pub loop_definition: Option<Box<LoopDefinition>>,
 }
 
 impl NodeDefinition {
-    pub fn has_order_edges(&self) -> bool {
-        self.loop_definition
-            .as_ref()
-            .is_some_and(|definition| definition.body.has_order_edges())
-            || (self.kind == crate::ITERATION_KIND
-                && self.config["body"]["order_edges"]
-                    .as_array()
-                    .is_some_and(|edges| !edges.is_empty()))
+    /// Stable observation/compilation scope for an executable child field.
+    pub fn flow_scope_key(&self, name: &str) -> String {
+        if name == "body"
+            && matches!(
+                self.kind.as_str(),
+                CALL_KIND | LOOP_KIND | crate::ITERATION_KIND
+            )
+        {
+            self.id.to_string()
+        } else {
+            mf_telemetry::event::ScopePathEntry::binding_key(self.id.as_str(), name)
+        }
     }
-}
 
-impl LoopBodyDefinition {
-    pub fn has_order_edges(&self) -> bool {
-        !self.order_edges.is_empty() || self.nodes.iter().any(NodeDefinition::has_order_edges)
+    /// Writes a normalized child into its declared configuration field.
+    pub fn set_node_flow(
+        &mut self,
+        name: &str,
+        body: WorkflowDefinition,
+    ) -> Result<(), mf_telemetry::ContractError> {
+        ensure!(
+            !name.trim().is_empty(),
+            mf_telemetry::InvalidSnafu {
+                message: "Flow parameter field names must be nonblank"
+            }
+        );
+        let config = self.config.as_object_mut().ok_or_else(|| {
+            mf_telemetry::InvalidSnafu {
+                message: "Flow parameters require an object configuration",
+            }
+            .build()
+        })?;
+        config.insert(name.into(), serde_json::to_value(body)?);
+        Ok(())
+    }
+
+    /// Reads only the declared, present, non-null executable configuration fields.
+    /// Source resolution must normalize these fields to direct workflow definitions first.
+    /// Every other field remains opaque provider data.
+    pub fn flow_parameters(
+        &self,
+        parameters: &[&str],
+    ) -> Result<BTreeMap<String, WorkflowDefinition>, mf_telemetry::ContractError> {
+        let mut flows = BTreeMap::new();
+        for &name in parameters {
+            ensure!(
+                !name.trim().is_empty(),
+                mf_telemetry::InvalidSnafu {
+                    message: "Flow parameter field names must be nonblank"
+                }
+            );
+            if let Some(value) = self.config.get(name).filter(|value| !value.is_null()) {
+                flows.insert(name.to_owned(), serde_json::from_value(value.clone())?);
+            }
+        }
+        Ok(flows)
     }
 }
 
@@ -227,7 +267,7 @@ pub struct LoopDefinition {
     pub variables: Vec<LoopVariableDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<LoopConditionDefinition>,
-    pub body: LoopBodyDefinition,
+    pub body: Box<WorkflowDefinition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -236,20 +276,6 @@ pub struct LoopVariableDefinition {
     pub name: String,
     #[serde(rename = "type")]
     pub value_type: Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LoopBodyDefinition {
-    pub nodes: Vec<NodeDefinition>,
-    #[serde(default)]
-    pub edges: Vec<EdgeDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub control_edges: Vec<ControlEdgeDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub order_edges: Vec<OrderEdgeDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub clusters: Vec<ClusterDefinition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

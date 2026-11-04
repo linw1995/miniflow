@@ -154,6 +154,22 @@ impl NodeRegistry {
         self.registrations.values().copied()
     }
 
+    /// Includes plain kinds with empty contracts so bootstrap can distinguish unknown kinds.
+    pub fn flow_parameter_contracts(&self) -> BTreeMap<String, Vec<String>> {
+        self.iter()
+            .map(|registration| {
+                (
+                    registration.kind.to_owned(),
+                    registration
+                        .flow_parameters()
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     fn from_registrations(
         registrations: impl IntoIterator<Item = &'static NodeRegistration>,
     ) -> Result<Self, NodeRegistryError> {
@@ -301,16 +317,57 @@ mod tests {
     };
 
     #[test]
-    fn plain_factory_rejects_a_subgraph_during_preparation() {
-        let body = crate::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new()));
+    fn plain_factory_rejects_prepared_subgraphs() {
+        assert!(!FIRST.accepts_subgraphs());
+        let arguments = BTreeMap::from([(
+            "selected".into(),
+            crate::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+        )]);
         let error = FIRST
-            .instantiate_subgraph("node", Value::Null, Value::Null, body)
+            .instantiate_subgraphs("node", Value::Null, arguments)
             .err()
             .unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("does not accept a prepared body")
+        assert!(matches!(
+            error,
+            NodeBuildError::InvalidSubgraph { message }
+                if message == "node `test.duplicate` does not accept prepared Flow arguments"
+        ));
+    }
+
+    #[test]
+    fn subgraph_factory_retains_plain_instantiation() {
+        let registration = NodeRegistration {
+            kind: "test.subgraph",
+            factory: crate::NodeFactory::Subgraph {
+                parameters: &["body"],
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        };
+        assert!(registration.accepts_subgraphs());
+        assert!(registration.instantiate(Value::Null).is_ok());
+    }
+
+    #[test]
+    fn flow_parameter_contracts_include_plain_kinds() {
+        static FLOW: NodeRegistration = NodeRegistration {
+            kind: "test.flow",
+            factory: crate::NodeFactory::Subgraph {
+                parameters: &["selected", "fallback"],
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        };
+        let registry = NodeRegistry::from_registrations([&FIRST, &FLOW]).unwrap();
+        assert_eq!(
+            registry.flow_parameter_contracts(),
+            BTreeMap::from([
+                ("test.duplicate".into(), vec![]),
+                (
+                    "test.flow".into(),
+                    vec!["selected".into(), "fallback".into()]
+                ),
+            ])
         );
     }
 

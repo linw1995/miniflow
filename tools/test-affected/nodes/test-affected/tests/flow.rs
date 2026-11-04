@@ -276,7 +276,7 @@ fn configure_github(nodes: &mut Value, base: &str) {
         if node["kind"] == "github.read" || node["kind"] == "github.download" {
             node["config"]["api_base"] = json!(base);
         }
-        if let Some(body) = node.get_mut("loop").and_then(|v| v.get_mut("body")) {
+        if let Some(body) = node["config"].get_mut("body") {
             configure_github(&mut body["nodes"], base);
         }
     }

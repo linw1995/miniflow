@@ -230,6 +230,7 @@ pub struct PreparedSubgraph {
 
 #[derive(Clone)]
 enum PreparedSubgraphBody {
+    Flow(Flow),
     Finite(Arc<SubgraphBody>),
     Event(Arc<dyn Fn() -> Result<crate::PreparedStream, WorkflowRunError> + Send + Sync>),
 }
@@ -306,6 +307,55 @@ impl<N: SubgraphNode> crate::TaskStreamNode for SubgraphTask<N> {
 }
 
 impl PreparedSubgraph {
+    /// Retains an already compiled Flow and captures its execution interface metadata.
+    pub fn from_flow(flow: Flow, nodes: Vec<NodeIdentity>) -> Self {
+        let outputs = flow
+            .plan()
+            .outputs
+            .iter()
+            .map(|output| {
+                let port = flow
+                    .node_metadata(&output.node_id)
+                    .expect("validated output node")
+                    .ports
+                    .outputs
+                    .iter()
+                    .find(|port| port.name == output.port)
+                    .expect("validated output port");
+                PortSpec::owned(
+                    output.name.as_ref(),
+                    port.value_type.clone(),
+                    !output.optional,
+                )
+            })
+            .collect();
+        let inputs = flow.input_schema().clone();
+        let input_metadata = SubgraphInputMetadata::from_flow(&flow);
+        let stream_outputs = flow.stream_output_ports();
+        Self {
+            nodes,
+            inputs,
+            outputs,
+            stream_outputs,
+            input_metadata,
+            body: PreparedSubgraphBody::Flow(flow),
+        }
+    }
+
+    /// Recovers an actual compiled Flow for injection into a typed node configuration.
+    /// Host callbacks and Event factories have no equivalent finite Flow representation.
+    pub fn into_flow(self) -> Result<Flow, crate::NodeBuildError> {
+        match self.body {
+            PreparedSubgraphBody::Flow(flow) => Ok(flow),
+            PreparedSubgraphBody::Finite(_) | PreparedSubgraphBody::Event(_) => {
+                crate::NodeInvalidSubgraphSnafu {
+                    message: "prepared body is not backed by a compiled finite Flow",
+                }
+                .fail()
+            }
+        }
+    }
+
     pub fn new(
         nodes: Vec<NodeIdentity>,
         outputs: Vec<PortSpec>,
@@ -371,6 +421,13 @@ impl PreparedSubgraph {
         context: ExecutionContext,
     ) -> Result<crate::FlowInvocation, WorkflowRunError> {
         match &self.body {
+            PreparedSubgraphBody::Flow(flow) => {
+                let flow = flow.clone();
+                crate::FlowInvocation::start_body(
+                    Arc::new(move |state, sink| flow.execute_with_sink(state, sink)),
+                    context,
+                )
+            }
             PreparedSubgraphBody::Finite(body) => {
                 crate::FlowInvocation::start_body(body.clone(), context)
             }
@@ -425,6 +482,7 @@ impl PreparedSubgraph {
         sink: &mut dyn crate::EmissionSink,
     ) -> Result<FlowOutputs, WorkflowRunError> {
         match &self.body {
+            PreparedSubgraphBody::Flow(flow) => flow.execute_with_sink(state, sink),
             PreparedSubgraphBody::Finite(body) => body(state, sink),
             PreparedSubgraphBody::Event(_) => {
                 let context = state.fork_domain_with_observation(state.observation().cloned());
@@ -499,6 +557,53 @@ impl crate::EmissionSink for ProjectedSink<'_> {
 mod tests {
     use super::*;
     use crate::{EmissionSink, NodeId, NodeResult, ValueRef, ValueType};
+
+    #[test]
+    fn compiled_body_recovers_the_same_shared_flow_and_interface() {
+        let flow = Flow::from_plan(
+            Vec::new(),
+            crate::FlowPlan {
+                connections: Vec::new().into(),
+                dependencies: Vec::new().into(),
+                execution_order: Vec::new().into(),
+                outputs: Vec::new().into(),
+                execution_domains: crate::ExecutionDomains::from_parts(
+                    Vec::new().into(),
+                    Vec::new().into(),
+                ),
+            },
+            WorkflowInputSchema::default(),
+        );
+        let prepared = PreparedSubgraph::from_flow(flow.clone(), Vec::new());
+        assert_eq!(&prepared.inputs, flow.input_schema());
+        assert_eq!(
+            prepared.input_metadata(),
+            &SubgraphInputMetadata::from_flow(&flow)
+        );
+        assert!(!prepared.is_event_stream());
+        let injected = prepared.into_flow().unwrap();
+        assert!(std::ptr::eq(flow.plan(), injected.plan()));
+    }
+
+    #[test]
+    fn callbacks_and_events_cannot_be_injected_as_compiled_flows() {
+        let callback = PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
+            panic!("conversion must not execute the callback")
+        });
+        let event = PreparedSubgraph::from_stream_factory(
+            Vec::new(),
+            WorkflowInputSchema::default(),
+            Vec::new(),
+            || panic!("conversion must not instantiate an Event flow"),
+        );
+        for prepared in [callback, event] {
+            assert!(matches!(
+                prepared.into_flow(),
+                Err(crate::NodeBuildError::InvalidSubgraph { message })
+                    if message.contains("prepared body") && message.contains("compiled finite Flow")
+            ));
+        }
+    }
 
     #[test]
     fn projection_preserves_nested_sensitivity_and_marks_other_children_skipped() {

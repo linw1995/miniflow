@@ -1,9 +1,9 @@
 use mf_runtime::{
-    EmissionSink, ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy,
-    IterationMode, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts,
-    NodeRegistration, NodeResult, NodeValue, OutputDerivation, Outputs, PreparedSubgraph,
-    SubgraphNode, SubgraphStream, SubgraphStreamSender, TaskNode, TypedNodeResult, TypedTaskNode,
-    ValueKind, ValueRef, ValueType, deserialize_config, execute_typed_task,
+    EmissionSink, ExecutionContext, ExecutionScope, Inputs, IterationErrorPolicy, IterationMode,
+    NodeBuildError, NodeConfig, NodeExecutionError, NodePortContract, NodePorts, NodeRegistration,
+    NodeResult, NodeValue, OutputDerivation, Outputs, PreparedSubgraph, SubgraphNode,
+    SubgraphStream, SubgraphStreamSender, TaskNode, TypedNodeResult, TypedTaskNode, ValueKind,
+    ValueRef, ValueType, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
@@ -19,14 +19,37 @@ use serde_json::Value;
 
 pub const KIND: &str = mf_runtime::ITERATION_KIND;
 
+#[derive(NodeConfig)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    body: PreparedSubgraph,
+    #[serde(default)]
+    mode: IterationMode,
+    #[serde(default)]
+    on_error: IterationErrorPolicy,
+    #[serde(default)]
+    stream_outputs: BTreeMap<String, mf_runtime::OutputReferenceDefinition>,
+}
+
+fn plain(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    mf_runtime::NodeInvalidSubgraphSnafu {
+        message: "builtin.iteration requires a prepared `body` binding",
+    }
+    .fail()
+}
+
 fn factory(
     id: &str,
     config: Value,
-    _: Value,
-    body: PreparedSubgraph,
+    bodies: BTreeMap<String, PreparedSubgraph>,
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
-    let config: IterationConfig = deserialize_config(config)?;
-    let node = IterationNode::new(id, config.mode, config.on_error, body)?;
+    let Config {
+        body,
+        mode,
+        on_error,
+        stream_outputs: _stream_outputs,
+    } = Config::from_config(config, bodies)?;
+    let node = IterationNode::new(id, mode, on_error, body)?;
     let metadata = mf_runtime::NodeMetadata {
         output_derivations: vec![node.result_derivation()],
         ..Default::default()
@@ -35,7 +58,14 @@ fn factory(
 }
 
 inventory::submit! {
-    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Subgraph(factory) }
+    NodeRegistration {
+        kind: KIND,
+        factory: mf_runtime::NodeFactory::Subgraph {
+            parameters: Config::FLOW_PARAMETERS,
+            plain,
+            prepared: factory,
+        },
+    }
 }
 
 pub struct IterationNode {
@@ -379,6 +409,23 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn iteration_factory_rejects_missing_and_unexpected_body_handles() {
+        let config = json!({
+            "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]},
+        });
+        for bodies in [
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "unexpected".into(),
+                PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Default::default())),
+            )]),
+        ] {
+            let error = factory("each", config.clone(), bodies).err().unwrap();
+            assert!(error.to_string().contains("prepared Flow field"), "{error}");
+        }
+    }
+
+    #[test]
     fn parallel_mode_is_bounded_and_returns_input_order() {
         let values: Vec<_> = (0..64).map(Value::from).collect();
         for items in [
@@ -505,20 +552,19 @@ mod tests {
         let registration = NodeRegistry::from_inventory().unwrap().get(KIND).unwrap();
         assert!(registration.instantiate(json!({})).is_err());
         let node = registration
-            .instantiate_subgraph(
+            .instantiate_subgraphs(
                 "iteration",
                 json!({
-                    "body": {
-                        "nodes": [],
-                        "result": {"node": "%iteration", "port": "item"}
-                    }
+                    "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}
                 }),
-                Value::Null,
-                PreparedSubgraph::new(
-                    Vec::new(),
-                    vec![PortSpec::new("result", ValueType::Any, true)],
-                    |_| Ok(Outputs::new()),
-                ),
+                BTreeMap::from([(
+                    "body".into(),
+                    PreparedSubgraph::new(
+                        Vec::new(),
+                        vec![PortSpec::new("result", ValueType::Any, true)],
+                        |_| Ok(Outputs::new()),
+                    ),
+                )]),
             )
             .unwrap();
         let ports = &node.metadata.ports;

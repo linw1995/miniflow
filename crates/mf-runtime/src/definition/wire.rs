@@ -62,14 +62,12 @@ fn decode_scope(
                 .get("nodes")
                 .and_then(Value::as_array)
                 .is_none_or(|nodes| nodes.iter().all(|node| {
-                    node.pointer("/loop/stream_outputs")
+                    !matches!(
+                        node["kind"].as_str(),
+                        Some(LOOP_KIND | crate::ITERATION_KIND)
+                    ) || node
+                        .pointer("/config/stream_outputs")
                         .is_none_or(|outputs| outputs.as_object().is_some_and(Map::is_empty))
-                        && (node["kind"] != crate::ITERATION_KIND
-                            || node
-                                .pointer("/config/stream_outputs")
-                                .is_none_or(|outputs| {
-                                    outputs.as_object().is_some_and(Map::is_empty)
-                                }))
                 })),
         InvalidSnafu {
             path,
@@ -213,7 +211,7 @@ fn decode_scope(
             }
         );
     }
-    visit_bodies(scope, modern, version, path, decode_scope)
+    Ok(())
 }
 
 fn encode_scope(
@@ -231,14 +229,12 @@ fn encode_scope(
                 .get("nodes")
                 .and_then(Value::as_array)
                 .is_none_or(|nodes| nodes.iter().all(|node| {
-                    node.pointer("/loop/stream_outputs")
+                    !matches!(
+                        node["kind"].as_str(),
+                        Some(LOOP_KIND | crate::ITERATION_KIND)
+                    ) || node
+                        .pointer("/config/stream_outputs")
                         .is_none_or(|outputs| outputs.as_object().is_some_and(Map::is_empty))
-                        && (node["kind"] != crate::ITERATION_KIND
-                            || node
-                                .pointer("/config/stream_outputs")
-                                .is_none_or(|outputs| {
-                                    outputs.as_object().is_some_and(Map::is_empty)
-                                }))
                 })),
         InvalidSnafu {
             path,
@@ -346,34 +342,6 @@ fn encode_scope(
             }
         );
         scope.remove("order_edges");
-    }
-    visit_bodies(scope, modern, version, path, encode_scope)
-}
-
-fn visit_bodies(
-    scope: &mut Map<String, Value>,
-    modern: bool,
-    version: WorkflowDefinitionVersion,
-    path: &str,
-    visit: fn(&mut Value, bool, WorkflowDefinitionVersion, &str) -> Result<(), WireError>,
-) -> Result<(), WireError> {
-    if let Some(nodes) = scope.get_mut("nodes").and_then(Value::as_array_mut) {
-        for node in nodes {
-            let nested = format!(
-                "{path}/{}",
-                node.get("id").and_then(Value::as_str).unwrap_or("?")
-            );
-            if let Some(body) = node.get_mut("loop").and_then(|value| value.get_mut("body")) {
-                visit(body, modern, version, &nested)?;
-            }
-            if node.get("kind").and_then(Value::as_str) == Some(crate::ITERATION_KIND)
-                && let Some(body) = node
-                    .get_mut("config")
-                    .and_then(|value| value.get_mut("body"))
-            {
-                visit(body, modern, version, &nested)?;
-            }
-        }
     }
     Ok(())
 }

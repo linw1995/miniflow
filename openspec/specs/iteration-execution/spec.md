@@ -13,14 +13,17 @@ the kind. The compiler SHALL bind an engine-prepared body to the registered impl
 the node package SHALL own item scheduling, result collection, and failure policies. The node SHALL expose
 one required input `items` accepting arrays or JSON objects and one required array output `results`.
 Other input shapes MUST fail at execution before the body runs, regardless of the item failure policy.
-Its body SHALL contain ordinary nodes,
-optional data and control edges, and one required result selection. The reserved `%iteration` source SHALL expose the
+Its `config.body` SHALL be a complete Flow definition with its own version and dependencies,
+ordinary nodes, optional data and execution edges, and exactly one required output named `result`
+in the standard `outputs` array. The partial-body format and `body.result` field SHALL be rejected. The reserved `%iteration` source SHALL expose the
 current array element or map value as `item`, the map key as `key` (JSON null for arrays), and its zero-based index
 as `index`. Map entries SHALL be visited in lexicographic key order, with `index` assigned in that order.
 The body source MUST NOT expose the legacy `items` port. Port contracts SHALL follow the selected runtime and
 node package versions; the workflow JSON `version` MUST NOT select a compatibility alias.
 Each item SHALL use a fresh context; outputs from
-another item MUST NOT be visible. The body MUST NOT contain the reserved source ID, another Iteration node, or a structured Loop construct.
+another item MUST NOT be visible. Normalization SHALL supply the engine-owned `%iteration` input node;
+a normalized Flow may retain that exact scoped source. The body MUST NOT redefine the source, contain
+another Iteration node, or contain a structured Loop construct.
 
 #### Scenario: Transform an array
 

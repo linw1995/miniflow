@@ -85,11 +85,11 @@ fn definition() -> Value {
             {
                 "id": "repeat",
                 "kind": "workflow.loop",
-                "loop": {
+                "config": {
                     "max_iterations": 5,
                     "variables": [{"name": "count", "type": "int"}],
                     "until": {"variable": "count", "operator": "gte", "value": 3},
-                    "body": {
+                    "body": {"version":"2026-09-29", "dependencies":{},
                         "nodes": [
                             {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}},
                             {"id": "increment", "kind": "builtin.code", "config": {
@@ -119,13 +119,14 @@ fn plans_and_type_checks_nested_loop_body() {
     let definition = parse(definition());
     assert_eq!(definition.version, WorkflowDefinitionVersion::V2026_09_29);
     let plan = plan_definition(&definition).unwrap();
-    let body = &plan.definition.nodes[1]
-        .loop_definition
-        .as_ref()
-        .unwrap()
-        .body;
-    assert_eq!(body.nodes[0].id.as_str(), "increment");
-    assert_eq!(body.nodes[1].id.as_str(), "assign");
+    let body = &plan.definition.nodes[1].flow_parameters(&["body"]).unwrap()["body"];
+    let authored_nodes: Vec<_> = body
+        .nodes
+        .iter()
+        .filter(|node| node.id.as_str() != "%loop")
+        .collect();
+    assert_eq!(authored_nodes[0].id.as_str(), "increment");
+    assert_eq!(authored_nodes[1].id.as_str(), "assign");
     compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap();
 }
 
@@ -152,7 +153,7 @@ fn rejects_old_schema_and_invalid_loop_structure() {
     );
 
     let mut value = definition();
-    value["nodes"][1]["loop"]["max_iterations"] = json!(0);
+    value["nodes"][1]["config"]["max_iterations"] = json!(0);
     assert!(
         plan_definition(&parse(value))
             .unwrap_err()
@@ -161,7 +162,7 @@ fn rejects_old_schema_and_invalid_loop_structure() {
     );
 
     let mut value = definition();
-    value["nodes"][1]["loop"]["body"]["edges"][0]["from_node"] = json!("seed");
+    value["nodes"][1]["config"]["body"]["edges"][0]["from_node"] = json!("seed");
     assert!(
         plan_definition(&parse(value))
             .unwrap_err()
@@ -170,7 +171,7 @@ fn rejects_old_schema_and_invalid_loop_structure() {
     );
 
     let mut value = definition();
-    value["nodes"][1]["loop"]["body"]["control_edges"] = json!([{
+    value["nodes"][1]["config"]["body"]["control_edges"] = json!([{
         "from_node": "assign", "from_output": "done", "to_node": "increment"
     }]);
     assert!(
@@ -220,21 +221,25 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
         ),
     ] {
         let mut value = definition();
-        value["nodes"][1]["loop"]["variables"] = variables.clone();
+        value["nodes"][1]["config"]["variables"] = variables.clone();
         let error = plan_definition(&parse(value)).unwrap_err().to_string();
         assert!(error.contains(expected), "{error}");
 
         let config = json!({
             "max_iterations": 5,
             "variables": variables,
+            "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]},
         });
-        let error = mf_compiler::instantiate_subgraph_with_metadata(
+        let error = mf_compiler::instantiate_subgraphs_with_metadata(
             &NodeRegistry::from_inventory().unwrap(),
             "repeat",
             mf_runtime::LOOP_KIND,
-            "{}",
             &config.to_string(),
-            mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+            [(
+                "body".into(),
+                mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+            )]
+            .into(),
         )
         .err()
         .unwrap()
@@ -242,14 +247,20 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
         assert!(error.contains(expected), "{error}");
     }
 
-    let complete_definition = definition()["nodes"][1]["loop"].to_string();
-    let prepared = mf_compiler::instantiate_subgraph_with_metadata(
+    let mut complete_definition = definition()["nodes"][1]["config"].clone();
+    complete_definition["body"] = json!({
+        "version":"2026-10-28", "dependencies":{}, "nodes":[],
+    });
+    let prepared = mf_compiler::instantiate_subgraphs_with_metadata(
         &NodeRegistry::from_inventory().unwrap(),
         "repeat",
         mf_runtime::LOOP_KIND,
-        "{}",
-        &complete_definition,
-        mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+        &complete_definition.to_string(),
+        [(
+            "body".into(),
+            mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+        )]
+        .into(),
     )
     .unwrap();
     assert_eq!(prepared.metadata.ports.inputs[0].name, "count");
@@ -259,7 +270,7 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
 fn validates_body_plugins_and_loop_port_types() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut value = definition();
-    value["nodes"][1]["loop"]["body"]["nodes"][1]["kind"] = json!("missing.plugin");
+    value["nodes"][1]["config"]["body"]["nodes"][1]["kind"] = json!("missing.plugin");
     assert!(
         compile_definition(&parse(value), &registry)
             .unwrap_err()
@@ -268,11 +279,11 @@ fn validates_body_plugins_and_loop_port_types() {
     );
 
     let mut inactive = exit_definition();
-    inactive["nodes"][1]["loop"]["body"]["nodes"]
+    inactive["nodes"][1]["config"]["body"]["nodes"]
         .as_array_mut()
         .unwrap()
         .push(json!({"id": "invalid_inactive", "kind": "missing.plugin"}));
-    inactive["nodes"][1]["loop"]["body"]["control_edges"]
+    inactive["nodes"][1]["config"]["body"]["control_edges"]
         .as_array_mut()
         .unwrap()
         .push(json!({"from_node": "route", "from_output": "stop", "to_node": "invalid_inactive"}));
@@ -284,15 +295,15 @@ fn validates_body_plugins_and_loop_port_types() {
     );
 
     let mut value = definition();
-    value["nodes"][1]["loop"]["variables"][0]["type"] = json!("string");
-    value["nodes"][1]["loop"]["until"] = Value::Null;
+    value["nodes"][1]["config"]["variables"][0]["type"] = json!("string");
+    value["nodes"][1]["config"]["until"] = Value::Null;
     let error = compile_definition(&parse(value), &registry)
         .unwrap_err()
         .to_string();
     assert!(error.contains("cannot connect"), "{error}");
 
     let mut value = definition();
-    value["nodes"][1]["loop"]["body"]["nodes"][0]["config"]["variable"] = json!("unknown");
+    value["nodes"][1]["config"]["body"]["nodes"][0]["config"]["variable"] = json!("unknown");
     assert!(
         plan_definition(&parse(value))
             .unwrap_err()
@@ -305,8 +316,8 @@ fn validates_body_plugins_and_loop_port_types() {
 fn initial_literal_does_not_specialize_later_passes() {
     let mut value = definition();
     value["nodes"][0]["config"]["value"] = json!("initial");
-    value["nodes"][1]["loop"]["variables"][0]["type"] = json!("any");
-    value["nodes"][1]["loop"]["until"] = Value::Null;
+    value["nodes"][1]["config"]["variables"][0]["type"] = json!("any");
+    value["nodes"][1]["config"]["until"] = Value::Null;
     compile_definition(&parse(value), &NodeRegistry::from_inventory().unwrap()).unwrap();
 }
 
@@ -398,14 +409,14 @@ fn assert_invalid_loop_edits_preserve_installed_binary_and_lock(
     let installed = fs::read(executable).unwrap();
     let lock_path = definition_path.with_extension("lock");
     let lock = fs::read(&lock_path).unwrap();
-    value["nodes"][1]["loop"]["max_iterations"] = json!(0);
+    value["nodes"][1]["config"]["max_iterations"] = json!(0);
     fs::write(definition_path, value.to_string()).unwrap();
     let error = compile_project(request).unwrap_err();
     assert_eq!(error.stage, "structural validation");
     assert_eq!(fs::read(executable).unwrap(), installed);
     assert_eq!(fs::read(&lock_path).unwrap(), lock);
 
-    value["nodes"][1]["loop"]["max_iterations"] = json!(5);
+    value["nodes"][1]["config"]["max_iterations"] = json!(5);
     value["nodes"][0] = json!({
         "id": "seed",
         "kind": "builtin.code",
@@ -417,7 +428,9 @@ fn assert_invalid_loop_edits_preserve_installed_binary_and_lock(
         .remove("core");
     fs::write(definition_path, value.to_string()).unwrap();
     let error = compile_project(request).unwrap_err();
-    assert_eq!(error.stage, "Cargo build");
+    // Receiver contracts must now be discovered before generation. Omitting
+    // the provider is rejected at discovery, without touching installed output.
+    assert_eq!(error.stage, "Flow source discovery");
     assert_eq!(fs::read(executable).unwrap(), installed);
     assert_eq!(fs::read(&lock_path).unwrap(), lock);
 }
@@ -433,7 +446,7 @@ fn run_in_memory(value: Value) -> Result<Value, String> {
 #[test]
 fn stops_at_maximum_and_immediate_exit() {
     let mut value = definition();
-    value["nodes"][1]["loop"]["until"] = Value::Null;
+    value["nodes"][1]["config"]["until"] = Value::Null;
     assert_eq!(run_in_memory(value.clone()).unwrap(), json!({"count": 5}));
 
     assert_eq!(
@@ -444,8 +457,8 @@ fn stops_at_maximum_and_immediate_exit() {
 
 fn exit_definition() -> Value {
     let mut value = definition();
-    value["nodes"][1]["loop"]["until"] = Value::Null;
-    let body = &mut value["nodes"][1]["loop"]["body"];
+    value["nodes"][1]["config"]["until"] = Value::Null;
+    let body = &mut value["nodes"][1]["config"]["body"];
     body["nodes"].as_array_mut().unwrap().extend([
         json!({"id": "route", "kind": "builtin.if_else", "config": {"branches": [{
             "id": "stop", "condition": {"source": {"output": "increment.next", "path": ""},
@@ -469,9 +482,9 @@ fn exit_definition() -> Value {
 #[test]
 fn skipped_assignment_preserves_previous_value() {
     let mut value = definition();
-    value["nodes"][1]["loop"]["until"] = Value::Null;
-    value["nodes"][1]["loop"]["max_iterations"] = json!(2);
-    let body = &mut value["nodes"][1]["loop"]["body"];
+    value["nodes"][1]["config"]["until"] = Value::Null;
+    value["nodes"][1]["config"]["max_iterations"] = json!(2);
+    let body = &mut value["nodes"][1]["config"]["body"];
     body["nodes"].as_array_mut().unwrap().push(json!({
         "id": "route", "kind": "builtin.if_else", "config": {"branches": [{
             "id": "skip", "condition": {"source": {"output": "%loop.index", "path": ""},
@@ -487,15 +500,15 @@ fn skipped_assignment_preserves_previous_value() {
 
 fn nested_definition() -> Value {
     let mut value = definition();
-    let inner = value["nodes"][1]["loop"].clone();
-    value["nodes"][1]["loop"]["until"] = Value::Null;
-    value["nodes"][1]["loop"]["max_iterations"] = json!(2);
+    let inner = value["nodes"][1]["config"].clone();
+    value["nodes"][1]["config"]["until"] = Value::Null;
+    value["nodes"][1]["config"]["max_iterations"] = json!(2);
     let mut inner = inner;
     inner["until"] = Value::Null;
     inner["max_iterations"] = json!(1);
-    value["nodes"][1]["loop"]["body"] = json!({
+    value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
-            {"id": "inner", "kind": "workflow.loop", "loop": inner},
+            {"id": "inner", "kind": "workflow.loop", "config": inner},
             {"id": "assign_outer", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
         ],
         "edges": [
@@ -526,21 +539,21 @@ fn nested_loops_restore_parent_state_and_share_step_budget() {
 
 fn budget_definition() -> Value {
     let mut value = nested_definition();
-    let inner = &mut value["nodes"][1]["loop"]["body"]["nodes"][0]["loop"];
+    let inner = &mut value["nodes"][1]["config"]["body"]["nodes"][0]["config"];
     inner["max_iterations"] = json!(1000);
-    inner["body"] = json!({
+    inner["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [{"id": "tick", "kind": "builtin.constant", "config": {"value": true}}]
     });
-    value["nodes"][1]["loop"]["max_iterations"] = json!(1000);
+    value["nodes"][1]["config"]["max_iterations"] = json!(1000);
     value
 }
 
 #[test]
 fn later_pass_cannot_read_an_omitted_prior_output() {
     let mut value = definition();
-    value["nodes"][1]["loop"]["until"] = Value::Null;
-    value["nodes"][1]["loop"]["max_iterations"] = json!(2);
-    value["nodes"][1]["loop"]["body"] = json!({
+    value["nodes"][1]["config"]["until"] = Value::Null;
+    value["nodes"][1]["config"]["max_iterations"] = json!(2);
+    value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
             {"id": "probe", "kind": "test.omit_on_second"},
             {"id": "sink", "kind": "builtin.identity"}
@@ -581,7 +594,7 @@ fn skipped_definition() -> Value {
 #[test]
 fn invalid_assignment_does_not_publish_partial_loop_output() {
     let mut value = definition();
-    value["nodes"][1]["loop"]["body"] = json!({
+    value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
             {"id": "wrong", "kind": "test.wrong_type"},
             {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
@@ -607,7 +620,7 @@ fn invalid_assignment_does_not_publish_partial_loop_output() {
 fn loop_observation_identifies_each_pass_and_body_invocation() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut value = definition();
-    value["nodes"][1]["loop"]["max_iterations"] = json!(3);
+    value["nodes"][1]["config"]["max_iterations"] = json!(3);
     let plan = compile_definition(&parse(value), &registry).unwrap();
     let harness = capture::Harness::new(true);
     let observation = plan
@@ -854,7 +867,7 @@ fn loop_observation_distinguishes_exit_skip_and_nested_paths() {
 #[test]
 fn failed_body_emits_a_failed_pass_and_no_loop_success() {
     let mut value = definition();
-    value["nodes"][1]["loop"]["body"] = json!({
+    value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
             {"id": "wrong", "kind": "test.wrong_type"},
             {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
@@ -1157,11 +1170,8 @@ fn observation_preserves_description_and_structural_order_errors() {
         .iter_mut()
         .find(|node| node.id.as_str() == "repeat")
         .unwrap()
-        .loop_definition
-        .as_mut()
-        .unwrap()
-        .body;
-    body.edges[1].from_node = "missing".into();
+        .config["body"];
+    body["edges"][1]["from_node"] = json!("missing");
     let harness = capture::Harness::new(true);
     let error = plan
         .start_observation(&harness.observer(), RunId::new())

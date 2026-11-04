@@ -127,26 +127,25 @@ fn success_edges_participate_in_structural_order_and_cycles() {
 }
 
 #[test]
-fn nested_iteration_uses_the_root_version_and_preserves_bindings() {
+fn nested_iteration_uses_its_own_version_and_preserves_bindings() {
     let mut value = reference_workflow();
     value["nodes"] = json!([{"id":"each","kind":"builtin.iteration","config":{
-        "body":{"nodes":[{"id":"echo","kind":"builtin.identity","inputs":{
+        "body":{"version":"2026-10-19", "dependencies":{}, "nodes":[{"id":"echo","kind":"builtin.identity","inputs":{
             "input":{"from":{"node":"%iteration","port":"item"}}
-        }}],"result":{"node":"echo","port":"value"}}
+        }}],"outputs": [{"name":"result", "node":"echo","port":"value"}]}
     }}]);
     value["outputs"] = json!([]);
     let definition: WorkflowDefinition = serde_json::from_value(value.clone()).unwrap();
-    assert_eq!(
-        definition.nodes[0].config["body"]["edges"][0]["from_node"],
-        "%iteration"
-    );
+    let children = definition.nodes[0].flow_parameters(&["body"]).unwrap();
+    assert_eq!(children["body"].edges[0].from_node.as_str(), "%iteration");
     let encoded = serde_json::to_value(&definition).unwrap();
     assert_eq!(
         encoded["nodes"][0]["config"]["body"]["nodes"][0]["inputs"],
         value["nodes"][0]["config"]["body"]["nodes"][0]["inputs"]
     );
     value["nodes"][0]["config"]["body"]["control_edges"] = json!([]);
-    assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
+    let invalid: WorkflowDefinition = serde_json::from_value(value).unwrap();
+    assert!(invalid.nodes[0].flow_parameters(&["body"]).is_err());
 }
 
 #[test]

@@ -227,9 +227,9 @@ fn selected_loops_keep_pass_and_stop_rules() {
     let value: Value = serde_json::from_str(include_str!("../../../examples/loop.json")).unwrap();
     for (maximum, exit, expected) in [(5, false, 3), (1, false, 1), (5, true, 1)] {
         let mut value = value.clone();
-        value["nodes"][1]["loop"]["max_iterations"] = json!(maximum);
+        value["nodes"][1]["config"]["max_iterations"] = json!(maximum);
         if exit {
-            value["nodes"][1]["loop"]["body"]["nodes"]
+            value["nodes"][1]["config"]["body"]["nodes"]
                 .as_array_mut()
                 .unwrap()
                 .push(json!({"id":"aa_exit", "kind":"workflow.exit_loop"}));
@@ -302,11 +302,11 @@ fn selected_parallel_iteration_keeps_order_worker_bounds_and_error_policy() {
         let plan = plan(
             json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
             {"id":"source", "kind":"builtin.constant", "config":{"value":[1,2,3]}},
-            {"id":"iteration", "kind":"builtin.iteration", "config":{"mode":"parallel", "on_error":policy, "body":{
+            {"id":"iteration", "kind":"builtin.iteration", "config":{"mode":"parallel", "on_error":policy, "body":{"version":"2026-10-03", "dependencies":{},
                 "nodes":[{"id":"map", "kind":"test.isolation_item"}], "edges":[
                     {"from_node":"%iteration", "from_output":"item", "to_node":"map", "to_input":"item"},
                     {"from_node":"%iteration", "from_output":"index", "to_node":"map", "to_input":"index"}],
-                "result":{"node":"map", "port":"value"}
+                "outputs": [{"name":"result", "node":"map", "port":"value"}]
             }}}
         ], "edges":[{"from_node":"source", "from_output":"value", "to_node":"iteration", "to_input":"items"}]}),
             &registry,
@@ -795,10 +795,10 @@ fn selected_stream_iteration_keeps_the_original_worker_ceiling() {
         json!({"version":"2026-10-03", "execution":{"limits":{"workers":1}}, "dependencies":{},
             "nodes":[{"id":"producer", "kind":"test.isolation_producer"},
             {"id":"source", "kind":"builtin.constant", "config":{"value":[1,2,3]}},
-            {"id":"iteration", "kind":"builtin.iteration", "config":{"mode":"parallel", "body":{
+            {"id":"iteration", "kind":"builtin.iteration", "config":{"mode":"parallel", "body":{"version":"2026-10-03", "dependencies":{},
                 "nodes":[{"id":"map", "kind":"test.isolation_item", "config":{"workers":1}}],
                 "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"map", "to_input":"item"}, {"from_node":"%iteration", "from_output":"index", "to_node":"map", "to_input":"index"}],
-                "result":{"node":"map", "port":"value"}
+                "outputs": [{"name":"result", "node":"map", "port":"value"}]
             }}}], "edges":[{"from_node":"source", "from_output":"value", "to_node":"iteration", "to_input":"items"}]
         }),
         &registry,

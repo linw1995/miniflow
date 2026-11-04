@@ -31,5 +31,6 @@ pub fn fixture_plan() -> CompiledWorkflow {
     CompiledWorkflow {
         definition: fixture_definition(),
         execution_order: vec!["a".into(), "b".into()],
+        loop_orders: vec![],
     }
 }

@@ -72,8 +72,12 @@ pub enum EmbeddingError {
 
 /// Check workflow structure and emit source modules into Cargo's OUT_DIR.
 ///
-/// Paths are relative to CARGO_MANIFEST_DIR. The host links node crates as normal dependencies;
-/// preparation validates their configuration, ports, and execution contracts at runtime.
+/// Paths are relative to CARGO_MANIFEST_DIR. Providers with Flow-valued configuration must
+/// also be linked into the build script (build dependencies plus `use provider as _;`),
+/// including the provider of `workflow.call`, Loop, and Iteration bodies. Their
+/// NodeConfig metadata and builtin Flow registrations must be available while freezing
+/// sources. This reads registration metadata only; factories are not executed. The host
+/// links the same providers as normal dependencies for runtime preparation.
 pub fn embed_workflows(requests: &[EmbedRequest]) -> Result<(), EmbeddingError> {
     let manifest = env::var_os("CARGO_MANIFEST_DIR").context(CargoEnvironmentSnafu {
         variable: "CARGO_MANIFEST_DIR",
@@ -142,8 +146,9 @@ fn embed_workflows_at(
         for source in resolved.sources {
             println!("cargo:rerun-if-changed={}", source.display());
         }
-        let plan = crate::compiler::plan_resolved_definition(&resolved.definition)
-            .context(PlanningSnafu { name, path: &path })?;
+        let plan =
+            crate::compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts)
+                .context(PlanningSnafu { name, path: &path })?;
         let module = plan
             .generate_embedded_artifacts()
             .context(GenerationSnafu { name, path: &path })?;

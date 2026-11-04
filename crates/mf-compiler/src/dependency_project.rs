@@ -58,7 +58,13 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let workflow = mf_compiler::CompiledWorkflow::from_json(include_str!("workflow-plan.json"))?;
     let artifacts = workflow.generate_runner_execution_plans(&registry)?;
     let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes)?;
-    let workflow = mf_compiler::plan_definition(&manifest.definition)?;
+    // The manifest has resolved execution modes; its sources are already frozen.
+    // Retain the validated order without running source resolution a second time.
+    let workflow = mf_compiler::CompiledWorkflow {
+        definition: manifest.definition,
+        execution_order: workflow.execution_order,
+        loop_orders: workflow.loop_orders,
+    };
     if workflow.definition.execution.is_some() {
         println!("cargo:rustc-cfg=mf_streaming");
     }
@@ -447,7 +453,29 @@ pub fn write_dependency_project_with_options(
     options: &RunnerOptions,
 ) -> Result<(), DependencyProjectError> {
     let plan_json = plan.to_json().context(PlanSnafu)?;
-    let definition = &plan.definition;
+    let (manifest, imports) = project_manifest(&plan.definition, support, options)?;
+    let build = format!("{imports}{BUILD}");
+    let main = format!("{imports}{MAIN}");
+    write_project_files(
+        project,
+        &[
+            ("Cargo.toml", &manifest),
+            ("src/main.rs", &main),
+            ("build.rs", &build),
+            (
+                "src/workflow.rs",
+                "include!(concat!(env!(\"OUT_DIR\"), \"/workflow.rs\"));\n",
+            ),
+            ("workflow-plan.json", &plan_json),
+        ],
+    )
+}
+
+fn project_manifest(
+    definition: &crate::WorkflowDefinition,
+    support: &SupportPackages,
+    options: &RunnerOptions,
+) -> Result<(String, String), DependencyProjectError> {
     let mut features = Vec::new();
     if options.telemetry {
         features.push("\"telemetry\"");
@@ -481,15 +509,13 @@ pub fn write_dependency_project_with_options(
             ));
         }
     }
-    let mut main = String::new();
-    let mut build = String::new();
+    let mut imports = String::new();
     for (index, (alias, dependency)) in definition.dependencies.iter().enumerate() {
         dependency
             .validate()
             .context(DependencyValidationSnafu { alias })?;
         let name = format!("node_{index}");
-        main.push_str(&format!("extern crate {name} as _;\n"));
-        build.push_str(&format!("extern crate {name} as _;\n"));
+        imports.push_str(&format!("extern crate {name} as _;\n"));
         let mut fields = vec![format!("package = {}", quoted(&dependency.package))];
         if let Some(version) = &dependency.version {
             fields.push(format!("version = {}", quoted(version)));
@@ -516,8 +542,49 @@ pub fn write_dependency_project_with_options(
         .find("\n[dependencies]\n")
         .expect("generated dependency section");
     manifest.insert_str(dependencies_offset, &build_dependencies);
-    build.push_str(BUILD);
-    main.push_str(MAIN);
+    Ok((manifest, imports))
+}
+
+/// A provider-linked metadata probe. It never constructs or executes a node.
+/// Its caller must place it in a fresh temporary directory, not the user's cache.
+pub fn write_resolution_project(
+    project: &Path,
+    definition: &crate::WorkflowDefinition,
+    support: &SupportPackages,
+    options: &RunnerOptions,
+) -> Result<(), DependencyProjectError> {
+    let (manifest, imports) = project_manifest(definition, support, options)?;
+    let main = format!(
+        "{imports}{}",
+        r#"
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = std::env::args_os().skip(1);
+    let source = std::path::PathBuf::from(args.next().ok_or("missing authored definition")?);
+    let output = std::path::PathBuf::from(args.next().ok_or("missing discovery output")?);
+    let (catalog, selected_packages) = if let Some(path) = args.next() {
+        serde_json::from_slice(&std::fs::read(path)?)?
+    } else {
+        (std::collections::BTreeMap::new(), std::collections::BTreeSet::new())
+    };
+    let registry = mf_runtime::NodeRegistry::from_inventory()?;
+    let discovery = mf_compiler::FlowDiscovery::load_with_builtin_catalog(
+        &source, &registry, catalog, selected_packages,
+    )?;
+    std::fs::write(output, serde_json::to_vec(&discovery)?)?;
+    Ok(())
+}
+"#
+    );
+    write_project_files(
+        project,
+        &[("Cargo.toml", &manifest), ("src/main.rs", &main)],
+    )
+}
+
+fn write_project_files(
+    project: &Path,
+    files: &[(&str, &str)],
+) -> Result<(), DependencyProjectError> {
     for name in ["src", "target"] {
         let path = project.join(name);
         match fs::symlink_metadata(&path) {
@@ -532,16 +599,7 @@ pub fn write_dependency_project_with_options(
     fs::create_dir_all(project.join("src")).context(WriteSnafu {
         path: project.to_owned(),
     })?;
-    for (name, value) in [
-        ("Cargo.toml", manifest.as_str()),
-        ("src/main.rs", main.as_str()),
-        ("build.rs", build.as_str()),
-        (
-            "src/workflow.rs",
-            "include!(concat!(env!(\"OUT_DIR\"), \"/workflow.rs\"));\n",
-        ),
-        ("workflow-plan.json", plan_json.as_str()),
-    ] {
+    for (name, value) in files {
         crate::state::write_if_changed(&project.join(name), value.as_bytes())
             .context(StateSnafu)?;
     }

@@ -1,3 +1,5 @@
+mod config;
+
 use proc_macro::TokenStream;
 use quote::quote;
 use std::collections::BTreeSet;
@@ -50,6 +52,32 @@ pub fn derive_node_value(input: TokenStream) -> TokenStream {
 pub fn derive_node_enum(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_enum(input) {
+        Ok(output) => output.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+/// Discovers executable `Flow` and `Option<Flow>` configuration fields and injects
+/// their prepared values through `NodeConfig::from_config`. Existing host-policy
+/// configurations may also use `PreparedSubgraph` or `Option<PreparedSubgraph>`.
+/// Such configurations need not derive `Deserialize`: ordinary fields retain their
+/// Serde decoding contract, while executable fields come only from prepared handles.
+///
+/// Serde `rename` and container `rename_all` determine the wire names. Names that
+/// collide with ordinary fields' deserialize names or aliases are rejected, as
+/// are flattened fields in configurations containing Flow parameters.
+///
+/// Discovery requires these literal type spellings (possibly qualified).
+/// Differently named type aliases are not discovered. Recognized types are checked
+/// against the runtime's actual types by constructing the decoded fields. Nested
+/// Flow parameters and Serde options that change their wire representation are
+/// rejected. Executable fields allow bare `default` only when optional; custom
+/// defaults cannot supply executable values. Use
+/// `#[config(runtime = "::runtime_alias")]` to override the runtime crate path.
+#[proc_macro_derive(NodeConfig, attributes(config, serde))]
+pub fn derive_node_config(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match config::expand(input) {
         Ok(output) => output.into(),
         Err(error) => error.into_compile_error().into(),
     }

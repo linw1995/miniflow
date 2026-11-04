@@ -7,8 +7,9 @@ Execution uses existing runtime APIs without reading workflow or generated sourc
 
 ## Cargo setup
 
-Declare node crates only in normal dependencies. Enable compiler codegen in build dependencies and
-disable it in the normal dependency:
+Declare execution node crates in normal dependencies. Also link providers that declare typed Flow
+parameters in build dependencies so source loading can read their `NodeConfig` contract. Enable compiler
+codegen only in build dependencies:
 
 ```toml
 [dependencies]
@@ -18,17 +19,24 @@ core_nodes = { package = "mfn-core", version = "=0.1.0" }
 
 [build-dependencies]
 mf-compiler = { version = "=0.1.0", default-features = false, features = ["codegen"] }
+core_nodes = { package = "mfn-core", version = "=0.1.0" }
 ```
 
 Cargo and the host lockfile select packages and features. Dependency descriptors in workflow JSON
 retain their existing format but do not install packages, resolve paths, or override the host graph.
-No provider alias mapping or node build dependencies are required. Link node registrations in the
-host with ordinary Rust imports, such as `use core_nodes as _;`.
+No provider alias mapping is required. Link node registrations in the host with ordinary Rust imports,
+such as `use core_nodes as _;`. Providers without Flow parameters need not be build dependencies.
+For a provider with Flow parameters, add the same package to both dependency sections and import it
+in `build.rs` as well; the loader reads its declared field names without running its executors.
+This includes `mfn-core` when using Call, Loop, or Iteration: builtin children no longer bypass the
+receiving registration's metadata.
 
 ## Generate source during the build
 
 ```rust
 // build.rs
+use core_nodes as _;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     mf_compiler::embed_workflows(&[
         mf_compiler::EmbedRequest::new("answer", "workflows/answer.json"),
@@ -43,14 +51,16 @@ identifiers, and `_`. Invalid or duplicate names and invalid graph structure fai
 from a prior successful build are replaced.
 
 Each workflow emits one file, `OUT_DIR/mf-embedded/<name>/workflow.rs`, containing its normalized
-structural plan and preparation entry points. The helper does not load node crates, execute node
-constructors, or start a nested Cargo build. Unknown kinds, invalid node configuration, incompatible
-ports, and node execution contracts are validated during preparation, not by Rust type checking.
+structural plan and preparation entry points. The helper reads linked registration metadata to resolve
+typed Flow parameters, but does not execute node constructors or start a nested Cargo build. Configured
+node contracts and ports are validated during preparation, not by Rust type checking. Flow source and
+declared-parameter errors fail during source loading.
 
 The helper emits `cargo:rerun-if-changed` for definitions. Retain tracking for other inputs when
 calling it from an existing build script. Keep workflow JSON in the host package because consumers
-compile its build script. Node source/feature changes are ordinary normal-dependency rebuilds;
-preparation uses their current metadata without a separate build-time node feature graph.
+compile its build script. Node source/feature changes follow ordinary Cargo dependency tracking;
+preparation uses current node metadata. Build-linked Flow-parameter contracts must agree with the
+host's configuration contract.
 
 ## Prepare and execute tasks
 

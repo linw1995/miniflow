@@ -9,7 +9,8 @@ Define versioned node-local data bindings that normalize into a complete depende
 ### Requirement: Select binding syntax by definition version
 
 Version `2026-10-19` SHALL support node-local inputs and execution-only edges. Existing versions SHALL retain their
-original data edges and control gates and reject node-local inputs. Bodies SHALL inherit the root version. Every JSON
+original data edges and control gates and reject node-local inputs. Child bodies SHALL be complete Flow definitions
+with their own version; their bindings SHALL follow that version rather than the root's version. Every JSON
 and programmatic entry point MUST enforce version-specific fields without shape-based guessing. The new version SHALL
 inherit previously supported features.
 

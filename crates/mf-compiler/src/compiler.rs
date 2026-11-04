@@ -1,4 +1,4 @@
-use crate::iteration::{body_definition, normalize_config, parse_config};
+use crate::iteration::parse_config;
 use crate::{
     CompiledWorkflow, ExecutionDependency, Flow, FlowBuildError, FlowNode, NodeBuildError,
     NodeRegistry, ValueType,
@@ -9,8 +9,7 @@ use mf_runtime::{
 };
 use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
 use mf_telemetry::{ContractError, description::WorkflowDescription, event::NodeIdentity};
-use serde_json::Value;
-use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -75,6 +74,10 @@ pub enum WorkflowCompileError {
     #[snafu(transparent)]
     WorkflowInputs {
         source: mf_runtime::WorkflowInputError,
+    },
+    #[snafu(transparent)]
+    Manifest {
+        source: mf_runtime::WorkflowManifestError,
     },
     #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidStream { message: String },
@@ -251,6 +254,14 @@ pub enum WorkflowCompileError {
     LoopVariables {
         path: String,
         source: mf_runtime::LoopVariableError,
+    },
+    #[snafu(
+        display("invalid Loop configuration at {path}: {source}"),
+        visibility(pub)
+    )]
+    LoopConfiguration {
+        path: String,
+        source: serde_json::Error,
     },
     #[snafu(display("invalid Loop at {path}: {source}"), visibility(pub))]
     LoopAssignmentConfiguration {
@@ -528,10 +539,13 @@ pub fn prepare_definition_with_layouts(
     registry: &NodeRegistry,
     body_layouts: Option<&mut ScopeLayouts>,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
-    crate::loops::validate_structure(definition)?;
-    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
-    prepare_graph(
+    let normalized = normalize_plan(
         definition,
+        structural_order(definition)?,
+        &registry.flow_parameter_contracts(),
+    )?;
+    prepare_graph(
+        &normalized.definition,
         &mut GraphPreparation {
             registry,
             body_layouts,
@@ -1208,11 +1222,25 @@ fn find_cycle(
     }
 }
 
+// Resolution validates an Iteration boundary before descending into its children.
+// Keep the compiler's established structural error classification for that boundary;
+// source-file wrappers retain their resolution provenance through the normal path.
+fn resolution_error(error: crate::FlowResolutionError) -> WorkflowCompileError {
+    match error {
+        crate::FlowResolutionError::IterationBody { node, source } => IterationValidationSnafu {
+            definition_id: DefinitionId::from(node),
+        }
+        .into_error(source),
+        error => error.into(),
+    }
+}
+
 pub fn compile_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let resolved = crate::resolve_flows(definition, None)?;
+    let resolved =
+        crate::resolve_flows_with_registry(definition, None, registry).map_err(resolution_error)?;
     compile_resolved_definition(&resolved.definition, registry)
 }
 
@@ -1240,7 +1268,11 @@ pub fn compile_resolved_definition(
         flow.into_tasks().context(FlowConstructionSnafu)?;
     }
 
-    normalize_plan(&definition, execution_order)
+    normalize_plan(
+        &definition,
+        execution_order,
+        &registry.flow_parameter_contracts(),
+    )
 }
 
 pub fn resolve_execution(
@@ -1280,13 +1312,13 @@ pub fn resolve_execution(
 pub fn plan_definition(
     definition: &WorkflowDefinition,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let resolved = crate::resolve_flows(definition, None)?;
-    let definition = &resolved.definition;
-    plan_resolved_definition(definition)
+    let resolved = crate::resolve_flows(definition, None).map_err(resolution_error)?;
+    plan_resolved_definition(&resolved.definition, &resolved.contracts)
 }
 
 pub fn plan_resolved_definition(
     definition: &WorkflowDefinition,
+    contracts: &BTreeMap<String, Vec<String>>,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
     for node in &definition.nodes {
         if node.kind == ITERATION_INPUT_KIND {
@@ -1297,13 +1329,30 @@ pub fn plan_resolved_definition(
             .fail();
         }
     }
-    normalize_plan(definition, structural_order(definition)?)
+    normalize_plan(definition, structural_order(definition)?, contracts)
 }
 
 pub fn normalize_plan(
     definition: &WorkflowDefinition,
     execution_order: Vec<DefinitionId>,
+    contracts: &BTreeMap<String, Vec<String>>,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
+    let definition = normalize_scope(definition, &execution_order, None, contracts)?;
+    crate::loops::validate_structure(&definition)?;
+    let loop_orders = loop_execution_orders(&definition, contracts)?;
+    Ok(CompiledWorkflow {
+        definition,
+        execution_order,
+        loop_orders,
+    })
+}
+
+fn normalize_scope(
+    definition: &WorkflowDefinition,
+    execution_order: &[DefinitionId],
+    owner_kind: Option<&str>,
+    contracts: &BTreeMap<String, Vec<String>>,
+) -> Result<WorkflowDefinition, WorkflowCompileError> {
     let nodes_by_id: BTreeMap<DefinitionId, _> = definition
         .nodes
         .iter()
@@ -1314,17 +1363,78 @@ pub fn normalize_plan(
         .map(|id| (*nodes_by_id[id]).clone())
         .collect();
     for node in &mut nodes {
-        normalize_loop_node(node, &definition.dependencies, definition.version)?;
-        if node.kind == ITERATION_KIND {
-            node.config = normalize_config(definition, node)?;
-        }
-        if node.kind == mf_runtime::CALL_KIND {
-            let body = crate::calls::body_definition(node)?;
-            let normalized = plan_resolved_definition(&body)?.definition;
-            node.config["definition"] =
-                serde_json::to_value(normalized).context(CallConfigurationSnafu {
-                    definition_id: node.id.clone(),
-                })?;
+        ensure!(
+            (node.id.as_str() != mf_runtime::ITERATION_INPUT_ID
+                && node.kind != ITERATION_INPUT_KIND)
+                || (owner_kind == Some(ITERATION_KIND)
+                    && node.id.as_str() == mf_runtime::ITERATION_INPUT_ID
+                    && node.kind == ITERATION_INPUT_KIND
+                    && node.config == serde_json::json!({})),
+            InvalidIterationSnafu {
+                definition_id: node.id.clone(),
+                message: "internal iteration input is reserved for iteration bodies",
+            }
+        );
+        ensure!(
+            (node.id.as_str() != crate::LOOP_SOURCE_ID && node.kind != crate::LOOP_SOURCE_ID)
+                || (owner_kind == Some(crate::LOOP_KIND)
+                    && node.id.as_str() == crate::LOOP_SOURCE_ID
+                    && node.kind == crate::LOOP_SOURCE_ID
+                    && node.config == serde_json::json!({})),
+            InvalidLoopSnafu {
+                path: format!("{:?}", node.id),
+                message: "`%loop` is reserved for the canonical Loop body source",
+            }
+        );
+        crate::calls::validate_owner(definition, node)?;
+        let parameters = contracts
+            .get(&node.kind)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let mut declared = BTreeSet::new();
+        ensure!(
+            parameters
+                .iter()
+                .all(|name| !name.trim().is_empty() && declared.insert(name)),
+            InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "blank or duplicate receiving Flow parameter declaration",
+            }
+        );
+        for (name, mut body) in node.flow_parameters(&parameters).context(ContractSnafu)? {
+            crate::calls::validate_child(
+                node,
+                &body,
+                owner_kind == Some(ITERATION_KIND),
+                contracts,
+            )?;
+            // This is execution lowering, not a second representation or a runtime
+            // reader adapter. Persist the canonical source in the full child graph.
+            let source = match (node.kind.as_str(), name.as_str()) {
+                (crate::LOOP_KIND, "body") => Some((crate::LOOP_SOURCE_ID, crate::LOOP_SOURCE_ID)),
+                (ITERATION_KIND, "body") => {
+                    Some((mf_runtime::ITERATION_INPUT_ID, ITERATION_INPUT_KIND))
+                }
+                _ => None,
+            };
+            if let Some((id, kind)) = source
+                && !body.nodes.iter().any(|node| node.id.as_str() == id)
+            {
+                body.nodes.push(crate::NodeDefinition {
+                    id: id.into(),
+                    kind: kind.into(),
+                    config: serde_json::json!({}),
+                });
+            }
+            let order = crate::calls::child_result(node, structural_order_graph(&body))?;
+            let normalized = crate::calls::child_result(
+                node,
+                normalize_scope(&body, &order, Some(&node.kind), contracts),
+            )?;
+            node.set_node_flow(&name, normalized)
+                .context(ContractSnafu)?;
         }
     }
     let mut edges = definition.edges.clone();
@@ -1349,45 +1459,22 @@ pub fn normalize_plan(
         (&left.name, &left.node, &left.port).cmp(&(&right.name, &right.node, &right.port))
     });
 
-    Ok(CompiledWorkflow {
-        definition: WorkflowDefinition {
-            version: definition.version,
-            execution: definition.execution.clone(),
-            flows: definition.flows.clone(),
-            dependencies: definition.dependencies.clone(),
-            nodes,
-            edges,
-            control_edges,
-            order_edges: {
-                let mut edges = definition.order_edges.clone();
-                edges.sort();
-                edges
-            },
-            outputs,
-            clusters: definition.clusters.clone(),
+    Ok(WorkflowDefinition {
+        version: definition.version,
+        execution: definition.execution.clone(),
+        flows: definition.flows.clone(),
+        dependencies: definition.dependencies.clone(),
+        nodes,
+        edges,
+        control_edges,
+        order_edges: {
+            let mut edges = definition.order_edges.clone();
+            edges.sort();
+            edges
         },
-        execution_order,
+        outputs,
+        clusters: definition.clusters.clone(),
     })
-}
-
-fn normalize_loop_node(
-    node: &mut crate::NodeDefinition,
-    dependencies: &BTreeMap<String, crate::NodeDependency>,
-    version: crate::WorkflowDefinitionVersion,
-) -> Result<(), WorkflowCompileError> {
-    let Some(loop_definition) = &mut node.loop_definition else {
-        return Ok(());
-    };
-    let body = crate::loops::body_definition(&loop_definition.body, dependencies, version);
-    let mut normalized = normalize_plan(&body, structural_order_graph(&body)?)?.definition;
-    normalized
-        .nodes
-        .retain(|node| node.id.as_str() != crate::LOOP_SOURCE_ID);
-    loop_definition.body.nodes = normalized.nodes;
-    loop_definition.body.edges = normalized.edges;
-    loop_definition.body.control_edges = normalized.control_edges;
-    loop_definition.body.order_edges = normalized.order_edges;
-    Ok(())
 }
 
 pub fn instantiate_compiled(
@@ -1404,10 +1491,21 @@ pub fn instantiate_compiled(
     builder.into_tasks().context(FlowConstructionSnafu)
 }
 
+/// Check receiving metadata drift before constructing any provider in a saved plan.
+pub fn validate_compiled_scope_orders(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+) -> Result<(), WorkflowCompileError> {
+    let selected = loop_execution_orders(&plan.definition, &registry.flow_parameter_contracts())?;
+    ensure!(selected == plan.loop_orders, NonCanonicalPlanOrderSnafu);
+    Ok(())
+}
+
 pub fn prepare_compiled_plan(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<(CompiledWorkflow, crate::FlowBuilder), WorkflowCompileError> {
+    validate_compiled_scope_orders(plan, registry)?;
     let (nodes, canonical_order) = prepare_definition(&plan.definition, registry)?;
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
@@ -1415,6 +1513,7 @@ pub fn prepare_compiled_plan(
     let resolved = CompiledWorkflow {
         definition: resolve_execution(&plan.definition, &nodes)?,
         execution_order: canonical_order,
+        loop_orders: plan.loop_orders.clone(),
     };
     let builder = crate::FlowBuilder::prepare(
         nodes,
@@ -1491,15 +1590,19 @@ pub fn describe_interface(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::WorkflowInterface, WorkflowCompileError> {
-    let (resolved, schema) = prepare_interface(plan, registry)?;
-    let graph = describe_compiled(&resolved)?;
-    let interface = mf_runtime::WorkflowInterface {
-        version: mf_runtime::WorkflowInterfaceVersion::for_schema(&schema),
-        workflow_id: graph.workflow_id.clone(),
-        schema,
+    let (resolved, input_schema) = prepare_interface(plan, registry)?;
+    let manifest = mf_runtime::WorkflowManifest {
+        version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
+        definition: resolved.definition,
+        execution_order: resolved
+            .execution_order
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        loop_orders: resolved.loop_orders,
+        input_schema,
     };
-    interface.validate_for_description(&graph)?;
-    Ok(interface)
+    Ok(manifest.interface()?)
 }
 
 #[derive(Debug, Snafu)]
@@ -1556,24 +1659,39 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    mf_runtime::describe_definition(
-        &plan.definition,
-        &order,
-        &loop_execution_orders(&plan.definition)?,
-    )
-    .context(ContractSnafu)
+    validate_compiled_description(&plan.definition, &mut Vec::new(), &plan.loop_orders)?;
+    mf_runtime::describe_definition(&plan.definition, &order, &plan.loop_orders)
+        .context(ContractSnafu)
+}
+
+/// Retain the compiler's typed authoring/ordering diagnostics while following
+/// only compiled child paths. Runtime's provider-free projection validates the
+/// supplied order lists and rejects leftover/unknown paths afterward.
+fn validate_compiled_description(
+    definition: &WorkflowDefinition,
+    path: &mut Vec<String>,
+    orders: &[mf_runtime::LoopExecutionOrder],
+) -> Result<(), DescriptionError> {
+    for node in &definition.nodes {
+        let flows = crate::calls::compiled_node_flows(definition, node, orders, path)
+            .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
+        for (name, body) in flows {
+            path.push(node.flow_scope_key(&name));
+            structural_order_graph(&body)
+                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
+            validate_compiled_description(&body, path, orders)?;
+            path.pop();
+        }
+    }
+    Ok(())
 }
 
 pub fn loop_execution_orders(
     definition: &WorkflowDefinition,
+    contracts: &BTreeMap<String, Vec<String>>,
 ) -> Result<Vec<mf_runtime::LoopExecutionOrder>, DescriptionError> {
     let mut orders = Vec::new();
-    collect_loop_execution_orders(
-        definition,
-        &mut Vec::new(),
-        &mut orders,
-        definition.has_order_edges() || definition.version.supports_clusters(),
-    )?;
+    collect_loop_execution_orders(definition, &mut Vec::new(), &mut orders, contracts)?;
     Ok(orders)
 }
 
@@ -1581,38 +1699,35 @@ fn collect_loop_execution_orders(
     definition: &WorkflowDefinition,
     path: &mut Vec<String>,
     orders: &mut Vec<mf_runtime::LoopExecutionOrder>,
-    include_iterations: bool,
+    contracts: &BTreeMap<String, Vec<String>>,
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
-        let body = if let Some(loop_definition) = &node.loop_definition {
-            crate::loops::body_definition(
-                &loop_definition.body,
-                &definition.dependencies,
-                definition.version,
-            )
-        } else if node.kind == mf_runtime::CALL_KIND {
-            crate::calls::body_definition(node)
-                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?
-        } else if include_iterations && node.kind == ITERATION_KIND {
-            let config = parse_config(node)
-                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
-            body_definition(definition, &config)
-                .context(IterationValidationSnafu {
-                    definition_id: node.id.clone(),
-                })
-                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?
-        } else {
-            continue;
-        };
-        path.push(node.id.to_string());
-        let order = structural_order_graph(&body)
+        // These are executable-scope authority facts, independent of the
+        // observation schema's historical projection of Iteration bodies.
+        crate::calls::validate_owner(definition, node)
             .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
-        orders.push(mf_runtime::LoopExecutionOrder {
-            path: path.clone(),
-            execution_order: order.iter().map(ToString::to_string).collect(),
-        });
-        collect_loop_execution_orders(&body, path, orders, include_iterations)?;
-        path.pop();
+        let parameters = contracts
+            .get(&node.kind)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let flows = node
+            .flow_parameters(&parameters)
+            .context(ContractSnafu)
+            .map_err(WorkflowCompileError::from)
+            .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
+        for (name, body) in flows {
+            path.push(node.flow_scope_key(&name));
+            let order = structural_order_graph(&body)
+                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
+            orders.push(mf_runtime::LoopExecutionOrder {
+                path: path.clone(),
+                execution_order: order.iter().map(ToString::to_string).collect(),
+            });
+            collect_loop_execution_orders(&body, path, orders, contracts)?;
+            path.pop();
+        }
     }
     Ok(())
 }
@@ -1648,12 +1763,15 @@ pub fn resolve_nodes(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
-    let resolved = crate::resolve_flows(definition, None)?;
-    let definition = &resolved.definition;
-    crate::loops::validate_structure(definition)?;
-    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
+    let resolved =
+        crate::resolve_flows_with_registry(definition, None, registry).map_err(resolution_error)?;
+    let normalized = normalize_plan(
+        &resolved.definition,
+        structural_order(&resolved.definition)?,
+        &registry.flow_parameter_contracts(),
+    )?;
     resolve_nodes_in_scope(
-        definition,
+        &normalized.definition,
         &mut GraphPreparation {
             registry,
             body_layouts: None,
@@ -1718,14 +1836,14 @@ fn prepare_stream_outputs(
         })
 }
 
-fn bind_subgraph_node(
+fn prepare_subgraph_body(
     node: &crate::NodeDefinition,
+    name: &str,
     preparation: &mut GraphPreparation<'_>,
     body: &WorkflowDefinition,
     enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
-    options: Value,
-) -> Result<FlowNode, WorkflowCompileError> {
+) -> Result<PreparedSubgraph, WorkflowCompileError> {
     ensure!(
         preparation.path.len() < mf_telemetry::MAX_SCOPE_DEPTH,
         InvalidCallSnafu {
@@ -1733,29 +1851,18 @@ fn bind_subgraph_node(
             message: "combined container nesting exceeds twenty scopes"
         }
     );
-    let registration = registration_for(node, preparation.registry)?;
-    preparation.path.push(node.id.clone());
+    let call_like = crate::calls::call_like(node);
+    preparation.path.push(node.flow_scope_key(name).into());
     let prepared = prepare_graph(body, preparation, enclosing, allow_iteration_input);
     let path = preparation
         .body_layouts
         .as_ref()
         .map(|_| preparation.path.clone());
     preparation.path.pop();
-    let (nodes, order) = if node.kind == crate::LOOP_KIND {
-        prepared.context(LoopBodySnafu {
-            path: format!("{:?}", node.id),
-        })?
-    } else if node.kind == mf_runtime::CALL_KIND {
-        prepared.context(CallBodySnafu {
-            definition_id: node.id.clone(),
-        })?
-    } else {
-        prepared.context(IterationBodySnafu {
-            definition_id: node.id.clone(),
-        })?
-    };
-    let mut stream_outputs = if let Some(definition) = &node.loop_definition {
-        prepare_stream_outputs(&definition.stream_outputs, &nodes, node)?
+    let (nodes, order) = crate::calls::child_result(node, prepared)?;
+    let mut stream_outputs = if node.kind == crate::LOOP_KIND {
+        let config = crate::loops::parse_config(node)?;
+        prepare_stream_outputs(&config.stream_outputs, &nodes, node)?
     } else {
         Vec::new()
     };
@@ -1766,16 +1873,15 @@ fn bind_subgraph_node(
             &nodes,
             node,
         )?);
+        let result = &body.outputs[0];
         ensure!(
-            nodes
-                .iter()
-                .any(|child| child.definition_id == config.body.result.node
-                    && child
-                        .metadata
-                        .ports
-                        .outputs
-                        .iter()
-                        .any(|port| port.name == config.body.result.port)),
+            nodes.iter().any(|child| child.definition_id == result.node
+                && child
+                    .metadata
+                    .ports
+                    .outputs
+                    .iter()
+                    .any(|port| port.name == result.port)),
             InvalidIterationSnafu {
                 definition_id: node.id.clone(),
                 message: "Iteration result must select a terminal body output"
@@ -1783,14 +1889,13 @@ fn bind_subgraph_node(
         );
     }
     let mut terminal_outputs = Vec::new();
-    let mut outputs = Vec::new();
     for output in &body.outputs {
         let (index, source) = nodes
             .iter()
             .enumerate()
             .find(|(_, node)| node.definition_id == output.node)
             .expect("validated body output source");
-        if node.kind == mf_runtime::CALL_KIND
+        if call_like
             && let Some(port) = source
                 .metadata
                 .stream_outputs
@@ -1804,18 +1909,6 @@ fn bind_subgraph_node(
                 optional: output.optional,
             });
         } else {
-            let port = source
-                .metadata
-                .ports
-                .outputs
-                .iter()
-                .find(|port| port.name == output.port)
-                .expect("validated body output");
-            outputs.push(crate::PortSpec::owned(
-                output.name.as_ref(),
-                port.value_type.clone(),
-                !output.optional,
-            ));
             terminal_outputs.push(output.clone());
         }
     }
@@ -1833,7 +1926,7 @@ fn bind_subgraph_node(
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
         .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
         .context(FlowConstructionSnafu)?;
-    let builder = if node.kind == mf_runtime::CALL_KIND {
+    let builder = if call_like {
         builder.with_workflow_inputs()?
     } else {
         builder
@@ -1864,21 +1957,127 @@ fn bind_subgraph_node(
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
-    let input_schema = flow.input_schema().clone();
-    let input_metadata = mf_runtime::SubgraphInputMetadata::from_flow(&flow);
-    let stream_ports = flow.stream_output_ports();
-    let body =
-        PreparedSubgraph::streaming(identities, outputs, stream_ports, move |state, sink| {
-            flow.execute_with_sink(state, sink)
-        })
-        .with_input_metadata(input_schema, input_metadata);
+    Ok(PreparedSubgraph::from_flow(flow, identities))
+}
+
+/// Prepare every selected child before the single registry factory dispatch.
+fn prepare_node_subgraphs(
+    definition: &WorkflowDefinition,
+    node: &crate::NodeDefinition,
+    flows: &BTreeMap<String, WorkflowDefinition>,
+    preparation: &mut GraphPreparation<'_>,
+    inside_iteration: bool,
+) -> Result<FlowNode, WorkflowCompileError> {
+    let registration = registration_for(node, preparation.registry)?;
+    ensure!(
+        registration.accepts_subgraphs(),
+        InvalidCallSnafu {
+            definition_id: node.id.clone(),
+            message: "registered node factory does not accept prepared subgraphs"
+        }
+    );
+    // Validate the actual frozen configuration before constructing any child.
+    let declared_flows =
+        registration
+            .validate_flow_parameters(node)
+            .context(NodeConstructionSnafu {
+                definition_id: node.id.clone(),
+                kind: node.kind.clone(),
+            })?;
+    ensure!(
+        declared_flows.keys().eq(flows.keys()),
+        InvalidCallSnafu {
+            definition_id: node.id.clone(),
+            message: "receiving Flow parameter declarations differ from the prepared binding set",
+        }
+    );
+    let loop_types = if node.kind == crate::LOOP_KIND {
+        let config = crate::loops::parse_config(node)?;
+        Some(mf_runtime::loop_variable_types(&config.variables).expect("validated Loop variables"))
+    } else {
+        None
+    };
+    let mut subgraphs = BTreeMap::new();
+    for (name, body) in flows {
+        crate::calls::validate_child(
+            node,
+            body,
+            inside_iteration,
+            &preparation.registry.flow_parameter_contracts(),
+        )?;
+        let key = node.flow_scope_key(name);
+        ensure!(
+            key == node.id.as_str()
+                || !definition
+                    .nodes
+                    .iter()
+                    .any(|child| child.id.as_str() == key),
+            InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "Flow parameter body key collides with an authored node ID"
+            }
+        );
+        let host = if node.kind == mf_runtime::CALL_KIND {
+            let config: mf_runtime::CallConfig = serde_json::from_value(node.config.clone())
+                .context(CallConfigurationSnafu {
+                    definition_id: node.id.clone(),
+                })?;
+            preparation.registry.flow(&config.flow)
+        } else {
+            None
+        };
+        let prepared = if let Some(registered) = host {
+            ensure!(
+                plan_resolved_definition(body, &preparation.registry.flow_parameter_contracts())?
+                    .definition
+                    == plan_resolved_definition(
+                        &registered.definition,
+                        &preparation.registry.flow_parameter_contracts()
+                    )?
+                    .definition,
+                InvalidCallSnafu {
+                    definition_id: node.id.clone(),
+                    message: "host Flow binding differs from the frozen call definition"
+                }
+            );
+            ensure!(
+                preparation.body_layouts.is_none(),
+                InvalidCallSnafu {
+                    definition_id: node.id.clone(),
+                    message: "host Flow executors cannot be emitted into generated execution plans"
+                }
+            );
+            registered.body.clone()
+        } else {
+            prepare_subgraph_body(
+                node,
+                name,
+                preparation,
+                body,
+                loop_types.as_ref(),
+                node.kind == ITERATION_KIND,
+            )?
+        };
+        subgraphs.insert(name.clone(), prepared);
+    }
     let instance = registration
-        .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
+        .instantiate_subgraphs(node.id.as_str(), node.config.clone(), subgraphs)
         .context(NodeConstructionSnafu {
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
-    Ok(FlowNode::new(node.id.clone(), instance))
+    let prepared = FlowNode::new(node.id.clone(), instance);
+    if node.kind == mf_runtime::CALL_KIND {
+        ensure!(
+            prepared.metadata.stream_outputs.is_empty()
+                || definition.version.supports_child_streams(),
+            InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "Flow call streams require version 2026-10-28"
+            }
+        );
+    }
+    Ok(prepared)
 }
 
 fn resolve_nodes_in_scope(
@@ -1891,64 +2090,7 @@ fn resolve_nodes_in_scope(
         .nodes
         .iter()
         .map(|node| {
-            if node.kind == mf_runtime::CALL_KIND {
-                let body = crate::calls::body_definition(node)?;
-                crate::validate_execution(&body).context(StreamConstructionSnafu)?;
-                ensure!(!allow_iteration_input || !crate::calls::contains_iteration_containers(&body)?, InvalidCallSnafu {
-                    definition_id: node.id.clone(), message: "calls inside Iteration cannot contain Loop or Iteration constructs"
-                });
-                crate::loops::validate_structure(&body)?;
-                let config: mf_runtime::CallConfig = serde_json::from_value(node.config.clone())
-                    .context(CallConfigurationSnafu { definition_id: node.id.clone() })?;
-                let prepared = if let Some(registered) = preparation.registry.flow(&config.flow) {
-                    ensure!(
-                        plan_resolved_definition(&body)?.definition
-                            == plan_resolved_definition(&registered.definition)?.definition,
-                        InvalidCallSnafu {
-                            definition_id: node.id.clone(),
-                            message: "host Flow binding differs from the frozen call definition"
-                        }
-                    );
-                    let instance = registration_for(node, preparation.registry)?
-                        .instantiate_subgraph(
-                            node.id.as_str(), node.config.clone(), Value::Null, registered.body.clone(),
-                        )
-                        .context(NodeConstructionSnafu {
-                            definition_id: node.id.clone(), kind: node.kind.clone(),
-                        })?;
-                    FlowNode::new(node.id.clone(), instance)
-                } else {
-                    bind_subgraph_node(node, preparation, &body, None, false, Value::Null)?
-                };
-                ensure!(prepared.metadata.stream_outputs.is_empty() || definition.version.supports_child_streams(), InvalidCallSnafu {
-                    definition_id: node.id.clone(), message: "Flow call streams require version 2026-10-28"
-                });
-                return Ok(prepared);
-            }
             match node.kind.as_str() {
-                crate::LOOP_KIND => {
-                    let loop_definition = node.loop_definition.as_deref().expect("validated Loop");
-                    let types = mf_runtime::loop_variable_types(&loop_definition.variables)
-                        .expect("validated Loop variables");
-                    let body = crate::loops::body_definition(
-                        &loop_definition.body,
-                        &definition.dependencies,
-                        definition.version,
-                    );
-                    let options = serde_json::json!({
-                        "max_iterations": loop_definition.max_iterations,
-                        "variables": loop_definition.variables,
-                        "until": loop_definition.until,
-                    });
-                    return bind_subgraph_node(
-                        node,
-                        preparation,
-                        &body,
-                        Some(&types),
-                        false,
-                        options,
-                    );
-                }
                 crate::LOOP_ASSIGN_KIND => {
                     let target = crate::loops::assignment_target(
                         &node.config,
@@ -1966,40 +2108,72 @@ fn resolve_nodes_in_scope(
                     return Ok(mf_runtime::prepared_loop_exit(node.id.as_str()));
                 }
                 crate::LOOP_SOURCE_ID => {
-                    return Ok(mf_runtime::prepared_loop_source_types(
-                        enclosing.expect("Loop source has variables"),
-                    ));
+                    let types = enclosing.with_context(|| InvalidLoopSnafu {
+                        path: format!("{:?}", node.id),
+                        message: "Loop source requires a Loop body",
+                    })?;
+                    ensure!(
+                        node.id.as_str() == crate::LOOP_SOURCE_ID,
+                        InvalidLoopSnafu {
+                            path: format!("{:?}", node.id),
+                            message: "Loop source must use the canonical ID",
+                        }
+                    );
+                    return Ok(mf_runtime::prepared_loop_source_types(types));
+                }
+                ITERATION_INPUT_KIND => {
+                    ensure!(
+                        allow_iteration_input && node.id.as_str() == mf_runtime::ITERATION_INPUT_ID,
+                        InvalidIterationSnafu {
+                            definition_id: node.id.clone(),
+                            message: "internal iteration input is reserved for iteration bodies"
+                        }
+                    );
+                    return Ok(iteration_input_flow_node());
+                }
+                ITERATION_KIND => {
+                    ensure!(
+                        !allow_iteration_input,
+                        InvalidIterationSnafu {
+                            definition_id: node.id.clone(),
+                            message: "nested iterations are not supported"
+                        }
+                    );
                 }
                 _ => {}
             }
-            if node.kind == ITERATION_INPUT_KIND {
-                if allow_iteration_input && node.id.as_str() == mf_runtime::ITERATION_INPUT_ID {
-                    return Ok(iteration_input_flow_node());
-                }
-                return InvalidIterationSnafu {
-                    definition_id: node.id.clone(),
-                    message: "internal iteration input is reserved for iteration bodies".to_owned(),
-                }
-                .fail();
+            let registration = registration_for(node, preparation.registry)?;
+            let parameters = registration
+                .flow_parameters()
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>();
+            crate::calls::validate_owner(definition, node)?;
+            let flows = node
+                .flow_parameters(&parameters.iter().map(String::as_str).collect::<Vec<_>>())
+                .context(ContractSnafu)?;
+            if !flows.is_empty() {
+                return prepare_node_subgraphs(
+                    definition,
+                    node,
+                    &flows,
+                    preparation,
+                    allow_iteration_input,
+                );
             }
-            if node.kind == ITERATION_KIND {
-                if allow_iteration_input {
-                    return InvalidIterationSnafu {
-                        definition_id: node.id.clone(),
-                        message: "nested iterations are not supported".to_owned(),
-                    }
-                    .fail();
-                }
-                let config = parse_config(node)?;
-                let body = body_definition(definition, &config).context(IterationValidationSnafu { definition_id: node.id.clone() })?;
-                return bind_subgraph_node(node, preparation, &body, None, true, Value::Null);
-            }
-            let instance = registration_for(node, preparation.registry)?
-                .instantiate(node.config.clone())
+            registration
+                .validate_flow_parameters(node)
                 .context(NodeConstructionSnafu {
                     definition_id: node.id.clone(),
                     kind: node.kind.clone(),
                 })?;
+            let instance =
+                registration
+                    .instantiate(node.config.clone())
+                    .context(NodeConstructionSnafu {
+                        definition_id: node.id.clone(),
+                        kind: node.kind.clone(),
+                    })?;
             Ok(FlowNode::new(node.id.clone(), instance))
         })
         .collect()

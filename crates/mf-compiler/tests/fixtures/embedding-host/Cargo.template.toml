@@ -21,3 +21,4 @@ opentelemetry_sdk = { version = "0.33.0", default-features = false, features = [
 
 [build-dependencies]
 compiler = { package = "mf-compiler", path = "../../../../mf-compiler", default-features = false, features = ["codegen"] }
+core_nodes = { package = "mfn-core", path = "../../../../builtin-nodes/core", default-features = false }

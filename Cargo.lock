@@ -1807,6 +1807,7 @@ dependencies = [
  "snafu",
  "syn 3.0.6",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

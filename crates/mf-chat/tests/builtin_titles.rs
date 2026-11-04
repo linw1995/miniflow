@@ -273,7 +273,7 @@ fn embedded_application_declares_and_prepares_the_builtin_title_call() {
     assert_eq!(call.kind, mf_runtime::CALL_KIND);
     let configuration: mf_runtime::CallConfig =
         serde_json::from_value(call.config.clone()).unwrap();
-    let body = configuration.definition.unwrap();
+    let body = configuration.body.unwrap();
     let registered = mf_chat::flows::title_definition().unwrap();
     let registered_plan = mf_compiler::plan_definition(&registered).unwrap();
     assert_eq!(*body, registered_plan.definition);

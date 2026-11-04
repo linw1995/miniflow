@@ -98,13 +98,13 @@ fn definition(items: Value, mode: &str, on_error: &str) -> Value {
             {"id":"iteration","kind":"builtin.iteration","config":{
                 "mode":mode,
                 "on_error":on_error,
-                "body":{
+                "body":{"version":"2026-09-26", "dependencies":{},
                     "nodes":[{"id":"map","kind":"test.iteration_map"}],
                     "edges":[
                         {"from_node":"%iteration","from_output":"item","to_node":"map","to_input":"item"},
                         {"from_node":"%iteration","from_output":"index","to_node":"map","to_input":"index"}
                     ],
-                    "result":{"node":"map","port":"value"}
+                    "outputs": [{"name":"result", "node":"map","port":"value"}]
                 }
             }}
         ],
@@ -193,8 +193,8 @@ fn iteration_exposes_null_keys_for_arrays_and_preserves_mixed_map_values() {
             (json!({"b": 2, "a": 1}), "key", json!(["a", "b"])),
         ] {
             let mut value = definition(items, mode, "terminate");
-            value["nodes"][1]["config"]["body"] = json!({
-                "nodes": [], "result": {"node": "%iteration", "port": port}
+            value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-26", "dependencies":{},
+                "nodes": [], "outputs": [{"name":"result", "node": "%iteration", "port": port}]
             });
             assert_eq!(execute(value).unwrap(), json!({"results": expected}));
         }
@@ -266,10 +266,10 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     invalid["nodes"][1]["config"]["body"]["nodes"][0] = json!({
         "id": "inner_loop",
         "kind": "workflow.loop",
-        "loop": {
+        "config": {
             "max_iterations": 1,
             "variables": [{"name": "value", "type": "int"}],
-            "body": {"nodes": [{"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "value"}}]}
+            "body": {"version":"2026-09-26", "dependencies":{}, "nodes": [{"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "value"}}]}
         }
     });
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
@@ -281,7 +281,7 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     );
 
     let mut invalid = definition(json!([1]), "sequential", "terminate");
-    invalid["nodes"][1]["config"]["body"]["result"]["port"] = json!("missing");
+    invalid["nodes"][1]["config"]["body"]["outputs"][0]["port"] = json!("missing");
     let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let error = compile_definition(&definition, &registry)
@@ -304,18 +304,18 @@ fn iteration_rejects_legacy_item_references_for_all_definition_versions() {
         let mut edge = value.clone();
         edge["nodes"][1]["config"]["body"]["edges"][0]["from_output"] = json!("items");
         let mut output = value.clone();
-        output["nodes"][1]["config"]["body"]["result"] =
-            json!({"node": "%iteration", "port": "items"});
+        output["nodes"][1]["config"]["body"]["outputs"][0] =
+            json!({"name":"result", "node": "%iteration", "port": "items"});
         let mut control = value.clone();
         control["nodes"][1]["config"]["body"]["control_edges"] = json!([
             {"from_node": "%iteration", "from_output": "items", "to_node": "map"}
         ]);
-        value["nodes"][1]["config"]["body"] = json!({
+        value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-26", "dependencies":{},
             "nodes": [{"id": "route", "kind": "builtin.if_else", "config": {"branches": [{
                 "id": "one", "condition": {"source": {"output": "%iteration.items", "path": ""}, "operator": "eq", "value": 1}
             }]}}],
             "control_edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "route"}],
-            "result": {"node": "route", "port": "one"}
+            "outputs": [{"name":"result", "node": "route", "port": "one"}]
         });
         for invalid in [edge, output, control, value] {
             let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
@@ -521,14 +521,14 @@ fn parallel_iteration_reports_correlated_item_and_body_node_activity() {
 #[test]
 fn body_plugins_inherit_the_correlated_node_span() {
     let mut value = definition(json!([1, 2, 3]), "parallel", "terminate");
-    value["nodes"][1]["config"]["body"] = json!({
+    value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-26", "dependencies":{},
         "nodes":[{"id":"probe","kind":"test.iteration_trace_probe"}],
         "control_edges":[{
             "from_node":"%iteration",
             "from_output":"item",
             "to_node":"probe"
         }],
-        "result":{"node":"probe","port":"span"}
+        "outputs": [{"name":"result", "node":"probe","port":"span"}]
     });
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -602,7 +602,7 @@ fn item_and_body_logs_remain_live_when_traces_are_unsampled() {
 #[test]
 fn skipped_body_nodes_report_their_item_and_dependency() {
     let mut value = definition(json!([1, 2]), "sequential", "continue_on_error");
-    value["nodes"][1]["config"]["body"] = json!({
+    value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-26", "dependencies":{},
         "nodes":[
             {"id":"route","kind":"builtin.if_else","config":{"branches":[{
                 "id":"one",
@@ -621,7 +621,7 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
             {"from_node":"%iteration","from_output":"item","to_node":"route"},
             {"from_node":"route","from_output":"one","to_node":"copy"}
         ],
-        "result":{"node":"copy","port":"value"}
+        "outputs": [{"name":"result", "node":"copy","port":"value"}]
     });
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -811,14 +811,16 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
         "kind":"builtin.code",
         "config":{"language":"cel","inputs":{},"code":{"values":"[1, 2]"}}
     });
-    value["nodes"][1]["config"]["body"] = json!({
+    value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-26", "dependencies":{},
         "nodes":[],
-        "result":{"node":"%iteration","port":"item"}
+        "outputs": [{"name":"result", "node":"%iteration","port":"item"}]
     });
     value["nodes"][1]["inputs"]["items"]["from"]["port"] = json!("values");
     fs::write(&path, value.to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
-    assert_eq!(error.stage, "Cargo build");
+    // Receiver contracts must now be discovered before generation. Omitting
+    // the provider is rejected at discovery, without touching installed output.
+    assert_eq!(error.stage, "Flow source discovery");
     assert_eq!(fs::read(&output).unwrap(), installed);
     assert_eq!(fs::read(path.with_extension("lock")).unwrap(), lock);
 }
@@ -876,12 +878,12 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
         serde_json::from_str(include_str!("../../../examples/loop.json")).unwrap();
     nested["dependencies"] = flow["dependencies"].clone();
     nested["nodes"][0]["config"]["value"] = json!([1, 2, 3]);
-    nested["nodes"][1]["loop"]["max_iterations"] = json!(2);
-    nested["nodes"][1]["loop"]["variables"] = json!([{"name": "items", "type": "array"}]);
-    nested["nodes"][1]["loop"]["until"] = Value::Null;
+    nested["nodes"][1]["config"]["max_iterations"] = json!(2);
+    nested["nodes"][1]["config"]["variables"] = json!([{"name": "items", "type": "array"}]);
+    nested["nodes"][1]["config"]["until"] = Value::Null;
     let mut nested_iteration = iteration["nodes"][1].clone();
     nested_iteration["inputs"]["items"] = json!({"from":{"node":"%loop","port":"items"}});
-    nested["nodes"][1]["loop"]["body"] = json!({
+    nested["nodes"][1]["config"]["body"] = json!({"version":nested["version"], "dependencies":{},
         "nodes": [
             nested_iteration,
             {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "items"},

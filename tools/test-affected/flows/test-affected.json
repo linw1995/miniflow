@@ -1133,7 +1133,7 @@
     {
       "id": "search",
       "kind": "workflow.loop",
-      "loop": {
+      "config": {
         "max_iterations": 100,
         "variables": [
           {
@@ -1175,6 +1175,8 @@
           "value": true
         },
         "body": {
+          "version": "2026-10-19",
+          "dependencies": {},
           "nodes": [
             {
               "id": "pick",
@@ -2367,7 +2369,7 @@
     {
       "id": "graph_search",
       "kind": "workflow.loop",
-      "loop": {
+      "config": {
         "max_iterations": 100,
         "variables": [
           {
@@ -2413,6 +2415,8 @@
           "value": true
         },
         "body": {
+          "version": "2026-10-19",
+          "dependencies": {},
           "nodes": [
             {
               "id": "pick",

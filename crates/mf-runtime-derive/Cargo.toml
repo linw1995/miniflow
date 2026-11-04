@@ -8,8 +8,11 @@ description = "Input and output definition derives for the miniflow runtime"
 
 [lib]
 proc-macro = true
+# Run expansion tests in the integration binary, avoiding proc-macro's dynamic libstd.
+# --all-targets overrides this setting but the library harness has no test cases.
+test = false
 
 [dependencies]
 proc-macro2.workspace = true
 quote.workspace = true
-syn = { workspace = true, features = ["derive", "parsing", "printing", "proc-macro", "visit"] }
+syn = { workspace = true, features = ["clone-impls", "derive", "parsing", "printing", "proc-macro", "visit"] }

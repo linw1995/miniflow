@@ -62,7 +62,7 @@ fn loop_definition(body: Value) -> WorkflowDefinition {
         "version": "2026-09-29", "dependencies": {},
         "nodes": [
             {"id": "seed", "kind": "builtin.constant", "config": {"value": 0}},
-            {"id": "repeat", "kind": "workflow.loop", "loop": {
+            {"id": "repeat", "kind": "workflow.loop", "config": {
                 "max_iterations": 1, "variables": [{"name": "x", "type": "int"}],
                 "body": body
             }}
@@ -75,8 +75,9 @@ fn loop_definition(body: Value) -> WorkflowDefinition {
 #[test]
 fn loop_failures_preserve_scope_context_and_typed_plugin_sources() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    let definition =
-        loop_definition(json!({"nodes": [{"id": "fail", "kind": "test.error_source"}]}));
+    let definition = loop_definition(
+        json!({"version":"2026-09-29", "dependencies":{}, "nodes": [{"id": "fail", "kind": "test.error_source"}]}),
+    );
     let plan = compile_definition(&definition, &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     let error = flow.execute().unwrap_err();
@@ -93,7 +94,7 @@ fn call_failures_preserve_typed_plugin_sources_and_call_context() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25", "dependencies":{},
         "nodes":[{"id":"invoke","kind":"workflow.call","config":{
-            "flow":"failing", "definition":{
+            "flow":"failing", "body":{
                 "version":"2026-10-25", "dependencies":{},
                 "nodes":[{"id":"fail","kind":"test.error_source"}],
                 "outputs":[{"name":"result","node":"fail","port":"result"}]
@@ -123,9 +124,9 @@ fn iteration_failures_preserve_item_context_and_typed_workflow_sources() {
             "nodes": [
                 {"id": "items", "kind": "builtin.constant", "config": {"value": [1]}},
                 {"id": "each", "kind": "builtin.iteration", "config": {
-                    "mode": mode, "body": {
+                    "mode": mode, "body": {"version":"2026-09-26", "dependencies":{},
                         "nodes": [{"id": "fail", "kind": "test.error_source"}],
-                        "result": {"node": "fail", "port": "result"}
+                        "outputs": [{"name":"result", "node": "fail", "port": "result"}]
                     }
                 }}
             ],
@@ -173,13 +174,15 @@ fn readline_conversion_preserves_the_stream_input_failure_phase() {
 fn subgraph_compilation_preserves_nested_configuration_errors() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let broken = json!({"id": "broken", "kind": "builtin.constant", "config": {}});
-    let loop_definition = loop_definition(json!({"nodes": [broken.clone()]}));
+    let loop_definition = loop_definition(
+        json!({"version":"2026-09-29", "dependencies":{}, "nodes": [broken.clone()]}),
+    );
     let iteration_definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-26", "dependencies": {},
         "nodes": [
             {"id": "seed", "kind": "builtin.constant", "config": {"value": []}},
-            {"id": "each", "kind": "builtin.iteration", "config": {"body": {
-                "nodes": [broken], "result": {"node": "broken", "port": "value"}
+            {"id": "each", "kind": "builtin.iteration", "config": {"body": {"version":"2026-09-26", "dependencies":{},
+                "nodes": [broken], "outputs": [{"name":"result", "node": "broken", "port": "value"}]
             }}}
         ],
         "edges": [{"from_node": "seed", "from_output": "value", "to_node": "each", "to_input": "items"}]
@@ -207,9 +210,11 @@ fn malformed_iteration_configuration_remains_a_typed_json_error() {
 
 #[test]
 fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
-    let definition = loop_definition(json!({"nodes": [{
-        "id": "assign", "kind": "workflow.loop_assign", "config": {}
-    }]}));
+    let definition = loop_definition(
+        json!({"version":"2026-09-29", "dependencies":{}, "nodes": [{
+            "id": "assign", "kind": "workflow.loop_assign", "config": {}
+        }]}),
+    );
     let error = plan_definition(&definition).unwrap_err();
     assert!(
         matches!(error, WorkflowCompileError::LoopAssignmentConfiguration { ref path, .. }
@@ -217,9 +222,11 @@ fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
     );
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
 
-    let definition = loop_definition(json!({"nodes": [{
-        "id": "assign", "kind": "workflow.loop_assign", "config": {"variable": " "}
-    }]}));
+    let definition = loop_definition(
+        json!({"version":"2026-09-29", "dependencies":{}, "nodes": [{
+            "id": "assign", "kind": "workflow.loop_assign", "config": {"variable": " "}
+        }]}),
+    );
     let error = plan_definition(&definition).unwrap_err();
     assert!(matches!(error, WorkflowCompileError::InvalidLoop { .. }));
     assert!(
@@ -231,7 +238,7 @@ fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
 
 #[test]
 fn loop_structure_errors_preserve_the_typed_inner_compilation_error() {
-    let definition = loop_definition(json!({
+    let definition = loop_definition(json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [{"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "x"}}],
         "edges": [{"from_node": "missing", "from_output": "value", "to_node": "assign", "to_input": "value"}]
     }));
@@ -474,13 +481,9 @@ fn pipeline_context_preserves_definition_parse_errors() {
 
 #[test]
 fn loop_validation_preserves_variable_and_descriptor_sources() {
-    let mut definition = loop_definition(json!({"nodes": []}));
-    definition.nodes[1]
-        .loop_definition
-        .as_mut()
-        .unwrap()
-        .variables[0]
-        .value_type = json!("unknown");
+    let mut definition =
+        loop_definition(json!({"version":"2026-09-29", "dependencies":{}, "nodes": []}));
+    definition.nodes[1].config["variables"][0]["type"] = json!("unknown");
     let error = plan_definition(&definition).unwrap_err();
     assert!(
         matches!(&error, WorkflowCompileError::LoopVariables { path, .. } if path == "[\"repeat\"]")
@@ -506,9 +509,9 @@ fn loop_validation_preserves_variable_and_descriptor_sources() {
 fn iteration_validation_preserves_the_structural_source() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-26", "dependencies": {},
-        "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {"body": {
+        "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {"body": {"version":"2026-09-26", "dependencies":{},
             "nodes": [{"id": "%iteration", "kind": "builtin.constant", "config": {"value": 1}}],
-            "result": {"node": "%iteration", "port": "value"}
+            "outputs": [{"name":"result", "node": "%iteration", "port": "value"}]
         }}}]
     }))
     .unwrap();

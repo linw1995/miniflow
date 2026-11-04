@@ -74,7 +74,7 @@ fn builtin_title_policy_preserves_captured_failure_usage_without_a_title() {
                 .iter()
                 .find(|node| node.id.as_str() == "title")
                 .unwrap()
-                .config["definition"]
+                .config["body"]
                 .clone(),
         )
         .unwrap();
@@ -108,7 +108,7 @@ fn builtin_title_policy_preserves_captured_failure_usage_without_a_title() {
                 replace(node, "succeeded", "Primary answer", "conversation");
             }
             if node.id.as_str() == "title" {
-                node.config["definition"] = serde_json::to_value(&child).unwrap();
+                node.config["body"] = serde_json::to_value(&child).unwrap();
             }
         }
         let registry = NodeRegistry::from_inventory().unwrap();

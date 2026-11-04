@@ -29,6 +29,8 @@
         "mode": "sequential",
         "on_error": "terminate",
         "body": {
+          "version": "2026-10-23",
+          "dependencies": {},
           "nodes": [
             {
               "id": "transform",
@@ -59,10 +61,13 @@
               }
             }
           ],
-          "result": {
-            "node": "transform",
-            "port": "value"
-          },
+          "outputs": [
+            {
+              "name": "result",
+              "node": "transform",
+              "port": "value"
+            }
+          ],
           "clusters": [
             {
               "label": "Transform item",

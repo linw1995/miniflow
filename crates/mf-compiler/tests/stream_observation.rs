@@ -385,8 +385,8 @@ fn records(harness: &Harness) -> Vec<StreamRecord> {
 fn startup_loop_observation_needs_no_synthetic_message_or_source() {
     let plan = plan(
         json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
-        "nodes":[{"id":"repeat", "kind":"workflow.loop", "loop":{"max_iterations":2,
-            "variables":[{"name":"x", "type":"int"}], "body":{
+        "nodes":[{"id":"repeat", "kind":"workflow.loop", "config":{"max_iterations":2,
+            "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
                 "nodes":[{"id":"copy", "kind":"builtin.identity"}],
                 "edges":[{"from_node":"%loop", "from_output":"x", "to_node":"copy", "to_input":"input"}]
             }}}], "outputs":[{"name":"value", "node":"repeat", "port":"x"}]}),
@@ -665,11 +665,11 @@ fn task_failures_preserve_outcomes_and_raw_snapshots_need_no_telemetry() {
 fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
     let value = json!({"version":"2026-10-03", "execution":{}, "dependencies":{},
         "nodes":[
-            {"id":"repeat", "kind":"workflow.loop", "loop":{"max_iterations":2, "variables":[{"name":"x", "type":"int"}], "body":{
+            {"id":"repeat", "kind":"workflow.loop", "config":{"max_iterations":2, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
                 "nodes":[{"id":"copy", "kind":"builtin.identity"}], "edges":[{"from_node":"%loop", "from_output":"x", "to_node":"copy", "to_input":"input"}]}}},
             {"id":"collect", "kind":"builtin.batch", "config":{"max_items":1, "max_wait_ms":100}},
-            {"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"nodes":[{"id":"copy", "kind":"builtin.identity"}],
-                "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"copy", "to_input":"input"}], "result":{"node":"copy", "port":"value"}}}}
+            {"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-03", "dependencies":{}, "nodes":[{"id":"copy", "kind":"builtin.identity"}],
+                "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"copy", "to_input":"input"}], "outputs": [{"name":"result", "node":"copy", "port":"value"}]}}}
         , controlled::source(json!("int"))], "edges":[{"from_node":"feed", "from_output":"item", "to_node":"repeat", "to_input":"x"},
             {"from_node":"repeat", "from_output":"x", "to_node":"collect", "to_input":"item"},
             {"from_node":"collect", "from_output":"items", "to_node":"iterate", "to_input":"items"}],

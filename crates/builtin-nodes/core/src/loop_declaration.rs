@@ -1,23 +1,37 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, LoopComparisonOperator, LoopConditionDefinition,
-    LoopVariableDefinition, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts,
-    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedSubgraph, SubgraphNode,
-    SubgraphStream, ValueType, compare_json_numbers, deserialize_config, loop_variable_types,
+    LoopVariableDefinition, NodeBuildError, NodeConfig, NodeExecutionError, NodePortContract,
+    NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedSubgraph, SubgraphNode,
+    SubgraphStream, ValueType, compare_json_numbers, loop_variable_types,
 };
 use mf_telemetry::{
     Count,
     event::{LoopPassOutcome, LoopStopReason, LoopSummary},
 };
-use serde::Deserialize;
 use serde_json::Value;
 use snafu::{ResultExt, Snafu, ensure};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 pub const KIND: &str = mf_runtime::LOOP_KIND;
 
-#[derive(Deserialize)]
+#[derive(NodeConfig)]
 #[serde(deny_unknown_fields)]
-struct Config {}
+struct Config {
+    body: PreparedSubgraph,
+    max_iterations: u16,
+    variables: Vec<LoopVariableDefinition>,
+    #[serde(default)]
+    until: Option<LoopConditionDefinition>,
+    #[serde(default)]
+    stream_outputs: BTreeMap<String, mf_runtime::OutputReferenceDefinition>,
+}
+
+fn plain(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    mf_runtime::NodeInvalidSubgraphSnafu {
+        message: "workflow.loop requires a prepared `body` binding",
+    }
+    .fail()
+}
 
 #[derive(Debug, Snafu)]
 #[snafu(display("invalid prepared subgraph: {source}"))]
@@ -34,18 +48,22 @@ impl From<LoopBuildError> for NodeBuildError {
 fn factory(
     id: &str,
     config: Value,
-    options: Value,
-    body: PreparedSubgraph,
+    bodies: BTreeMap<String, PreparedSubgraph>,
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
-    let _: Config = deserialize_config(config)?;
-    let config: ExecutionConfig = deserialize_config(options)?;
+    let Config {
+        body,
+        max_iterations,
+        variables,
+        until,
+        stream_outputs: _stream_outputs,
+    } = Config::from_config(config, bodies)?;
     ensure!(
-        (1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&config.max_iterations),
+        (1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&max_iterations),
         mf_runtime::NodeInvalidSubgraphSnafu {
             message: "max_iterations must be in 1..=1000",
         }
     );
-    let types = loop_variable_types(&config.variables).context(LoopBuildSnafu)?;
+    let types = loop_variable_types(&variables).context(LoopBuildSnafu)?;
     ensure!(
         body.stream_outputs
             .iter()
@@ -56,8 +74,8 @@ fn factory(
     );
     let node = LoopNode {
         id: id.into(),
-        max_iterations: config.max_iterations,
-        until: config.until,
+        max_iterations,
+        until,
         types,
         body,
     };
@@ -65,7 +83,14 @@ fn factory(
 }
 
 inventory::submit! {
-    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Subgraph(factory) }
+    NodeRegistration {
+        kind: KIND,
+        factory: mf_runtime::NodeFactory::Subgraph {
+            parameters: Config::FLOW_PARAMETERS,
+            plain,
+            prepared: factory,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -75,7 +100,26 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registers_loop_factory_and_requires_a_body_and_empty_config() {
+    fn loop_factory_rejects_missing_and_unexpected_body_handles() {
+        let config = json!({
+            "max_iterations": 1,
+            "variables": [{"name":"x", "type":"int"}],
+            "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]},
+        });
+        for bodies in [
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "unexpected".into(),
+                PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+            )]),
+        ] {
+            let error = factory("repeat", config.clone(), bodies).err().unwrap();
+            assert!(error.to_string().contains("prepared Flow field"), "{error}");
+        }
+    }
+
+    #[test]
+    fn registers_loop_factory_and_requires_a_prepared_body_and_valid_config() {
         let registration = NodeRegistry::from_inventory().unwrap().get(KIND).unwrap();
         assert!(
             registration
@@ -83,12 +127,21 @@ mod tests {
                 .is_err()
         );
         assert!(registration.instantiate(json!({})).is_err());
-        for (config, valid) in [(json!({}), true), (json!({"unexpected": true}), false)] {
-            let prepared = registration.instantiate_subgraph(
+        let config = json!({
+            "max_iterations":1,
+            "variables":[{"name":"x", "type":"int"}],
+            "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}
+        });
+        let mut invalid = config.clone();
+        invalid["unexpected"] = json!(true);
+        for (config, valid) in [(config, true), (invalid, false)] {
+            let prepared = registration.instantiate_subgraphs(
                 "repeat",
                 config,
-                json!({"max_iterations":1, "variables":[{"name":"x", "type":"int"}]}),
-                PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+                BTreeMap::from([(
+                    "body".into(),
+                    PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+                )]),
             );
             assert_eq!(prepared.is_ok(), valid);
         }
@@ -100,15 +153,6 @@ fn structural_error(message: impl Into<String>) -> NodeExecutionError {
         message: message.into(),
     }
     .build()
-}
-
-// Older generated sources include a body field; it is not needed to configure execution.
-#[derive(Deserialize)]
-struct ExecutionConfig {
-    max_iterations: u16,
-    variables: Vec<LoopVariableDefinition>,
-    #[serde(default)]
-    until: Option<LoopConditionDefinition>,
 }
 
 struct LoopNode {

@@ -869,12 +869,51 @@ pub enum WorkflowBuildError {
     },
 }
 
+/// Validate the receiving registration and the compiled binding set before children
+/// are constructed. Configuration outside its declarations remains opaque.
+pub fn validate_node_flow_parameters(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+    expected: &[&str],
+) -> Result<(), WorkflowBuildError> {
+    let registration = registry.get(kind).with_context(|| UnknownKindSnafu {
+        definition_id: DefinitionId::from(definition_id),
+        kind: kind.to_owned(),
+    })?;
+    let node = crate::NodeDefinition {
+        id: definition_id.into(),
+        kind: kind.into(),
+        config: serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
+            definition_id: DefinitionId::from(definition_id),
+        })?,
+    };
+    let fields = registration
+        .validate_flow_parameters(&node)
+        .context(NodeConstructionSnafu {
+            definition_id: DefinitionId::from(definition_id),
+        })?;
+    ensure!(
+        fields
+            .keys()
+            .map(String::as_str)
+            .eq(expected.iter().copied()),
+        InvalidDefinitionSnafu {
+            definition_id: DefinitionId::from(definition_id),
+            message: "receiving Flow parameter declarations differ from the compiled binding set",
+        }
+    );
+    Ok(())
+}
+
 pub fn instantiate_node_with_metadata(
     registry: &NodeRegistry,
     definition_id: &str,
     kind: &str,
     config_json: &str,
 ) -> Result<crate::FlowNode, WorkflowBuildError> {
+    validate_node_flow_parameters(registry, definition_id, kind, config_json, &[])?;
     let Some(registration) = registry.get(kind) else {
         return UnknownKindSnafu {
             definition_id: DefinitionId::from(definition_id),
@@ -893,33 +932,22 @@ pub fn instantiate_node_with_metadata(
     Ok(crate::FlowNode::new(definition_id, node))
 }
 
-pub fn instantiate_subgraph_with_metadata(
+pub fn instantiate_subgraphs_with_metadata(
     registry: &NodeRegistry,
     definition_id: &str,
     kind: &str,
     config_json: &str,
-    options_json: &str,
-    body: mf_runtime::PreparedSubgraph,
+    arguments: BTreeMap<String, mf_runtime::PreparedSubgraph>,
 ) -> Result<crate::FlowNode, WorkflowBuildError> {
-    let Some(registration) = registry.get(kind) else {
-        return UnknownKindSnafu {
-            definition_id: DefinitionId::from(definition_id),
-            kind: kind.to_owned(),
-        }
-        .fail();
-    };
-    let parse = |value| {
-        serde_json::from_str(value).context(InvalidEmbeddedConfigSnafu {
-            definition_id: DefinitionId::from(definition_id),
-        })
-    };
+    let registration = registry.get(kind).with_context(|| UnknownKindSnafu {
+        definition_id: DefinitionId::from(definition_id),
+        kind: kind.to_owned(),
+    })?;
+    let config = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
+        definition_id: DefinitionId::from(definition_id),
+    })?;
     let prepared = registration
-        .instantiate_subgraph(
-            definition_id,
-            parse(config_json)?,
-            parse(options_json)?,
-            body,
-        )
+        .instantiate_subgraphs(definition_id, config, arguments)
         .context(NodeConstructionSnafu {
             definition_id: DefinitionId::from(definition_id),
         })?;

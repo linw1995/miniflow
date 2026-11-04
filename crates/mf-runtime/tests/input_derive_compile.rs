@@ -118,7 +118,7 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
     let mut cases = Cases::default();
     let runtime = serde_json::to_string(env!("CARGO_MANIFEST_DIR")).unwrap();
     fs::write(root.path().join("Cargo.toml"), format!(
-        "[package]\nname = \"input-derive-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nruntime_alias = {{ package = \"mf-runtime\", path = {runtime} }}\n"
+        "[package]\nname = \"input-derive-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nruntime_alias = {{ package = \"mf-runtime\", path = {runtime} }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\nserde_json = \"1\"\n"
     )).unwrap();
     for outputs in [false, true] {
         let prefix = "use runtime_alias::NodeInputs;\n#[derive(NodeInputs)]\n#[input(runtime = \"::runtime_alias\")]\n";
@@ -249,6 +249,49 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
             &format!("{enum_prefix}{declaration}"),
             false,
             Some(diagnostic),
+        );
+    }
+    let config_prefix =
+        "#[derive(runtime_alias::NodeConfig)]\n#[config(runtime = \"::runtime_alias\")]\n";
+    cases.add(
+        &format!("{config_prefix}#[serde(deny_unknown_fields)]\nstruct Config {{ body: runtime_alias::Flow, optional: Option<runtime_alias::Flow>, callback: Option<runtime_alias::PreparedSubgraph>, #[serde(default, alias = \"count\")] repeat: usize }}"),
+        false,
+        None,
+    );
+    for (declaration, diagnostic) in [
+        (
+            "struct Config(Vec<runtime_alias::Flow>);",
+            "requires a named-field struct",
+        ),
+        (
+            "struct Config { body: Vec<runtime_alias::Flow> }",
+            "nested containers and wrappers are unsupported",
+        ),
+        (
+            "struct Config { #[serde(alias = \"other\")] body: runtime_alias::Flow }",
+            "unsupported serde option on a Flow parameter field",
+        ),
+    ] {
+        cases.add(
+            &format!("{config_prefix}{declaration}"),
+            false,
+            Some(diagnostic),
+        );
+    }
+    for ty in [
+        "other::Flow",
+        "Option<other::Flow>",
+        "other::Option<runtime_alias::Flow>",
+        "other::PreparedSubgraph",
+        "Option<other::PreparedSubgraph>",
+        "other::Option<runtime_alias::PreparedSubgraph>",
+    ] {
+        cases.add(
+            &format!(
+                "mod other {{ pub struct Flow; pub struct PreparedSubgraph; pub struct Option<T>(pub T); }}\n{config_prefix}struct Config {{ body: {ty} }}"
+            ),
+            false,
+            Some("mismatched types"),
         );
     }
     cases.check(root.path());

@@ -10,7 +10,7 @@ use mf_telemetry::identity::WorkflowId;
 use mf_telemetry::{ContractError, description::WorkflowDescription};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MANIFEST_MAGIC: &[u8; 8] = b"MFMANIF\0";
 pub const MANIFEST_FRAMING_VERSION: u32 = 1;
@@ -84,14 +84,48 @@ impl WorkflowManifest {
     }
 
     pub fn interface(&self) -> Result<WorkflowInterface, WorkflowManifestError> {
-        Ok(self.interface_for(self.workflow_id()?))
+        let description = self.description()?;
+        let interface = self.interface_for(&description);
+        interface
+            .validate_for_description(&description)
+            .context(InterfaceSnafu)?;
+        Ok(interface)
     }
 
-    fn interface_for(&self, workflow_id: WorkflowId) -> WorkflowInterface {
+    fn interface_for(&self, description: &WorkflowDescription) -> WorkflowInterface {
+        let mut schema = self.input_schema.clone();
+        if !self.definition.version.supports_startup_inputs() && description.execution.is_some() {
+            // A newer child can require a newer observation schema, whose interface
+            // describes every initial node. Preserve the old root's startup policy:
+            // these declarations expose no input ports, bindings, or stdin ownership.
+            // The stored schema remains the actual prepared schema for drift checks.
+            let incoming = description
+                .data_edges
+                .iter()
+                .map(|edge| edge.to_node.as_str())
+                .chain(
+                    description
+                        .control_edges
+                        .iter()
+                        .map(|edge| edge.to_node.as_str()),
+                )
+                .chain(
+                    description
+                        .order_edges
+                        .iter()
+                        .map(|edge| edge.to_node.as_str()),
+                )
+                .collect::<BTreeSet<_>>();
+            for node in &description.nodes {
+                if !incoming.contains(node.id.as_str()) {
+                    schema.inputs.entry(node.id.clone()).or_default();
+                }
+            }
+        }
         WorkflowInterface {
-            version: crate::WorkflowInterfaceVersion::for_schema(&self.input_schema),
-            workflow_id,
-            schema: self.input_schema.clone(),
+            version: crate::WorkflowInterfaceVersion::for_schema(&schema),
+            workflow_id: description.workflow_id.clone(),
+            schema,
         }
     }
 
@@ -157,7 +191,7 @@ impl WorkflowManifest {
 
     pub fn validate(&self) -> Result<(), WorkflowManifestError> {
         let description = self.description()?;
-        self.interface_for(description.workflow_id.clone())
+        self.interface_for(&description)
             .validate_for_description(&description)
             .context(InterfaceSnafu)
     }
@@ -248,12 +282,14 @@ pub fn describe_definition(
         }
     );
     let mut loop_bodies = Vec::new();
+    let mut omitted_iterations = Vec::new();
     describe_loops(
-        &definition.nodes,
+        definition,
         &mut Vec::new(),
         &mut orders,
         &mut loop_bodies,
         definition.has_order_edges() || definition.version.supports_clusters(),
+        &mut omitted_iterations,
     )?;
     ensure!(
         orders.is_empty(),
@@ -261,40 +297,18 @@ pub fn describe_definition(
             message: "compiled execution order names an unknown Loop body"
         }
     );
-    let description = WorkflowDescription {
+    // Validate every supplied scope, including scopes omitted by the historical
+    // observation projection, using an existing schema that supports all features.
+    let mut description = WorkflowDescription {
         order_edges: order_edges(&definition.order_edges),
-        version: if definition.version.supports_clusters() {
-            WorkflowDescriptionVersion::V2026_10_23
-        } else if definition.has_order_edges() {
-            WorkflowDescriptionVersion::V2026_10_19
-        } else {
-            match definition.version {
-                crate::WorkflowDefinitionVersion::V2026_09_26 => {
-                    WorkflowDescriptionVersion::V2026_09_27
-                }
-                crate::WorkflowDefinitionVersion::V2026_09_29
-                | crate::WorkflowDefinitionVersion::V2026_10_02 => {
-                    WorkflowDescriptionVersion::V2026_09_29
-                }
-                crate::WorkflowDefinitionVersion::V2026_10_03
-                | crate::WorkflowDefinitionVersion::V2026_10_19
-                | crate::WorkflowDefinitionVersion::V2026_10_23
-                | crate::WorkflowDefinitionVersion::V2026_10_25
-                | crate::WorkflowDefinitionVersion::V2026_10_28 => {
-                    WorkflowDescriptionVersion::V2026_10_03
-                }
-            }
-        },
-        execution: definition
-            .version
-            .supports_startup_inputs()
-            .then(|| ExecutionDescription {
-                mode: if definition.execution.is_some() {
-                    ExecutionMode::Stream
-                } else {
-                    ExecutionMode::Single
-                },
-            }),
+        version: WorkflowDescriptionVersion::V2026_10_23,
+        execution: Some(ExecutionDescription {
+            mode: if definition.execution.is_some() {
+                ExecutionMode::Stream
+            } else {
+                ExecutionMode::Single
+            },
+        }),
         workflow_id: WorkflowId::from_definition(definition, execution_order)?,
         nodes: ordered_nodes(
             definition
@@ -309,6 +323,55 @@ pub fn describe_definition(
         loop_bodies,
         clusters: clusters(&definition.clusters),
     };
+    // An old root's historical projection cannot hide features that require a
+    // newer observation schema in an independently versioned child scope.
+    omitted_iterations.retain(|path| {
+        !description.loop_bodies.iter().any(|body| {
+            body.path.starts_with(path)
+                && (!body.order_edges.is_empty() || !body.clusters.is_empty())
+        })
+    });
+    if !omitted_iterations.is_empty() {
+        description.validate()?;
+        description.loop_bodies.retain(|body| {
+            !omitted_iterations
+                .iter()
+                .any(|path| body.path.starts_with(path))
+        });
+    }
+    // Receiving fields can carry newer child features even when the authored root
+    // is old. Select a compatible existing observation schema from the projection;
+    // this never changes the authored workflow version or scans opaque JSON.
+    description.version = if definition.version.supports_clusters()
+        || !description.clusters.is_empty()
+        || description
+            .loop_bodies
+            .iter()
+            .any(|body| !body.clusters.is_empty())
+    {
+        WorkflowDescriptionVersion::V2026_10_23
+    } else if definition.has_order_edges()
+        || description
+            .loop_bodies
+            .iter()
+            .any(|body| !body.order_edges.is_empty())
+    {
+        WorkflowDescriptionVersion::V2026_10_19
+    } else if definition.version.supports_startup_inputs() {
+        WorkflowDescriptionVersion::V2026_10_03
+    } else if definition.version != crate::WorkflowDefinitionVersion::V2026_09_26
+        || !description.loop_bodies.is_empty()
+    {
+        WorkflowDescriptionVersion::V2026_09_29
+    } else {
+        WorkflowDescriptionVersion::V2026_09_27
+    };
+    if matches!(
+        description.version,
+        WorkflowDescriptionVersion::V2026_09_27 | WorkflowDescriptionVersion::V2026_09_29
+    ) {
+        description.execution = None;
+    }
     description.validate()?;
     Ok(description)
 }
@@ -395,85 +458,80 @@ fn order_edges(edges: &[crate::OrderEdgeDefinition]) -> Vec<OrderEdge> {
 }
 
 fn describe_loops(
-    nodes: &[crate::NodeDefinition],
+    parent: &crate::WorkflowDefinition,
     path: &mut Vec<String>,
     orders: &mut BTreeMap<Vec<String>, &[String]>,
     bodies: &mut Vec<LoopBodyDescription>,
     include_iterations: bool,
+    omitted_iterations: &mut Vec<Vec<String>>,
 ) -> Result<(), ContractError> {
-    for node in nodes {
-        let iteration;
-        let call;
-        let (nodes, data, controls, successes, body_clusters, source_id, source_kind) =
-            if let Some(definition) = &node.loop_definition {
-                let body = &definition.body;
-                (
-                    &body.nodes,
-                    &body.edges,
-                    &body.control_edges,
-                    &body.order_edges,
-                    &body.clusters,
-                    crate::LOOP_SOURCE_ID,
-                    crate::LOOP_SOURCE_ID,
-                )
-            } else if node.kind == crate::CALL_KIND {
-                call = serde_json::from_value::<crate::CallConfig>(node.config.clone())?;
-                let body = call.definition.as_deref().ok_or_else(|| {
-                    mf_telemetry::InvalidSnafu {
-                        message: "unresolved Flow call",
-                    }
-                    .build()
-                })?;
-                (
-                    &body.nodes,
-                    &body.edges,
-                    &body.control_edges,
-                    &body.order_edges,
-                    &body.clusters,
-                    "",
-                    "",
-                )
-            } else if include_iterations && node.kind == crate::ITERATION_KIND {
-                iteration = serde_json::from_value::<crate::IterationConfig>(node.config.clone())?;
-                let body = &iteration.body;
-                (
-                    &body.nodes,
-                    &body.edges,
-                    &body.control_edges,
-                    &body.order_edges,
-                    &body.clusters,
-                    crate::ITERATION_INPUT_ID,
-                    crate::ITERATION_INPUT_KIND,
-                )
-            } else {
+    for node in &parent.nodes {
+        let omit_iteration = !include_iterations && node.kind == crate::ITERATION_KIND;
+        if omit_iteration {
+            let mut body_path = path.clone();
+            body_path.push(node.flow_scope_key("body"));
+            // Historical manifests can omit these orders entirely. New compiler
+            // facts include them: consume and validate all supplied paths before
+            // omitting the subtree from the observation view.
+            if !orders.keys().any(|order| order.starts_with(&body_path)) {
                 continue;
-            };
-        path.push(node.id.to_string());
-        let order = orders
-            .remove(path)
-            .with_context(|| mf_telemetry::InvalidSnafu {
-                message: format!("missing compiled body execution order at {path:?}"),
-            })?;
-        bodies.push(LoopBodyDescription {
-            path: path.clone(),
-            nodes: ordered_nodes(
-                std::iter::once((source_id, source_kind))
-                    .filter(|(id, _)| !id.is_empty())
-                    .chain(
-                        nodes
-                            .iter()
-                            .map(|node| (node.id.as_str(), node.kind.as_str())),
+            }
+            omitted_iterations.push(body_path);
+        }
+        // Scope paths are the compiler's authority for ordinary configuration.
+        // Without receiving metadata, an omitted outer typed scope is intentionally
+        // indistinguishable from opaque JSON; never infer it from object contents.
+        let parameters = node
+            .config
+            .as_object()
+            .into_iter()
+            .flat_map(|config| config.keys())
+            .filter(|field| {
+                let key = node.flow_scope_key(field);
+                orders.keys().any(|order| {
+                    order.len() > path.len() && order.starts_with(path) && order[path.len()] == key
+                })
+            })
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        for (name, body) in node.flow_parameters(&parameters)? {
+            path.push(node.flow_scope_key(&name));
+            let order = orders
+                .remove(path)
+                .with_context(|| mf_telemetry::InvalidSnafu {
+                    message: format!(
+                        "missing compiled {} at {path:?}",
+                        if node.flow_scope_key(&name) == node.id.as_str() {
+                            "body execution order"
+                        } else {
+                            "Flow parameter order"
+                        }
                     ),
-                order,
-            )?,
-            data_edges: data_edges(data),
-            control_edges: control_edges(controls),
-            order_edges: order_edges(successes),
-            execution_order: order.to_vec(),
-            clusters: clusters(body_clusters),
-        });
-        describe_loops(nodes, path, orders, bodies, include_iterations)?;
-        path.pop();
+                })?;
+            bodies.push(LoopBodyDescription {
+                path: path.clone(),
+                nodes: ordered_nodes(
+                    body.nodes
+                        .iter()
+                        .map(|node| (node.id.as_str(), node.kind.as_str())),
+                    order,
+                )?,
+                data_edges: data_edges(&body.edges),
+                control_edges: control_edges(&body.control_edges),
+                order_edges: order_edges(&body.order_edges),
+                execution_order: order.to_vec(),
+                clusters: clusters(&body.clusters),
+            });
+            describe_loops(
+                &body,
+                path,
+                orders,
+                bodies,
+                include_iterations,
+                omitted_iterations,
+            )?;
+            path.pop();
+        }
     }
     Ok(())
 }

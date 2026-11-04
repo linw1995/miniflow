@@ -1,7 +1,9 @@
 mod calls;
 mod flow_sources;
 pub use flow_sources::{
-    FlowResolutionError, ResolvedWorkflow, load_embedded_workflow, load_workflow, resolve_flows,
+    FlowDiscovery, FlowResolutionError, ResolvedWorkflow, discover_flows_with_registry,
+    load_embedded_workflow, load_workflow, load_workflow_with_registry, resolve_flows,
+    resolve_flows_with_registry,
 };
 #[cfg(feature = "codegen")]
 mod cache;
@@ -54,8 +56,9 @@ pub use compiler::{
     CyclePath, DescriptionError, TypeInferenceState, WorkflowCompileError, WorkflowExecutionError,
     compile_definition, compile_resolved_definition, describe_compiled, describe_interface,
     describe_workflow_inputs, execute_compiled, execute_compiled_with_inputs, instantiate_compiled,
-    instantiate_compiled_with_observation, plan_definition, prepare_definition, resolve_execution,
-    resolve_nodes, structural_order, topological_order, validate_definition,
+    instantiate_compiled_with_observation, plan_definition, plan_resolved_definition,
+    prepare_definition, resolve_execution, resolve_nodes, structural_order, topological_order,
+    validate_definition,
 };
 #[cfg(feature = "codegen")]
 pub use dependency_project::{
@@ -70,11 +73,11 @@ pub use mf_runtime::{
     CALL_KIND, CallConfig, ContextReference, ContextValue, ControlEdgeDefinition, DefinitionId,
     DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, ExecutionContext,
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowSource, InputBindingDefinition,
-    Inputs, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
-    LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
-    MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeBuildError,
-    NodeDefinition, NodeDependency, NodeExecutionError, NodeFactory, NodeId, NodeMetadata,
-    NodePorts, NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult, OrderEdgeDefinition,
+    Inputs, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopComparisonOperator,
+    LoopConditionDefinition, LoopDefinition, LoopVariableDefinition, MAX_CALL_DEPTH,
+    MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeBuildError, NodeDefinition,
+    NodeDependency, NodeExecutionError, NodeFactory, NodeId, NodeMetadata, NodePorts,
+    NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult, OrderEdgeDefinition,
     OutputDerivation, OutputDerivationError, OutputReferenceDefinition, Outputs, PortSpec,
     PreparedNode, RunObservation, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch,
     ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
@@ -106,9 +109,10 @@ pub use construction::{
     StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
     UnknownKindSnafu as WorkflowUnknownKindSnafu, WorkflowBuildError, bind_workflow_inputs,
     build_flow, build_stream_program, instantiate_node_with_metadata,
-    instantiate_subgraph_with_metadata, into_task, partition_execution_domains, prepare_stream,
+    instantiate_subgraphs_with_metadata, into_task, partition_execution_domains, prepare_stream,
     prepared_loop_assign_from_json, prepared_loop_source_from_json, stream_workflow_inputs,
-    validate_execution, validate_stream_limits, validate_success_connection, workflow_input_schema,
+    validate_execution, validate_node_flow_parameters, validate_stream_limits,
+    validate_success_connection, workflow_input_schema,
 };
 pub use mf_runtime::{
     FlowRuntime, RuntimeOptions, TaskFlowNode, WorkflowInputError, WorkflowInputSchema,

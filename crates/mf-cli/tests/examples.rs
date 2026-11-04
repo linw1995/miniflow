@@ -182,7 +182,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 serde_json::from_slice(&fs::read(workspace().join("examples").join(name)).unwrap())
                     .unwrap();
             let config = if name == "llm-loop.json" {
-                &mut value["nodes"][0]["loop"]["body"]["nodes"][0]["config"]
+                &mut value["nodes"][0]["config"]["body"]["nodes"][0]["config"]
             } else if name == "llm-parameters.json" {
                 &mut value["nodes"][1]["config"]
             } else {

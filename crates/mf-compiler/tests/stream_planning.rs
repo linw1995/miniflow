@@ -345,10 +345,10 @@ fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
             .is_some()
     );
 
-    let iteration = json!({"id":"iterate", "kind":"builtin.iteration", "config":{"body":{
+    let iteration = json!({"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-03", "dependencies":{},
         "nodes":[{"id":"collect", "kind":"test.collect"}],
         "edges":[edge("%iteration", "item", "collect", "item")],
-        "result":{"node":"collect", "port":"items"}
+        "outputs": [{"name":"result", "node":"collect", "port":"items"}]
     }}});
     let mut value = graph(
         json!([iteration]),
@@ -362,8 +362,8 @@ fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
         "{error}"
     );
 
-    let repeat = json!({"id":"repeat", "kind":"workflow.loop", "loop":{
-        "max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{
+    let repeat = json!({"id":"repeat", "kind":"workflow.loop", "config":{
+        "max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
             "nodes":[{"id":"collect", "kind":"test.collect"}], "edges":[edge("%loop", "x", "collect", "item")]
         }
     }});

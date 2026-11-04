@@ -34,7 +34,7 @@ fn child() -> WorkflowDefinition {
 }
 
 fn call(id: &str, body: &WorkflowDefinition) -> Value {
-    json!({"id":id,"kind":"workflow.call","config":{"flow":"child","definition":body}})
+    json!({"id":id,"kind":"workflow.call","config":{"flow":"child","body":body}})
 }
 
 fn iteration_call_graph(body: &WorkflowDefinition, mode: &str) -> WorkflowDefinition {
@@ -44,8 +44,8 @@ fn iteration_call_graph(body: &WorkflowDefinition, mode: &str) -> WorkflowDefini
     graph(
         json!([
             {"id":"items","kind":"builtin.constant","config":{"value":["first","second"]}},
-            {"id":"each","kind":"builtin.iteration","config":{"mode":mode,"body":{
-                "nodes":[invocation],"result":{"node":"invoke","port":"value"}
+            {"id":"each","kind":"builtin.iteration","config":{"mode":mode,"body":{"version":"2026-10-25", "dependencies":{},
+                "nodes":[invocation],"outputs": [{"name":"result", "node":"invoke","port":"value"}]
             }},"inputs":{"items":{"from":{"node":"items","port":"value"}}}}
         ]),
         json!([{"name":"results","node":"each","port":"results"}]),
@@ -172,7 +172,7 @@ fn iteration_calls_isolate_item_bindings_and_observe_nested_skips() {
 fn iteration_calls_cannot_hide_loop_containers_from_either_preparation_path() {
     let loop_body: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","loop":{"max_iterations":1,"variables":[{"name":"value","type":"string"}],"body":{"nodes":[]}}}],
+        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{"max_iterations":1,"variables":[{"name":"value","type":"string"}],"body":{"version":"2026-10-25", "dependencies":{}, "nodes":[]}}}],
         "outputs":[{"name":"value","node":"repeat","port":"value"}]
     })).unwrap();
     let body = graph(
@@ -368,7 +368,7 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
         .config
         .as_object_mut()
         .unwrap()
-        .remove("definition");
+        .remove("body");
     assert!(manifest.validate().is_err());
     let mut cycle = child();
     cycle.edges.push(mf_runtime::EdgeDefinition {
@@ -379,7 +379,7 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
         to_input: "value".into(),
     });
     let mut invalid = plan;
-    invalid.definition.nodes[0].config["definition"] = serde_json::to_value(cycle).unwrap();
+    invalid.definition.nodes[0].config["body"] = serde_json::to_value(cycle).unwrap();
     assert!(
         invalid
             .generate_runner_artifacts()
@@ -718,7 +718,7 @@ fn missing_inputs_unknown_aliases_and_incompatible_ports_fail_early() {
     let definition = graph(
         json!([
             {"id":"source","kind":"builtin.constant","config":{"value":1}},
-            {"id":"call","kind":"workflow.call","config":{"flow":"child","definition":body},"inputs":{"input.value":{"from":{"node":"source","port":"value"}}}}
+            {"id":"call","kind":"workflow.call","config":{"flow":"child","body":body},"inputs":{"input.value":{"from":{"node":"source","port":"value"}}}}
         ]),
         json!([]),
     );
@@ -778,7 +778,7 @@ fn provider_features_merge_and_source_conflicts_are_rejected() {
     assert_eq!(dependency.features, ["child", "parent"]);
     assert!(dependency.default_features);
     body.dependencies.get_mut("child_provider").unwrap().version = Some("2.0".into());
-    definition.nodes[0].config["definition"] = serde_json::to_value(body).unwrap();
+    definition.nodes[0].config["body"] = serde_json::to_value(body).unwrap();
     assert!(
         mf_compiler::resolve_flows(&definition, None)
             .err()
@@ -815,14 +815,22 @@ fn generated_calls_match_memory_without_flow_sources() {
         .execute()
         .unwrap();
     let execution = plan.generate_runner_execution_plans(&registry).unwrap();
-    assert!(execution.rust_source.contains("with_input_metadata"));
+    assert!(
+        execution
+            .rust_source
+            .contains("PreparedSubgraph::from_flow")
+    );
     let frozen = mf_runtime::WorkflowManifest::from_bytes(&execution.manifest_bytes).unwrap();
     assert_eq!(frozen.definition, plan.definition);
     let targets: Vec<mf_runtime::NodeTarget> =
         serde_json::from_str(&execution.node_targets_json).unwrap();
     assert_eq!(targets[0].id, "outer");
     let artifacts = plan.generate_artifacts().unwrap();
-    assert!(artifacts.rust_source.contains("with_input_metadata"));
+    assert!(
+        artifacts
+            .rust_source
+            .contains("PreparedSubgraph::from_flow")
+    );
     let runner_artifacts = plan.generate_runner_artifacts().unwrap();
     assert!(!runner_artifacts.rust_source.is_empty());
     let project = root.path().join("build");
@@ -861,9 +869,9 @@ fn generated_calls_match_memory_without_flow_sources() {
 fn call_loop_call_execution_preserves_complete_observation_paths() {
     use mf_telemetry::event::{Event, ScopePathEntry};
     let body = graph(
-        json!([{"id":"repeat","kind":"workflow.loop","loop":{
+        json!([{"id":"repeat","kind":"workflow.loop","config":{
             "max_iterations":1,"variables":[{"name":"value","type":"string"}],
-            "body":{"nodes":[call("inner", &child())]}
+            "body":{"version":"2026-10-25", "dependencies":{}, "nodes":[call("inner", &child())]}
         }}]),
         json!([{"name":"value","node":"repeat","port":"value"}]),
     );
@@ -978,9 +986,9 @@ fn calls_inside_loops_share_the_callers_step_budget_and_cancellation() {
     }
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","loop":{
+        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{
             "max_iterations":1000,"variables":[{"name":"value","type":"string"}],
-            "body":{"nodes":[call("call", &body)]}
+            "body":{"version":"2026-10-25", "dependencies":{}, "nodes":[call("call", &body)]}
         }}],
         "outputs":[{"name":"value","node":"repeat","port":"value"}]
     }))

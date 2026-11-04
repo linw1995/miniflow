@@ -194,7 +194,7 @@ fn compile_call_wrapper(
     let definition = serde_json::from_value(serde_json::json!({
         "version": "2026-10-28", "dependencies": {},
         "nodes": [{"id": "workflow", "kind": "workflow.call", "config": {
-            "flow": name, "definition": definition
+            "flow": name, "body": definition
         }}],
         "outputs": outputs
     }))

@@ -74,9 +74,14 @@ the workflow. Manifest inspection reads the frozen graph and interface without c
 Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
 
 Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
-Use `NodeFactory::Subgraph` when construction also needs the occurrence ID, execution options, and a
-`PreparedSubgraph`. The compiler supplies Loop, Iteration, and Call bodies through this second form. Missing
-or inappropriate body arguments fail during preparation; an executor is returned only after binding.
+Use `NodeFactory::Subgraph { parameters, plain, prepared }` for declared executable child fields.
+Its prepared factory takes `(id: &str, config: Value, children: BTreeMap<String, PreparedSubgraph>)`;
+there is no separate execution-options argument. `parameters` is `Config::FLOW_PARAMETERS`.
+Call, Loop, Iteration, and custom providers all use this same map-based factory contract. Their child
+fields contain complete Flow definitions in ordinary node configuration; Loop and Iteration no longer
+have separate partial-body formats or a top-level `loop` field. The compiler resolves the selected
+provider's declared fields and injects prepared children without a legacy-format adapter.
+Missing or inappropriate body arguments fail during preparation; an executor is returned only after binding.
 Factories and retained executors can call `PreparedSubgraph::input_metadata()` to inspect startup inputs
 partitioned by independent, weakly connected Flow. Each entry lists that Flow's nodes and its input
 schema. `PreparedSubgraph::inputs` remains the complete flat schema used for runtime binding.
@@ -976,7 +981,8 @@ cancellation between reads and while waiting for stdin readiness. Nonblocking op
 waits; they do not make regular-file disk I/O interruptible. Application-specific sources use ordinary
 `StreamNode` implementations and propagate emitter errors; arbitrary plugin I/O requires cooperation.
 
-Every emitted message has fresh bindings and a step budget. Frames execute in FIFO order in each domain,
+Every emitted message has fresh bindings. Top-level messages have independent step budgets; nested
+invocation messages share their caller's budget. Frames execute in FIFO order in each domain,
 while domains progress independently. `receive` returns a delivery that its sink must acknowledge or fail.
 Success waits for all sources and output acknowledgements. Failure stops admission and dispatch, wakes source
 waits, suppresses later publication, and waits for started calls before releasing nodes. Dropping an unfinished
@@ -1072,3 +1078,64 @@ Catalog construction validates registrations without invoking their factories. T
 to request a definition and handles its typed `DefinitionParseError`. Each provider owns its source
 and dependency declarations. Factories must not execute the Flow or perform business I/O.
 The catalog exposes definitions independently of compilation and execution.
+
+## Receive and execute passed subgraphs
+
+Declare executable child parameters in your configuration type and register that contract:
+
+```rust
+use mf_runtime::{Flow, NodeConfig, NodeFactory};
+
+#[derive(NodeConfig)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    body: Flow,
+    fallback: Option<Flow>,
+}
+
+// In NodeRegistration, using the provider's plain and prepared factory functions:
+// factory: NodeFactory::Subgraph {
+//     parameters: Config::FLOW_PARAMETERS,
+//     plain,
+//     prepared,
+// },
+```
+
+`NodeConfig` discovers the existing executable types `Flow` and `Option<Flow>` from the receiving
+node's fields; it does not require a separate source-description type or a new workflow schema.
+Use `PreparedSubgraph` (or its optional form) when the node needs the existing callable interface,
+including manual host callbacks. The derive reflects Serde field names (`rename` and `rename_all`),
+checks type identity, and rejects ambiguous wire names, flattening, aliases or custom codecs on Flow
+fields. Ordinary configuration remains provider-owned data, even if it contains keys such as `$flow`,
+`definition` or `path`.
+
+Author a declared field as `{"path": "./worker.json"}`, `{"builtin": "my-provider.worker"}`, or
+`{"definition": <WorkflowDefinition>}` using the workflow's existing version. Source loading consults
+the selected receiving registration, resolves only those fields, and embeds their resolved definitions
+for compilation. It never runs node business logic to discover children. Users do not write internal
+markers, add a Flow declaration table, or migrate workflow versions.
+
+The prepared factory receives the node ID, resolved configuration, and a
+`BTreeMap<String, PreparedSubgraph>`. Inspect the prepared interfaces before executing any work, then
+call `Config::from_config(config, children)` to deserialize ordinary fields and inject the executable
+Flow fields. Flow objects are not deserialized from source JSON. Required fields need prepared handles;
+omitted optional fields become `None`. All supplied children are prepared, even if execution later
+selects only one. The plain factory retains ordinary direct-instantiation semantics and can reject a
+configuration requiring a prepared child.
+
+Use the map's standard `get`, `keys`, and `values` methods. Each `PreparedSubgraph` already provides
+startup `inputs`, terminal `outputs`, `stream_outputs`, and partitioned `input_metadata()`. Inspect
+those contracts in your prepared factory; do not execute children during preparation. Return a normal
+`PreparedNode` with your own ports and policy. The runtime does not prescribe selector inputs, argument
+objects, error envelopes, invocation count, or result aggregation.
+
+The current authored/compiler-prepared child path remains finite, including compatible TaskStream
+forwarding and calls from parent Stream messages. Its preparation rejects autonomous Event/Stream
+children. This is separate from the runtime lifecycle API above: factory-backed Event handles can use
+`PreparedSubgraph::from_stream_factory` and `FlowInvocation`. Merging that runtime support does not
+provide the fresh-state preparation and code generation needed to accept authored Event children.
+Terminal-only execution of a finite TaskStream child does not subscribe to its incremental outputs.
+
+Interpreted and generated preparation use the same registered factory and frozen child contracts.
+Loop still establishes a fresh scope per pass, and Iteration per item; sharing a factory does not
+wrap them as Calls or unify their lifecycle protocols.

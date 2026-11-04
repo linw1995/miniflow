@@ -192,6 +192,10 @@ pub type GeneratedDomainExecutor = dyn Fn(&Flow, &mut crate::ExecutionContext) -
     + Send
     + Sync;
 
+/// A compiled graph whose clones share the same frozen preparation and executors.
+/// Finish binding inputs, guards, and generated domains before cloning; binding
+/// requires unique ownership and does not perform copy-on-write.
+#[derive(Clone)]
 pub struct Flow {
     inner: Arc<FlowData>,
 }
@@ -209,12 +213,6 @@ impl Flow {
     fn data_mut(&mut self) -> &mut FlowData {
         Arc::get_mut(&mut self.inner)
             .expect("Flow executors are uniquely owned while binding inputs")
-    }
-
-    fn shared_clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
     }
 }
 
@@ -657,7 +655,7 @@ impl Flow {
                 );
                 let sender = sender.clone();
                 let parent_context = opentelemetry::Context::current();
-                let flow = self.shared_clone();
+                let flow = self.clone();
                 let domain = domain.clone();
                 let job = crate::worker::WorkerJob::new(move || {
                     let _context = parent_context.attach();

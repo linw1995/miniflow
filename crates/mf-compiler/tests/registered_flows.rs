@@ -16,7 +16,7 @@ fn child() -> WorkflowDefinition {
 fn caller(body: &WorkflowDefinition) -> WorkflowDefinition {
     serde_json::from_value(json!({
         "version":"2026-10-28", "dependencies":{},
-        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"host.runner","definition":body}}],
+        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"host.runner","body":body}}],
         "outputs":[{"name":"value","node":"invoke","port":"value"}]
     }))
     .unwrap()

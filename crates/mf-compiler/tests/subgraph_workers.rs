@@ -116,10 +116,10 @@ fn workflow(kind: &str, workers: usize) -> WorkflowDefinition {
     let (subgraph, input, output, seed) = if kind == "loop" {
         (
             json!({
-                "id": "subgraph", "kind": "workflow.loop", "loop": {
+                "id": "subgraph", "kind": "workflow.loop", "config": {
                     "max_iterations": 3,
                     "variables": [{"name": "threads", "type": {"list": "string"}}],
-                    "body": {
+                    "body": {"version":"2026-09-29", "dependencies":{},
                         "nodes": [probe, {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "threads"}}],
                         "edges": [{"from_node": "probe", "from_output": "value", "to_node": "assign", "to_input": "value"}]
                     }
@@ -134,7 +134,7 @@ fn workflow(kind: &str, workers: usize) -> WorkflowDefinition {
             json!({
                 "id": "subgraph", "kind": "builtin.iteration", "config": {
                     "mode": kind,
-                    "body": {"nodes": [probe], "result": {"node": "probe", "port": "value"}}
+                    "body": {"version":"2026-09-29", "dependencies":{}, "nodes": [probe], "outputs": [{"name":"result", "node": "probe", "port": "value"}]}
                 }
             }),
             "items",
@@ -160,11 +160,7 @@ fn serial_flows_and_subgraphs_do_not_start_workers() {
     let mut definitions = vec![simple];
     for kind in ["loop", "sequential"] {
         let mut definition = serde_json::to_value(workflow(kind, 4)).unwrap();
-        let body = if kind == "loop" {
-            &mut definition["nodes"][1]["loop"]["body"]
-        } else {
-            &mut definition["nodes"][1]["config"]["body"]
-        };
+        let body = &mut definition["nodes"][1]["config"]["body"];
         body["nodes"][0] = json!({"id": "probe", "kind": "test.serial_probe"});
         definitions.push(definition);
     }

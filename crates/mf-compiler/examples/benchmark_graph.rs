@@ -20,7 +20,6 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
         id: id(0).into(),
         kind: "builtin.constant".into(),
         config: json!({ "value": value }),
-        loop_definition: None,
     }];
     let mut edges = Vec::new();
     for index in 1..count {
@@ -28,7 +27,6 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
             id: id(index).into(),
             kind: "builtin.identity".into(),
             config: json!({}),
-            loop_definition: None,
         });
         edges.push(EdgeDefinition {
             exclusive: false,

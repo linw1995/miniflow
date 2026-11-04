@@ -1,10 +1,25 @@
 use mf_runtime::{
-    CallConfig, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
+    ExecutionContext, Inputs, NodeBuildError, NodeConfig, NodeExecutionError, NodeFactory,
     NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, PortSpec,
     PreparedNode, PreparedSubgraph, SubgraphNode, SubgraphStream, WorkflowArguments,
 };
 use serde_json::Value;
 use snafu::{ResultExt, Snafu, ensure};
+use std::collections::BTreeMap;
+
+#[derive(NodeConfig)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    flow: String,
+    body: PreparedSubgraph,
+}
+
+fn plain(_config: Value) -> Result<PreparedNode, NodeBuildError> {
+    mf_runtime::NodeInvalidSubgraphSnafu {
+        message: "workflow.call requires a prepared `body` binding",
+    }
+    .fail()
+}
 
 struct CallNode {
     id: String,
@@ -92,12 +107,11 @@ impl SubgraphNode for CallNode {
 fn factory(
     id: &str,
     config: Value,
-    _options: Value,
-    body: PreparedSubgraph,
+    bodies: BTreeMap<String, PreparedSubgraph>,
 ) -> Result<PreparedNode, NodeBuildError> {
-    let config: CallConfig = mf_runtime::deserialize_config(config)?;
+    let Config { flow, body } = Config::from_config(config, bodies)?;
     ensure!(
-        !config.flow.trim().is_empty(),
+        !flow.trim().is_empty(),
         mf_runtime::NodeInvalidSubgraphSnafu {
             message: "Flow alias must not be blank"
         }
@@ -129,7 +143,7 @@ fn factory(
         .collect();
     let node = CallNode {
         id: id.into(),
-        flow: config.flow,
+        flow,
         body,
     };
     let metadata = NodeMetadata {
@@ -140,7 +154,14 @@ fn factory(
 }
 
 inventory::submit! {
-    NodeRegistration { kind: mf_runtime::CALL_KIND, factory: NodeFactory::Subgraph(factory) }
+    NodeRegistration {
+        kind: mf_runtime::CALL_KIND,
+        factory: NodeFactory::Subgraph {
+            parameters: Config::FLOW_PARAMETERS,
+            plain,
+            prepared: factory,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -153,9 +174,38 @@ mod tests {
     }
 
     #[test]
+    fn call_factory_requires_a_valid_config_and_exact_prepared_body() {
+        let config = json!({
+            "flow": "child",
+            "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}
+        });
+        let registration = mf_runtime::NodeRegistry::from_inventory()
+            .unwrap()
+            .get(mf_runtime::CALL_KIND)
+            .unwrap();
+        assert_eq!(registration.flow_parameters(), Config::FLOW_PARAMETERS);
+        assert!(registration.instantiate(config.clone()).is_err());
+        for bodies in [
+            BTreeMap::new(),
+            BTreeMap::from([("other".into(), body())]),
+            BTreeMap::from([("body".into(), body()), ("extra".into(), body())]),
+        ] {
+            assert!(factory("invoke", config.clone(), bodies).is_err());
+        }
+        let mut invalid = config.clone();
+        invalid["body"] = Value::Null;
+        assert!(factory("invoke", invalid, BTreeMap::from([("body".into(), body())])).is_err());
+        assert!(factory("invoke", config, BTreeMap::from([("body".into(), body())])).is_ok());
+    }
+
+    #[test]
     fn direct_call_factories_reject_blank_names_and_stdin_before_execution() {
         assert!(
-            factory("invoke", json!({"flow":" "}), Value::Null, body())
+            factory(
+                "invoke",
+                json!({"flow":" ", "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}}),
+                BTreeMap::from([("body".into(), body())]),
+            )
                 .err()
                 .unwrap()
                 .to_string()
@@ -168,9 +218,8 @@ mod tests {
         assert!(
             factory(
                 "invoke",
-                json!({"flow":"child"}),
-                Value::Null,
-                body().with_input_schema(inputs)
+                json!({"flow":"child", "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}}),
+                BTreeMap::from([("body".into(), body().with_input_schema(inputs))]),
             )
             .err()
             .unwrap()

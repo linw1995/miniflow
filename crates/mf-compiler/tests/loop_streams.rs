@@ -14,10 +14,10 @@ use serde_json::{Value, json};
 
 fn definition() -> Value {
     json!({"version":"2026-10-28","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","loop":{
+        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{
             "max_iterations":3,"variables":[{"name":"count","type":"usize"}],
             "stream_outputs":{"increment":{"node":"step","port":"delta"}},
-            "body":{"nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"from":{"node":"%loop","port":"count"}}}}]}
+            "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"from":{"node":"%loop","port":"count"}}}}]}
         }}],
         "outputs":[{"name":"increment","node":"repeat","port":"increment"},{"name":"count","node":"repeat","port":"count"}]
     })
@@ -135,11 +135,11 @@ fn nested_loops_compose_stream_exports_without_replacing_loop_variables() {
     let inner = value["nodes"][0].clone();
     let mut inner = inner;
     inner["id"] = "inner".into();
-    inner["loop"]["max_iterations"] = 2.into();
+    inner["config"]["max_iterations"] = 2.into();
     inner["inputs"] = json!({"count":{"from":{"node":"%loop","port":"count"}}});
-    value["nodes"][0]["loop"]["max_iterations"] = 2.into();
-    value["nodes"][0]["loop"]["body"]["nodes"] = json!([inner]);
-    value["nodes"][0]["loop"]["stream_outputs"] =
+    value["nodes"][0]["config"]["max_iterations"] = 2.into();
+    value["nodes"][0]["config"]["body"]["nodes"] = json!([inner]);
+    value["nodes"][0]["config"]["stream_outputs"] =
         json!({"increment":{"node":"inner","port":"increment"}});
     let instance = prepare(value).start_with_options(options()).unwrap();
     let mut increments = Vec::new();
@@ -163,7 +163,7 @@ fn a_child_prefix_arrives_before_completion_and_cancellation_stops_remaining_pas
         let root = tempfile::tempdir().unwrap();
         let release = root.path().join("release");
         let mut value = definition();
-        value["nodes"][0]["loop"]["body"]["nodes"][0]["config"] = json!({"wait_path":release});
+        value["nodes"][0]["config"]["body"]["nodes"][0]["config"] = json!({"wait_path":release});
         let instance = prepare(value).start_with_options(options()).unwrap();
         let cancellation = instance.cancellation();
         let first = instance.receive().unwrap().unwrap();
@@ -202,7 +202,7 @@ fn stream_export_declarations_reject_old_versions_unknown_children_ports_and_col
         json!({"":{"node":"step","port":"delta"}}),
     ] {
         let mut value = definition();
-        value["nodes"][0]["loop"]["stream_outputs"] = exports;
+        value["nodes"][0]["config"]["stream_outputs"] = exports;
         assert!(compile_definition(&serde_json::from_value(value).unwrap(), &registry).is_err());
     }
 }
@@ -249,13 +249,14 @@ fn child_delivery_errors_stop_forwarding_and_keep_typed_sources() {
 #[test]
 fn multiple_child_exports_preserve_sparse_packet_ownership() {
     let mut value = definition();
-    let mut other = value["nodes"][0]["loop"]["body"]["nodes"][0].clone();
+    let mut other = value["nodes"][0]["config"]["body"]["nodes"][0].clone();
     other["id"] = "other".into();
-    value["nodes"][0]["loop"]["body"]["nodes"]
+    value["nodes"][0]["config"]["body"]["nodes"]
         .as_array_mut()
         .unwrap()
         .push(other);
-    value["nodes"][0]["loop"]["stream_outputs"]["second"] = json!({"node":"other","port":"delta"});
+    value["nodes"][0]["config"]["stream_outputs"]["second"] =
+        json!({"node":"other","port":"delta"});
     value["outputs"]
         .as_array_mut()
         .unwrap()
@@ -287,9 +288,9 @@ fn multiple_child_exports_preserve_sparse_packet_ownership() {
 
 fn guarded_definition(enabled: bool, marker: &std::path::Path) -> Value {
     let mut value = definition();
-    let mut step = value["nodes"][0]["loop"]["body"]["nodes"][0].clone();
+    let mut step = value["nodes"][0]["config"]["body"]["nodes"][0].clone();
     step["config"] = json!({"marker":marker});
-    value["nodes"][0]["loop"]["body"] = json!({"nodes":[
+    value["nodes"][0]["config"]["body"] = json!({"version":"2026-10-28", "dependencies":{}, "nodes":[
         {"id":"enabled","kind":"builtin.constant","config":{"value":enabled}},
         {"id":"gate","kind":"builtin.if_else","config":{"branches":[{"id":"pass","condition":{"source":{"output":"enabled.value","path":""},"operator":"eq","value":true}}]}},
         {"id":"ready","kind":"builtin.identity","inputs":{"input":{"from":{"node":"gate","port":"pass"}}}},step
@@ -310,7 +311,7 @@ fn exported_children_reuse_success_guards_in_streamed_and_terminal_execution() {
                     .as_array_mut()
                     .unwrap()
                     .retain(|output| output["name"] != "increment");
-                value["nodes"][0]["loop"]["body"]["nodes"][3]["config"]["wait_path"] =
+                value["nodes"][0]["config"]["body"]["nodes"][3]["config"]["wait_path"] =
                     json!(root.path().join("unreleased"));
             }
             let plan =
@@ -434,7 +435,7 @@ fn standalone_loop_streams_preserve_guards_delivery_and_frozen_contracts() {
 #[test]
 fn child_panics_close_the_active_pass_without_publishing_loop_terminal_outputs() {
     let mut value = definition();
-    value["nodes"][0]["loop"]["body"]["nodes"][0]["kind"] = "fixture.task_stream_panic".into();
+    value["nodes"][0]["config"]["body"]["nodes"][0]["kind"] = "fixture.task_stream_panic".into();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
     let harness = capture::Harness::new(true);

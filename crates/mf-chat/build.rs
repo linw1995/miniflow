@@ -1,6 +1,7 @@
 #[path = "build/title.rs"]
 mod title;
 
+use mfn_core as _;
 use std::{env, fs, path::Path, process::Command, sync::OnceLock};
 
 static TITLE_DEFINITION: OnceLock<mf_runtime::WorkflowDefinition> = OnceLock::new();

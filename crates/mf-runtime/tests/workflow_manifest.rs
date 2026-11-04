@@ -96,14 +96,162 @@ fn compiled_manifests_derive_views_from_original_facts() {
 }
 
 #[test]
+fn mapped_binding_bodies_use_frozen_orders_and_their_own_schema() {
+    let definition = serde_json::from_value(serde_json::json!({
+        "version": "2026-10-28", "dependencies": {},
+        "nodes": [{"id": "dispatch", "kind": "fixture.dispatch", "config": {
+            "selected": {
+                "version": "2026-10-28", "dependencies": {},
+                "nodes": [{"id": "value", "kind": "fixture.input",
+                    "config": {"legacy": {"$flow": "opaque provider config"}}}]
+            },
+            "opaque": {"nested": {"$flow": "not an immediate marker"}}
+        }}]
+    }))
+    .unwrap();
+    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
+    let manifest = WorkflowManifest {
+        version: WorkflowManifestVersion::V2026_10_16,
+        definition,
+        execution_order: vec!["dispatch".into()],
+        loop_orders: vec![mf_runtime::LoopExecutionOrder {
+            path: vec![key.clone()],
+            execution_order: vec!["value".into()],
+        }],
+        input_schema: WorkflowInputSchema {
+            inputs: [("dispatch".to_owned(), Default::default())].into(),
+            ..Default::default()
+        },
+    };
+    let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, manifest);
+    let description = decoded.description().unwrap();
+    assert_eq!(description.loop_bodies.len(), 1);
+    assert_eq!(description.loop_bodies[0].path, vec![key]);
+    assert_eq!(description.loop_bodies[0].nodes[0].id, "value");
+}
+
+#[test]
+fn nested_binding_views_require_consistent_orders_for_each_frozen_field() {
+    let definition = serde_json::from_value(serde_json::json!({
+        "version": "2026-10-28", "dependencies": {},
+        "nodes": [{"id": "dispatch", "kind": "fixture.dispatch", "config": {
+            "selected": {
+                "version": "2026-10-28", "dependencies": {},
+                "nodes": [{"id": "inner", "kind": "fixture.dispatch", "config": {
+                    "nested": {
+                        "version": "2026-10-28", "dependencies": {},
+                        "nodes": [{"id": "value", "kind": "fixture.input"}]
+                    }
+                }}]
+            },
+            "ordinary": {"definition": {
+                "version": "2026-10-28", "dependencies": {},
+                "nodes": [{"id": "shadowed", "kind": "fixture.input"}]
+            }}
+        }}]
+    }))
+    .unwrap();
+    let outer_key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
+    let inner_key = mf_telemetry::event::ScopePathEntry::binding_key("inner", "nested");
+    let manifest = WorkflowManifest {
+        version: WorkflowManifestVersion::V2026_10_16,
+        definition,
+        execution_order: vec!["dispatch".into()],
+        loop_orders: vec![
+            mf_runtime::LoopExecutionOrder {
+                path: vec![outer_key.clone()],
+                execution_order: vec!["inner".into()],
+            },
+            mf_runtime::LoopExecutionOrder {
+                path: vec![outer_key.clone(), inner_key.clone()],
+                execution_order: vec!["value".into()],
+            },
+        ],
+        input_schema: WorkflowInputSchema {
+            inputs: [("dispatch".to_owned(), Default::default())].into(),
+            ..Default::default()
+        },
+    };
+    let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, manifest);
+    let graph = decoded.description().unwrap();
+    assert_eq!(graph.loop_bodies.len(), 2);
+    assert_eq!(graph.loop_bodies[0].path, vec![outer_key]);
+    assert_eq!(graph.loop_bodies[1].path, manifest.loop_orders[1].path);
+    assert_eq!(graph.loop_bodies[1].nodes[0].id, "value");
+
+    // Offline projection has no provider declarations. With no order (or descendant
+    // order) identifying a field, it is ordinary JSON, not a missing typed child.
+    // A retained descendant order still requires its outer execution prerequisite.
+    let mut omitted_nested = manifest.clone();
+    omitted_nested.loop_orders.pop();
+    assert_eq!(omitted_nested.description().unwrap().loop_bodies.len(), 1);
+    assert!(omitted_nested.to_bytes().is_ok());
+    let mut ordinary = manifest.clone();
+    ordinary.loop_orders.clear();
+    assert!(ordinary.description().unwrap().loop_bodies.is_empty());
+    assert!(ordinary.to_bytes().is_ok());
+
+    for (case, diagnostic) in [
+        ("missing_outer", "missing compiled Flow parameter order"),
+        ("unknown_outer_field", "unknown"),
+        ("duplicate_outer", "duplicate"),
+        ("incomplete_outer", "does not match the node count"),
+        ("unknown_outer_node", "names unknown node `unknown`"),
+        ("wrong_frozen_field", "names unknown node `shadowed`"),
+    ] {
+        let mut invalid = manifest.clone();
+        match case {
+            "missing_outer" => {
+                invalid.loop_orders.remove(0);
+            }
+            "unknown_outer_field" => {
+                invalid.loop_orders.pop();
+                invalid.loop_orders[0].path[0] =
+                    mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "unknown");
+            }
+            "duplicate_outer" => invalid.loop_orders.push(invalid.loop_orders[0].clone()),
+            "incomplete_outer" => invalid.loop_orders[0].execution_order.clear(),
+            "unknown_outer_node" => {
+                invalid.loop_orders[0].execution_order[0] = "unknown".into();
+            }
+            _ => {
+                invalid.loop_orders[1].execution_order[0] = "shadowed".into();
+            }
+        }
+        for error in [
+            invalid.to_bytes().unwrap_err(),
+            WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&invalid).unwrap()))
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(error, WorkflowManifestError::Graph { .. }),
+                "{case}"
+            );
+            let message = error.to_string();
+            assert!(message.contains(diagnostic), "{case}: {message}");
+        }
+    }
+}
+
+#[test]
 fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
     let definition = serde_json::from_value(serde_json::json!({
         "version": "2026-09-29", "dependencies": {},
-        "nodes": [{"id": "repeat", "kind": "workflow.loop", "loop": {
+        "nodes": [{"id": "repeat", "kind": "workflow.loop", "config": {
             "max_iterations": 1, "variables": [], "body": {
-                "nodes": [{"id": "inner", "kind": "workflow.loop", "loop": {
-                    "max_iterations": 1, "variables": [], "body": {"nodes": [], "edges": []}
-                }}], "edges": []
+                "version": "2026-09-29", "dependencies": {},
+                "nodes": [
+                    {"id": "%loop", "kind": "%loop", "config": {}},
+                    {"id": "inner", "kind": "workflow.loop", "config": {
+                        "max_iterations": 1, "variables": [], "body": {
+                            "version": "2026-09-29", "dependencies": {},
+                            "nodes": [{"id": "%loop", "kind": "%loop", "config": {}}],
+                            "edges": [], "outputs": []
+                        }
+                    }}
+                ], "edges": [], "outputs": []
             }
         }}]
     }))
@@ -125,6 +273,7 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
         input_schema: WorkflowInputSchema::default(),
     };
     let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, manifest);
     let graph = decoded.description().unwrap();
     assert_eq!(graph.loop_bodies.len(), 2);
     assert_eq!(
@@ -155,6 +304,8 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
         "wrong_root",
         "duplicate_node",
         "duplicate_order",
+        "missing_source",
+        "incomplete_body_order",
         "incomplete",
         "schema",
     ] {
@@ -178,9 +329,7 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
             "wrong_node" => loop_orders[1].execution_order[0] = "unknown".into(),
             "wrong_root" => execution_order[0] = "unknown".into(),
             "duplicate_node" => {
-                let mut duplicate = definition.nodes[0].clone();
-                duplicate.loop_definition = None;
-                definition.nodes.push(duplicate);
+                definition.nodes.push(definition.nodes[0].clone());
             }
             "duplicate_order" => {
                 definition.nodes.push(
@@ -190,6 +339,16 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
                     .unwrap(),
                 );
                 execution_order.push("repeat".into());
+            }
+            "missing_source" => {
+                // Offline consumers must not recreate compiler-owned scope nodes.
+                definition.nodes[0].config["body"]["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(0);
+            }
+            "incomplete_body_order" => {
+                loop_orders[0].execution_order.remove(0);
             }
             "incomplete" => execution_order.clear(),
             "schema" => *input_schema = sample().input_schema,

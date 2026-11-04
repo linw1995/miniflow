@@ -13,9 +13,9 @@ fn definition(mode: &str, config: Value) -> Value {
     json!({"version":"2026-10-28","dependencies":{},
         "nodes":[{"id":"each","kind":"builtin.iteration","config":{
             "mode":mode,"stream_outputs":{"increment":{"node":"step","port":"delta"}},
-            "body":{"nodes":[{"id":"step","kind":"fixture.iteration_stream","config":config,
+            "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.iteration_stream","config":config,
                 "inputs":{"count":{"from":{"node":"%iteration","port":"item"}}}}],
-                "result":{"node":"step","port":"total"}}
+                "outputs": [{"name":"result", "node":"step","port":"total"}]}
         }}],
         "outputs":[{"name":"increment","node":"each","port":"increment"},
                    {"name":"results","node":"each","port":"results"}]
@@ -260,10 +260,10 @@ fn parallel_iterations_forward_called_flow_streams_with_item_observation() {
     let mut value = definition("parallel", json!({}));
     value["nodes"][0]["config"]["stream_outputs"] =
         json!({"increment":{"node":"invoke","port":"delta"}});
-    value["nodes"][0]["config"]["body"] = json!({
-        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"child","definition":child},
+    value["nodes"][0]["config"]["body"] = json!({"version":"2026-10-28", "dependencies":{},
+        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"child","body":child},
             "inputs":{"step.count":{"from":{"node":"%iteration","port":"item"}}}}],
-        "result":{"node":"invoke","port":"count"}
+        "outputs": [{"name":"result", "node":"invoke","port":"count"}]
     });
     value["execution"] = json!({"limits":{"workers":2,"max_pending_messages":2}});
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -381,7 +381,7 @@ fn iteration_stream_bindings_reject_invalid_versions_aliases_sources_and_stream_
         assert!(compile_definition(&serde_json::from_value(value).unwrap(), &registry).is_err());
     }
     let mut value = definition("sequential", json!({}));
-    value["nodes"][0]["config"]["body"]["result"]["port"] = json!("delta");
+    value["nodes"][0]["config"]["body"]["outputs"][0]["port"] = json!("delta");
     assert!(
         compile_definition(&serde_json::from_value(value).unwrap(), &registry)
             .unwrap_err()

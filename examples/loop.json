@@ -21,7 +21,7 @@
     {
       "id": "repeat",
       "kind": "workflow.loop",
-      "loop": {
+      "config": {
         "max_iterations": 5,
         "variables": [
           {
@@ -35,6 +35,8 @@
           "value": 3
         },
         "body": {
+          "version": "2026-10-23",
+          "dependencies": {},
           "nodes": [
             {
               "id": "increment",

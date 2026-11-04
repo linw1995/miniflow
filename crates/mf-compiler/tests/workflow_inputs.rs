@@ -326,7 +326,7 @@ fn preserves_noninitial_and_body_required_inputs_and_legacy_validation() {
     assert!(compile_definition(&definition, &registry).is_err());
 
     let nested = definition_from_json(json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
-        {"id":"repeat", "kind":"workflow.loop", "loop":{"max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{
+        {"id":"repeat", "kind":"workflow.loop", "config":{"max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
             "nodes":[{"id":"missing", "kind":"builtin.identity"}]
         }}}
     ]}));
@@ -337,15 +337,13 @@ fn preserves_noninitial_and_body_required_inputs_and_legacy_validation() {
             .contains("missing")
     );
     let mut nested = nested;
-    let body = &mut nested.nodes[0].loop_definition.as_mut().unwrap().body;
-    body.nodes = serde_json::from_value(json!([
+    let body = &mut nested.nodes[0].config["body"];
+    body["nodes"] = json!([
         {"id":"repeat", "kind":"builtin.identity"}
-    ]))
-    .unwrap();
-    body.edges = serde_json::from_value(json!([
+    ]);
+    body["edges"] = json!([
         {"from_node":"%loop", "from_output":"x", "to_node":"repeat", "to_input":"input"}
-    ]))
-    .unwrap();
+    ]);
     nested.outputs = serde_json::from_value(json!([
         {"name":"value", "node":"repeat", "port":"x"}
     ]))
