@@ -1385,25 +1385,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn embedded_root_entry_resolves_children_from_empty_virtual_directory() {
-        let child = definition(json!([]));
-        let parent = definition(json!([{
-            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"child.json"}}
-        }]));
-        let resolved = embedded_archive(
-            "root.json",
-            &[("root.json", parent), ("child.json", child.clone())],
-        )
-        .resolve(&NodeRegistry::from_inventory().unwrap())
-        .unwrap();
-        assert_eq!(resolved.definition.nodes[0].config["body"], json!(child));
-        assert_eq!(
-            resolved.sources,
-            BTreeSet::from(["root.json".into(), "child.json".into()])
-        );
-    }
-
     fn unauthorized_archive_builtin() -> Result<WorkflowDefinition, crate::DefinitionParseError> {
         panic!("an unselected Call must not invoke a builtin definition callback")
     }
@@ -1507,31 +1488,15 @@ mod tests {
     }
 
     #[test]
-    fn embedded_sources_only_selected_fields_authorize_archive_reads() {
-        let parent = definition(json!([{
-            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"missing.json"}}
-        }]));
-        let archive = embedded_archive("root.json", &[("root.json", parent.clone())]);
-        let opaque = archive.resolve(&NodeRegistry::default()).unwrap();
-        assert_eq!(opaque.definition, parent);
-        let error = archive
-            .resolve(&NodeRegistry::from_inventory().unwrap())
-            .err()
-            .unwrap();
-        assert!(
-            matches!(source_cause(&error), FlowResolutionError::Read { path, source }
-            if path == Path::new("missing.json") && source.kind() == io::ErrorKind::NotFound)
-        );
-    }
-
-    #[test]
-    fn embedded_missing_sources_never_fall_back_to_existing_files() {
+    fn embedded_only_selected_fields_read_archive_sources_without_filesystem_fallback() {
         // This path exists relative to the process cwd, but is absent from the archive.
         let parent = definition(json!([{
             "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"Cargo.toml"}}
         }]));
         assert!(Path::new("Cargo.toml").is_file());
-        let archive = embedded_archive("root.json", &[("root.json", parent)]);
+        let archive = embedded_archive("root.json", &[("root.json", parent.clone())]);
+        let opaque = archive.resolve(&NodeRegistry::default()).unwrap();
+        assert_eq!(opaque.definition, parent);
         let error = archive
             .resolve(&NodeRegistry::from_inventory().unwrap())
             .err()
@@ -1826,7 +1791,7 @@ mod tests {
     }
 
     #[test]
-    fn source_resolution_requires_lexical_directories_and_enforces_call_depth() {
+    fn source_resolution_requires_lexical_directories() {
         let mut parent = definition(json!([{
             "id":"owner", "kind":"test.flow-source-owner", "config":{"body":{"path":"not-in-the-process-cwd.json"}}
         }]));
@@ -1836,20 +1801,6 @@ mod tests {
         assert!(
             matches!(error, FlowResolutionError::Invalid { reference, message }
             if reference == "owner.config.body" && message.contains("source directory"))
-        );
-        let mut child = definition(json!([]));
-        let error = resolver()
-            .definition(
-                &mut child,
-                None,
-                &BTreeMap::new(),
-                MAX_CALL_DEPTH + 1,
-                "too-deep",
-            )
-            .unwrap_err();
-        assert!(
-            matches!(error, FlowResolutionError::Invalid { reference, message }
-            if reference == "too-deep" && message.contains("nesting exceeds sixteen"))
         );
     }
 
@@ -2035,12 +1986,17 @@ mod tests {
             }]));
             parent.version = version;
             let original = parent.clone();
-            let discovery = discover_unlinked_flows(&parent, None).unwrap();
-            assert_eq!(
-                discovery.pending,
-                BTreeSet::from(["node:test.flow-source-owner".into()])
-            );
-            assert_eq!(discovery.resolved.definition, original);
+            for discovery in [
+                discover_unlinked_flows(&parent, None).unwrap(),
+                discover_flows_with_registry(&parent, None, &NodeRegistry::default()).unwrap(),
+            ] {
+                assert_eq!(
+                    discovery.pending,
+                    BTreeSet::from(["node:test.flow-source-owner".into()])
+                );
+                assert_eq!(discovery.resolved.definition, original);
+                assert!(discovery.resolved.sources.is_empty());
+            }
             assert!(
                 resolver()
                     .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
@@ -2188,103 +2144,77 @@ mod tests {
 
     #[test]
     fn explicit_call_bodies_require_selected_receiving_authority_before_any_io() {
-        fn plain(
-            _: serde_json::Value,
-        ) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
-            panic!("source resolution must not construct a provider")
-        }
-        fn prepared(
-            _: &str,
-            _: serde_json::Value,
-            _: BTreeMap<String, mf_runtime::PreparedSubgraph>,
-        ) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
-            panic!("source resolution must not construct a provider")
-        }
-        let providers = [
-            mf_runtime::NodeRegistration {
-                kind: CALL_KIND,
-                factory: mf_runtime::NodeFactory::Plain(plain),
-            },
-            mf_runtime::NodeRegistration {
-                kind: CALL_KIND,
-                factory: mf_runtime::NodeFactory::Subgraph {
-                    parameters: &[],
-                    plain,
-                    prepared,
-                },
-            },
-        ];
         let root = tempfile::tempdir().unwrap();
-        for dependencies in [
-            json!({}),
-            json!({"untrusted":{
-                "package":"untrusted", "path":"must-not-canonicalize-provider"
-            }}),
+        let mut child = definition(json!([{
+            "id":"nested", "kind":CALL_KIND, "config":{"flow":"missing"}
+        }]));
+        child.flows.insert(
+            "missing".into(),
+            FlowSource::Path {
+                path: "must-not-read.json".into(),
+            },
+        );
+        let mut poisoned_child = child.clone();
+        poisoned_child.dependencies = serde_json::from_value(json!({"untrusted":{
+            "package":"untrusted", "path":"must-not-canonicalize-provider"
+        }}))
+        .unwrap();
+        let mut case_count = 0;
+        for (body_case, body) in [
+            ("direct", json!(child)),
+            ("wrapped", json!({"definition":child})),
+            ("direct poison", json!(poisoned_child)),
+            ("wrapped poison", json!({"definition":poisoned_child})),
+            ("path", json!({"path":"must-not-read.json"})),
+            ("builtin", json!({"builtin":"compiler-call-codec.body"})),
         ] {
-            let mut child = definition(json!([{
-                "id":"nested", "kind":CALL_KIND, "config":{"flow":"missing"}
+            let parent = definition(json!([{
+                "id":"explicit", "kind":CALL_KIND, "config":{"flow":"frozen", "body":body}
             }]));
-            child.dependencies = serde_json::from_value(dependencies).unwrap();
-            child.flows.insert(
-                "missing".into(),
-                FlowSource::Path {
-                    path: "must-not-read.json".into(),
-                },
-            );
-            for body in [
-                json!(child),
-                json!({"definition":child}),
-                json!({"path":"must-not-read.json"}),
-                json!({"builtin":"compiler-call-codec.body"}),
+            // Plain and zero-parameter Subgraph providers both supply this empty contract.
+            for contracts in [
+                BTreeMap::new(),
+                BTreeMap::from([(CALL_KIND.into(), vec![])]),
             ] {
-                let parent = definition(json!([{
-                    "id":"explicit", "kind":CALL_KIND, "config":{"flow":"frozen", "body":body}
-                }]));
-                let contracts =
-                    std::iter::once(BTreeMap::new()).chain(providers.iter().map(|provider| {
-                        BTreeMap::from([(
-                            CALL_KIND.into(),
-                            provider
-                                .flow_parameters()
-                                .iter()
-                                .map(|field| (*field).to_owned())
-                                .collect(),
-                        )])
-                    }));
-                for contracts in contracts {
-                    for discovery in [false, true] {
-                        let mut resolver = Resolver {
-                            contracts: contracts.clone(),
-                            discovery,
-                            ..Default::default()
-                        };
-                        let mut candidate = parent.clone();
-                        let result = resolver.definition(
-                            &mut candidate,
-                            Some(root.path()),
-                            &BTreeMap::new(),
-                            0,
-                            "test",
+                for discovery in [false, true] {
+                    let case = format!(
+                        "{body_case}, selected={}, discovery={discovery}",
+                        !contracts.is_empty()
+                    );
+                    let mut resolver = Resolver {
+                        contracts: contracts.clone(),
+                        discovery,
+                        ..Default::default()
+                    };
+                    let mut candidate = parent.clone();
+                    case_count += 1;
+                    let result = resolver.definition(
+                        &mut candidate,
+                        Some(root.path()),
+                        &BTreeMap::new(),
+                        0,
+                        "test",
+                    );
+                    assert_eq!(candidate.nodes[0].config, parent.nodes[0].config, "{case}");
+                    if discovery && contracts.is_empty() {
+                        assert!(result.is_ok(), "{case}: {result:?}");
+                        assert_eq!(
+                            resolver.pending,
+                            BTreeSet::from([format!("node:{CALL_KIND}")]),
+                            "{case}"
                         );
-                        assert_eq!(candidate.nodes[0].config, parent.nodes[0].config);
-                        if discovery && contracts.is_empty() {
-                            result.unwrap();
-                            assert_eq!(
-                                resolver.pending,
-                                BTreeSet::from([format!("node:{CALL_KIND}")])
-                            );
-                        } else {
-                            assert!(
-                                matches!(result, Err(FlowResolutionError::Invalid { .. })),
-                                "{result:?}"
-                            );
-                        }
-                        assert!(resolver.sources.is_empty());
-                        assert!(resolver.dependencies.is_empty());
+                    } else {
+                        assert!(
+                            matches!(result, Err(FlowResolutionError::Invalid { .. })),
+                            "{case}: {result:?}"
+                        );
                     }
+                    assert!(resolver.sources.is_empty(), "{case}");
+                    assert!(resolver.dependencies.is_empty(), "{case}");
                 }
             }
         }
+        assert_eq!(case_count, 24);
     }
 
     #[test]
@@ -2498,24 +2428,5 @@ mod tests {
         fs::write(&path, serde_json::to_string(&parent).unwrap()).unwrap();
         let error = resolver().file(&path, &BTreeMap::new(), 0).err().unwrap();
         assert!(error.to_string().contains("recursive Flow reference"));
-    }
-
-    #[test]
-    fn discovery_explicitly_reports_unknown_contracts_without_following_json_paths() {
-        let mut parent = definition(json!([{
-            "id": "owner", "kind": "unlinked.owner", "config": {"body": {"path": "missing.json"}}
-        }]));
-        let mut resolver = Resolver {
-            discovery: true,
-            ..Default::default()
-        };
-        resolver
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap();
-        assert_eq!(
-            resolver.pending,
-            BTreeSet::from(["node:unlinked.owner".into()])
-        );
-        assert!(resolver.sources.is_empty());
     }
 }

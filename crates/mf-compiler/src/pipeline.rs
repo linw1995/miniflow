@@ -1075,14 +1075,6 @@ inventory::submit! {
 "#,
         );
         let source = root.path().join("flow.json");
-        let build = root.path().join("managed-build-must-not-be-opened");
-        let output = root.path().join("runner");
-        let support = SupportPackages::Local {
-            crates_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .to_owned(),
-        };
         for version in ["2026-10-25", "2026-10-28"] {
             let authored = json!({
                 "version":version, "dependencies":{
@@ -1091,24 +1083,8 @@ inventory::submit! {
                 "flows":{"catalog":{"builtin":"compiler-public-catalog.example"}},
                 "nodes":[{"id":"call", "kind":"workflow.call", "config":{"flow":"catalog"}}]
             });
-            fs::write(&source, authored.to_string()).unwrap();
+            let resolved = discover_fixture(root.path(), authored, false).unwrap();
             let inputs = BuildInputs::new(&source).unwrap();
-            let definition = WorkflowDefinition::from_json(&authored.to_string()).unwrap();
-            let request = CompileRequest {
-                definition: &source,
-                output: &output,
-                locked: false,
-                build_dir: Some(&build),
-                support: &support,
-            };
-            let resolved = resolve_provider_flows(
-                &request,
-                &RunnerOptions { telemetry: false },
-                &inputs,
-                &definition,
-                &output,
-            )
-            .unwrap();
             assert_eq!(resolved.definition.dependencies.len(), 1);
             assert_eq!(
                 resolved
@@ -1132,40 +1108,21 @@ inventory::submit! {
             );
             crate::compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts)
                 .unwrap();
-            assert!(!build.exists());
-            assert!(!output.exists());
             assert!(!inputs.lock.exists());
         }
         let mut authored: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&source).unwrap()).unwrap();
         authored["flows"]["catalog"]["builtin"] = json!("resolution-first.removed");
-        fs::write(&source, authored.to_string()).unwrap();
+        let error = discover_fixture(root.path(), authored, false)
+            .err()
+            .unwrap();
         let inputs = BuildInputs::new(&source).unwrap();
-        let definition = WorkflowDefinition::from_json(&authored.to_string()).unwrap();
-        let request = CompileRequest {
-            definition: &source,
-            output: &output,
-            locked: false,
-            build_dir: Some(&build),
-            support: &support,
-        };
-        let error = resolve_provider_flows(
-            &request,
-            &RunnerOptions { telemetry: false },
-            &inputs,
-            &definition,
-            &output,
-        )
-        .err()
-        .unwrap();
         assert!(
             error
                 .to_string()
                 .contains("builtin:resolution-first.removed"),
             "{error}"
         );
-        assert!(!build.exists());
-        assert!(!output.exists());
         assert!(!inputs.lock.exists());
     }
 
@@ -1224,39 +1181,20 @@ inventory::submit! {
             "nodes":[{"id":"builtin", "kind":"workflow.call", "config":{"flow":"feature"}}]
         });
         let source = root.path().join("flow.json");
-        fs::write(&source, authored.to_string()).unwrap();
         fs::write(root.path().join("child/flow.json"), child.to_string()).unwrap();
         fs::write(
             root.path().join("child/grandchild.json"),
             grandchild.to_string(),
         )
         .unwrap();
-        let build = root.path().join("managed-build-must-not-be-opened");
-        let output = root.path().join("runner");
         let support = SupportPackages::Local {
             crates_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .unwrap()
                 .to_owned(),
         };
+        let resolved = discover_fixture(root.path(), authored.clone(), false).unwrap();
         let inputs = BuildInputs::new(&source).unwrap();
-        let definition = WorkflowDefinition::from_json(&authored.to_string()).unwrap();
-        let resolved = resolve_provider_flows(
-            &CompileRequest {
-                definition: &source,
-                output: &output,
-                locked: false,
-                build_dir: Some(&build),
-                support: &support,
-            },
-            &RunnerOptions { telemetry: false },
-            &inputs,
-            &definition,
-            &output,
-        )
-        .unwrap();
-        assert!(!build.exists());
-        assert!(!output.exists());
         assert!(!inputs.lock.exists());
         assert_eq!(resolved.sources.len(), 3);
         let first = resolved
@@ -1296,25 +1234,10 @@ inventory::submit! {
         resolve_project(final_project.path(), &inputs.lock, false).unwrap();
         let authoritative_lock = fs::read(final_project.path().join("Cargo.lock")).unwrap();
         fs::write(&inputs.lock, &authoritative_lock).unwrap();
-        let replay = resolve_provider_flows(
-            &CompileRequest {
-                definition: &source,
-                output: &output,
-                locked: true,
-                build_dir: Some(&build),
-                support: &support,
-            },
-            &RunnerOptions { telemetry: false },
-            &inputs,
-            &definition,
-            &output,
-        )
-        .unwrap();
+        let replay = discover_fixture(root.path(), authored.clone(), true).unwrap();
         assert_eq!(replay.definition, resolved.definition);
         assert_eq!(replay.sources, resolved.sources);
         assert_eq!(fs::read(&inputs.lock).unwrap(), authoritative_lock);
-        assert!(!build.exists());
-        assert!(!output.exists());
 
         // Activating a new dependency through an already-locked local provider
         // must fail before Cargo executes any newly selected Rust build code.
@@ -1329,21 +1252,7 @@ inventory::submit! {
             .unwrap()
             .replace("expanded = []", "expanded = [\"dep:unlocked\"]");
         fs::write(&first_manifest, format!("{manifest}\n[dependencies.unlocked]\npackage = \"resolution-unlocked\"\npath = \"../resolution-unlocked\"\noptional = true\n")).unwrap();
-        let error = resolve_provider_flows(
-            &CompileRequest {
-                definition: &source,
-                output: &output,
-                locked: true,
-                build_dir: Some(&build),
-                support: &support,
-            },
-            &RunnerOptions { telemetry: false },
-            &inputs,
-            &definition,
-            &output,
-        )
-        .err()
-        .unwrap();
+        let error = discover_fixture(root.path(), authored, true).err().unwrap();
         assert_eq!(error.stage, "discovery lock validation", "{error}");
         assert!(error.to_string().contains("--locked discovery"), "{error}");
         assert!(
@@ -1351,7 +1260,5 @@ inventory::submit! {
             "an unlocked provider build script executed"
         );
         assert_eq!(fs::read(&inputs.lock).unwrap(), authoritative_lock);
-        assert!(!build.exists());
-        assert!(!output.exists());
     }
 }

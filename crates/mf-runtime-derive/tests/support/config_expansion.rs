@@ -1,4 +1,5 @@
 use crate::config::expand;
+use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, Path, parse_quote};
 
@@ -29,6 +30,22 @@ fn assert_error(input: DeriveInput, message: &str) {
         error.contains(message),
         "expected {message:?}, got {error:?}"
     );
+}
+
+fn ordinary_config(attrs: TokenStream) -> DeriveInput {
+    parse_quote! {
+        struct Config {
+            #attrs
+            ordinary: String,
+            body: Flow,
+        }
+    }
+}
+
+fn assert_field_order_errors(ordinary: TokenStream, flow: TokenStream, message: &str) {
+    for fields in [quote!(#ordinary #flow), quote!(#flow #ordinary)] {
+        assert_error(parse_quote!(struct Config { #fields }), message);
+    }
 }
 
 #[test]
@@ -199,22 +216,14 @@ fn rejects_ordinary_deserialize_names_and_aliases_that_shadow_flow_names() {
         quote!(rename(deserialize = "body"), rename(serialize = "output")),
         quote!(rename(serialize = "output"), rename(deserialize = "body")),
     ] {
-        for flow_first in [false, true] {
-            let ordinary = quote! {
+        assert_field_order_errors(
+            quote! {
                 #[serde(#option)]
                 settings: Option<Value>,
-            };
-            let flow = quote!(body: Option<Flow>,);
-            let fields = if flow_first {
-                quote!(#flow #ordinary)
-            } else {
-                quote!(#ordinary #flow)
-            };
-            assert_error(
-                parse_quote!(struct Config { #fields }),
-                "collides with an ordinary field's deserialize name or alias",
-            );
-        }
+            },
+            quote!(body: Option<Flow>,),
+            "collides with an ordinary field's deserialize name or alias",
+        );
     }
     assert_error(
         parse_quote! {
@@ -278,22 +287,14 @@ fn rejects_any_flattened_field_when_flow_fields_exist() {
         quote!(Settings),
         quote!(std::collections::BTreeMap<String, Value>),
     ] {
-        for flow_first in [false, true] {
-            let ordinary = quote! {
+        assert_field_order_errors(
+            quote! {
                 #[serde(flatten)]
                 settings: #ty,
-            };
-            let flow = quote!(body: Flow,);
-            let fields = if flow_first {
-                quote!(#flow #ordinary)
-            } else {
-                quote!(#ordinary #flow)
-            };
-            assert_error(
-                parse_quote!(struct Config { #fields }),
-                "cannot combine Flow parameter fields with serde flatten",
-            );
-        }
+            },
+            quote!(body: Flow,),
+            "cannot combine Flow parameter fields with serde flatten",
+        );
     }
 }
 
@@ -524,13 +525,7 @@ fn rejects_ambiguous_ordinary_deserialize_renames() {
         quote!(#[serde(rename = "first")] #[serde(rename = "second")]),
     ] {
         assert_error(
-            parse_quote! {
-                struct Config {
-                    #options
-                    ordinary: String,
-                    body: Flow,
-                }
-            },
+            ordinary_config(options),
             "duplicate serde deserialize rename",
         );
     }
@@ -540,13 +535,7 @@ fn rejects_ambiguous_ordinary_deserialize_renames() {
 fn rejects_unknown_ordinary_rename_directions() {
     for direction in [quote!(deserialise), quote!(alias), quote!(unknown)] {
         assert_error(
-            parse_quote! {
-                struct Config {
-                    #[serde(rename(#direction = "settings"))]
-                    ordinary: String,
-                    body: Flow,
-                }
-            },
+            ordinary_config(quote!(#[serde(rename(#direction = "settings"))])),
             "expected `serialize` or `deserialize` in serde rename",
         );
     }
@@ -569,13 +558,7 @@ fn rejects_repeated_directions_inside_an_ordinary_rename() {
         ),
     ] {
         assert_error(
-            parse_quote! {
-                struct Config {
-                    #[serde(rename(#options))]
-                    ordinary: String,
-                    body: Flow,
-                }
-            },
+            ordinary_config(quote!(#[serde(rename(#options))])),
             "duplicate serde rename direction",
         );
     }
@@ -593,13 +576,7 @@ fn rejects_non_string_serde_wire_names_for_ordinary_and_flow_fields() {
         quote!(rename(serialize = false)),
     ] {
         assert_error(
-            parse_quote! {
-                struct Config {
-                    #[serde(#option)]
-                    ordinary: String,
-                    body: Flow,
-                }
-            },
+            ordinary_config(quote!(#[serde(#option)])),
             "NodeConfig requires a string value",
         );
     }
