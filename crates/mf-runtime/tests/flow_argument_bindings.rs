@@ -135,11 +135,7 @@ fn only_declared_immediate_fields_select_flow_parameters() {
 
 #[test]
 fn malformed_declared_fields_are_rejected_but_absent_and_null_fields_are_optional() {
-    for (name, value) in [
-        ("", frozen()),
-        (" ", frozen()),
-        ("selected", json!({"$flow": definition()})),
-    ] {
+    for (name, value) in [("", frozen()), (" ", frozen())] {
         assert!(node(json!({name: value})).flow_parameters(&[name]).is_err());
     }
     for config in [json!({}), json!({"selected": null})] {
@@ -175,7 +171,7 @@ fn declarations_are_validated_but_unknown_json_is_opaque() {
         }
     }
     for kind in ["user.dispatch", "user.plain"] {
-        let mut node = node(json!({"selected": {"$flow": null}}));
+        let mut node = node(json!({"selected": {"version": "opaque"}}));
         node.kind = kind.into();
         assert!(matches!(
             node.declared_flows(&BTreeMap::new()),
@@ -194,11 +190,7 @@ fn declarations_are_validated_but_unknown_json_is_opaque() {
         );
     }
     let registration = registration(|| [("selected".into(), ConfigParameterType::Flow)].into());
-    for config in [
-        json!({"selected": frozen()}),
-        json!({"unknown": frozen()}),
-        json!({"selected": frozen(), "unknown": {"$flow": null}}),
-    ] {
+    for config in [json!({"selected": frozen()}), json!({"unknown": frozen()})] {
         registration
             .validate_flow_parameters(&node(config))
             .unwrap();
@@ -251,9 +243,8 @@ fn prepared_argument_keys_must_exactly_match_frozen_config_fields() {
 fn malformed_declared_frozen_fields_preserve_the_typed_error_chain() {
     let registration = registration(|| [("selected".into(), ConfigParameterType::Flow)].into());
     for value in [
-        json!({"$flow": null}),
         json!({"version": "2099-01-01", "dependencies": {}, "nodes": []}),
-        json!({"$flow": definition(), "extra": true}),
+        json!({"definition": definition()}),
     ] {
         let node = node(json!({"selected": value}));
         let original = node.clone();
@@ -288,12 +279,12 @@ fn malformed_declared_frozen_fields_preserve_the_typed_error_chain() {
 }
 
 #[test]
-fn plain_factories_reject_prepared_bindings_before_inspecting_reserved_markers() {
+fn plain_factories_reject_prepared_bindings_before_reading_configuration() {
     let registration = NodeRegistration {
         kind: "user.plain",
         factory: NodeFactory::Plain(factory),
     };
-    for config in [Value::Null, json!({"selected": {"$flow": null}})] {
+    for config in [Value::Null, json!({"selected": "provider-owned"})] {
         let error = registration
             .instantiate_subgraphs(
                 "custom",

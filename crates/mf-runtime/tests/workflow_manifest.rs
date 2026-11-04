@@ -118,11 +118,11 @@ fn nested_binding_views_require_consistent_orders_for_each_frozen_field() {
                     "nested": {
                         "version": "2026-10-28", "dependencies": {},
                         "nodes": [{"id": "value", "kind": "fixture.input",
-                            "config": {"legacy": {"$flow": "opaque provider config"}}}]
+                            "config": {"legacy": "opaque provider config"}}]
                     }
                 }}]
             },
-            "opaque": {"nested": {"$flow": "not an immediate marker"}},
+            "opaque": {"nested": "opaque provider config"},
             "ordinary": {"definition": {
                 "version": "2026-10-28", "dependencies": {},
                 "nodes": [{"id": "shadowed", "kind": "fixture.input"}]

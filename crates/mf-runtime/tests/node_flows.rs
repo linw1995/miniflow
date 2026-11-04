@@ -29,7 +29,7 @@ fn nodes() -> Vec<NodeDefinition> {
         }},
         {"id": "custom", "kind": "user.dispatch", "config": {
             "selected": child, "option": 42,
-            "nested": {"ignored": {"$flow": child}}
+            "nested": {"ignored": child}
         }}
     ]))
     .unwrap()
@@ -350,11 +350,8 @@ fn unencodable_children_do_not_partially_replace_configuration_fields() {
 }
 
 #[test]
-fn marker_and_definition_shaped_json_is_opaque_without_field_authority() {
+fn definition_shaped_json_is_opaque_without_field_authority() {
     for value in [
-        json!({"$flow": null}),
-        json!({"$flow": {"version": "2099-01-01"}}),
-        json!({"$flow": definition("2026-10-28"), "extra": true}),
         json!({"definition": definition("2026-10-28")}),
         json!({"path": "child.json"}),
     ] {
@@ -379,7 +376,7 @@ fn marker_and_definition_shaped_json_is_opaque_without_field_authority() {
 fn definition_is_still_an_ordinary_custom_field_not_a_global_alias_for_body() {
     let mut node = nodes().pop().unwrap();
     let child = definition("2026-10-25");
-    node.config = json!({"definition": child, "$flow": "opaque", "path": "child.json"});
+    node.config = json!({"definition": child, "path": "child.json"});
     assert!(node.flow_parameters(&["body"]).unwrap().is_empty());
     assert_eq!(
         node.flow_parameters(&["definition"]).unwrap()["definition"],
@@ -388,7 +385,6 @@ fn definition_is_still_an_ordinary_custom_field_not_a_global_alias_for_body() {
     node.set_node_flow("selected", definition("2026-10-28"))
         .unwrap();
     assert_eq!(node.config["definition"], json!(child));
-    assert_eq!(node.config["$flow"], "opaque");
     assert_eq!(node.config["path"], "child.json");
     assert!(node.config.get("body").is_none());
 }

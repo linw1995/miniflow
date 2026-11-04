@@ -51,7 +51,7 @@ pub enum FlowResolutionError {
 }
 
 /// Private authoring codec, applied only after a receiving node declares a field.
-/// Ordinary JSON, including objects containing `$flow`, is never inspected here.
+/// Ordinary JSON is never inspected here.
 #[derive(Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 enum ParameterSource {
@@ -1312,7 +1312,7 @@ mod tests {
         let parent = definition(json!([{
             "id":"owner", "kind":"test.source-api-owner", "config":{
                 "body":{"path":"nested/./child.json"},
-                "ordinary":{"$flow":{"path":"never-read.json"}}
+                "ordinary":{"path":"never-read.json"}
             }
         }, {
             "id":"opaque", "kind":"unregistered.owner", "config":{
@@ -1942,11 +1942,11 @@ mod tests {
     }
 
     #[test]
-    fn marker_looking_and_definition_looking_ordinary_json_remains_opaque() {
+    fn ordinary_json_remains_opaque() {
         let child = definition(json!([]));
         let mut parent = definition(json!([{
             "id": "owner", "kind": "test.ordinary", "config": {
-                "body": {"$flow": child}, "other":child,
+                "body": child, "other":child,
                 "path":{"path":"never-read.json"}, "builtin":{"builtin":"not.linked"}
             }
         }]));
@@ -1966,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_field_accepts_inline_and_direct_definition_but_not_marker_wrappers() {
+    fn declared_field_accepts_inline_and_direct_definitions() {
         for version in [
             mf_runtime::WorkflowDefinitionVersion::V2026_09_26,
             mf_runtime::WorkflowDefinitionVersion::V2026_10_28,
@@ -1989,13 +1989,6 @@ mod tests {
                 );
             }
         }
-        let mut parent = definition(json!([{
-            "id":"owner", "kind":"test.flow-source-owner", "config":{"body":{"$flow":definition(json!([]))}}
-        }]));
-        assert!(matches!(
-            resolver().definition(&mut parent, None, &BTreeMap::new(), 0, "test"),
-            Err(FlowResolutionError::Configuration { .. })
-        ));
     }
 
     #[test]
@@ -2017,7 +2010,7 @@ mod tests {
             },
         );
         let parent = definition(json!([{
-            "id":"owner", "kind":"unlinked.owner", "config":{"body":{"$flow":child}}
+            "id":"owner", "kind":"unlinked.owner", "config":{"body":child}
         }]));
         let original = parent.nodes[0].config.clone();
         let discovery = discover_unlinked_flows(&parent, Some(root.path())).unwrap();

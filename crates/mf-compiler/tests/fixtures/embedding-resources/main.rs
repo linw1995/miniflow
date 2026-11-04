@@ -66,7 +66,6 @@ fn factory(
         config.opaque,
         json::json!({
             "path": "does-not-exist.json",
-            "$flow": {"path": "also-does-not-exist.json"},
             "body": {"path": "not-a-flow.json"}
         })
     );

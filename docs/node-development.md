@@ -1117,7 +1117,7 @@ the existing callable interface, including manual host callbacks; its metadata u
 
 All ordinary fields have opaque `ConfigParameterType::Value` metadata, including optional values,
 custom-Serde types, and named flattened fields in configurations without executable fields. This does
-not require `NodeValue`, reflect nested JSON, or infer executable roles from keys such as `$flow`,
+not require `NodeValue`, reflect nested JSON, or infer executable roles from keys such as
 `definition`, `body` or `path`. Ordinary aliases participate in collision checks but do not add map entries.
 The derive rejects ambiguous canonical names, executable-field aliases or custom codecs, and combining
 flattened fields with executable fields. Ordinary configuration remains provider-owned Serde data.

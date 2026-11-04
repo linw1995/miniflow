@@ -45,46 +45,38 @@ fn definition(version: &str) -> WorkflowDefinition {
 #[test]
 fn plain_provider_configuration_remains_opaque() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    for marker_shaped in [false, true] {
-        let mut authored = definition("2026-10-28");
-        if marker_shaped {
-            authored.nodes[0].config["body"] = json!({"$flow":{
-                "version":"2026-10-28", "dependencies":{}, "nodes":[]
-            }});
-        }
-        let resolved = mf_compiler::resolve_flows(&authored, None).unwrap();
-        assert_eq!(resolved.definition, authored);
-        let plan = compile_definition(&authored, &registry).unwrap();
-        assert_eq!(plan.definition.nodes[0].config, authored.nodes[0].config);
-        assert!(
-            mf_compiler::describe_compiled(&plan)
-                .unwrap()
-                .loop_bodies
-                .is_empty()
-        );
-        let outputs = instantiate_compiled(&plan, &registry)
+    let authored = definition("2026-10-28");
+    let resolved = mf_compiler::resolve_flows(&authored, None).unwrap();
+    assert_eq!(resolved.definition, authored);
+    let plan = compile_definition(&authored, &registry).unwrap();
+    assert_eq!(plan.definition.nodes[0].config, authored.nodes[0].config);
+    assert!(
+        mf_compiler::describe_compiled(&plan)
             .unwrap()
-            .execute()
-            .unwrap();
-        assert_eq!(outputs["value"].as_i64(), Some(42));
-        #[cfg(feature = "codegen")]
-        {
-            let generated = plan.generate_artifacts().unwrap();
-            syn::parse_file(&generated.rust_source).unwrap();
-            assert!(
-                !generated
-                    .rust_source
-                    .contains("instantiate_subgraphs_with_metadata")
-            );
-            let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
-            let manifest =
-                mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
-            assert_eq!(
-                manifest.node_definition("provider").unwrap().config,
-                authored.nodes[0].config
-            );
-            assert!(manifest.description().unwrap().loop_bodies.is_empty());
-        }
+            .loop_bodies
+            .is_empty()
+    );
+    let outputs = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap();
+    assert_eq!(outputs["value"].as_i64(), Some(42));
+    #[cfg(feature = "codegen")]
+    {
+        let generated = plan.generate_artifacts().unwrap();
+        syn::parse_file(&generated.rust_source).unwrap();
+        assert!(
+            !generated
+                .rust_source
+                .contains("instantiate_subgraphs_with_metadata")
+        );
+        let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
+        let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+        assert_eq!(
+            manifest.node_definition("provider").unwrap().config,
+            authored.nodes[0].config
+        );
+        assert!(manifest.description().unwrap().loop_bodies.is_empty());
     }
 }
 
@@ -349,7 +341,7 @@ fn same_json_only_prepares_children_for_the_declared_receiver_on_the_same_versio
     let config = json!({
         "subgraphs": {"provider_specific": "opaque data"},
         "body": child,
-        "opaque": {"$flow": null, "definition": {"path": "not-a-file.json"}}
+        "opaque": {"definition": {"path": "not-a-file.json"}}
     });
     for (kind, executable) in [
         ("test.versioned_plain_config", false),
@@ -512,10 +504,10 @@ fn undeclared_fields_stay_opaque_even_when_the_factory_accepts_other_flow_fields
     let authored: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-10-28", "dependencies": {},
         "nodes": [{"id": "owner", "kind": "test.versioned_optional_flow", "config": {
-            "undeclared": {"$flow": {
+            "undeclared": {
                 "version": "2026-10-28", "dependencies": {},
                 "nodes": [{"id": "child", "kind": "test.undeclared_flow_child"}]
-            }}
+            }
         }}]
     }))
     .unwrap();

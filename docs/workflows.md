@@ -179,7 +179,7 @@ or parameter-alias mapping: the configuration field name is the prepared-child m
 Source loading reads the selected receiving node's parameter types, resolves only its declared Flow
 fields, and merges child dependencies for standalone compilation. Resolved definitions are compiled
 into executable Flow objects and injected into those fields. JSON shape alone grants no executable
-authority; ordinary fields containing `$flow`, `definition` or `path` remain ordinary data.
+authority; ordinary fields containing `definition` or `path` remain ordinary data.
 Missing required fields and malformed values fail configuration validation;
 omitted optional Flow fields grant no handle. Every supplied body is validated before execution,
 including unselected ones. Metadata inspection and child preparation never execute workflow work.
