@@ -5,7 +5,7 @@ use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 #[derive(Debug, Snafu)]
@@ -66,6 +66,121 @@ pub struct ResolvedWorkflow {
     pub contracts: BTreeMap<String, Vec<String>>,
 }
 
+/// Authored Flow sources captured relative to the embedding package's manifest.
+/// Receiving-provider contracts are applied only when the host resolves the archive.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedWorkflow {
+    #[serde(serialize_with = "serialize_embedded_path")]
+    pub entry: PathBuf,
+    #[serde(serialize_with = "serialize_embedded_sources")]
+    pub sources: BTreeMap<PathBuf, String>,
+}
+
+fn portable_embedded_path(path: &Path) -> Result<String, &'static str> {
+    path.components()
+        .map(|component| match component {
+            Component::Prefix(_) | Component::RootDir => {
+                Err("embedded Flow source path must be relative to the manifest directory")
+            }
+            component => component
+                .as_os_str()
+                .to_str()
+                .ok_or("embedded Flow source path must be valid UTF-8"),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
+}
+
+fn serialize_embedded_path<S: serde::Serializer>(
+    path: &Path,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let path = portable_embedded_path(path).map_err(serde::ser::Error::custom)?;
+    serializer.serialize_str(&path)
+}
+
+fn serialize_embedded_sources<S: serde::Serializer>(
+    sources: &BTreeMap<PathBuf, String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+
+    let mut map = serializer.serialize_map(Some(sources.len()))?;
+    for (path, source) in sources {
+        let path = portable_embedded_path(path).map_err(serde::ser::Error::custom)?;
+        map.serialize_entry(&path, source)?;
+    }
+    map.end()
+}
+
+impl EmbeddedWorkflow {
+    /// Resolve using host metadata and only the captured sources, never the filesystem.
+    pub fn resolve(
+        &self,
+        registry: &NodeRegistry,
+    ) -> Result<ResolvedWorkflow, FlowResolutionError> {
+        let mut sources = BTreeMap::new();
+        for (path, source) in &self.sources {
+            let normalized = normalize_embedded_path(path)?;
+            ensure!(
+                sources.insert(normalized, source.clone()).is_none(),
+                InvalidSnafu {
+                    reference: path.display().to_string(),
+                    message: "duplicate normalized embedded Flow source path",
+                }
+            );
+        }
+        let mut resolver = Resolver {
+            host_dependencies: true,
+            embedded_sources: Some(sources),
+            contracts: registry.flow_parameter_contracts(),
+            ..Default::default()
+        };
+        let definition = resolver.file(&self.entry, &BTreeMap::new(), 0)?;
+        Ok(ResolvedWorkflow {
+            definition,
+            sources: resolver.sources,
+            contracts: resolver.contracts,
+        })
+    }
+}
+
+/// Normalize a manifest-relative archive identity without consulting the filesystem.
+pub fn normalize_embedded_path(path: &Path) -> Result<PathBuf, FlowResolutionError> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(component) => normalized.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                ensure!(
+                    normalized.pop(),
+                    InvalidSnafu {
+                        reference: path.display().to_string(),
+                        message: "embedded Flow source path escapes the manifest directory",
+                    }
+                );
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return InvalidSnafu {
+                    reference: path.display().to_string(),
+                    message: "embedded Flow source path must be relative to the manifest directory",
+                }
+                .fail();
+            }
+        }
+    }
+    ensure!(
+        !normalized.as_os_str().is_empty(),
+        InvalidSnafu {
+            reference: path.display().to_string(),
+            message: "embedded Flow source path must name a file",
+        }
+    );
+    Ok(normalized)
+}
+
 /// Metadata-only discovery may pause at a provider that is not linked yet.
 /// Consumers must retry from the authored source with the expanded provider set;
 /// a result with pending entries is not an executable or structurally frozen plan.
@@ -78,6 +193,7 @@ pub struct FlowDiscovery {
 #[derive(Default)]
 struct Resolver {
     host_dependencies: bool,
+    embedded_sources: Option<BTreeMap<PathBuf, String>>,
     discovery: bool,
     unlinked: bool,
     contracts: BTreeMap<String, Vec<String>>,
@@ -88,32 +204,6 @@ struct Resolver {
     scope_depth: usize,
     sources: BTreeSet<PathBuf>,
     dependencies: BTreeMap<String, NodeDependency>,
-}
-
-#[cfg(feature = "codegen")]
-pub fn resolve_embedded_flows(
-    definition: &WorkflowDefinition,
-    directory: &Path,
-) -> Result<ResolvedWorkflow, FlowResolutionError> {
-    let registry = NodeRegistry::from_inventory()?;
-    let mut resolver = Resolver {
-        host_dependencies: true,
-        contracts: registry.flow_parameter_contracts(),
-        ..Default::default()
-    };
-    let mut definition = definition.clone();
-    resolver.definition(
-        &mut definition,
-        Some(directory),
-        &BTreeMap::new(),
-        0,
-        "workflow",
-    )?;
-    Ok(ResolvedWorkflow {
-        definition,
-        sources: resolver.sources,
-        contracts: resolver.contracts,
-    })
 }
 
 pub fn load_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResolutionError> {
@@ -431,7 +521,11 @@ impl Resolver {
         inherited: &BTreeMap<String, NodeDependency>,
         depth: usize,
     ) -> Result<WorkflowDefinition, FlowResolutionError> {
-        let path = fs::canonicalize(path).context(ReadSnafu { path })?;
+        let path = if self.embedded_sources.is_some() {
+            normalize_embedded_path(path)?
+        } else {
+            fs::canonicalize(path).context(ReadSnafu { path })?
+        };
         ensure!(
             !self.stack.contains(&path),
             InvalidSnafu {
@@ -439,7 +533,17 @@ impl Resolver {
                 message: format!("recursive Flow reference through {:?}", self.stack)
             }
         );
-        let source = fs::read_to_string(&path).context(ReadSnafu { path: &path })?;
+        let source = if let Some(sources) = &self.embedded_sources {
+            sources
+                .get(&path)
+                .cloned()
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "Flow source is not embedded")
+                })
+                .context(ReadSnafu { path: &path })?
+        } else {
+            fs::read_to_string(&path).context(ReadSnafu { path: &path })?
+        };
         let mut definition =
             WorkflowDefinition::from_json(&source).context(ParseSnafu { path: &path })?;
         self.sources.insert(path.clone());
@@ -780,9 +884,10 @@ impl Resolver {
                             message: "selected Call provider does not declare the `body` Flow parameter",
                         }
                     );
-                } else if explicit_body {
-                    // An explicit receiving value is not a `flow` alias lookup.
-                    // Never grant it authority from the intrinsic Call shape.
+                } else if explicit_body || self.embedded_sources.is_some() {
+                    // Archived sources always require selected receiving metadata;
+                    // named aliases must not bootstrap dependency discovery in a host.
+                    // An explicit receiving value likewise has no intrinsic authority.
                     if self.discovery {
                         self.pending.insert(format!("node:{}", node.kind));
                         continue;
@@ -1124,6 +1229,489 @@ mod tests {
                 parameters:&["body"], plain:metadata_plain, prepared:metadata_prepared,
             },
         }
+    }
+
+    fn embedded_archive(entry: &str, sources: &[(&str, WorkflowDefinition)]) -> EmbeddedWorkflow {
+        EmbeddedWorkflow {
+            entry: entry.into(),
+            sources: sources
+                .iter()
+                .map(|(path, definition)| {
+                    (
+                        PathBuf::from(path),
+                        serde_json::to_string(definition).unwrap(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn source_cause(error: &FlowResolutionError) -> &FlowResolutionError {
+        match error {
+            FlowResolutionError::Source { source, .. } => source_cause(source),
+            error => error,
+        }
+    }
+
+    #[test]
+    fn embedded_sources_resolve_nested_lexical_paths_with_host_contracts() {
+        let leaf = definition(json!([]));
+        let mut child = definition(json!([{
+            "id":"nested", "kind":"test.source-api-owner", "config":{
+                "body":{"path":"../leaf.json"},
+                "ordinary":{"path":"../../outside.json"}
+            }
+        }]));
+        child.dependencies.insert(
+            "provider".into(),
+            NodeDependency {
+                package: "host-provider".into(),
+                path: Some("not-on-the-host-filesystem".into()),
+                version: None,
+                git: None,
+                rev: None,
+                features: vec![],
+                default_features: false,
+            },
+        );
+        let parent = definition(json!([{
+            "id":"owner", "kind":"test.source-api-owner", "config":{
+                "body":{"path":"nested/./child.json"},
+                "ordinary":{"$flow":{"path":"never-read.json"}}
+            }
+        }, {
+            "id":"opaque", "kind":"unregistered.owner", "config":{
+                "body":{"path":"never-read.json"}
+            }
+        }]));
+        let archive = embedded_archive(
+            "./flows/root.json",
+            &[
+                ("flows/root.json", parent.clone()),
+                ("flows/nested/child.json", child.clone()),
+                ("flows/unused/../leaf.json", leaf.clone()),
+            ],
+        );
+        let archive =
+            EmbeddedWorkflow::from_json(&serde_json::to_string(&archive).unwrap()).unwrap();
+        let resolved = archive
+            .resolve(&NodeRegistry::from_inventory().unwrap())
+            .unwrap();
+        assert_eq!(
+            resolved.sources,
+            BTreeSet::from([
+                "flows/root.json".into(),
+                "flows/nested/child.json".into(),
+                "flows/leaf.json".into(),
+            ])
+        );
+        assert_eq!(resolved.definition.dependencies, parent.dependencies);
+        assert_eq!(
+            resolved.definition.nodes[0].config["body"]["dependencies"],
+            json!(child.dependencies)
+        );
+        assert_eq!(
+            resolved.definition.nodes[0].config["body"]["nodes"][0]["config"]["body"],
+            json!(leaf)
+        );
+        assert_eq!(
+            resolved.definition.nodes[0].config["body"]["nodes"][0]["config"]["ordinary"],
+            child.nodes[0].config["ordinary"]
+        );
+        assert_eq!(
+            resolved.definition.nodes[0].config["ordinary"],
+            parent.nodes[0].config["ordinary"]
+        );
+        assert_eq!(resolved.definition.nodes[1], parent.nodes[1]);
+        assert_eq!(resolved.contracts["test.source-api-owner"], vec!["body"]);
+    }
+
+    #[test]
+    fn embedded_archive_serializes_native_paths_as_portable_slash_identities() {
+        let archive = EmbeddedWorkflow {
+            entry: PathBuf::from("flows").join("root.json"),
+            sources: BTreeMap::from([
+                (
+                    PathBuf::from("flows").join("root.json"),
+                    "root source".into(),
+                ),
+                (
+                    PathBuf::from("flows").join("nested").join("child.json"),
+                    "child source".into(),
+                ),
+            ]),
+        };
+        let value = serde_json::to_value(&archive).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "entry":"flows/root.json",
+                "sources":{
+                    "flows/root.json":"root source",
+                    "flows/nested/child.json":"child source"
+                }
+            })
+        );
+        let restored = EmbeddedWorkflow::from_json(&value.to_string()).unwrap();
+        assert_eq!(restored.entry, archive.entry);
+        assert_eq!(restored.sources, archive.sources);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_archive_serialization_rejects_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
+        let archive = EmbeddedWorkflow {
+            entry: invalid.clone(),
+            sources: BTreeMap::new(),
+        };
+        assert!(
+            serde_json::to_string(&archive)
+                .unwrap_err()
+                .to_string()
+                .contains("valid UTF-8")
+        );
+        let archive = EmbeddedWorkflow {
+            entry: "root.json".into(),
+            sources: BTreeMap::from([(invalid, "source".into())]),
+        };
+        assert!(
+            serde_json::to_string(&archive)
+                .unwrap_err()
+                .to_string()
+                .contains("valid UTF-8")
+        );
+    }
+
+    #[test]
+    fn embedded_root_entry_resolves_children_from_empty_virtual_directory() {
+        let child = definition(json!([]));
+        let parent = definition(json!([{
+            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"child.json"}}
+        }]));
+        let resolved = embedded_archive(
+            "root.json",
+            &[("root.json", parent), ("child.json", child.clone())],
+        )
+        .resolve(&NodeRegistry::from_inventory().unwrap())
+        .unwrap();
+        assert_eq!(resolved.definition.nodes[0].config["body"], json!(child));
+        assert_eq!(
+            resolved.sources,
+            BTreeSet::from(["root.json".into(), "child.json".into()])
+        );
+    }
+
+    fn unauthorized_archive_builtin() -> Result<WorkflowDefinition, crate::DefinitionParseError> {
+        panic!("an unselected Call must not invoke a builtin definition callback")
+    }
+
+    fn archive_builtin_with_local_path() -> Result<WorkflowDefinition, crate::DefinitionParseError>
+    {
+        Ok(definition(json!([{
+            "id":"nested", "kind":"test.source-api-owner", "config":{"body":{"path":"child.json"}}
+        }])))
+    }
+
+    inventory::submit! {
+        mf_runtime::BuiltinFlowRegistration::new("source-archive-test", "unauthorized", unauthorized_archive_builtin)
+    }
+
+    inventory::submit! {
+        mf_runtime::BuiltinFlowRegistration::new("source-archive-test", "local-path", archive_builtin_with_local_path)
+    }
+
+    #[test]
+    fn embedded_named_calls_require_selected_contract_before_reading_or_invoking_sources() {
+        for source in [
+            FlowSource::Path {
+                path: "invalid.json".into(),
+            },
+            FlowSource::Builtin {
+                builtin: "source-archive-test.unauthorized".into(),
+            },
+        ] {
+            let mut parent = definition(json!([{
+                "id":"call", "kind":CALL_KIND, "config":{"flow":"selected"}
+            }]));
+            parent.flows.insert("selected".into(), source);
+            let mut archive = embedded_archive("root.json", &[("root.json", parent)]);
+            archive
+                .sources
+                .insert("invalid.json".into(), "{not valid JSON}".into());
+            let error = archive.resolve(&NodeRegistry::default()).err().unwrap();
+            assert!(
+                matches!(source_cause(&error), FlowResolutionError::Invalid { reference, message }
+                if reference == "call" && message == "no selected provider metadata authorizes the Call `body` Flow parameter"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_declared_parameters_allow_absent_null_and_present_values() {
+        let child = definition(json!([]));
+        let parent = definition(json!([
+            {"id":"absent", "kind":"test.source-api-owner", "config":{}},
+            {"id":"null", "kind":"test.source-api-owner", "config":{"body":null}},
+            {"id":"present", "kind":"test.source-api-owner", "config":{"body":{"path":"child.json"}}}
+        ]));
+        let resolved = embedded_archive(
+            "root.json",
+            &[("root.json", parent), ("child.json", child.clone())],
+        )
+        .resolve(&NodeRegistry::from_inventory().unwrap())
+        .unwrap();
+        assert_eq!(resolved.definition.nodes[0].config, json!({}));
+        assert_eq!(resolved.definition.nodes[1].config, json!({"body":null}));
+        assert_eq!(resolved.definition.nodes[2].config["body"], json!(child));
+        assert_eq!(
+            resolved.sources,
+            BTreeSet::from(["root.json".into(), "child.json".into()])
+        );
+    }
+
+    #[test]
+    fn embedded_unknown_builtins_fail_and_builtin_local_paths_have_no_archive_directory() {
+        let registry = NodeRegistry::from_inventory().unwrap();
+        for (builtin, reference, message) in [
+            (
+                "source-archive-test.unknown",
+                "source-archive-test.unknown",
+                "unknown built-in Flow",
+            ),
+            (
+                "source-archive-test.local-path",
+                "nested.config.body",
+                "local Flow references require",
+            ),
+        ] {
+            let parent = definition(json!([{
+                "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"builtin":builtin}}
+            }]));
+            // The path is present in the archive, but builtins cannot inherit its
+            // entry's directory or otherwise acquire local source provenance.
+            let archive = embedded_archive(
+                "root.json",
+                &[("root.json", parent), ("child.json", definition(json!([])))],
+            );
+            let error = archive.resolve(&registry).err().unwrap();
+            assert!(
+                matches!(source_cause(&error), FlowResolutionError::Invalid { reference: actual_reference, message: actual_message }
+                if actual_reference == reference && actual_message.contains(message)),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_sources_only_selected_fields_authorize_archive_reads() {
+        let parent = definition(json!([{
+            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"missing.json"}}
+        }]));
+        let archive = embedded_archive("root.json", &[("root.json", parent.clone())]);
+        let opaque = archive.resolve(&NodeRegistry::default()).unwrap();
+        assert_eq!(opaque.definition, parent);
+        let error = archive
+            .resolve(&NodeRegistry::from_inventory().unwrap())
+            .err()
+            .unwrap();
+        assert!(
+            matches!(source_cause(&error), FlowResolutionError::Read { path, source }
+            if path == Path::new("missing.json") && source.kind() == io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn embedded_missing_sources_never_fall_back_to_existing_files() {
+        // This path exists relative to the process cwd, but is absent from the archive.
+        let parent = definition(json!([{
+            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"Cargo.toml"}}
+        }]));
+        assert!(Path::new("Cargo.toml").is_file());
+        let archive = embedded_archive("root.json", &[("root.json", parent)]);
+        let error = archive
+            .resolve(&NodeRegistry::from_inventory().unwrap())
+            .err()
+            .unwrap();
+        assert!(
+            matches!(source_cause(&error), FlowResolutionError::Read { path, source }
+            if path == Path::new("Cargo.toml") && source.kind() == io::ErrorKind::NotFound)
+        );
+        let archive = EmbeddedWorkflow {
+            entry: "Cargo.toml".into(),
+            sources: BTreeMap::new(),
+        };
+        let error = archive.resolve(&NodeRegistry::default()).err().unwrap();
+        assert!(matches!(error, FlowResolutionError::Read { source, .. }
+            if source.kind() == io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn embedded_paths_reject_escapes_absolute_names_and_normalized_collisions() {
+        for path in [
+            "../outside.json",
+            "nested/../../outside.json",
+            "/absolute.json",
+            ".",
+            "nested/..",
+        ] {
+            assert!(matches!(
+                normalize_embedded_path(Path::new(path)),
+                Err(FlowResolutionError::Invalid { .. })
+            ));
+            let archive = embedded_archive(path, &[]);
+            assert!(matches!(
+                archive.resolve(&NodeRegistry::default()),
+                Err(FlowResolutionError::Invalid { .. })
+            ));
+            let archive = embedded_archive("root.json", &[(path, definition(json!([])))]);
+            assert!(matches!(
+                archive.resolve(&NodeRegistry::default()),
+                Err(FlowResolutionError::Invalid { .. })
+            ));
+        }
+        let collision = embedded_archive(
+            "root.json",
+            &[
+                ("root.json", definition(json!([]))),
+                ("nested/../root.json", definition(json!([]))),
+            ],
+        );
+        assert!(
+            matches!(collision.resolve(&NodeRegistry::default()), Err(FlowResolutionError::Invalid { message, .. })
+            if message.contains("duplicate normalized"))
+        );
+        for path in ["../outside.json", "/absolute.json"] {
+            let parent = definition(json!([{
+                "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":path}}
+            }]));
+            let error = embedded_archive("root.json", &[("root.json", parent)])
+                .resolve(&NodeRegistry::from_inventory().unwrap())
+                .err()
+                .unwrap();
+            assert!(matches!(
+                source_cause(&error),
+                FlowResolutionError::Invalid { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn embedded_entry_establishes_normalized_cycle_identity() {
+        let parent = definition(json!([{
+            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"nested/../root.json"}}
+        }]));
+        let error = embedded_archive("./root.json", &[("root.json", parent)])
+            .resolve(&NodeRegistry::from_inventory().unwrap())
+            .err()
+            .unwrap();
+        assert!(
+            matches!(source_cause(&error), FlowResolutionError::Invalid { reference, message }
+            if reference == "root.json" && message.contains("recursive Flow reference"))
+        );
+    }
+
+    #[test]
+    fn embedded_sources_preserve_typed_parse_errors_and_strict_archive_schema() {
+        assert!(
+            EmbeddedWorkflow::from_json(r#"{"entry":"root.json","sources":{},"contracts":{}}"#)
+                .is_err()
+        );
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let mut archive = embedded_archive(
+            "root.json",
+            &[(
+                "root.json",
+                definition(json!([{
+                    "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"invalid.json"}}
+                }])),
+            )],
+        );
+        archive
+            .sources
+            .insert("invalid.json".into(), "{not valid JSON}".into());
+        let error = archive.resolve(&registry).err().unwrap();
+        assert!(
+            matches!(source_cause(&error), FlowResolutionError::Parse { path, source: crate::DefinitionParseError::JsonParse { .. } }
+            if path == Path::new("invalid.json"))
+        );
+        archive.entry = "invalid.json".into();
+        let error = archive.resolve(&registry).err().unwrap();
+        assert!(
+            matches!(error, FlowResolutionError::Parse { path, source: crate::DefinitionParseError::JsonParse { .. } }
+            if path == Path::new("invalid.json"))
+        );
+    }
+
+    #[test]
+    fn embedded_sources_retain_call_depth_and_combined_scope_limits() {
+        for (kind, limit, diagnostic) in [
+            (
+                "test.source-api-owner",
+                MAX_CALL_DEPTH,
+                "nesting exceeds sixteen",
+            ),
+            (
+                mf_runtime::LOOP_KIND,
+                mf_telemetry::MAX_SCOPE_DEPTH,
+                "exceeds twenty scopes",
+            ),
+        ] {
+            let mut archive = EmbeddedWorkflow {
+                entry: "0.json".into(),
+                sources: BTreeMap::new(),
+            };
+            for index in 0..=limit + 1 {
+                let value = if index == limit + 1 {
+                    definition(json!([]))
+                } else {
+                    definition(json!([{
+                        "id":"owner", "kind":kind, "config":{"body":{"path":format!("{}.json", index + 1)}}
+                    }]))
+                };
+                archive.sources.insert(
+                    format!("{index}.json").into(),
+                    serde_json::to_string(&value).unwrap(),
+                );
+            }
+            let mut resolver = Resolver {
+                host_dependencies: true,
+                embedded_sources: Some(archive.sources),
+                contracts: BTreeMap::from([(kind.into(), vec!["body".into()])]),
+                ..Default::default()
+            };
+            let error = resolver
+                .file(&archive.entry, &BTreeMap::new(), 0)
+                .unwrap_err();
+            assert_eq!(resolver.scope_depth, 0);
+            assert!(resolver.stack.is_empty());
+            assert!(
+                matches!(source_cause(&error), FlowResolutionError::Invalid { message, .. }
+                if message.contains(diagnostic)),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_sources_use_host_builtin_inventory() {
+        let parent = definition(json!([{
+            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"builtin":"source-catalog-test.example"}}
+        }]));
+        let resolved = embedded_archive("root.json", &[("root.json", parent)])
+            .resolve(&NodeRegistry::from_inventory().unwrap())
+            .unwrap();
+        assert_eq!(
+            resolved.definition.nodes[0].config["body"]["nodes"][0]["id"],
+            "selected"
+        );
+        assert_eq!(
+            resolved.sources,
+            BTreeSet::from([PathBuf::from("root.json")])
+        );
     }
 
     #[test]

@@ -1,0 +1,19 @@
+[package]
+name = "mf-embedded-resources-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+compiler = { package = "mf-compiler", path = "@CRATES@/mf-compiler", default-features = false }
+runtime = { package = "mf-runtime", path = "@CRATES@/mf-runtime", default-features = false }
+core_nodes = { package = "mfn-core", path = "@CRATES@/builtin-nodes/core", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.151"
+inventory = "0.3"
+
+[build-dependencies]
+compiler = { package = "mf-compiler", path = "@CRATES@/mf-compiler", default-features = false, features = ["codegen"] }

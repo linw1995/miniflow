@@ -1,9 +1,9 @@
 mod calls;
 mod flow_sources;
 pub use flow_sources::{
-    FlowDiscovery, FlowResolutionError, ResolvedWorkflow, discover_flows_with_registry,
-    load_embedded_workflow, load_workflow, load_workflow_with_registry, resolve_flows,
-    resolve_flows_with_registry,
+    EmbeddedWorkflow, FlowDiscovery, FlowResolutionError, ResolvedWorkflow,
+    discover_flows_with_registry, load_embedded_workflow, load_workflow,
+    load_workflow_with_registry, resolve_flows, resolve_flows_with_registry,
 };
 #[cfg(feature = "codegen")]
 mod cache;
@@ -35,7 +35,9 @@ pub use mf_runtime as __runtime;
 
 /// Include a workflow emitted by the build-time `embed_workflows` helper.
 ///
-/// The module exposes `plan`, `manifest`, and either `prepare_workflow` or `prepare_stream`.
+/// The module exposes `plan(registry)`, `manifest(registry)`, `prepare_workflow`, and
+/// `prepare_stream`. Declared children are resolved from embedded resources using the
+/// supplied host registry, without filesystem access or build-linked node providers.
 /// The macro is available without the `codegen` feature; execution uses the host's runtime APIs.
 #[macro_export]
 macro_rules! embed_workflow {

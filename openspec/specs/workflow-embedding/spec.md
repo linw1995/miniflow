@@ -9,9 +9,11 @@ node validation, execution, and portable distribution.
 
 ### Requirement: Generate source without linked nodes
 
-The compiler SHALL provide a build helper that reads and structurally plans definitions without a
-registry or linked node crates. It SHALL emit Cargo input tracking and named source modules without
-executing node constructors, business operations, or a nested Cargo build.
+The compiler SHALL provide a build helper that parses and checks the entry graph's endpoints, IDs,
+and cycles without a registry or linked node crates. It SHALL pack the entry and explicitly listed
+source files, emitting Cargo input tracking and named source modules without interpreting provider
+configuration, executing node constructors, business operations, or a nested Cargo build. Declared
+child resolution and complete structural planning SHALL occur in the host with its selected registry.
 
 #### Scenario: Build without node build dependencies
 
@@ -75,9 +77,12 @@ and snapshots through existing runtime APIs.
 
 ### Requirement: Expose plans and current manifests
 
-Modules SHALL expose their structural `CompiledWorkflow` and derive existing-format manifests from
-current host metadata. Inspection SHALL prepare metadata without executing business operations.
-Embedding SHALL NOT freeze a build-time startup schema or emit executable manifest sections.
+Modules SHALL expose `plan(&NodeRegistry)` returning their structural `CompiledWorkflow` and derive
+existing-format manifests from current host metadata. Planning SHALL authorize child fields through
+the supplied registry, resolve sources from the packed resources and host builtin Flow registrations,
+and reuse shared compiler normalization without constructing nodes. Ordinary configuration SHALL remain
+opaque. Inspection SHALL prepare metadata without executing business operations. Embedding SHALL NOT
+freeze a build-time startup schema or emit executable manifest sections.
 
 #### Scenario: Use current node metadata
 
@@ -91,14 +96,29 @@ Embedding SHALL NOT freeze a build-time startup schema or emit executable manife
 
 ### Requirement: Rebuild inputs and run without sources
 
-Definition edits SHALL regenerate source in warm builds. Node changes SHALL be normal dependency
-rebuilds and affect preparation without build-time node validation. Built programs SHALL prepare
-and execute without definitions, generated files, or build tools.
+Entry and explicitly listed source edits SHALL regenerate source in warm builds. Source paths SHALL
+be manifest-relative package-contained files without symlink traversal; relative references SHALL
+resolve from the declaring file's embedded directory. The helper SHALL NOT infer resources from
+ordinary JSON or collect undeclared files. Missing packed resources SHALL fail with typed errors
+without filesystem fallback, even if a matching file exists on disk. Node changes SHALL be normal
+dependency rebuilds and affect preparation without build-time node validation. Built programs SHALL
+prepare and execute without definitions, generated files, or build tools.
 
 #### Scenario: Edit a definition
 
 - **WHEN** a host rebuilds after editing its definition without cleaning
 - **THEN** the module and execution reflect the edit
+
+#### Scenario: Resolve declared children using host-only providers
+
+- **WHEN** only normal dependencies register a custom Flow receiver or builtin Flow
+- **THEN** host planning resolves its children using those registrations without build-linked providers
+- **AND** unregistered ordinary configuration never gains child-source authority
+
+#### Scenario: Refer to an unpacked source
+
+- **WHEN** an authorized child references a file not listed as an embedded source
+- **THEN** host planning fails without reading any matching build-machine or deployment file
 
 #### Scenario: Change a target node
 

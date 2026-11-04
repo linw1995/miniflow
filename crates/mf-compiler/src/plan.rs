@@ -62,6 +62,8 @@ pub enum PlanError {
     #[snafu(transparent)]
     Description { source: crate::DescriptionError },
     #[snafu(transparent)]
+    Sources { source: crate::FlowResolutionError },
+    #[snafu(transparent)]
     Compilation {
         #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
         source: Box<crate::WorkflowCompileError>,
@@ -101,6 +103,52 @@ pub enum PlanError {
         definition_id: DefinitionId,
         source: crate::IterationValidationError,
     },
+}
+
+impl crate::EmbeddedWorkflow {
+    pub fn from_json(source: &str) -> Result<Self, PlanError> {
+        serde_json::from_str(source).context(ParseSnafu)
+    }
+}
+
+#[cfg(feature = "codegen")]
+pub fn generate_embedded_source(
+    workflow: &crate::EmbeddedWorkflow,
+) -> Result<String, crate::PlanError> {
+    let source = serde_json::to_string(workflow).context(SerializeSnafu)?;
+    let source = syn::LitStr::new(&source, proc_macro2::Span::call_site());
+    let generated = quote::quote! {
+        pub fn plan(
+            registry: &mf_runtime::NodeRegistry,
+        ) -> Result<mf_compiler::CompiledWorkflow, mf_compiler::PlanError> {
+            let workflow = mf_compiler::EmbeddedWorkflow::from_json(#source)?;
+            let resolved = workflow.resolve(registry)?;
+            Ok(mf_compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts)?)
+        }
+
+        pub fn manifest(
+            registry: &mf_runtime::NodeRegistry,
+        ) -> Result<mf_runtime::WorkflowManifest, mf_compiler::PlanError> {
+            plan(registry)?.manifest(registry)
+        }
+
+        pub fn prepare_workflow(
+            registry: &mf_runtime::NodeRegistry,
+            observation: Option<&mut mf_runtime::RunObservation>,
+        ) -> Result<mf_runtime::Flow, mf_compiler::PlanError> {
+            Ok(mf_compiler::instantiate_compiled_with_observation(
+                &plan(registry)?, registry, observation,
+            )?)
+        }
+
+        pub fn prepare_stream(
+            registry: &mf_runtime::NodeRegistry,
+        ) -> Result<mf_runtime::PreparedStream, mf_compiler::PlanError> {
+            Ok(mf_compiler::instantiate_stream(&plan(registry)?, registry)?)
+        }
+    };
+    let syntax: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
+    Ok(prettyplease::unparse(&syntax))
 }
 
 impl CompiledWorkflow {

@@ -1149,7 +1149,7 @@ fn compose_conversation(
         ..Default::default()
     };
     let mut definition =
-        serde_json::to_value(flows::conversation::plan()?.definition).context(JsonSnafu)?;
+        serde_json::to_value(flows::conversation::plan(registry)?.definition).context(JsonSnafu)?;
     let nodes = definition["nodes"]
         .as_array_mut()
         .expect("conversation nodes");
@@ -1346,7 +1346,7 @@ pub fn run_conversation_with_preview(
         )
         .context(BackendBuildSnafu)?;
         ConversationPlan {
-            plan: flows::conversation::plan()?,
+            plan: flows::conversation::plan(&registry)?,
             bindings: vec![("workflow", bound)],
         }
     };

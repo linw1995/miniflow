@@ -1,7 +1,7 @@
 use crate::WorkflowDefinition;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs, io,
     path::{Path, PathBuf},
 };
@@ -11,6 +11,8 @@ use std::{
 pub struct EmbedRequest {
     pub name: String,
     pub definition: PathBuf,
+    /// Additional source files, relative to CARGO_MANIFEST_DIR. No JSON fields are scanned.
+    pub sources: Vec<PathBuf>,
 }
 
 impl EmbedRequest {
@@ -18,7 +20,14 @@ impl EmbedRequest {
         Self {
             name: name.into(),
             definition: definition.into(),
+            sources: Vec::new(),
         }
+    }
+
+    /// Include a source that a declared child may reference during host preparation.
+    pub fn with_source(mut self, source: impl Into<PathBuf>) -> Self {
+        self.sources.push(source.into());
+        self
     }
 }
 
@@ -62,6 +71,12 @@ pub enum EmbeddingError {
         #[snafu(source(from(crate::PlanError, Box::new)))]
         source: Box<crate::PlanError>,
     },
+    #[snafu(display("embedded source {path:?} must be inside package directory {root:?}"))]
+    OutsidePackage { path: PathBuf, root: PathBuf },
+    #[snafu(display("embedded source {path:?} must not traverse symbolic links"))]
+    LinkedSource { path: PathBuf },
+    #[snafu(display("embedded source {path:?} must be a regular UTF-8 source file"))]
+    InvalidSourceFile { path: PathBuf },
     #[snafu(display("embedding output directory {path:?} must not be a symbolic link"))]
     LinkedOutput { path: PathBuf },
     #[snafu(display("could not create embedding output directory {path:?}: {source}"))]
@@ -72,12 +87,11 @@ pub enum EmbeddingError {
 
 /// Check workflow structure and emit source modules into Cargo's OUT_DIR.
 ///
-/// Paths are relative to CARGO_MANIFEST_DIR. Providers with Flow-valued configuration must
-/// also be linked into the build script (build dependencies plus `use provider as _;`),
-/// including the provider of `workflow.call`, Loop, and Iteration bodies. Their
-/// NodeConfig metadata and builtin Flow registrations must be available while freezing
-/// sources. This reads registration metadata only; factories are not executed. The host
-/// links the same providers as normal dependencies for runtime preparation.
+/// Paths are relative to CARGO_MANIFEST_DIR and must stay inside that package. The root
+/// definition and explicitly listed sources are embedded without consulting node metadata.
+/// Generated `plan(registry)` and preparation entry points resolve declared child fields
+/// against the host registry, using only those embedded sources and host builtin Flows.
+/// Providers, including mfn-core, are needed only as normal host dependencies.
 pub fn embed_workflows(requests: &[EmbedRequest]) -> Result<(), EmbeddingError> {
     let manifest = env::var_os("CARGO_MANIFEST_DIR").context(CargoEnvironmentSnafu {
         variable: "CARGO_MANIFEST_DIR",
@@ -128,36 +142,41 @@ fn embed_workflows_at(
             }
         );
     }
+    if requests.is_empty() {
+        return Ok(());
+    }
+    let logical_manifest = manifest;
+    let manifest = fs::canonicalize(manifest).context(ReadSnafu {
+        name: "package",
+        path: manifest,
+    })?;
     let mut modules = Vec::new();
     for request in requests {
         let name = &request.name;
-        let path = manifest.join(&request.definition);
-        println!("cargo:rerun-if-changed={}", path.display());
-        let source = fs::read_to_string(&path).context(ReadSnafu { name, path: &path })?;
-        let definition = WorkflowDefinition::from_json(&source)
+        let mut sources = BTreeMap::new();
+        let entry = collect_source(
+            name,
+            &request.definition,
+            logical_manifest,
+            &manifest,
+            &mut sources,
+        )?;
+        let path = manifest.join(&entry);
+        let definition = WorkflowDefinition::from_json(&sources[&entry])
             .context(DefinitionSnafu { name, path: &path })?;
-        let canonical = fs::canonicalize(&path).context(ReadSnafu { name, path: &path })?;
-        println!("cargo:rerun-if-changed={}", canonical.display());
-        let resolved = crate::flow_sources::resolve_embedded_flows(
-            &definition,
-            canonical.parent().expect("canonical file has a parent"),
-        )
-        .context(SourcesSnafu { name, path: &path })?;
-        for source in resolved.sources {
-            println!("cargo:rerun-if-changed={}", source.display());
+        // Validate only the authored root graph. Declared children remain opaque until
+        // the host supplies its registry; an incomplete plan is never serialized.
+        crate::compiler::structural_order_graph(&definition)
+            .context(PlanningSnafu { name, path: &path })?;
+        for source in &request.sources {
+            collect_source(name, source, logical_manifest, &manifest, &mut sources)?;
         }
-        let plan =
-            crate::compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts)
-                .context(PlanningSnafu { name, path: &path })?;
-        let module = plan
-            .generate_embedded_artifacts()
+        let workflow = crate::EmbeddedWorkflow { entry, sources };
+        let source = crate::plan::generate_embedded_source(&workflow)
             .context(GenerationSnafu { name, path: &path })?;
-        modules.push((output.join("mf-embedded").join(name), module.rust_source));
+        modules.push((output.join("mf-embedded").join(name), source));
     }
     // A structural failure must preserve every module from the previous successful build.
-    if modules.is_empty() {
-        return Ok(());
-    }
     create_output_directory(&output.join("mf-embedded"))?;
     for (directory, _) in &modules {
         create_output_directory(directory)?;
@@ -166,6 +185,54 @@ fn embed_workflows_at(
         crate::write_if_changed(&directory.join("workflow.rs"), source.as_bytes())?;
     }
     Ok(())
+}
+
+fn collect_source(
+    name: &str,
+    path: &Path,
+    logical_manifest: &Path,
+    manifest: &Path,
+    sources: &mut BTreeMap<PathBuf, String>,
+) -> Result<PathBuf, EmbeddingError> {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(logical_manifest)
+            .or_else(|_| path.strip_prefix(manifest))
+            .ok()
+            .context(OutsidePackageSnafu {
+                path,
+                root: manifest,
+            })?
+    } else {
+        path
+    };
+    let normalized = crate::flow_sources::normalize_embedded_path(relative)
+        .context(SourcesSnafu { name, path })?;
+    let mut component_path = manifest.to_path_buf();
+    for component in relative.components() {
+        component_path.push(component);
+        let metadata = fs::symlink_metadata(&component_path).context(ReadSnafu {
+            name,
+            path: &component_path,
+        })?;
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            LinkedSourceSnafu {
+                path: &component_path
+            }
+        );
+    }
+    let relative = normalized;
+    let path = manifest.join(&relative);
+    println!("cargo:rerun-if-changed={}", path.display());
+    let canonical = fs::canonicalize(&path).context(ReadSnafu { name, path: &path })?;
+    ensure!(canonical == path, LinkedSourceSnafu { path: &path });
+    let metadata = fs::symlink_metadata(&path).context(ReadSnafu { name, path: &path })?;
+    ensure!(metadata.is_file(), InvalidSourceFileSnafu { path: &path });
+    if !sources.contains_key(&relative) {
+        let source = fs::read_to_string(&path).context(ReadSnafu { name, path: &path })?;
+        sources.insert(relative.clone(), source);
+    }
+    Ok(relative)
 }
 
 #[cfg(test)]
@@ -190,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_sources_preserve_host_owned_provider_dependencies() {
+    fn explicit_resources_are_packed_without_resolving_provider_metadata() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("flows")).unwrap();
         let mut child = definition();
@@ -212,11 +279,20 @@ mod tests {
         fs::write(root.path().join("flows/child.json"), child.to_string()).unwrap();
         write_definition(root.path(), &parent);
         let output = root.path().join("out");
-        embed_workflows_at(&[request()], root.path(), &output).unwrap();
+        embed_workflows_at(
+            &[request().with_source("flows/child.json")],
+            root.path(),
+            &output,
+        )
+        .unwrap();
         let module = fs::read_to_string(output.join("mf-embedded/answer/workflow.rs")).unwrap();
         assert!(module.contains("workflow.call"));
         assert!(module.contains("unlinked.echo"));
-        assert!(!module.contains("\"path\":\"flows/child.json\""));
+        assert!(module.contains("flows/child.json"));
+        assert!(module.contains("workflow.resolve(registry)"));
+        // Packaging never follows source-shaped configuration or named sources.
+        fs::remove_file(root.path().join("flows/child.json")).unwrap();
+        embed_workflows_at(&[request()], root.path(), &output).unwrap();
     }
 
     fn write_definition(root: &Path, value: &serde_json::Value) {
@@ -348,6 +424,161 @@ mod tests {
             crate::WorkflowCompileError::Cycle { .. }
         ));
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn packages_only_explicit_resources_without_parsing_their_contents() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("out");
+        let mut value = definition();
+        value["nodes"][0]["config"] = json!({"ordinary": {"path": "missing.json"}});
+        write_definition(root.path(), &value);
+        fs::write(root.path().join("unused.flow"), "not JSON").unwrap();
+        fs::write(root.path().join("private.txt"), "must not be embedded").unwrap();
+        embed_workflows_at(
+            &[request()
+                .with_source("unused.flow")
+                .with_source("./unused.flow")],
+            root.path(),
+            &output,
+        )
+        .unwrap();
+        let module = fs::read_to_string(output.join("mf-embedded/answer/workflow.rs")).unwrap();
+        assert!(module.contains("not JSON"));
+        assert!(!module.contains("must not be embedded"));
+        let error = embed_workflows_at(
+            &[request().with_source("missing.json")],
+            root.path(),
+            &output,
+        )
+        .unwrap_err();
+        assert!(matches!(error, EmbeddingError::Read { source, .. }
+            if source.kind() == io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn resource_paths_are_confined_to_the_package() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write_definition(root.path(), &definition());
+        fs::write(outside.path().join("secret.flow"), "not embedded").unwrap();
+        for path in [
+            PathBuf::from("../secret.flow"),
+            outside.path().join("secret.flow"),
+        ] {
+            let error = embed_workflows_at(
+                &[request().with_source(path)],
+                root.path(),
+                &root.path().join("out"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    EmbeddingError::Sources { .. } | EmbeddingError::OutsidePackage { .. }
+                ),
+                "{error}"
+            );
+        }
+        // Absolute entry paths inside the package remain supported.
+        let entry = fs::canonicalize(root.path().join("flow.json")).unwrap();
+        embed_workflows_at(
+            &[EmbedRequest::new("answer", entry)],
+            root.path(),
+            &root.path().join("out"),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_sources_accept_the_logical_package_directory() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        fs::create_dir(&package).unwrap();
+        write_definition(&package, &definition());
+        fs::write(package.join("child.flow"), "{}").unwrap();
+        let alias = root.path().join("logical-package");
+        symlink(&package, &alias).unwrap();
+        embed_workflows_at(
+            &[EmbedRequest::new("answer", alias.join("flow.json"))
+                .with_source(alias.join("child.flow"))],
+            &alias,
+            &root.path().join("out"),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_rejected_before_reading() {
+        let root = tempfile::tempdir().unwrap();
+        write_definition(root.path(), &definition());
+        let pipe = root.path().join("pipe.flow");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&pipe)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::create_dir(root.path().join("directory.flow")).unwrap();
+        for source in [Path::new("pipe.flow"), Path::new("directory.flow")] {
+            let error = embed_workflows_at(
+                &[request().with_source(source)],
+                root.path(),
+                &root.path().join("out"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, EmbeddingError::InvalidSourceFile { .. }),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_backed_loop_is_not_interpreted_during_packaging() {
+        let root = tempfile::tempdir().unwrap();
+        let value = json!({
+            "version": "2026-10-28", "dependencies": {}, "nodes": [{
+                "id": "repeat", "kind": "workflow.loop", "config": {
+                    "max_iterations": 1, "variables": [],
+                    "body": {"path": "not-included.flow"}
+                }
+            }]
+        });
+        write_definition(root.path(), &value);
+        embed_workflows_at(&[request()], root.path(), &root.path().join("out")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_source_links_instead_of_changing_virtual_path_semantics() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        write_definition(root.path(), &definition());
+        symlink("flow.json", root.path().join("alias.flow")).unwrap();
+        fs::create_dir(root.path().join("nested")).unwrap();
+        fs::write(root.path().join("nested/child.flow"), "{}").unwrap();
+        symlink("nested", root.path().join("alias-dir")).unwrap();
+        for source in [
+            "alias.flow",
+            "alias-dir/child.flow",
+            "alias-dir/../flow.json",
+        ] {
+            let error = embed_workflows_at(
+                &[request().with_source(source)],
+                root.path(),
+                &root.path().join("out"),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, EmbeddingError::LinkedSource { .. }),
+                "{error}"
+            );
+        }
     }
 
     #[cfg(unix)]

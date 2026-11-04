@@ -123,8 +123,12 @@ for inspecting the equivalent composition.
 Rust callers loading local references use `mf_compiler::load_workflow(path)?.definition` or
 `resolve_flows(&definition, Some(directory))?.definition` before preparing the graph. Definitions with
 only built-in references can also use the existing planning and compilation entry points directly.
-`embed_workflows` resolves sources and emits Cargo rebuild dependencies for every referenced file.
-For host-owned Cargo dependencies, use `load_embedded_workflow` followed by
+`embed_workflows` packs the root and files explicitly listed with `EmbedRequest::with_source`, emitting
+Cargo rebuild dependencies for those files without linking providers in the build script. Generated
+modules resolve declared children with the host registry in `plan(&registry)`, `manifest(&registry)`,
+and preparation. They never fall back to the filesystem for missing packed sources. See
+[embedding workflows](embedding.md) for the two-stage API. For dynamic loading with host-owned Cargo
+dependencies, use `load_embedded_workflow` followed by
 `compile_resolved_definition`; provider declarations remain provenance and their paths need not exist.
 `mf_chat::WorkflowProfile::from_path` provides this path-loading behavior for chat profiles.
 
