@@ -145,13 +145,71 @@ class ValidationTests(unittest.TestCase):
         with patch.object(validation.subprocess, 'run', side_effect=OSError('unavailable')):
             self.assertFalse(validation.declaration_changes_only('mod old;', 'mod new;'))
 
+    def test_macro_definition_leading_comments_do_not_change_executable_items(self):
+        body = 'macro_rules! emit { () => { let text = r#"/// literal"#; invoke(); } }'
+        for attribute in ['', '#[macro_export]\n']:
+            for prefix in ['/// Old documentation.\n', '/** Old documentation. */\n', '// Old comment.\n']:
+                with self.subTest(attribute=attribute, prefix=prefix):
+                    before = 'pub use old::Item;\n' + prefix + attribute + body
+                    after = ('pub use new::{Item, Other};\n'
+                             '/* Ordinary /* nested */ comment. */\n'
+                             '/// Updated documentation: 工作流.\n/// More documentation.\n'
+                             + attribute + body + '\nmod added;')
+                    self.assertEqual(validation.executable_items(before), [('MACRO_RULES', attribute + body)])
+                    self.assertTrue(validation.declaration_changes_only(before, after))
+                    self.assertTrue(validation.declaration_changes_only(attribute + body, after))
+                    self.assertTrue(validation.declaration_changes_only(after, attribute + body))
+        # Only ordinary SOURCE_FILE comments are skipped; retained items are not
+        # rebuilt by concatenating tokens across their whitespace boundaries.
+        self.assertTrue(validation.declaration_changes_only('// Old standalone comment.\n', '/* New comment. */\n'))
+        self.assertTrue(validation.declaration_changes_only(body, body + '\n// Trailing comment.\n'))
+        self.assertTrue(validation.declaration_changes_only(body, body + '\n/* Trailing /* nested */ comment. */'))
+
+    def test_macro_comment_proof_keeps_attributes_and_all_nonleading_bytes_strict(self):
+        body = 'macro_rules! emit { () => { /* body comment */ let text = r#"/// literal"#; invoke(); } }'
+        before = '/// Old documentation.\n#[macro_export]\n' + body
+        for after in [
+            before.replace('invoke();', 'changed();'),
+            before.replace('emit {', 'renamed {'),
+            before.replace('macro_rules!', 'macro_rules !'),
+            before.replace('macro_rules!', 'macro_rules /* keyword comment */ !'),
+            before.replace('() =>', '( ) =>'),
+            before.replace('body comment', 'changed body comment'),
+            before.replace('/// literal', '/// changed literal'),
+            before.replace('#[macro_export]', '#[macro_export(local_inner_macros)]'),
+            before.replace('#[macro_export]', '#[macro_export]\n#[custom]'),
+            before.replace('#[macro_export]\n', ''),
+            before.replace('#[macro_export]', '#[ macro_export ]'),
+            before.replace('#[macro_export]', '#[macro_export]\n/// Interleaved docs.'),
+            before + '\nfn added() {}',
+            before + '\n//! Crate documentation.',
+            before + '\n#![custom]',
+        ]:
+            with self.subTest(after=after):
+                self.assertFalse(validation.declaration_changes_only(before, after))
+        for attribute in ['#[custom]', '#[cfg(feature = "enabled")]', '#[doc(hidden)]', '#[derive(Custom)]']:
+            source = '/// Old documentation.\n' + attribute + '\n' + body
+            with self.subTest(attribute=attribute):
+                self.assertFalse(validation.declaration_changes_only(source, source.replace('Old', 'New')))
+        for source in [
+            '/// Old documentation.\nfn run() {}',
+            'emit! { /// Old documentation.\nfn run() {} }',
+            'macro_rules! emit { () => { /// Old documentation.\nfn run() {} } }',
+            '//! Old documentation.\n' + body,
+            'fn run() {}\n/// Old documentation.\nfn other() {}',
+        ]:
+            with self.subTest(source=source):
+                self.assertFalse(validation.declaration_changes_only(source, source.replace('Old', 'New')))
+
     def test_unmapped_module_changes_require_unchanged_executable_items(self):
         source = self.root / 'lib.rs'
-        source.write_text('pub use old::Item;\nmacro_rules! emit { () => { run(); } }\n')
+        source.write_text('pub use old::Item;\n/// Original documentation.\n#[macro_export]\n'
+                          'macro_rules! emit { () => { run(); } }\n')
         self.git('add', '.')
         self.git('commit', '-qm', 'test(ci): unmapped base')
         base = self.git('rev-parse', 'HEAD')
-        source.write_text('pub use new::Item;\nmacro_rules! emit { () => { run(); } }\nmod added;\n')
+        source.write_text('pub use new::Item;\n/// Updated documentation.\n/// More documentation.\n#[macro_export]\n'
+                          'macro_rules! emit { () => { run(); } }\nmod added;\n')
         self.git('add', '.')
         self.git('commit', '-qm', 'test(ci): declaration changes')
         head = self.git('rev-parse', 'HEAD')

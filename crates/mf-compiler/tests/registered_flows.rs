@@ -74,6 +74,32 @@ fn registered_calls_use_host_execution_without_loading_child_providers() {
     }
 }
 
+#[cfg(feature = "codegen")]
+#[test]
+fn registered_host_calls_cannot_be_emitted_into_generated_runners() {
+    let mut registry = NodeRegistry::from_inventory().unwrap();
+    let body = child();
+    registry
+        .register_flow(
+            "host.runner",
+            body.clone(),
+            PreparedSubgraph::new(
+                vec![],
+                vec![PortSpec::new("value", ValueType::String, true)],
+                |_| panic!("code generation must not execute a host closure"),
+            ),
+        )
+        .unwrap();
+    let plan = compile_resolved_definition(&caller(&body), &registry).unwrap();
+    let error = plan.generate_execution_plans(&registry).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("host Flow executors cannot be emitted"),
+        "{error}"
+    );
+}
+
 #[test]
 fn registered_calls_reject_definition_drift_and_duplicate_names() {
     let mut registry = NodeRegistry::from_inventory().unwrap();

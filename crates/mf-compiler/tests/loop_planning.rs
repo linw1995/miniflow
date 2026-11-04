@@ -1188,3 +1188,118 @@ fn observation_preserves_description_and_structural_order_errors() {
     );
     assert!(harness.records().is_empty());
 }
+
+#[test]
+fn descriptions_reject_damaged_loop_authoring_boundaries_with_typed_owners() {
+    use std::error::Error;
+    let valid = plan_definition(&parse(definition())).unwrap();
+    // CompiledWorkflow is public persisted data. Describing a damaged plan must
+    // diagnose its authored boundary rather than silently lower/replace it.
+    for (case, expected) in [
+        (
+            "wrong owner",
+            "compiled execution order names an unknown Loop body",
+        ),
+        (
+            "old version",
+            "Loop constructs require definition version 2026-09-29",
+        ),
+        ("malformed body", "invalid workflow definition"),
+        ("missing body", "missing field `body`"),
+    ] {
+        let mut damaged = valid.clone();
+        if case == "old version" {
+            damaged.definition.version = WorkflowDefinitionVersion::V2026_09_26;
+        } else {
+            let owner = damaged
+                .definition
+                .nodes
+                .iter_mut()
+                .find(|node| node.id.as_str() == "repeat")
+                .unwrap();
+            match case {
+                "wrong owner" => owner.kind = "builtin.constant".into(),
+                "malformed body" => {
+                    owner.config["body"] = json!("not a workflow");
+                }
+                "missing body" => {
+                    owner.config.as_object_mut().unwrap().remove("body");
+                }
+                _ => unreachable!(),
+            }
+        }
+        let error = mf_compiler::describe_compiled(&damaged).unwrap_err();
+        if case == "wrong owner" {
+            assert!(
+                matches!(&error, mf_compiler::DescriptionError::Contract {
+                source: mf_telemetry::ContractError::Invalid { message }
+            } if message == expected),
+                "{error}"
+            );
+            assert!(error.source().unwrap().is::<mf_telemetry::ContractError>());
+            continue;
+        }
+        let mf_compiler::DescriptionError::DescriptionOrder { path, source } = &error else {
+            panic!("{case}: expected an ordering error: {error}");
+        };
+        assert!(path.is_empty(), "{case}: {error}");
+        if matches!(case, "malformed body" | "missing body") {
+            assert!(
+                matches!(source.as_ref(), mf_compiler::WorkflowCompileError::LoopConfiguration { path, .. }
+                if path == "[\"repeat\"]"),
+                "{case}: {error}"
+            );
+            assert!(source.source().unwrap().is::<serde_json::Error>());
+            if case == "missing body" {
+                assert!(error.to_string().contains(expected), "{error}");
+            }
+        } else {
+            assert!(
+                matches!(source.as_ref(), mf_compiler::WorkflowCompileError::InvalidLoop { path, message }
+                if path == "[\"repeat\"]" && message == expected),
+                "{case}: {error}"
+            );
+        }
+        assert!(
+            error
+                .source()
+                .unwrap()
+                .is::<Box<mf_compiler::WorkflowCompileError>>()
+        );
+    }
+}
+
+#[test]
+fn resolved_graphs_reject_missing_loop_bodies_before_factory_preparation() {
+    use std::error::Error;
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for nested in [false, true] {
+        let mut authored = parse(definition());
+        let owner = authored
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "repeat")
+            .unwrap();
+        let expected_path = if nested {
+            // The outer graph is valid; the error belongs to this nested authoring node.
+            owner.config["body"]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "inner", "kind": "workflow.loop"}));
+            "[\"repeat\",\"inner\"]"
+        } else {
+            owner.config.as_object_mut().unwrap().remove("body");
+            "[\"repeat\"]"
+        };
+        let error = mf_compiler::compile_resolved_definition(&authored, &registry).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                mf_compiler::WorkflowCompileError::LoopConfiguration { path, .. }
+                    if path == expected_path
+            ),
+            "{error}"
+        );
+        assert!(error.source().unwrap().is::<serde_json::Error>());
+    }
+}

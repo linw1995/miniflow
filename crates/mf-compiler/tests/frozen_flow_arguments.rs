@@ -1,0 +1,306 @@
+//! Frozen arguments retain ordinary source resolution without provider expansion hooks.
+extern crate mfn_core as _;
+
+#[path = "fixtures/observation_capture.rs"]
+mod capture;
+
+use mf_compiler::{CallConfig, WorkflowDefinition, load_workflow, plan_definition, resolve_flows};
+use mf_runtime::{Flow, NodeConfig};
+use serde_json::{Value, json};
+use std::{collections::BTreeMap, fs};
+
+fn definition(value: Value) -> WorkflowDefinition {
+    serde_json::from_value(value).unwrap()
+}
+
+#[derive(NodeConfig)]
+struct Config {
+    local: Flow,
+}
+
+fn owner(child: Value) -> Value {
+    json!({"id":"custom", "kind":"test.mixed_version_owner", "config":{
+        "local":{"definition":child}
+    }})
+}
+
+fn plain_owner(_: Value) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
+    mf_runtime::NodeRegistry::from_inventory()
+        .unwrap()
+        .get("builtin.constant")
+        .unwrap()
+        .instantiate(json!({"value": 0}))
+}
+
+fn prepared_owner(
+    _: &str,
+    config: Value,
+    arguments: BTreeMap<String, mf_runtime::PreparedSubgraph>,
+) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
+    let config = Config::from_config(config, arguments)?;
+    assert!(!config.local.nodes().is_empty());
+    plain_owner(json!({}))
+}
+
+inventory::submit! {
+    mf_runtime::NodeRegistration {
+        kind: "test.mixed_version_owner",
+        factory: mf_runtime::NodeFactory::Subgraph {
+            parameters: Config::FLOW_PARAMETERS,
+            plain: plain_owner,
+            prepared: prepared_owner,
+        },
+    }
+}
+
+fn leaf() -> Value {
+    json!({
+        "version": "2026-10-28", "dependencies": {},
+        "nodes": [{"id": "value", "kind": "builtin.constant", "config": {"value": 42}}],
+        "outputs": [{"name": "value", "node": "value", "port": "value"}]
+    })
+}
+
+fn caller() -> Value {
+    json!({
+        "version": "2026-10-28", "dependencies": {},
+        "flows": {"local": {"path": "leaf.json"}},
+        "nodes": [{"id": "invoke", "kind": "workflow.call", "config": {"flow": "local"}}],
+        "outputs": [{"name": "value", "node": "invoke", "port": "value"}]
+    })
+}
+
+#[test]
+fn frozen_arguments_resolve_relative_files_and_survive_without_source_files() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("provider")).unwrap();
+    fs::write(directory.path().join("leaf.json"), leaf().to_string()).unwrap();
+    let mut argument = caller();
+    argument["dependencies"] =
+        json!({"provider": {"package": "test-provider", "path": "provider"}});
+    let authored = json!({
+        "version": "2026-10-28", "dependencies": {}, "nodes": [owner(argument)]
+    });
+    let source = directory.path().join("flow.json");
+    fs::write(&source, authored.to_string()).unwrap();
+    let resolved = load_workflow(&source).unwrap();
+    assert_eq!(resolved.sources.len(), 2);
+    let arguments = resolved.definition.nodes[0]
+        .flow_parameters(&["local"])
+        .unwrap();
+    let argument = &arguments["local"];
+    assert!(argument.flows.is_empty());
+    assert_eq!(
+        argument.dependencies["provider"].path.as_deref(),
+        Some(
+            fs::canonicalize(directory.path().join("provider"))
+                .unwrap()
+                .as_path()
+        )
+    );
+    let call: CallConfig = serde_json::from_value(argument.nodes[0].config.clone()).unwrap();
+    assert_eq!(*call.body.unwrap(), definition(leaf()));
+    let frozen = serde_json::to_string(&resolved.definition).unwrap();
+    directory.close().unwrap();
+    let frozen = WorkflowDefinition::from_json(&frozen).unwrap();
+    let offline = resolve_flows(&frozen, None).unwrap();
+    assert_eq!(offline.definition, frozen);
+    assert!(offline.sources.is_empty());
+    let plan = plan_definition(&frozen).unwrap();
+    assert_eq!(plan_definition(&plan.definition).unwrap(), plan);
+}
+
+#[test]
+fn mixed_version_child_iterations_retain_body_paths_for_static_and_mapped_calls() {
+    let child = json!({
+        "version": "2026-10-03", "dependencies": {},
+        "nodes": [
+            {"id": "items", "kind": "builtin.constant", "config": {"value": [1]}},
+            {"id": "iteration", "kind": "builtin.iteration", "config": {
+                "mode": "sequential", "on_error": "terminate",
+                "body": {"version":"2026-10-03", "dependencies":{},
+                    "nodes": [{"id": "value", "kind": "builtin.constant", "config": {"value": 7}}],
+                    "outputs": [{"name":"result", "node": "value", "port": "value"}]
+                }
+            }}
+        ],
+        "edges": [{"from_node": "items", "from_output": "value", "to_node": "iteration", "to_input": "items"}],
+        "outputs": [{"name": "results", "node": "iteration", "port": "results"}]
+    });
+    let parent = definition(json!({
+        "version": "2026-10-28", "dependencies": {},
+        "nodes": [
+            {"id": "invoke", "kind": "workflow.call", "config": {"flow": "static", "body": child}},
+            owner(child)
+        ]
+    }));
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
+    let plan = mf_compiler::compile_definition(&parent, &registry).unwrap();
+    let expected_paths = vec![
+        vec!["invoke".to_owned(), "iteration".to_owned()],
+        vec![
+            mf_telemetry::event::ScopePathEntry::binding_key("custom", "local"),
+            "iteration".to_owned(),
+        ],
+    ];
+    let assert_iteration_paths = |description: mf_telemetry::description::WorkflowDescription| {
+        for path in &expected_paths {
+            let body = description
+                .loop_bodies
+                .iter()
+                .find(|body| &body.path == path)
+                .unwrap_or_else(|| panic!("missing mixed-version Iteration body {path:?}"));
+            assert!(body.nodes.iter().any(|node| node.id == "value"));
+        }
+    };
+    assert_iteration_paths(mf_compiler::describe_compiled(&plan).unwrap());
+    let replanned = mf_compiler::plan_resolved_definition(
+        &plan.definition,
+        &registry.flow_parameter_contracts(),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.loop_orders, replanned.loop_orders,
+        "mixed-version scope orders must remain canonical after preparation"
+    );
+    assert_iteration_paths(plan.manifest(&registry).unwrap().description().unwrap());
+    #[cfg(feature = "codegen")]
+    {
+        let generated = plan.generate_runner_execution_plans(&registry).unwrap();
+        let manifest = mf_runtime::WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
+        assert_iteration_paths(manifest.description().unwrap());
+    }
+}
+
+#[test]
+fn old_root_preserves_new_child_features_in_every_observation_projection() {
+    use mf_telemetry::{description::WorkflowDescriptionVersion, identity::RunId};
+    let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
+    for clustered in [false, true] {
+        let mut child = leaf();
+        child["nodes"].as_array_mut().unwrap().push(json!({
+            "id": "before", "kind": "builtin.constant", "config": {"value": 1}
+        }));
+        child["edges"] = json!([{"from_node": "before", "to_node": "value"}]);
+        if clustered {
+            child["clusters"] = json!([{"label": "Child steps", "annotation": "Newer child metadata", "nodes": ["before", "value"]}]);
+        }
+        let child_plan =
+            mf_compiler::compile_definition(&definition(child.clone()), &registry).unwrap();
+        assert_eq!(
+            mf_compiler::instantiate_compiled(&child_plan, &registry)
+                .unwrap()
+                .execute()
+                .unwrap()["value"]
+                .as_i64(),
+            Some(42)
+        );
+        let root = definition(json!({
+            "version": "2026-09-26", "dependencies": {}, "nodes": [owner(child)]
+        }));
+        let plan = mf_compiler::compile_definition(&root, &registry).unwrap();
+        assert_eq!(
+            plan.definition.version,
+            mf_compiler::WorkflowDefinitionVersion::V2026_09_26
+        );
+        let graph = mf_compiler::describe_compiled(&plan).unwrap();
+        assert_eq!(
+            graph.version,
+            if clustered {
+                WorkflowDescriptionVersion::V2026_10_23
+            } else {
+                WorkflowDescriptionVersion::V2026_10_19
+            }
+        );
+        let path = vec![mf_telemetry::event::ScopePathEntry::binding_key(
+            "custom", "local",
+        )];
+        let body = graph.body(&path).unwrap();
+        assert_eq!(body.order_edges.len(), 1);
+        assert_eq!(body.order_edges[0].from_node, "before");
+        assert_eq!(body.order_edges[0].to_node, "value");
+        assert_eq!(body.clusters.len(), usize::from(clustered));
+        if clustered {
+            assert_eq!(body.clusters[0].nodes, ["before", "value"]);
+        }
+        let manifest = plan.manifest(&registry).unwrap();
+        assert_eq!(manifest.definition.version, root.version);
+        assert_eq!(manifest.description().unwrap(), graph);
+        let harness = capture::Harness::new(true);
+        let observation = plan
+            .start_observation(&harness.observer(), RunId::new())
+            .unwrap();
+        mf_compiler::execute_compiled_with_inputs(
+            &plan,
+            &registry,
+            Default::default(),
+            Some(observation),
+        )
+        .unwrap();
+        harness.traces.force_flush().unwrap();
+        assert!(!harness.spans.get_finished_spans().unwrap().is_empty());
+        let records = harness.records();
+        assert!(!records.is_empty());
+        for record in records {
+            record.decode().unwrap().validate_for(&graph).unwrap();
+        }
+        #[cfg(feature = "codegen")]
+        {
+            let generated = plan.generate_execution_plans(&registry).unwrap();
+            let embedded =
+                mf_runtime::WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
+            assert_eq!(embedded.definition.version, root.version);
+            assert_eq!(embedded.description().unwrap(), graph);
+        }
+    }
+}
+
+#[test]
+fn frozen_arguments_do_not_capture_enclosing_source_aliases() {
+    let mut authored = caller();
+    authored["flows"] = json!({"local": {"builtin": "not-linked"}});
+    authored["nodes"] = json!([]);
+    let mut argument = caller();
+    argument.as_object_mut().unwrap().remove("flows");
+    authored["nodes"] = json!([owner(argument)]);
+    let error = resolve_flows(&definition(authored), None).err().unwrap();
+    assert!(error.to_string().contains("unknown Flow alias"), "{error}");
+}
+
+#[test]
+fn frozen_argument_resolution_shares_the_call_depth_budget() {
+    let mut nested = leaf();
+    for _ in 0..=mf_compiler::MAX_CALL_DEPTH {
+        nested = json!({
+            "version": "2026-10-28", "dependencies": {}, "nodes": [owner(nested)]
+        });
+    }
+    let error = resolve_flows(&definition(nested), None).err().unwrap();
+    assert!(error.to_string().contains("sixteen calls"), "{error}");
+}
+
+#[test]
+fn frozen_argument_normalization_canonicalizes_every_body() {
+    let mut argument = leaf();
+    argument["nodes"] = json!([
+        {"id": "z", "kind": "builtin.constant", "config": {"value": 1}},
+        {"id": "a", "kind": "builtin.constant", "config": {"value": 2}}
+    ]);
+    argument["outputs"] = json!([]);
+    let authored = definition(json!({
+        "version": "2026-10-28", "dependencies": {}, "nodes": [owner(argument)]
+    }));
+    let plan = plan_definition(&authored).unwrap();
+    let parameters = plan.definition.nodes[0]
+        .flow_parameters(&["local"])
+        .unwrap();
+    let body = &parameters["local"];
+    assert_eq!(
+        body.nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "z"]
+    );
+    assert_eq!(plan_definition(&plan.definition).unwrap(), plan);
+}

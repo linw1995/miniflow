@@ -249,6 +249,151 @@ fn nested_descriptions_validate_scope_ownership_and_version() {
     }
 }
 
+fn static_custom_children() -> WorkflowDescription {
+    let key = mf_telemetry::event::ScopePathEntry::binding_key;
+    // A real authored ID can resemble an encoded field scope. It owns its body
+    // directly and must not also be attributed to `dispatch`.
+    let claimed = key("dispatch", "claimed");
+    let value = json!({
+        "version": "2026-09-29", "workflow_id": graph().workflow_id,
+        "nodes": [
+            {"id": "dispatch", "kind": "user.dispatch"},
+            {"id": "repeat", "kind": "workflow.loop"},
+            {"id": claimed, "kind": "workflow.loop"}
+        ],
+        "execution_order": ["dispatch", "repeat", claimed],
+        "data_edges": [], "control_edges": [],
+        "loop_bodies": [
+            {"path": [key("dispatch", "selected")],
+                "nodes": [{"id": "inner", "kind": "user.dispatch"}],
+                "data_edges": [], "control_edges": [], "execution_order": ["inner"]},
+            {"path": [key("dispatch", "fallback")],
+                "nodes": [{"id": "inner", "kind": "fixture.fallback"}],
+                "data_edges": [], "control_edges": [], "execution_order": ["inner"]},
+            {"path": [key("dispatch", "selected"), key("inner", "selected")],
+                "nodes": [{"id": "leaf", "kind": "fixture.leaf"}],
+                "data_edges": [], "control_edges": [], "execution_order": ["leaf"]},
+            {"path": ["repeat"], "nodes": [{"id": "%loop", "kind": "%loop"}],
+                "data_edges": [], "control_edges": [], "execution_order": ["%loop"]},
+            {"path": [claimed], "nodes": [{"id": "%loop", "kind": "%loop"}],
+                "data_edges": [], "control_edges": [], "execution_order": ["%loop"]}
+        ]
+    });
+    WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap()
+}
+
+#[test]
+fn static_custom_child_lookup_respects_field_ownership_and_parent_scope() {
+    let description = static_custom_children();
+    let key = mf_telemetry::event::ScopePathEntry::binding_key;
+    let selected = vec![key("dispatch", "selected")];
+    let fallback = vec![key("dispatch", "fallback")];
+    let nested = vec![key("dispatch", "selected"), key("inner", "selected")];
+    let claimed = vec![key("dispatch", "claimed")];
+    assert_eq!(
+        description.body_paths_for_node(&[], "dispatch"),
+        vec![&selected, &fallback]
+    );
+    assert_eq!(
+        description.body_paths_for_node(&selected, "inner"),
+        vec![&nested]
+    );
+    // Identical IDs in another child cannot claim this child's descendants.
+    assert!(
+        description
+            .body_paths_for_node(&fallback, "inner")
+            .is_empty()
+    );
+    assert!(
+        description
+            .body_paths_for_node(&["missing".into()], "inner")
+            .is_empty()
+    );
+    assert!(description.body_paths_for_node(&[], "inner").is_empty());
+    assert_eq!(
+        description.body_paths_for_node(&[], &claimed[0]),
+        vec![&claimed]
+    );
+    let repeat = vec!["repeat".to_owned()];
+    assert_eq!(
+        description.body_paths_for_node(&[], "repeat"),
+        vec![&repeat]
+    );
+    for path in [&selected, &fallback, &nested, &claimed, &repeat] {
+        assert_eq!(description.loop_body(path), description.body(path));
+        assert!(description.loop_body(path).is_some());
+    }
+    assert_eq!(
+        description.loop_body(&selected).unwrap().nodes[0].kind,
+        "user.dispatch"
+    );
+    assert_eq!(
+        description.loop_body(&fallback).unwrap().nodes[0].kind,
+        "fixture.fallback"
+    );
+    assert!(
+        description
+            .loop_body(&[key("missing", "selected")])
+            .is_none()
+    );
+    assert!(
+        description
+            .loop_body(&[key("dispatch", "not-prepared")])
+            .is_none()
+    );
+    assert!(
+        description
+            .loop_body(&[fallback[0].clone(), nested[1].clone()])
+            .is_none()
+    );
+    assert_eq!(
+        WorkflowDescription::from_json(&description.to_json().unwrap()).unwrap(),
+        description
+    );
+}
+
+#[test]
+fn static_custom_children_reject_corrupt_scope_facts_with_typed_errors() {
+    let description = static_custom_children();
+    let key = mf_telemetry::event::ScopePathEntry::binding_key;
+    for (case, diagnostic) in [
+        ("unknown_owner", "unknown body container"),
+        ("missing_parent", "unknown parent Loop scope"),
+        ("duplicate_scope", "duplicate Loop body path"),
+        (
+            "wrong_order",
+            "execution order contains an unknown or duplicate node",
+        ),
+        (
+            "claimed_id",
+            "body path does not name a supported container",
+        ),
+    ] {
+        let mut corrupt = description.clone();
+        match case {
+            "unknown_owner" => corrupt.loop_bodies[0].path = vec![key("missing", "selected")],
+            "missing_parent" => {
+                corrupt.loop_bodies.remove(0);
+            }
+            "duplicate_scope" => corrupt.loop_bodies.push(corrupt.loop_bodies[0].clone()),
+            "wrong_order" => corrupt.loop_bodies[1].execution_order[0] = "leaf".into(),
+            // Exact authored IDs take precedence over decoding a field's owner.
+            "claimed_id" => corrupt.nodes[2].kind = "fixture.not-a-container".into(),
+            _ => unreachable!(),
+        }
+        for error in [
+            corrupt.validate().unwrap_err(),
+            WorkflowDescription::from_json(&serde_json::to_vec(&corrupt).unwrap()).unwrap_err(),
+        ] {
+            assert!(
+                matches!(&error, mf_telemetry::ContractError::Invalid { message }
+                if message == diagnostic),
+                "{case}: {error}"
+            );
+        }
+    }
+}
+
 #[test]
 fn additive_fields_are_ignored_but_required_fields_and_versions_are_checked() {
     let wire = record("success");

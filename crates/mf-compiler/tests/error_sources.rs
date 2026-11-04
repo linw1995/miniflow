@@ -418,6 +418,7 @@ fn filesystem_contexts_preserve_the_failing_path_and_io_source() {
 
     let directory = root.path().join("managed");
     fs::create_dir(&directory).unwrap();
+    let directory = fs::canonicalize(directory).unwrap();
     let marker = directory.join(".mf-owner.json");
     fs::create_dir(&marker).unwrap();
     let error = mf_compiler::BuildDirectory::open(&definition, Some(&directory))
@@ -515,12 +516,65 @@ fn iteration_validation_preserves_the_structural_source() {
         }}}]
     }))
     .unwrap();
-    let error = plan_definition(&definition).unwrap_err();
-    assert!(
-        matches!(&error, WorkflowCompileError::IterationValidation { definition_id, .. } if definition_id.as_str() == "each")
-    );
-    assert!(
-        matches!(find_source::<mf_compiler::IterationValidationError>(&error).unwrap(),
-        mf_compiler::IterationValidationError::ReservedNode { node } if node.as_str() == "%iteration")
-    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for error in [
+        plan_definition(&definition).unwrap_err(),
+        compile_definition(&definition, &registry).unwrap_err(),
+        // Saved definitions enter preparation without the resolver's validation wrapper.
+        mf_compiler::compile_resolved_definition(&definition, &registry).unwrap_err(),
+        mf_compiler::resolve_nodes(&definition, &registry)
+            .err()
+            .unwrap(),
+    ] {
+        assert!(
+            matches!(&error, WorkflowCompileError::IterationValidation { definition_id, .. } if definition_id.as_str() == "each")
+        );
+        assert!(
+            matches!(find_source::<mf_compiler::IterationValidationError>(&error).unwrap(),
+            mf_compiler::IterationValidationError::ReservedNode { node } if node.as_str() == "%iteration")
+        );
+    }
+}
+
+#[test]
+fn frozen_graphs_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for id in [mf_runtime::ITERATION_INPUT_ID, "authored-input"] {
+        let child: WorkflowDefinition = serde_json::from_value(json!({
+            "version": "2026-10-28", "dependencies": {},
+            "nodes": [{"id": id, "kind": mf_runtime::ITERATION_INPUT_KIND}]
+        }))
+        .unwrap();
+        let error = mf_compiler::compile_resolved_definition(&child, &registry).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                WorkflowCompileError::InvalidIteration { definition_id, message }
+                    if definition_id.as_str() == id
+                        && message == "internal iteration input is reserved for iteration bodies"
+            ),
+            "{error}"
+        );
+        assert!(error.source().is_none());
+
+        let caller: WorkflowDefinition = serde_json::from_value(json!({
+            "version": "2026-10-28", "dependencies": {},
+            "nodes": [{"id": "invoke", "kind": "workflow.call", "config": {
+                "flow": "frozen-child", "body": child
+            }}]
+        }))
+        .unwrap();
+        let error = mf_compiler::compile_resolved_definition(&caller, &registry).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                WorkflowCompileError::CallBody { definition_id, source }
+                    if definition_id.as_str() == "invoke"
+                        && matches!(source.as_ref(), WorkflowCompileError::InvalidIteration { definition_id, .. }
+                            if definition_id.as_str() == id)
+            ),
+            "{error}"
+        );
+        assert!(find_source::<Box<WorkflowCompileError>>(&error).is_some());
+    }
 }

@@ -5,6 +5,153 @@ use mf_compiler::{
 };
 
 #[test]
+fn every_executable_child_uses_direct_canonical_flow_parameters() {
+    use serde_json::json;
+    let leaf = json!({
+        "version":"2026-10-28", "dependencies":{},
+        "nodes":[{"id":"leaf", "kind":"builtin.constant", "config":{"value":42}}],
+        "outputs":[{"name":"answer", "node":"leaf", "port":"value"}]
+    });
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-28", "dependencies":{},
+        "nodes":[
+            {"id":"callA", "kind":"workflow.call", "config":{"flow":"A", "body":leaf}},
+            {"id":"repeat", "kind":"workflow.loop", "config":{
+                "max_iterations":1, "variables":[{"name":"count", "type":"int"}],
+                "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"leaf", "kind":"builtin.constant", "config":{"value":42}}]}
+            }},
+            {"id":"each", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-28", "dependencies":{},
+                "nodes":[{"id":"leaf", "kind":"builtin.constant", "config":{"value":42}}],
+                "outputs": [{"name":"result", "node":"leaf", "port":"value"}]
+            }}},
+            {"id":"apply", "kind":"example.apply", "config":{"body":leaf}}
+        ]
+    }))
+    .unwrap();
+    for node in &definition.nodes {
+        let children = node.flow_parameters(&["body"]).unwrap();
+        assert_eq!(
+            children.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["body"]
+        );
+        assert!(
+            children["body"]
+                .nodes
+                .iter()
+                .any(|child| child.id.as_str() == "leaf")
+        );
+        let config = &node.config;
+        assert_eq!(
+            serde_json::from_value::<WorkflowDefinition>(config["body"].clone()).unwrap(),
+            children["body"]
+        );
+        assert!(config.get("definition").is_none());
+        let expected_scope = if node.id.as_str() == "apply" {
+            mf_telemetry::event::ScopePathEntry::binding_key("apply", "body")
+        } else {
+            node.id.to_string()
+        };
+        assert_eq!(node.flow_scope_key("body"), expected_scope);
+        let mut round_trip = node.clone();
+        round_trip
+            .set_node_flow("body", children["body"].clone())
+            .unwrap();
+        assert_eq!(round_trip.flow_parameters(&["body"]).unwrap(), children);
+    }
+    // Every executable child is authored directly as a full workflow in config.body.
+    let authored = serde_json::to_value(&definition).unwrap();
+    assert!(authored["nodes"][0]["config"].get("definition").is_none());
+    assert!(authored["nodes"][1].get("loop").is_none());
+    assert_eq!(
+        authored["nodes"][2]["config"]["body"]["outputs"][0]["name"],
+        "result"
+    );
+    assert!(
+        authored["nodes"][2]["config"]["body"]
+            .get("result")
+            .is_none()
+    );
+}
+
+#[test]
+fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_versions() {
+    use serde_json::json;
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-28", "dependencies":{}, "nodes":[
+            {"id":"repeat", "kind":"workflow.loop", "config":{
+                "max_iterations":1, "variables":[{"name":"count", "type":"int"}],
+                "body":{"version":"2026-09-29", "dependencies":{}, "nodes":[
+                    {"id":"tick", "kind":"builtin.constant", "config":{"value":true}}
+                ]}
+            }},
+            {"id":"each", "kind":"builtin.iteration", "config":{"body":{
+                "version":"2026-10-03", "dependencies":{}, "nodes":[],
+                "outputs":[{"name":"result", "node":"%iteration", "port":"item"}]
+            }}}
+        ]
+    }))
+    .unwrap();
+    let normalized = plan_definition(&definition).unwrap();
+    for (owner, source, kind, version) in [
+        (
+            "repeat",
+            "%loop",
+            "%loop",
+            WorkflowDefinitionVersion::V2026_09_29,
+        ),
+        (
+            "each",
+            "%iteration",
+            "builtin.iteration_input",
+            WorkflowDefinitionVersion::V2026_10_03,
+        ),
+    ] {
+        let node = normalized
+            .definition
+            .nodes
+            .iter()
+            .find(|node| node.id.as_str() == owner)
+            .unwrap();
+        let children = node.flow_parameters(&["body"]).unwrap();
+        assert_eq!(children["body"].version, version);
+        let sources: Vec<_> = children["body"]
+            .nodes
+            .iter()
+            .filter(|node| node.id.as_str() == source)
+            .collect();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].kind, kind);
+        assert_eq!(sources[0].config, json!({}));
+    }
+    let round_trip =
+        WorkflowDefinition::from_json(&serde_json::to_string(&normalized.definition).unwrap())
+            .unwrap();
+    assert_eq!(plan_definition(&round_trip).unwrap(), normalized);
+}
+
+#[test]
+fn removed_container_shapes_are_rejected_instead_of_adapted() {
+    use serde_json::json;
+    let root = |node| json!({"version":"2026-10-28", "dependencies":{}, "nodes":[node]});
+    let old_loop = root(json!({"id":"repeat", "kind":"workflow.loop", "loop":{
+        "max_iterations":1, "variables":[{"name":"count", "type":"int"}],
+        "body":{"nodes":[]}
+    }}));
+    assert!(WorkflowDefinition::from_json(&old_loop.to_string()).is_err());
+    for node in [
+        json!({"id":"invoke", "kind":"workflow.call", "config":{
+            "flow":"child", "definition":{"version":"2026-10-28", "dependencies":{}, "nodes":[]}
+        }}),
+        json!({"id":"each", "kind":"builtin.iteration", "config":{"body":{
+            "nodes":[], "result":{"node":"%iteration", "port":"item"}
+        }}}),
+    ] {
+        let definition: WorkflowDefinition = serde_json::from_value(root(node)).unwrap();
+        assert!(plan_definition(&definition).is_err());
+    }
+}
+
+#[test]
 fn parses_a_versioned_workflow_definition() {
     let definition = WorkflowDefinition::from_json(
         r#"{
@@ -27,6 +174,14 @@ fn parses_a_versioned_workflow_definition() {
 
 #[test]
 fn rejects_unsupported_definition_versions() {
+    for version in ["2026-11-01", "2026-11-03"] {
+        let input =
+            serde_json::json!({"version":version, "dependencies":{}, "nodes":[]}).to_string();
+        assert!(matches!(
+            WorkflowDefinition::from_json(&input),
+            Err(DefinitionParseError::JsonParse { .. })
+        ));
+    }
     let error =
         WorkflowDefinition::from_json(r#"{"version":"2027-01-01","nodes":[]}"#).unwrap_err();
 

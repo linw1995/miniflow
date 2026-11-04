@@ -169,7 +169,8 @@ def declarations_only(contents):
 
 def executable_items(contents):
     # The pinned Rust parser locates top-level items without interpreting literals or macros.
-    # Keep every nondeclaration byte-for-byte so missing mappings cannot hide body changes.
+    # Keep nondeclarations byte-for-byte except standalone ordinary comments and leading
+    # comments on plain macro_rules! definitions. Never strip macro inputs or body bytes.
     try:
         parsed = subprocess.run(["rust-analyzer", "parse", "--json"], input=contents,
                                 capture_output=True, text=True, timeout=30, check=True)
@@ -187,11 +188,34 @@ def executable_items(contents):
             if start != offset or not start <= end <= len(source):
                 return None
             offset = end
-            if item["kind"] == "WHITESPACE":
+            # SOURCE_FILE trivia cannot join or rewrite the retained item byte slices.
+            # Crate-level DOC_COMMENT nodes remain significant attributes.
+            if item["kind"] in {"WHITESPACE", "COMMENT"}:
                 continue
             text = source[start:end].decode()
             if item["kind"] in {"USE", "MODULE", "EXTERN_CRATE"} and declarations_only(text):
                 continue
+            if item["kind"] == "MACRO_RULES":
+                children = item["children"]
+                attributes = [source[child["start"][0]:child["end"][0]]
+                              for child in children if child["kind"] == "ATTR"]
+                # Doc comments become attributes and can affect procedural attribute
+                # macros. Only plain definitions (optionally exported) prove them inert.
+                if all(attribute == b"#[macro_export]" for attribute in attributes):
+                    prefix_end = start
+                    for child in children:
+                        if child["kind"] not in {"COMMENT", "DOC_COMMENT", "WHITESPACE"}:
+                            break
+                        child_start, child_end = child["start"][0], child["end"][0]
+                        if child_start != prefix_end or not child_start <= child_end <= end:
+                            return None
+                        if child["kind"] == "DOC_COMMENT":
+                            if [doc["kind"] for doc in child.get("children", [])] != ["OUTER_DOC_COMMENT"]:
+                                return None
+                        prefix_end = child_end
+                    # Preserve the first attribute and every following byte, including
+                    # any interleaved docs, the macro name, and its entire token tree.
+                    text = source[prefix_end:end].decode()
             items.append((item["kind"], text))
         return items if offset == len(source) else None
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):

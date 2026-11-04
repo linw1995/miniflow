@@ -362,6 +362,253 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
     }
 }
 
+#[test]
+fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
+    for feature in ["order_edges", "clusters"] {
+        let mut child = serde_json::json!({
+            "version": "2026-10-23", "dependencies": {},
+            "nodes": [
+                {"id": "source", "kind": "fixture.source"},
+                {"id": "sink", "kind": "fixture.sink"}
+            ]
+        });
+        child[if feature == "order_edges" {
+            "edges"
+        } else {
+            feature
+        }] = if feature == "order_edges" {
+            serde_json::json!([{"from_node": "source", "to_node": "sink"}])
+        } else {
+            serde_json::json!([{
+                "label": "Child work", "annotation": "Scoped child metadata.",
+                "nodes": ["source", "sink"]
+            }])
+        };
+        let manifest = WorkflowManifest {
+            version: WorkflowManifestVersion::V2026_10_16,
+            definition: serde_json::from_value(serde_json::json!({
+                "version": "2026-09-29", "dependencies": {},
+                "nodes": [
+                    {"id": "dispatch", "kind": "user.dispatch", "config": {"selected": child}},
+                    {"id": "independent", "kind": "fixture.input"},
+                    {"id": "data-target", "kind": "fixture.sink"},
+                    {"id": "control-target", "kind": "fixture.sink"}
+                ],
+                "edges": [{"from_node": "dispatch", "from_output": "value",
+                    "to_node": "data-target", "to_input": "value"}],
+                "control_edges": [{"from_node": "dispatch", "from_output": "ready",
+                    "to_node": "control-target"}]
+            }))
+            .unwrap(),
+            execution_order: vec![
+                "dispatch".into(),
+                "independent".into(),
+                "data-target".into(),
+                "control-target".into(),
+            ],
+            loop_orders: vec![mf_runtime::LoopExecutionOrder {
+                path: vec![mf_telemetry::event::ScopePathEntry::binding_key(
+                    "dispatch", "selected",
+                )],
+                execution_order: vec!["source".into(), "sink".into()],
+            }],
+            input_schema: WorkflowInputSchema::default(),
+        };
+        let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
+        assert_eq!(decoded, manifest);
+        let description = decoded.description().unwrap();
+        assert_eq!(description.loop_bodies.len(), 1);
+        assert_eq!(
+            description.version,
+            if feature == "order_edges" {
+                mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_19
+            } else {
+                mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23
+            }
+        );
+        assert!(description.execution.is_some());
+        let body = &description.loop_bodies[0];
+        if feature == "order_edges" {
+            assert_eq!(body.order_edges.len(), 1);
+            assert_eq!(body.order_edges[0].from_node, "source");
+            assert_eq!(body.order_edges[0].to_node, "sink");
+        } else {
+            assert_eq!(body.clusters.len(), 1);
+            assert_eq!(body.clusters[0].nodes, ["source", "sink"]);
+        }
+        assert_eq!(
+            decoded.definition.version,
+            mf_runtime::WorkflowDefinitionVersion::V2026_09_29
+        );
+        let interface = decoded.interface().unwrap();
+        assert_eq!(
+            interface.schema.inputs,
+            [
+                ("dispatch".to_owned(), Default::default()),
+                ("independent".to_owned(), Default::default())
+            ]
+            .into()
+        );
+        assert!(interface.schema.stdin.is_empty());
+        assert_eq!(interface.workflow_id, decoded.workflow_id().unwrap());
+        interface.validate_for_description(&description).unwrap();
+        // Observation declarations must not rewrite the actual prepared schema.
+        assert_eq!(decoded.input_schema, WorkflowInputSchema::default());
+        decoded
+            .validate_prepared_schema(&decoded.input_schema)
+            .unwrap();
+        assert!(matches!(
+            decoded.validate_prepared_schema(&interface.schema),
+            Err(WorkflowManifestError::InterfaceDrift {
+                component: "initial node declaration",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn sibling_frozen_fields_keep_identical_node_ids_in_separate_scopes() {
+    let key = |field| mf_telemetry::event::ScopePathEntry::binding_key("dispatch", field);
+    let manifest = WorkflowManifest {
+        version: WorkflowManifestVersion::V2026_10_16,
+        definition: serde_json::from_value(serde_json::json!({
+            "version": "2026-10-28", "dependencies": {},
+            "nodes": [{"id": "dispatch", "kind": "user.dispatch", "config": {
+                "selected": {"version": "2026-10-28", "dependencies": {}, "nodes": [
+                    {"id": "value", "kind": "fixture.selected"}
+                ]},
+                "fallback": {"version": "2026-10-28", "dependencies": {}, "nodes": [
+                    {"id": "value", "kind": "fixture.fallback"}
+                ]},
+                "opaque": {"version": "2099-01-01", "nodes": []}
+            }}]
+        }))
+        .unwrap(),
+        execution_order: vec!["dispatch".into()],
+        loop_orders: vec![
+            mf_runtime::LoopExecutionOrder {
+                path: vec![key("selected")],
+                execution_order: vec!["value".into()],
+            },
+            mf_runtime::LoopExecutionOrder {
+                path: vec![key("fallback")],
+                execution_order: vec!["value".into()],
+            },
+        ],
+        input_schema: WorkflowInputSchema {
+            inputs: [("dispatch".to_owned(), Default::default())].into(),
+            ..Default::default()
+        },
+    };
+    let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
+    let graph = decoded.description().unwrap();
+    for field in ["selected", "fallback"] {
+        let body = graph.loop_body(&[key(field)]).unwrap();
+        assert_eq!(body.nodes[0].id, "value");
+        assert_eq!(body.nodes[0].kind, format!("fixture.{field}"));
+    }
+    assert_eq!(graph.body_paths_for_node(&[], "dispatch").len(), 2);
+    assert_eq!(graph.static_node_count().unwrap().get(), 3);
+    let mut reordered = manifest.clone();
+    reordered.loop_orders.reverse();
+    assert_eq!(reordered.description().unwrap(), graph);
+
+    // Only an explicit order turns ordinary provider JSON into a frozen child.
+    let mut corrupt = manifest.clone();
+    corrupt.loop_orders.push(mf_runtime::LoopExecutionOrder {
+        path: vec![key("opaque")],
+        execution_order: vec![],
+    });
+    for error in [
+        corrupt.to_bytes().unwrap_err(),
+        WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&corrupt).unwrap())).unwrap_err(),
+    ] {
+        assert!(matches!(&error, WorkflowManifestError::Graph {
+            source: mf_telemetry::ContractError::Json { source }
+        } if source.is_data()));
+        assert!(error.source().unwrap().is::<mf_telemetry::ContractError>());
+        assert!(
+            error
+                .source()
+                .unwrap()
+                .source()
+                .unwrap()
+                .is::<serde_json::Error>()
+        );
+    }
+    assert_eq!(manifest.description().unwrap(), graph);
+}
+
+#[test]
+fn historical_iteration_projection_still_validates_explicit_frozen_descendants() {
+    let selected = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
+    let manifest = WorkflowManifest {
+        version: WorkflowManifestVersion::V2026_10_16,
+        definition: serde_json::from_value(serde_json::json!({
+            "version": "2026-09-29", "dependencies": {},
+            "nodes": [{"id": "map", "kind": "builtin.iteration", "config": {"body": {
+                "version": "2026-10-19", "dependencies": {}, "nodes": [
+                    {"id": "%iteration", "kind": "builtin.iteration_input"},
+                    {"id": "dispatch", "kind": "user.dispatch", "config": {"selected": {
+                        "version": "2026-10-19", "dependencies": {},
+                        "nodes": [{"id": "value", "kind": "fixture.value"}]
+                    }}}
+                ]
+            }}}]
+        }))
+        .unwrap(),
+        execution_order: vec!["map".into()],
+        loop_orders: vec![
+            mf_runtime::LoopExecutionOrder {
+                path: vec!["map".into()],
+                execution_order: vec!["%iteration".into(), "dispatch".into()],
+            },
+            mf_runtime::LoopExecutionOrder {
+                path: vec!["map".into(), selected],
+                execution_order: vec!["value".into()],
+            },
+        ],
+        input_schema: WorkflowInputSchema::default(),
+    };
+    let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, manifest);
+    assert!(decoded.description().unwrap().loop_bodies.is_empty());
+    assert!(decoded.interface().unwrap().schema.inputs.is_empty());
+    for (case, diagnostic) in [
+        ("missing_parent", "missing compiled body execution order"),
+        (
+            "unknown_descendant",
+            "compiled execution order names unknown node `unknown`",
+        ),
+        (
+            "incomplete_descendant",
+            "compiled execution order does not match the node count",
+        ),
+    ] {
+        let mut corrupt = manifest.clone();
+        match case {
+            "missing_parent" => {
+                corrupt.loop_orders.remove(0);
+            }
+            "unknown_descendant" => corrupt.loop_orders[1].execution_order[0] = "unknown".into(),
+            _ => corrupt.loop_orders[1].execution_order.clear(),
+        }
+        for error in [
+            corrupt.to_bytes().unwrap_err(),
+            WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&corrupt).unwrap()))
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(&error, WorkflowManifestError::Graph {
+                source: mf_telemetry::ContractError::Invalid { message }
+            } if message.contains(diagnostic)),
+                "{case}: {error}"
+            );
+        }
+    }
+}
+
 fn sample() -> WorkflowManifest {
     WorkflowManifest {
         version: WorkflowManifestVersion::V2026_10_16,
