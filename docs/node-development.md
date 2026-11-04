@@ -74,9 +74,10 @@ the workflow. Manifest inspection reads the frozen graph and interface without c
 Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
 
 Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
-Use `NodeFactory::Subgraph { parameters, plain, prepared }` for declared executable child fields.
+Use `NodeFactory::Subgraph { parameter_types, plain, prepared }` for declared executable child fields.
 Its prepared factory takes `(id: &str, config: Value, children: BTreeMap<String, PreparedSubgraph>)`;
-there is no separate execution-options argument. `parameters` is `Config::FLOW_PARAMETERS`.
+there is no separate execution-options argument. Set `parameter_types` to the `Config::parameter_types`
+function, which returns the unified configuration parameter-type map.
 Call, Loop, Iteration, and custom providers all use this same map-based factory contract. Their child
 fields contain complete Flow definitions in ordinary node configuration; Loop and Iteration no longer
 have separate partial-body formats or a top-level `loop` field. The compiler resolves the selected
@@ -1091,23 +1092,35 @@ use mf_runtime::{Flow, NodeConfig, NodeFactory};
 struct Config {
     body: Flow,
     fallback: Option<Flow>,
+    label: String,
 }
 
+// Config::parameter_types() contains:
+// body: ConfigParameterType::Flow
+// fallback: ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
+// label: ConfigParameterType::Value
+//
 // In NodeRegistration, using the provider's plain and prepared factory functions:
 // factory: NodeFactory::Subgraph {
-//     parameters: Config::FLOW_PARAMETERS,
+//     parameter_types: Config::parameter_types,
 //     plain,
 //     prepared,
 // },
 ```
 
-`NodeConfig` discovers the existing executable types `Flow` and `Option<Flow>` from the receiving
-node's fields; it does not require a separate source-description type or a new workflow schema.
-Use `PreparedSubgraph` (or its optional form) when the node needs the existing callable interface,
-including manual host callbacks. The derive reflects Serde field names (`rename` and `rename_all`),
-checks type identity, and rejects ambiguous wire names, flattening, aliases or custom codecs on Flow
-fields. Ordinary configuration remains provider-owned data, even if it contains keys such as `$flow`,
-`definition` or `path`.
+`NodeConfig::parameter_types()` returns a `ConfigParameterTypes` map for every named configuration
+field, keyed by its canonical Serde deserialize name (`rename` and `rename_all`). Direct `Flow` fields
+have type `ConfigParameterType::Flow`; `Option<Flow>` fields have type
+`ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))`. There is no separate Flow-name
+list or source-description schema. Use `PreparedSubgraph` (or its optional form) when the node needs
+the existing callable interface, including manual host callbacks; its metadata uses the same Flow types.
+
+All ordinary fields have opaque `ConfigParameterType::Value` metadata, including optional values,
+custom-Serde types, and named flattened fields in configurations without executable fields. This does
+not require `NodeValue`, reflect nested JSON, or infer executable roles from keys such as `$flow`,
+`definition`, `body` or `path`. Ordinary aliases participate in collision checks but do not add map entries.
+The derive rejects ambiguous canonical names, executable-field aliases or custom codecs, and combining
+flattened fields with executable fields. Ordinary configuration remains provider-owned Serde data.
 
 Author a declared field as `{"path": "./worker.json"}`, `{"builtin": "my-provider.worker"}`, or
 `{"definition": <WorkflowDefinition>}` using the workflow's existing version. Source loading consults

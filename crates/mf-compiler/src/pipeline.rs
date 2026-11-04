@@ -716,7 +716,9 @@ mod tests {
         mf_runtime::NodeRegistration {
             kind: "fixture.first",
             factory: mf_runtime::NodeFactory::Subgraph {
-                parameters: &["host_extra"], plain: host_plain, prepared: host_prepared,
+                parameter_types: || BTreeMap::from([
+                    ("host_extra".into(), mf_runtime::ConfigParameterType::Flow),
+                ]), plain: host_plain, prepared: host_prepared,
             },
         }
     }
@@ -1032,7 +1034,10 @@ fn prepared(_: &str, _: Value, _: BTreeMap<String, PreparedSubgraph>) -> Result<
 }}
 inventory::submit! {{
     NodeRegistration {{ kind: {kind:?}, factory: NodeFactory::Subgraph {{
-        parameters: &["body"], plain, prepared,
+        parameter_types: || BTreeMap::from([
+            ("body".into(), mf_runtime::ConfigParameterType::Flow),
+            ("host_extra".into(), mf_runtime::ConfigParameterType::Value),
+        ]), plain, prepared,
     }} }}
 }}
 {extra}
@@ -1069,7 +1074,10 @@ inventory::submit! {{
             r#"
 inventory::submit! {
     NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
-        parameters: &["body"], plain, prepared,
+        parameter_types: || BTreeMap::from([
+            ("body".into(), mf_runtime::ConfigParameterType::Flow),
+            ("host_extra".into(), mf_runtime::ConfigParameterType::Value),
+        ]), plain, prepared,
     } }
 }
 "#,
@@ -1099,6 +1107,10 @@ inventory::submit! {
             assert_eq!(
                 resolved.sources,
                 BTreeSet::from([inputs.definition.clone()])
+            );
+            assert_eq!(
+                resolved.contracts["fixture.first"]["host_extra"],
+                mf_runtime::ConfigParameterType::Value
             );
             let config = &resolved.definition.nodes[0].config["body"]["nodes"][0]["config"];
             assert!(config["body"].get("nodes").is_some());
@@ -1156,7 +1168,10 @@ mf_runtime::register_builtin_flow!("feature", builtin);
 // requires the selected provider's explicit receiving contract.
 inventory::submit! {
     NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
-        parameters: &["body"], plain, prepared,
+        parameter_types: || BTreeMap::from([
+            ("body".into(), mf_runtime::ConfigParameterType::Flow),
+            ("host_extra".into(), mf_runtime::ConfigParameterType::Value),
+        ]), plain, prepared,
     } }
 }
 "###,

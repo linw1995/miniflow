@@ -3,11 +3,31 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, Path, parse_quote};
 
-fn assert_expansion(input: DeriveInput, runtime: Path, names: &[&str]) {
+enum ParameterType {
+    Value,
+    Flow,
+    OptionalFlow,
+}
+
+use ParameterType::{Flow, OptionalFlow, Value};
+
+fn assert_expansion(input: DeriveInput, runtime: Path, parameters: &[(&str, ParameterType)]) {
     let name = &input.ident;
     let prefix = quote! { impl #runtime::NodeConfig for #name }.to_string();
+    let entries = parameters.iter().map(|(name, ty)| {
+        let ty = match ty {
+            Value => quote!(#runtime::ConfigParameterType::Value),
+            Flow => quote!(#runtime::ConfigParameterType::Flow),
+            OptionalFlow => quote!(#runtime::ConfigParameterType::Optional(::std::boxed::Box::new(
+                #runtime::ConfigParameterType::Flow
+            ))),
+        };
+        quote!((#name.into(), #ty))
+    });
     let declaration = quote! {
-        const FLOW_PARAMETERS: &'static [&'static str] = &[#(#names),*];
+        fn parameter_types() -> #runtime::ConfigParameterTypes {
+            #runtime::ConfigParameterTypes::from([#(#entries),*])
+        }
     }
     .to_string();
     let expanded = expand(input).unwrap().to_string();
@@ -63,7 +83,15 @@ fn discovers_direct_and_optional_fields_in_declaration_order() {
             }
         },
         parse_quote!(::mf_runtime),
-        &["body", "left", "right", "qualified", "type"],
+        &[
+            ("body", Flow),
+            ("count", Value),
+            ("left", OptionalFlow),
+            ("right", OptionalFlow),
+            ("qualified", Flow),
+            ("ordinary", Value),
+            ("type", Flow),
+        ],
     );
 }
 
@@ -83,10 +111,11 @@ fn supports_empty_and_ordinary_configs() {
                 ordinary: std::collections::BTreeMap<String, String>,
                 #[serde(alias = "other", skip_deserializing)]
                 value: String,
+                body: Option<Settings>,
             }
         },
         parse_quote!(::mf_runtime),
-        &[],
+        &[("ordinary", Value), ("value", Value), ("body", Value)],
     );
 }
 
@@ -101,10 +130,17 @@ fn honors_runtime_alias_and_serde_names_and_defaults() {
                 #[serde(rename = "left-hand", default)]
                 left_side: Option<Flow>,
                 right_side: Flow,
+                #[serde(rename = "settings", alias = "legacy", default)]
+                user_settings: Settings,
             }
         },
         parse_quote!(::runtime_alias),
-        &["requestBody", "left-hand", "rightSide"],
+        &[
+            ("requestBody", Flow),
+            ("left-hand", OptionalFlow),
+            ("rightSide", Flow),
+            ("settings", Value),
+        ],
     );
 }
 
@@ -191,7 +227,7 @@ fn supports_all_serde_field_rename_rules() {
                 struct Config { request_body: Flow }
             },
             parse_quote!(::mf_runtime),
-            &[expected],
+            &[(expected, Flow)],
         );
     }
     // Serde does not lowercase a field identifier for its `lowercase` rule.
@@ -201,7 +237,7 @@ fn supports_all_serde_field_rename_rules() {
             struct Config { mixedCase: Flow }
         },
         parse_quote!(::mf_runtime),
-        &["mixedCase"],
+        &[("mixedCase", Flow)],
     );
 }
 
@@ -277,7 +313,12 @@ fn ordinary_deserialize_names_ignore_serialize_names_and_custom_codecs() {
             }
         },
         parse_quote!(::mf_runtime),
-        &["body"],
+        &[
+            ("settings", Value),
+            ("otherSettings", Value),
+            ("extraSettings", Value),
+            ("body", Flow),
+        ],
     );
 }
 
@@ -309,7 +350,7 @@ fn discovers_literal_type_spellings_and_ignores_differently_named_aliases() {
             }
         },
         parse_quote!(::mf_runtime),
-        &["body", "left"],
+        &[("body", Flow), ("left", OptionalFlow), ("alias", Value)],
     );
 }
 
@@ -449,6 +490,26 @@ fn rejects_duplicate_names_and_attributes() {
         },
         "duplicate Flow parameter wire name",
     );
+    for input in [
+        parse_quote! {
+            struct Config {
+                #[serde(rename = "settings")]
+                left: String,
+                #[serde(rename = "settings")]
+                right: Settings,
+            }
+        },
+        parse_quote! {
+            #[serde(rename_all = "camelCase")]
+            struct Config {
+                user_settings: String,
+                userSettings: Settings,
+                body: Flow,
+            }
+        },
+    ] {
+        assert_error(input, "duplicate configuration parameter wire name");
+    }
     assert_error(
         parse_quote! {
             struct Config {
@@ -635,7 +696,12 @@ fn ignores_ordinary_associated_types_and_unparameterized_option_names() {
             }
         },
         parse_quote!(::mf_runtime),
-        &["body"],
+        &[
+            ("ordinary", Value),
+            ("named_option", Value),
+            ("qualified_option", Value),
+            ("body", Flow),
+        ],
     );
     assert_error(
         parse_quote! {
@@ -659,7 +725,12 @@ fn injects_flow_and_existing_host_policy_handles_without_deserializing_them() {
             }
         },
         parse_quote!(::mf_runtime),
-        &["compiled", "optional", "callback", "optional_callback"],
+        &[
+            ("compiled", Flow),
+            ("optional", OptionalFlow),
+            ("callback", Flow),
+            ("optional_callback", OptionalFlow),
+        ],
     );
     let expanded = expand(parse_quote! {
         #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -757,6 +828,6 @@ fn camel_case_handles_underscore_only_names_without_panicking() {
             struct Config { __: Flow }
         },
         parse_quote!(::mf_runtime),
-        &[""],
+        &[("", Flow)],
     );
 }

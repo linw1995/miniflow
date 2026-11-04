@@ -133,6 +133,20 @@ The selected receiving registrations determine which configuration fields are ex
 ordinary provider data is not interpreted as a Flow source. Planning uses registration metadata without
 constructing nodes and supports existing description and observation APIs.
 
+The plan freezes unified configuration parameter types for reachable node kinds. `NodeConfig`
+derives this metadata for every field: ordinary data remains opaque `Value`, while executable fields
+are `Flow` or `Optional(Flow)`. Missing optional values retain their types, and plain factories have
+explicit empty metadata. There is no separate Flow-name constant or declaration list.
+
+Offline descriptions and generated code select executable fields by scanning these frozen types;
+configuration keys and scope-order paths never establish field roles. Scope orders remain separate
+execution prerequisites. Saved-plan and generated preparation validate the complete receiver type
+metadata before constructing providers, not merely the set of present children.
+
+Manifest payload version `2026-11-04` requires the frozen parameter types; framing remains version 1.
+Older payloads and saved plans without types are rejected rather than inferred from JSON or
+order paths. This is an explicit format change, not a legacy-format adapter.
+
 `manifest(&registry) -> Result<WorkflowManifest, PlanError>` derives the current configured interface
 from the host registry. Inspection prepares separate nodes without executing them. There is no
 frozen build-time schema or comparison between build and target node features. Node metadata must

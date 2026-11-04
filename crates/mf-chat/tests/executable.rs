@@ -185,6 +185,9 @@ fn contract_accepts_multiple_models_and_arbitrary_output_sources() {
         .node = "another-model".into();
     ChatContract::from_manifest(&manifest).unwrap();
     manifest.definition.nodes[1].kind = "custom.generator".into();
+    manifest
+        .parameter_types
+        .insert("custom.generator".into(), Default::default());
     manifest.definition.nodes[1].config = json!({});
     ChatContract::from_manifest(&manifest).unwrap();
 }

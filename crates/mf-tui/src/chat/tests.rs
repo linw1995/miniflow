@@ -15,6 +15,11 @@ pub fn launch(directory: &Path) -> ChatLaunch {
         ]
     }))
     .unwrap();
+    manifest.parameter_types = [(
+        "builtin.llm".into(),
+        [("model".into(), mf_runtime::ConfigParameterType::Value)].into(),
+    )]
+    .into();
     manifest.execution_order = vec!["start".into()];
     manifest.input_schema = serde_json::from_value(json!({"inputs":{"start":{
         "prompt":{"type":"string","required":true},

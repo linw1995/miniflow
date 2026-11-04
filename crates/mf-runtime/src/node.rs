@@ -1339,9 +1339,9 @@ impl PreparedNode {
     }
 }
 
-/// Declares which serialized configuration fields contain executable Flow values.
+/// Reflects serialized configuration parameter types and injects prepared Flow values.
 pub trait NodeConfig: Sized {
-    const FLOW_PARAMETERS: &'static [&'static str];
+    fn parameter_types() -> crate::ConfigParameterTypes;
 
     /// Decodes ordinary configuration and injects the explicitly prepared Flow fields.
     /// The derive implements this without requiring executable Flow values to be deserializable.
@@ -1355,7 +1355,7 @@ pub trait NodeConfig: Sized {
 pub enum NodeFactory {
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
     Subgraph {
-        parameters: &'static [&'static str],
+        parameter_types: fn() -> crate::ConfigParameterTypes,
         plain: fn(Value) -> Result<PreparedNode, NodeBuildError>,
         #[expect(
             clippy::type_complexity,
@@ -1381,10 +1381,12 @@ impl NodeRegistration {
         matches!(self.factory, NodeFactory::Subgraph { .. })
     }
 
-    pub fn flow_parameters(&self) -> &'static [&'static str] {
+    pub fn parameter_types(&self) -> crate::ConfigParameterTypes {
         match self.factory {
-            NodeFactory::Subgraph { parameters, .. } => parameters,
-            _ => &[],
+            NodeFactory::Subgraph {
+                parameter_types, ..
+            } => parameter_types(),
+            NodeFactory::Plain(_) => BTreeMap::new(),
         }
     }
 
@@ -1394,20 +1396,13 @@ impl NodeRegistration {
         &self,
         node: &crate::NodeDefinition,
     ) -> Result<BTreeMap<String, crate::WorkflowDefinition>, NodeBuildError> {
-        let mut declared = std::collections::BTreeSet::new();
-        for name in self.flow_parameters() {
-            ensure!(
-                !name.trim().is_empty() && declared.insert(*name),
-                InvalidSubgraphSnafu {
-                    message: format!(
-                        "node `{}` declares a blank or duplicate Flow parameter `{name}`",
-                        self.kind
-                    )
-                }
-            );
-        }
-        node.flow_parameters(self.flow_parameters())
-            .context(FlowParametersSnafu)
+        let parameter_types = self.parameter_types();
+        let names = parameter_types
+            .iter()
+            .filter(|(_, parameter_type)| parameter_type.is_flow())
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        node.flow_parameters(&names).context(FlowParametersSnafu)
     }
 
     pub fn instantiate_subgraphs(

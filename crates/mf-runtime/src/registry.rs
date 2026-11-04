@@ -154,19 +154,10 @@ impl NodeRegistry {
         self.registrations.values().copied()
     }
 
-    /// Includes plain kinds with empty contracts so bootstrap can distinguish unknown kinds.
-    pub fn flow_parameter_contracts(&self) -> BTreeMap<String, Vec<String>> {
+    /// Includes plain kinds with empty metadata so bootstrap can distinguish unknown kinds.
+    pub fn parameter_types(&self) -> crate::NodeParameterTypes {
         self.iter()
-            .map(|registration| {
-                (
-                    registration.kind.to_owned(),
-                    registration
-                        .flow_parameters()
-                        .iter()
-                        .map(|name| (*name).to_owned())
-                        .collect(),
-                )
-            })
+            .map(|registration| (registration.kind.to_owned(), registration.parameter_types()))
             .collect()
     }
 
@@ -339,7 +330,9 @@ mod tests {
         let registration = NodeRegistration {
             kind: "test.subgraph",
             factory: crate::NodeFactory::Subgraph {
-                parameters: &["body"],
+                parameter_types: || {
+                    BTreeMap::from([("body".into(), crate::ConfigParameterType::Flow)])
+                },
                 plain: first_factory,
                 prepared: |_, config, _| first_factory(config),
             },
@@ -349,23 +342,35 @@ mod tests {
     }
 
     #[test]
-    fn flow_parameter_contracts_include_plain_kinds() {
+    fn parameter_types_include_plain_kinds() {
+        use crate::ConfigParameterType::{Flow, Optional, Value};
+
         static FLOW: NodeRegistration = NodeRegistration {
             kind: "test.flow",
             factory: crate::NodeFactory::Subgraph {
-                parameters: &["selected", "fallback"],
+                parameter_types: || {
+                    BTreeMap::from([
+                        ("selected".into(), Flow),
+                        ("fallback".into(), Optional(Box::new(Flow))),
+                        ("option".into(), Value),
+                    ])
+                },
                 plain: first_factory,
                 prepared: |_, config, _| first_factory(config),
             },
         };
         let registry = NodeRegistry::from_registrations([&FIRST, &FLOW]).unwrap();
         assert_eq!(
-            registry.flow_parameter_contracts(),
+            registry.parameter_types(),
             BTreeMap::from([
-                ("test.duplicate".into(), vec![]),
+                ("test.duplicate".into(), BTreeMap::new()),
                 (
                     "test.flow".into(),
-                    vec!["selected".into(), "fallback".into()]
+                    BTreeMap::from([
+                        ("selected".into(), Flow),
+                        ("fallback".into(), Optional(Box::new(Flow))),
+                        ("option".into(), Value),
+                    ])
                 ),
             ])
         );

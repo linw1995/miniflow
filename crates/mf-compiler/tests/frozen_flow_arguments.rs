@@ -46,7 +46,7 @@ inventory::submit! {
     mf_runtime::NodeRegistration {
         kind: "test.mixed_version_owner",
         factory: mf_runtime::NodeFactory::Subgraph {
-            parameters: Config::FLOW_PARAMETERS,
+            parameter_types: Config::parameter_types,
             plain: plain_owner,
             prepared: prepared_owner,
         },
@@ -154,11 +154,9 @@ fn mixed_version_child_iterations_retain_body_paths_for_static_and_mapped_calls(
         }
     };
     assert_iteration_paths(mf_compiler::describe_compiled(&plan).unwrap());
-    let replanned = mf_compiler::plan_resolved_definition(
-        &plan.definition,
-        &registry.flow_parameter_contracts(),
-    )
-    .unwrap();
+    let replanned =
+        mf_compiler::plan_resolved_definition(&plan.definition, &registry.parameter_types())
+            .unwrap();
     assert_eq!(
         plan.loop_orders, replanned.loop_orders,
         "mixed-version scope orders must remain canonical after preparation"

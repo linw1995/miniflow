@@ -29,8 +29,8 @@ pub struct LoopExecutionOrder {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowManifestVersion {
-    #[serde(rename = "2026-10-16")]
-    V2026_10_16,
+    #[serde(rename = "2026-11-04")]
+    V2026_11_04,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,6 +38,7 @@ pub enum WorkflowManifestVersion {
 pub struct WorkflowManifest {
     pub version: WorkflowManifestVersion,
     pub definition: crate::WorkflowDefinition,
+    pub parameter_types: crate::NodeParameterTypes,
     pub execution_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_orders: Vec<LoopExecutionOrder>,
@@ -79,8 +80,13 @@ impl WorkflowManifest {
     }
 
     pub fn description(&self) -> Result<WorkflowDescription, WorkflowManifestError> {
-        describe_definition(&self.definition, &self.execution_order, &self.loop_orders)
-            .context(GraphSnafu)
+        describe_definition(
+            &self.definition,
+            &self.execution_order,
+            &self.loop_orders,
+            &self.parameter_types,
+        )
+        .context(GraphSnafu)
     }
 
     pub fn interface(&self) -> Result<WorkflowInterface, WorkflowManifestError> {
@@ -270,6 +276,7 @@ pub fn describe_definition(
     definition: &crate::WorkflowDefinition,
     execution_order: &[String],
     loop_orders: &[LoopExecutionOrder],
+    parameter_types: &crate::NodeParameterTypes,
 ) -> Result<WorkflowDescription, ContractError> {
     let mut orders: BTreeMap<_, _> = loop_orders
         .iter()
@@ -290,6 +297,7 @@ pub fn describe_definition(
         &mut loop_bodies,
         definition.has_order_edges() || definition.version.supports_clusters(),
         &mut omitted_iterations,
+        parameter_types,
     )?;
     ensure!(
         orders.is_empty(),
@@ -464,28 +472,21 @@ fn describe_loops(
     bodies: &mut Vec<LoopBodyDescription>,
     include_iterations: bool,
     omitted_iterations: &mut Vec<Vec<String>>,
+    parameter_types: &crate::NodeParameterTypes,
 ) -> Result<(), ContractError> {
     for node in &parent.nodes {
         let omit_iteration = !include_iterations && node.kind == crate::ITERATION_KIND;
         if omit_iteration {
             let mut body_path = path.clone();
             body_path.push(node.flow_scope_key("body"));
-            // Historical manifests can omit these orders entirely. New compiler
-            // facts include them: consume and validate all supplied paths before
-            // omitting the subtree from the observation view.
-            if !orders.keys().any(|order| order.starts_with(&body_path)) {
-                continue;
-            }
+            // Validate every declared child and its order before applying the
+            // historical observation projection, even if all orders were deleted.
             omitted_iterations.push(body_path);
         }
-        // Scope paths are the compiler's authority for ordinary configuration.
-        // Without receiving metadata, an omitted outer typed scope is intentionally
-        // indistinguishable from opaque JSON; never infer it from object contents.
-        let parameters = node.compiled_flow_fields(path, orders.keys().map(Vec::as_slice));
         // Translate definition errors only at the observation projection boundary.
         // Keep the original JSON source rather than stringifying it.
         let flows = node
-            .flow_parameters(&parameters)
+            .declared_flows(parameter_types)
             .or_else(|error| match error {
                 crate::FlowParameterError::Invalid { message } => {
                     mf_telemetry::InvalidSnafu { message }.fail()
@@ -527,6 +528,7 @@ fn describe_loops(
                 bodies,
                 include_iterations,
                 omitted_iterations,
+                parameter_types,
             )?;
             path.pop();
         }

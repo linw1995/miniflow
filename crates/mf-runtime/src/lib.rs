@@ -43,14 +43,14 @@ pub use context::{
     execute_resolved_node_in_context, select_context_output,
 };
 pub use definition::{
-    CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
-    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, FlowParameterError,
-    FlowSource, InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID,
-    LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
-    MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
-    NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
-    validate_exclusive_inputs,
+    CALL_KIND, CallConfig, ClusterDefinition, ConfigParameterType, ConfigParameterTypes,
+    ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition,
+    ExclusiveInputError, FlowParameterError, FlowSource, InputBindingDefinition, LOOP_ASSIGN_KIND,
+    LOOP_KIND, LOOP_SOURCE_ID, LoopComparisonOperator, LoopConditionDefinition, LoopDefinition,
+    LoopVariableDefinition, MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS,
+    MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency, NodeDependencyError, NodeParameterTypes,
+    OrderEdgeDefinition, OutputReferenceDefinition, WorkflowDefinition, WorkflowDefinitionVersion,
+    WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{

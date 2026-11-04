@@ -1,6 +1,6 @@
 use mf_runtime::{
-    CallConfig, IterationConfig, LoopDefinition, NodeDefinition, NodeFactory, NodeRegistration,
-    WorkflowDefinition, WorkflowDefinitionVersion,
+    CallConfig, ConfigParameterType, ConfigParameterTypes, IterationConfig, LoopDefinition,
+    NodeDefinition, NodeFactory, NodeRegistration, WorkflowDefinition, WorkflowDefinitionVersion,
 };
 use serde_json::{Value, json};
 use std::error::Error;
@@ -43,12 +43,48 @@ fn parameter(node: &NodeDefinition) -> &'static str {
     }
 }
 
+fn parameter_types(kind: &str) -> ConfigParameterTypes {
+    use ConfigParameterType::{Flow, Optional, Value};
+    match kind {
+        "workflow.call" => [
+            ("body".into(), Optional(Box::new(Flow))),
+            ("flow".into(), Value),
+        ]
+        .into(),
+        "workflow.loop" => [
+            ("body".into(), Flow),
+            ("max_iterations".into(), Value),
+            ("variables".into(), Value),
+        ]
+        .into(),
+        "builtin.iteration" => [
+            ("body".into(), Flow),
+            ("mode".into(), Value),
+            ("on_error".into(), Value),
+        ]
+        .into(),
+        "user.dispatch" => [
+            ("selected".into(), Flow),
+            ("option".into(), Value),
+            ("nested".into(), Value),
+        ]
+        .into(),
+        "%loop" | "builtin.iteration_input" => Default::default(),
+        _ => panic!("unknown fixture kind: {kind}"),
+    }
+}
+
 #[test]
 fn all_child_kinds_use_declared_fields_without_conversion_or_synthetic_nodes() {
     for node in nodes() {
         let name = parameter(&node);
         assert!(node.flow_parameters(&[]).unwrap().is_empty());
         let flows = node.flow_parameters(&[name]).unwrap();
+        assert_eq!(
+            node.declared_flows(&[(node.kind.clone(), parameter_types(&node.kind))].into())
+                .unwrap(),
+            flows
+        );
         assert_eq!(flows.len(), 1);
         let body = &flows[name];
         assert_eq!(body.version, WorkflowDefinitionVersion::V2026_10_25);
@@ -67,10 +103,12 @@ fn all_child_kinds_use_declared_fields_without_conversion_or_synthetic_nodes() {
         let registration = NodeRegistration {
             kind: "test.child",
             factory: NodeFactory::Subgraph {
-                parameters: if name == "body" {
-                    &["body"]
-                } else {
-                    &["selected"]
+                parameter_types: match node.kind.as_str() {
+                    "workflow.call" => || parameter_types("workflow.call"),
+                    "workflow.loop" => || parameter_types("workflow.loop"),
+                    "builtin.iteration" => || parameter_types("builtin.iteration"),
+                    "user.dispatch" => || parameter_types("user.dispatch"),
+                    _ => unreachable!(),
                 },
                 plain: |_| panic!("no providers needed"),
                 prepared: |_, _, _| panic!("no providers needed"),
@@ -164,7 +202,19 @@ fn manifest_projects_explicit_compiled_sources_with_complete_child_orders() {
             }
         })
         .collect::<Vec<_>>();
-    let description = mf_runtime::describe_definition(&parent, &order, &child_orders).unwrap();
+    let declarations = [
+        "workflow.call",
+        "workflow.loop",
+        "builtin.iteration",
+        "user.dispatch",
+        "%loop",
+        "builtin.iteration_input",
+    ]
+    .into_iter()
+    .map(|kind| (kind.into(), parameter_types(kind)))
+    .collect();
+    let description =
+        mf_runtime::describe_definition(&parent, &order, &child_orders, &declarations).unwrap();
     assert_eq!(description.loop_bodies.len(), 4);
     for child in &description.loop_bodies {
         match child.path[0].as_str() {
@@ -191,6 +241,13 @@ fn missing_and_null_fields_are_optional_and_unresolved_calls_are_not_special_cas
         }))
         .unwrap();
         assert!(node.flow_parameters(&["body"]).unwrap().is_empty());
+        assert!(
+            node.declared_flows(
+                &[("workflow.call".into(), parameter_types("workflow.call"))].into()
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 }
 

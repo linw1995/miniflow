@@ -832,6 +832,12 @@ pub enum WorkflowBuildError {
         source: NodeBuildError,
         definition_id: DefinitionId,
     },
+    #[snafu(display("compiled parameter types reference unknown node kind `{kind}`"))]
+    UnknownParameterKind { kind: String },
+    #[snafu(display(
+        "configuration parameter types for node kind `{kind}` differ from the compiled contract"
+    ))]
+    ParameterTypeDrift { kind: String },
     #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
     LoopVariables {
         definition_id: DefinitionId,
@@ -867,6 +873,37 @@ pub enum WorkflowBuildError {
         #[snafu(source(from(WorkflowBuildError, Box::new)))]
         source: Box<WorkflowBuildError>,
     },
+}
+
+/// Preflight the complete typed configuration contract without invoking factories.
+pub fn validate_parameter_types(
+    registry: &NodeRegistry,
+    expected: &mf_runtime::NodeParameterTypes,
+) -> Result<(), WorkflowBuildError> {
+    for (kind, parameter_types) in expected {
+        // These nodes are lowered and constructed by the compiler, not providers.
+        if matches!(
+            kind.as_str(),
+            crate::LOOP_SOURCE_ID
+                | mf_runtime::ITERATION_INPUT_KIND
+                | crate::LOOP_ASSIGN_KIND
+                | crate::EXIT_LOOP_KIND
+        ) {
+            ensure!(
+                parameter_types.is_empty(),
+                ParameterTypeDriftSnafu { kind: kind.clone() }
+            );
+            continue;
+        }
+        let registration = registry
+            .get(kind)
+            .with_context(|| UnknownParameterKindSnafu { kind: kind.clone() })?;
+        ensure!(
+            registration.parameter_types() == *parameter_types,
+            ParameterTypeDriftSnafu { kind: kind.clone() }
+        );
+    }
+    Ok(())
 }
 
 /// Validate the receiving registration and the compiled binding set before children

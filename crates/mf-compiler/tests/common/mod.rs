@@ -34,6 +34,11 @@ pub fn fixture_definition() -> WorkflowDefinition {
 pub fn fixture_plan() -> CompiledWorkflow {
     CompiledWorkflow {
         definition: fixture_definition(),
+        parameter_types: [
+            ("fixture.source".into(), Default::default()),
+            ("fixture.echo".into(), Default::default()),
+        ]
+        .into(),
         execution_order: vec!["a".into(), "b".into()],
         loop_orders: vec![],
     }

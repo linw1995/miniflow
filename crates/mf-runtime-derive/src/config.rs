@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -83,8 +83,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut flow_initializers = Vec::new();
     let mut flow_idents = Vec::new();
     let mut parameters = Vec::new();
-    let mut names = BTreeSet::new();
+    let mut flow_names = BTreeMap::new();
     let mut ordinary_names = BTreeSet::new();
+    let mut ordinary_wire_names = BTreeSet::new();
     let mut flatten = None;
     for field in fields.named {
         let mut options = serde_options(&field.attrs)?;
@@ -127,7 +128,15 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     flatten = Some(meta.span());
                 }
             }
-            ordinary_names.insert(wire_name(&ident, rename, rename_all.as_ref()).value());
+            let wire = wire_name(&ident, rename, rename_all.as_ref());
+            if !ordinary_wire_names.insert(wire.value()) {
+                return Err(syn::Error::new(
+                    wire.span(),
+                    "duplicate configuration parameter wire name",
+                ));
+            }
+            ordinary_names.insert(wire.value());
+            parameters.push((wire, quote!(#runtime::ConfigParameterType::Value)));
             continue;
         };
         let ident = field.ident.expect("named field");
@@ -153,7 +162,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
         let wire = wire_name(&ident, rename, rename_all.as_ref());
-        if !names.insert(wire.value()) {
+        if flow_names.insert(wire.value(), wire.span()).is_some() {
             return Err(syn::Error::new(
                 wire.span(),
                 "duplicate Flow parameter wire name",
@@ -196,9 +205,16 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         };
         flow_initializers.push(quote!(let #ident = #value;));
         flow_idents.push(ident);
-        parameters.push(wire);
+        let parameter_type = if optional {
+            quote!(#runtime::ConfigParameterType::Optional(::std::boxed::Box::new(
+                #runtime::ConfigParameterType::Flow
+            )))
+        } else {
+            quote!(#runtime::ConfigParameterType::Flow)
+        };
+        parameters.push((wire, parameter_type));
     }
-    if !parameters.is_empty()
+    if !flow_names.is_empty()
         && let Some(span) = flatten
     {
         return Err(syn::Error::new(
@@ -206,10 +222,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             "NodeConfig cannot combine Flow parameter fields with serde flatten; flattened wire names are unknown, so implement NodeConfig manually",
         ));
     }
-    for parameter in &parameters {
-        if ordinary_names.contains(&parameter.value()) {
+    for (parameter, span) in &flow_names {
+        if ordinary_names.contains(parameter) {
             return Err(syn::Error::new(
-                parameter.span(),
+                *span,
                 "Flow parameter wire name collides with an ordinary field's deserialize name or alias",
             ));
         }
@@ -240,9 +256,14 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     }
     let container_attrs =
         (!container_options.is_empty()).then(|| quote!(#[serde(#(#container_options),*)]));
+    let (parameter_names, parameter_types): (Vec<_>, Vec<_>) = parameters.into_iter().unzip();
     Ok(quote! {
         impl #runtime::NodeConfig for #name {
-            const FLOW_PARAMETERS: &'static [&'static str] = &[#(#parameters),*];
+            fn parameter_types() -> #runtime::ConfigParameterTypes {
+                #runtime::ConfigParameterTypes::from([
+                    #((#parameter_names.into(), #parameter_types)),*
+                ])
+            }
 
             #[allow(unused_mut)]
             fn from_config(

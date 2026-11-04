@@ -206,6 +206,8 @@ pub enum WorkflowCompileError {
         visibility(pub)
     )]
     NonCanonicalPlanOrder,
+    #[snafu(display("compiled configuration parameter types differ from the receiving registry"))]
+    NonCanonicalParameterTypes,
     #[snafu(display("invalid node metadata for `{definition_id}`: {message}"))]
     InvalidNodeMetadata {
         definition_id: DefinitionId,
@@ -550,7 +552,7 @@ pub fn prepare_definition_with_layouts(
     let normalized = normalize_plan(
         definition,
         structural_order(definition)?,
-        &registry.flow_parameter_contracts(),
+        &registry.parameter_types(),
     )?;
     prepare_graph(
         &normalized.definition,
@@ -1276,11 +1278,7 @@ pub fn compile_resolved_definition(
         flow.into_tasks().context(FlowConstructionSnafu)?;
     }
 
-    normalize_plan(
-        &definition,
-        execution_order,
-        &registry.flow_parameter_contracts(),
-    )
+    normalize_plan(&definition, execution_order, &registry.parameter_types())
 }
 
 pub fn resolve_execution(
@@ -1326,7 +1324,7 @@ pub fn plan_definition(
 
 pub fn plan_resolved_definition(
     definition: &WorkflowDefinition,
-    contracts: &BTreeMap<String, Vec<String>>,
+    contracts: &mf_runtime::NodeParameterTypes,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
     for node in &definition.nodes {
         if node.kind == ITERATION_INPUT_KIND {
@@ -1343,15 +1341,16 @@ pub fn plan_resolved_definition(
 pub fn normalize_plan(
     definition: &WorkflowDefinition,
     execution_order: Vec<DefinitionId>,
-    contracts: &BTreeMap<String, Vec<String>>,
+    contracts: &mf_runtime::NodeParameterTypes,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
     let definition = normalize_scope(definition, &execution_order, None, contracts)?;
     crate::loops::validate_structure(&definition)?;
-    let loop_orders = loop_execution_orders(&definition, contracts)?;
+    let (loop_orders, parameter_types) = compiled_scope_facts(&definition, contracts)?;
     Ok(CompiledWorkflow {
         definition,
         execution_order,
         loop_orders,
+        parameter_types,
     })
 }
 
@@ -1359,7 +1358,7 @@ fn normalize_scope(
     definition: &WorkflowDefinition,
     execution_order: &[DefinitionId],
     owner_kind: Option<&str>,
-    contracts: &BTreeMap<String, Vec<String>>,
+    contracts: &mf_runtime::NodeParameterTypes,
 ) -> Result<WorkflowDefinition, WorkflowCompileError> {
     let nodes_by_id: BTreeMap<DefinitionId, _> = definition
         .nodes
@@ -1398,17 +1397,15 @@ fn normalize_scope(
         let parameters = contracts
             .get(&node.kind)
             .into_iter()
-            .flatten()
-            .map(String::as_str)
+            .flat_map(|parameters| parameters.iter())
+            .filter(|(_, value_type)| value_type.is_flow())
+            .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>();
-        let mut declared = BTreeSet::new();
         ensure!(
-            parameters
-                .iter()
-                .all(|name| !name.trim().is_empty() && declared.insert(name)),
+            parameters.iter().all(|name| !name.trim().is_empty()),
             InvalidCallSnafu {
                 definition_id: node.id.clone(),
-                message: "blank or duplicate receiving Flow parameter declaration",
+                message: "blank receiving Flow parameter declaration",
             }
         );
         for (name, mut body) in node
@@ -1511,8 +1508,16 @@ pub fn validate_compiled_scope_orders(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<(), WorkflowCompileError> {
-    let selected = loop_execution_orders(&plan.definition, &registry.flow_parameter_contracts())?;
-    ensure!(selected == plan.loop_orders, NonCanonicalPlanOrderSnafu);
+    let (selected_orders, selected_parameters) =
+        compiled_scope_facts(&plan.definition, &registry.parameter_types())?;
+    ensure!(
+        selected_parameters == plan.parameter_types,
+        NonCanonicalParameterTypesSnafu
+    );
+    ensure!(
+        selected_orders == plan.loop_orders,
+        NonCanonicalPlanOrderSnafu
+    );
     Ok(())
 }
 
@@ -1529,6 +1534,7 @@ pub fn prepare_compiled_plan(
         definition: resolve_execution(&plan.definition, &nodes)?,
         execution_order: canonical_order,
         loop_orders: plan.loop_orders.clone(),
+        parameter_types: plan.parameter_types.clone(),
     };
     let builder = crate::FlowBuilder::prepare(
         nodes,
@@ -1607,7 +1613,7 @@ pub fn describe_interface(
 ) -> Result<mf_runtime::WorkflowInterface, WorkflowCompileError> {
     let (resolved, input_schema) = prepare_interface(plan, registry)?;
     let manifest = mf_runtime::WorkflowManifest {
-        version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
+        version: mf_runtime::WorkflowManifestVersion::V2026_11_04,
         definition: resolved.definition,
         execution_order: resolved
             .execution_order
@@ -1615,6 +1621,7 @@ pub fn describe_interface(
             .map(ToString::to_string)
             .collect(),
         loop_orders: resolved.loop_orders,
+        parameter_types: resolved.parameter_types,
         input_schema,
     };
     Ok(manifest.interface()?)
@@ -1674,61 +1681,77 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    validate_compiled_description(&plan.definition, &mut Vec::new(), &plan.loop_orders)?;
-    mf_runtime::describe_definition(&plan.definition, &order, &plan.loop_orders)
-        .context(ContractSnafu)
+    validate_compiled_description(&plan.definition, &mut Vec::new(), &plan.parameter_types)?;
+    mf_runtime::describe_definition(
+        &plan.definition,
+        &order,
+        &plan.loop_orders,
+        &plan.parameter_types,
+    )
+    .context(ContractSnafu)
 }
 
 /// Retain the compiler's typed authoring/ordering diagnostics while following
-/// only compiled child paths. Runtime's provider-free projection validates the
-/// supplied order lists and rejects leftover/unknown paths afterward.
+/// only frozen receiver declarations. Runtime's provider-free projection validates
+/// the separate order lists and rejects leftover/unknown paths afterward.
 fn validate_compiled_description(
     definition: &WorkflowDefinition,
     path: &mut Vec<String>,
-    orders: &[mf_runtime::LoopExecutionOrder],
+    parameter_types: &mf_runtime::NodeParameterTypes,
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
-        let flows = crate::calls::compiled_node_flows(definition, node, orders, path)
+        let flows = crate::calls::compiled_node_flows(definition, node, parameter_types)
             .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
         for (name, body) in flows {
             path.push(node.flow_scope_key(&name));
-            structural_order_graph(&body)
+            crate::calls::child_result(node, structural_order_graph(&body))
                 .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
-            validate_compiled_description(&body, path, orders)?;
+            validate_compiled_description(&body, path, parameter_types)?;
             path.pop();
         }
     }
     Ok(())
 }
 
-pub fn loop_execution_orders(
+fn compiled_scope_facts(
     definition: &WorkflowDefinition,
-    contracts: &BTreeMap<String, Vec<String>>,
-) -> Result<Vec<mf_runtime::LoopExecutionOrder>, DescriptionError> {
+    contracts: &mf_runtime::NodeParameterTypes,
+) -> Result<
+    (
+        Vec<mf_runtime::LoopExecutionOrder>,
+        mf_runtime::NodeParameterTypes,
+    ),
+    DescriptionError,
+> {
     let mut orders = Vec::new();
-    collect_loop_execution_orders(definition, &mut Vec::new(), &mut orders, contracts)?;
-    Ok(orders)
+    let mut declarations = BTreeMap::new();
+    collect_loop_execution_orders(
+        definition,
+        &mut Vec::new(),
+        &mut orders,
+        contracts,
+        &mut declarations,
+    )?;
+    Ok((orders, declarations))
 }
 
 fn collect_loop_execution_orders(
     definition: &WorkflowDefinition,
     path: &mut Vec<String>,
     orders: &mut Vec<mf_runtime::LoopExecutionOrder>,
-    contracts: &BTreeMap<String, Vec<String>>,
+    contracts: &mf_runtime::NodeParameterTypes,
+    declarations: &mut mf_runtime::NodeParameterTypes,
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
         // These are executable-scope authority facts, independent of the
         // observation schema's historical projection of Iteration bodies.
         crate::calls::validate_owner(definition, node)
             .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
-        let parameters = contracts
-            .get(&node.kind)
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
+        declarations
+            .entry(node.kind.clone())
+            .or_insert_with(|| contracts.get(&node.kind).cloned().unwrap_or_default());
         let flows = node
-            .flow_parameters(&parameters)
+            .declared_flows(declarations)
             .context(FlowParametersSnafu {
                 definition_id: node.id.clone(),
             })
@@ -1741,7 +1764,7 @@ fn collect_loop_execution_orders(
                 path: path.clone(),
                 execution_order: order.iter().map(ToString::to_string).collect(),
             });
-            collect_loop_execution_orders(&body, path, orders, contracts)?;
+            collect_loop_execution_orders(&body, path, orders, contracts, declarations)?;
             path.pop();
         }
     }
@@ -1784,7 +1807,7 @@ pub fn resolve_nodes(
     let normalized = normalize_plan(
         &resolved.definition,
         structural_order(&resolved.definition)?,
-        &registry.flow_parameter_contracts(),
+        &registry.parameter_types(),
     )?;
     resolve_nodes_in_scope(
         &normalized.definition,
@@ -2019,7 +2042,7 @@ fn prepare_node_subgraphs(
             node,
             body,
             inside_iteration,
-            &preparation.registry.flow_parameter_contracts(),
+            &preparation.registry.parameter_types(),
         )?;
         let key = node.flow_scope_key(name);
         ensure!(
@@ -2044,11 +2067,10 @@ fn prepare_node_subgraphs(
         };
         let prepared = if let Some(registered) = host {
             ensure!(
-                plan_resolved_definition(body, &preparation.registry.flow_parameter_contracts())?
-                    .definition
+                plan_resolved_definition(body, &preparation.registry.parameter_types())?.definition
                     == plan_resolved_definition(
                         &registered.definition,
-                        &preparation.registry.flow_parameter_contracts()
+                        &preparation.registry.parameter_types()
                     )?
                     .definition,
                 InvalidCallSnafu {
@@ -2160,8 +2182,14 @@ fn resolve_nodes_in_scope(
             }
             let registration = registration_for(node, preparation.registry)?;
             crate::calls::validate_owner(definition, node)?;
+            let parameter_types = registration.parameter_types();
+            let parameters = parameter_types
+                .iter()
+                .filter(|(_, value_type)| value_type.is_flow())
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>();
             let flows = node
-                .flow_parameters(registration.flow_parameters())
+                .flow_parameters(&parameters)
                 .context(FlowParametersSnafu {
                     definition_id: node.id.clone(),
                 })?;

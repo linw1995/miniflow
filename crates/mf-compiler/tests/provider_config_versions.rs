@@ -3,7 +3,8 @@ extern crate mfn_core as _;
 
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
 use mf_runtime::{
-    NodeBuildError, NodeConfig, NodeFactory, NodeRegistration, PreparedNode, PreparedSubgraph,
+    ConfigParameterType, NodeBuildError, NodeConfig, NodeFactory, NodeRegistration, PreparedNode,
+    PreparedSubgraph,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -11,6 +12,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    assert_ne!(
+        config["panic_if_constructed"],
+        json!(true),
+        "latent declaration drift must be rejected before earlier factories"
+    );
     assert_eq!(
         config["subgraphs"],
         json!({"provider_specific": "opaque data"})
@@ -90,7 +96,12 @@ fn removed_root_flow_arguments_are_rejected_instead_of_ignored() {
     assert!(error.to_string().contains("flow_arguments"), "{error}");
 }
 
-fn optional_flow_plain(_: Value) -> Result<PreparedNode, NodeBuildError> {
+fn optional_flow_plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    assert_ne!(
+        config["panic_if_constructed"],
+        json!(true),
+        "declaration validation must reject drift before invoking factories"
+    );
     NodeRegistry::from_inventory()
         .unwrap()
         .get("builtin.constant")
@@ -106,12 +117,25 @@ fn unexpected_prepared(
     panic!("a provider without selected children must use its plain factory")
 }
 
+#[derive(mf_runtime::NodeConfig)]
+struct OptionalFlowConfig {
+    body: Option<mf_runtime::Flow>,
+    note: Option<String>,
+}
+
+fn optional_typed_plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    let decoded = OptionalFlowConfig::from_config(config.clone(), BTreeMap::new())?;
+    assert!(decoded.body.is_none());
+    assert_eq!(decoded.note.as_deref(), config["note"].as_str());
+    optional_flow_plain(config)
+}
+
 inventory::submit! {
     NodeRegistration {
         kind: "test.versioned_optional_flow",
         factory: NodeFactory::Subgraph {
-            parameters: &["body"],
-            plain: optional_flow_plain,
+            parameter_types: OptionalFlowConfig::parameter_types,
+            plain: optional_typed_plain,
             prepared: unexpected_prepared,
         },
     }
@@ -126,20 +150,134 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
     ] {
         let authored: WorkflowDefinition = serde_json::from_value(json!({
             "version": version, "dependencies": {},
-            "nodes": [{"id": "provider", "kind": "test.versioned_optional_flow", "config": config}],
+            "nodes": [
+                {"id": "before", "kind": "test.versioned_plain_config", "config": {
+                    "subgraphs": {"provider_specific": "opaque data"}
+                }},
+                {"id": "provider", "kind": "test.versioned_optional_flow", "config": config}
+            ],
             "outputs": [{"name": "value", "node": "provider", "port": "value"}]
         }))
         .unwrap();
         let plan = compile_definition(&authored, &registry).unwrap();
-        assert_eq!(plan.definition.nodes[0].config, authored.nodes[0].config);
-        let outputs = instantiate_compiled(&plan, &registry)
+        assert_eq!(plan.definition.nodes[1].config, authored.nodes[1].config);
+        assert_eq!(plan.execution_order[0].as_str(), "before");
+        // Freeze the complete typed declaration even when its optional value is null or absent.
+        // The linked registry also contains unused plain and Flow-capable kinds.
+        assert_eq!(
+            plan.parameter_types,
+            BTreeMap::from([
+                ("test.versioned_plain_config".into(), BTreeMap::new()),
+                (
+                    "test.versioned_optional_flow".into(),
+                    BTreeMap::from([
+                        (
+                            "body".into(),
+                            ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
+                        ),
+                        ("note".into(), ConfigParameterType::Value),
+                    ])
+                ),
+            ])
+        );
+        let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+        assert_eq!(saved, plan);
+        assert_eq!(
+            mf_compiler::describe_compiled(&saved).unwrap(),
+            mf_compiler::describe_compiled(&plan).unwrap()
+        );
+        mf_compiler::validate_parameter_types(&registry, &saved.parameter_types).unwrap();
+        for change in [
+            "flow_to_value",
+            "optional_to_required",
+            "ordinary_to_flow",
+            "missing_ordinary",
+        ] {
+            let mut expected = saved.parameter_types.clone();
+            let fields = expected.get_mut("test.versioned_optional_flow").unwrap();
+            match change {
+                "flow_to_value" => {
+                    fields.insert("body".into(), ConfigParameterType::Value);
+                }
+                "optional_to_required" => {
+                    fields.insert("body".into(), ConfigParameterType::Flow);
+                }
+                "ordinary_to_flow" => {
+                    fields.insert("note".into(), ConfigParameterType::Flow);
+                }
+                _ => {
+                    fields.remove("note");
+                }
+            }
+            let error = mf_compiler::validate_parameter_types(&registry, &expected).unwrap_err();
+            assert!(
+                matches!(error, mf_compiler::WorkflowBuildError::ParameterTypeDrift { kind }
+                if kind == "test.versioned_optional_flow"),
+                "{change}"
+            );
+        }
+        let unknown = BTreeMap::from([("missing.receiver".into(), BTreeMap::new())]);
+        assert!(matches!(
+            mf_compiler::validate_parameter_types(&registry, &unknown).unwrap_err(),
+            mf_compiler::WorkflowBuildError::UnknownParameterKind { kind } if kind == "missing.receiver"
+        ));
+        let outputs = instantiate_compiled(&saved, &registry)
             .unwrap()
             .execute()
             .unwrap();
         assert_eq!(outputs["value"].as_i64(), Some(42));
+        let mut stale = saved.clone();
+        stale.parameter_types.insert(
+            "test.versioned_optional_flow".into(),
+            BTreeMap::from([
+                ("body".into(), ConfigParameterType::Value),
+                ("note".into(), ConfigParameterType::Value),
+            ]),
+        );
+        stale.definition.nodes[0].config["panic_if_constructed"] = json!(true);
+        let error = instantiate_compiled(&stale, &registry).err().unwrap();
+        assert!(matches!(
+            error,
+            mf_compiler::WorkflowCompileError::NonCanonicalParameterTypes
+        ));
         #[cfg(feature = "codegen")]
         {
-            let generated = plan.generate_artifacts().unwrap();
+            // This path has no registry argument: saved declarations are authoritative.
+            let generated = saved.generate_artifacts().unwrap();
+            assert_eq!(generated, plan.generate_artifacts().unwrap());
+            use quote::ToTokens as _;
+            let syntax = syn::parse_file(&generated.rust_source).unwrap();
+            let prepare = syntax
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Fn(function) if function.sig.ident == "prepare_workflow" => {
+                        Some(function)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+                .to_token_stream()
+                .to_string();
+            let preflight = prepare.find("validate_parameter_types").unwrap();
+            let inference = prepare.find("TypeInferenceState").unwrap();
+            let constructor = prepare.find("instantiate_node_with_metadata").unwrap();
+            assert!(preflight < inference && inference < constructor);
+            let metadata = &prepare[preflight..inference];
+            for expected in [
+                "\"test.versioned_plain_config\"",
+                "\"test.versioned_optional_flow\"",
+                "\"body\"",
+                "\"note\"",
+                "ConfigParameterType :: Optional",
+                "ConfigParameterType :: Flow",
+                "ConfigParameterType :: Value",
+            ] {
+                assert!(
+                    metadata.contains(expected),
+                    "missing {expected}: {metadata}"
+                );
+            }
             assert!(
                 generated
                     .rust_source
@@ -192,7 +330,7 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.declared_flow_owner",
         factory: NodeFactory::Subgraph {
-            parameters: TypedConfig::FLOW_PARAMETERS,
+            parameter_types: TypedConfig::parameter_types,
             plain: optional_flow_plain, prepared: typed_prepared,
         },
     }
@@ -269,8 +407,8 @@ fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() 
         registry
             .get("test.declared_flow_owner")
             .unwrap()
-            .flow_parameters(),
-        ["body"]
+            .parameter_types(),
+        BTreeMap::from([("body".into(), ConfigParameterType::Flow)])
     );
     let authored: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-10-28", "dependencies": {},
@@ -283,10 +421,35 @@ fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() 
     .unwrap();
     // A selected external provider can have no Flow fields even though a linked
     // host registration of the same kind declares one. Never infer its contract.
-    let ordinary = mf_compiler::plan_resolved_definition(&authored, &BTreeMap::new()).unwrap();
+    let ordinary = mf_compiler::plan_resolved_definition(
+        &authored,
+        &BTreeMap::from([(
+            "test.declared_flow_owner".into(),
+            BTreeMap::from([("body".into(), ConfigParameterType::Value)]),
+        )]),
+    )
+    .unwrap();
     let typed =
-        mf_compiler::plan_resolved_definition(&authored, &registry.flow_parameter_contracts())
-            .unwrap();
+        mf_compiler::plan_resolved_definition(&authored, &registry.parameter_types()).unwrap();
+    assert_eq!(
+        ordinary.parameter_types,
+        BTreeMap::from([(
+            "test.declared_flow_owner".into(),
+            BTreeMap::from([("body".into(), ConfigParameterType::Value)])
+        )])
+    );
+    assert_eq!(
+        typed.parameter_types,
+        BTreeMap::from([
+            (
+                "test.declared_flow_owner".into(),
+                BTreeMap::from([("body".into(), ConfigParameterType::Flow)])
+            ),
+            ("builtin.constant".into(), BTreeMap::new()),
+        ])
+    );
+    let ordinary = mf_compiler::CompiledWorkflow::from_json(&ordinary.to_json().unwrap()).unwrap();
+    let typed = mf_compiler::CompiledWorkflow::from_json(&typed.to_json().unwrap()).unwrap();
     assert!(ordinary.loop_orders.is_empty());
     assert_eq!(typed.loop_orders.len(), 1);
     assert_eq!(
@@ -371,10 +534,35 @@ fn undeclared_fields_stay_opaque_even_when_the_factory_accepts_other_flow_fields
 fn generated_receiving_contracts_reject_stale_binding_sets_before_factories() {
     use mf_compiler::{
         WorkflowBuildError, instantiate_subgraphs_with_metadata, validate_node_flow_parameters,
+        validate_parameter_types,
     };
     use std::error::Error;
 
     let registry = NodeRegistry::from_inventory().unwrap();
+    for kind in [
+        mf_runtime::LOOP_SOURCE_ID,
+        mf_runtime::ITERATION_INPUT_KIND,
+        mf_runtime::LOOP_ASSIGN_KIND,
+        mf_runtime::EXIT_LOOP_KIND,
+    ] {
+        assert!(
+            registry.get(kind).is_none(),
+            "{kind} must be compiler-owned"
+        );
+        validate_parameter_types(&registry, &[(kind.into(), BTreeMap::new())].into()).unwrap();
+        for parameter_type in [ConfigParameterType::Value, ConfigParameterType::Flow] {
+            let expected = [(kind.into(), [("unexpected".into(), parameter_type)].into())].into();
+            assert!(matches!(
+                validate_parameter_types(&registry, &expected).unwrap_err(),
+                WorkflowBuildError::ParameterTypeDrift { kind: actual } if actual == kind
+            ));
+        }
+    }
+    let unknown = [("%not-a-compiler-kind".into(), BTreeMap::new())].into();
+    assert!(matches!(
+        validate_parameter_types(&registry, &unknown).unwrap_err(),
+        WorkflowBuildError::UnknownParameterKind { kind } if kind == "%not-a-compiler-kind"
+    ));
     let kind = "test.versioned_optional_flow";
     let config = json!({"body": {
         "version": "2026-10-28", "dependencies": {}, "nodes": []

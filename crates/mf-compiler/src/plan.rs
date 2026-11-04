@@ -23,6 +23,8 @@ pub struct CompiledWorkflow {
     /// Compiler-produced scope facts. Offline traversal must not infer roles from JSON.
     #[serde(default)]
     pub loop_orders: Vec<mf_runtime::LoopExecutionOrder>,
+    /// Unified configuration parameter types frozen from the selected registrations.
+    pub parameter_types: mf_runtime::NodeParameterTypes,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,7 +167,7 @@ impl CompiledWorkflow {
         input_schema: mf_runtime::WorkflowInputSchema,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
         let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
+            version: mf_runtime::WorkflowManifestVersion::V2026_11_04,
             definition: self.definition.clone(),
             execution_order: self
                 .execution_order
@@ -173,6 +175,7 @@ impl CompiledWorkflow {
                 .map(ToString::to_string)
                 .collect(),
             loop_orders: self.loop_orders.clone(),
+            parameter_types: self.parameter_types.clone(),
             input_schema,
         };
         manifest.validate()?;
@@ -348,6 +351,7 @@ impl CompiledWorkflow {
     pub fn from_json(input: &str) -> Result<Self, PlanError> {
         let plan: Self = serde_json::from_str(input).context(ParseSnafu)?;
         crate::validate_execution(&plan.definition).map_err(crate::WorkflowBuildError::from)?;
+        crate::describe_compiled(&plan)?;
         Ok(plan)
     }
 
@@ -358,6 +362,7 @@ impl CompiledWorkflow {
             crate::structural_order(&self.definition)? == self.execution_order,
             InvalidExecutionOrderSnafu
         );
+        crate::describe_compiled(self)?;
         let plan_json = self.to_json()?;
         let source = LitStr::new(&plan_json, Span::call_site());
         let preparation = quote! {
@@ -473,6 +478,7 @@ impl CompiledWorkflow {
             }
         }
 
+        crate::describe_compiled(self)?;
         let (preparations, _, root_flow) = generate_scope(
             &self.definition,
             &self.execution_order,
@@ -481,7 +487,7 @@ impl CompiledWorkflow {
             None,
             None,
             ScopeBuild::Dynamic,
-            &self.loop_orders,
+            &self.parameter_types,
         )?;
 
         let mut output_names = BTreeSet::new();
@@ -590,6 +596,7 @@ fn generate_stream_artifacts(
     if crate::structural_order(&plan.definition).context(StreamSnafu)? != plan.execution_order {
         return InvalidExecutionOrderSnafu.fail();
     }
+    crate::describe_compiled(plan)?;
     let definition = &plan.definition;
     let order = &plan.execution_order;
     let (preparations, _, _) = generate_scope(
@@ -600,7 +607,7 @@ fn generate_stream_artifacts(
         None,
         None,
         ScopeBuild::PreparationOnly,
-        &plan.loop_orders,
+        &plan.parameter_types,
     )?;
     let nodes = (0..order.len()).map(|index| format_ident!("node_stream_{index}"));
     let initial = initial_nodes(definition, order);
@@ -664,9 +671,42 @@ enum ScopeBuild<'a> {
 }
 
 #[cfg(feature = "codegen")]
+fn parameter_type_tokens(value_type: &mf_runtime::ConfigParameterType) -> TokenStream {
+    match value_type {
+        mf_runtime::ConfigParameterType::Value => quote!(mf_runtime::ConfigParameterType::Value),
+        mf_runtime::ConfigParameterType::Flow => quote!(mf_runtime::ConfigParameterType::Flow),
+        mf_runtime::ConfigParameterType::Optional(inner) => {
+            let inner = parameter_type_tokens(inner);
+            quote!(mf_runtime::ConfigParameterType::Optional(::std::boxed::Box::new(#inner)))
+        }
+    }
+}
+
+#[cfg(feature = "codegen")]
+fn parameter_preflight_tokens(parameter_types: &mf_runtime::NodeParameterTypes) -> TokenStream {
+    let kinds = parameter_types.iter().map(|(kind, fields)| {
+        let fields = fields.iter().map(|(name, value_type)| {
+            let value_type = parameter_type_tokens(value_type);
+            quote!((#name.into(), #value_type))
+        });
+        quote!((#kind.into(), mf_runtime::ConfigParameterTypes::from([#(#fields),*])))
+    });
+    quote! {
+        mf_compiler::validate_parameter_types(
+            registry,
+            &mf_runtime::NodeParameterTypes::from([#(#kinds),*]),
+        ).inspect_err(|error| {
+            if let Some(observation) = observation.as_deref_mut() {
+                observation.preparation_failed_unattributed(error.to_string());
+            }
+        })?;
+    }
+}
+
+#[cfg(feature = "codegen")]
 #[expect(
     clippy::too_many_arguments,
-    reason = "Thread compiled scope authority alongside the existing code-generation context."
+    reason = "Thread compiled parameter types alongside the existing code-generation context."
 )]
 fn generate_scope(
     definition: &WorkflowDefinition,
@@ -676,7 +716,7 @@ fn generate_scope(
     enclosing: Option<&LoopDefinition>,
     preparation_error_override: Option<&TokenStream>,
     build: ScopeBuild<'_>,
-    loop_orders: &[mf_runtime::LoopExecutionOrder],
+    parameter_types: &mf_runtime::NodeParameterTypes,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>, syn::Ident), PlanError> {
     let nodes_by_id: BTreeMap<_, _> = definition
         .nodes
@@ -684,9 +724,13 @@ fn generate_scope(
         .map(|node| (&node.id, node))
         .collect();
     let inference_ident = format_ident!("inference_{scope}");
-    let mut preparations = vec![quote! {
+    let mut preparations = Vec::new();
+    if static_scope.is_empty() {
+        preparations.push(parameter_preflight_tokens(parameter_types));
+    }
+    preparations.push(quote! {
         let mut #inference_ident = mf_compiler::TypeInferenceState::default();
-    }];
+    });
     let mut statements = Vec::new();
     let mut node_idents = Vec::with_capacity(order.len());
     let incoming = crate::compiler::incoming_dependencies(definition);
@@ -703,7 +747,7 @@ fn generate_scope(
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         let bindings = dependency_tokens(dependencies);
-        let flows = crate::calls::compiled_node_flows(definition, node, loop_orders, static_scope)?;
+        let flows = crate::calls::compiled_node_flows(definition, node, parameter_types)?;
         if !flows.is_empty() {
             preparations.push(subgraphs_preparation(
                 node,
@@ -712,7 +756,7 @@ fn generate_scope(
                 index,
                 static_scope,
                 &bindings,
-                loop_orders,
+                parameter_types,
             )?);
             node_idents.push(node_ident);
             continue;
@@ -895,7 +939,7 @@ fn subgraphs_preparation(
     index: usize,
     static_scope: &[String],
     bindings: &[TokenStream],
-    loop_orders: &[mf_runtime::LoopExecutionOrder],
+    parameter_types: &mf_runtime::NodeParameterTypes,
 ) -> Result<TokenStream, PlanError> {
     let node_ident = format_ident!("node_{scope}_{index}");
     let inference_ident = format_ident!("inference_{scope}");
@@ -937,7 +981,7 @@ fn subgraphs_preparation(
             } else {
                 ScopeBuild::Dynamic
             },
-            loop_orders,
+            parameter_types,
         )?;
         let body_ident = format_ident!("subgraph_{body_scope}");
         let bind_streams = format_ident!("bind_stream_outputs_{body_scope}");
@@ -1047,6 +1091,7 @@ impl CompiledWorkflow {
             definition: crate::compiler::resolve_execution(&self.definition, &nodes)?,
             execution_order: order.clone(),
             loop_orders: self.loop_orders.clone(),
+            parameter_types: self.parameter_types.clone(),
         };
         resolved.generate_resolved_execution_plans(nodes, order, body_layouts, standard)
     }
@@ -1136,7 +1181,7 @@ impl CompiledWorkflow {
                 &mut Vec::new(),
                 &body_layouts,
                 &mut layouts,
-                &self.loop_orders,
+                &self.parameter_types,
             )?;
         } else {
             let flow = flow.into_tasks().map_err(crate::WorkflowBuildError::from)?;
@@ -1157,7 +1202,7 @@ impl CompiledWorkflow {
                 &mut Vec::new(),
                 &body_layouts,
                 &mut layouts,
-                &self.loop_orders,
+                &self.parameter_types,
             )?;
         }
         let syntax: syn::File =
@@ -1352,7 +1397,7 @@ fn typed_preparation_tokens(
         None,
         None,
         ScopeBuild::Typed(&constructors),
-        &workflow.loop_orders,
+        &workflow.parameter_types,
     )?;
     let mut bindings = Vec::new();
     for domain in flow.execution_domains().domains() {
@@ -1595,7 +1640,7 @@ fn collect_body_layouts(
     path: &mut Vec<DefinitionId>,
     body_layouts: &crate::compiler::ScopeLayouts,
     layouts: &mut Vec<TokenStream>,
-    loop_orders: &[mf_runtime::LoopExecutionOrder],
+    parameter_types: &mf_runtime::NodeParameterTypes,
 ) -> Result<(), PlanError> {
     for (index, id) in order.iter().enumerate() {
         let node = definition
@@ -1603,9 +1648,8 @@ fn collect_body_layouts(
             .iter()
             .find(|node| &node.id == id)
             .expect("validated node ID");
-        let prefix = path.iter().map(ToString::to_string).collect::<Vec<_>>();
         for (binding_index, (name, mut body)) in
-            crate::calls::compiled_node_flows(definition, node, loop_orders, &prefix)?
+            crate::calls::compiled_node_flows(definition, node, parameter_types)?
                 .into_iter()
                 .enumerate()
         {
@@ -1626,7 +1670,7 @@ fn collect_body_layouts(
                 path,
                 body_layouts,
                 layouts,
-                loop_orders,
+                parameter_types,
             )?;
             path.pop();
         }

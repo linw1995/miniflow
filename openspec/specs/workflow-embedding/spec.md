@@ -78,11 +78,17 @@ and snapshots through existing runtime APIs.
 ### Requirement: Expose plans and current manifests
 
 Modules SHALL expose `plan(&NodeRegistry)` returning their structural `CompiledWorkflow` and derive
-existing-format manifests from current host metadata. Planning SHALL authorize child fields through
+runtime manifests from current host metadata. Planning SHALL authorize child fields through
 the supplied registry, resolve sources from the packed resources and host builtin Flow registrations,
 and reuse shared compiler normalization without constructing nodes. Ordinary configuration SHALL remain
 opaque. Inspection SHALL prepare metadata without executing business operations. Embedding SHALL NOT
-freeze a build-time startup schema or emit executable manifest sections.
+freeze a build-time startup schema or emit executable manifest sections. Compiled plans and manifest
+payload version `2026-11-04` SHALL retain unified selected configuration parameter types for each
+reachable kind, including absent optional fields and empty plain-kind metadata. Flow parameters SHALL
+be selected by their types, without a separate Flow-name list. Offline traversal SHALL NOT infer roles
+from configuration keys or order paths. Saved-plan and generated preparation SHALL reject complete
+parameter-type drift before factories. Older payloads and saved plans missing these types SHALL be
+rejected without inference or adaptation.
 
 #### Scenario: Use current node metadata
 

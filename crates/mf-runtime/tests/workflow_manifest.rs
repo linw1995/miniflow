@@ -6,6 +6,10 @@ use mf_runtime::{
 use mf_telemetry::identity::WorkflowId;
 use std::error::Error;
 
+fn declarations(value: serde_json::Value) -> mf_runtime::NodeParameterTypes {
+    serde_json::from_value(value).unwrap()
+}
+
 #[test]
 fn compiled_manifests_derive_views_from_original_facts() {
     let config = serde_json::json!({
@@ -18,14 +22,17 @@ fn compiled_manifests_derive_views_from_original_facts() {
     }))
     .unwrap();
     let manifest = WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_16,
+        version: WorkflowManifestVersion::V2026_11_04,
         definition,
+        parameter_types: declarations(serde_json::json!({"fixture.input": {
+            "model": "value", "temperature": "value", "options": "value"
+        }})),
         execution_order: vec!["root.a/~".into()],
         loop_orders: vec![],
         input_schema: sample().input_schema,
     };
     let payload = serde_json::to_value(&manifest).unwrap();
-    assert_eq!(payload["version"], "2026-10-16");
+    assert_eq!(payload["version"], "2026-11-04");
     for derived in ["description", "interface", "workflow_id"] {
         assert!(payload.get(derived).is_none());
     }
@@ -75,7 +82,12 @@ fn compiled_manifests_derive_views_from_original_facts() {
         WorkflowInterfaceVersion::V2026_10_16
     );
 
-    for missing in ["definition", "execution_order", "input_schema"] {
+    for missing in [
+        "definition",
+        "parameter_types",
+        "execution_order",
+        "input_schema",
+    ] {
         let mut invalid = payload.clone();
         invalid.as_object_mut().unwrap().remove(missing);
         assert!(matches!(
@@ -83,7 +95,7 @@ fn compiled_manifests_derive_views_from_original_facts() {
             Err(WorkflowManifestError::Json { .. })
         ));
     }
-    for version in ["2026-10-07", "2099-01-01"] {
+    for version in ["2026-10-07", "2026-10-16", "2099-01-01"] {
         let mut invalid = payload.clone();
         invalid["version"] = version.into();
         assert!(
@@ -121,8 +133,15 @@ fn nested_binding_views_require_consistent_orders_for_each_frozen_field() {
     let outer_key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
     let inner_key = mf_telemetry::event::ScopePathEntry::binding_key("inner", "nested");
     let manifest = WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_16,
+        version: WorkflowManifestVersion::V2026_11_04,
         definition,
+        parameter_types: declarations(serde_json::json!({
+            "fixture.dispatch": {
+                "selected": {"optional": "flow"}, "nested": {"optional": "flow"},
+                "opaque": "value", "ordinary": "value"
+            },
+            "fixture.input": {"legacy": "value"}
+        })),
         execution_order: vec!["dispatch".into()],
         loop_orders: vec![
             mf_runtime::LoopExecutionOrder {
@@ -147,21 +166,27 @@ fn nested_binding_views_require_consistent_orders_for_each_frozen_field() {
     assert_eq!(graph.loop_bodies[1].path, manifest.loop_orders[1].path);
     assert_eq!(graph.loop_bodies[1].nodes[0].id, "value");
 
-    // Offline projection has no provider declarations. With no order (or descendant
-    // order) identifying a field, it is ordinary JSON, not a missing typed child.
-    // A retained descendant order still requires its outer execution prerequisite.
-    let mut omitted_nested = manifest.clone();
-    omitted_nested.loop_orders.pop();
-    assert_eq!(omitted_nested.description().unwrap().loop_bodies.len(), 1);
-    assert!(omitted_nested.to_bytes().is_ok());
+    // Orders are execution prerequisites, not field authority: deleting any or
+    // all of them cannot make a declared executable child ordinary provider JSON.
     let mut ordinary = manifest.clone();
     ordinary.loop_orders.clear();
+    assert!(ordinary.description().is_err());
+    ordinary.parameter_types = declarations(serde_json::json!({"fixture.dispatch": {
+        "selected": "value", "nested": "value", "opaque": "value", "ordinary": "value"
+    }}));
     assert!(ordinary.description().unwrap().loop_bodies.is_empty());
     assert!(ordinary.to_bytes().is_ok());
 
     for (case, diagnostic) in [
         ("missing_outer", "missing compiled Flow parameter order"),
-        ("unknown_outer_field", "unknown"),
+        ("missing_nested", "missing compiled Flow parameter order"),
+        ("missing_all", "missing compiled Flow parameter order"),
+        ("missing_kind", "missing parameter types"),
+        ("missing_plain_kind", "missing parameter types"),
+        (
+            "unknown_outer_field",
+            "missing compiled Flow parameter order",
+        ),
         ("incomplete_outer", "does not match the node count"),
         ("unknown_outer_node", "names unknown node `unknown`"),
         ("wrong_frozen_field", "names unknown node `shadowed`"),
@@ -170,6 +195,16 @@ fn nested_binding_views_require_consistent_orders_for_each_frozen_field() {
         match case {
             "missing_outer" => {
                 invalid.loop_orders.remove(0);
+            }
+            "missing_nested" => {
+                invalid.loop_orders.pop();
+            }
+            "missing_all" => invalid.loop_orders.clear(),
+            "missing_kind" => {
+                invalid.parameter_types.remove("fixture.dispatch");
+            }
+            "missing_plain_kind" => {
+                invalid.parameter_types.remove("fixture.input");
             }
             "unknown_outer_field" => {
                 invalid.loop_orders.pop();
@@ -221,8 +256,12 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
     }))
     .unwrap();
     let manifest = WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_16,
+        version: WorkflowManifestVersion::V2026_11_04,
         definition,
+        parameter_types: declarations(serde_json::json!({
+            "workflow.loop": {"body": "flow", "max_iterations": "value", "variables": "value"},
+            "%loop": {}
+        })),
         execution_order: vec!["repeat".into()],
         loop_orders: vec![
             mf_runtime::LoopExecutionOrder {
@@ -349,7 +388,7 @@ fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
             }])
         };
         let manifest = WorkflowManifest {
-            version: WorkflowManifestVersion::V2026_10_16,
+            version: WorkflowManifestVersion::V2026_11_04,
             definition: serde_json::from_value(serde_json::json!({
                 "version": "2026-09-29", "dependencies": {},
                 "nodes": [
@@ -364,6 +403,10 @@ fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
                     "to_node": "control-target"}]
             }))
             .unwrap(),
+            parameter_types: declarations(serde_json::json!({
+                "user.dispatch": {"selected": "flow"},
+                "fixture.input": {}, "fixture.source": {}, "fixture.sink": {}
+            })),
             execution_order: vec![
                 "dispatch".into(),
                 "independent".into(),
@@ -435,7 +478,7 @@ fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
 fn sibling_frozen_fields_keep_identical_node_ids_in_separate_scopes() {
     let key = |field| mf_telemetry::event::ScopePathEntry::binding_key("dispatch", field);
     let manifest = WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_16,
+        version: WorkflowManifestVersion::V2026_11_04,
         definition: serde_json::from_value(serde_json::json!({
             "version": "2026-10-28", "dependencies": {},
             "nodes": [{"id": "dispatch", "kind": "user.dispatch", "config": {
@@ -449,6 +492,13 @@ fn sibling_frozen_fields_keep_identical_node_ids_in_separate_scopes() {
             }}]
         }))
         .unwrap(),
+        parameter_types: declarations(serde_json::json!({
+            "user.dispatch": {
+                "selected": "flow", "fallback": "flow",
+                "optional": {"optional": "flow"}, "opaque": "value"
+            },
+            "fixture.selected": {}, "fixture.fallback": {}
+        })),
         execution_order: vec!["dispatch".into()],
         loop_orders: vec![
             mf_runtime::LoopExecutionOrder {
@@ -478,28 +528,51 @@ fn sibling_frozen_fields_keep_identical_node_ids_in_separate_scopes() {
     reordered.loop_orders.reverse();
     assert_eq!(reordered.description().unwrap(), graph);
 
-    // Only an explicit order turns ordinary provider JSON into a frozen child.
-    let mut corrupt = manifest.clone();
-    corrupt.loop_orders.push(mf_runtime::LoopExecutionOrder {
-        path: vec![key("opaque")],
-        execution_order: vec![],
-    });
-    for error in [
-        corrupt.to_bytes().unwrap_err(),
-        WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&corrupt).unwrap())).unwrap_err(),
-    ] {
-        assert!(matches!(&error, WorkflowManifestError::Graph {
-            source: mf_telemetry::ContractError::Json { source }
-        } if source.is_data()));
-        assert!(error.source().unwrap().is::<mf_telemetry::ContractError>());
-        assert!(
-            error
-                .source()
-                .unwrap()
-                .source()
-                .unwrap()
-                .is::<serde_json::Error>()
-        );
+    assert_eq!(decoded.parameter_types, manifest.parameter_types);
+    assert_eq!(
+        decoded.parameter_types["user.dispatch"]["optional"],
+        mf_runtime::ConfigParameterType::Optional(Box::new(mf_runtime::ConfigParameterType::Flow))
+    );
+    assert!(decoded.definition.nodes[0].config.get("optional").is_none());
+
+    // A forged order cannot authorize parsing opaque, malformed provider JSON.
+    // Corrupting a declared field instead preserves the native JSON source chain.
+    for case in ["forged_opaque_order", "corrupt_declared_field"] {
+        let mut corrupt = manifest.clone();
+        if case == "forged_opaque_order" {
+            corrupt.loop_orders.push(mf_runtime::LoopExecutionOrder {
+                path: vec![key("opaque")],
+                execution_order: vec![],
+            });
+        } else {
+            corrupt.definition.nodes[0].config["selected"] =
+                serde_json::json!({"version": "2099-01-01", "nodes": []});
+        }
+        for error in [
+            corrupt.to_bytes().unwrap_err(),
+            WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&corrupt).unwrap()))
+                .unwrap_err(),
+        ] {
+            assert!(error.source().unwrap().is::<mf_telemetry::ContractError>());
+            if case == "forged_opaque_order" {
+                assert!(matches!(&error, WorkflowManifestError::Graph {
+                    source: mf_telemetry::ContractError::Invalid { message }
+                } if message.contains("unknown Loop body")));
+                assert!(error.source().unwrap().source().is_none());
+            } else {
+                assert!(matches!(&error, WorkflowManifestError::Graph {
+                    source: mf_telemetry::ContractError::Json { source }
+                } if source.is_data()));
+                assert!(
+                    error
+                        .source()
+                        .unwrap()
+                        .source()
+                        .unwrap()
+                        .is::<serde_json::Error>()
+                );
+            }
+        }
     }
     assert_eq!(manifest.description().unwrap(), graph);
 }
@@ -508,7 +581,7 @@ fn sibling_frozen_fields_keep_identical_node_ids_in_separate_scopes() {
 fn historical_iteration_projection_still_validates_explicit_frozen_descendants() {
     let selected = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
     let manifest = WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_16,
+        version: WorkflowManifestVersion::V2026_11_04,
         definition: serde_json::from_value(serde_json::json!({
             "version": "2026-09-29", "dependencies": {},
             "nodes": [{"id": "map", "kind": "builtin.iteration", "config": {"body": {
@@ -522,6 +595,10 @@ fn historical_iteration_projection_still_validates_explicit_frozen_descendants()
             }}}]
         }))
         .unwrap(),
+        parameter_types: declarations(serde_json::json!({
+            "builtin.iteration": {"body": "flow"}, "builtin.iteration_input": {},
+            "user.dispatch": {"selected": "flow"}, "fixture.value": {}
+        })),
         execution_order: vec!["map".into()],
         loop_orders: vec![
             mf_runtime::LoopExecutionOrder {
@@ -541,6 +618,11 @@ fn historical_iteration_projection_still_validates_explicit_frozen_descendants()
     assert!(decoded.interface().unwrap().schema.inputs.is_empty());
     for (case, diagnostic) in [
         ("missing_parent", "missing compiled body execution order"),
+        ("missing_all", "missing compiled body execution order"),
+        (
+            "missing_descendant",
+            "missing compiled Flow parameter order",
+        ),
         (
             "unknown_descendant",
             "compiled execution order names unknown node `unknown`",
@@ -554,6 +636,10 @@ fn historical_iteration_projection_still_validates_explicit_frozen_descendants()
         match case {
             "missing_parent" => {
                 corrupt.loop_orders.remove(0);
+            }
+            "missing_all" => corrupt.loop_orders.clear(),
+            "missing_descendant" => {
+                corrupt.loop_orders.pop();
             }
             "unknown_descendant" => corrupt.loop_orders[1].execution_order[0] = "unknown".into(),
             _ => corrupt.loop_orders[1].execution_order.clear(),
@@ -575,12 +661,13 @@ fn historical_iteration_projection_still_validates_explicit_frozen_descendants()
 
 fn sample() -> WorkflowManifest {
     WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_16,
+        version: WorkflowManifestVersion::V2026_11_04,
         definition: serde_json::from_value(serde_json::json!({
             "version": "2026-10-03", "dependencies": {},
             "nodes": [{"id": "root.a/~", "kind": "fixture.input"}]
         }))
         .unwrap(),
+        parameter_types: declarations(serde_json::json!({"fixture.input": {}})),
         execution_order: vec!["root.a/~".into()],
         loop_orders: vec![],
         input_schema: WorkflowInputSchema {
@@ -674,8 +761,8 @@ fn rejects_corrupt_framing_and_lengths_without_allocating_declared_payloads() {
 fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
     let payload = serde_json::to_string(&sample()).unwrap();
     for invalid in [
-        payload.replace("2026-10-16", "2099-01-01"),
-        payload.replacen("{", "{\"version\":\"2026-10-16\",", 1),
+        payload.replace("2026-11-04", "2099-01-01"),
+        payload.replacen("{", "{\"version\":\"2026-11-04\",", 1),
         payload.replace("\"required\":false", "\"required\":false,\"required\":true"),
         format!("{payload}{{}}"),
         "{".into(),
@@ -689,7 +776,8 @@ fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
 #[test]
 fn limits_the_combined_serialized_payload() {
     let mut manifest = sample();
-    manifest.definition.nodes[0].kind = "x".repeat(MAX_MANIFEST_PAYLOAD_BYTES);
+    manifest.definition.nodes[0].config =
+        serde_json::json!({"opaque": "x".repeat(MAX_MANIFEST_PAYLOAD_BYTES)});
     assert!(matches!(
         manifest.to_bytes(),
         Err(WorkflowManifestError::TooLarge { .. })

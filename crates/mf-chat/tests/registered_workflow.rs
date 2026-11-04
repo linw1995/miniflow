@@ -26,7 +26,8 @@ impl Runner {
             })).chain([serde_json::json!({"name":"answer","node":"remote","port":"answer","optional":true})]).collect();
         Self {
             manifest: WorkflowManifest {
-                version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
+                version: mf_runtime::WorkflowManifestVersion::V2026_11_04,
+                parameter_types: [("unlinked.chat_provider".into(), Default::default())].into(),
                 definition: serde_json::from_value(serde_json::json!({
                     "version":"2026-10-28", "dependencies":{},
                     "execution":{},

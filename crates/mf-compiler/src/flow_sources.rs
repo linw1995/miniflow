@@ -1,5 +1,8 @@
 use crate::{NodeDependency, WorkflowDefinition};
-use mf_runtime::{CALL_KIND, CallConfig, FlowSource, MAX_CALL_DEPTH, NodeDefinition, NodeRegistry};
+use mf_runtime::{
+    CALL_KIND, CallConfig, ConfigParameterType, FlowSource, MAX_CALL_DEPTH, NodeDefinition,
+    NodeParameterTypes, NodeRegistry,
+};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
@@ -61,9 +64,9 @@ enum ParameterSource {
 pub struct ResolvedWorkflow {
     pub definition: WorkflowDefinition,
     pub sources: BTreeSet<PathBuf>,
-    /// Selected receiving-provider declarations retained across metadata probes.
+    /// Selected receiving-provider configuration types retained across metadata probes.
     #[serde(default)]
-    pub contracts: BTreeMap<String, Vec<String>>,
+    pub contracts: NodeParameterTypes,
 }
 
 /// Authored Flow sources captured relative to the embedding package's manifest.
@@ -134,7 +137,7 @@ impl EmbeddedWorkflow {
         let mut resolver = Resolver {
             host_dependencies: true,
             embedded_sources: Some(sources),
-            contracts: registry.flow_parameter_contracts(),
+            contracts: registry.parameter_types(),
             ..Default::default()
         };
         let definition = resolver.file(&self.entry, &BTreeMap::new(), 0)?;
@@ -196,7 +199,7 @@ struct Resolver {
     embedded_sources: Option<BTreeMap<PathBuf, String>>,
     discovery: bool,
     unlinked: bool,
-    contracts: BTreeMap<String, Vec<String>>,
+    contracts: NodeParameterTypes,
     builtin_catalog: BTreeMap<String, WorkflowDefinition>,
     selected_packages: BTreeSet<String>,
     pending: BTreeSet<String>,
@@ -215,7 +218,7 @@ pub fn load_workflow_with_registry(
     registry: &NodeRegistry,
 ) -> Result<ResolvedWorkflow, FlowResolutionError> {
     let mut resolver = Resolver {
-        contracts: registry.flow_parameter_contracts(),
+        contracts: registry.parameter_types(),
         ..Default::default()
     };
     let mut definition = resolver.file(path, &BTreeMap::new(), 0)?;
@@ -232,7 +235,7 @@ pub fn load_embedded_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResol
     let registry = NodeRegistry::from_inventory()?;
     let mut resolver = Resolver {
         host_dependencies: true,
-        contracts: registry.flow_parameter_contracts(),
+        contracts: registry.parameter_types(),
         ..Default::default()
     };
     let definition = resolver.file(path, &BTreeMap::new(), 0)?;
@@ -276,7 +279,7 @@ fn resolve(
 ) -> Result<FlowDiscovery, FlowResolutionError> {
     let resolver = Resolver {
         discovery,
-        contracts: registry.flow_parameter_contracts(),
+        contracts: registry.parameter_types(),
         ..Default::default()
     };
     resolve_using(resolver, definition, directory)
@@ -340,13 +343,16 @@ impl FlowDiscovery {
             }
             let children = {
                 let mut children = Vec::new();
-                for field in self
+                for (field, parameter_type) in self
                     .resolved
                     .contracts
                     .get(&node.kind)
                     .into_iter()
                     .flatten()
                 {
+                    if !parameter_type.is_flow() {
+                        continue;
+                    }
                     let Some(value) = node.config.get(field).filter(|value| !value.is_null())
                     else {
                         continue;
@@ -391,7 +397,7 @@ impl FlowDiscovery {
             path,
             Resolver {
                 discovery: true,
-                contracts: registry.flow_parameter_contracts(),
+                contracts: registry.parameter_types(),
                 builtin_catalog,
                 selected_packages,
                 ..Default::default()
@@ -751,24 +757,26 @@ impl Resolver {
             // Only the selected receiving provider grants source authority.
             return Ok(());
         };
-        let mut fields = BTreeSet::new();
-        for field in &contract {
+        for field in contract.keys() {
             ensure!(
-                !field.trim().is_empty() && fields.insert(field.clone()),
+                !field.trim().is_empty(),
                 InvalidSnafu {
                     reference: node.id.as_str(),
                     message: format!(
-                        "blank or duplicate Flow parameter declaration on `{}`",
+                        "blank configuration parameter declaration on `{}`",
                         node.kind
                     )
                 }
             );
         }
-        for field in fields {
+        for (field, parameter_type) in &contract {
+            if !parameter_type.is_flow() {
+                continue;
+            }
             let reference = format!("{}.config.{field}", node.id);
             // The contract declares roles, not serde requiredness. Optional/defaulted
             // parameters may be absent or null; the provider validates required fields.
-            let Some(value) = node.config.get(&field).filter(|value| !value.is_null()) else {
+            let Some(value) = node.config.get(field).filter(|value| !value.is_null()) else {
                 continue;
             };
             // Validate an authorized inline Iteration boundary before descending
@@ -805,11 +813,14 @@ impl Resolver {
                         }
                     );
                 }
-                node.config[&field] = serde_json::to_value(definition)
+                node.config[field] = serde_json::to_value(definition)
                     .context(ConfigurationSnafu { node: &reference })?;
             }
         }
         if node.kind == mf_runtime::ITERATION_KIND
+            && contract
+                .get("body")
+                .is_some_and(ConfigParameterType::is_flow)
             && let Some(body) = node.config.get("body")
             && let Ok(body) = serde_json::from_value::<WorkflowDefinition>(body.clone())
         {
@@ -878,7 +889,9 @@ impl Resolver {
                 let contract = self.contracts.get(&node.kind);
                 if let Some(contract) = contract {
                     ensure!(
-                        contract.iter().any(|field| field == "body"),
+                        contract
+                            .get("body")
+                            .is_some_and(ConfigParameterType::is_flow),
                         InvalidSnafu {
                             reference: node.id.as_str(),
                             message: "selected Call provider does not declare the `body` Flow parameter",
@@ -969,9 +982,27 @@ mod tests {
     fn resolver() -> Resolver {
         Resolver {
             contracts: BTreeMap::from([
-                ("test.flow-source-owner".into(), vec!["body".into()]),
-                ("test.ordinary".into(), vec![]),
-                (CALL_KIND.into(), vec!["body".into()]),
+                (
+                    "test.flow-source-owner".into(),
+                    BTreeMap::from([("body".into(), ConfigParameterType::Flow)]),
+                ),
+                (
+                    "test.ordinary".into(),
+                    BTreeMap::from([
+                        ("body".into(), ConfigParameterType::Value),
+                        ("other".into(), ConfigParameterType::Value),
+                        ("path".into(), ConfigParameterType::Value),
+                        ("builtin".into(), ConfigParameterType::Value),
+                        (
+                            "source".into(),
+                            ConfigParameterType::Optional(Box::new(ConfigParameterType::Value)),
+                        ),
+                    ]),
+                ),
+                (
+                    CALL_KIND.into(),
+                    BTreeMap::from([("body".into(), ConfigParameterType::Flow)]),
+                ),
             ]),
             ..Default::default()
         }
@@ -1226,7 +1257,11 @@ mod tests {
         mf_runtime::NodeRegistration {
             kind:"test.source-api-owner",
             factory:mf_runtime::NodeFactory::Subgraph {
-                parameters:&["body"], plain:metadata_plain, prepared:metadata_prepared,
+                parameter_types: || BTreeMap::from([
+                    ("body".into(), ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))),
+                    ("ordinary".into(), ConfigParameterType::Value),
+                ]),
+                plain:metadata_plain, prepared:metadata_prepared,
             },
         }
     }
@@ -1323,7 +1358,16 @@ mod tests {
             parent.nodes[0].config["ordinary"]
         );
         assert_eq!(resolved.definition.nodes[1], parent.nodes[1]);
-        assert_eq!(resolved.contracts["test.source-api-owner"], vec!["body"]);
+        assert_eq!(
+            resolved.contracts["test.source-api-owner"],
+            BTreeMap::from([
+                (
+                    "body".into(),
+                    ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
+                ),
+                ("ordinary".into(), ConfigParameterType::Value),
+            ])
+        );
     }
 
     #[test]
@@ -1645,7 +1689,10 @@ mod tests {
             let mut resolver = Resolver {
                 host_dependencies: true,
                 embedded_sources: Some(archive.sources),
-                contracts: BTreeMap::from([(kind.into(), vec!["body".into()])]),
+                contracts: BTreeMap::from([(
+                    kind.into(),
+                    BTreeMap::from([("body".into(), ConfigParameterType::Flow)]),
+                )]),
                 ..Default::default()
             };
             let error = resolver
@@ -1696,6 +1743,10 @@ mod tests {
             FlowDiscovery::load_with_registry(&root.path().join("root.json"), &registry).unwrap();
         assert!(discovered.pending.is_empty());
         assert!(loaded.pending.is_empty());
+        assert_eq!(
+            serde_json::to_value(&discovered).unwrap()["resolved"]["contracts"]["test.source-api-owner"],
+            json!({"body":{"optional":"flow"}, "ordinary":"value"})
+        );
         assert_eq!(discovered.resolved.definition, resolved.definition);
         assert_eq!(loaded.resolved.definition, resolved.definition);
         assert_eq!(
@@ -1733,8 +1784,12 @@ mod tests {
     }
 
     #[test]
-    fn malformed_contracts_fail_before_resolving_declared_sources() {
-        for contract in [vec!["".into()], vec!["body".into(), "body".into()]] {
+    fn blank_parameter_names_fail_before_resolving_declared_sources() {
+        for field in ["", "   ", "\u{2000}"] {
+            let contract = BTreeMap::from([
+                (field.into(), ConfigParameterType::Flow),
+                ("body".into(), ConfigParameterType::Flow),
+            ]);
             let mut parent = definition(json!([{
                 "id":"owner", "kind":"test.flow-source-owner", "config":{"body":{"path":"never-read.json"}}
             }]));
@@ -1747,7 +1802,7 @@ mod tests {
                 .unwrap_err();
             assert!(
                 matches!(error, FlowResolutionError::Invalid { reference, message }
-                if reference == "owner" && message.contains("blank or duplicate Flow parameter declaration"))
+                if reference == "owner" && message.contains("blank configuration parameter declaration"))
             );
             assert!(resolver.sources.is_empty());
         }
@@ -2174,7 +2229,7 @@ mod tests {
             // Plain and zero-parameter Subgraph providers both supply this empty contract.
             for contracts in [
                 BTreeMap::new(),
-                BTreeMap::from([(CALL_KIND.into(), vec![])]),
+                BTreeMap::from([(CALL_KIND.into(), BTreeMap::new())]),
             ] {
                 for discovery in [false, true] {
                     let case = format!(
@@ -2218,6 +2273,45 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_call_body_types_do_not_authorize_named_or_explicit_sources() {
+        for parameter_type in [
+            ConfigParameterType::Value,
+            ConfigParameterType::Optional(Box::new(ConfigParameterType::Value)),
+        ] {
+            for explicit in [false, true] {
+                let mut parent = call_definition();
+                parent.flows.insert(
+                    "a".into(),
+                    FlowSource::Builtin {
+                        builtin: "source-archive-test.unauthorized".into(),
+                    },
+                );
+                if explicit {
+                    parent.nodes[0].config["body"] = json!({"path":"must-not-read.json"});
+                }
+                let config = parent.nodes[0].config.clone();
+                let mut receiver = Resolver {
+                    contracts: BTreeMap::from([(
+                        CALL_KIND.into(),
+                        BTreeMap::from([("body".into(), parameter_type.clone())]),
+                    )]),
+                    ..Default::default()
+                };
+                let error = receiver
+                    .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
+                    .unwrap_err();
+                assert!(
+                    matches!(error, FlowResolutionError::Invalid { reference, message }
+                    if reference == "call" && message == "selected Call provider does not declare the `body` Flow parameter")
+                );
+                assert_eq!(parent.nodes[0].config, config);
+                assert!(receiver.sources.is_empty());
+                assert!(receiver.dependencies.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn external_loop_sources_stop_at_the_existing_combined_scope_limit_before_poison_io() {
         let root = tempfile::tempdir().unwrap();
         let loop_source = |next: usize| {
@@ -2241,9 +2335,10 @@ mod tests {
         fs::write(&poison, "must not be read or parsed as a workflow").unwrap();
         let mut parent = loop_source(0);
         let mut receiver = resolver();
-        receiver
-            .contracts
-            .insert(mf_runtime::LOOP_KIND.into(), vec!["body".into()]);
+        receiver.contracts.insert(
+            mf_runtime::LOOP_KIND.into(),
+            BTreeMap::from([("body".into(), ConfigParameterType::Flow)]),
+        );
         let error = receiver
             .definition(&mut parent, Some(root.path()), &BTreeMap::new(), 0, "test")
             .unwrap_err();
@@ -2361,9 +2456,10 @@ mod tests {
                 }]));
             }
             let mut resolver = resolver();
-            resolver
-                .contracts
-                .insert(mf_runtime::LOOP_KIND.into(), vec!["body".into()]);
+            resolver.contracts.insert(
+                mf_runtime::LOOP_KIND.into(),
+                BTreeMap::from([("body".into(), ConfigParameterType::Flow)]),
+            );
             let result = resolver.definition(&mut parent, None, &BTreeMap::new(), 0, "test");
             if calls == 16 {
                 result.unwrap();
@@ -2402,9 +2498,10 @@ mod tests {
             }
         }]));
         let mut resolver = resolver();
-        resolver
-            .contracts
-            .insert(mf_runtime::ITERATION_KIND.into(), vec!["body".into()]);
+        resolver.contracts.insert(
+            mf_runtime::ITERATION_KIND.into(),
+            BTreeMap::from([("body".into(), ConfigParameterType::Flow)]),
+        );
         let error = resolver
             .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
             .unwrap_err();
@@ -2416,6 +2513,21 @@ mod tests {
             }
         ));
         assert!(error.to_string().contains("nested"));
+        for parameter_type in [
+            ConfigParameterType::Value,
+            ConfigParameterType::Optional(Box::new(ConfigParameterType::Value)),
+        ] {
+            resolver.contracts.insert(
+                mf_runtime::ITERATION_KIND.into(),
+                BTreeMap::from([("body".into(), parameter_type)]),
+            );
+            let original = parent.clone();
+            resolver
+                .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
+                .unwrap();
+            assert_eq!(parent, original);
+            assert!(resolver.sources.is_empty());
+        }
     }
 
     #[test]

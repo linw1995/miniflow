@@ -24,18 +24,15 @@ pub fn validate_owner(
     Ok(())
 }
 
-/// Registry-free traversal uses compiled scope paths, never configuration shapes.
-/// Every receiving field, including built-in bodies, needs an order fact.
+/// Registry-free traversal uses frozen receiver declarations, never JSON keys or
+/// order paths. Order facts remain independently validated execution prerequisites.
 pub fn compiled_node_flows(
     parent: &WorkflowDefinition,
     node: &NodeDefinition,
-    orders: &[mf_runtime::LoopExecutionOrder],
-    prefix: &[String],
+    declarations: &mf_runtime::NodeParameterTypes,
 ) -> Result<BTreeMap<String, WorkflowDefinition>, WorkflowCompileError> {
-    let parameters =
-        node.compiled_flow_fields(prefix, orders.iter().map(|order| order.path.as_slice()));
     validate_owner(parent, node)?;
-    node.flow_parameters(&parameters)
+    node.declared_flows(declarations)
         .context(crate::compiler::FlowParametersSnafu {
             definition_id: node.id.clone(),
         })
@@ -71,7 +68,7 @@ pub fn validate_child(
     node: &NodeDefinition,
     body: &WorkflowDefinition,
     inside_iteration: bool,
-    contracts: &BTreeMap<String, Vec<String>>,
+    contracts: &mf_runtime::NodeParameterTypes,
 ) -> Result<(), WorkflowCompileError> {
     crate::validate_execution(body).context(crate::compiler::StreamConstructionSnafu)?;
     if call_like(node) {
@@ -109,7 +106,7 @@ fn validate_call(node: &NodeDefinition) -> Result<(), WorkflowCompileError> {
 
 pub fn contains_iteration_containers(
     definition: &WorkflowDefinition,
-    contracts: &BTreeMap<String, Vec<String>>,
+    contracts: &mf_runtime::NodeParameterTypes,
 ) -> Result<bool, WorkflowCompileError> {
     for node in &definition.nodes {
         if matches!(
@@ -121,8 +118,9 @@ pub fn contains_iteration_containers(
         let parameters = contracts
             .get(&node.kind)
             .into_iter()
-            .flatten()
-            .map(String::as_str)
+            .flat_map(|parameters| parameters.iter())
+            .filter(|(_, value_type)| value_type.is_flow())
+            .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>();
         for body in node
             .flow_parameters(&parameters)

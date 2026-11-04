@@ -5,7 +5,8 @@ use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 fn manifest() -> WorkflowManifest {
     serde_json::from_value(serde_json::json!({
-        "version": "2026-10-16",
+        "version": "2026-11-04",
+        "parameter_types": {"fixture.source": {}, "fixture.transform": {}},
         "definition": {
             "version": "2026-10-03", "dependencies": {},
             "nodes": [

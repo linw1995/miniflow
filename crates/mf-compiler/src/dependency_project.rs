@@ -64,6 +64,7 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
         definition: manifest.definition,
         execution_order: workflow.execution_order,
         loop_orders: workflow.loop_orders,
+        parameter_types: workflow.parameter_types,
     };
     if workflow.definition.execution.is_some() {
         println!("cargo:rustc-cfg=mf_streaming");

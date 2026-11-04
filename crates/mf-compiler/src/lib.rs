@@ -113,8 +113,8 @@ pub use construction::{
     build_flow, build_stream_program, instantiate_node_with_metadata,
     instantiate_subgraphs_with_metadata, into_task, partition_execution_domains, prepare_stream,
     prepared_loop_assign_from_json, prepared_loop_source_from_json, stream_workflow_inputs,
-    validate_execution, validate_node_flow_parameters, validate_stream_limits,
-    validate_success_connection, workflow_input_schema,
+    validate_execution, validate_node_flow_parameters, validate_parameter_types,
+    validate_stream_limits, validate_success_connection, workflow_input_schema,
 };
 pub use mf_runtime::{
     FlowRuntime, RuntimeOptions, TaskFlowNode, WorkflowInputError, WorkflowInputSchema,

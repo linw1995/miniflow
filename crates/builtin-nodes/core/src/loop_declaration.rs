@@ -86,7 +86,7 @@ inventory::submit! {
     NodeRegistration {
         kind: KIND,
         factory: mf_runtime::NodeFactory::Subgraph {
-            parameters: Config::FLOW_PARAMETERS,
+            parameter_types: Config::parameter_types,
             plain,
             prepared: factory,
         },
@@ -121,6 +121,22 @@ mod tests {
     #[test]
     fn registers_loop_factory_and_requires_a_prepared_body_and_valid_config() {
         let registration = NodeRegistry::from_inventory().unwrap().get(KIND).unwrap();
+        assert_eq!(
+            registration.parameter_types(),
+            BTreeMap::from([
+                ("body".into(), mf_runtime::ConfigParameterType::Flow),
+                (
+                    "max_iterations".into(),
+                    mf_runtime::ConfigParameterType::Value
+                ),
+                ("variables".into(), mf_runtime::ConfigParameterType::Value),
+                ("until".into(), mf_runtime::ConfigParameterType::Value),
+                (
+                    "stream_outputs".into(),
+                    mf_runtime::ConfigParameterType::Value
+                ),
+            ])
+        );
         assert!(
             registration
                 .instantiate(json!({"unexpected": true}))

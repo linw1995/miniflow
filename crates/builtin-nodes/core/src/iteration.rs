@@ -61,7 +61,7 @@ inventory::submit! {
     NodeRegistration {
         kind: KIND,
         factory: mf_runtime::NodeFactory::Subgraph {
-            parameters: Config::FLOW_PARAMETERS,
+            parameter_types: Config::parameter_types,
             plain,
             prepared: factory,
         },
@@ -550,6 +550,18 @@ mod tests {
     #[test]
     fn registers_iteration_and_checks_its_configuration_shape() {
         let registration = NodeRegistry::from_inventory().unwrap().get(KIND).unwrap();
+        assert_eq!(
+            registration.parameter_types(),
+            BTreeMap::from([
+                ("body".into(), mf_runtime::ConfigParameterType::Flow),
+                ("mode".into(), mf_runtime::ConfigParameterType::Value),
+                ("on_error".into(), mf_runtime::ConfigParameterType::Value),
+                (
+                    "stream_outputs".into(),
+                    mf_runtime::ConfigParameterType::Value
+                ),
+            ])
+        );
         assert!(registration.instantiate(json!({})).is_err());
         let node = registration
             .instantiate_subgraphs(

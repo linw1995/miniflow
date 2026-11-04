@@ -190,6 +190,31 @@ pub struct NodeDefinition {
     pub config: Value,
 }
 
+/// Reflected configuration parameter type; ordinary provider data remains opaque.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigParameterType {
+    Value,
+    Flow,
+    Optional(Box<ConfigParameterType>),
+}
+
+impl ConfigParameterType {
+    pub fn is_flow(&self) -> bool {
+        match self {
+            Self::Flow => true,
+            Self::Optional(inner) => inner.is_flow(),
+            Self::Value => false,
+        }
+    }
+}
+
+/// Configuration wire field names and their reflected types.
+pub type ConfigParameterTypes = BTreeMap<String, ConfigParameterType>;
+
+/// Frozen configuration parameter types by node kind, including empty plain entries.
+pub type NodeParameterTypes = BTreeMap<String, ConfigParameterTypes>;
+
 /// Errors reading or replacing declared executable configuration fields.
 #[derive(Debug, Snafu)]
 pub enum FlowParameterError {
@@ -217,26 +242,24 @@ impl NodeDefinition {
         }
     }
 
-    /// Selects immediate fields from compiled scope paths, not from JSON shapes.
-    /// Descendant facts also select their parent so missing parent orders are diagnosed.
-    pub fn compiled_flow_fields<'a>(
+    /// Reads executable fields exclusively from frozen parameter type metadata.
+    /// Missing kind metadata is invalid, even for ordinary provider nodes.
+    pub fn declared_flows(
         &self,
-        prefix: &[String],
-        paths: impl IntoIterator<Item = &'a [String]>,
-    ) -> Vec<&str> {
-        let scopes = paths
-            .into_iter()
-            .filter(|path| path.starts_with(prefix))
-            .filter_map(|path| path.get(prefix.len()))
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>();
-        self.config
-            .as_object()
-            .into_iter()
-            .flat_map(|config| config.keys())
-            .filter(|field| scopes.contains(self.flow_scope_key(field).as_str()))
-            .map(String::as_str)
-            .collect()
+        parameter_types: &NodeParameterTypes,
+    ) -> Result<BTreeMap<String, WorkflowDefinition>, FlowParameterError> {
+        let parameters = parameter_types.get(&self.kind).ok_or_else(|| {
+            InvalidSnafu {
+                message: "missing parameter types for node kind",
+            }
+            .build()
+        })?;
+        let names = parameters
+            .iter()
+            .filter(|(_, parameter_type)| parameter_type.is_flow())
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        self.flow_parameters(&names)
     }
 
     /// Writes a normalized child into its declared configuration field.

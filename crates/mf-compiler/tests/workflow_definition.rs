@@ -309,7 +309,7 @@ fn loop_body_clusters_are_preserved_in_descriptions() {
         &legacy,
         &mf_compiler::NodeRegistry::from_inventory()
             .unwrap()
-            .flow_parameter_contracts(),
+            .parameter_types(),
     )
     .unwrap_err()
     .to_string();

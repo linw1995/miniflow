@@ -1,6 +1,6 @@
 extern crate mf_runtime as runtime_alias;
 
-use mf_runtime::{Flow, NodeConfig, PreparedSubgraph};
+use mf_runtime::{ConfigParameterType, Flow, NodeConfig, PreparedSubgraph};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -45,8 +45,19 @@ fn prepared() -> PreparedSubgraph {
 #[test]
 fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
     assert_eq!(
-        DirectConfig::FLOW_PARAMETERS,
-        ["requestBody", "left-hand", "right"]
+        DirectConfig::parameter_types(),
+        BTreeMap::from([
+            ("requestBody".into(), ConfigParameterType::Flow),
+            (
+                "left-hand".into(),
+                ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
+            ),
+            (
+                "right".into(),
+                ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
+            ),
+            ("settings".into(), ConfigParameterType::Value),
+        ])
     );
     let config = DirectConfig::from_config(
         json!({
@@ -70,7 +81,16 @@ fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
 
 #[test]
 fn actual_derive_accepts_qualified_types_with_a_runtime_crate_alias() {
-    assert_eq!(AliasedRuntimeConfig::FLOW_PARAMETERS, ["body", "left"]);
+    assert_eq!(
+        AliasedRuntimeConfig::parameter_types(),
+        BTreeMap::from([
+            ("body".into(), ConfigParameterType::Flow),
+            (
+                "left".into(),
+                ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
+            ),
+        ])
+    );
     let config = AliasedRuntimeConfig::from_config(
         json!({"body": {}, "left": null}),
         BTreeMap::from([("body".into(), prepared())]),
