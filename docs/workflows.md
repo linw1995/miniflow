@@ -275,6 +275,13 @@ relative to the definition in `examples/`):
 
 Paths resolve relative to the canonical definition's directory, including when the definition is accessed through a symlink. `order.json` uses `order.lock`; `order.flow.json` uses `order.flow.lock`. An extensionless definition has `.lock` appended. Different Flows can use independent dependencies in one directory. Compilation never rewrites the definition.
 
+CLI provider discovery and final source resolution are separate phases. Temporary provider probes may repeat
+metadata discovery until the selected dependency closure stabilizes. Their partial handoff is a `FlowDiscovery`,
+not a host `ResolvedWorkflow`; it includes the captured `FlowSourceBundle`. Only then does the CLI fully resolve
+that bundle once and call `plan_resolved_definition` to freeze the standalone plan. The runner does not perform
+startup source resolution. Existing `--locked` validation, authoritative-lock handling, and discovery retries remain
+unchanged by this phase split.
+
 ## Migrate older definitions
 
 Definitions with version `2026-09-24` are rejected with a migration diagnostic. Change the version to `2026-09-26` and add `dependencies` declaring the packages that provide every node kind, including built-ins. An empty object is valid for definitions that require no plugins. Node configuration, connections, and selected outputs retain their meanings.

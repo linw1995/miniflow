@@ -1,7 +1,7 @@
 mod calls;
 mod flow_sources;
 pub use flow_sources::{
-    EmbeddedWorkflow, FlowDiscovery, FlowResolutionError, ResolvedWorkflow,
+    FlowDiscovery, FlowResolutionError, FlowSourceBundle, ResolvedWorkflow,
     discover_flows_with_registry, load_embedded_workflow, load_workflow,
     load_workflow_with_registry, resolve_flows, resolve_flows_with_registry,
 };

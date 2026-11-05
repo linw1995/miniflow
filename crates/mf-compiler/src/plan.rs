@@ -107,7 +107,7 @@ pub enum PlanError {
     },
 }
 
-impl crate::EmbeddedWorkflow {
+impl crate::FlowSourceBundle {
     pub fn from_json(source: &str) -> Result<Self, PlanError> {
         serde_json::from_str(source).context(ParseSnafu)
     }
@@ -115,7 +115,7 @@ impl crate::EmbeddedWorkflow {
 
 #[cfg(feature = "codegen")]
 pub fn generate_embedded_source(
-    workflow: &crate::EmbeddedWorkflow,
+    workflow: &crate::FlowSourceBundle,
 ) -> Result<String, crate::PlanError> {
     let source = serde_json::to_string(workflow).context(SerializeSnafu)?;
     let source = syn::LitStr::new(&source, proc_macro2::Span::call_site());
@@ -123,7 +123,7 @@ pub fn generate_embedded_source(
         pub fn plan(
             registry: &mf_runtime::NodeRegistry,
         ) -> Result<mf_compiler::CompiledWorkflow, mf_compiler::PlanError> {
-            let workflow = mf_compiler::EmbeddedWorkflow::from_json(#source)?;
+            let workflow = mf_compiler::FlowSourceBundle::from_json(#source)?;
             let resolved = workflow.resolve(registry)?;
             Ok(mf_compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts)?)
         }

@@ -1,5 +1,5 @@
 use crate::{
-    BuildGuard, BuildInputs, RunnerOptions, SupportPackages, WorkflowDefinition, atomic_copy,
+    BuildGuard, BuildInputs, RunnerOptions, SupportPackages, atomic_copy,
     validate_runtime_identity, write_dependency_project_with_options,
 };
 use snafu::{IntoError, ResultExt, Snafu};
@@ -68,31 +68,27 @@ pub fn compile_project_with_options(
         request.definition,
         inputs.check_output(request.output),
     )?;
-    let source = at(
-        "definition read",
+    let discovery = discover_provider_flows(request, options, &inputs, &output)?;
+    let registry = at(
+        "host registry",
         &inputs.definition,
-        fs::read_to_string(&inputs.definition),
+        mf_runtime::NodeRegistry::from_inventory(),
     )?;
-    let definition = at(
-        "definition parsing",
+    // Provider probes stop at a stable dependency closure. Do not return their
+    // last partial result: resolve the complete authoring bundle exactly once.
+    let mut resolved = at(
+        "Flow source resolution",
         &inputs.definition,
-        WorkflowDefinition::from_json(&source),
+        discovery.bundle.resolve(&registry),
     )?;
-    let definition = at(
-        "dependency paths",
-        &inputs.definition,
-        inputs.resolve_dependencies(&definition),
-    )?;
-    let mut resolved = resolve_provider_flows(request, options, &inputs, &definition, &output)?;
     resolved.sources.insert(inputs.definition.clone());
     check_source_destinations(&inputs, &output, &resolved.sources)?;
     let mut protected: Vec<&Path> = resolved.sources.iter().map(PathBuf::as_path).collect();
     protected.extend([inputs.lock.as_path(), output.as_path()]);
-    let definition = resolved.definition;
     let plan = at(
         "structural validation",
         &inputs.definition,
-        crate::compiler::plan_resolved_definition(&definition, &resolved.contracts),
+        crate::compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts),
     )?;
     let guard_path = inputs.lock.with_extension("lock.guard");
     let _guard = at(
@@ -171,13 +167,12 @@ fn check_source_destinations(
 /// Discover the complete provider closure before touching the user-selected build
 /// directory. Every pass reads the original authoring file: a frozen partial pass
 /// must not hide fields whose contracts become available after linking a provider.
-fn resolve_provider_flows(
+fn discover_provider_flows(
     request: &CompileRequest<'_>,
     options: &RunnerOptions,
     inputs: &BuildInputs,
-    _definition: &WorkflowDefinition,
     output: &Path,
-) -> Result<crate::ResolvedWorkflow, PipelineError> {
+) -> Result<crate::FlowDiscovery, PipelineError> {
     // CLI process inventory is not the selected provider bundle (tests and hosts
     // may link extra crates or different feature sets). Only the probe grants
     // authored configuration fields Flow authority for this compilation.
@@ -186,12 +181,12 @@ fn resolve_provider_flows(
         &inputs.definition,
         crate::flow_sources::discover_unlinked_workflow(&inputs.definition),
     )?;
-    check_source_destinations(inputs, output, &initial.resolved.sources)?;
+    check_source_destinations(inputs, output, &initial.sources)?;
     let mut builtin_catalog = BTreeMap::new();
     // A static public builtin can itself supply the first provider dependencies.
     // Only explicitly requested names are snapshotted, never host node contracts.
     for _ in 0..64 {
-        if !initial.resolved.definition.dependencies.is_empty() || initial.pending.is_empty() {
+        if !initial.definition.dependencies.is_empty() || initial.pending.is_empty() {
             break;
         }
         let changed = at(
@@ -214,16 +209,16 @@ fn resolve_provider_flows(
                 &builtin_catalog,
             ),
         )?;
-        check_source_destinations(inputs, output, &initial.resolved.sources)?;
+        check_source_destinations(inputs, output, &initial.sources)?;
     }
     // No provider probe is needed when discovery already has no pending metadata.
     // This never infers executable roles from arbitrary configuration JSON.
     if initial.pending.is_empty()
-        && (builtin_catalog.is_empty() || initial.resolved.definition.dependencies.is_empty())
+        && (builtin_catalog.is_empty() || initial.definition.dependencies.is_empty())
     {
-        return Ok(initial.resolved);
+        return Ok(initial);
     }
-    if initial.resolved.definition.dependencies.is_empty() {
+    if initial.definition.dependencies.is_empty() {
         at(
             "Flow source discovery",
             &inputs.definition,
@@ -274,8 +269,8 @@ fn resolve_provider_flows(
     )?;
     probe.disable_cleanup(!request.locked);
     let project = probe.path();
-    let mut selected = initial.resolved.definition;
-    let mut sources = initial.resolved.sources;
+    let mut selected = initial.definition;
+    let mut sources = initial.sources;
     at(
         "public builtin catalog",
         &inputs.definition,
@@ -353,7 +348,7 @@ fn resolve_provider_flows(
             project,
             serde_json::from_slice(&result),
         )?;
-        sources.extend(std::mem::take(&mut discovery.resolved.sources));
+        sources.extend(std::mem::take(&mut discovery.sources));
         check_source_destinations(inputs, output, &sources)?;
         let catalog_changed = at(
             "public builtin catalog",
@@ -361,7 +356,6 @@ fn resolve_provider_flows(
             crate::flow_sources::snapshot_pending_builtins(
                 &discovery.pending,
                 &discovery
-                    .resolved
                     .definition
                     .dependencies
                     .values()
@@ -370,7 +364,7 @@ fn resolve_provider_flows(
                 &mut builtin_catalog,
             ),
         )?;
-        if !catalog_changed && selected.dependencies == discovery.resolved.definition.dependencies {
+        if !catalog_changed && selected.dependencies == discovery.definition.dependencies {
             if !discovery.pending.is_empty() {
                 at(
                     "Flow source discovery",
@@ -386,13 +380,13 @@ fn resolve_provider_flows(
                     ),
                 ));
             }
-            discovery.resolved.sources = sources;
+            discovery.sources = sources;
             // Only failed unlocked probes are retained. Locked probes always keep
             // their temporary-only cleanup policy and never touch the managed cache.
             probe.disable_cleanup(false);
-            return Ok(discovery.resolved);
+            return Ok(discovery);
         }
-        selected = discovery.resolved.definition;
+        selected = discovery.definition;
     }
     Err(failure(
         "Flow source discovery",
@@ -696,6 +690,7 @@ fn validate_discovery_lock(project: &Path, flow_lock: &Path) -> Result<(), Pipel
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WorkflowDefinition;
     use serde_json::json;
 
     fn host_plain(
@@ -777,11 +772,10 @@ checksum = "original"
         root: &Path,
         authored: serde_json::Value,
         locked: bool,
-    ) -> Result<crate::ResolvedWorkflow, PipelineError> {
+    ) -> Result<crate::FlowDiscovery, PipelineError> {
         let source = root.join("flow.json");
         fs::write(&source, authored.to_string()).unwrap();
         let inputs = BuildInputs::new(&source).unwrap();
-        let definition = WorkflowDefinition::from_json(&authored.to_string()).unwrap();
         let support = SupportPackages::Local {
             crates_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
@@ -790,7 +784,7 @@ checksum = "original"
         };
         let output = root.join("runner");
         let build = root.join("managed-build");
-        let result = resolve_provider_flows(
+        let result = discover_provider_flows(
             &CompileRequest {
                 definition: &source,
                 output: &output,
@@ -800,7 +794,6 @@ checksum = "original"
             },
             &RunnerOptions { telemetry: false },
             &inputs,
-            &definition,
             &output,
         );
         assert!(!output.exists());
@@ -849,7 +842,7 @@ checksum = "original"
             discovery.pending,
             BTreeSet::from([format!("node:{}", mf_runtime::CALL_KIND)])
         );
-        let resolved = discovery.resolved;
+        let resolved = discovery;
         assert!(resolved.definition.dependencies.is_empty());
         assert_eq!(
             resolved.definition.nodes[0].config["body"],

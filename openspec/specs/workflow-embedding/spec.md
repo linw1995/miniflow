@@ -11,9 +11,12 @@ node validation, execution, and portable distribution.
 
 The compiler SHALL provide a build helper that parses and checks the entry graph's endpoints, IDs,
 and cycles without a registry or linked node crates. It SHALL pack the entry and explicitly listed
-source files, emitting Cargo input tracking and named source modules without interpreting provider
-configuration, executing node constructors, business operations, or a nested Cargo build. Declared
-child resolution and complete structural planning SHALL occur in the host with its selected registry.
+source files into a `FlowSourceBundle`, emitting Cargo input tracking and named source modules without
+interpreting provider configuration, executing node constructors, business operations, or a nested
+Cargo build. The build-product bundle SHALL contain only its entry and resources, not a partial
+`ResolvedWorkflow` or selected contracts. Generated `plan(registry)` SHALL resolve that bundle into a
+host `ResolvedWorkflow` and pass it to `plan_resolved_definition`. Declared child resolution and complete
+structural planning SHALL occur in the host with its selected registry.
 
 #### Scenario: Build without node build dependencies
 

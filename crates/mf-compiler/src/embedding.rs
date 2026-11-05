@@ -171,7 +171,7 @@ fn embed_workflows_at(
         for source in &request.sources {
             collect_source(name, source, logical_manifest, &manifest, &mut sources)?;
         }
-        let workflow = crate::EmbeddedWorkflow { entry, sources };
+        let workflow = crate::FlowSourceBundle { entry, sources };
         let source = crate::plan::generate_embedded_source(&workflow)
             .context(GenerationSnafu { name, path: &path })?;
         modules.push((output.join("mf-embedded").join(name), source));

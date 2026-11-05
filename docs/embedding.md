@@ -55,11 +55,13 @@ Submit all workflows in one batch. Names must be ASCII Rust module identifiers, 
 raw identifiers, and `_`. Invalid or duplicate names and root syntax or structural-cycle errors fail
 before modules from a prior successful build are replaced.
 
-Each workflow emits one file, `OUT_DIR/mf-embedded/<name>/workflow.rs`, containing its packed source
-resources and host planning/preparation entry points. The helper neither loads provider metadata nor
-constructs nodes or starts a nested Cargo build. Declared child resolution and planning occur in the
-host's `plan`, `manifest`, or preparation call using the supplied registry. Configured node contracts
-and ports are validated during preparation, not by Rust type checking.
+Each workflow emits one file, `OUT_DIR/mf-embedded/<name>/workflow.rs`, containing a
+`FlowSourceBundle` and host planning/preparation entry points. This build-product handoff contains
+only the package-relative entry and UTF-8 resources, never a partial `ResolvedWorkflow` or selected
+node contracts. The helper neither loads provider metadata nor constructs nodes or starts a nested
+Cargo build. Generated `plan(registry)` resolves that bundle with the host registry and passes the
+result to `plan_resolved_definition`. Configured node contracts and ports are validated during
+preparation, not by Rust type checking.
 
 The helper emits `cargo:rerun-if-changed` for the root and every explicitly supplied source. Retain
 tracking for other inputs when calling it from an existing build script. Keep these files in the host
@@ -127,8 +129,9 @@ to stop a running instance. Generated modules do not claim global stdio or initi
 
 ## Plans, manifests, and observation
 
-Every module exposes `plan(&NodeRegistry) -> Result<CompiledWorkflow, PlanError>`. It resolves declared
-child Flows from packed resources and the host's built-in catalog, then produces the structural plan.
+Every module exposes `plan(&NodeRegistry) -> Result<CompiledWorkflow, PlanError>`. It resolves the
+`FlowSourceBundle` into a host `ResolvedWorkflow`, then calls `plan_resolved_definition` once. Declared
+child Flows come from packed resources and the host's built-in catalog before structural planning.
 The selected receiving registrations determine which configuration fields are executable children;
 ordinary provider data is not interpreted as a Flow source. Planning uses registration metadata without
 constructing nodes and supports existing description and observation APIs.
