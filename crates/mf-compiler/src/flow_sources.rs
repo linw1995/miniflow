@@ -141,13 +141,8 @@ impl FlowSourceBundle {
             contracts: registry.parameter_types(),
             ..Default::default()
         };
-        let mut definition = resolver.file(&self.entry, &BTreeMap::new(), 0)?;
-        resolver.finish(&mut definition);
-        Ok(ResolvedWorkflow {
-            definition,
-            sources: resolver.sources,
-            contracts: resolver.contracts,
-        })
+        let definition = resolver.file(&self.entry, &BTreeMap::new(), 0)?;
+        Ok(resolver.finish_resolution(definition))
     }
 }
 
@@ -227,13 +222,8 @@ pub fn load_workflow_with_registry(
         contracts: registry.parameter_types(),
         ..Default::default()
     };
-    let mut definition = resolver.file(path, &BTreeMap::new(), 0)?;
-    resolver.finish(&mut definition);
-    Ok(ResolvedWorkflow {
-        definition,
-        sources: resolver.sources,
-        contracts: resolver.contracts,
-    })
+    let definition = resolver.file(path, &BTreeMap::new(), 0)?;
+    Ok(resolver.finish_resolution(definition))
 }
 
 /// Loads Flow files while the embedding host retains authority over provider dependencies.
@@ -245,11 +235,7 @@ pub fn load_embedded_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResol
         ..Default::default()
     };
     let definition = resolver.file(path, &BTreeMap::new(), 0)?;
-    Ok(ResolvedWorkflow {
-        definition,
-        sources: resolver.sources,
-        contracts: resolver.contracts,
-    })
+    Ok(resolver.into_resolved(definition))
 }
 
 pub fn resolve_flows(
@@ -264,19 +250,13 @@ pub fn resolve_flows_with_registry(
     directory: Option<&Path>,
     registry: &NodeRegistry,
 ) -> Result<ResolvedWorkflow, FlowResolutionError> {
-    let discovery = resolve(definition, directory, registry, false)?;
-    ensure!(
-        discovery.pending.is_empty(),
-        InvalidSnafu {
-            reference: "workflow",
-            message: "complete source resolution returned pending providers",
-        }
-    );
-    Ok(ResolvedWorkflow {
-        definition: discovery.definition,
-        sources: discovery.sources,
-        contracts: discovery.contracts,
-    })
+    let mut resolver = Resolver {
+        contracts: registry.parameter_types(),
+        ..Default::default()
+    };
+    let mut definition = definition.clone();
+    resolver.definition(&mut definition, directory, &BTreeMap::new(), 0, "workflow")?;
+    Ok(resolver.finish_resolution(definition))
 }
 
 /// Resolve everything whose linked metadata is available, without executing factories.
@@ -286,17 +266,8 @@ pub fn discover_flows_with_registry(
     directory: Option<&Path>,
     registry: &NodeRegistry,
 ) -> Result<FlowDiscovery, FlowResolutionError> {
-    resolve(definition, directory, registry, true)
-}
-
-fn resolve(
-    definition: &WorkflowDefinition,
-    directory: Option<&Path>,
-    registry: &NodeRegistry,
-    discovery: bool,
-) -> Result<FlowDiscovery, FlowResolutionError> {
     let resolver = Resolver {
-        discovery,
+        discovery: true,
         contracts: registry.parameter_types(),
         ..Default::default()
     };
@@ -409,13 +380,8 @@ impl FlowDiscovery {
             selected_packages,
             ..Default::default()
         };
-        let mut definition = resolver.file(path, &BTreeMap::new(), 0)?;
-        resolver.finish(&mut definition);
-        Ok(ResolvedWorkflow {
-            definition,
-            sources: resolver.sources,
-            contracts: resolver.contracts,
-        })
+        let definition = resolver.file(path, &BTreeMap::new(), 0)?;
+        Ok(resolver.finish_resolution(definition))
     }
 
     /// Replay authored sources with an application-owned static builtin catalog.
@@ -513,6 +479,19 @@ fn discover_file(
 }
 
 impl Resolver {
+    fn finish_resolution(self, mut definition: WorkflowDefinition) -> ResolvedWorkflow {
+        self.finish(&mut definition);
+        self.into_resolved(definition)
+    }
+
+    fn into_resolved(self, definition: WorkflowDefinition) -> ResolvedWorkflow {
+        ResolvedWorkflow {
+            definition,
+            sources: self.sources,
+            contracts: self.contracts,
+        }
+    }
+
     fn with_scope<T>(
         &mut self,
         reference: &str,
@@ -1317,6 +1296,63 @@ mod tests {
             FlowResolutionError::Source { source, .. } => source_cause(source),
             error => error,
         }
+    }
+
+    #[test]
+    fn strict_resolution_entries_share_dependency_and_source_results() {
+        let root = tempfile::tempdir().unwrap();
+        let dependency = |features| NodeDependency {
+            package: "resolution-provider".into(),
+            version: Some("1".into()),
+            path: None,
+            git: None,
+            rev: None,
+            features,
+            default_features: false,
+        };
+        let mut child = definition(json!([]));
+        child
+            .dependencies
+            .insert("child-provider".into(), dependency(vec!["child".into()]));
+        let mut parent = definition(json!([{
+            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"child.json"}}
+        }]));
+        parent
+            .dependencies
+            .insert("root-provider".into(), dependency(vec!["root".into()]));
+        write_definition(root.path(), "root.json", &parent);
+        write_definition(root.path(), "child.json", &child);
+        let entry = fs::canonicalize(root.path().join("root.json")).unwrap();
+        let child_path = fs::canonicalize(root.path().join("child.json")).unwrap();
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let file = load_workflow_with_registry(&entry, &registry).unwrap();
+        assert_eq!(
+            file.definition.dependencies["root-provider"].features,
+            vec!["child", "root"]
+        );
+        assert_eq!(file.sources, BTreeSet::from([entry.clone(), child_path]));
+        assert_eq!(file.contracts, registry.parameter_types());
+        let selected = FlowDiscovery::resolve_with_builtin_catalog(
+            &entry,
+            &registry,
+            BTreeMap::new(),
+            BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(selected.definition, file.definition);
+        assert_eq!(selected.sources, file.sources);
+        assert_eq!(selected.contracts, file.contracts);
+        let mut memory =
+            resolve_flows_with_registry(&parent, Some(root.path()), &registry).unwrap();
+        assert_eq!(memory.definition, file.definition);
+        assert_eq!(memory.contracts, file.contracts);
+        assert!(!memory.sources.contains(&entry));
+        memory.sources.insert(entry.clone());
+        assert_eq!(memory.sources, file.sources);
+        let embedded = load_embedded_workflow(&entry).unwrap();
+        assert_eq!(embedded.definition.dependencies, parent.dependencies);
+        assert_eq!(embedded.sources, file.sources);
+        assert_eq!(embedded.contracts, file.contracts);
     }
 
     #[test]
