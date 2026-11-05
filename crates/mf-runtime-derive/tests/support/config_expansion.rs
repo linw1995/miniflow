@@ -152,16 +152,25 @@ fn executable_fields_reject_defaults_that_could_construct_a_flow() {
         quote!(PreparedSubgraph),
         quote!(Option<PreparedSubgraph>),
     ] {
-        for default in [
-            quote!(default = "make_flow"),
-            quote!(default = 42),
-            quote!(default()),
-            quote!(default(foo)),
-            quote!(default, default),
+        for (default, message) in [
+            (
+                quote!(default = "make_flow"),
+                "executable defaults cannot construct a Flow",
+            ),
+            (
+                quote!(default = 42),
+                "expected serde default attribute to be a string",
+            ),
+            (quote!(default()), "expected `,`"),
+            (quote!(default(foo)), "expected `,`"),
+            (
+                quote!(default, default),
+                "duplicate serde attribute `default`",
+            ),
         ] {
             assert_error(
                 parse_quote! { struct Config { #[serde(#default)] body: #ty } },
-                "executable defaults cannot construct a Flow",
+                message,
             );
         }
     }
@@ -473,7 +482,7 @@ fn rejects_directional_renames_and_invalid_rules() {
             #[serde(rename_all = "unknown")]
             struct Config { body: Flow }
         },
-        "unsupported serde rename_all rule",
+        "unknown rename rule",
     );
 }
 
@@ -517,14 +526,14 @@ fn rejects_duplicate_names_and_attributes() {
                 body: Flow,
             }
         },
-        "duplicate serde rename",
+        "duplicate serde attribute `rename`",
     );
     assert_error(
         parse_quote! {
             #[serde(rename_all = "camelCase", rename_all = "snake_case")]
             struct Config { body: Flow }
         },
-        "duplicate serde rename_all",
+        "duplicate serde attribute `rename_all`",
     );
     assert_error(
         parse_quote! {
@@ -587,7 +596,7 @@ fn rejects_ambiguous_ordinary_deserialize_renames() {
     ] {
         assert_error(
             ordinary_config(options),
-            "duplicate serde deserialize rename",
+            "duplicate serde attribute `rename`",
         );
     }
 }
@@ -597,7 +606,7 @@ fn rejects_unknown_ordinary_rename_directions() {
     for direction in [quote!(deserialise), quote!(alias), quote!(unknown)] {
         assert_error(
             ordinary_config(quote!(#[serde(rename(#direction = "settings"))])),
-            "expected `serialize` or `deserialize` in serde rename",
+            "malformed rename attribute",
         );
     }
 }
@@ -620,26 +629,41 @@ fn rejects_repeated_directions_inside_an_ordinary_rename() {
     ] {
         assert_error(
             ordinary_config(quote!(#[serde(rename(#options))])),
-            "duplicate serde rename direction",
+            "duplicate serde attribute `rename`",
         );
     }
 }
 
 #[test]
 fn rejects_non_string_serde_wire_names_for_ordinary_and_flow_fields() {
-    for option in [
-        quote!(rename),
-        quote!(rename = 42),
-        quote!(rename = wire_name()),
-        quote!(alias = false),
-        quote!(alias = SOME_NAME),
-        quote!(rename(deserialize = 42)),
-        quote!(rename(serialize = false)),
+    for (option, message) in [
+        (quote!(rename), "expected `=` or parentheses"),
+        (
+            quote!(rename = 42),
+            "expected serde rename attribute to be a string",
+        ),
+        (
+            quote!(rename = wire_name()),
+            "expected serde rename attribute to be a string",
+        ),
+        (
+            quote!(alias = false),
+            "expected serde alias attribute to be a string",
+        ),
+        (
+            quote!(alias = SOME_NAME),
+            "expected serde alias attribute to be a string",
+        ),
+        (
+            quote!(rename(deserialize = 42)),
+            "expected serde rename attribute to be a string",
+        ),
+        (
+            quote!(rename(serialize = false)),
+            "expected serde rename attribute to be a string",
+        ),
     ] {
-        assert_error(
-            ordinary_config(quote!(#[serde(#option)])),
-            "NodeConfig requires a string value",
-        );
+        assert_error(ordinary_config(quote!(#[serde(#option)])), message);
     }
     assert_error(
         parse_quote! {
@@ -648,7 +672,7 @@ fn rejects_non_string_serde_wire_names_for_ordinary_and_flow_fields() {
                 body: Flow,
             }
         },
-        "NodeConfig requires a string value",
+        "expected serde rename attribute to be a string",
     );
     assert_error(
         parse_quote! {
@@ -820,14 +844,16 @@ fn projects_container_defaults_onto_only_ordinary_fields() {
 }
 
 #[test]
-fn camel_case_handles_underscore_only_names_without_panicking() {
-    // Serde's field rule removes underscores, even when no letters remain.
+fn explicit_rename_gives_underscore_only_fields_a_valid_wire_name() {
     assert_expansion(
         parse_quote! {
             #[serde(rename_all = "camelCase")]
-            struct Config { __: Flow }
+            struct Config {
+                #[serde(rename = "body")]
+                __: Flow,
+            }
         },
         parse_quote!(::mf_runtime),
-        &[("", Flow)],
+        &[("body", Flow)],
     );
 }

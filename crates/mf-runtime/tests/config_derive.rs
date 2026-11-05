@@ -202,6 +202,119 @@ fn ordinary_helper_names_do_not_shadow_user_types_or_container_defaults() {
 }
 
 #[test]
+#[allow(non_snake_case)]
+fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
+    macro_rules! assert_parity {
+        ($rule:tt, $settings_name:literal) => {{
+            #[derive(NodeConfig)]
+            #[serde(rename_all = $rule, deny_unknown_fields)]
+            struct Config {
+                request_body: Flow,
+                optional_body: Option<Flow>,
+                r#type: Flow,
+                ordinary_field: usize,
+                mixedCase: usize,
+                r#match: usize,
+                #[serde(rename(serialize = "output-only", deserialize = "input-only"))]
+                directional_field: usize,
+                #[serde(alias = "legacy-preferences")]
+                user_settings: usize,
+                #[serde(rename = "explicit-body")]
+                __: Flow,
+            }
+
+            // An independent Serde derive is the oracle, including for executable
+            // fields whose placeholder values NodeConfig removes before decoding.
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = $rule, deny_unknown_fields)]
+            struct SerdeConfig {
+                request_body: serde_json::Value,
+                optional_body: Option<serde_json::Value>,
+                r#type: serde_json::Value,
+                ordinary_field: usize,
+                mixedCase: usize,
+                r#match: usize,
+                #[serde(rename(serialize = "output-only", deserialize = "input-only"))]
+                directional_field: usize,
+                #[serde(alias = "legacy-preferences")]
+                user_settings: usize,
+                #[serde(rename = "explicit-body")]
+                __: serde_json::Value,
+            }
+
+            let parameters = Config::parameter_types();
+            assert_eq!(parameters.len(), 9, "{}", $rule);
+            assert_eq!(
+                parameters.get("input-only"),
+                Some(&ConfigParameterType::Value)
+            );
+            assert_eq!(
+                parameters.get($settings_name),
+                Some(&ConfigParameterType::Value)
+            );
+            assert!(!parameters.contains_key("output-only"));
+            assert!(!parameters.contains_key("legacy-preferences"));
+            let canonical = serde_json::Value::Object(
+                parameters
+                    .iter()
+                    .map(|(name, ty)| {
+                        let value = match ty {
+                            ConfigParameterType::Value => json!(17),
+                            ConfigParameterType::Flow | ConfigParameterType::Optional(_) => {
+                                json!({})
+                            }
+                        };
+                        (name.clone(), value)
+                    })
+                    .collect(),
+            );
+            let mut aliased = canonical.clone();
+            let fields = aliased.as_object_mut().unwrap();
+            let settings = fields.remove($settings_name).unwrap();
+            fields.insert("legacy-preferences".into(), settings);
+
+            for input in [canonical, aliased] {
+                let decoded: SerdeConfig = serde_json::from_value(input.clone()).unwrap();
+                assert_eq!(decoded.request_body, json!({}));
+                assert_eq!(decoded.optional_body, Some(json!({})));
+                assert_eq!(decoded.r#type, json!({}));
+                assert_eq!(decoded.ordinary_field, 17);
+                assert_eq!(decoded.mixedCase, 17);
+                assert_eq!(decoded.r#match, 17);
+                assert_eq!(decoded.directional_field, 17);
+                assert_eq!(decoded.user_settings, 17);
+                assert_eq!(decoded.__, json!({}));
+
+                let flows = parameters
+                    .iter()
+                    .filter(|(_, ty)| **ty != ConfigParameterType::Value)
+                    .map(|(name, _)| (name.clone(), prepared()))
+                    .collect();
+                let config = Config::from_config(input, flows).unwrap();
+                assert!(config.request_body.execute().unwrap().is_empty());
+                assert!(config.optional_body.unwrap().execute().unwrap().is_empty());
+                assert!(config.r#type.execute().unwrap().is_empty());
+                assert_eq!(config.ordinary_field, 17);
+                assert_eq!(config.mixedCase, 17);
+                assert_eq!(config.r#match, 17);
+                assert_eq!(config.directional_field, 17);
+                assert_eq!(config.user_settings, 17);
+                assert!(config.__.execute().unwrap().is_empty());
+            }
+        }};
+    }
+
+    assert_parity!("lowercase", "user_settings");
+    assert_parity!("UPPERCASE", "USER_SETTINGS");
+    assert_parity!("PascalCase", "UserSettings");
+    assert_parity!("camelCase", "userSettings");
+    assert_parity!("snake_case", "user_settings");
+    assert_parity!("SCREAMING_SNAKE_CASE", "USER_SETTINGS");
+    assert_parity!("kebab-case", "user-settings");
+    assert_parity!("SCREAMING-KEBAB-CASE", "USER-SETTINGS");
+}
+
+#[test]
 fn flow_config_cannot_be_decoded_without_its_prepared_body() {
     assert!(AliasedRuntimeConfig::from_config(json!({"body": {}}), BTreeMap::new()).is_err());
     assert!(

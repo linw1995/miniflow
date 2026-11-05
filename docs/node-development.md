@@ -1109,7 +1109,8 @@ struct Config {
 ```
 
 `NodeConfig::parameter_types()` returns a `ConfigParameterTypes` map for every named configuration
-field, keyed by its canonical Serde deserialize name (`rename` and `rename_all`). Direct `Flow` fields
+field, keyed by its canonical Serde deserialize name (`rename` and `rename_all`). The derive consumes
+Serde's parsed field metadata directly; it does not maintain a separate naming-rule implementation. Direct `Flow` fields
 have type `ConfigParameterType::Flow`; `Option<Flow>` fields have type
 `ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))`. There is no separate Flow-name
 list or source-description schema. Use `PreparedSubgraph` (or its optional form) when the node needs

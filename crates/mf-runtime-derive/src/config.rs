@@ -14,20 +14,20 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             "NodeConfig does not support generic structs",
         ));
     }
-    let Data::Struct(data) = input.data else {
+    let Data::Struct(data) = &input.data else {
         return Err(syn::Error::new(
             input.ident.span(),
             "NodeConfig requires a named-field struct",
         ));
     };
-    let Fields::Named(fields) = data.fields else {
+    let Fields::Named(_) = &data.fields else {
         return Err(syn::Error::new(
             input.ident.span(),
             "NodeConfig requires a named-field struct",
         ));
     };
 
-    let name = input.ident;
+    let name = &input.ident;
     let ordinary_config = format_ident!(
         "__Mf{}OrdinaryConfig",
         name.unraw(),
@@ -50,13 +50,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     }
     let runtime: Path = runtime.unwrap_or_else(|| parse_quote!(::mf_runtime));
-    let mut rename_all = None;
     for meta in serde_options(&input.attrs)? {
         if meta.path().is_ident("rename_all") {
-            if rename_all.is_some() {
-                return Err(syn::Error::new_spanned(meta, "duplicate serde rename_all"));
-            }
-            rename_all = Some(RenameRule::parse(&string_value(&meta)?)?);
+            string_value(&meta)?;
         } else if ![
             "rename",
             "default",
@@ -87,21 +83,39 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut ordinary_names = BTreeSet::new();
     let mut ordinary_wire_names = BTreeSet::new();
     let mut flatten = None;
-    for field in fields.named {
+    // Serde owns wire names and aliases. Consume its resolved fields rather than
+    // reimplementing rename/rename_all rules alongside the ordinary decoder.
+    let context = serde_derive_internals::Ctxt::new();
+    let container = serde_derive_internals::ast::Container::from_ast(
+        &context,
+        &input,
+        serde_derive_internals::Derive::Deserialize,
+        &syn::Ident::new("__private", proc_macro2::Span::mixed_site()),
+    );
+    context.check()?;
+    let container = container.expect("validated named-field config");
+    let serde_derive_internals::ast::Data::Struct(_, fields) = container.data else {
+        unreachable!("validated named-field config")
+    };
+    for metadata in fields {
+        let wire = metadata.attrs.name().deserialize_name();
+        let wire = LitStr::new(&wire.value, wire.span);
+        let field = metadata.original;
         let mut options = serde_options(&field.attrs)?;
         let Some((flow_ident, optional)) = flow_field_type(&field.ty) else {
             let mut nested = ContainsFlow(false);
             nested.visit_type(&field.ty);
             if nested.0 {
                 return Err(syn::Error::new_spanned(
-                    field.ty,
+                    &field.ty,
                     "NodeConfig supports only direct Flow or Option<Flow> fields (or PreparedSubgraph equivalents); nested containers and wrappers are unsupported",
                 ));
             }
+            reject_repeated_deserialize_names(&options)?;
             let ident = field.ident.clone().expect("named field");
             let mut ordinary = field.clone();
             for meta in &mut options {
-                qualify_serde_path(meta, &name)?;
+                qualify_serde_path(meta, name)?;
             }
             ordinary.attrs = if options.is_empty() {
                 Vec::new()
@@ -110,25 +124,18 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             };
             ordinary_fields.push(ordinary);
             ordinary_idents.push(ident.clone());
-            let mut rename = None;
             for meta in options {
-                if meta.path().is_ident("rename") {
-                    if let Some(value) = deserialize_rename(&meta)? {
-                        if rename.is_some() {
-                            return Err(syn::Error::new_spanned(
-                                meta,
-                                "duplicate serde deserialize rename",
-                            ));
-                        }
-                        rename = Some(value);
-                    }
-                } else if meta.path().is_ident("alias") {
-                    ordinary_names.insert(string_value(&meta)?.value());
-                } else if meta.path().is_ident("flatten") {
+                if meta.path().is_ident("flatten") {
                     flatten = Some(meta.span());
                 }
             }
-            let wire = wire_name(&ident, rename, rename_all.as_ref());
+            ordinary_names.extend(
+                metadata
+                    .attrs
+                    .aliases()
+                    .iter()
+                    .map(|alias| alias.value.clone()),
+            );
             if !ordinary_wire_names.insert(wire.value()) {
                 return Err(syn::Error::new(
                     wire.span(),
@@ -139,15 +146,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             parameters.push((wire, quote!(#runtime::ConfigParameterType::Value)));
             continue;
         };
-        let ident = field.ident.expect("named field");
-        let mut rename = None;
+        let ident = field.ident.clone().expect("named field");
         let mut default = false;
         for meta in options {
             if meta.path().is_ident("rename") {
-                if rename.is_some() {
-                    return Err(syn::Error::new_spanned(meta, "duplicate serde rename"));
-                }
-                rename = Some(string_value(&meta)?);
+                string_value(&meta)?;
             } else if !(meta.path().is_ident("default")
                 && matches!(meta, Meta::Path(_))
                 && optional
@@ -161,7 +164,6 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 default = true;
             }
         }
-        let wire = wire_name(&ident, rename, rename_all.as_ref());
         if flow_names.insert(wire.value(), wire.span()).is_some() {
             return Err(syn::Error::new(
                 wire.span(),
@@ -233,7 +235,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut container_options = Vec::new();
     let mut helper_default = None;
     for mut meta in serde_options(&input.attrs)? {
-        qualify_serde_path(&mut meta, &name)?;
+        qualify_serde_path(&mut meta, name)?;
         if meta.path().is_ident("default") {
             let default = if matches!(meta, Meta::Path(_)) {
                 quote!(<#name as ::core::default::Default>::default())
@@ -351,45 +353,28 @@ fn string_value(meta: &Meta) -> syn::Result<LitStr> {
     ))
 }
 
-fn wire_name(ident: &syn::Ident, rename: Option<LitStr>, rule: Option<&RenameRule>) -> LitStr {
-    rename.unwrap_or_else(|| {
-        let name = ident.unraw().to_string();
-        let name = rule.map_or_else(|| name.clone(), |rule| rule.apply(&name));
-        LitStr::new(&name, ident.span())
-    })
-}
-
-// Ordinary fields may use directional renames even though Flow fields cannot:
-// only the deserialize name participates in routing incoming configuration.
-fn deserialize_rename(meta: &Meta) -> syn::Result<Option<LitStr>> {
-    let Meta::List(list) = meta else {
-        return string_value(meta).map(Some);
-    };
-    let mut rename = None;
-    let mut seen = BTreeSet::new();
-    for direction in list.parse_args_with(Punctuated::<Meta, syn::Token![,]>::parse_terminated)? {
-        let name = if direction.path().is_ident("deserialize") {
-            "deserialize"
-        } else if direction.path().is_ident("serialize") {
-            "serialize"
-        } else {
-            return Err(syn::Error::new_spanned(
-                direction,
-                "expected `serialize` or `deserialize` in serde rename",
-            ));
+// Serde accepts repeated deserialize renames as aliases. NodeConfig keeps its
+// single-canonical-name contract; values and name transformations stay Serde-owned.
+fn reject_repeated_deserialize_names(options: &[Meta]) -> syn::Result<()> {
+    let mut count = 0;
+    for meta in options.iter().filter(|meta| meta.path().is_ident("rename")) {
+        count += match meta {
+            Meta::NameValue(_) => 1,
+            Meta::List(list) => list
+                .parse_args_with(Punctuated::<Meta, syn::Token![,]>::parse_terminated)?
+                .iter()
+                .filter(|direction| direction.path().is_ident("deserialize"))
+                .count(),
+            Meta::Path(_) => 0,
         };
-        if !seen.insert(name) {
+        if count > 1 {
             return Err(syn::Error::new_spanned(
-                direction,
-                "duplicate serde rename direction",
+                meta,
+                "duplicate serde attribute `rename`",
             ));
-        }
-        let value = string_value(&direction)?;
-        if name == "deserialize" {
-            rename = Some(value);
         }
     }
-    Ok(rename)
+    Ok(())
 }
 
 fn flow_field_type(ty: &Type) -> Option<(&syn::Ident, bool)> {
@@ -428,63 +413,5 @@ impl<'ast> Visit<'ast> for ContainsFlow {
             self.0 = true;
         }
         syn::visit::visit_type_path(self, path);
-    }
-}
-
-// These are Serde's *field* rules, not its enum-variant rules. In particular,
-// lowercase and snake_case preserve the field identifier rather than splitting it.
-enum RenameRule {
-    Unchanged,
-    Uppercase,
-    PascalCase,
-    CamelCase,
-    KebabCase,
-    ScreamingKebabCase,
-}
-
-impl RenameRule {
-    fn parse(value: &LitStr) -> syn::Result<Self> {
-        match value.value().as_str() {
-            "lowercase" | "snake_case" => Ok(Self::Unchanged),
-            "UPPERCASE" | "SCREAMING_SNAKE_CASE" => Ok(Self::Uppercase),
-            "PascalCase" => Ok(Self::PascalCase),
-            "camelCase" => Ok(Self::CamelCase),
-            "kebab-case" => Ok(Self::KebabCase),
-            "SCREAMING-KEBAB-CASE" => Ok(Self::ScreamingKebabCase),
-            _ => Err(syn::Error::new(
-                value.span(),
-                "unsupported serde rename_all rule",
-            )),
-        }
-    }
-
-    fn apply(&self, field: &str) -> String {
-        match self {
-            Self::Unchanged => field.to_owned(),
-            Self::Uppercase => field.to_ascii_uppercase(),
-            Self::PascalCase | Self::CamelCase => {
-                let mut capitalize = true;
-                let mut name = String::new();
-                for ch in field.chars() {
-                    if ch == '_' {
-                        capitalize = true;
-                    } else if capitalize {
-                        name.push(ch.to_ascii_uppercase());
-                        capitalize = false;
-                    } else {
-                        name.push(ch);
-                    }
-                }
-                if matches!(self, Self::CamelCase) {
-                    let mut chars = name.chars();
-                    if let Some(first) = chars.next() {
-                        return first.to_ascii_lowercase().to_string() + chars.as_str();
-                    }
-                }
-                name
-            }
-            Self::KebabCase => field.replace('_', "-"),
-            Self::ScreamingKebabCase => field.to_ascii_uppercase().replace('_', "-"),
-        }
     }
 }

@@ -15,4 +15,5 @@ test = false
 [dependencies]
 proc-macro2.workspace = true
 quote.workspace = true
+serde_derive_internals.workspace = true
 syn = { workspace = true, features = ["clone-impls", "derive", "parsing", "printing", "proc-macro", "visit"] }
