@@ -1007,6 +1007,7 @@ fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
 #[derive(Default)]
 struct ViewState {
     graph_notice: Option<String>,
+    minimap_hidden: bool,
     latest_node_sequence: Option<mf_telemetry::Count>,
     latest_iteration_revision: u64,
     iteration_items: BTreeMap<Vec<String>, ItemIdentity>,
@@ -1167,6 +1168,7 @@ impl ViewState {
         }
         match key {
             KeyCode::Char('d') => self.details_visible = !self.details_visible,
+            KeyCode::Char('m') => self.minimap_hidden = !self.minimap_hidden,
             KeyCode::Esc if self.details_visible => self.details_visible = false,
             KeyCode::PageDown if self.details_visible => {
                 self.details_offset = self
@@ -1671,7 +1673,8 @@ fn draw(
             .reader(receiver)
             .selected(view_state.selected)
             .offset(view_state.offset.0, view_state.offset.1)
-            .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64);
+            .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64)
+            .minimap(!view_state.minimap_hidden);
         graph_view = graph_view.nodes(&display_nodes);
         frame.render_widget(graph_view, graph);
         let observations = display_nodes.as_slice();
@@ -1735,7 +1738,7 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | d details | ? help | {controls}",
+            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | m minimap | d details | ? help | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
@@ -1761,7 +1764,7 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
          l              Expand selected body inline\nh              Collapse body / enclosing body\n\
          Esc            Close details / collapse body\n\
          [ / ]          Older / newer pass or item\nf              Reset viewport\n\
-         Ctrl-C         Interrupt / close\nq, Enter       Close after completion"
+         m              Show / hide minimap\nCtrl-C         Interrupt / close\nq, Enter       Close after completion"
     };
     let [_, horizontal, _] = Layout::horizontal([
         Constraint::Fill(1),
@@ -3881,6 +3884,32 @@ mod tests {
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert!(view.state.graph_notice.is_none());
         assert_eq!(view.root.nodes()[view.state.selected].id, "usages");
+    }
+
+    #[test]
+    fn minimap_toggle_preserves_navigation_and_is_consumed_by_help() {
+        let description = scope_fixture();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.state.offset = (12, 8);
+        let selected = view.state.selected;
+        assert!(!view.state.minimap_hidden);
+        view.handle_navigation(KeyCode::Char('m'), &snapshot, &traces, &logs);
+        assert!(view.state.minimap_hidden);
+        assert_eq!(view.state.offset, (12, 8));
+        assert_eq!(view.state.selected, selected);
+        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+        assert!(view.state.minimap_hidden);
+        view.state.handle_help(KeyCode::Char('?'));
+        assert!(view.state.handle_help(KeyCode::Char('m')));
+        assert!(view.state.minimap_hidden);
+        view.state.handle_help(KeyCode::Esc);
+        view.handle_navigation(KeyCode::Char('m'), &snapshot, &traces, &logs);
+        assert!(!view.state.minimap_hidden);
     }
 
     #[test]

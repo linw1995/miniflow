@@ -14,7 +14,7 @@ use mf_runtime::{
 use rig_core::{
     completion::{CompletionRequest, CompletionResponse, FinishReason},
     error::ProviderError,
-    providers::openai::OpenAIConfig,
+    providers::openai::{OpenAIConfig, wire::Auth},
 };
 use rig_reqwest::ReqwestClient;
 use serde_json::Value;
@@ -300,7 +300,6 @@ fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
         }
         "model" if value.contains_secret() => Some("a public model identifier"),
         "model" if value.as_str().unwrap().trim().is_empty() => Some("a nonblank identifier"),
-        "api_key" if value.as_str().unwrap().is_empty() => Some("a nonempty credential"),
         "api_key_env"
             if value.as_str().unwrap().trim().is_empty()
                 || value.as_str().unwrap().contains(['=', '\0']) =>
@@ -559,10 +558,12 @@ impl LlmNode {
             key
         };
         let transport = transport::TerminalTransport::new(self.client()?);
-        let model = OpenAIConfig::new(key)
-            .with_base_url(&config.base_url)
-            .connect(transport.clone())
-            .chat(&config.model);
+        let keyless = key.is_empty();
+        let mut openai = OpenAIConfig::new(key).with_base_url(&config.base_url);
+        if keyless {
+            openai.auth = Auth::OptionalBearer;
+        }
+        let model = openai.connect(transport.clone()).chat(&config.model);
         let mut usage = CallUsage {
             attribution: config.attribution.clone(),
             started_at: None,
