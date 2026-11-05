@@ -36,17 +36,22 @@ The node SHALL require a model field and validate literal settings during prepar
 
 ### Requirement: Prepare without external execution resources
 
-Node preparation and workflow build validation MUST NOT read credentials, initialize network clients or asynchronous executors, or issue provider requests. Manifest inspection SHALL remain independent of execution resources. Missing or empty credentials SHALL fail at invocation before a request is sent.
+Node preparation and workflow build validation MUST NOT read credentials, initialize network clients or asynchronous executors, or issue provider requests. Manifest inspection SHALL remain independent of execution resources. Missing or empty `api_key_env` credentials SHALL fail at invocation before a request is sent, while an empty resolved `api_key` template SHALL omit authentication instead of failing.
 
 #### Scenario: Build without credentials
 
 - **WHEN** a valid workflow is compiled with its configured credential variable unset
 - **THEN** compilation succeeds without contacting the model endpoint
 
-#### Scenario: Execute without credentials
+#### Scenario: Execute without environment credentials
 
-- **WHEN** the node executes with a missing or empty configured credential variable
+- **WHEN** the node executes with a missing or empty configured `api_key_env` variable
 - **THEN** execution fails with node attribution and publishes no result
+
+#### Scenario: Execute against a keyless endpoint
+
+- **WHEN** the node resolves an empty `api_key` template
+- **THEN** the request omits the `Authorization` header and proceeds without a credential
 
 ### Requirement: Send one model request from explicit messages
 
@@ -268,7 +273,8 @@ Workflow definitions SHALL store only a credential reference. Credential values 
 LLM model, endpoint, generation parameters, deadline, and reply limit SHALL accept
 shared configuration templates. An api_key template SHALL supply an execution-time
 credential and MUST NOT coexist with api_key_env. Literal credentials SHALL be
-rejected. Existing literal api_key_env configuration SHALL remain supported, with
+rejected. An empty resolved api_key SHALL omit the Authorization header. Existing
+literal api_key_env configuration SHALL remain supported, with
 OPENAI_API_KEY as its default when no credential template is configured.
 
 #### Scenario: Configure the provider from typed parameters
