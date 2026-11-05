@@ -119,7 +119,7 @@ fn serialize_embedded_sources<S: serde::Serializer>(
 }
 
 impl FlowSourceBundle {
-    /// Resolve using host metadata and only the captured sources, never the filesystem.
+    /// Resolve host resources without interpreting their provider dependency paths.
     pub fn resolve(
         &self,
         registry: &NodeRegistry,
@@ -141,7 +141,8 @@ impl FlowSourceBundle {
             contracts: registry.parameter_types(),
             ..Default::default()
         };
-        let definition = resolver.file(&self.entry, &BTreeMap::new(), 0)?;
+        let mut definition = resolver.file(&self.entry, &BTreeMap::new(), 0)?;
+        resolver.finish(&mut definition);
         Ok(ResolvedWorkflow {
             definition,
             sources: resolver.sources,
@@ -190,7 +191,6 @@ pub fn normalize_embedded_path(path: &Path) -> Result<PathBuf, FlowResolutionErr
 /// a result with pending entries is not an executable or structurally frozen plan.
 #[derive(Serialize, Deserialize)]
 pub struct FlowDiscovery {
-    pub bundle: FlowSourceBundle,
     /// Definition carrying selected provider dependencies and authorized child
     /// placeholders. This is not a complete ResolvedWorkflow while pending is nonempty.
     pub definition: WorkflowDefinition,
@@ -210,10 +210,8 @@ struct Resolver {
     selected_packages: BTreeSet<String>,
     pending: BTreeSet<String>,
     stack: Vec<PathBuf>,
-    entry: Option<PathBuf>,
     scope_depth: usize,
     sources: BTreeSet<PathBuf>,
-    packed_sources: BTreeMap<PathBuf, String>,
     dependencies: BTreeMap<String, NodeDependency>,
 }
 
@@ -331,10 +329,6 @@ fn resolve_using(
     resolver.definition(&mut definition, directory, &BTreeMap::new(), 0, "workflow")?;
     resolver.finish(&mut definition);
     Ok(FlowDiscovery {
-        bundle: FlowSourceBundle {
-            entry: PathBuf::from("flow.json"),
-            sources: BTreeMap::new(),
-        },
         definition,
         sources: resolver.sources,
         contracts: resolver.contracts,
@@ -399,6 +393,29 @@ impl FlowDiscovery {
         registry: &NodeRegistry,
     ) -> Result<Self, FlowResolutionError> {
         Self::load_with_builtin_catalog(path, registry, BTreeMap::new(), BTreeSet::new())
+    }
+
+    /// Fully resolve authored sources once after the provider closure is stable.
+    /// This uses the selected process registry, never the CLI host's node metadata.
+    pub fn resolve_with_builtin_catalog(
+        path: &Path,
+        registry: &NodeRegistry,
+        builtin_catalog: BTreeMap<String, WorkflowDefinition>,
+        selected_packages: BTreeSet<String>,
+    ) -> Result<ResolvedWorkflow, FlowResolutionError> {
+        let mut resolver = Resolver {
+            contracts: registry.parameter_types(),
+            builtin_catalog,
+            selected_packages,
+            ..Default::default()
+        };
+        let mut definition = resolver.file(path, &BTreeMap::new(), 0)?;
+        resolver.finish(&mut definition);
+        Ok(ResolvedWorkflow {
+            definition,
+            sources: resolver.sources,
+            contracts: resolver.contracts,
+        })
     }
 
     /// Replay authored sources with an application-owned static builtin catalog.
@@ -485,16 +502,9 @@ fn discover_file(
     path: &Path,
     mut resolver: Resolver,
 ) -> Result<FlowDiscovery, FlowResolutionError> {
-    let canonical = fs::canonicalize(path).context(ReadSnafu { path })?;
-    resolver.entry = Some(canonical.clone());
-    let mut definition = resolver.file(&canonical, &BTreeMap::new(), 0)?;
+    let mut definition = resolver.file(path, &BTreeMap::new(), 0)?;
     resolver.finish(&mut definition);
-    let entry = resolver.relative_to_entry(&canonical);
     Ok(FlowDiscovery {
-        bundle: FlowSourceBundle {
-            entry,
-            sources: std::mem::take(&mut resolver.packed_sources),
-        },
         definition,
         sources: resolver.sources,
         contracts: resolver.contracts,
@@ -543,25 +553,6 @@ impl Resolver {
         }
     }
 
-    fn relative_to_entry(&self, path: &Path) -> PathBuf {
-        let Some(directory) = self.entry.as_ref().and_then(|entry| entry.parent()) else {
-            return path.to_owned();
-        };
-        let suffix = path.strip_prefix(directory).unwrap_or_else(|_| {
-            panic!("Flow source {path:?} is below entry directory {directory:?}")
-        });
-        suffix
-            .components()
-            .fold(PathBuf::new(), |mut result, component| {
-                if result.as_os_str().is_empty() && component == Component::CurDir {
-                    result.push(component);
-                } else {
-                    result.push(component.as_os_str());
-                }
-                result
-            })
-    }
-
     fn file(
         &mut self,
         path: &Path,
@@ -594,10 +585,6 @@ impl Resolver {
         let mut definition =
             WorkflowDefinition::from_json(&source).context(ParseSnafu { path: &path })?;
         self.sources.insert(path.clone());
-        if self.discovery && !self.unlinked {
-            let logical = self.relative_to_entry(&path);
-            self.packed_sources.insert(logical, source.clone());
-        }
         self.stack.push(path.clone());
         let result = self.definition(
             &mut definition,
@@ -1795,7 +1782,7 @@ mod tests {
         assert_eq!(loaded.definition, resolved.definition);
         assert_eq!(
             resolved.definition.nodes[0].config["body"],
-            serde_json::to_value(child).unwrap()
+            serde_json::to_value(&child).unwrap()
         );
         assert_eq!(
             discovered.sources,
@@ -1804,17 +1791,31 @@ mod tests {
         let mut expected = discovered.sources;
         expected.insert(fs::canonicalize(root.path().join("root.json")).unwrap());
         assert_eq!(loaded.sources, expected);
-        assert_eq!(loaded.bundle.entry, PathBuf::from("root.json"));
-        assert_eq!(loaded.bundle.sources.len(), 2);
+        let complete = FlowDiscovery::resolve_with_builtin_catalog(
+            &root.path().join("root.json"),
+            &registry,
+            BTreeMap::new(),
+            BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(complete.definition, loaded.definition);
+        assert_eq!(complete.sources, loaded.sources);
+        let bundle = embedded_archive(
+            "nested/root.json",
+            &[("nested/root.json", parent), ("nested/child.json", child)],
+        );
         // The captured build handoff replays the same host result after source removal.
         fs::remove_file(root.path().join("child.json")).unwrap();
         fs::remove_file(root.path().join("root.json")).unwrap();
-        let replay = loaded.bundle.resolve(&registry).unwrap();
+        let replay = bundle.resolve(&registry).unwrap();
         assert_eq!(replay.definition, resolved.definition);
         assert_eq!(replay.contracts, resolved.contracts);
         assert_eq!(
             replay.sources,
-            BTreeSet::from([PathBuf::from("root.json"), PathBuf::from("child.json")])
+            BTreeSet::from([
+                PathBuf::from("nested/root.json"),
+                PathBuf::from("nested/child.json")
+            ])
         );
     }
 

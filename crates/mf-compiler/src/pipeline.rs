@@ -68,19 +68,7 @@ pub fn compile_project_with_options(
         request.definition,
         inputs.check_output(request.output),
     )?;
-    let discovery = discover_provider_flows(request, options, &inputs, &output)?;
-    let registry = at(
-        "host registry",
-        &inputs.definition,
-        mf_runtime::NodeRegistry::from_inventory(),
-    )?;
-    // Provider probes stop at a stable dependency closure. Do not return their
-    // last partial result: resolve the complete authoring bundle exactly once.
-    let mut resolved = at(
-        "Flow source resolution",
-        &inputs.definition,
-        discovery.bundle.resolve(&registry),
-    )?;
+    let mut resolved = resolve_provider_flows(request, options, &inputs, &output)?;
     resolved.sources.insert(inputs.definition.clone());
     check_source_destinations(&inputs, &output, &resolved.sources)?;
     let mut protected: Vec<&Path> = resolved.sources.iter().map(PathBuf::as_path).collect();
@@ -167,12 +155,12 @@ fn check_source_destinations(
 /// Discover the complete provider closure before touching the user-selected build
 /// directory. Every pass reads the original authoring file: a frozen partial pass
 /// must not hide fields whose contracts become available after linking a provider.
-fn discover_provider_flows(
+fn resolve_provider_flows(
     request: &CompileRequest<'_>,
     options: &RunnerOptions,
     inputs: &BuildInputs,
     output: &Path,
-) -> Result<crate::FlowDiscovery, PipelineError> {
+) -> Result<crate::ResolvedWorkflow, PipelineError> {
     // CLI process inventory is not the selected provider bundle (tests and hosts
     // may link extra crates or different feature sets). Only the probe grants
     // authored configuration fields Flow authority for this compilation.
@@ -216,7 +204,28 @@ fn discover_provider_flows(
     if initial.pending.is_empty()
         && (builtin_catalog.is_empty() || initial.definition.dependencies.is_empty())
     {
-        return Ok(initial);
+        let resolved = at(
+            "Flow source resolution",
+            &inputs.definition,
+            crate::FlowDiscovery::resolve_with_builtin_catalog(
+                &inputs.definition,
+                &mf_runtime::NodeRegistry::default(),
+                builtin_catalog,
+                initial
+                    .definition
+                    .dependencies
+                    .values()
+                    .map(|dependency| dependency.package.clone())
+                    .collect(),
+            ),
+        )?;
+        return finish_provider_resolution(
+            inputs,
+            output,
+            &initial.definition,
+            initial.sources,
+            resolved,
+        );
     }
     if initial.definition.dependencies.is_empty() {
         at(
@@ -318,35 +327,12 @@ fn discover_provider_flows(
             validate_runtime_identity(&metadata),
         )?;
         let executable = build_runner(project)?;
-        let result_path = project.join("flow-discovery.json");
-        let status = at(
-            "Flow metadata probe",
+        let mut discovery: crate::FlowDiscovery = run_provider_probe(
             project,
-            Command::new(executable)
-                .arg(&inputs.definition)
-                .arg(&result_path)
-                .arg(&catalog_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status(),
-        )?;
-        if !status.success() {
-            return Err(failure(
-                "Flow metadata probe",
-                project,
-                format!("provider-linked Flow resolution exited with {status}"),
-            ));
-        }
-        let result = at(
-            "Flow metadata probe output",
-            project,
-            fs::read(&result_path),
-        )?;
-        let mut discovery: crate::flow_sources::FlowDiscovery = at(
-            "Flow metadata probe output",
-            project,
-            serde_json::from_slice(&result),
+            &executable,
+            &inputs.definition,
+            &catalog_path,
+            false,
         )?;
         sources.extend(std::mem::take(&mut discovery.sources));
         check_source_destinations(inputs, output, &sources)?;
@@ -380,11 +366,21 @@ fn discover_provider_flows(
                     ),
                 ));
             }
-            discovery.sources = sources;
+            // Reuse exactly this selected-provider executable, but restart from
+            // the original source in strict mode rather than freezing discovery.
+            let resolved = run_provider_probe(
+                project,
+                &executable,
+                &inputs.definition,
+                &catalog_path,
+                true,
+            )?;
+            let resolved =
+                finish_provider_resolution(inputs, output, &selected, sources, resolved)?;
             // Only failed unlocked probes are retained. Locked probes always keep
             // their temporary-only cleanup policy and never touch the managed cache.
             probe.disable_cleanup(false);
-            return Ok(discovery);
+            return Ok(resolved);
         }
         selected = discovery.definition;
     }
@@ -393,6 +389,67 @@ fn discover_provider_flows(
         &inputs.definition,
         "provider dependency discovery did not converge after 64 passes",
     ))
+}
+
+/// Discovery and strict resolution share one binary and catalog, never host inventory.
+fn run_provider_probe<T: serde::de::DeserializeOwned>(
+    project: &Path,
+    executable: &Path,
+    source: &Path,
+    catalog: &Path,
+    resolve: bool,
+) -> Result<T, PipelineError> {
+    let (stage, result_name) = if resolve {
+        ("Flow source resolution", "flow-resolved.json")
+    } else {
+        ("Flow metadata probe", "flow-discovery.json")
+    };
+    let result_path = project.join(result_name);
+    let mut command = Command::new(executable);
+    command.arg(source).arg(&result_path).arg(catalog);
+    if resolve {
+        command.arg("resolve");
+    }
+    let status = at(
+        stage,
+        project,
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status(),
+    )?;
+    if !status.success() {
+        return Err(failure(
+            stage,
+            project,
+            format!("provider-linked Flow resolution exited with {status}"),
+        ));
+    }
+    let result = at(stage, project, fs::read(&result_path))?;
+    at(stage, project, serde_json::from_slice(&result))
+}
+
+/// Strict resolution must confirm discovery's provider closure before managed
+/// paths can be opened. Preserve source facts from every discovery pass as well.
+fn finish_provider_resolution(
+    inputs: &BuildInputs,
+    output: &Path,
+    selected: &crate::WorkflowDefinition,
+    mut sources: BTreeSet<PathBuf>,
+    mut resolved: crate::ResolvedWorkflow,
+) -> Result<crate::ResolvedWorkflow, PipelineError> {
+    sources.append(&mut resolved.sources);
+    check_source_destinations(inputs, output, &sources)?;
+    if selected.dependencies != resolved.definition.dependencies {
+        return Err(failure(
+            "Flow source resolution",
+            &inputs.definition,
+            "provider dependency closure changed during strict Flow resolution",
+        ));
+    }
+    resolved.sources = sources;
+    Ok(resolved)
 }
 
 fn build_runner(project: &Path) -> Result<PathBuf, PipelineError> {
@@ -772,7 +829,7 @@ checksum = "original"
         root: &Path,
         authored: serde_json::Value,
         locked: bool,
-    ) -> Result<crate::FlowDiscovery, PipelineError> {
+    ) -> Result<crate::ResolvedWorkflow, PipelineError> {
         let source = root.join("flow.json");
         fs::write(&source, authored.to_string()).unwrap();
         let inputs = BuildInputs::new(&source).unwrap();
@@ -784,7 +841,7 @@ checksum = "original"
         };
         let output = root.join("runner");
         let build = root.join("managed-build");
-        let result = discover_provider_flows(
+        let result = resolve_provider_flows(
             &CompileRequest {
                 definition: &source,
                 output: &output,
@@ -1169,17 +1226,34 @@ inventory::submit! {
 }
 "###,
         );
-        fs::create_dir(root.path().join("child")).unwrap();
+        let entry_directory = root.path().join("entry");
+        let child_directory = root.path().join("external/child");
+        fs::create_dir(&entry_directory).unwrap();
+        fs::create_dir_all(&child_directory).unwrap();
+        #[cfg(unix)]
+        let (first_path, child_path) = {
+            // The child's dependencies are relative to its canonical declaring
+            // directory, not the entry directory containing this symlink.
+            std::os::unix::fs::symlink(
+                "../external/child/flow.json",
+                entry_directory.join("child-link.json"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink("resolution-first", root.path().join("first-link")).unwrap();
+            ("../first-link", "child-link.json")
+        };
+        #[cfg(not(unix))]
+        let (first_path, child_path) = ("../resolution-first", "../external/child/flow.json");
         let authored = json!({
             "version":"2026-10-28", "dependencies":{
-                "first":{"package":"resolution-first", "path":"resolution-first", "default-features":false}
+                "first":{"package":"resolution-first", "path":first_path, "default-features":false}
             },
-            "nodes":[{"id":"first", "kind":"fixture.first", "config":{"body":{"path":"child/flow.json"}}}]
+            "nodes":[{"id":"first", "kind":"fixture.first", "config":{"body":{"path":child_path}}}]
         });
         let child = json!({
             "version":"2026-10-28", "dependencies":{
-                "first":{"package":"resolution-first", "path":"../resolution-first", "features":["expanded"], "default-features":false},
-                "second":{"package":"resolution-second", "path":"../resolution-second", "default-features":false}
+                "first":{"package":"resolution-first", "path":"../../resolution-first", "features":["expanded"], "default-features":false},
+                "second":{"package":"resolution-second", "path":"../../resolution-second", "default-features":false}
             },
             "nodes":[{"id":"second", "kind":"fixture.second", "config":{"body":{"path":"grandchild.json"}}}]
         });
@@ -1188,10 +1262,10 @@ inventory::submit! {
             "flows":{"feature":{"builtin":"resolution-second.feature"}},
             "nodes":[{"id":"builtin", "kind":"workflow.call", "config":{"flow":"feature"}}]
         });
-        let source = root.path().join("flow.json");
-        fs::write(root.path().join("child/flow.json"), child.to_string()).unwrap();
+        let source = entry_directory.join("flow.json");
+        fs::write(child_directory.join("flow.json"), child.to_string()).unwrap();
         fs::write(
-            root.path().join("child/grandchild.json"),
+            child_directory.join("grandchild.json"),
             grandchild.to_string(),
         )
         .unwrap();
@@ -1201,10 +1275,43 @@ inventory::submit! {
                 .unwrap()
                 .to_owned(),
         };
-        let resolved = discover_fixture(root.path(), authored.clone(), false).unwrap();
+        let resolved = discover_fixture(&entry_directory, authored.clone(), false).unwrap();
         let inputs = BuildInputs::new(&source).unwrap();
         assert!(!inputs.lock.exists());
-        assert_eq!(resolved.sources.len(), 3);
+        assert_eq!(
+            resolved.sources,
+            BTreeSet::from([
+                inputs.definition.clone(),
+                fs::canonicalize(child_directory.join("flow.json")).unwrap(),
+                fs::canonicalize(child_directory.join("grandchild.json")).unwrap(),
+            ])
+        );
+        assert!(
+            resolved
+                .sources
+                .iter()
+                .any(|path| !path.starts_with(inputs.definition.parent().unwrap()))
+        );
+        // Strict selected-provider resolution normalizes paths relative to each
+        // declaring source, including the child, not the generated Cargo project.
+        let child_dependencies = &resolved.definition.nodes[0].config["body"]["dependencies"];
+        for (alias, package) in [
+            ("first", "resolution-first"),
+            ("second", "resolution-second"),
+        ] {
+            assert_eq!(
+                child_dependencies[alias]["path"],
+                json!(fs::canonicalize(root.path().join(package)).unwrap())
+            );
+        }
+        assert_eq!(
+            resolved.contracts["fixture.first"]["body"],
+            mf_runtime::ConfigParameterType::Flow
+        );
+        assert_eq!(
+            resolved.contracts["fixture.first"]["host_extra"],
+            mf_runtime::ConfigParameterType::Value
+        );
         let first = resolved
             .definition
             .dependencies
@@ -1212,6 +1319,10 @@ inventory::submit! {
             .find(|dependency| dependency.package == "resolution-first")
             .unwrap();
         assert_eq!(first.features, ["expanded"]);
+        assert_eq!(
+            first.path,
+            Some(fs::canonicalize(root.path().join("resolution-first")).unwrap())
+        );
         assert_eq!(resolved.definition.dependencies.len(), 2);
         // Production uses this source-free planning entrypoint. Host inventory
         // deliberately disagrees with the selected provider's `body` contract.
@@ -1242,7 +1353,7 @@ inventory::submit! {
         resolve_project(final_project.path(), &inputs.lock, false).unwrap();
         let authoritative_lock = fs::read(final_project.path().join("Cargo.lock")).unwrap();
         fs::write(&inputs.lock, &authoritative_lock).unwrap();
-        let replay = discover_fixture(root.path(), authored.clone(), true).unwrap();
+        let replay = discover_fixture(&entry_directory, authored.clone(), true).unwrap();
         assert_eq!(replay.definition, resolved.definition);
         assert_eq!(replay.sources, resolved.sources);
         assert_eq!(fs::read(&inputs.lock).unwrap(), authoritative_lock);
@@ -1260,7 +1371,9 @@ inventory::submit! {
             .unwrap()
             .replace("expanded = []", "expanded = [\"dep:unlocked\"]");
         fs::write(&first_manifest, format!("{manifest}\n[dependencies.unlocked]\npackage = \"resolution-unlocked\"\npath = \"../resolution-unlocked\"\noptional = true\n")).unwrap();
-        let error = discover_fixture(root.path(), authored, true).err().unwrap();
+        let error = discover_fixture(&entry_directory, authored, true)
+            .err()
+            .unwrap();
         assert_eq!(error.stage, "discovery lock validation", "{error}");
         assert!(error.to_string().contains("--locked discovery"), "{error}");
         assert!(

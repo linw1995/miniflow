@@ -568,10 +568,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (std::collections::BTreeMap::new(), std::collections::BTreeSet::new())
     };
     let registry = mf_runtime::NodeRegistry::from_inventory()?;
-    let discovery = mf_compiler::FlowDiscovery::load_with_builtin_catalog(
-        &source, &registry, catalog, selected_packages,
-    )?;
-    std::fs::write(output, serde_json::to_vec(&discovery)?)?;
+    let bytes = if args.next().as_deref() == Some(std::ffi::OsStr::new("resolve")) {
+        let resolved = mf_compiler::FlowDiscovery::resolve_with_builtin_catalog(
+            &source, &registry, catalog, selected_packages,
+        )?;
+        serde_json::to_vec(&resolved)?
+    } else {
+        let discovery = mf_compiler::FlowDiscovery::load_with_builtin_catalog(
+            &source, &registry, catalog, selected_packages,
+        )?;
+        serde_json::to_vec(&discovery)?
+    };
+    std::fs::write(output, bytes)?;
     Ok(())
 }
 "#
@@ -605,4 +613,45 @@ fn write_project_files(
             .context(StateSnafu)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolution_probe_has_one_explicit_strict_selected_inventory_branch() {
+        let project = tempfile::tempdir().unwrap();
+        let definition = crate::WorkflowDefinition::from_json(
+            r#"{"version":"2026-10-28","dependencies":{},"nodes":[]}"#,
+        )
+        .unwrap();
+        write_resolution_project(
+            project.path(),
+            &definition,
+            &SupportPackages::Local {
+                crates_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .to_owned(),
+            },
+            &RunnerOptions { telemetry: false },
+        )
+        .unwrap();
+        let main = fs::read_to_string(project.path().join("src/main.rs")).unwrap();
+        assert_eq!(main.matches("NodeRegistry::from_inventory()").count(), 1);
+        assert_eq!(
+            main.matches("FlowDiscovery::resolve_with_builtin_catalog(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            main.matches("FlowDiscovery::load_with_builtin_catalog(")
+                .count(),
+            1
+        );
+        assert!(main.contains("args.next().as_deref() == Some(std::ffi::OsStr::new(\"resolve\"))"));
+        assert!(main.contains("&source, &registry, catalog, selected_packages,"));
+        assert!(!main.contains(".bundle"));
+    }
 }

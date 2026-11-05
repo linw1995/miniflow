@@ -277,10 +277,11 @@ Paths resolve relative to the canonical definition's directory, including when t
 
 CLI provider discovery and final source resolution are separate phases. Temporary provider probes may repeat
 metadata discovery until the selected dependency closure stabilizes. Their partial handoff is a `FlowDiscovery`,
-not a host `ResolvedWorkflow`; it includes the captured `FlowSourceBundle`. Only then does the CLI fully resolve
-that bundle once and call `plan_resolved_definition` to freeze the standalone plan. The runner does not perform
-startup source resolution. Existing `--locked` validation, authoritative-lock handling, and discovery retries remain
-unchanged by this phase split.
+not a `ResolvedWorkflow`. The stable provider-linked process then fully resolves the original sources once,
+using its selected registrations rather than the CLI host's registry. The CLI calls `plan_resolved_definition`
+with that result to freeze the standalone plan. Source and provider paths retain their declaring-file semantics,
+including sources outside the root's directory. The runner does not perform startup source resolution.
+Existing `--locked` validation, authoritative-lock handling, and discovery retries remain unchanged.
 
 ## Migrate older definitions
 

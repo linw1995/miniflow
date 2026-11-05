@@ -173,6 +173,17 @@ use the structural plan with existing `mf_compiler::start_stream` and `StreamOpt
 Manifests are module data, without standalone executable sections; a multi-workflow host is not
 automatically a runner accepted by `mf run --tui`.
 
+## Standalone runner boundary
+
+`FlowSourceBundle` is the embedding build handoff, not the standalone runner format. CLI compilation
+first discovers the provider closure in temporary provider-linked processes, then performs one complete
+source resolution in the stable selected-provider process. It freezes the resulting `CompiledWorkflow`
+before generating the runner project. Standalone startup does not re-read files, discover providers,
+or resolve sources; deleting authoring files after compilation remains supported. This differs from
+an embedded module's explicit host `plan(registry)` entry point. The separate
+`CompiledWorkflow::generate_embedded_artifacts` API also retains its already-frozen, zero-argument
+`plan()` entry point rather than adopting resource-bundle resolution.
+
 ## Repository example
 
 The [embedded-workflows example](../examples/embedded-workflows) prints `{"answer":42}` and declares

@@ -28,6 +28,22 @@ structural planning SHALL occur in the host with its selected registry.
 - **WHEN** a definition is malformed or has invalid endpoints, duplicate IDs, or a cycle
 - **THEN** source generation fails with typed sources before replacing modules
 
+### Requirement: Separate CLI discovery from final resolution
+
+The CLI SHALL discover the selected provider dependency closure before final source resolution. Partial
+`FlowDiscovery` results SHALL NOT be represented as `ResolvedWorkflow`. Once the closure stabilizes,
+the selected provider-linked process SHALL fully resolve the original sources once, preserving lexical
+source and dependency paths, selected-provider contracts, and public builtin namespace ownership.
+The CLI SHALL freeze the resulting plan before runner compilation; standalone startup SHALL NOT load
+or resolve authoring sources. Locked discovery and authoritative-lock validation SHALL retain their
+existing behavior.
+
+#### Scenario: Resolve after provider closure convergence
+
+- **WHEN** nested sources add provider packages or features during discovery
+- **THEN** final resolution uses the stable selected registrations, not the CLI host inventory
+- **AND** relative provider and child-source paths keep their declaring-file directory semantics
+
 ### Requirement: Include isolated modules in Rust hosts
 
 A macro SHALL include named modules without target-side compiler codegen. Renamed compiler/runtime
