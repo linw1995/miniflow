@@ -24,7 +24,7 @@ use mf_tui::{
 };
 use ratatui::{
     Terminal,
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     layout::{Constraint, Layout},
     widgets::Paragraph,
 };
@@ -35,6 +35,102 @@ use std::{
 };
 
 type PreviewResult<T> = Result<T, Box<dyn Error>>;
+
+/// Animation frame interval used to throttle preview redraws.
+const FRAME_INTERVAL: Duration = Duration::from_millis(100);
+/// Settling window after the last event. A terminal node's single-lap pulse
+/// runs for 1.2s, so the animation must stay alive past that before freezing.
+const SETTLING: Duration = Duration::from_millis(1_500);
+/// Poll wait once the animation has settled and only keys are expected.
+const IDLE_WAIT: Duration = Duration::from_secs(1);
+
+/// Frame index for the given animation clock.
+fn frame_index(animation_elapsed: Duration) -> u128 {
+    animation_elapsed.as_millis() / FRAME_INTERVAL.as_millis()
+}
+
+/// Time left until the next frame deadline, measured from `started` so time
+/// spent rendering is subtracted instead of accumulating into drift.
+fn next_frame_wait(started: Duration, tick: u128) -> Duration {
+    let deadline =
+        Duration::from_millis((tick.saturating_add(1) * FRAME_INTERVAL.as_millis()) as u64);
+    deadline.saturating_sub(started)
+}
+
+/// Animation clock, capped one settling window past the last event.
+fn animation_clock(elapsed: Duration, final_elapsed: Duration) -> Duration {
+    elapsed.min(final_elapsed + SETTLING)
+}
+
+/// Timing outcome for one preview frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Frame {
+    /// Animation clock for this frame, capped past the final pulse.
+    animation_elapsed: Duration,
+    /// Whether the frame boundary or the final pulse requires a redraw.
+    redraw: bool,
+}
+
+/// Animation clock state shared by the preview loop and its tests.
+struct Timing {
+    final_elapsed: Duration,
+    animation_end: Duration,
+    frame_tick: u128,
+    settled: bool,
+}
+
+impl Timing {
+    fn new(final_elapsed: Duration) -> Self {
+        Self {
+            final_elapsed,
+            animation_end: final_elapsed + SETTLING,
+            frame_tick: u128::MAX,
+            settled: false,
+        }
+    }
+
+    /// Advance to `elapsed`, reporting whether this frame must be redrawn.
+    fn advance(&mut self, elapsed: Duration) -> Frame {
+        let animation_elapsed = animation_clock(elapsed, self.final_elapsed);
+        let tick = frame_index(animation_elapsed);
+        let mut redraw = false;
+        if tick != self.frame_tick {
+            self.frame_tick = tick;
+            redraw = true;
+        }
+        if elapsed >= self.animation_end && !self.settled {
+            self.settled = true;
+            redraw = true;
+        }
+        Frame {
+            animation_elapsed,
+            redraw,
+        }
+    }
+
+    /// Poll until the next frame deadline, the final pulse, or idle keys,
+    /// subtracting time already spent rendering.
+    fn wait(&self, rendered: Duration) -> Duration {
+        if self.settled {
+            IDLE_WAIT
+        } else {
+            next_frame_wait(rendered, self.frame_tick)
+                .min(self.animation_end.saturating_sub(rendered))
+        }
+    }
+}
+
+/// Terminal event source, injectable so the preview loop can run under test.
+struct Input {
+    poll: fn(Duration) -> io::Result<bool>,
+    read: fn() -> io::Result<TerminalEvent>,
+}
+
+/// Real terminal events used by the interactive preview.
+const TERMINAL_INPUT: Input = Input {
+    poll: event::poll,
+    read: event::read,
+};
 
 struct TerminalGuard;
 
@@ -61,13 +157,16 @@ fn main() -> PreviewResult<()> {
     let guard = TerminalGuard;
     execute!(io::stderr(), EnterAlternateScreen, Hide)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stderr()))?;
-    let result = run(&mut terminal);
+    let result = run(&mut terminal, TERMINAL_INPUT);
     drop(terminal);
     drop(guard);
     result
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<()> {
+fn run<B: Backend>(terminal: &mut Terminal<B>, input: Input) -> PreviewResult<()>
+where
+    B::Error: 'static,
+{
     let description = preview_description(
         description(),
         std::env::args().any(|arg| arg == "--clusters"),
@@ -78,9 +177,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
     let events = scheduled_events(&description, run_id);
     let mut next_event = 0;
     let mut offset = (0u32, 0u32);
+    let mut minimap = true;
     let started = Instant::now();
     let final_elapsed = events.last().map_or(Duration::ZERO, |entry| entry.0);
-    let mut frame_tick = u128::MAX;
+    let mut timing = Timing::new(final_elapsed);
     let mut redraw = true;
 
     loop {
@@ -92,12 +192,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
         }
         let complete = next_event == events.len();
         let displayed_elapsed = if complete { final_elapsed } else { elapsed };
-        let tick = displayed_elapsed.as_millis() / 200;
-        if tick != frame_tick {
-            frame_tick = tick;
-            redraw = true;
-        }
-        if redraw {
+        let preview = timing.advance(elapsed);
+        if redraw || preview.redraw {
             let snapshot = state.snapshot();
             terminal.draw(|frame| {
                 let [header, graph, footer] = Layout::vertical([
@@ -118,24 +214,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
                     GraphView::new(&layout)
                         .snapshot(&snapshot)
                         .offset(offset.0, offset.1)
-                        .elapsed_ns(displayed_elapsed.as_nanos() as u64),
+                        .elapsed_ns(preview.animation_elapsed.as_nanos() as u64)
+                        .minimap(minimap),
                     graph,
                 );
                 frame.render_widget(
-                    Paragraph::new("Arrows: pan  |  f: origin  |  q/Esc: quit"),
+                    Paragraph::new("Arrows: pan  |  f: origin  |  m: minimap  |  q/Esc: quit"),
                     footer,
                 );
             })?;
             redraw = false;
         }
 
-        let wait = if complete {
-            Duration::from_secs(1)
-        } else {
-            Duration::from_millis(80)
-        };
-        if event::poll(wait)? {
-            match event::read()? {
+        let wait = timing.wait(started.elapsed());
+        if (input.poll)(wait)? {
+            match (input.read)()? {
                 TerminalEvent::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
@@ -145,6 +238,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
                             return Ok(());
                         }
                         KeyCode::Char('f') => offset = (0, 0),
+                        KeyCode::Char('m') => minimap = !minimap,
                         KeyCode::Left => offset.0 = offset.0.saturating_sub(4),
                         KeyCode::Right => offset.0 = offset.0.saturating_add(4),
                         KeyCode::Up => offset.1 = offset.1.saturating_sub(2),
@@ -542,6 +636,143 @@ fn dump_graph() -> PreviewResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyEvent;
+    use ratatui::widgets::Widget;
+
+    #[test]
+    fn animation_clock_freezes_past_the_terminal_pulse() {
+        let final_elapsed = Duration::from_millis(3_500);
+        let pulse = Duration::from_millis(1_200);
+        let capped = animation_clock(final_elapsed + SETTLING + IDLE_WAIT, final_elapsed);
+        assert_eq!(capped, final_elapsed + SETTLING);
+        assert!(capped >= final_elapsed + pulse);
+        assert_eq!(
+            animation_clock(Duration::from_millis(2_000), final_elapsed),
+            Duration::from_millis(2_000)
+        );
+
+        let fixture = description();
+        let layout = GraphLayout::new(&fixture).unwrap();
+        let run_id = RunId::new();
+        let mut state = SessionState::new(fixture.clone(), run_id).unwrap();
+        let events = scheduled_events(&fixture, run_id);
+        let last_event = events.last().unwrap().0;
+        for (_, event) in events {
+            state.apply(event).unwrap();
+        }
+        let snapshot = state.snapshot();
+        let render = |elapsed: Duration| {
+            let mut buffer =
+                ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 160, 60));
+            GraphView::new(&layout)
+                .snapshot(&snapshot)
+                .elapsed_ns(elapsed.as_nanos() as u64)
+                .render(buffer.area, &mut buffer);
+            buffer
+        };
+        let pulsing = render(last_event + Duration::from_secs(1));
+        let settled = render(animation_clock(
+            last_event + Duration::from_secs(10),
+            last_event,
+        ));
+        assert_ne!(
+            pulsing, settled,
+            "preview stopped during the terminal pulse"
+        );
+        assert_eq!(settled, render(last_event + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn frame_index_advances_on_frame_boundaries() {
+        assert_eq!(frame_index(Duration::ZERO), 0);
+        assert_eq!(frame_index(Duration::from_millis(99)), 0);
+        assert_eq!(frame_index(Duration::from_millis(100)), 1);
+        assert_eq!(frame_index(Duration::from_millis(1_499)), 14);
+    }
+
+    #[test]
+    fn next_frame_wait_subtracts_render_time() {
+        let tick = frame_index(Duration::from_millis(130));
+        assert_eq!(tick, 1);
+        assert_eq!(
+            next_frame_wait(Duration::from_millis(130), tick),
+            Duration::from_millis(70)
+        );
+        assert_eq!(
+            next_frame_wait(Duration::from_millis(205), tick),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn timing_advances_active_frames() {
+        let mut timing = Timing::new(Duration::from_millis(3_500));
+
+        let first = timing.advance(Duration::ZERO);
+        assert!(first.redraw);
+        assert_eq!(first.animation_elapsed, Duration::ZERO);
+
+        let still = timing.advance(Duration::from_millis(99));
+        assert!(!still.redraw);
+        assert_eq!(still.animation_elapsed, Duration::from_millis(99));
+
+        let next = timing.advance(Duration::from_millis(100));
+        assert!(next.redraw);
+        assert_eq!(next.animation_elapsed, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn timing_redraws_once_at_the_final_cap() {
+        let final_elapsed = Duration::from_millis(3_500);
+        let animation_end = final_elapsed + SETTLING;
+        let mut timing = Timing::new(final_elapsed);
+        timing.advance(animation_end - Duration::from_millis(1));
+
+        let capped = timing.advance(animation_end);
+        assert!(capped.redraw);
+        assert_eq!(capped.animation_elapsed, animation_end);
+
+        let idle = timing.advance(animation_end + IDLE_WAIT);
+        assert!(!idle.redraw);
+        assert_eq!(idle.animation_elapsed, animation_end);
+    }
+
+    #[test]
+    fn timing_waits_for_the_frame_deadline_then_idles() {
+        let final_elapsed = Duration::from_millis(3_500);
+        let animation_end = final_elapsed + SETTLING;
+        let mut timing = Timing::new(final_elapsed);
+
+        timing.advance(Duration::from_millis(130));
+        assert_eq!(
+            timing.wait(Duration::from_millis(130)),
+            Duration::from_millis(70)
+        );
+        assert_eq!(timing.wait(Duration::from_millis(205)), Duration::ZERO);
+
+        let final_render = animation_end - Duration::from_millis(15);
+        timing.advance(final_render);
+        assert_eq!(timing.wait(final_render), Duration::from_millis(15));
+
+        timing.advance(animation_end);
+        assert_eq!(timing.wait(animation_end), IDLE_WAIT);
+        assert_eq!(timing.wait(animation_end + IDLE_WAIT), IDLE_WAIT);
+    }
+
+    #[test]
+    fn run_draws_a_frame_and_exits_on_quit() {
+        fn poll(_: Duration) -> io::Result<bool> {
+            Ok(true)
+        }
+        fn read() -> io::Result<TerminalEvent> {
+            Ok(TerminalEvent::Key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            )))
+        }
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        run(&mut terminal, Input { poll, read }).unwrap();
+    }
 
     #[test]
     fn preview_modes_complete_with_valid_cluster_and_lifecycle_contracts() {

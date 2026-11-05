@@ -276,6 +276,14 @@ impl ObservationReader {
             .data(trace_id, span_id)
     }
 
+    pub fn recent_data_snapshot(&self, window: Duration) -> HistorySnapshot {
+        self.context
+            .snapshots
+            .lock()
+            .expect("snapshot capture was not poisoned")
+            .recent(window)
+    }
+
     pub fn history_snapshot(&self, selected: Option<usize>, rows: usize) -> HistorySnapshot {
         self.context
             .snapshots
