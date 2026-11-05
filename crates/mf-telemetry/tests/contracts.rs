@@ -254,6 +254,12 @@ fn static_custom_children() -> WorkflowDescription {
     // A real authored ID can resemble an encoded field scope. It owns its body
     // directly and must not also be attributed to `dispatch`.
     let claimed = key("dispatch", "claimed");
+    let body = |path: Vec<String>, id: &str, kind: &str| {
+        json!({
+            "path": path, "nodes": [{"id": id, "kind": kind}],
+            "data_edges": [], "control_edges": [], "execution_order": [id]
+        })
+    };
     let value = json!({
         "version": "2026-09-29", "workflow_id": graph().workflow_id,
         "nodes": [
@@ -264,19 +270,11 @@ fn static_custom_children() -> WorkflowDescription {
         "execution_order": ["dispatch", "repeat", claimed],
         "data_edges": [], "control_edges": [],
         "loop_bodies": [
-            {"path": [key("dispatch", "selected")],
-                "nodes": [{"id": "inner", "kind": "user.dispatch"}],
-                "data_edges": [], "control_edges": [], "execution_order": ["inner"]},
-            {"path": [key("dispatch", "fallback")],
-                "nodes": [{"id": "inner", "kind": "fixture.fallback"}],
-                "data_edges": [], "control_edges": [], "execution_order": ["inner"]},
-            {"path": [key("dispatch", "selected"), key("inner", "selected")],
-                "nodes": [{"id": "leaf", "kind": "fixture.leaf"}],
-                "data_edges": [], "control_edges": [], "execution_order": ["leaf"]},
-            {"path": ["repeat"], "nodes": [{"id": "%loop", "kind": "%loop"}],
-                "data_edges": [], "control_edges": [], "execution_order": ["%loop"]},
-            {"path": [claimed], "nodes": [{"id": "%loop", "kind": "%loop"}],
-                "data_edges": [], "control_edges": [], "execution_order": ["%loop"]}
+            body(vec![key("dispatch", "selected")], "inner", "user.dispatch"),
+            body(vec![key("dispatch", "fallback")], "inner", "fixture.fallback"),
+            body(vec![key("dispatch", "selected"), key("inner", "selected")], "leaf", "fixture.leaf"),
+            body(vec!["repeat".into()], "%loop", "%loop"),
+            body(vec![claimed.clone()], "%loop", "%loop")
         ]
     });
     WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap()
@@ -290,35 +288,23 @@ fn static_custom_child_lookup_respects_field_ownership_and_parent_scope() {
     let fallback = vec![key("dispatch", "fallback")];
     let nested = vec![key("dispatch", "selected"), key("inner", "selected")];
     let claimed = vec![key("dispatch", "claimed")];
-    assert_eq!(
-        description.body_paths_for_node(&[], "dispatch"),
-        vec![&selected, &fallback]
-    );
-    assert_eq!(
-        description.body_paths_for_node(&selected, "inner"),
-        vec![&nested]
-    );
-    // Identical IDs in another child cannot claim this child's descendants.
-    assert!(
-        description
-            .body_paths_for_node(&fallback, "inner")
-            .is_empty()
-    );
-    assert!(
-        description
-            .body_paths_for_node(&["missing".into()], "inner")
-            .is_empty()
-    );
-    assert!(description.body_paths_for_node(&[], "inner").is_empty());
-    assert_eq!(
-        description.body_paths_for_node(&[], &claimed[0]),
-        vec![&claimed]
-    );
     let repeat = vec!["repeat".to_owned()];
-    assert_eq!(
-        description.body_paths_for_node(&[], "repeat"),
-        vec![&repeat]
-    );
+    for (parent, node, expected) in [
+        (vec![], "dispatch", vec![&selected, &fallback]),
+        (selected.clone(), "inner", vec![&nested]),
+        // Identical IDs in another child cannot claim this child's descendants.
+        (fallback.clone(), "inner", vec![]),
+        (vec!["missing".into()], "inner", vec![]),
+        (vec![], "inner", vec![]),
+        (vec![], claimed[0].as_str(), vec![&claimed]),
+        (vec![], "repeat", vec![&repeat]),
+    ] {
+        assert_eq!(
+            description.body_paths_for_node(&parent, node),
+            expected,
+            "{parent:?}/{node}"
+        );
+    }
     for path in [&selected, &fallback, &nested, &claimed, &repeat] {
         assert_eq!(description.loop_body(path), description.body(path));
         assert!(description.loop_body(path).is_some());
@@ -331,21 +317,13 @@ fn static_custom_child_lookup_respects_field_ownership_and_parent_scope() {
         description.loop_body(&fallback).unwrap().nodes[0].kind,
         "fixture.fallback"
     );
-    assert!(
-        description
-            .loop_body(&[key("missing", "selected")])
-            .is_none()
-    );
-    assert!(
-        description
-            .loop_body(&[key("dispatch", "not-prepared")])
-            .is_none()
-    );
-    assert!(
-        description
-            .loop_body(&[fallback[0].clone(), nested[1].clone()])
-            .is_none()
-    );
+    for missing in [
+        vec![key("missing", "selected")],
+        vec![key("dispatch", "not-prepared")],
+        vec![fallback[0].clone(), nested[1].clone()],
+    ] {
+        assert!(description.loop_body(&missing).is_none(), "{missing:?}");
+    }
     assert_eq!(
         WorkflowDescription::from_json(&description.to_json().unwrap()).unwrap(),
         description

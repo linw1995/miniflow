@@ -75,8 +75,15 @@ fn parameter_types(kind: &str) -> ConfigParameterTypes {
 }
 
 #[test]
-fn all_child_kinds_use_declared_fields_without_conversion_or_synthetic_nodes() {
-    for node in nodes() {
+fn all_child_kinds_use_declared_fields_without_inheriting_parent_schema_or_dependencies() {
+    let mut parent = definition("2026-10-28");
+    parent.dependencies = serde_json::from_value(json!({
+        "provider": {"package": "provider", "path": "../provider"}
+    }))
+    .unwrap();
+    parent.nodes = nodes();
+    let decoded: WorkflowDefinition = serde_json::from_value(json!(parent)).unwrap();
+    for node in decoded.nodes {
         let name = parameter(&node);
         assert!(node.flow_parameters(&[]).unwrap().is_empty());
         let flows = node.flow_parameters(&[name]).unwrap();
@@ -100,7 +107,7 @@ fn all_child_kinds_use_declared_fields_without_conversion_or_synthetic_nodes() {
             );
         }
         assert_ne!(node.flow_scope_key("other"), node.id.to_string());
-        let registration = NodeRegistration {
+        NodeRegistration {
             kind: "test.child",
             factory: NodeFactory::Subgraph {
                 parameter_types: match node.kind.as_str() {
@@ -113,8 +120,9 @@ fn all_child_kinds_use_declared_fields_without_conversion_or_synthetic_nodes() {
                 plain: |_| panic!("no providers needed"),
                 prepared: |_, _, _| panic!("no providers needed"),
             },
-        };
-        registration.validate_flow_parameters(&node).unwrap();
+        }
+        .validate_flow_parameters(&node)
+        .unwrap();
     }
 }
 
@@ -154,23 +162,6 @@ fn setters_preserve_full_definitions_and_unrelated_configuration_for_every_kind(
     let round_trip: WorkflowDefinition =
         serde_json::from_value(serde_json::to_value(&parent).unwrap()).unwrap();
     assert_eq!(round_trip, parent);
-}
-
-#[test]
-fn children_keep_their_own_schema_and_dependencies_instead_of_inheriting_parent_fields() {
-    let mut parent = definition("2026-10-28");
-    parent.dependencies = serde_json::from_value(json!({
-        "provider": {"package": "provider", "path": "../provider"}
-    }))
-    .unwrap();
-    parent.nodes = nodes();
-    let decoded: WorkflowDefinition = serde_json::from_value(json!(parent)).unwrap();
-    for node in &decoded.nodes {
-        let name = parameter(node);
-        let child = &node.flow_parameters(&[name]).unwrap()[name];
-        assert_eq!(child.version, WorkflowDefinitionVersion::V2026_10_25);
-        assert!(child.dependencies.is_empty());
-    }
 }
 
 #[test]
@@ -390,30 +381,12 @@ fn definition_is_still_an_ordinary_custom_field_not_a_global_alias_for_body() {
 }
 
 #[test]
-fn old_top_level_loop_partial_bodies_and_call_definition_are_rejected() {
+fn old_top_level_loop_and_incomplete_definitions_are_rejected() {
     assert!(
         serde_json::from_value::<NodeDefinition>(json!({
             "id": "loop", "kind": "workflow.loop", "loop": {
                 "max_iterations": 3, "variables": [], "body": {"nodes": []}
             }
-        }))
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<CallConfig>(json!({
-            "flow": "child", "definition": definition("2026-10-25")
-        }))
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<LoopDefinition>(json!({
-            "max_iterations": 3, "variables": [], "body": {"nodes": []}
-        }))
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<IterationConfig>(json!({
-            "body": {"nodes": [], "result": {"node": "%iteration", "port": "item"}}
         }))
         .is_err()
     );
@@ -425,44 +398,37 @@ fn old_top_level_loop_partial_bodies_and_call_definition_are_rejected() {
 }
 
 #[test]
-fn typed_builtin_config_validation_rejects_malformed_and_null_required_fields() {
-    for value in [
+fn typed_builtin_config_validation_rejects_legacy_malformed_and_null_required_fields() {
+    fn reject<T: serde::de::DeserializeOwned>(values: impl IntoIterator<Item = Value>) {
+        for value in values {
+            let Err(error) = serde_json::from_value::<T>(value.clone()) else {
+                panic!("accepted malformed config: {value}");
+            };
+            assert!(error.is_data(), "{value}: {error}");
+        }
+    }
+    reject::<CallConfig>([
         Value::Null,
         json!({}),
         json!({"flow": 42}),
         json!({"flow": "child", "body": {"nodes": []}}),
-    ] {
-        assert!(
-            serde_json::from_value::<CallConfig>(value)
-                .unwrap_err()
-                .is_data()
-        );
-    }
-    for value in [
+        json!({"flow": "child", "definition": definition("2026-10-25")}),
+    ]);
+    reject::<LoopDefinition>([
         Value::Null,
         json!({}),
         json!({"max_iterations": "three", "variables": [], "body": definition("2026-10-25")}),
         json!({"max_iterations": 3, "variables": [], "body": null}),
-    ] {
-        assert!(
-            serde_json::from_value::<LoopDefinition>(value)
-                .unwrap_err()
-                .is_data()
-        );
-    }
-    for value in [
+        json!({"max_iterations": 3, "variables": [], "body": {"nodes": []}}),
+    ]);
+    reject::<IterationConfig>([
         Value::Null,
         json!({}),
         json!({"body": null}),
         json!({"body": definition("2026-10-25"), "mode": "unknown"}),
         json!({"body": definition("2026-10-25"), "on_error": "unknown"}),
-    ] {
-        assert!(
-            serde_json::from_value::<IterationConfig>(value)
-                .unwrap_err()
-                .is_data()
-        );
-    }
+        json!({"body": {"nodes": [], "result": {"node": "%iteration", "port": "item"}}}),
+    ]);
 }
 
 #[test]

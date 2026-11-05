@@ -990,6 +990,22 @@ mod tests {
         .unwrap()
     }
 
+    fn dependency(package: &str) -> NodeDependency {
+        NodeDependency {
+            package: package.into(),
+            version: None,
+            path: None,
+            git: None,
+            rev: None,
+            features: vec![],
+            default_features: false,
+        }
+    }
+
+    fn source_definition(kind: &str, body: serde_json::Value) -> WorkflowDefinition {
+        definition(json!([{"id":"owner", "kind":kind, "config":{"body":body}}]))
+    }
+
     fn resolver() -> Resolver {
         Resolver {
             contracts: BTreeMap::from([
@@ -1019,6 +1035,16 @@ mod tests {
         }
     }
 
+    impl Resolver {
+        fn resolve(
+            &mut self,
+            definition: &mut WorkflowDefinition,
+            directory: Option<&Path>,
+        ) -> Result<(), FlowResolutionError> {
+            self.definition(definition, directory, &BTreeMap::new(), 0, "test")
+        }
+    }
+
     fn write_definition(root: &Path, name: &str, value: &WorkflowDefinition) {
         let path = root.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1027,108 +1053,75 @@ mod tests {
 
     #[cfg(feature = "codegen")]
     #[test]
-    fn exhausted_discovery_preserves_unknown_node_and_receiving_scope() {
+    fn exhausted_discovery_preserves_receiving_scope_and_ignores_ordinary_json() {
         let root = tempfile::tempdir().unwrap();
         let child = definition(json!([{"id":"fetch", "kind":"missing.fetch"}]));
         write_definition(root.path(), "child.json", &child);
-        let mut parent = definition(json!([
-            {"id":"pending-builtin", "kind":"workflow.call", "config":{"flow":"missing"}},
-            {"id":"receiver", "kind":"test.flow-source-owner", "config":{
-                "body":{"path":"child.json"},
-                "ordinary":{"version":"2026-10-28", "dependencies":{},
-                    "nodes":[{"id":"not-a-node", "kind":"missing.fetch"}]}
-            }}
-        ]));
-        parent.flows.insert(
-            "missing".into(),
-            FlowSource::Builtin {
-                builtin: "missing.template".into(),
-            },
-        );
-        let discovery = resolve_using(
-            Resolver {
-                discovery: true,
-                ..resolver()
-            },
-            &parent,
-            Some(root.path()),
-        )
-        .unwrap();
-        assert_eq!(
-            discovery.pending,
-            BTreeSet::from([
-                "node:missing.fetch".into(),
-                "builtin:missing.template".into()
-            ])
-        );
-        assert!(
-            discovery
-                .sources
-                .contains(&fs::canonicalize(root.path().join("child.json")).unwrap())
-        );
-        // The pipeline receives this metadata across a provider-probe process boundary.
-        let discovery: FlowDiscovery =
-            serde_json::from_slice(&serde_json::to_vec(&discovery).unwrap()).unwrap();
-        let error = discovery.check_pending_nodes().unwrap_err();
-        for expected in ["receiver", "fetch", "missing.fetch", "unknown kind"] {
-            assert!(error.to_string().contains(expected), "{error}");
+        for (kind, body, authorized) in [
+            ("test.flow-source-owner", json!({"path":"child.json"}), true),
+            ("test.ordinary", json!(child), false),
+        ] {
+            let mut parent = definition(json!([
+                {"id":"pending-builtin", "kind":CALL_KIND, "config":{"flow":"missing"}},
+                {"id":"receiver", "kind":kind, "config":{
+                    "body":body, "source":{"path":"must-not-read.json"},
+                    "ordinary":{"version":"2026-10-28", "dependencies":{},
+                        "nodes":[{"id":"not-a-node", "kind":"missing.fetch"}]}
+                }}
+            ]));
+            parent.flows.insert(
+                "missing".into(),
+                FlowSource::Builtin {
+                    builtin: "missing.template".into(),
+                },
+            );
+            let discovery = resolve_using(
+                Resolver {
+                    discovery: true,
+                    ..resolver()
+                },
+                &parent,
+                authorized.then_some(root.path()),
+            )
+            .unwrap();
+            let mut pending = BTreeSet::from(["builtin:missing.template".into()]);
+            let mut sources = BTreeSet::new();
+            if authorized {
+                pending.insert("node:missing.fetch".into());
+                sources.insert(fs::canonicalize(root.path().join("child.json")).unwrap());
+            }
+            assert_eq!(discovery.pending, pending);
+            assert_eq!(discovery.sources, sources);
+            // Metadata crosses the provider-probe process boundary before inspection.
+            let discovery: FlowDiscovery =
+                serde_json::from_slice(&serde_json::to_vec(&discovery).unwrap()).unwrap();
+            if !authorized {
+                discovery.check_pending_nodes().unwrap();
+                continue;
+            }
+            let error = discovery.check_pending_nodes().unwrap_err();
+            for expected in ["receiver", "fetch", "missing.fetch", "unknown kind"] {
+                assert!(error.to_string().contains(expected), "{error}");
+            }
+            assert!(matches!(
+                error,
+                crate::WorkflowCompileError::CallBody { definition_id, source }
+                    if definition_id.as_str() == "receiver"
+                        && matches!(source.as_ref(), crate::WorkflowCompileError::UnknownNodeKind {
+                            definition_id, kind
+                        } if definition_id.as_str() == "fetch" && kind == "missing.fetch")
+            ));
         }
-        assert!(matches!(
-            error,
-            crate::WorkflowCompileError::CallBody { definition_id, source }
-                if definition_id.as_str() == "receiver"
-                    && matches!(source.as_ref(), crate::WorkflowCompileError::UnknownNodeKind {
-                        definition_id, kind
-                    } if definition_id.as_str() == "fetch" && kind == "missing.fetch")
-        ));
     }
 
-    #[cfg(feature = "codegen")]
-    #[test]
-    fn exhausted_builtin_discovery_does_not_inspect_ordinary_json() {
-        let mut parent = definition(json!([
-            {"id":"pending-builtin", "kind":"workflow.call", "config":{"flow":"missing"}},
-            {"id":"ordinary", "kind":"test.ordinary", "config":{
-                "body":{"version":"2026-10-28", "dependencies":{},
-                    "nodes":[{"id":"fetch", "kind":"missing.fetch"}]},
-                "source":{"path":"must-not-read.json"}
-            }}
-        ]));
-        parent.flows.insert(
-            "missing".into(),
-            FlowSource::Builtin {
-                builtin: "missing.template".into(),
-            },
-        );
-        let discovery = resolve_using(
-            Resolver {
-                discovery: true,
-                ..resolver()
-            },
-            &parent,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            discovery.pending,
-            BTreeSet::from(["builtin:missing.template".into()])
-        );
-        discovery.check_pending_nodes().unwrap();
-    }
-
-    fn call_definition() -> WorkflowDefinition {
-        let mut parent = definition(json!([]));
+    fn call_definition(source: serde_json::Value) -> WorkflowDefinition {
+        let mut parent = definition(json!([{
+            "id":"call", "kind":CALL_KIND, "config":{"flow":"a"}
+        }]));
         parent.version = mf_runtime::WorkflowDefinitionVersion::CURRENT;
-        parent.nodes = serde_json::from_value(json!([{
-            "id":"call", "kind":"workflow.call", "config":{"flow":"a"}
-        }]))
-        .unwrap();
-        parent.flows.insert(
-            "a".into(),
-            FlowSource::Path {
-                path: "child/a.json".into(),
-            },
-        );
+        parent
+            .flows
+            .insert("a".into(), serde_json::from_value(source).unwrap());
         parent
     }
 
@@ -1144,13 +1137,7 @@ mod tests {
 
     #[test]
     fn public_catalog_fallback_never_supplies_host_node_configuration_roles() {
-        let mut parent = call_definition();
-        parent.flows.insert(
-            "a".into(),
-            FlowSource::Builtin {
-                builtin: "public-catalog.example".into(),
-            },
-        );
+        let mut parent = call_definition(json!({"builtin":"public-catalog.example"}));
         let catalog_body = definition(json!([{
             "id":"opaque", "kind":"host-only.owner", "config":{"body":{"path":"never-read.json"}}
         }]));
@@ -1160,9 +1147,7 @@ mod tests {
             builtin_catalog: BTreeMap::from([("public-catalog.example".into(), catalog_body)]),
             ..Default::default()
         };
-        resolver
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap();
+        resolver.resolve(&mut parent, None).unwrap();
         assert_eq!(
             resolver.pending,
             BTreeSet::from(["node:host-only.owner".into(), format!("node:{CALL_KIND}")])
@@ -1177,13 +1162,7 @@ mod tests {
 
     #[test]
     fn selected_builtin_registry_wins_over_catalog_fallback() {
-        let mut parent = call_definition();
-        parent.flows.insert(
-            "a".into(),
-            FlowSource::Builtin {
-                builtin: "source-catalog-test.example".into(),
-            },
-        );
+        let mut parent = call_definition(json!({"builtin":"source-catalog-test.example"}));
         let mut resolver = resolver();
         resolver.builtin_catalog.insert(
             "source-catalog-test.example".into(),
@@ -1191,33 +1170,20 @@ mod tests {
                 {"id":"fallback", "kind":"test.ordinary"}
             ])),
         );
-        resolver
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap();
+        resolver.resolve(&mut parent, None).unwrap();
         assert_eq!(parent.nodes[0].config["body"]["nodes"][0]["id"], "selected");
     }
 
     #[test]
     fn selected_namespace_missing_builtin_cannot_be_resurrected_from_host_catalog() {
         for global_selection in [false, true] {
-            let mut parent = call_definition();
-            parent.flows.insert(
-                "a".into(),
-                FlowSource::Builtin {
-                    builtin: "selected-provider.removed".into(),
-                },
-            );
+            let mut parent = call_definition(json!({"builtin":"selected-provider.removed"}));
             if !global_selection {
                 parent.dependencies.insert(
                     "selected".into(),
                     NodeDependency {
-                        package: "selected-provider".into(),
                         version: Some("1".into()),
-                        path: None,
-                        git: None,
-                        rev: None,
-                        features: vec![],
-                        default_features: false,
+                        ..dependency("selected-provider")
                     },
                 );
             }
@@ -1235,9 +1201,7 @@ mod tests {
                 },
                 ..Default::default()
             };
-            resolver
-                .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-                .unwrap();
+            resolver.resolve(&mut parent, None).unwrap();
             assert_eq!(
                 resolver.pending,
                 BTreeSet::from([
@@ -1301,25 +1265,19 @@ mod tests {
     #[test]
     fn strict_resolution_entries_share_dependency_and_source_results() {
         let root = tempfile::tempdir().unwrap();
-        let dependency = |features| NodeDependency {
-            package: "resolution-provider".into(),
+        let provider = |feature: &str| NodeDependency {
             version: Some("1".into()),
-            path: None,
-            git: None,
-            rev: None,
-            features,
-            default_features: false,
+            features: vec![feature.into()],
+            ..dependency("resolution-provider")
         };
         let mut child = definition(json!([]));
         child
             .dependencies
-            .insert("child-provider".into(), dependency(vec!["child".into()]));
-        let mut parent = definition(json!([{
-            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"child.json"}}
-        }]));
+            .insert("child-provider".into(), provider("child"));
+        let mut parent = source_definition("test.source-api-owner", json!({"path":"child.json"}));
         parent
             .dependencies
-            .insert("root-provider".into(), dependency(vec!["root".into()]));
+            .insert("root-provider".into(), provider("root"));
         write_definition(root.path(), "root.json", &parent);
         write_definition(root.path(), "child.json", &child);
         let entry = fs::canonicalize(root.path().join("root.json")).unwrap();
@@ -1332,6 +1290,7 @@ mod tests {
         );
         assert_eq!(file.sources, BTreeSet::from([entry.clone(), child_path]));
         assert_eq!(file.contracts, registry.parameter_types());
+        assert_eq!(file.definition.nodes[0].config["body"], json!(child));
         let selected = FlowDiscovery::resolve_with_builtin_catalog(
             &entry,
             &registry,
@@ -1339,20 +1298,58 @@ mod tests {
             BTreeSet::new(),
         )
         .unwrap();
-        assert_eq!(selected.definition, file.definition);
-        assert_eq!(selected.sources, file.sources);
-        assert_eq!(selected.contracts, file.contracts);
-        let mut memory =
-            resolve_flows_with_registry(&parent, Some(root.path()), &registry).unwrap();
-        assert_eq!(memory.definition, file.definition);
-        assert_eq!(memory.contracts, file.contracts);
-        assert!(!memory.sources.contains(&entry));
-        memory.sources.insert(entry.clone());
-        assert_eq!(memory.sources, file.sources);
+        let memory = resolve_flows_with_registry(&parent, Some(root.path()), &registry).unwrap();
+        for (result, from_file) in [(selected, true), (memory, false)] {
+            assert_eq!(result.definition, file.definition);
+            assert_eq!(result.contracts, file.contracts);
+            let mut sources = result.sources;
+            assert_eq!(sources.contains(&entry), from_file);
+            sources.insert(entry.clone());
+            assert_eq!(sources, file.sources);
+        }
+        for (discovery, from_file) in [
+            (
+                discover_flows_with_registry(&parent, Some(root.path()), &registry).unwrap(),
+                false,
+            ),
+            (
+                FlowDiscovery::load_with_registry(&entry, &registry).unwrap(),
+                true,
+            ),
+        ] {
+            assert!(discovery.pending.is_empty());
+            assert_eq!(discovery.definition, file.definition);
+            assert_eq!(discovery.contracts, file.contracts);
+            assert_eq!(
+                serde_json::to_value(&discovery).unwrap()["contracts"]["test.source-api-owner"],
+                json!({"body":{"optional":"flow"}, "ordinary":"value"})
+            );
+            let mut sources = discovery.sources;
+            assert_eq!(sources.contains(&entry), from_file);
+            sources.insert(entry.clone());
+            assert_eq!(sources, file.sources);
+        }
         let embedded = load_embedded_workflow(&entry).unwrap();
         assert_eq!(embedded.definition.dependencies, parent.dependencies);
         assert_eq!(embedded.sources, file.sources);
         assert_eq!(embedded.contracts, file.contracts);
+        let bundle = embedded_archive(
+            "nested/root.json",
+            &[("nested/root.json", parent), ("nested/child.json", child)],
+        );
+        // The captured build handoff replays the host result after source removal.
+        fs::remove_file(root.path().join("child.json")).unwrap();
+        fs::remove_file(&entry).unwrap();
+        let replay = bundle.resolve(&registry).unwrap();
+        assert_eq!(replay.definition, embedded.definition);
+        assert_eq!(replay.contracts, file.contracts);
+        assert_eq!(
+            replay.sources,
+            BTreeSet::from([
+                PathBuf::from("nested/root.json"),
+                PathBuf::from("nested/child.json")
+            ])
+        );
     }
 
     #[test]
@@ -1367,13 +1364,8 @@ mod tests {
         child.dependencies.insert(
             "provider".into(),
             NodeDependency {
-                package: "host-provider".into(),
                 path: Some("not-on-the-host-filesystem".into()),
-                version: None,
-                git: None,
-                rev: None,
-                features: vec![],
-                default_features: false,
+                ..dependency("host-provider")
             },
         );
         let parent = definition(json!([{
@@ -1474,26 +1466,23 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
-        let archive = FlowSourceBundle {
-            entry: invalid.clone(),
-            sources: BTreeMap::new(),
-        };
-        assert!(
-            serde_json::to_string(&archive)
-                .unwrap_err()
-                .to_string()
-                .contains("valid UTF-8")
-        );
-        let archive = FlowSourceBundle {
-            entry: "root.json".into(),
-            sources: BTreeMap::from([(invalid, "source".into())]),
-        };
-        assert!(
-            serde_json::to_string(&archive)
-                .unwrap_err()
-                .to_string()
-                .contains("valid UTF-8")
-        );
+        for archive in [
+            FlowSourceBundle {
+                entry: invalid.clone(),
+                sources: BTreeMap::new(),
+            },
+            FlowSourceBundle {
+                entry: "root.json".into(),
+                sources: BTreeMap::from([(invalid, "source".into())]),
+            },
+        ] {
+            assert!(
+                serde_json::to_string(&archive)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("valid UTF-8")
+            );
+        }
     }
 
     fn unauthorized_archive_builtin() -> Result<WorkflowDefinition, crate::DefinitionParseError> {
@@ -1525,10 +1514,7 @@ mod tests {
                 builtin: "source-archive-test.unauthorized".into(),
             },
         ] {
-            let mut parent = definition(json!([{
-                "id":"call", "kind":CALL_KIND, "config":{"flow":"selected"}
-            }]));
-            parent.flows.insert("selected".into(), source);
+            let parent = call_definition(json!(source));
             let mut archive = embedded_archive("root.json", &[("root.json", parent)]);
             archive
                 .sources
@@ -1580,9 +1566,7 @@ mod tests {
                 "local Flow references require",
             ),
         ] {
-            let parent = definition(json!([{
-                "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"builtin":builtin}}
-            }]));
+            let parent = source_definition("test.source-api-owner", json!({"builtin":builtin}));
             // The path is present in the archive, but builtins cannot inherit its
             // entry's directory or otherwise acquire local source provenance.
             let archive = embedded_archive(
@@ -1601,9 +1585,7 @@ mod tests {
     #[test]
     fn embedded_only_selected_fields_read_archive_sources_without_filesystem_fallback() {
         // This path exists relative to the process cwd, but is absent from the archive.
-        let parent = definition(json!([{
-            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"Cargo.toml"}}
-        }]));
+        let parent = source_definition("test.source-api-owner", json!({"path":"Cargo.toml"}));
         assert!(Path::new("Cargo.toml").is_file());
         let archive = embedded_archive("root.json", &[("root.json", parent.clone())]);
         let opaque = archive.resolve(&NodeRegistry::default()).unwrap();
@@ -1661,9 +1643,7 @@ mod tests {
             if message.contains("duplicate normalized"))
         );
         for path in ["../outside.json", "/absolute.json"] {
-            let parent = definition(json!([{
-                "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":path}}
-            }]));
+            let parent = source_definition("test.source-api-owner", json!({"path":path}));
             let error = embedded_archive("root.json", &[("root.json", parent)])
                 .resolve(&NodeRegistry::from_inventory().unwrap())
                 .err()
@@ -1677,9 +1657,10 @@ mod tests {
 
     #[test]
     fn embedded_entry_establishes_normalized_cycle_identity() {
-        let parent = definition(json!([{
-            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"nested/../root.json"}}
-        }]));
+        let parent = source_definition(
+            "test.source-api-owner",
+            json!({"path":"nested/../root.json"}),
+        );
         let error = embedded_archive("./root.json", &[("root.json", parent)])
             .resolve(&NodeRegistry::from_inventory().unwrap())
             .err()
@@ -1701,9 +1682,7 @@ mod tests {
             "root.json",
             &[(
                 "root.json",
-                definition(json!([{
-                    "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"invalid.json"}}
-                }])),
+                source_definition("test.source-api-owner", json!({"path":"invalid.json"})),
             )],
         );
         archive
@@ -1777,9 +1756,10 @@ mod tests {
 
     #[test]
     fn embedded_sources_use_host_builtin_inventory() {
-        let parent = definition(json!([{
-            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"builtin":"source-catalog-test.example"}}
-        }]));
+        let parent = source_definition(
+            "test.source-api-owner",
+            json!({"builtin":"source-catalog-test.example"}),
+        );
         let resolved = embedded_archive("root.json", &[("root.json", parent)])
             .resolve(&NodeRegistry::from_inventory().unwrap())
             .unwrap();
@@ -1790,68 +1770,6 @@ mod tests {
         assert_eq!(
             resolved.sources,
             BTreeSet::from([PathBuf::from("root.json")])
-        );
-    }
-
-    #[test]
-    fn public_discovery_apis_agree_on_frozen_sources_and_file_provenance() {
-        let root = tempfile::tempdir().unwrap();
-        let child = definition(json!([]));
-        write_definition(root.path(), "child.json", &child);
-        let parent = definition(json!([{
-            "id":"owner", "kind":"test.source-api-owner", "config":{"body":{"path":"child.json"}}
-        }]));
-        write_definition(root.path(), "root.json", &parent);
-        let registry = NodeRegistry::from_inventory().unwrap();
-        let discovered =
-            discover_flows_with_registry(&parent, Some(root.path()), &registry).unwrap();
-        let resolved = resolve_flows_with_registry(&parent, Some(root.path()), &registry).unwrap();
-        let loaded =
-            FlowDiscovery::load_with_registry(&root.path().join("root.json"), &registry).unwrap();
-        assert!(discovered.pending.is_empty());
-        assert!(loaded.pending.is_empty());
-        assert_eq!(
-            serde_json::to_value(&discovered).unwrap()["contracts"]["test.source-api-owner"],
-            json!({"body":{"optional":"flow"}, "ordinary":"value"})
-        );
-        assert_eq!(discovered.definition, resolved.definition);
-        assert_eq!(loaded.definition, resolved.definition);
-        assert_eq!(
-            resolved.definition.nodes[0].config["body"],
-            serde_json::to_value(&child).unwrap()
-        );
-        assert_eq!(
-            discovered.sources,
-            BTreeSet::from([fs::canonicalize(root.path().join("child.json")).unwrap()])
-        );
-        let mut expected = discovered.sources;
-        expected.insert(fs::canonicalize(root.path().join("root.json")).unwrap());
-        assert_eq!(loaded.sources, expected);
-        let complete = FlowDiscovery::resolve_with_builtin_catalog(
-            &root.path().join("root.json"),
-            &registry,
-            BTreeMap::new(),
-            BTreeSet::new(),
-        )
-        .unwrap();
-        assert_eq!(complete.definition, loaded.definition);
-        assert_eq!(complete.sources, loaded.sources);
-        let bundle = embedded_archive(
-            "nested/root.json",
-            &[("nested/root.json", parent), ("nested/child.json", child)],
-        );
-        // The captured build handoff replays the same host result after source removal.
-        fs::remove_file(root.path().join("child.json")).unwrap();
-        fs::remove_file(root.path().join("root.json")).unwrap();
-        let replay = bundle.resolve(&registry).unwrap();
-        assert_eq!(replay.definition, resolved.definition);
-        assert_eq!(replay.contracts, resolved.contracts);
-        assert_eq!(
-            replay.sources,
-            BTreeSet::from([
-                PathBuf::from("nested/root.json"),
-                PathBuf::from("nested/child.json")
-            ])
         );
     }
 
@@ -1883,16 +1801,13 @@ mod tests {
                 (field.into(), ConfigParameterType::Flow),
                 ("body".into(), ConfigParameterType::Flow),
             ]);
-            let mut parent = definition(json!([{
-                "id":"owner", "kind":"test.flow-source-owner", "config":{"body":{"path":"never-read.json"}}
-            }]));
+            let mut parent =
+                source_definition("test.flow-source-owner", json!({"path":"never-read.json"}));
             let mut resolver = resolver();
             resolver
                 .contracts
                 .insert("test.flow-source-owner".into(), contract);
-            let error = resolver
-                .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-                .unwrap_err();
+            let error = resolver.resolve(&mut parent, None).unwrap_err();
             assert!(
                 matches!(error, FlowResolutionError::Invalid { reference, message }
                 if reference == "owner" && message.contains("blank configuration parameter declaration"))
@@ -1907,45 +1822,39 @@ mod tests {
             ("   ", "call", "Flow alias must not be blank"),
             ("missing", "missing", "unknown Flow alias"),
         ] {
-            let mut parent = call_definition();
+            let mut parent = call_definition(json!({"path":"child/a.json"}));
             parent.nodes[0].config["flow"] = json!(flow);
-            let error = resolver()
-                .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-                .unwrap_err();
+            let error = resolver().resolve(&mut parent, None).unwrap_err();
             assert!(
                 matches!(error, FlowResolutionError::Invalid { reference, message }
                 if reference == expected_reference && message == expected_message)
             );
         }
-        let mut parent = call_definition();
-        parent.nodes[0].config["flow"] = json!(42);
-        let error = resolver()
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap_err();
-        assert!(
-            matches!(error, FlowResolutionError::Configuration { node, source }
-            if node == "call" && source.is_data())
-        );
-        let mut parent = definition(json!([{
-            "id":"owner", "kind":"test.flow-source-owner", "config":{"body":{"path":42}}
-        }]));
-        let error = resolver()
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap_err();
-        assert!(
-            matches!(error, FlowResolutionError::Configuration { node, source }
-            if node == "owner.config.body" && source.is_data())
-        );
+        for (mut parent, reference) in [
+            (
+                definition(json!([{"id":"call", "kind":CALL_KIND, "config":{"flow":42}}])),
+                "call",
+            ),
+            (
+                source_definition("test.flow-source-owner", json!({"path":42})),
+                "owner.config.body",
+            ),
+        ] {
+            let error = resolver().resolve(&mut parent, None).unwrap_err();
+            assert!(
+                matches!(error, FlowResolutionError::Configuration { node, source }
+                if node == reference && source.is_data())
+            );
+        }
     }
 
     #[test]
     fn source_resolution_requires_lexical_directories() {
-        let mut parent = definition(json!([{
-            "id":"owner", "kind":"test.flow-source-owner", "config":{"body":{"path":"not-in-the-process-cwd.json"}}
-        }]));
-        let error = resolver()
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap_err();
+        let mut parent = source_definition(
+            "test.flow-source-owner",
+            json!({"path":"not-in-the-process-cwd.json"}),
+        );
+        let error = resolver().resolve(&mut parent, None).unwrap_err();
         assert!(
             matches!(error, FlowResolutionError::Invalid { reference, message }
             if reference == "owner.config.body" && message.contains("source directory"))
@@ -1982,11 +1891,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("child/provider")).unwrap();
         let grandchild = definition(json!([]));
-        fs::write(
-            root.path().join("child/grandchild.json"),
-            serde_json::to_string(&grandchild).unwrap(),
-        )
-        .unwrap();
+        write_definition(root.path(), "child/grandchild.json", &grandchild);
         let mut child = definition(json!([{
             "id": "nested", "kind": "test.flow-source-owner",
             "config": {"body": {"path": "grandchild.json"}}
@@ -1994,28 +1899,18 @@ mod tests {
         child.dependencies.insert(
             "provider".into(),
             NodeDependency {
-                package: "lexical-provider".into(),
                 path: Some("provider".into()),
-                version: None,
-                git: None,
-                rev: None,
                 features: vec!["flow".into()],
-                default_features: false,
+                ..dependency("lexical-provider")
             },
         );
-        fs::write(
-            root.path().join("child/flow.json"),
-            serde_json::to_string(&child).unwrap(),
-        )
-        .unwrap();
+        write_definition(root.path(), "child/flow.json", &child);
         let mut parent = definition(json!([{
             "id": "owner", "kind": "test.flow-source-owner",
             "config": {"body": {"path": "child/flow.json"}, "data": {"path": "not-a-flow.json"}}
         }]));
         let mut resolver = resolver();
-        resolver
-            .definition(&mut parent, Some(root.path()), &BTreeMap::new(), 0, "test")
-            .unwrap();
+        resolver.resolve(&mut parent, Some(root.path())).unwrap();
         resolver.finish(&mut parent);
         assert_eq!(resolver.sources.len(), 2);
         assert!(
@@ -2044,9 +1939,7 @@ mod tests {
             }
         }]));
         let original = parent.clone();
-        resolver()
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap();
+        resolver().resolve(&mut parent, None).unwrap();
         assert_eq!(parent, original);
         let plan = crate::plan_resolved_definition(&parent, &resolver().contracts).unwrap();
         assert!(plan.loop_orders.is_empty());
@@ -2066,13 +1959,9 @@ mod tests {
         ] {
             let child = definition(json!([]));
             for value in [json!({"definition":child}), json!(child)] {
-                let mut parent = definition(json!([{
-                    "id":"owner", "kind":"test.flow-source-owner", "config":{"body":value}
-                }]));
+                let mut parent = source_definition("test.flow-source-owner", value);
                 parent.version = version;
-                resolver()
-                    .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-                    .unwrap();
+                resolver().resolve(&mut parent, None).unwrap();
                 assert_eq!(parent.nodes[0].config["body"], json!(child));
                 let plan = crate::plan_resolved_definition(&parent, &resolver().contracts).unwrap();
                 assert_eq!(plan.loop_orders.len(), 1);
@@ -2093,18 +1982,11 @@ mod tests {
         child.dependencies.insert(
             "untrusted".into(),
             NodeDependency {
-                package: "untrusted-provider".into(),
                 path: Some("nonexistent-provider".into()),
-                version: None,
-                git: None,
-                rev: None,
-                features: vec![],
-                default_features: false,
+                ..dependency("untrusted-provider")
             },
         );
-        let parent = definition(json!([{
-            "id":"owner", "kind":"unlinked.owner", "config":{"body":child}
-        }]));
+        let parent = source_definition("unlinked.owner", json!(child));
         let original = parent.nodes[0].config.clone();
         let discovery = discover_unlinked_flows(&parent, Some(root.path())).unwrap();
         assert_eq!(
@@ -2122,9 +2004,8 @@ mod tests {
             mf_runtime::WorkflowDefinitionVersion::V2026_09_26,
             mf_runtime::WorkflowDefinitionVersion::V2026_10_28,
         ] {
-            let mut parent = definition(json!([{
-                "id":"owner", "kind":"test.flow-source-owner", "config":{"body":{"path":"missing.json"}}
-            }]));
+            let mut parent =
+                source_definition("test.flow-source-owner", json!({"path":"missing.json"}));
             parent.version = version;
             let original = parent.clone();
             for discovery in [
@@ -2138,15 +2019,9 @@ mod tests {
                 assert_eq!(discovery.definition, original);
                 assert!(discovery.sources.is_empty());
             }
-            assert!(
-                resolver()
-                    .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-                    .is_err()
-            );
+            assert!(resolver().resolve(&mut parent, None).is_err());
             parent.nodes[0].kind = "test.ordinary".into();
-            resolver()
-                .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-                .unwrap();
+            resolver().resolve(&mut parent, None).unwrap();
         }
     }
 
@@ -2156,9 +2031,7 @@ mod tests {
             {"id":"absent", "kind":"test.flow-source-owner", "config":{}},
             {"id":"null", "kind":"test.flow-source-owner", "config":{"body":null}}
         ]));
-        resolver()
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap();
+        resolver().resolve(&mut parent, None).unwrap();
         assert_eq!(parent.nodes[0].config, json!({}));
         assert_eq!(parent.nodes[1].config, json!({"body": null}));
     }
@@ -2172,19 +2045,11 @@ mod tests {
             .parent()
             .unwrap()
             .join("builtin-nodes/core");
-        let mut parent = definition(json!([{
-            "id":"call", "kind":CALL_KIND, "config":{"flow":"empty"}
-        }]));
+        let mut parent = call_definition(json!({"path":"empty.json"}));
         parent.dependencies = serde_json::from_value(json!({
             "core":{"package":"mfn-core", "path":core}
         }))
         .unwrap();
-        parent.flows.insert(
-            "empty".into(),
-            FlowSource::Path {
-                path: "empty.json".into(),
-            },
-        );
         let discovery = discover_unlinked_flows(&parent, Some(root.path())).unwrap();
         assert_eq!(
             discovery.pending,
@@ -2220,9 +2085,7 @@ mod tests {
             "id":"call", "kind":CALL_KIND, "config":{"flow":"explicit", "body":child}
         }]));
         let mut resolver = resolver();
-        resolver
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap();
+        resolver.resolve(&mut parent, None).unwrap();
         let plan = crate::compiler::plan_resolved_definition(&parent, &resolver.contracts).unwrap();
         let config: CallConfig =
             serde_json::from_value(plan.definition.nodes[0].config.clone()).unwrap();
@@ -2237,12 +2100,9 @@ mod tests {
     }
 
     fn call_codec_body() -> Result<WorkflowDefinition, crate::DefinitionParseError> {
-        WorkflowDefinition::from_json(
-            r#"{
-            "version":"2026-10-28", "dependencies":{},
-            "nodes":[{"id":"apply", "kind":"test.flow-source-owner", "config":{"body":null}}]
-        }"#,
-        )
+        Ok(definition(json!([{
+            "id":"apply", "kind":"test.flow-source-owner", "config":{"body":null}
+        }])))
     }
 
     inventory::submit! {
@@ -2251,20 +2111,12 @@ mod tests {
 
     #[test]
     fn call_null_body_keeps_alias_selection_and_selector_validation_strict() {
-        for config in [
-            json!({"flow":"alias"}),
-            json!({"flow":"alias", "body":null}),
-        ] {
-            let mut parent = definition(json!([{"id":"call", "kind":CALL_KIND, "config":config}]));
-            parent.flows.insert(
-                "alias".into(),
-                FlowSource::Builtin {
-                    builtin: "compiler-call-codec.body".into(),
-                },
-            );
-            resolver()
-                .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-                .unwrap();
+        for null_body in [false, true] {
+            let mut parent = call_definition(json!({"builtin":"compiler-call-codec.body"}));
+            if null_body {
+                parent.nodes[0].config["body"] = json!(null);
+            }
+            resolver().resolve(&mut parent, None).unwrap();
             let config: CallConfig =
                 serde_json::from_value(parent.nodes[0].config.clone()).unwrap();
             assert_eq!(*config.body.unwrap(), call_codec_body().unwrap());
@@ -2273,9 +2125,7 @@ mod tests {
             "id":"call", "kind":CALL_KIND,
             "config":{"flow":"alias", "body":{"path":"must-not-read.json"}, "unexpected":true}
         }]));
-        let error = resolver()
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap_err();
+        let error = resolver().resolve(&mut parent, None).unwrap_err();
         assert!(matches!(error, FlowResolutionError::Configuration { .. }));
         assert!(error.to_string().contains("unexpected"));
     }
@@ -2326,13 +2176,7 @@ mod tests {
                     };
                     let mut candidate = parent.clone();
                     case_count += 1;
-                    let result = resolver.definition(
-                        &mut candidate,
-                        Some(root.path()),
-                        &BTreeMap::new(),
-                        0,
-                        "test",
-                    );
+                    let result = resolver.resolve(&mut candidate, Some(root.path()));
                     assert_eq!(candidate.nodes[0].config, parent.nodes[0].config, "{case}");
                     if discovery && contracts.is_empty() {
                         assert!(result.is_ok(), "{case}: {result:?}");
@@ -2362,13 +2206,8 @@ mod tests {
             ConfigParameterType::Optional(Box::new(ConfigParameterType::Value)),
         ] {
             for explicit in [false, true] {
-                let mut parent = call_definition();
-                parent.flows.insert(
-                    "a".into(),
-                    FlowSource::Builtin {
-                        builtin: "source-archive-test.unauthorized".into(),
-                    },
-                );
+                let mut parent =
+                    call_definition(json!({"builtin":"source-archive-test.unauthorized"}));
                 if explicit {
                     parent.nodes[0].config["body"] = json!({"path":"must-not-read.json"});
                 }
@@ -2380,9 +2219,7 @@ mod tests {
                     )]),
                     ..Default::default()
                 };
-                let error = receiver
-                    .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-                    .unwrap_err();
+                let error = receiver.resolve(&mut parent, None).unwrap_err();
                 assert!(
                     matches!(error, FlowResolutionError::Invalid { reference, message }
                     if reference == "call" && message == "selected Call provider does not declare the `body` Flow parameter")
@@ -2423,14 +2260,10 @@ mod tests {
             BTreeMap::from([("body".into(), ConfigParameterType::Flow)]),
         );
         let error = receiver
-            .definition(&mut parent, Some(root.path()), &BTreeMap::new(), 0, "test")
+            .resolve(&mut parent, Some(root.path()))
             .unwrap_err();
-        let mut cause = &error;
-        while let FlowResolutionError::Source { source, .. } = cause {
-            cause = source;
-        }
         assert!(
-            matches!(cause, FlowResolutionError::Invalid { reference, message }
+            matches!(source_cause(&error), FlowResolutionError::Invalid { reference, message }
             if reference == "repeat.config.body"
                 && message == "combined container nesting exceeds twenty scopes"),
             "{error}"
@@ -2472,15 +2305,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write_definition(root.path(), "empty.json", &definition(json!([])));
         for selected in [false, true] {
-            let mut parent = definition(json!([{
-                "id":"call", "kind":CALL_KIND, "config":{"flow":"empty"}
-            }]));
-            parent.flows.insert(
-                "empty".into(),
-                FlowSource::Path {
-                    path: "empty.json".into(),
-                },
-            );
+            let mut parent = call_definition(json!({"path":"empty.json"}));
             let mut receiver = if selected {
                 resolver()
             } else {
@@ -2491,9 +2316,7 @@ mod tests {
                 }
             };
             receiver.scope_depth = mf_telemetry::MAX_SCOPE_DEPTH - 1;
-            receiver
-                .definition(&mut parent, Some(root.path()), &BTreeMap::new(), 0, "test")
-                .unwrap();
+            receiver.resolve(&mut parent, Some(root.path())).unwrap();
             assert_eq!(
                 receiver.sources,
                 BTreeSet::from([fs::canonicalize(root.path().join("empty.json")).unwrap()])
@@ -2501,19 +2324,9 @@ mod tests {
             assert_eq!(receiver.scope_depth, mf_telemetry::MAX_SCOPE_DEPTH - 1);
             // The same source, at the limit rather than one below it, must not
             // access even a nonexistent file through either alias entry point.
-            let mut over = definition(json!([{
-                "id":"call", "kind":CALL_KIND, "config":{"flow":"missing"}
-            }]));
-            over.flows.insert(
-                "missing".into(),
-                FlowSource::Path {
-                    path: "must-not-read.json".into(),
-                },
-            );
+            let mut over = call_definition(json!({"path":"must-not-read.json"}));
             receiver.scope_depth = mf_telemetry::MAX_SCOPE_DEPTH;
-            let error = receiver
-                .definition(&mut over, Some(root.path()), &BTreeMap::new(), 0, "test")
-                .unwrap_err();
+            let error = receiver.resolve(&mut over, Some(root.path())).unwrap_err();
             assert!(
                 matches!(error, FlowResolutionError::Invalid { ref message, .. }
                 if message == "combined container nesting exceeds twenty scopes")
@@ -2543,7 +2356,7 @@ mod tests {
                 mf_runtime::LOOP_KIND.into(),
                 BTreeMap::from([("body".into(), ConfigParameterType::Flow)]),
             );
-            let result = resolver.definition(&mut parent, None, &BTreeMap::new(), 0, "test");
+            let result = resolver.resolve(&mut parent, None);
             if calls == 16 {
                 result.unwrap();
                 let plan = crate::compiler::plan_resolved_definition(&parent, &resolver.contracts)
@@ -2585,9 +2398,7 @@ mod tests {
             mf_runtime::ITERATION_KIND.into(),
             BTreeMap::from([("body".into(), ConfigParameterType::Flow)]),
         );
-        let error = resolver
-            .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-            .unwrap_err();
+        let error = resolver.resolve(&mut parent, None).unwrap_err();
         assert!(matches!(
             error,
             FlowResolutionError::IterationBody {
@@ -2605,9 +2416,7 @@ mod tests {
                 BTreeMap::from([("body".into(), parameter_type)]),
             );
             let original = parent.clone();
-            resolver
-                .definition(&mut parent, None, &BTreeMap::new(), 0, "test")
-                .unwrap();
+            resolver.resolve(&mut parent, None).unwrap();
             assert_eq!(parent, original);
             assert!(resolver.sources.is_empty());
         }
@@ -2620,7 +2429,7 @@ mod tests {
             "id": "owner", "kind": "test.flow-source-owner", "config": {"body": {"path": "./flow.json"}}
         }]));
         let path = root.path().join("flow.json");
-        fs::write(&path, serde_json::to_string(&parent).unwrap()).unwrap();
+        write_definition(root.path(), "flow.json", &parent);
         let error = resolver().file(&path, &BTreeMap::new(), 0).err().unwrap();
         assert!(error.to_string().contains("recursive Flow reference"));
     }

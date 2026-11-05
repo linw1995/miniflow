@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::embedding_coverage::assert_success;
+use common::embedding_coverage::{assert_success, build_command, executable};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -137,29 +137,12 @@ fn host(root: &Path) {
 }
 
 fn build(root: &Path, extra: Option<&Path>) -> Output {
-    let mut command = mf_compiler::cargo_command(root);
-    command
-        .args(["build", "--offline", "--release"])
-        .env("CARGO_TERM_COLOR", "never")
-        .env_remove("MF_EMBED_RESOURCE_EXTRA");
-    if std::env::var_os("MF_COVERAGE_BINARIES_DIR").is_some() {
-        command.arg("--message-format=json-render-diagnostics");
-    }
+    let mut command = build_command(root);
+    command.env_remove("MF_EMBED_RESOURCE_EXTRA");
     if let Some(extra) = extra {
         command.env("MF_EMBED_RESOURCE_EXTRA", extra);
     }
     command.output().unwrap()
-}
-
-fn executable(root: &Path) -> PathBuf {
-    std::env::var_os("MF_TEST_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target"))
-        .join("release")
-        .join(format!(
-            "mf-embedded-resources-host{}",
-            std::env::consts::EXE_SUFFIX
-        ))
 }
 
 fn run(executable: &Path, cwd: &Path) -> Value {
@@ -181,7 +164,7 @@ fn resources_are_packed_without_providers_and_resolved_only_by_the_runtime_host(
     let root = tempfile::tempdir().unwrap();
     host(root.path());
     assert_success(&build(root.path(), None));
-    let executable = executable(root.path());
+    let executable = executable(root.path(), "mf-embedded-resources-host");
 
     let output = Command::new(&executable)
         .current_dir(root.path())

@@ -1,7 +1,7 @@
 extern crate mf_runtime as runtime_alias;
 
 use mf_runtime::{ConfigParameterType, Flow, NodeConfig, PreparedSubgraph};
-use serde_json::json;
+use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeMap;
 
 #[derive(NodeConfig)]
@@ -206,41 +206,30 @@ fn ordinary_helper_names_do_not_shadow_user_types_or_container_defaults() {
 fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
     macro_rules! assert_parity {
         ($rule:tt, $settings_name:literal) => {{
-            #[derive(NodeConfig)]
-            #[serde(rename_all = $rule, deny_unknown_fields)]
-            struct Config {
-                request_body: Flow,
-                optional_body: Option<Flow>,
-                r#type: Flow,
-                ordinary_field: usize,
-                mixedCase: usize,
-                r#match: usize,
-                #[serde(rename(serialize = "output-only", deserialize = "input-only"))]
-                directional_field: usize,
-                #[serde(alias = "legacy-preferences")]
-                user_settings: usize,
-                #[serde(rename = "explicit-body")]
-                __: Flow,
+            // Keep identical fields but independent derives: Serde is the oracle
+            // even for the executable placeholders removed by NodeConfig.
+            macro_rules! config {
+                ($name:ident, $derive:path, $flow:ident) => {
+                    #[derive($derive)]
+                    #[serde(rename_all = $rule, deny_unknown_fields)]
+                    struct $name {
+                        request_body: $flow,
+                        optional_body: Option<$flow>,
+                        r#type: $flow,
+                        ordinary_field: usize,
+                        mixedCase: usize,
+                        r#match: usize,
+                        #[serde(rename(serialize = "output-only", deserialize = "input-only"))]
+                        directional_field: usize,
+                        #[serde(alias = "legacy-preferences")]
+                        user_settings: usize,
+                        #[serde(rename = "explicit-body")]
+                        __: $flow,
+                    }
+                };
             }
-
-            // An independent Serde derive is the oracle, including for executable
-            // fields whose placeholder values NodeConfig removes before decoding.
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = $rule, deny_unknown_fields)]
-            struct SerdeConfig {
-                request_body: serde_json::Value,
-                optional_body: Option<serde_json::Value>,
-                r#type: serde_json::Value,
-                ordinary_field: usize,
-                mixedCase: usize,
-                r#match: usize,
-                #[serde(rename(serialize = "output-only", deserialize = "input-only"))]
-                directional_field: usize,
-                #[serde(alias = "legacy-preferences")]
-                user_settings: usize,
-                #[serde(rename = "explicit-body")]
-                __: serde_json::Value,
-            }
+            config!(Config, NodeConfig, Flow);
+            config!(SerdeConfig, serde::Deserialize, JsonValue);
 
             let parameters = Config::parameter_types();
             assert_eq!(parameters.len(), 9, "{}", $rule);
@@ -275,15 +264,23 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
 
             for input in [canonical, aliased] {
                 let decoded: SerdeConfig = serde_json::from_value(input.clone()).unwrap();
-                assert_eq!(decoded.request_body, json!({}));
-                assert_eq!(decoded.optional_body, Some(json!({})));
-                assert_eq!(decoded.r#type, json!({}));
-                assert_eq!(decoded.ordinary_field, 17);
-                assert_eq!(decoded.mixedCase, 17);
-                assert_eq!(decoded.r#match, 17);
-                assert_eq!(decoded.directional_field, 17);
-                assert_eq!(decoded.user_settings, 17);
-                assert_eq!(decoded.__, json!({}));
+                assert_eq!(
+                    [
+                        decoded.request_body,
+                        decoded.optional_body.unwrap(),
+                        decoded.r#type,
+                        decoded.__
+                    ],
+                    [json!({}), json!({}), json!({}), json!({})]
+                );
+                let ordinary = [
+                    decoded.ordinary_field,
+                    decoded.mixedCase,
+                    decoded.r#match,
+                    decoded.directional_field,
+                    decoded.user_settings,
+                ];
+                assert_eq!(ordinary, [17; 5]);
 
                 let flows = parameters
                     .iter()
@@ -291,15 +288,24 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
                     .map(|(name, _)| (name.clone(), prepared()))
                     .collect();
                 let config = Config::from_config(input, flows).unwrap();
-                assert!(config.request_body.execute().unwrap().is_empty());
-                assert!(config.optional_body.unwrap().execute().unwrap().is_empty());
-                assert!(config.r#type.execute().unwrap().is_empty());
-                assert_eq!(config.ordinary_field, 17);
-                assert_eq!(config.mixedCase, 17);
-                assert_eq!(config.r#match, 17);
-                assert_eq!(config.directional_field, 17);
-                assert_eq!(config.user_settings, 17);
-                assert!(config.__.execute().unwrap().is_empty());
+                for flow in [
+                    config.request_body,
+                    config.optional_body.unwrap(),
+                    config.r#type,
+                    config.__,
+                ] {
+                    assert!(flow.execute().unwrap().is_empty());
+                }
+                assert_eq!(
+                    [
+                        config.ordinary_field,
+                        config.mixedCase,
+                        config.r#match,
+                        config.directional_field,
+                        config.user_settings
+                    ],
+                    ordinary
+                );
             }
         }};
     }

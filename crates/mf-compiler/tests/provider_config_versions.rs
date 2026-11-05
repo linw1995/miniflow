@@ -11,6 +11,42 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+fn constant() -> Result<PreparedNode, NodeBuildError> {
+    NodeRegistry::from_inventory()
+        .unwrap()
+        .get("builtin.constant")
+        .unwrap()
+        .instantiate(json!({"value": 42}))
+}
+
+fn execute(plan: &mf_compiler::CompiledWorkflow, registry: &NodeRegistry) {
+    assert_eq!(
+        instantiate_compiled(plan, registry)
+            .unwrap()
+            .execute()
+            .unwrap()["value"]
+            .as_i64(),
+        Some(42)
+    );
+}
+
+#[cfg(feature = "codegen")]
+fn manifest(
+    plan: &mf_compiler::CompiledWorkflow,
+    registry: &NodeRegistry,
+) -> mf_runtime::WorkflowManifest {
+    let artifacts = plan.generate_runner_execution_plans(registry).unwrap();
+    mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap()
+}
+
+fn optional_parameters(body: ConfigParameterType) -> BTreeMap<String, ConfigParameterType> {
+    [
+        ("body".into(), body),
+        ("note".into(), ConfigParameterType::Value),
+    ]
+    .into()
+}
+
 fn plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
     assert_ne!(
         config["panic_if_constructed"],
@@ -21,11 +57,7 @@ fn plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
         config["subgraphs"],
         json!({"provider_specific": "opaque data"})
     );
-    NodeRegistry::from_inventory()
-        .unwrap()
-        .get("builtin.constant")
-        .unwrap()
-        .instantiate(json!({"value": 42}))
+    constant()
 }
 
 inventory::submit! {
@@ -56,11 +88,7 @@ fn plain_provider_configuration_remains_opaque() {
             .loop_bodies
             .is_empty()
     );
-    let outputs = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute()
-        .unwrap();
-    assert_eq!(outputs["value"].as_i64(), Some(42));
+    execute(&plan, &registry);
     #[cfg(feature = "codegen")]
     {
         let generated = plan.generate_artifacts().unwrap();
@@ -70,8 +98,7 @@ fn plain_provider_configuration_remains_opaque() {
                 .rust_source
                 .contains("instantiate_subgraphs_with_metadata")
         );
-        let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
-        let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+        let manifest = manifest(&plan, &registry);
         assert_eq!(
             manifest.node_definition("provider").unwrap().config,
             authored.nodes[0].config
@@ -94,11 +121,7 @@ fn optional_flow_plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
         json!(true),
         "declaration validation must reject drift before invoking factories"
     );
-    NodeRegistry::from_inventory()
-        .unwrap()
-        .get("builtin.constant")
-        .unwrap()
-        .instantiate(json!({"value": 42}))
+    constant()
 }
 
 fn unexpected_prepared(
@@ -162,13 +185,9 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
                 ("test.versioned_plain_config".into(), BTreeMap::new()),
                 (
                     "test.versioned_optional_flow".into(),
-                    BTreeMap::from([
-                        (
-                            "body".into(),
-                            ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
-                        ),
-                        ("note".into(), ConfigParameterType::Value),
-                    ])
+                    optional_parameters(ConfigParameterType::Optional(Box::new(
+                        ConfigParameterType::Flow
+                    )))
                 ),
             ])
         );
@@ -179,33 +198,26 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
             mf_compiler::describe_compiled(&plan).unwrap()
         );
         mf_compiler::validate_parameter_types(&registry, &saved.parameter_types).unwrap();
-        for change in [
-            "flow_to_value",
-            "optional_to_required",
-            "ordinary_to_flow",
-            "missing_ordinary",
+        for (field, replacement) in [
+            ("body", Some(ConfigParameterType::Value)),
+            ("body", Some(ConfigParameterType::Flow)),
+            ("note", Some(ConfigParameterType::Flow)),
+            ("note", None),
         ] {
             let mut expected = saved.parameter_types.clone();
             let fields = expected.get_mut("test.versioned_optional_flow").unwrap();
-            match change {
-                "flow_to_value" => {
-                    fields.insert("body".into(), ConfigParameterType::Value);
-                }
-                "optional_to_required" => {
-                    fields.insert("body".into(), ConfigParameterType::Flow);
-                }
-                "ordinary_to_flow" => {
-                    fields.insert("note".into(), ConfigParameterType::Flow);
-                }
-                _ => {
-                    fields.remove("note");
-                }
+            if let Some(replacement) = replacement {
+                fields.insert(field.into(), replacement);
+            } else {
+                fields.remove(field);
             }
-            let error = mf_compiler::validate_parameter_types(&registry, &expected).unwrap_err();
             assert!(
-                matches!(error, mf_compiler::ParameterTypeError::ParameterTypeDrift { kind }
-                if kind == "test.versioned_optional_flow"),
-                "{change}"
+                matches!(
+                    mf_compiler::validate_parameter_types(&registry, &expected).unwrap_err(),
+                    mf_compiler::ParameterTypeError::ParameterTypeDrift { kind }
+                    if kind == "test.versioned_optional_flow"
+                ),
+                "{expected:?}"
             );
         }
         let unknown = BTreeMap::from([("missing.receiver".into(), BTreeMap::new())]);
@@ -213,18 +225,11 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
             mf_compiler::validate_parameter_types(&registry, &unknown).unwrap_err(),
             mf_compiler::ParameterTypeError::UnknownParameterKind { kind } if kind == "missing.receiver"
         ));
-        let outputs = instantiate_compiled(&saved, &registry)
-            .unwrap()
-            .execute()
-            .unwrap();
-        assert_eq!(outputs["value"].as_i64(), Some(42));
+        execute(&saved, &registry);
         let mut stale = saved.clone();
         stale.parameter_types.insert(
             "test.versioned_optional_flow".into(),
-            BTreeMap::from([
-                ("body".into(), ConfigParameterType::Value),
-                ("note".into(), ConfigParameterType::Value),
-            ]),
+            optional_parameters(ConfigParameterType::Value),
         );
         stale.definition.nodes[0].config["panic_if_constructed"] = json!(true);
         let error = instantiate_compiled(&stale, &registry).err().unwrap();
@@ -280,9 +285,7 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
                     .rust_source
                     .contains("instantiate_subgraphs_with_metadata")
             );
-            let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
-            let manifest =
-                mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+            let manifest = manifest(&plan, &registry);
             assert_eq!(manifest.definition, plan.definition);
         }
     }
@@ -363,14 +366,7 @@ fn same_json_only_prepares_children_for_the_declared_receiver_on_the_same_versio
         assert_eq!(plan.definition.nodes[0].config, config);
         let graph = mf_compiler::describe_compiled(&plan).unwrap();
         assert_eq!(!graph.loop_bodies.is_empty(), executable);
-        assert_eq!(
-            instantiate_compiled(&plan, &registry)
-                .unwrap()
-                .execute()
-                .unwrap()["value"]
-                .as_i64(),
-            Some(42)
-        );
+        execute(&plan, &registry);
         #[cfg(feature = "codegen")]
         {
             let generated = plan.generate_artifacts().unwrap();
@@ -381,9 +377,7 @@ fn same_json_only_prepares_children_for_the_declared_receiver_on_the_same_versio
                     .contains("instantiate_subgraphs_with_metadata"),
                 executable
             );
-            let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
-            let manifest =
-                mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+            let manifest = manifest(&plan, &registry);
             assert_eq!(manifest.node_definition("owner").unwrap().config, config);
             assert_eq!(manifest.description().unwrap(), graph);
         }
@@ -440,42 +434,30 @@ fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() 
             ("builtin.constant".into(), BTreeMap::new()),
         ])
     );
-    let ordinary = mf_compiler::CompiledWorkflow::from_json(&ordinary.to_json().unwrap()).unwrap();
-    let typed = mf_compiler::CompiledWorkflow::from_json(&typed.to_json().unwrap()).unwrap();
-    assert!(ordinary.loop_orders.is_empty());
-    assert_eq!(typed.loop_orders.len(), 1);
-    assert_eq!(
-        ordinary.definition.nodes[0].config,
-        authored.nodes[0].config
-    );
-    assert!(
-        mf_compiler::describe_compiled(&ordinary)
-            .unwrap()
-            .loop_bodies
-            .is_empty()
-    );
-    assert_eq!(
-        mf_compiler::describe_compiled(&typed)
-            .unwrap()
-            .loop_bodies
-            .len(),
-        1
-    );
-    #[cfg(feature = "codegen")]
-    {
-        assert!(
-            !ordinary
-                .generate_artifacts()
+    for (plan, children) in [(ordinary, 0), (typed, 1)] {
+        let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+        assert_eq!(saved.loop_orders.len(), children);
+        let mut expected = authored.nodes[0].config.clone();
+        if children != 0 {
+            let body: WorkflowDefinition = serde_json::from_value(expected["body"].take()).unwrap();
+            expected["body"] = json!(body);
+        }
+        assert_eq!(saved.definition.nodes[0].config, expected);
+        assert_eq!(
+            mf_compiler::describe_compiled(&saved)
                 .unwrap()
-                .rust_source
-                .contains("instantiate_subgraphs_with_metadata")
+                .loop_bodies
+                .len(),
+            children
         );
-        assert!(
-            typed
+        #[cfg(feature = "codegen")]
+        assert_eq!(
+            saved
                 .generate_artifacts()
                 .unwrap()
                 .rust_source
-                .contains("instantiate_subgraphs_with_metadata")
+                .contains("instantiate_subgraphs_with_metadata"),
+            children != 0
         );
     }
     let mut malformed = authored;

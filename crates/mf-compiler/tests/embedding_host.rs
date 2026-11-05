@@ -2,6 +2,7 @@
 
 mod common;
 
+use common::embedding_coverage::{assert_success, build_command, executable};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -80,22 +81,7 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 fn build(root: &Path) -> Output {
-    let mut command = mf_compiler::cargo_command(root);
-    command
-        .args(["build", "--offline", "--release"])
-        .env("CARGO_TERM_COLOR", "never");
-    if std::env::var_os("MF_COVERAGE_BINARIES_DIR").is_some() {
-        command.arg("--message-format=json-render-diagnostics");
-    }
-    command.output().unwrap()
-}
-
-fn executable(root: &Path) -> PathBuf {
-    std::env::var_os("MF_TEST_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target"))
-        .join("release")
-        .join(format!("mf-embedded-host{}", std::env::consts::EXE_SUFFIX))
+    build_command(root).output().unwrap()
 }
 
 #[test]
@@ -168,15 +154,9 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     );
     let input = root.path().join("lines.txt");
     fs::write(&input, "first\nsecond\n").unwrap();
-    let executable = executable(root.path());
-    let output = Command::new(&executable).arg(&input).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let executable = executable(root.path(), "mf-embedded-host");
     assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        run(&executable, &input),
         json!({
             "answer": {"answer":42}, "events":[{"line":"first"},{"line":"second"}]
         })
@@ -310,11 +290,7 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         .env("PATH", "")
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_success(&output);
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap()["answer"]["answer"],
         43
@@ -336,24 +312,10 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     );
     fs::write(manifest, content).unwrap();
     assert_build_success(example.path());
-    let example_binary = executable.with_file_name(format!(
-        "embedded-workflows{}",
-        std::env::consts::EXE_SUFFIX
-    ));
-    let example_binary = if std::env::var_os("MF_TEST_TARGET_DIR").is_some() {
-        example_binary
-    } else {
-        example
-            .path()
-            .join("target/release")
-            .join(example_binary.file_name().unwrap())
-    };
+    let example_binary =
+        common::embedding_coverage::executable(example.path(), "embedded-workflows");
     let output = Command::new(example_binary).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_success(&output);
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         json!({"answer":42})
@@ -362,20 +324,12 @@ fn embedded_host_preserves_execution_and_build_contracts() {
 
 fn assert_build_success(root: &Path) -> Output {
     let output = build(root);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_success(&output);
     output
 }
 
 fn run(executable: &Path, input: &Path) -> Value {
     let output = Command::new(executable).arg(input).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_success(&output);
     serde_json::from_slice(&output.stdout).unwrap()
 }

@@ -8,6 +8,26 @@ use std::{
     process::{Command, Output},
 };
 
+/// Build the exact release artifacts consumed by the embedding fixtures.
+pub fn build_command(root: &Path) -> Command {
+    let mut command = mf_compiler::cargo_command(root);
+    command
+        .args(["build", "--offline", "--release"])
+        .env("CARGO_TERM_COLOR", "never");
+    if std::env::var_os("MF_COVERAGE_BINARIES_DIR").is_some() {
+        command.arg("--message-format=json-render-diagnostics");
+    }
+    command
+}
+
+pub fn executable(root: &Path, name: &str) -> PathBuf {
+    std::env::var_os("MF_TEST_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"))
+        .join("release")
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+}
+
 pub fn preserve(
     coverage: &Path,
     root: &Path,

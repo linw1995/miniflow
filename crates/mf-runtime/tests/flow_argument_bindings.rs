@@ -43,6 +43,21 @@ fn registration(parameter_types: fn() -> ConfigParameterTypes) -> NodeRegistrati
     }
 }
 
+fn preparation_error(
+    registration: NodeRegistration,
+    config: Value,
+    keys: &[&str],
+) -> NodeBuildError {
+    registration
+        .instantiate_subgraphs(
+            "custom",
+            config,
+            keys.iter().map(|key| ((*key).into(), body())).collect(),
+        )
+        .err()
+        .unwrap()
+}
+
 #[test]
 fn legacy_provider_config_remains_opaque() {
     let node = node(json!({"selected": frozen(), "subgraphs": "provider-owned"}));
@@ -203,14 +218,7 @@ fn declarations_are_validated_but_unknown_json_is_opaque() {
     plain
         .validate_flow_parameters(&node(json!({"selected": frozen()})))
         .unwrap();
-    let error = registration
-        .instantiate_subgraphs(
-            "custom",
-            json!({"unknown": frozen()}),
-            BTreeMap::from([("unknown".into(), body())]),
-        )
-        .err()
-        .unwrap();
+    let error = preparation_error(registration, json!({"unknown": frozen()}), &["unknown"]);
     assert!(matches!(error, NodeBuildError::InvalidSubgraph { .. }));
 }
 
@@ -226,15 +234,8 @@ fn prepared_argument_keys_must_exactly_match_frozen_config_fields() {
         ]
         .into()
     });
-    for arguments in [
-        BTreeMap::new(),
-        BTreeMap::from([("other".into(), body())]),
-        BTreeMap::from([("selected".into(), body()), ("other".into(), body())]),
-    ] {
-        let error = registration
-            .instantiate_subgraphs("custom", json!({"selected": frozen()}), arguments)
-            .err()
-            .unwrap();
+    for keys in [&[][..], &["other"], &["selected", "other"]] {
+        let error = preparation_error(registration, json!({"selected": frozen()}), keys);
         assert!(error.to_string().contains("do not match"));
     }
 }
@@ -249,14 +250,7 @@ fn malformed_declared_frozen_fields_preserve_the_typed_error_chain() {
         let node = node(json!({"selected": value}));
         let original = node.clone();
         let validation_error = registration.validate_flow_parameters(&node).unwrap_err();
-        let preparation_error = registration
-            .instantiate_subgraphs(
-                "custom",
-                node.config.clone(),
-                BTreeMap::from([("selected".into(), body())]),
-            )
-            .err()
-            .unwrap();
+        let preparation_error = preparation_error(registration, node.config.clone(), &["selected"]);
         for error in [validation_error, preparation_error] {
             assert!(matches!(&error, NodeBuildError::FlowParameters {
                 source: mf_runtime::FlowParameterError::Json { parameter, source }
@@ -285,14 +279,7 @@ fn plain_factories_reject_prepared_bindings_before_reading_configuration() {
         factory: NodeFactory::Plain(factory),
     };
     for config in [Value::Null, json!({"selected": "provider-owned"})] {
-        let error = registration
-            .instantiate_subgraphs(
-                "custom",
-                config,
-                BTreeMap::from([("selected".into(), body())]),
-            )
-            .err()
-            .unwrap();
+        let error = preparation_error(registration, config, &["selected"]);
         assert!(matches!(&error, NodeBuildError::InvalidSubgraph { message }
             if message == "node `user.plain` does not accept prepared Flow arguments"));
         assert!(error.source().is_none());
@@ -300,35 +287,7 @@ fn plain_factories_reject_prepared_bindings_before_reading_configuration() {
 }
 
 #[test]
-fn absent_frozen_fields_leave_nonobject_config_validation_to_the_provider() {
-    let registration = NodeRegistration {
-        kind: "user.dispatch",
-        factory: NodeFactory::Subgraph {
-            parameter_types: || [("selected".into(), ConfigParameterType::Flow)].into(),
-            plain: factory,
-            prepared: |id, config, arguments| {
-                assert_eq!(id, "custom");
-                assert!(config.is_null());
-                assert!(arguments.is_empty());
-                mf_runtime::NodeInvalidSubgraphSnafu {
-                    message: "dispatch configuration must be an object",
-                }
-                .fail()
-            },
-        },
-    };
-    let node = node(Value::Null);
-    registration.validate_flow_parameters(&node).unwrap();
-    let error = registration
-        .instantiate_subgraphs("custom", node.config, BTreeMap::new())
-        .err()
-        .unwrap();
-    assert!(matches!(error, NodeBuildError::InvalidSubgraph { message }
-        if message == "dispatch configuration must be an object"));
-}
-
-#[test]
-fn matching_arguments_reach_provider_business_validation() {
+fn matching_arguments_leave_nonobject_and_business_validation_to_the_provider() {
     let registration = NodeRegistration {
         kind: "user.dispatch",
         factory: NodeFactory::Subgraph {
@@ -342,22 +301,37 @@ fn matching_arguments_reach_provider_business_validation() {
             plain: factory,
             prepared: |id, config, arguments| {
                 assert_eq!(id, "custom");
-                assert_eq!(config["option"], 42);
-                assert!(arguments.contains_key("selected"));
-                mf_runtime::NodeInvalidSubgraphSnafu {
-                    message: "provider business rule",
-                }
-                .fail()
+                let message = if config.is_null() {
+                    assert!(arguments.is_empty());
+                    "dispatch configuration must be an object"
+                } else {
+                    assert_eq!(config["option"], 42);
+                    assert_eq!(
+                        arguments.keys().map(String::as_str).collect::<Vec<_>>(),
+                        ["selected"]
+                    );
+                    "provider business rule"
+                };
+                mf_runtime::NodeInvalidSubgraphSnafu { message }.fail()
             },
         },
     };
-    let error = registration
-        .instantiate_subgraphs(
-            "custom",
+    for (config, keys, expected) in [
+        (
+            Value::Null,
+            &[][..],
+            "dispatch configuration must be an object",
+        ),
+        (
             json!({"selected": frozen(), "option": 42}),
-            BTreeMap::from([("selected".into(), body())]),
-        )
-        .err()
-        .unwrap();
-    assert!(error.to_string().contains("provider business rule"));
+            &["selected"],
+            "provider business rule",
+        ),
+    ] {
+        registration
+            .validate_flow_parameters(&node(config.clone()))
+            .unwrap();
+        assert!(matches!(preparation_error(registration, config, keys),
+            NodeBuildError::InvalidSubgraph { message } if message == expected));
+    }
 }

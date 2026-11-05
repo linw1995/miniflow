@@ -783,11 +783,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn locked_probe_graph_allows_subsets_but_rejects_identity_checksum_and_edge_changes() {
-        let root = tempfile::tempdir().unwrap();
-        let authoritative = root.path().join("authoritative.lock");
-        let full = r#"
+    const DISCOVERY_LOCK: &str = r#"
 version = 4
 [[package]]
 name = "mf-generated-workflow"
@@ -803,34 +799,80 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "original"
 "#;
-        fs::write(&authoritative, full).unwrap();
-        let working = root.path().join("Cargo.lock");
-        let subset = full
+
+    fn validate_locks(authoritative: &str, working: &str) -> Result<(), PipelineError> {
+        let root = tempfile::tempdir().unwrap();
+        let lock = root.path().join("authoritative.lock");
+        fs::write(&lock, authoritative).unwrap();
+        fs::write(root.path().join("Cargo.lock"), working).unwrap();
+        validate_discovery_lock(root.path(), &lock)
+    }
+
+    fn assert_io_error(error: &PipelineError, stage: &str, kind: io::ErrorKind) {
+        assert_eq!(error.stage, stage, "{error}");
+        assert_eq!(
+            error.source.downcast_ref::<io::Error>().unwrap().kind(),
+            kind
+        );
+    }
+
+    #[test]
+    fn locked_probe_graph_allows_subsets_but_rejects_identity_checksum_and_edge_changes() {
+        let subset = DISCOVERY_LOCK
             .replace(
                 "dependencies = [\"parent\", \"leaf\"]",
                 "dependencies = [\"parent\"]",
             )
             .replace("dependencies = [\"leaf\"]", "dependencies = []");
-        fs::write(&working, &subset).unwrap();
-        validate_discovery_lock(root.path(), &authoritative).unwrap();
-        for changed in [
-            subset.replace("checksum = \"original\"", "checksum = \"changed\""),
-            subset.replace(
+        validate_locks(DISCOVERY_LOCK, &subset).unwrap();
+        for (from, to, expected) in [
+            (
+                "checksum = \"original\"",
+                "checksum = \"changed\"",
+                "changed checksum",
+            ),
+            (
                 "name = \"leaf\"\nversion = \"1.0.0\"",
                 "name = \"leaf\"\nversion = \"1.0.1\"",
+                "unlocked package",
             ),
-            subset.replace(
+            (
                 "registry+https://github.com/rust-lang/crates.io-index",
                 "git+https://example.invalid/repo#revision",
+                "unlocked package",
+            ),
+            (
+                "name = \"parent\"\nversion = \"1.0.0\"",
+                "name = \"parent\"\nversion = \"1.0.0\"\nreplace = \"leaf 1.0.0\"",
+                "changed replacement for `parent`",
             ),
         ] {
-            fs::write(&working, changed).unwrap();
-            assert!(validate_discovery_lock(root.path(), &authoritative).is_err());
+            let error = validate_locks(DISCOVERY_LOCK, &subset.replace(from, to)).unwrap_err();
+            assert_io_error(&error, "discovery lock validation", io::ErrorKind::Other);
+            assert!(error.to_string().contains(expected), "{error}");
         }
-        fs::write(&authoritative, subset).unwrap();
-        fs::write(&working, full).unwrap();
-        let error = validate_discovery_lock(root.path(), &authoritative).unwrap_err();
+        let error = validate_locks(&subset, DISCOVERY_LOCK).unwrap_err();
         assert!(error.to_string().contains("added dependencies"));
+    }
+
+    const CALL_REGISTRATION: &str = r#"
+inventory::submit! {
+    NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
+        parameter_types: || BTreeMap::from([
+            ("body".into(), mf_runtime::ConfigParameterType::Flow),
+            ("host_extra".into(), mf_runtime::ConfigParameterType::Value),
+        ]), plain, prepared,
+    } }
+}
+"#;
+
+    fn local_support() -> SupportPackages {
+        SupportPackages::Local {
+            crates_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .to_owned(),
+        }
     }
 
     fn discover_fixture(
@@ -841,12 +883,7 @@ checksum = "original"
         let source = root.join("flow.json");
         fs::write(&source, authored.to_string()).unwrap();
         let inputs = BuildInputs::new(&source).unwrap();
-        let support = SupportPackages::Local {
-            crates_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .to_owned(),
-        };
+        let support = local_support();
         let output = root.join("runner");
         let build = root.join("managed-build");
         let result = resolve_provider_flows(
@@ -948,11 +985,7 @@ checksum = "original"
             },
             "nodes":[{"id":"owner", "kind":"fixture.locked", "config":{}}]
         }), true).err().unwrap();
-        assert_eq!(error.stage, "dependency resolution");
-        assert_eq!(
-            error.source.downcast_ref::<io::Error>().unwrap().kind(),
-            io::ErrorKind::NotFound
-        );
+        assert_io_error(&error, "dependency resolution", io::ErrorKind::NotFound);
         let inputs = BuildInputs::new(&root.path().join("flow.json")).unwrap();
         assert!(!inputs.lock.exists());
     }
@@ -964,38 +997,23 @@ checksum = "original"
         let error = read_discovery_lock(root.path(), &authoritative)
             .err()
             .unwrap();
-        assert_eq!(error.stage, "discovery lock validation");
-        assert_eq!(
-            error.source.downcast_ref::<io::Error>().unwrap().kind(),
-            io::ErrorKind::NotFound
-        );
+        assert_io_error(&error, "discovery lock validation", io::ErrorKind::NotFound);
         fs::write(&authoritative, "[[package]\nname = broken").unwrap();
         let error = read_discovery_lock(root.path(), &authoritative)
             .err()
             .unwrap();
         assert_eq!(error.stage, "discovery lock validation");
         assert!(error.source.downcast_ref::<toml::de::Error>().is_some());
-        let ambiguous = r#"
-version = 4
-[[package]]
-name = "parent"
-version = "1.0.0"
-dependencies = ["leaf"]
-[[package]]
-name = "leaf"
-version = "1.0.0"
-source = "registry+https://example.invalid/index"
-[[package]]
-name = "leaf"
-version = "2.0.0"
-source = "registry+https://example.invalid/index"
-"#;
-        fs::write(&authoritative, ambiguous).unwrap();
-        fs::write(root.path().join("Cargo.lock"), ambiguous).unwrap();
-        let error = validate_discovery_lock(root.path(), &authoritative).unwrap_err();
-        assert_eq!(error.stage, "discovery lock validation");
+        let ambiguous = format!(
+            "{DISCOVERY_LOCK}\n[[package]]\nname = \"leaf\"\nversion = \"2.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+        )
+        .replace(
+            "dependencies = [\"parent\", \"leaf\"]",
+            "dependencies = [\"parent\"]",
+        );
+        let error = validate_locks(&ambiguous, &ambiguous).unwrap_err();
+        assert_io_error(&error, "discovery lock validation", io::ErrorKind::Other);
         let source = error.source.downcast_ref::<io::Error>().unwrap();
-        assert_eq!(source.kind(), io::ErrorKind::Other);
         assert!(
             source
                 .to_string()
@@ -1003,44 +1021,9 @@ source = "registry+https://example.invalid/index"
         );
         let explicit = ambiguous.replace(
             "dependencies = [\"leaf\"]",
-            "dependencies = [\"leaf 1.0.0 (registry+https://example.invalid/index)\"]",
+            "dependencies = [\"leaf 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)\"]",
         );
-        fs::write(&authoritative, &explicit).unwrap();
-        fs::write(root.path().join("Cargo.lock"), explicit).unwrap();
-        validate_discovery_lock(root.path(), &authoritative).unwrap();
-    }
-
-    #[test]
-    fn discovery_lock_rejects_changed_replacement_identity() {
-        let root = tempfile::tempdir().unwrap();
-        let authoritative = root.path().join("authoritative.lock");
-        let original = r#"
-version = 4
-[[package]]
-name = "parent"
-version = "1.0.0"
-[[package]]
-name = "parent-fork"
-version = "1.0.0"
-"#;
-        fs::write(&authoritative, original).unwrap();
-        fs::write(
-            root.path().join("Cargo.lock"),
-            original.replace(
-                "name = \"parent\"\nversion = \"1.0.0\"",
-                "name = \"parent\"\nversion = \"1.0.0\"\nreplace = \"parent-fork 1.0.0\"",
-            ),
-        )
-        .unwrap();
-        let error = validate_discovery_lock(root.path(), &authoritative).unwrap_err();
-        assert_eq!(error.stage, "discovery lock validation");
-        let source = error.source.downcast_ref::<io::Error>().unwrap();
-        assert_eq!(source.kind(), io::ErrorKind::Other);
-        assert!(
-            source
-                .to_string()
-                .contains("changed replacement for `parent`")
-        );
+        validate_locks(&explicit, &explicit).unwrap();
     }
 
     #[test]
@@ -1058,11 +1041,9 @@ version = "1.0.0"
             },
             "nodes":[{"id":"invalid", "kind":"fixture.invalid-config", "config":{"body":{"path":42}}}]
         }), false).err().unwrap();
-        assert_eq!(error.stage, "Flow metadata probe");
-        let source = error.source.downcast_ref::<io::Error>().unwrap();
-        assert_eq!(source.kind(), io::ErrorKind::Other);
+        assert_io_error(&error, "Flow metadata probe", io::ErrorKind::Other);
         assert!(
-            source
+            error
                 .to_string()
                 .contains("provider-linked Flow resolution exited")
         );
@@ -1129,16 +1110,7 @@ inventory::submit! {{
             root.path(),
             "resolution-first",
             "fixture.first",
-            r#"
-inventory::submit! {
-    NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
-        parameter_types: || BTreeMap::from([
-            ("body".into(), mf_runtime::ConfigParameterType::Flow),
-            ("host_extra".into(), mf_runtime::ConfigParameterType::Value),
-        ]), plain, prepared,
-    } }
-}
-"#,
+            CALL_REGISTRATION,
         );
         let source = root.path().join("flow.json");
         for version in ["2026-10-25", "2026-10-28"] {
@@ -1214,7 +1186,8 @@ inventory::submit! {
             root.path(),
             "resolution-second",
             "fixture.second",
-            r###"
+            &[
+                r###"
 fn builtin() -> Result<mf_runtime::WorkflowDefinition, mf_runtime::DefinitionParseError> {
     mf_runtime::WorkflowDefinition::from_json(r##"{
         "version":"2026-10-28", "dependencies":{},
@@ -1222,17 +1195,11 @@ fn builtin() -> Result<mf_runtime::WorkflowDefinition, mf_runtime::DefinitionPar
     }"##)
 }
 mf_runtime::register_builtin_flow!("feature", builtin);
-// Named alias discovery is intrinsic, but executable child traversal still
-// requires the selected provider's explicit receiving contract.
-inventory::submit! {
-    NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
-        parameter_types: || BTreeMap::from([
-            ("body".into(), mf_runtime::ConfigParameterType::Flow),
-            ("host_extra".into(), mf_runtime::ConfigParameterType::Value),
-        ]), plain, prepared,
-    } }
-}
+// Named aliases still need the selected provider's explicit receiving contract.
 "###,
+                CALL_REGISTRATION,
+            ]
+            .concat(),
         );
         let entry_directory = root.path().join("entry");
         let child_directory = root.path().join("external/child");
@@ -1277,12 +1244,7 @@ inventory::submit! {
             grandchild.to_string(),
         )
         .unwrap();
-        let support = SupportPackages::Local {
-            crates_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .to_owned(),
-        };
+        let support = local_support();
         let resolved = discover_fixture(&entry_directory, authored.clone(), false).unwrap();
         let inputs = BuildInputs::new(&source).unwrap();
         assert!(!inputs.lock.exists());

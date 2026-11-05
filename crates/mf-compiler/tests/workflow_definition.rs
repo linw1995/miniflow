@@ -174,24 +174,18 @@ fn parses_a_versioned_workflow_definition() {
 
 #[test]
 fn rejects_unsupported_definition_versions() {
-    for version in ["2026-11-01", "2026-11-03"] {
+    for version in ["2026-11-01", "2026-11-03", "2027-01-01"] {
         let input =
             serde_json::json!({"version":version, "dependencies":{}, "nodes":[]}).to_string();
-        assert!(matches!(
-            WorkflowDefinition::from_json(&input),
-            Err(DefinitionParseError::JsonParse { .. })
-        ));
+        let error = WorkflowDefinition::from_json(&input).unwrap_err();
+        assert!(matches!(&error, DefinitionParseError::JsonParse { .. }));
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .to_string()
+                .contains(&format!("unknown variant `{version}`"))
+        );
     }
-    let error =
-        WorkflowDefinition::from_json(r#"{"version":"2027-01-01","nodes":[]}"#).unwrap_err();
-
-    assert!(matches!(&error, DefinitionParseError::JsonParse { .. }));
-    assert!(
-        std::error::Error::source(&error)
-            .unwrap()
-            .to_string()
-            .contains("unknown variant `2027-01-01`")
-    );
 }
 
 #[test]
@@ -269,96 +263,73 @@ fn dependencies_validate_sources_and_preserve_features() {
 }
 
 #[test]
-fn loop_body_clusters_are_preserved_in_descriptions() {
-    let definition = WorkflowDefinition::from_json(
-        r#"{
-            "version": "2026-10-23",
-            "dependencies": {},
-            "nodes": [{
-                "id": "repeat",
-                "kind": "workflow.loop",
-                "config": {
-                    "max_iterations": 1,
-                    "variables": [{"name": "count", "type": "int"}],
-                    "body": {"version":"2026-10-23", "dependencies":{},
-                        "nodes": [{"id": "step", "kind": "fixture.task"}],
-                        "clusters": [{
-                            "label": "Body step",
-                            "annotation": "The only body transformation.",
-                            "nodes": ["step"]
-                        }]
-                    }
-                }
-            }]
-        }"#,
-    )
-    .unwrap();
-    let plan = plan_definition(&definition).unwrap();
-    let description = mf_compiler::describe_compiled(&plan).unwrap();
-    assert_eq!(description.clusters.len(), 0);
-    assert_eq!(description.loop_bodies.len(), 1);
-    assert_eq!(description.loop_bodies[0].clusters.len(), 1);
-    assert_eq!(description.loop_bodies[0].clusters[0].label, "Body step");
-    assert_eq!(
-        description.loop_bodies[0].clusters[0].nodes,
-        vec!["step".to_owned()]
-    );
-    let mut legacy = definition;
-    legacy.nodes[0].config["body"]["version"] = serde_json::json!("2026-10-19");
-    let error = mf_compiler::plan_resolved_definition(
-        &legacy,
-        &mf_compiler::NodeRegistry::from_inventory()
-            .unwrap()
-            .parameter_types(),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        error.contains("node clusters require version 2026-10-23"),
-        "{error}"
-    );
-    assert!(
-        legacy.nodes[0]
-            .flow_parameters(&["body"])
-            .unwrap_err()
-            .to_string()
-            .contains("node clusters require version 2026-10-23")
-    );
-}
-
-#[test]
-fn iteration_body_clusters_are_preserved_in_descriptions() {
-    let definition = WorkflowDefinition::from_json(
-        r#"{
-            "version": "2026-10-23",
-            "dependencies": {},
-            "nodes": [{
-                "id": "iterate",
-                "kind": "builtin.iteration",
-                "config": {
-                    "body": {"version":"2026-10-23", "dependencies":{},
-                        "nodes": [{"id": "step", "kind": "fixture.task"}],
-                        "outputs": [{"name":"result", "node": "step", "port": "value"}],
-                        "clusters": [{
-                            "label": "Item step",
-                            "annotation": "The body executed for every item.",
-                            "nodes": ["step"]
-                        }]
-                    }
-                }
-            }]
-        }"#,
-    )
-    .unwrap();
-    let plan = plan_definition(&definition).unwrap();
-    let description = mf_compiler::describe_compiled(&plan).unwrap();
-    assert_eq!(description.loop_bodies.len(), 1);
-    assert_eq!(description.loop_bodies[0].clusters.len(), 1);
-    assert_eq!(description.loop_bodies[0].clusters[0].label, "Item step");
-    assert_eq!(
-        description.loop_bodies[0].clusters[0].nodes,
-        vec!["step".to_owned()]
-    );
+fn executable_body_clusters_are_preserved_in_descriptions() {
+    use serde_json::json;
+    for (id, kind, label, annotation) in [
+        (
+            "repeat",
+            "workflow.loop",
+            "Body step",
+            "The only body transformation.",
+        ),
+        (
+            "iterate",
+            "builtin.iteration",
+            "Item step",
+            "The body executed for every item.",
+        ),
+    ] {
+        let mut config = json!({"body": {
+            "version":"2026-10-23", "dependencies":{},
+            "nodes":[{"id":"step", "kind":"fixture.task"}],
+            "clusters":[{"label":label, "annotation":annotation, "nodes":["step"]}]
+        }});
+        if kind == "workflow.loop" {
+            config["max_iterations"] = json!(1);
+            config["variables"] = json!([{"name":"count", "type":"int"}]);
+        } else {
+            config["body"]["outputs"] = json!([{"name":"result", "node":"step", "port":"value"}]);
+        }
+        let definition = WorkflowDefinition::from_json(
+            &json!({
+                "version":"2026-10-23", "dependencies":{},
+                "nodes":[{"id":id, "kind":kind, "config":config}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let plan = plan_definition(&definition).unwrap();
+        let description = mf_compiler::describe_compiled(&plan).unwrap();
+        assert_eq!(description.clusters.len(), 0);
+        assert_eq!(description.loop_bodies.len(), 1);
+        assert_eq!(description.loop_bodies[0].clusters.len(), 1);
+        assert_eq!(description.loop_bodies[0].clusters[0].label, label);
+        assert_eq!(description.loop_bodies[0].clusters[0].nodes, ["step"]);
+        if kind != "workflow.loop" {
+            continue;
+        }
+        let mut legacy = definition;
+        legacy.nodes[0].config["body"]["version"] = json!("2026-10-19");
+        let error = mf_compiler::plan_resolved_definition(
+            &legacy,
+            &mf_compiler::NodeRegistry::from_inventory()
+                .unwrap()
+                .parameter_types(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("node clusters require version 2026-10-23"),
+            "{error}"
+        );
+        assert!(
+            legacy.nodes[0]
+                .flow_parameters(&["body"])
+                .unwrap_err()
+                .to_string()
+                .contains("node clusters require version 2026-10-23")
+        );
+    }
 }
 #[test]
 fn nested_iteration_clusters_preserve_their_own_definition_version() {
