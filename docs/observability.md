@@ -570,6 +570,38 @@ to yellow. Their labels distinguish prerequisites in monochrome. Connections joi
 and `▶┤` input ports. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle
 loss remains visibly uncertain.
 
+The main canvas shows a bottom-right minimap when the graph exceeds the viewport and the terminal
+has enough space. It includes the routed topology, status-colored nodes, the selection, and a white
+viewport frame. Press `m` to toggle it; small viewports and picture-in-picture graphs omit it.
+`GraphView::minimap(true)` opts widget callers into the overlay without changing graph coordinates.
+
+Glyph-style `·░▒▓` motion distinguishes execution from data movement. Running nodes have a moving
+pulse traveling counter-clockwise around the complete node border. Real terminal observations send
+that pulse around the border once over 1.2 seconds, then restore the ordinary border. Border pulses
+use the same `▓▒░·` density trail and bold terminal-palette styling as connection pulses, retaining the
+node's status hue without additional RGB attenuation. Border-to-connection attachments participate
+in the pulse and restore their junction glyphs afterward. No full-border flash or fixed terminal
+pattern remains. Status markers and colors remain authoritative; uncertain observations do not
+animate.
+
+Shade glyph appearance is terminal-dependent. Ghostty may render `▓▒░` as translucent solid blocks
+rather than dotted textures; applications cannot reliably query that visual choice. Users who prefer
+font-rendered textures can configure Ghostty with `font-codepoint-map = U+2591-U+2593=Menlo`.
+
+Connection pulses represent observed data boundaries, not time spent Running. Finite Tasks pulse
+once when inputs have resolved at the destination's Started boundary; exclusive mappings additionally
+require the exact selected source/output/input. Live capture supplies the Started observation timestamp;
+typed input slots may have moved before values are captured, so missing snapshot payloads are not inferred as missing transfers.
+Streaming paths pulse for admitted `Emitted` snapshots containing that output port, including
+repeated equal emissions, or a captured Started boundary containing the actual destination input
+(for Task stages within a streaming workflow). Buffering does not invent an output emission, and
+pure control/success edges do not fabricate transfers.
+Execution-view connections can carry pulses for data mappings hidden behind the same execution edge.
+Transitively hidden mappings do not invent a substitute path. Pulses expire after 600 ms of observation
+time even if the node remains Running or the process has exited. Scoped events require matching
+trace/span context, so missing evidence or another pass/item's emission is not presented as a transfer.
+Animation does not display payload values, acknowledge consumer completion, or measure wire latency.
+
 LLM cards reserve two extra rows for FTT and Gen / E2E token rates, so receiving results does not move
 the graph. The node details explain the timing windows, report observation coverage, and list each
 call's model, purpose, and performance. Request events supply timing and provisional call facts before
@@ -731,7 +763,7 @@ connections or `--body` for the same fixture inside a Loop body. Inspect crossin
 `graph_preview -- --crossings`, adding `--color` for a status-color sample. These export modes run
 without an interactive terminal.
 
-Arrow keys pan the graph, `f` returns to the origin, and `q` or Esc closes the preview. The preview uses fixture events and does not launch a compiled runner.
+Arrow keys pan the graph, `f` returns to the origin, `m` toggles the minimap, and `q` or Esc closes the preview. The preview uses fixture events and does not launch a compiled runner.
 
 See [compiling workflows](compiling.md) for executable commands, endpoint settings, lock migration, and build prerequisites. Automatically generated metadata excludes configuration and business values. Arbitrary plugin failure messages can contain sensitive text and are not automatically sanitized by this contract.
 

@@ -188,6 +188,8 @@ pub struct SpanData {
 pub struct SnapshotMetadata {
     pub sequence: usize,
     pub time_unix_nano: u64,
+    /// Local admission time, independent of exporter batching and wall-clock adjustments.
+    pub received_at: Option<std::time::Instant>,
     pub correlation: Option<SpanKey>,
 }
 
@@ -239,6 +241,7 @@ impl SnapshotCapture {
                     .or_insert(SnapshotMetadata {
                         sequence,
                         time_unix_nano: record.time_unix_nano,
+                        received_at: None,
                         correlation,
                     });
             }
@@ -249,12 +252,13 @@ impl SnapshotCapture {
                     _ => None,
                 };
                 let changed = self.store.apply(record)?;
-                let metadata = self
+                let mut metadata = self
                     .pending_contexts
                     .remove(&(first + offset))
                     .expect("assembled records retain their packet metadata");
                 let correlation = metadata.correlation.clone();
                 if changed {
+                    metadata.received_at = Some(std::time::Instant::now());
                     self.metadata.push(metadata);
                 }
                 if let (Some((scope, node)), Some(correlation)) = (node, correlation) {
@@ -328,6 +332,25 @@ impl SnapshotCapture {
         let snapshot = Arc::new(self.view(None, usize::MAX));
         self.cached = Some(snapshot.clone());
         snapshot
+    }
+
+    /// Copy only the live animation window, not the complete session history.
+    pub fn recent(&self, window: std::time::Duration) -> HistorySnapshot {
+        let now = std::time::Instant::now();
+        let first = self.metadata.partition_point(|metadata| {
+            metadata
+                .received_at
+                .is_some_and(|received_at| now.saturating_duration_since(received_at) > window)
+        });
+        let history = self.store.history();
+        HistorySnapshot {
+            history_len: history.len(),
+            selected: history.len().saturating_sub(1),
+            first,
+            entries: history[first..].to_vec(),
+            metadata: self.metadata[first..].to_vec(),
+            status: self.status(),
+        }
     }
 
     pub fn view(&self, selected: Option<usize>, rows: usize) -> HistorySnapshot {
@@ -488,6 +511,33 @@ mod tests {
             })
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn animation_window_copies_only_recent_records_and_keeps_history_intact() {
+        let capture = Arc::new(Mutex::new(SnapshotCapture::default()));
+        let publisher = recorder(capture.clone());
+        for value in 0..3 {
+            publisher.record(Vec::new(), "source", snapshot(ValueRef::from(value)));
+        }
+        let mut capture = capture.lock().unwrap();
+        let now = std::time::Instant::now();
+        capture.metadata[0].received_at = Some(now - std::time::Duration::from_secs(10));
+        capture.metadata[1].received_at = Some(now - std::time::Duration::from_secs(5));
+        capture.metadata[2].received_at = Some(now);
+        let recent = capture.recent(std::time::Duration::from_secs(1));
+        assert_eq!(recent.first, 2);
+        assert_eq!(recent.history_len, 3);
+        assert_eq!(recent.entries.len(), 1);
+        assert_eq!(recent.metadata.len(), 1);
+        assert_eq!(capture.store.history().len(), 3);
+        capture.metadata[2].received_at = Some(now - std::time::Duration::from_secs(2));
+        assert!(
+            capture
+                .recent(std::time::Duration::from_secs(1))
+                .entries
+                .is_empty()
+        );
     }
 
     #[test]
