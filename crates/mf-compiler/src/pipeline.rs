@@ -164,11 +164,19 @@ fn resolve_provider_flows(
     // CLI process inventory is not the selected provider bundle (tests and hosts
     // may link extra crates or different feature sets). Only the probe grants
     // authored configuration fields Flow authority for this compilation.
-    let mut initial = at(
-        "Flow source discovery",
-        &inputs.definition,
-        crate::flow_sources::discover_unlinked_workflow(&inputs.definition),
-    )?;
+    let initial = crate::flow_sources::discover_unlinked_workflow(&inputs.definition);
+    // Root read/parse failures retain their public stage without reading or
+    // parsing the entry twice; nested sources keep discovery attribution.
+    let stage = match &initial {
+        Err(crate::FlowResolutionError::Parse { path, .. }) if path == &inputs.definition => {
+            "definition parsing"
+        }
+        Err(crate::FlowResolutionError::Read { path, .. }) if path == &inputs.definition => {
+            "definition read"
+        }
+        _ => "Flow source discovery",
+    };
+    let mut initial = at(stage, &inputs.definition, initial)?;
     check_source_destinations(inputs, output, &initial.sources)?;
     let mut builtin_catalog = BTreeMap::new();
     // A static public builtin can itself supply the first provider dependencies.
