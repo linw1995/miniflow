@@ -146,6 +146,15 @@ It calls the `mf-chat`-owned `mf-chat.chat-title` Flow through `workflow.call`; 
 streaming and combines both usage lists. See [reusable Flows](workflows.md#reusable-flows) for its
 interface and local-source support.
 
+The [calculator agent](../examples/chat-calculator-flow.json) shows multi-turn tool use without
+changing the chat contract. It injects a named calculator Flow into `mfn-llm.agent`, which calls
+`mfn-llm.agent-turn` inside a bounded native Loop, and composes router gates and ordinary calls
+inside a native parallel Iteration to execute requested tools concurrently. The final assistant text is returned as `text`; `answer` streams text from each
+assistant turn, including any preamble emitted with tool calls. Intermediate assistant and tool messages
+stay inside the agent transcript and only the final result is persisted. The same pattern supports chat
+title generation because the final result still exposes `status`, `text`, and accumulated `usages`. See
+[Router and LLM agent Flows](workflows.md#router-and-llm-agent-flows) for the interface.
+
 The supplied user flow may generate a title after a successful primary call. Its `context.title` input
 contains the current title source, revision, whether an attempt has been recorded, and whether automatic
 titles are enabled. The [conversation and title example](../examples/chat-title-flow.json) decides

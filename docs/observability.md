@@ -670,6 +670,12 @@ before navigating back. The footer shows only common controls. Press `?` in the 
 for the remaining shortcuts, and `?` or Esc to dismiss help. Help consumes navigation keys while open.
 The header keeps the observed workflow outcome separate from the child process result. Arrow keys
 pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. `e` cycles connection views.
+Left-click a visible graph node to select it and update its scope and any open Details, including nodes
+inside expanded bodies. Clicks do not open Details or change history automatically. Wheel up/down pans
+the canvas vertically; horizontal wheel events pan horizontally. Mouse input over headers, Details,
+running-node PiPs, help, or the tracing/log view does not pan or select the underlying canvas. These
+controls also work in the chat inspector, but not the compact read-only Flow overview. Dragging and
+mouse folding are not supported; use the existing keyboard shortcuts to expand or collapse bodies.
 When at least two display nodes run concurrently in the current scope, picture-in-picture local graphs
 center on and highlight each running node without changing the main graph's selection, pan state, or
 layout. The PiP grid recomputes its rows, columns, and visible count from the running-node count and
@@ -690,10 +696,14 @@ Aligned ports use a straight connection when collision checks allow it, includin
 Press `c` to collapse or
 expand the selected node's cluster; collapsed clusters render as one aggregate node, remap external
 connections, and hide internal connections. On a node with a described Loop, Iteration, or Call body,
-`c` toggles that body and `l` expands it inside the parent node. Bodies start expanded (`[-]`);
-expanded bodies keep parent nodes and external connections visible and support nested expansion.
-Collapsed bodies (`[+]`) can be reopened without leaving the parent graph.
-Tab selects body nodes alongside parent nodes. `h` or Esc collapses the selected expanded body or its
+`c` cycles that body between expanded (`[-]`) and fully collapsed (`[+]`) states. Only bodies containing
+injected Flows have an intermediate summary (`[~]`) state, which keeps the enclosing subgraph folded
+and draws its injected subgraphs instead. Bodies without injected Flows never show a summary or a
+fallback list of passed inputs; a programmatically supplied summary state is treated as fully collapsed.
+`l` expands the body inside the parent node. Bodies start expanded, keeping parent nodes and external
+connections visible and supporting nested expansion. Fully collapsed bodies show neither the subgraph
+nor its inputs and can be reopened without leaving the parent graph.
+Tab selects body nodes alongside parent nodes. `h` or Esc fully collapses the selected visible body or its
 enclosing body; Esc closes visible Details first. `[` and `]` inspect older and newer retained pass
 frames or Iteration items for the selected node's scope, with nested bodies following their enclosing pass.
 New lifecycle and Iteration detail events focus and reveal the deepest visible node; collapsed bodies focus their owner.

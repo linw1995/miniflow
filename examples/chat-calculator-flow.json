@@ -1,0 +1,152 @@
+{
+  "version": "2026-11-01",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "flows": {
+    "agent": {
+      "builtin": "mfn-llm.agent",
+      "flows": {
+        "calculator": {
+          "source": {
+            "path": "agent-calculator/calculator.json"
+          },
+          "description": "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message.",
+          "parameters": {
+            "calculate.operation": {
+              "description": "Operation to perform: add, subtract, multiply, or divide."
+            },
+            "calculate.left": {
+              "description": "Left operand."
+            },
+            "calculate.right": {
+              "description": "Right operand; must be nonzero for division."
+            }
+          }
+        }
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string",
+            "default": ""
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "OPENAI_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "agent",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "agent"
+      },
+      "inputs": {
+        "params.prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "params.system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        },
+        "params.history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "params.model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "params.base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "params.api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "agent",
+      "port": "answer",
+      "optional": true
+    },
+    {
+      "name": "status",
+      "node": "agent",
+      "port": "status"
+    },
+    {
+      "name": "text",
+      "node": "agent",
+      "port": "text"
+    },
+    {
+      "name": "usages",
+      "node": "agent",
+      "port": "usages"
+    },
+    {
+      "name": "error",
+      "node": "agent",
+      "port": "error",
+      "optional": true
+    }
+  ]
+}

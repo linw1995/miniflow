@@ -250,6 +250,33 @@ fn nested_descriptions_validate_scope_ownership_and_version() {
 }
 
 #[test]
+fn injected_body_paths_must_name_unique_non_root_bodies() {
+    let mut value = serde_json::to_value(graph()).unwrap();
+    value["version"] = json!("2026-09-29");
+    value["nodes"] = json!([{"id": "call", "kind": "workflow.call"}]);
+    value["execution_order"] = json!(["call"]);
+    value["data_edges"] = json!([]);
+    value["control_edges"] = json!([]);
+    value["loop_bodies"] = json!([{
+        "path": ["call"], "nodes": [], "data_edges": [],
+        "control_edges": [], "execution_order": []
+    }]);
+    value["injected_bodies"] = json!([["call"]]);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let description = WorkflowDescription::from_json(&bytes).unwrap();
+    assert_eq!(description.injected_bodies, vec![vec!["call".to_owned()]]);
+    assert_eq!(serde_json::to_value(description).unwrap(), value);
+    for invalid in [
+        json!([[]]),
+        json!([["missing"]]),
+        json!([["call"], ["call"]]),
+    ] {
+        value["injected_bodies"] = invalid;
+        assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn additive_fields_are_ignored_but_required_fields_and_versions_are_checked() {
     let wire = record("success");
     let expected = wire.decode().unwrap();

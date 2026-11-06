@@ -42,6 +42,7 @@ pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
         version: WorkflowDefinitionVersion::CURRENT,
         execution: None,
         flows: Default::default(),
+        flow_arguments: Default::default(),
         dependencies: BTreeMap::new(),
         nodes,
         edges,

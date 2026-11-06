@@ -59,7 +59,7 @@ impl Invocation {
         (
             self.path
                 .iter()
-                .map(|entry| entry.node_id().to_owned())
+                .map(mf_telemetry::event::ScopePathEntry::body_key)
                 .collect(),
             self.node.id.clone(),
         )
@@ -318,7 +318,7 @@ impl StreamState {
         let key = (
             node.path
                 .iter()
-                .map(|entry| entry.node_id().to_owned())
+                .map(mf_telemetry::event::ScopePathEntry::body_key)
                 .collect(),
             node.id.clone(),
         );
@@ -576,7 +576,7 @@ fn validate_graph(
                 let path: Vec<_> = node
                     .path
                     .iter()
-                    .map(|entry| entry.node_id().to_owned())
+                    .map(mf_telemetry::event::ScopePathEntry::body_key)
                     .collect();
                 let (nodes, order, data, control, orders) = if path.is_empty() {
                     (
@@ -700,7 +700,7 @@ impl StreamState {
         }
         let body_path: Vec<_> = path
             .iter()
-            .map(|entry| entry.node_id().to_owned())
+            .map(mf_telemetry::event::ScopePathEntry::body_key)
             .collect();
         let body = description.loop_body(&body_path).expect("validated body");
         let key = (identity.invocation, path.clone());
@@ -794,7 +794,7 @@ impl StreamState {
         let owner_key = (
             parent
                 .iter()
-                .map(|entry| entry.node_id().to_owned())
+                .map(mf_telemetry::event::ScopePathEntry::body_key)
                 .collect(),
             last.node_id().to_owned(),
         );
@@ -826,7 +826,7 @@ impl StreamState {
             let static_path: Vec<_> = node
                 .path
                 .iter()
-                .map(|entry| entry.node_id().to_owned())
+                .map(mf_telemetry::event::ScopePathEntry::body_key)
                 .collect();
             let body = description.loop_body(&static_path).expect("validated body");
             self.total_passes = self.total_passes.saturating_add(1);
@@ -1180,6 +1180,7 @@ mod tests {
     }
     fn description() -> WorkflowDescription {
         WorkflowDescription {
+            injected_bodies: Vec::new(),
             order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_10_03,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),

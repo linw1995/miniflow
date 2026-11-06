@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 fn description() -> WorkflowDescription {
     let nodes = ["source", "router", "left", "right", "join", "orphan"];
     WorkflowDescription {
+        injected_bodies: Vec::new(),
         order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "b".repeat(64))).unwrap(),
@@ -177,6 +178,256 @@ fn inline_bodies_keep_nested_geometry_and_routes_inside_their_owners() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn summary_bodies_without_injected_flows_are_collapsed() {
+    use mf_tui::graph::{BodyDisplay, ConnectionView};
+    let description = inline_description();
+    let outer = vec!["box".into()];
+    let states = BTreeMap::from([(outer.clone(), BodyDisplay::Summary)]);
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
+    assert_eq!(layout.body_summary(owner), None);
+    assert!(!layout.is_expanded_body(owner));
+    assert_eq!(layout.nodes().len(), 3);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 30));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("box [+]"));
+    assert!(!text.contains("[~]"));
+    assert!(!text.contains("input ← source"));
+    assert!(!text.contains("subgraph:"));
+
+    let states = BTreeMap::from([(outer, BodyDisplay::Hidden)]);
+    let hidden = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = hidden.display_index_for_scoped_node(&[], "box").unwrap();
+    assert_eq!(hidden.body_summary(owner), None);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 30));
+    GraphView::new(&hidden).render(buffer.area, &mut buffer);
+    assert!(buffer_text(&buffer).contains("box [+]"));
+    assert_eq!(layout.nodes(), hidden.nodes());
+}
+
+#[test]
+fn unsupported_summary_bodies_do_not_list_passed_inputs() {
+    use mf_tui::graph::{BodyDisplay, ConnectionView};
+    let mut description = inline_description();
+    let edge = |from_node: &str, to_input: &str, exclusive: bool| DataEdge {
+        exclusive,
+        from_node: from_node.into(),
+        from_output: "value".into(),
+        to_node: "box".into(),
+        to_input: to_input.into(),
+    };
+    let with_sources = |description: &mut WorkflowDescription, sources: &[&str]| {
+        description.nodes = sources
+            .iter()
+            .map(|id| NodeDescription {
+                id: (*id).into(),
+                kind: "fixture.task".into(),
+            })
+            .chain(["box", "sink"].map(|id| NodeDescription {
+                id: id.into(),
+                kind: if id == "box" {
+                    "workflow.call".into()
+                } else {
+                    "fixture.task".into()
+                },
+            }))
+            .collect();
+        description.execution_order = sources
+            .iter()
+            .map(|id| (*id).into())
+            .chain(["box".into(), "sink".into()])
+            .collect();
+    };
+    with_sources(&mut description, &["x", "y", "z"]);
+    description.data_edges = vec![
+        edge("y", "a", true),
+        edge("x", "a", true),
+        edge("z", "b", false),
+        DataEdge {
+            exclusive: false,
+            from_node: "box".into(),
+            from_output: "value".into(),
+            to_node: "sink".into(),
+            to_input: "input".into(),
+        },
+    ];
+    let states = BTreeMap::from([(vec!["box".into()], BodyDisplay::Summary)]);
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
+    assert_eq!(layout.body_summary(owner), None);
+    assert!(!layout.is_expanded_body(owner));
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("box [+]"));
+    assert!(!text.contains("a ← x|y"));
+    assert!(!text.contains("b ← z"));
+
+    let upstream: Vec<String> = (0..4)
+        .map(|index| format!("upstream_source_{index}"))
+        .collect();
+    let upstream_refs: Vec<&str> = upstream.iter().map(String::as_str).collect();
+    with_sources(&mut description, &upstream_refs);
+    description.data_edges = upstream_refs
+        .iter()
+        .map(|source| edge(source, "input.wide_parameter", true))
+        .collect();
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
+    assert_eq!(layout.body_summary(owner), None);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("box [+]"));
+    assert!(!text.contains("input.wide_parameter"));
+}
+
+#[test]
+fn summary_bodies_draw_injected_flows_instead_of_inputs() {
+    use mf_tui::graph::{BodyDisplay, ConnectionView};
+    let mut description = inline_description();
+    description.injected_bodies = vec![vec!["box".into(), "inner".into()]];
+    let states = BTreeMap::from([(vec!["box".into()], BodyDisplay::Summary)]);
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let owner = layout.display_index_for_scoped_node(&[], "box").unwrap();
+    assert_eq!(layout.body_summary(owner), Some(&[][..]));
+    // Parent nodes plus the injected body only; the called body stays folded.
+    assert_eq!(layout.nodes().len(), 5);
+    assert!(
+        layout
+            .display_index_for_scoped_node(&["box".into(), "inner".into()], "source")
+            .is_some()
+    );
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("box [~]"));
+    assert!(!text.contains("input ← source"));
+
+    // Nested injections are rendered once through their outermost injected root.
+    description.injected_bodies = vec![vec!["box".into()], vec!["box".into(), "inner".into()]];
+    let states = BTreeMap::from([
+        (vec!["box".into()], BodyDisplay::Summary),
+        (vec!["box".into(), "inner".into()], BodyDisplay::Expanded),
+    ]);
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(layout.nodes().len(), 8);
+    let identities: BTreeSet<_> = layout
+        .all_nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (layout.source_path(index).to_vec(), node.id.clone()))
+        .collect();
+    assert_eq!(identities.len(), layout.all_nodes().len());
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 60));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    let text = buffer_text(&buffer);
+    assert!(text.contains("box [~]"));
+    assert!(text.contains("inner"));
+
+    // Independent injected roots are stacked inside the summarized call.
+    let mut sibling = description.loop_bodies[1].clone();
+    sibling.path = vec!["box".into(), "other".into()];
+    description.loop_bodies.push(sibling);
+    description.loop_bodies[0].nodes.push(NodeDescription {
+        id: "other".into(),
+        kind: "workflow.call".into(),
+    });
+    description.loop_bodies[0]
+        .execution_order
+        .push("other".into());
+    description.injected_bodies = vec![
+        vec!["box".into(), "inner".into()],
+        vec!["box".into(), "other".into()],
+    ];
+    let layout = GraphLayout::with_body_states(
+        &description,
+        ConnectionView::Execution,
+        &states,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(layout.nodes().len(), 7);
+    let first = layout
+        .display_index_for_scoped_node(&["box".into(), "inner".into()], "source")
+        .unwrap();
+    let second = layout
+        .display_index_for_scoped_node(&["box".into(), "other".into()], "source")
+        .unwrap();
+    assert!(layout.nodes()[first].rect.y < layout.nodes()[second].rect.y);
+}
+
+#[test]
+fn nested_summary_bodies_without_injected_flows_collapse_across_connection_views() {
+    use mf_tui::graph::{BodyDisplay, ConnectionView};
+    let description = inline_description();
+    let outer = vec!["box".into()];
+    let inner = vec!["box".into(), "inner".into()];
+    let states = BTreeMap::from([
+        (outer, BodyDisplay::Expanded),
+        (inner, BodyDisplay::Summary),
+    ]);
+    for view in [
+        ConnectionView::Execution,
+        ConnectionView::Dependencies,
+        ConnectionView::Ports,
+    ] {
+        let layout =
+            GraphLayout::with_body_states(&description, view, &states, &BTreeMap::new()).unwrap();
+        let owner = layout
+            .display_index_for_scoped_node(&["box".into()], "inner")
+            .unwrap();
+        assert_eq!(layout.body_summary(owner), None);
+        assert!(!layout.is_expanded_body(owner));
+        assert_eq!(layout.nodes().len(), 6);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 180, 40));
+        GraphView::new(&layout).render(buffer.area, &mut buffer);
+        let text = buffer_text(&buffer);
+        assert!(text.contains("box [-]"));
+        assert!(text.contains("inner [+]"));
+        assert!(!text.contains("[~]"));
+        assert!(!text.contains("input ← source"));
     }
 }
 
@@ -1978,6 +2229,7 @@ fn exclusive_candidates_have_distinct_edges_and_visible_labels() {
 
 fn parameter_graph() -> WorkflowDescription {
     WorkflowDescription {
+        injected_bodies: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "d".repeat(64))).unwrap(),
         execution: None,
@@ -3479,6 +3731,96 @@ fn monotonic_receipt_time_keeps_stale_source_emissions_visible() {
     let a = edge_index(&layout, "source", "sink-a", Some("a"));
     let buffer = render_stream(&layout, &nodes, &history, now);
     assert!(!route_transfer_cells(&buffer, &layout, a).is_empty());
+}
+
+#[test]
+fn binding_transfer_animations_keep_sibling_scopes_separate() {
+    let paths: Vec<_> = ["left", "right"]
+        .into_iter()
+        .map(|binding| vec![ScopePathEntry::binding_key("router", binding)])
+        .collect();
+    let bodies: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            serde_json::json!({
+                "path": path,
+                "nodes": [
+                    {"id": "source", "kind": "fixture.task"},
+                    {"id": "sink", "kind": "fixture.task"}
+                ],
+                "execution_order": ["source", "sink"],
+                "data_edges": [{
+                    "from_node": "source", "from_output": "value",
+                    "to_node": "sink", "to_input": "input", "exclusive": false
+                }],
+                "control_edges": []
+            })
+        })
+        .collect();
+    let graph: WorkflowDescription = serde_json::from_value(serde_json::json!({
+        "version": "2026-10-23",
+        "workflow_id": format!("sha256:{}", "d".repeat(64)),
+        "execution": {"mode": "single"},
+        "nodes": [{"id": "router", "kind": "builtin.router"}],
+        "execution_order": ["router"],
+        "data_edges": [], "control_edges": [],
+        "loop_bodies": bodies
+    }))
+    .unwrap();
+    let layout = GraphLayout::with_expanded_bodies(
+        &graph,
+        ConnectionView::Ports,
+        &paths.iter().cloned().collect(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let correlation = (vec![3; 16], vec![4; 8]);
+    let mut nodes = pending_nodes(&layout);
+    for node in &mut nodes {
+        // Even identical correlations must not conflate sibling bindings.
+        node.correlation = Some(correlation.clone());
+    }
+    let now = 20_000_000_000;
+    for binding in ["left", "right"] {
+        for outcome in [SnapshotOutcome::Emitted, SnapshotOutcome::Started] {
+            let mut store = snapshot_store([]);
+            store
+                .apply(SnapshotRecord::Node {
+                    scope: vec![ScopePathEntry::CallBinding {
+                        call_id: "router".into(),
+                        binding: binding.into(),
+                    }],
+                    node: if outcome == SnapshotOutcome::Emitted {
+                        "source"
+                    } else {
+                        "sink"
+                    }
+                    .into(),
+                    inputs: value_object("input", 1),
+                    outputs: value_object("value", 1),
+                    skipped: Vec::new().into(),
+                    outcome,
+                    error: None,
+                })
+                .unwrap();
+            let history =
+                history_snapshot(&store, now, &[(300_000_000, Some(correlation.clone()))]);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 100));
+            GraphView::new(&layout)
+                .nodes(&nodes)
+                .data_snapshot(&history)
+                .observed_at_unix_nano(now)
+                .render(buffer.area, &mut buffer);
+            for (edge, described) in layout.edges().iter().enumerate() {
+                let path = layout.node_path(described.from);
+                assert_eq!(
+                    !route_transfer_cells(&buffer, &layout, edge).is_empty(),
+                    path == [ScopePathEntry::binding_key("router", binding)],
+                    "{binding}, {outcome:?}, {path:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

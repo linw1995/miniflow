@@ -1,5 +1,7 @@
 #![cfg(feature = "codegen")]
 
+extern crate mfn_core as _;
+
 use mf_compiler::{NodeRegistry, WorkflowDefinition, describe_workflow_inputs, plan_definition};
 use mf_runtime::{
     ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
@@ -60,6 +62,48 @@ fn prepare(config: Value) -> Result<PreparedNode, NodeBuildError> {
 
 inventory::submit! {
     NodeRegistration { kind: "fixture.manifest", factory: NodeFactory::Plain(prepare) }
+}
+
+#[test]
+fn execution_plan_generation_rejects_corrupted_canonical_orders() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-11-01",
+        "dependencies": {},
+        "nodes": [
+            {"id": "first", "kind": "builtin.constant", "config": {"value": 1}},
+            {"id": "second", "kind": "builtin.constant", "config": {"value": 2}}
+        ],
+        "outputs": [{"name": "value", "node": "second", "port": "value"}]
+    }))
+    .unwrap();
+    let plan = plan_definition(&definition).unwrap();
+    assert_eq!(plan.execution_order, vec!["first".into(), "second".into()]);
+    plan.generate_execution_plans(&registry).unwrap();
+    plan.generate_runner_execution_plans(&registry).unwrap();
+
+    for order in [
+        vec![],
+        vec!["first"],
+        vec!["first", "first"],
+        vec!["first", "unknown"],
+        vec!["first", "second", "second"],
+        // Even a valid topological ordering of independent nodes must remain canonical.
+        vec!["second", "first"],
+    ] {
+        let mut corrupted = plan.clone();
+        corrupted.execution_order = order.iter().map(|id| (*id).into()).collect();
+        for result in [
+            corrupted.generate_execution_plans(&registry),
+            corrupted.generate_runner_execution_plans(&registry),
+        ] {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error, mf_compiler::PlanError::InvalidExecutionOrder),
+                "order {order:?}: {error}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -132,8 +176,30 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
             .collect();
         assert_eq!(
             functions,
-            ["plan", "manifest", "prepare_stream", "prepare_workflow"]
+            [
+                "plan",
+                "finalized_plan",
+                "manifest",
+                "prepare_stream",
+                "prepare_workflow"
+            ]
         );
+        // Preparation must enter the observation-aware path before constructing nodes.
+        // Eager `finalized_plan` here would hide initialization failures from observation.
+        for item in &syntax.items {
+            if let syn::Item::Fn(function) = item
+                && matches!(
+                    function.sig.ident.to_string().as_str(),
+                    "prepare_stream" | "prepare_workflow"
+                )
+            {
+                assert!(
+                    !quote::quote!(#function)
+                        .to_string()
+                        .contains("finalized_plan")
+                );
+            }
+        }
         assert!(embedded.rust_source.contains("instantiate_stream"));
         assert!(
             embedded

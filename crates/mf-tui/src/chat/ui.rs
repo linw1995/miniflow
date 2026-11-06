@@ -137,6 +137,9 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
                             operation: "resize terminal",
                         })?;
                 }
+                Event::Mouse(mouse) if view.mode == Mode::Inspect => {
+                    view.inspector.handle_mouse(mouse);
+                }
                 Event::Paste(text) if view.mode == Mode::Input => view
                     .editor
                     .insert(&text.replace("\r\n", "\n").replace('\r', "\n")),

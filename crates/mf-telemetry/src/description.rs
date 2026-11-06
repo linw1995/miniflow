@@ -70,6 +70,11 @@ pub struct WorkflowDescription {
     pub execution_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_bodies: Vec<LoopBodyDescription>,
+    /// Bodies that a call received as injected Flow parameters, keyed by the body path
+    /// that holds the injected subgraph. Inspection UIs can render them without the
+    /// intermediate calls that dispatch them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injected_bodies: Vec<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<ClusterDescription>,
 }
@@ -184,6 +189,30 @@ impl WorkflowDescription {
         self.loop_bodies.iter().find(|body| body.path == path)
     }
 
+    /// All statically prepared bodies owned by a node, including passed Flow bindings.
+    pub fn body_paths_for_node(&self, parent: &[String], id: &str) -> Vec<&Vec<String>> {
+        let nodes = if parent.is_empty() {
+            self.nodes.as_slice()
+        } else {
+            self.body(parent).map_or(&[][..], |body| &body.nodes)
+        };
+        self.loop_bodies
+            .iter()
+            .filter(|body| {
+                body.path.len() == parent.len() + 1
+                    && body.path.starts_with(parent)
+                    && body.path.last().is_some_and(|key| {
+                        // Authored IDs can look like binding keys; only decode unclaimed keys.
+                        key == id
+                            || (!nodes.iter().any(|node| node.id == *key)
+                                && crate::event::ScopePathEntry::binding_owner(key).as_deref()
+                                    == Some(id))
+                    })
+            })
+            .map(|body| &body.path)
+            .collect()
+    }
+
     pub fn validate_scope_path(
         &self,
         path: &[crate::event::ScopePathEntry],
@@ -202,12 +231,14 @@ impl WorkflowDescription {
             require(
                 if entry.is_call() {
                     container.kind == "workflow.call"
+                        || (container.kind == "builtin.router"
+                            && matches!(entry, crate::event::ScopePathEntry::CallBinding { .. }))
                 } else {
                     container.kind == "workflow.loop"
                 },
                 "scope path kind disagrees with its container",
             )?;
-            static_path.push(entry.node_id().to_owned());
+            static_path.push(entry.body_key());
             parent = &self
                 .body(&static_path)
                 .ok_or_else(|| crate::invalid("unknown scope body"))?
@@ -225,9 +256,15 @@ impl WorkflowDescription {
         let mut body = None;
         let mut has_call = false;
         for (index, id) in path.iter().enumerate() {
-            let container = nodes.iter().find(|node| node.id == *id)?;
+            let owner = crate::event::ScopePathEntry::binding_owner(id);
+            let container = nodes.iter().find(|node| node.id == *id).or_else(|| {
+                nodes
+                    .iter()
+                    .find(|node| node.id == owner.as_deref().unwrap_or(id))
+            })?;
             match container.kind.as_str() {
                 "workflow.call" => has_call = true,
+                "builtin.router" if owner.is_some() => has_call = true,
                 "workflow.loop" => {}
                 _ => return None,
             }
@@ -364,13 +401,20 @@ impl WorkflowDescription {
             let (parent, parent_has_call) = scopes
                 .get(parent_path)
                 .ok_or_else(|| crate::invalid("unknown parent Loop scope"))?;
+            let owner = crate::event::ScopePathEntry::binding_owner(loop_id);
             let container = parent
                 .iter()
                 .find(|node| node.id == *loop_id)
+                .or_else(|| {
+                    parent
+                        .iter()
+                        .find(|node| node.id == owner.as_deref().unwrap_or(loop_id))
+                })
                 .ok_or_else(|| crate::invalid("unknown body container"))?;
             let iteration =
                 self.version.supports_iteration_bodies() && container.kind == "builtin.iteration";
-            let call = container.kind == "workflow.call";
+            let call = container.kind == "workflow.call"
+                || (container.kind == "builtin.router" && owner.is_some());
             let has_call = *parent_has_call || call;
             require(
                 has_call || body.path.len() <= crate::MAX_LOOP_DEPTH,
@@ -408,6 +452,7 @@ impl WorkflowDescription {
                     },
                 ),
                 loop_bodies: Vec::new(),
+                injected_bodies: Vec::new(),
                 clusters: body.clusters.clone(),
             };
             scope.validate()?;
@@ -417,6 +462,14 @@ impl WorkflowDescription {
                     .is_none(),
                 "duplicate Loop body path",
             )?;
+        }
+        let mut injected = BTreeSet::new();
+        for path in &self.injected_bodies {
+            require(
+                !path.is_empty() && scopes.contains_key(path),
+                "unknown injected Flow body path",
+            )?;
+            require(injected.insert(path), "duplicate injected Flow body path")?;
         }
         Ok(())
     }

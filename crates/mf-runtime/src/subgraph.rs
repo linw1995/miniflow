@@ -218,6 +218,85 @@ impl SubgraphInputMetadata {
     }
 }
 
+/// Compile-time interface facts. Deliberately contains no executable closure.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubgraphMetadata {
+    pub inputs: crate::WorkflowInputSchema,
+    pub outputs: Vec<PortSpec>,
+    pub stream_outputs: Vec<PortSpec>,
+}
+
+#[derive(Debug, snafu::Snafu)]
+pub enum SubgraphMetadataError {
+    #[snafu(display("invalid metadata interface: {message}"))]
+    Invalid { message: String },
+    #[snafu(display("invalid metadata input: {source}"))]
+    Input { source: crate::WorkflowInputError },
+    #[snafu(display("invalid metadata type: {source}"))]
+    TypeDepth { source: crate::TypeDepthError },
+}
+
+impl SubgraphMetadata {
+    /// Validate frozen declarations without reading environment, stdin, or executing tasks.
+    pub fn validate(&self) -> Result<(), SubgraphMetadataError> {
+        use snafu::ResultExt;
+        for (node, ports) in &self.inputs.inputs {
+            for (port, input) in ports {
+                snafu::ensure!(
+                    !node.is_empty() && !port.is_empty(),
+                    InvalidSnafu {
+                        message: "input node and port names must not be empty"
+                    }
+                );
+                input.value_type.check_depth().context(TypeDepthSnafu)?;
+                input
+                    .binding
+                    .validate(&crate::output_id(node, port), &input.value_type)
+                    .context(InputSnafu)?;
+            }
+        }
+        for ports in [&self.outputs, &self.stream_outputs] {
+            let mut names = std::collections::BTreeSet::new();
+            for port in ports {
+                snafu::ensure!(
+                    !port.name.is_empty() && names.insert(&port.name),
+                    InvalidSnafu {
+                        message: "output names must be nonempty and unique within their channel"
+                    }
+                );
+                port.value_type.check_depth().context(TypeDepthSnafu)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Executable form of the canonical passed Flow parameter environment.
+/// Only preparation creates these handles; JSON selectors cannot add entries.
+#[derive(Clone, Default)]
+pub struct PreparedFlowArguments(
+    std::sync::Arc<std::collections::BTreeMap<String, PreparedSubgraph>>,
+);
+
+impl PreparedFlowArguments {
+    pub fn new(arguments: std::collections::BTreeMap<String, PreparedSubgraph>) -> Self {
+        Self(std::sync::Arc::new(arguments))
+    }
+
+    pub fn get(&self, name: &str) -> Option<&PreparedSubgraph> {
+        self.0.get(name)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &PreparedSubgraph> {
+        self.0.values()
+    }
+}
+
 #[derive(Clone)]
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,
@@ -306,6 +385,37 @@ impl<N: SubgraphNode> crate::TaskStreamNode for SubgraphTask<N> {
 }
 
 impl PreparedSubgraph {
+    /// Wraps an already prepared terminal callable without inspecting source definitions.
+    pub fn from_flow(flow: Flow, nodes: Vec<NodeIdentity>) -> Self {
+        let outputs = flow
+            .plan()
+            .outputs
+            .iter()
+            .map(|output| {
+                let port = flow
+                    .node_metadata(&output.node_id)
+                    .expect("validated output node")
+                    .ports
+                    .outputs
+                    .iter()
+                    .find(|port| port.name == output.port)
+                    .expect("validated output port");
+                PortSpec::owned(
+                    output.name.as_ref(),
+                    port.value_type.clone(),
+                    !output.optional,
+                )
+            })
+            .collect();
+        let inputs = flow.input_schema().clone();
+        let input_metadata = SubgraphInputMetadata::from_flow(&flow);
+        let stream_outputs = flow.stream_output_ports();
+        Self::streaming(nodes, outputs, stream_outputs, move |state, sink| {
+            flow.execute_with_sink(state, sink)
+        })
+        .with_input_metadata(inputs, input_metadata)
+    }
+
     pub fn new(
         nodes: Vec<NodeIdentity>,
         outputs: Vec<PortSpec>,
@@ -499,6 +609,53 @@ impl crate::EmissionSink for ProjectedSink<'_> {
 mod tests {
     use super::*;
     use crate::{EmissionSink, NodeId, NodeResult, ValueRef, ValueType};
+
+    fn input_metadata(node: &str, port: &str) -> SubgraphMetadata {
+        SubgraphMetadata {
+            inputs: WorkflowInputSchema {
+                inputs: std::collections::BTreeMap::from([(
+                    node.into(),
+                    std::collections::BTreeMap::from([(
+                        port.into(),
+                        crate::WorkflowInput {
+                            value_type: ValueType::String,
+                            required: true,
+                            binding: crate::InputBinding {
+                                env: Some("MF_METADATA_TEST_INPUT".into()),
+                                default: Some(serde_json::json!("fallback")),
+                                secret: true,
+                            },
+                        },
+                    )]),
+                )]),
+                stdin: Default::default(),
+            },
+            outputs: vec![PortSpec::new("value", ValueType::String, true)],
+            stream_outputs: vec![PortSpec::new("value", ValueType::String, true)],
+        }
+    }
+
+    #[test]
+    fn metadata_rejects_empty_input_node_or_port_names() {
+        for (node, port) in [("", "value"), ("source", ""), ("", "")] {
+            let error = input_metadata(node, port).validate().unwrap_err();
+            assert!(matches!(
+                error,
+                SubgraphMetadataError::Invalid { ref message }
+                    if message == "input node and port names must not be empty"
+            ));
+            assert_eq!(
+                error.to_string(),
+                "invalid metadata interface: input node and port names must not be empty"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_accepts_bound_inputs_and_matching_names_in_separate_output_channels() {
+        // Validation checks declarations only; it must not resolve the environment binding.
+        input_metadata("source", "value").validate().unwrap();
+    }
 
     #[test]
     fn projection_preserves_nested_sensitivity_and_marks_other_children_skipped() {

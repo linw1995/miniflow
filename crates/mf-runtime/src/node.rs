@@ -1338,10 +1338,22 @@ impl PreparedNode {
 
 #[derive(Clone, Copy, Debug)]
 pub enum NodeFactory {
+    Metadata(fn(Value, crate::SubgraphMetadata) -> Result<PreparedNode, NodeBuildError>),
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
     Subgraph(
         fn(&str, Value, Value, crate::PreparedSubgraph) -> Result<PreparedNode, NodeBuildError>,
     ),
+    FlowArguments {
+        plain: fn(Value) -> Result<PreparedNode, NodeBuildError>,
+        prepared:
+            fn(&str, Value, crate::PreparedFlowArguments) -> Result<PreparedNode, NodeBuildError>,
+    },
+    Call {
+        fixed:
+            fn(&str, Value, Value, crate::PreparedSubgraph) -> Result<PreparedNode, NodeBuildError>,
+        reference:
+            fn(&str, Value, crate::PreparedFlowArguments) -> Result<PreparedNode, NodeBuildError>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1351,13 +1363,39 @@ pub struct NodeRegistration {
 }
 
 impl NodeRegistration {
-    pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
+    pub fn instantiate_flow_reference(
+        &self,
+        id: &str,
+        config: Value,
+        arguments: crate::PreparedFlowArguments,
+    ) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
-            NodeFactory::Plain(factory) => factory(config),
-            NodeFactory::Subgraph(_) => crate::NodeInvalidSubgraphSnafu {
-                message: format!("node `{}` requires a prepared body", self.kind),
+            NodeFactory::Call { reference, .. }
+            | NodeFactory::FlowArguments {
+                prepared: reference,
+                ..
+            } => reference(id, config, arguments),
+            _ => crate::NodeInvalidSubgraphSnafu {
+                message: format!(
+                    "node `{}` does not accept Flow parameter references",
+                    self.kind
+                ),
             }
             .fail(),
+        }
+    }
+
+    pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
+        match self.factory {
+            NodeFactory::Plain(factory) | NodeFactory::FlowArguments { plain: factory, .. } => {
+                factory(config)
+            }
+            NodeFactory::Subgraph(_) | NodeFactory::Metadata(_) | NodeFactory::Call { .. } => {
+                crate::NodeInvalidSubgraphSnafu {
+                    message: format!("node `{}` requires a prepared body", self.kind),
+                }
+                .fail()
+            }
         }
     }
 
@@ -1369,8 +1407,12 @@ impl NodeRegistration {
         body: crate::PreparedSubgraph,
     ) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
-            NodeFactory::Subgraph(factory) => factory(id, config, options, body),
-            NodeFactory::Plain(_) => crate::NodeInvalidSubgraphSnafu {
+            NodeFactory::Subgraph(factory) | NodeFactory::Call { fixed: factory, .. } => {
+                factory(id, config, options, body)
+            }
+            NodeFactory::Plain(_)
+            | NodeFactory::Metadata(_)
+            | NodeFactory::FlowArguments { .. } => crate::NodeInvalidSubgraphSnafu {
                 message: format!("node `{}` does not accept a prepared body", self.kind),
             }
             .fail(),

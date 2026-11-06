@@ -48,6 +48,8 @@ pub struct WorkflowDefinition {
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub flows: BTreeMap<String, FlowSource>,
+    /// Canonical passed Flow parameters, frozen before preparation. Not runtime JSON capabilities.
+    pub flow_arguments: BTreeMap<String, ResolvedFlowArgument>,
     pub nodes: Vec<NodeDefinition>,
     pub edges: Vec<EdgeDefinition>,
     pub control_edges: Vec<ControlEdgeDefinition>,
@@ -72,6 +74,9 @@ struct DefinitionFields {
     pub dependencies: BTreeMap<String, NodeDependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flows: BTreeMap<String, FlowSource>,
+    /// Canonical passed Flow parameters, frozen before preparation. Not runtime JSON capabilities.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub flow_arguments: BTreeMap<String, ResolvedFlowArgument>,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -124,17 +129,26 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_25,
     #[serde(rename = "2026-10-28")]
     V2026_10_28,
+    #[serde(rename = "2026-11-01")]
+    V2026_11_01,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_28;
+    pub const CURRENT: Self = Self::V2026_11_01;
 
     pub fn supports_child_streams(self) -> bool {
-        matches!(self, Self::V2026_10_28)
+        matches!(self, Self::V2026_10_28 | Self::V2026_11_01)
     }
 
     pub fn supports_nested_flows(self) -> bool {
-        matches!(self, Self::V2026_10_25 | Self::V2026_10_28)
+        matches!(
+            self,
+            Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_01
+        )
+    }
+
+    pub fn supports_flow_arguments(self) -> bool {
+        matches!(self, Self::V2026_11_01)
     }
 
     pub fn supports_startup_inputs(self) -> bool {
@@ -145,20 +159,25 @@ impl WorkflowDefinitionVersion {
                 | Self::V2026_10_23
                 | Self::V2026_10_25
                 | Self::V2026_10_28
+                | Self::V2026_11_01
         )
     }
 
     pub fn supports_node_success_edges(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+            Self::V2026_10_19
+                | Self::V2026_10_23
+                | Self::V2026_10_25
+                | Self::V2026_10_28
+                | Self::V2026_11_01
         )
     }
 
     pub fn supports_clusters(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_01
         )
     }
 }
@@ -169,14 +188,118 @@ pub const MAX_CALL_DEPTH: usize = 16;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum FlowSource {
-    Path { path: PathBuf },
-    Builtin { builtin: String },
+    Path {
+        path: PathBuf,
+    },
+    Builtin {
+        builtin: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        config: Value,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        flows: BTreeMap<String, FlowArgument>,
+    },
+    Body {
+        body: FlowBodyDefinition,
+    },
+}
+
+/// An authored injection into a configurable built-in Flow.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowArgument {
+    pub source: FlowSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, FlowParameterDescription>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowParameterDescription {
+    pub description: String,
+}
+
+/// Frozen injection passed to a provider after source resolution.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedFlowArgument {
+    pub definition: WorkflowDefinition,
+    pub description: Option<String>,
+    pub parameters: BTreeMap<String, FlowParameterDescription>,
+}
+
+/// A resolved injection and its provider-linked interface; contains no executable capability.
+#[derive(Clone, Debug)]
+pub struct DescribedFlowArgument {
+    pub definition: WorkflowDefinition,
+    pub description: Option<String>,
+    pub parameters: BTreeMap<String, FlowParameterDescription>,
+    pub metadata: crate::SubgraphMetadata,
+}
+
+/// An inline Flow inherits its enclosing version, dependencies and alias scope.
+/// Its wire form uses node-local inputs and execution edges, like a full Flow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowBodyDefinition {
+    pub nodes: Vec<NodeDefinition>,
+    pub edges: Vec<EdgeDefinition>,
+    pub control_edges: Vec<ControlEdgeDefinition>,
+    pub order_edges: Vec<OrderEdgeDefinition>,
+    pub clusters: Vec<ClusterDefinition>,
+    pub outputs: Vec<WorkflowOutputDefinition>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "FlowBodyDefinition", deny_unknown_fields)]
+struct FlowBodyFields {
+    nodes: Vec<NodeDefinition>,
+    #[serde(default)]
+    edges: Vec<EdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    control_edges: Vec<ControlEdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    order_edges: Vec<OrderEdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    clusters: Vec<ClusterDefinition>,
+    #[serde(default)]
+    outputs: Vec<WorkflowOutputDefinition>,
+}
+
+/// A reference-only selector. Its JSON value is a name, never executable authority.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowReference {
+    #[serde(rename = "$ref")]
+    pub output: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+}
+
+impl FlowReference {
+    pub fn template(&self) -> Result<crate::ConfigTemplate, crate::ConfigTemplateError> {
+        crate::ConfigTemplate::parse(serde_json::json!({"$ref": self.output, "path": self.path}))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CallConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub flow: String,
+    /// Select only from passed, frozen Flow parameters in this lexical scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_ref: Option<FlowReference>,
+    /// Observation provenance: this call body was supplied as an injected Flow parameter.
+    /// Does not change execution behavior or imply tool semantics.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub injected: bool,
+    /// Accept a single object keyed by qualified startup input names.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub arguments_object: bool,
+    /// Return a result envelope instead of propagating recoverable child failures.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub capture_errors: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<Box<WorkflowDefinition>>,
 }
@@ -192,7 +315,77 @@ pub struct NodeDefinition {
     pub loop_definition: Option<Box<LoopDefinition>>,
 }
 
+/// A compile-time reference to a passed Flow parameter, not a registry alias or JSON body.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowParameterReference {
+    pub parameter: String,
+}
+
+/// Executable router mode. Legacy gate routing continues to use `routes` instead.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouterSubgraphConfig {
+    pub subgraphs: BTreeMap<String, FlowParameterReference>,
+    pub arguments_object: bool,
+    pub capture_errors: bool,
+}
+
 impl NodeDefinition {
+    pub fn accepts_flow_arguments(&self) -> bool {
+        (self.kind == CALL_KIND
+            && self
+                .config
+                .get("flow_ref")
+                .is_some_and(|value| !value.is_null()))
+            || (self.kind == ROUTER_KIND && self.config.get("subgraphs").is_some())
+    }
+
+    /// Resolve executable authority once from the lexical environment. Keys are owner-local
+    /// branch identities; values retain the parameter name for host executor lookup.
+    pub fn selected_flow_arguments<'a>(
+        &'a self,
+        arguments: &'a BTreeMap<String, ResolvedFlowArgument>,
+    ) -> Result<BTreeMap<String, (&'a str, &'a ResolvedFlowArgument)>, mf_telemetry::ContractError>
+    {
+        use snafu::{OptionExt, ensure};
+        if self.kind == ROUTER_KIND && self.accepts_flow_arguments() {
+            let config: RouterSubgraphConfig = serde_json::from_value(self.config.clone())?;
+            ensure!(
+                config.arguments_object && config.capture_errors,
+                mf_telemetry::InvalidSnafu {
+                    message: "subgraph routers require arguments_object and capture_errors"
+                }
+            );
+            let mut selected = BTreeMap::new();
+            for (branch, reference) in config.subgraphs {
+                ensure!(
+                    !branch.trim().is_empty()
+                        && branch != "else"
+                        && !reference.parameter.trim().is_empty(),
+                    mf_telemetry::InvalidSnafu {
+                        message: "subgraph router branch and parameter names must be nonblank; `else` is reserved"
+                    }
+                );
+                let (parameter, argument) = arguments
+                    .get_key_value(&reference.parameter)
+                    .with_context(|| mf_telemetry::InvalidSnafu {
+                        message: format!(
+                            "router `{}` references unknown passed Flow parameter `{}`",
+                            self.id, reference.parameter
+                        ),
+                    })?;
+                selected.insert(branch, (parameter.as_str(), argument));
+            }
+            Ok(selected)
+        } else {
+            Ok(arguments
+                .iter()
+                .map(|(name, argument)| (name.clone(), (name.as_str(), argument)))
+                .collect())
+        }
+    }
+
     pub fn has_order_edges(&self) -> bool {
         self.loop_definition
             .as_ref()
@@ -210,6 +403,7 @@ impl LoopBodyDefinition {
     }
 }
 
+pub const ROUTER_KIND: &str = "builtin.router";
 pub const LOOP_KIND: &str = "workflow.loop";
 pub const LOOP_ASSIGN_KIND: &str = "workflow.loop_assign";
 pub const EXIT_LOOP_KIND: &str = "workflow.exit_loop";

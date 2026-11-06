@@ -2,11 +2,27 @@ use crate::NodeRegistration;
 use snafu::Snafu;
 use std::collections::BTreeMap;
 
+/// Configurable provider expansion, supplied resolved, frozen injections and their metadata.
+pub type BuiltinFlowExpansion = fn(
+    serde_json::Value,
+    BTreeMap<String, crate::ResolvedFlowArgument>,
+) -> Result<crate::WorkflowDefinition, crate::NodeBuildError>;
+
+/// Pure provider expansion performed only after injected interfaces can be described.
+/// Implementations must not read environment values, perform I/O, or execute tasks.
+pub type BuiltinFlowMetadataExpansion =
+    fn(
+        serde_json::Value,
+        BTreeMap<String, crate::DescribedFlowArgument>,
+    ) -> Result<crate::WorkflowDefinition, crate::NodeBuildError>;
+
 /// Keeps application-owned Flow definitions discoverable without compiler dependencies on providers.
 pub struct BuiltinFlowRegistration {
     package: &'static str,
     name: &'static str,
     pub definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+    pub configure: Option<BuiltinFlowExpansion>,
+    pub configure_metadata: Option<BuiltinFlowMetadataExpansion>,
 }
 
 impl BuiltinFlowRegistration {
@@ -20,6 +36,37 @@ impl BuiltinFlowRegistration {
             package,
             name,
             definition,
+            configure: None,
+            configure_metadata: None,
+        }
+    }
+    pub const fn configurable(
+        package: &'static str,
+        name: &'static str,
+        definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+        configure: BuiltinFlowExpansion,
+    ) -> Self {
+        Self {
+            package,
+            name,
+            definition,
+            configure: Some(configure),
+            configure_metadata: None,
+        }
+    }
+
+    pub const fn metadata(
+        package: &'static str,
+        name: &'static str,
+        definition: fn() -> Result<crate::WorkflowDefinition, crate::DefinitionParseError>,
+        configure: BuiltinFlowMetadataExpansion,
+    ) -> Self {
+        Self {
+            package,
+            name,
+            definition,
+            configure: None,
+            configure_metadata: Some(configure),
         }
     }
 }
@@ -27,6 +74,16 @@ impl BuiltinFlowRegistration {
 /// Registers a local Flow name under the calling Cargo package's namespace.
 #[macro_export]
 macro_rules! register_builtin_flow {
+    ($name:expr, $definition:path, metadata = $configure:path $(,)?) => {
+        $crate::__submit_builtin_flow! {
+            $crate::BuiltinFlowRegistration::metadata(env!("CARGO_PKG_NAME"), $name, $definition, $configure)
+        }
+    };
+    ($name:expr, $definition:path, $configure:path $(,)?) => {
+        $crate::__submit_builtin_flow! {
+            $crate::BuiltinFlowRegistration::configurable(env!("CARGO_PKG_NAME"), $name, $definition, $configure)
+        }
+    };
     ($name:expr, $definition:path $(,)?) => {
         $crate::__submit_builtin_flow! {
             $crate::BuiltinFlowRegistration::new(env!("CARGO_PKG_NAME"), $name, $definition)
@@ -102,6 +159,7 @@ pub enum NodeRegistryError {
 }
 
 /// A frozen Flow whose execution is supplied by the application host.
+#[derive(Clone)]
 pub struct RegisteredFlow {
     pub definition: crate::WorkflowDefinition,
     pub body: crate::PreparedSubgraph,
@@ -116,7 +174,7 @@ impl std::fmt::Debug for RegisteredFlow {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NodeRegistry {
     registrations: BTreeMap<&'static str, &'static NodeRegistration>,
     flows: BTreeMap<String, RegisteredFlow>,
@@ -236,6 +294,63 @@ mod tests {
                 .unwrap()
                 .nodes
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn configurable_builtin_registrations_preserve_their_expansion_mode() {
+        fn configure(
+            config: Value,
+            injections: BTreeMap<String, crate::ResolvedFlowArgument>,
+        ) -> Result<crate::WorkflowDefinition, NodeBuildError> {
+            assert_eq!(config, serde_json::json!({"mode": "runtime"}));
+            assert!(injections.is_empty());
+            Ok(builtin_definition().unwrap())
+        }
+
+        fn configure_metadata(
+            config: Value,
+            injections: BTreeMap<String, crate::DescribedFlowArgument>,
+        ) -> Result<crate::WorkflowDefinition, NodeBuildError> {
+            assert_eq!(config, serde_json::json!({"mode": "metadata"}));
+            assert!(injections.is_empty());
+            Ok(builtin_definition().unwrap())
+        }
+
+        static RUNTIME: BuiltinFlowRegistration = BuiltinFlowRegistration::configurable(
+            "test-package",
+            "runtime",
+            builtin_definition,
+            configure,
+        );
+        static METADATA: BuiltinFlowRegistration = BuiltinFlowRegistration::metadata(
+            "test-package",
+            "metadata",
+            builtin_definition,
+            configure_metadata,
+        );
+        let registry = BuiltinFlowRegistry::from_registrations([&RUNTIME, &METADATA]).unwrap();
+        let runtime = registry.get("test-package.runtime").unwrap();
+        assert!(runtime.configure_metadata.is_none());
+        assert!((runtime.definition)().unwrap().nodes.is_empty());
+        assert!(
+            (runtime.configure.unwrap())(serde_json::json!({"mode": "runtime"}), BTreeMap::new(),)
+                .unwrap()
+                .nodes
+                .is_empty()
+        );
+
+        let metadata = registry.get("test-package.metadata").unwrap();
+        assert!(metadata.configure.is_none());
+        assert!((metadata.definition)().unwrap().nodes.is_empty());
+        assert!(
+            (metadata.configure_metadata.unwrap())(
+                serde_json::json!({"mode": "metadata"}),
+                BTreeMap::new(),
+            )
+            .unwrap()
+            .nodes
+            .is_empty()
         );
     }
 

@@ -241,6 +241,8 @@ fn builtin_sources_are_resolved_from_linked_providers() {
         "echo".into(),
         mf_runtime::FlowSource::Builtin {
             builtin: "missing".into(),
+            config: serde_json::Value::Null,
+            flows: Default::default(),
         },
     );
     assert!(
@@ -260,6 +262,8 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
         "echo".into(),
         mf_runtime::FlowSource::Builtin {
             builtin: "mf-compiler.echo".into(),
+            config: serde_json::Value::Null,
+            flows: Default::default(),
         },
     );
     assert!(
@@ -297,6 +301,8 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
         " ".into(),
         mf_runtime::FlowSource::Builtin {
             builtin: "mf-compiler.echo".into(),
+            config: serde_json::Value::Null,
+            flows: Default::default(),
         },
     );
     let mut blank_call = base.clone();

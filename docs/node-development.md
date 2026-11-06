@@ -1072,3 +1072,56 @@ Catalog construction validates registrations without invoking their factories. T
 to request a definition and handles its typed `DefinitionParseError`. Each provider owns its source
 and dependency declarations. Factories must not execute the Flow or perform business I/O.
 The catalog exposes definitions independently of compilation and execution.
+
+Configurable providers use `register_builtin_flow!("example", definition, expand)`. The expansion
+function receives a JSON configuration and a `BTreeMap<String, ResolvedFlowArgument>` of already
+resolved injected Flows, and returns a definition or `NodeBuildError`. Each argument retains its frozen
+`definition` and the builder-supplied optional `description` and qualified `parameters` descriptions.
+These values belong to the binding, never mutate the source Flow, and carry no runtime expression
+semantics. Inline bodies (including one-node bodies) inherit the caller's version and dependencies.
+Injection paths are resolved relative to the caller before expansion. The resolver then freezes all
+generated calls and applies the caller's provider selections. Zero-argument registrations remain
+unchanged and reject unexpected
+configuration/injections. Expansion is compile-time graph construction, not execution.
+
+Providers whose expansion depends on reflected child interfaces use
+`register_builtin_flow!("example", definition, metadata = expand)`. The pure expansion callback
+receives described Flow arguments after the selected providers are linked. It must not read
+runtime environment values, perform I/O, or execute tasks. Structural planning retains the frozen
+request until linked preparation can resolve it; final generated artifacts contain the expanded
+graph and its frozen facts, not deferred source reads. Metadata relationships do not establish
+execution prerequisites.
+
+A configurable Flow retains passed arguments once in its returned definition's `flow_arguments`
+field. Retain the original frozen `ResolvedFlowArgument` records; do not generate per-binding call
+nodes or expose executable JSON as runtime data. Described arguments can be converted by retaining
+their definition, description and parameter descriptions; public interface projections remain
+ordinary sanitized data.
+
+For router dispatch, author `builtin.router` with an explicit
+`subgraphs: {"branch": {"parameter": "passed-name"}}` mapping and true `arguments_object` and
+`capture_errors` flags. The compiler resolves that mapping against the lexical environment,
+validates every mapped body, and passes only the selected handles in `PreparedFlowArguments` through
+`NodeFactory::FlowArguments`' prepared factory. Its plain factory preserves legacy gate-mode
+`.instantiate(...)` calls. The router receives `route` and `arguments` data inputs and executes the
+selected child itself; schema adaptation runs before it and provider encoding runs after it. Branch
+aliases retain their own observation identity but look up host executors using the parameter name.
+Interpreted preparation, generated constructors and manifest descriptions use the same mapping.
+
+The generic `workflow.call` with `flow_ref: {"$ref":"select.name"}` remains available independently
+through `NodeFactory::Call`'s reference factory. Reference-only selectors require explicit producer
+prerequisites, do not support interpolation, and can only select from their prepared environment.
+No callable variant is added to `ValueRef`. Both consumers reuse normal call scope isolation,
+cancellation, work budgets and binding-aware observation.
+
+A node that only needs a child interface can register `NodeFactory::Metadata`. Preparation supplies
+`SubgraphMetadata` containing startup inputs and terminal/stream output contracts, with **no executor**.
+Definition-backed requests remain available for ordinary metadata consumers; compiled expansions can
+instead supply precomputed interfaces without embedding another child definition. This works in
+memory and generated runners using the supplied provider registry. Such nodes do not create child
+observation scopes, but any returned task is still an ordinary runtime task; preparation must not
+execute that task at build time. Providers can bind frozen interface data as ordinary Flow parameter
+defaults and author explicit runtime processing. For example, `mfn-llm.agent` maps linked tool bindings
+through `llm.tool_definition` in an authored Iteration before its conversation Loop, instead of having
+its expansion callback replace a catalog placeholder. Executable containers continue to use
+`NodeFactory::Subgraph`.

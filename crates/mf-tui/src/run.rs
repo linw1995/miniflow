@@ -2,7 +2,9 @@
 
 use crate::{
     duration::format_duration_ns,
-    graph::{ConnectionView, GraphCluster, GraphError, GraphLayout, GraphRect, GraphView},
+    graph::{
+        BodyDisplay, ConnectionView, GraphCluster, GraphError, GraphLayout, GraphRect, GraphView,
+    },
     logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
@@ -13,7 +15,10 @@ use crate::{
 };
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -659,7 +664,7 @@ impl TerminalGuard {
     pub fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let guard = Self;
-        execute!(io::stderr(), EnterAlternateScreen, Hide)?;
+        enter_screen(&mut io::stderr())?;
         Ok(guard)
     }
 }
@@ -667,8 +672,20 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stderr(), Show, LeaveAlternateScreen);
+        restore_screen(&mut io::stderr());
     }
+}
+
+fn enter_screen(writer: &mut impl Write) -> io::Result<()> {
+    execute!(writer, EnterAlternateScreen, Hide, EnableMouseCapture)
+}
+
+fn restore_screen(writer: &mut impl Write) {
+    // Attempt every restoration even when an earlier write fails. The guard is
+    // already alive during setup, so partial initialization uses this path too.
+    let _ = execute!(writer, DisableMouseCapture);
+    let _ = execute!(writer, Show);
+    let _ = execute!(writer, LeaveAlternateScreen);
 }
 
 struct ChildGuard {
@@ -1013,6 +1030,8 @@ struct ViewState {
     iteration_items: BTreeMap<Vec<String>, ItemIdentity>,
     reveal_selected: bool,
     graph_size: Option<(u16, u16)>,
+    mouse_graph: Rect,
+    mouse_overlays: Vec<Rect>,
     details_visible: bool,
     help_visible: bool,
     traces: TraceView,
@@ -1077,7 +1096,7 @@ impl ViewState {
             .node
             .path
             .iter()
-            .map(|entry| entry.node_id().to_owned())
+            .map(mf_telemetry::event::ScopePathEntry::body_key)
             .collect();
         let offsets = self.history_offsets();
         if (1..=path.len()).any(|depth| {
@@ -1231,6 +1250,51 @@ impl ViewState {
         }
     }
 
+    fn handle_mouse(&mut self, event: MouseEvent, layout: &GraphLayout) {
+        let position = (event.column, event.row).into();
+        if self.help_visible
+            || self.traces.visible
+            || !self.mouse_graph.contains(position)
+            || self
+                .mouse_overlays
+                .iter()
+                .any(|area| area.contains(position))
+        {
+            return;
+        }
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let x = self
+                    .offset
+                    .0
+                    .saturating_add(u32::from(event.column - self.mouse_graph.x));
+                let y = self
+                    .offset
+                    .1
+                    .saturating_add(u32::from(event.row - self.mouse_graph.y));
+                // Match paint order: inline children are drawn over their enclosing owner.
+                if let Some(selected) = layout.nodes().iter().rposition(|node| {
+                    let rect = node.rect;
+                    x >= rect.x
+                        && x < rect.x.saturating_add(rect.width)
+                        && y >= rect.y
+                        && y < rect.y.saturating_add(rect.height)
+                }) {
+                    self.selected = selected;
+                    self.sync_scope(layout);
+                    self.details_offset = 0;
+                    // A clipped node can be selected without moving the canvas.
+                    self.reveal_selected = false;
+                }
+            }
+            MouseEventKind::ScrollUp => self.offset.1 = self.offset.1.saturating_sub(2),
+            MouseEventKind::ScrollDown => self.offset.1 = self.offset.1.saturating_add(2),
+            MouseEventKind::ScrollLeft => self.offset.0 = self.offset.0.saturating_sub(4),
+            MouseEventKind::ScrollRight => self.offset.0 = self.offset.0.saturating_add(4),
+            _ => {}
+        }
+    }
+
     fn clear_iteration_history(&mut self, snapshot: &StateSnapshot) {
         for item in &snapshot.iterations.items {
             let owner = &item.iteration_path;
@@ -1285,6 +1349,7 @@ fn supervise(
                         view.handle_key(key.code, &observation);
                     }
                 }
+                Event::Mouse(mouse) => view.handle_mouse(mouse),
                 Event::Resize(width, height) => {
                     terminal
                         .resize(Rect::new(0, 0, width, height))
@@ -1669,6 +1734,7 @@ fn draw(
             graph
         } else { graph };
         view_state.reveal(layout, graph);
+        view_state.mouse_graph = graph;
         let mut graph_view = GraphView::new(layout)
             .reader(receiver)
             .selected(view_state.selected)
@@ -1676,6 +1742,7 @@ fn draw(
             .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64)
             .minimap(!view_state.minimap_hidden);
         graph_view = graph_view.nodes(&display_nodes);
+        let minimap_area = graph_view.minimap_area(graph);
         frame.render_widget(graph_view, graph);
         let observations = display_nodes.as_slice();
         let pip_nodes = inline_observations_with_items(
@@ -1685,6 +1752,10 @@ fn draw(
             &view_state.history_offsets(),
             &view_state.iteration_items,
         );
+        view_state.mouse_overlays = parallel_pip_areas(
+            execution_pips(pip_layout, &pip_nodes, Some(&snapshot.iterations)).len(), graph,
+        ).0;
+        view_state.mouse_overlays.extend(minimap_area);
         draw_parallel_pips(
             frame,
             graph,
@@ -1738,7 +1809,7 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | m minimap | d details | ? help | {controls}",
+            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows/wheel pan | Tab/click select | m minimap | d details | ? help | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
@@ -1758,10 +1829,10 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
          PgUp/PgDn      Scroll / page records\nv, Esc         Return to graph\n\
          Ctrl-C         Interrupt / close"
     } else {
-        "Arrows         Pan graph\nTab / Shift-Tab, j/k   Select node\n\
+        "Arrows / wheel Pan graph (wheel over canvas only)\nLeft click     Select node\nTab / Shift-Tab, j/k   Select node\n\
          d              Show / hide details\nPgUp/PgDn      Scroll visible details\n\
-         e              Cycle connection view\nc              Fold selected body / cluster\nv              Open OTEL tracing\n\
-         l              Expand selected body inline\nh              Collapse body / enclosing body\n\
+         e              Cycle connection view\nc              Cycle body: expanded / collapsed (summary with injected Flows)\nv              Open OTEL tracing\n\
+         l              Expand selected body inline\nh              Fully collapse body / enclosing body\n\
          Esc            Close details / collapse body\n\
          [ / ]          Older / newer pass or item\nf              Reset viewport\n\
          m              Show / hide minimap\nCtrl-C         Interrupt / close\nq, Enter       Close after completion"
@@ -1826,8 +1897,8 @@ fn scope_passes<'a>(
         .filter(|pass| {
             pass.path
                 .iter()
-                .map(|entry| entry.node_id())
-                .eq(path.iter())
+                .map(mf_telemetry::event::ScopePathEntry::body_key)
+                .eq(path.iter().cloned())
                 && parent.is_none_or(|parent| {
                     pass.path.starts_with(&parent.path)
                         && (pass.stream_invocation == parent.stream_invocation
@@ -2494,26 +2565,30 @@ pub struct ObservationView {
     root: Arc<GraphLayout>,
     execution: GraphLayout,
     pip_layout: Arc<GraphLayout>,
-    expanded: BTreeSet<Vec<String>>,
+    body_states: BTreeMap<Vec<String>, BodyDisplay>,
     viewports: BTreeMap<ConnectionView, GraphViewport>,
     collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
     cluster_focus: BTreeMap<(Vec<String>, usize), String>,
     state: ViewState,
 }
+fn default_body_states(description: &WorkflowDescription) -> BTreeMap<Vec<String>, BodyDisplay> {
+    description
+        .loop_bodies
+        .iter()
+        .map(|body| (body.path.clone(), BodyDisplay::Expanded))
+        .collect()
+}
+
 impl ObservationView {
     pub fn new(description: &WorkflowDescription) -> Result<Self, RunError> {
-        let expanded = description
-            .loop_bodies
-            .iter()
-            .map(|body| body.path.clone())
-            .collect();
+        let body_states = default_body_states(description);
         let execution =
             GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
         let root = Arc::new(
-            GraphLayout::with_expanded_bodies(
+            GraphLayout::with_body_states(
                 description,
                 ConnectionView::Execution,
-                &expanded,
+                &body_states,
                 &BTreeMap::new(),
             )
             .context(GraphSnafu)?,
@@ -2523,7 +2598,7 @@ impl ObservationView {
             execution,
             pip_layout: Arc::clone(&root),
             root,
-            expanded,
+            body_states,
             viewports: BTreeMap::new(),
             collapsed: BTreeMap::new(),
             cluster_focus: BTreeMap::new(),
@@ -2532,10 +2607,35 @@ impl ObservationView {
     }
     fn collapse_body_path(&self) -> Option<Vec<String>> {
         self.selected_body()
-            .filter(|path| self.expanded.contains(path))
+            .filter(|path| self.body_states.get(path) != Some(&BodyDisplay::Hidden))
             .or_else(|| {
                 let path = self.root.node_path(self.state.selected);
-                (!path.is_empty()).then(|| path.to_vec())
+                if path.is_empty() {
+                    return None;
+                }
+                // A summarized ancestor inlines injected bodies directly, so the
+                // selected leaf can be visible without its original owner node and
+                // its own display state cannot control that projection. Collapse
+                // the nearest visible summary ancestor instead.
+                let injected = self
+                    .description
+                    .injected_bodies
+                    .iter()
+                    .any(|body| body.as_slice() == path);
+                if injected
+                    && let Some(summary) = (1..path.len()).rev().find_map(|len| {
+                        let ancestor = &path[..len];
+                        (self.body_states.get(ancestor) == Some(&BodyDisplay::Summary)
+                            && self
+                                .root
+                                .display_index_for_scoped_node(&path[..len - 1], &path[len - 1])
+                                .is_some())
+                        .then(|| ancestor.to_vec())
+                    })
+                {
+                    return Some(summary);
+                }
+                Some(path.to_vec())
             })
     }
 
@@ -2548,22 +2648,29 @@ impl ObservationView {
             return None;
         }
         let node = self.root.nodes().get(self.state.selected)?;
-        let mut path = self.root.node_path(self.state.selected).to_vec();
-        path.push(node.id.clone());
-        self.description.body(&path).map(|_| path)
+        self.description
+            .body_paths_for_node(self.root.node_path(self.state.selected), &node.id)
+            .first()
+            .map(|path| (*path).clone())
     }
 
-    fn fold_body(&mut self, path: Vec<String>, expand: bool) -> Result<(), RunError> {
-        let mut expanded = self.expanded.clone();
-        if expand {
-            expanded.insert(path.clone());
-        } else {
-            expanded.remove(&path);
+    fn set_body_state(&mut self, path: Vec<String>, state: BodyDisplay) -> Result<(), RunError> {
+        let mut body_states = self.body_states.clone();
+        let (key, parent) = path.split_last().expect("body path is nonempty");
+        let owner = mf_telemetry::event::ScopePathEntry::binding_owner(key);
+        for sibling in self
+            .description
+            .body_paths_for_node(parent, owner.as_deref().unwrap_or(key))
+        {
+            body_states.insert(
+                sibling.clone(),
+                state.normalized(&self.description, sibling),
+            );
         }
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view(),
-            &expanded,
+            &body_states,
             &self.collapsed,
         )
         .context(GraphSnafu)?;
@@ -2572,11 +2679,37 @@ impl ObservationView {
             .display_index_for_scoped_node(parent, id)
             .unwrap_or_default();
         self.root = Arc::new(root);
-        self.expanded = expanded;
+        self.body_states = body_states;
         self.state.sync_scope(&self.root);
         self.state.reveal_selected = true;
         self.state.details_offset = 0;
         Ok(())
+    }
+
+    fn fold_body(&mut self, path: Vec<String>, expand: bool) -> Result<(), RunError> {
+        self.set_body_state(
+            path,
+            if expand {
+                BodyDisplay::Expanded
+            } else {
+                BodyDisplay::Hidden
+            },
+        )
+    }
+
+    fn cycle_body(&mut self, path: Vec<String>) -> Result<(), RunError> {
+        let next = match self
+            .body_states
+            .get(&path)
+            .copied()
+            .unwrap_or_default()
+            .normalized(&self.description, &path)
+        {
+            BodyDisplay::Expanded => BodyDisplay::Summary.normalized(&self.description, &path),
+            BodyDisplay::Summary => BodyDisplay::Hidden,
+            BodyDisplay::Hidden => BodyDisplay::Expanded,
+        };
+        self.set_body_state(path, next)
     }
 
     fn toggle_cluster(&mut self) -> Result<(), RunError> {
@@ -2600,10 +2733,10 @@ impl ObservationView {
         } else {
             set.insert(index);
         }
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view(),
-            &self.expanded,
+            &self.body_states,
             &folded,
         )
         .context(GraphSnafu)?;
@@ -2664,10 +2797,10 @@ impl ObservationView {
     }
     fn switch_connections(&mut self) -> Result<(), RunError> {
         let anchor = selection_anchor(&self.root, self.state.selected);
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_body_states(
             &self.description,
             self.root.connection_view().next(),
-            &self.expanded,
+            &self.body_states,
             &self.collapsed,
         )
         .context(GraphSnafu)?;
@@ -2677,15 +2810,10 @@ impl ObservationView {
             &self.collapsed.get(&Vec::new()).cloned().unwrap_or_default(),
         )
         .context(GraphSnafu)?;
-        let pip_layout = GraphLayout::with_expanded_bodies(
+        let pip_layout = GraphLayout::with_body_states(
             &self.description,
             root.connection_view(),
-            &self
-                .description
-                .loop_bodies
-                .iter()
-                .map(|body| body.path.clone())
-                .collect(),
+            &default_body_states(&self.description),
             &BTreeMap::new(),
         )
         .context(GraphSnafu)?;
@@ -2712,8 +2840,7 @@ impl ObservationView {
         if !self.state.traces.visible {
             let result = match key {
                 KeyCode::Char('c') => Some(if let Some(path) = self.selected_body() {
-                    let expand = !self.expanded.contains(&path);
-                    self.fold_body(path, expand)
+                    self.cycle_body(path)
                 } else {
                     self.toggle_cluster()
                 }),
@@ -2763,6 +2890,11 @@ impl ObservationView {
             );
         }
     }
+    /// Route mouse input using the last rendered inspector canvas bounds.
+    pub fn handle_mouse(&mut self, event: MouseEvent) {
+        self.state.handle_mouse(event, &self.root);
+    }
+
     pub fn dismiss_overlay(&mut self) -> bool {
         if self.state.help_visible {
             self.state.help_visible = false;
@@ -3099,6 +3231,7 @@ mod tests {
 
     fn parallel_fixture(count: usize) -> WorkflowDescription {
         WorkflowDescription {
+            injected_bodies: Vec::new(),
             order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_10_23,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
@@ -3808,6 +3941,7 @@ mod tests {
     #[test]
     fn cluster_folding_rebuilds_the_layout_and_preserves_the_selected_member() {
         let description = WorkflowDescription {
+            injected_bodies: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_10_23,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "f".repeat(64))).unwrap(),
             execution: Some(ExecutionDescription {
@@ -3884,6 +4018,260 @@ mod tests {
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert!(view.state.graph_notice.is_none());
         assert_eq!(view.root.nodes()[view.state.selected].id, "usages");
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_canvas_bounds_follow_rendered_header_warning_and_details() {
+        let description = scope_fixture();
+        let receiver = LoopbackReceiver::bind(description.clone(), RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let snapshot = reader.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(Box::new(io::sink()) as Box<dyn Write>),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(7, 3, 100, 24)),
+            },
+        )
+        .unwrap();
+        let capture = CaptureView {
+            stdout_open: false,
+            stderr_open: false,
+            stderr_tail: String::new(),
+            stderr_dropped: 0,
+            error: None,
+        };
+        for (details, warning, expected) in [
+            (false, false, Rect::new(7, 4, 100, 21)),
+            (true, false, Rect::new(7, 4, 70, 21)),
+            (true, true, Rect::new(7, 5, 70, 20)),
+        ] {
+            view.state.details_visible = details;
+            view.state.graph_notice = warning.then(|| "test warning".into());
+            draw(
+                &mut terminal,
+                &view.root,
+                &view.pip_layout,
+                &description,
+                &snapshot,
+                &capture,
+                Duration::ZERO,
+                &mut view.state,
+                &reader,
+                None,
+            )
+            .unwrap();
+            assert_eq!(view.state.mouse_graph, expected);
+            let offset = view.state.offset;
+            // Header, footer and the details pane do not pan the canvas.
+            for (x, y) in [(7, 3), (7, 25), (expected.right(), expected.y)] {
+                view.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
+                assert_eq!(view.state.offset, offset);
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_minimap_blocks_canvas_input_only_while_visible() {
+        let description = scope_fixture();
+        let receiver = LoopbackReceiver::bind(description.clone(), RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let snapshot = reader.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(Box::new(io::sink()) as Box<dyn Write>),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(7, 3, 24, 11)),
+            },
+        )
+        .unwrap();
+        let capture = CaptureView {
+            stdout_open: false,
+            stderr_open: false,
+            stderr_tail: String::new(),
+            stderr_dropped: 0,
+            error: None,
+        };
+        let render = |view: &mut ObservationView, terminal: &mut Terminal<_>| {
+            draw(
+                terminal,
+                &view.root,
+                &view.pip_layout,
+                &description,
+                &snapshot,
+                &capture,
+                Duration::ZERO,
+                &mut view.state,
+                &reader,
+                None,
+            )
+            .unwrap();
+        };
+        render(&mut view, &mut terminal);
+        let map = GraphView::new(&view.root)
+            .minimap(true)
+            .minimap_area(view.state.mouse_graph)
+            .expect("the graph overflows this small canvas");
+        let selected = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "target")
+            .unwrap();
+        let rect = view.root.nodes()[selected].rect;
+        // Place the target's bottom-right cell under the minimap's top-left cell.
+        view.state.offset = (
+            rect.x + rect.width - 1 - u32::from(map.x - view.state.mouse_graph.x),
+            rect.y + rect.height - 1 - u32::from(map.y - view.state.mouse_graph.y),
+        );
+        view.state.selected = (selected + 1) % view.root.nodes().len();
+        view.state.reveal_selected = false;
+        render(&mut view, &mut terminal);
+        assert!(view.state.mouse_overlays.contains(&map));
+        let previous = view.state.selected;
+        let offset = view.state.offset;
+        let click = mouse(MouseEventKind::Down(MouseButton::Left), map.x, map.y);
+        let wheel = mouse(MouseEventKind::ScrollDown, map.x, map.y);
+        view.handle_mouse(click);
+        view.handle_mouse(wheel);
+        assert_eq!(view.state.selected, previous);
+        assert_eq!(view.state.offset, offset);
+
+        view.state.minimap_hidden = true;
+        render(&mut view, &mut terminal);
+        assert!(!view.state.mouse_overlays.contains(&map));
+        view.handle_mouse(click);
+        assert_eq!(view.state.selected, selected);
+        view.handle_mouse(wheel);
+        assert_eq!(view.state.offset, (offset.0, offset.1 + 2));
+    }
+
+    #[test]
+    fn mouse_selects_clipped_inline_node_and_syncs_history_scope() {
+        let mut view = ObservationView::new(&scope_fixture()).unwrap();
+        let selected = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "target")
+            .unwrap();
+        let rect = view.root.nodes()[selected].rect;
+        // Nonzero viewport origin plus header/warning rows; node is clipped at left/top.
+        view.state.mouse_graph = Rect::new(7, 5, 30, 10);
+        view.state.offset = (rect.x + 1, rect.y + 1);
+        view.state.details_offset = 20;
+        view.state.pass_offsets.insert(vec!["second".into()], 3);
+        view.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 7, 5));
+        assert_eq!(view.state.selected, selected);
+        assert_eq!(view.state.path, ["second"]);
+        assert_eq!(view.state.pass_offset, 3);
+        assert_eq!(view.state.details_offset, 0);
+        assert_eq!(view.state.offset, (rect.x + 1, rect.y + 1));
+        assert!(!view.state.reveal_selected);
+    }
+
+    #[test]
+    fn mouse_respects_node_edges_canvas_bounds_and_overlays() {
+        let mut view = ObservationView::new(&scope_fixture()).unwrap();
+        let selected = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "target")
+            .unwrap();
+        let rect = view.root.nodes()[selected].rect;
+        view.state.mouse_graph = Rect::new(7, 5, 100, 40);
+        view.state.offset = (rect.x, rect.y);
+        let click = |x, y| mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+        for (x, y) in [
+            (6, 5),
+            (7, 4),
+            (107, 5),
+            (7, 45),
+            (7 + rect.width as u16, 5),
+            (7, 5 + rect.height as u16),
+        ] {
+            view.handle_mouse(click(x, y));
+            assert_ne!(view.state.selected, selected);
+        }
+        view.state.mouse_overlays = vec![Rect::new(7, 5, 10, 5)];
+        view.handle_mouse(click(7, 5));
+        assert_ne!(view.state.selected, selected);
+        view.state.mouse_overlays.clear();
+        view.state.help_visible = true;
+        view.handle_mouse(click(7, 5));
+        assert_ne!(view.state.selected, selected);
+        view.state.help_visible = false;
+        view.state.traces.visible = true;
+        view.handle_mouse(click(7, 5));
+        assert_ne!(view.state.selected, selected);
+        view.state.traces.visible = false;
+        view.handle_mouse(click(7 + rect.width as u16 - 1, 5 + rect.height as u16 - 1));
+        assert_eq!(view.state.selected, selected);
+    }
+
+    #[test]
+    fn mouse_wheel_pans_only_canvas_and_saturates() {
+        let mut view = ObservationView::new(&scope_fixture()).unwrap();
+        view.state.mouse_graph = Rect::new(3, 2, 30, 10);
+        for kind in [MouseEventKind::ScrollUp, MouseEventKind::ScrollLeft] {
+            view.handle_mouse(mouse(kind, 3, 2));
+        }
+        assert_eq!(view.state.offset, (0, 0));
+        view.handle_mouse(mouse(MouseEventKind::ScrollDown, 3, 2));
+        view.handle_mouse(mouse(MouseEventKind::ScrollRight, 3, 2));
+        assert_eq!(view.state.offset, (4, 2));
+        for (x, y) in [(3, 1), (33, 2), (3, 12)] {
+            view.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
+        }
+        assert_eq!(view.state.offset, (4, 2));
+        view.state.offset = (u32::MAX, u32::MAX);
+        view.handle_mouse(mouse(MouseEventKind::ScrollDown, 3, 2));
+        view.handle_mouse(mouse(MouseEventKind::ScrollRight, 3, 2));
+        assert_eq!(view.state.offset, (u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn terminal_screen_setup_and_cleanup_include_mouse_capture() {
+        let mut setup = Vec::new();
+        enter_screen(&mut setup).unwrap();
+        let mut expected = Vec::new();
+        execute!(expected, EnterAlternateScreen, Hide, EnableMouseCapture).unwrap();
+        assert_eq!(setup, expected);
+        let mut cleanup = Vec::new();
+        restore_screen(&mut cleanup);
+        expected.clear();
+        execute!(expected, DisableMouseCapture, Show, LeaveAlternateScreen).unwrap();
+        assert_eq!(cleanup, expected);
+
+        struct FailOnce {
+            writes: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for FailOnce {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                if self.writes == 1 {
+                    return Err(io::Error::other("test write failure"));
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut failing = FailOnce {
+            writes: 0,
+            bytes: Vec::new(),
+        };
+        restore_screen(&mut failing);
+        expected.clear();
+        execute!(expected, Show, LeaveAlternateScreen).unwrap();
+        assert_eq!(failing.bytes, expected);
     }
 
     #[test]
@@ -4513,8 +4901,12 @@ mod tests {
         assert_eq!(view.state.selected, 1);
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert_eq!(view.root.nodes().len(), 8);
+        assert!(view.root.body_summary(1).is_none());
         view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
         assert_eq!(view.root.nodes().len(), 5);
+        assert!(view.root.body_summary(1).is_none());
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert_eq!(view.root.nodes().len(), 8);
         assert_eq!(view.viewports.len(), 3);
         view.state.traces.visible = true;
         let mode = view.root.connection_view();
@@ -5060,6 +5452,19 @@ mod tests {
         }
         let snapshot = session.snapshot();
         let mut view = ObservationView::new(&description).unwrap();
+        let owner = view
+            .root
+            .display_index_for_scoped_node(&[], "call")
+            .unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Expanded);
+        assert!(view.root.is_expanded_body(owner));
+        view.cycle_body(path.clone()).unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Hidden);
+        assert!(view.root.body_summary(owner).is_none());
+        assert_eq!(view.root.nodes().len(), 1);
+        view.cycle_body(path.clone()).unwrap();
+        assert_eq!(view.body_states[&path], BodyDisplay::Expanded);
+        assert!(view.root.is_expanded_body(owner));
         let traces = TraceSnapshot::default();
         let logs = LogSnapshot::default();
         view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
@@ -5083,8 +5488,180 @@ mod tests {
     }
 
     #[test]
+    fn body_keyboard_cycles_depend_on_injected_flows_and_normalize_stored_summaries() {
+        for kind in ["workflow.call", "workflow.loop", "builtin.iteration"] {
+            for injected in [false, true] {
+                let mut description: WorkflowDescription =
+                    serde_json::from_value(serde_json::json!({
+                        "version":"2026-10-23",
+                        "workflow_id":format!("sha256:{}", "d".repeat(64)),
+                        "execution":{"mode":"single"},
+                        "nodes":[{"id":"outer", "kind":kind}],
+                        "execution_order":["outer"], "data_edges":[], "control_edges":[],
+                        "loop_bodies":[
+                            {"path":["outer"], "nodes":[{"id":"inner", "kind":kind}],
+                             "execution_order":["inner"], "data_edges":[], "control_edges":[]},
+                            {"path":["outer","inner"],
+                             "nodes":[{"id":"leaf", "kind":"fixture.task"}],
+                             "execution_order":["leaf"], "data_edges":[], "control_edges":[]}
+                        ]
+                    }))
+                    .unwrap();
+                if kind != "workflow.call" {
+                    let (id, source_kind) = if kind == "builtin.iteration" {
+                        ("%iteration", "builtin.iteration_input")
+                    } else {
+                        ("%loop", "%loop")
+                    };
+                    for body in &mut description.loop_bodies {
+                        body.nodes.insert(
+                            0,
+                            NodeDescription {
+                                id: id.into(),
+                                kind: source_kind.into(),
+                            },
+                        );
+                        body.execution_order.insert(0, id.into());
+                    }
+                }
+                let outer = vec!["outer".to_owned()];
+                let inner = vec!["outer".to_owned(), "inner".to_owned()];
+                if injected {
+                    description.injected_bodies.push(inner.clone());
+                }
+                let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+                    .unwrap()
+                    .snapshot();
+                let traces = TraceSnapshot::default();
+                let logs = LogSnapshot::default();
+                let mut view = ObservationView::new(&description).unwrap();
+                // Exercise both nested and root owners through the actual keyboard handler.
+                for path in [&inner, &outer] {
+                    let (id, parent) = path.split_last().unwrap();
+                    view.state.selected =
+                        view.root.display_index_for_scoped_node(parent, id).unwrap();
+                    let expected = if injected {
+                        vec![
+                            BodyDisplay::Summary,
+                            BodyDisplay::Hidden,
+                            BodyDisplay::Expanded,
+                        ]
+                    } else {
+                        vec![BodyDisplay::Hidden, BodyDisplay::Expanded]
+                    };
+                    for state in expected {
+                        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+                        assert_eq!(view.body_states[path], state, "{kind}, {path:?}");
+                        assert!(view.state.graph_notice.is_none());
+                        assert_eq!(
+                            view.root.body_summary(view.state.selected).is_some(),
+                            state == BodyDisplay::Summary
+                        );
+                    }
+                }
+                if !injected {
+                    view.set_body_state(inner.clone(), BodyDisplay::Summary)
+                        .unwrap();
+                    assert_eq!(view.body_states[&inner], BodyDisplay::Hidden);
+                    // Also tolerate callers supplying an unnormalized state map directly.
+                    view.body_states.insert(inner.clone(), BodyDisplay::Summary);
+                    view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+                    assert_eq!(view.body_states[&inner], BodyDisplay::Expanded);
+                    assert!(view.root.body_summary(view.state.selected).is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn injected_leaf_collapses_the_visible_summary_owner() {
+        let mut description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "d".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"source","kind":"fixture.task"},{"id":"call","kind":"workflow.call"}],
+            "execution_order":["source","call"], "data_edges":[], "control_edges":[],
+            "injected_bodies":[["call","inner"]],
+            "loop_bodies":[
+                {"path":["call"], "nodes":[{"id":"inner","kind":"workflow.call"}],
+                 "execution_order":["inner"], "data_edges":[], "control_edges":[]},
+                {"path":["call","inner"], "nodes":[{"id":"leaf","kind":"fixture.task"}],
+                 "execution_order":["leaf"], "data_edges":[], "control_edges":[]}
+            ]
+        }))
+        .unwrap();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        let call = vec!["call".to_owned()];
+        let inner = vec!["call".to_owned(), "inner".to_owned()];
+        for key in [KeyCode::Char('h'), KeyCode::Esc] {
+            let mut view = ObservationView::new(&description).unwrap();
+            view.cycle_body(call.clone()).unwrap();
+            assert_eq!(view.body_states[&call], BodyDisplay::Summary);
+            let owner = view
+                .root
+                .display_index_for_scoped_node(&[], "call")
+                .unwrap();
+            assert_ne!(owner, 0, "the summary owner is not the root node");
+            assert!(
+                view.root
+                    .display_index_for_scoped_node(&call, "inner")
+                    .is_none(),
+                "the summarized projection omits the original owner"
+            );
+            let leaf = view
+                .root
+                .display_index_for_scoped_node(&inner, "leaf")
+                .unwrap();
+            view.state.selected = leaf;
+            view.state.sync_scope(&view.root);
+            view.handle_navigation(key, &snapshot, &traces, &logs);
+            assert_eq!(view.body_states[&call], BodyDisplay::Hidden);
+            assert_eq!(view.state.selected, owner);
+            assert!(
+                view.root
+                    .display_index_for_scoped_node(&inner, "leaf")
+                    .is_none()
+            );
+        }
+
+        // Stacking the injected body under its own summarized call also keeps
+        // the owner visible, but folding the injected body alone would leave
+        // the direct summary projection in place.
+        description.injected_bodies = vec![call.clone(), inner.clone()];
+        let mut view = ObservationView::new(&description).unwrap();
+        view.cycle_body(call.clone()).unwrap();
+        let owner = view
+            .root
+            .display_index_for_scoped_node(&[], "call")
+            .unwrap();
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&call, "inner")
+                .is_some()
+        );
+        let leaf = view
+            .root
+            .display_index_for_scoped_node(&inner, "leaf")
+            .unwrap();
+        view.state.selected = leaf;
+        view.state.sync_scope(&view.root);
+        view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+        assert_eq!(view.body_states[&call], BodyDisplay::Hidden);
+        assert_eq!(view.state.selected, owner);
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&inner, "leaf")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn loop_views_preserve_navigation_and_compacted_stream_totals() {
         let description = WorkflowDescription {
+            injected_bodies: Vec::new(),
             order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_09_29,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64))).unwrap(),

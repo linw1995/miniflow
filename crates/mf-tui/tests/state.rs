@@ -170,6 +170,7 @@ fn count(value: i64) -> Count {
 
 fn graph() -> WorkflowDescription {
     WorkflowDescription {
+        injected_bodies: Vec::new(),
         order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
@@ -412,6 +413,7 @@ fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
 
 fn loop_graph() -> WorkflowDescription {
     WorkflowDescription {
+        injected_bodies: Vec::new(),
         order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_29,
         workflow_id: graph().workflow_id,

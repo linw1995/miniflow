@@ -30,6 +30,39 @@ fn nested_title_usage() -> Value {
     usage
 }
 
+const CALCULATOR_DESCRIPTION: &str = "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message.";
+const CALCULATOR_ANSWER: &str = "The results are 5 and 12.";
+
+fn agent_usage(iteration: usize) -> Value {
+    let mut usage = chat_usage(json!([
+        {"node":"agent","index":0},
+        {"node":"repeat","index":iteration},
+        {"node":"turn","index":0}
+    ]));
+    usage["node"]["id"] = "model".into();
+    usage["attribution"] = json!({"purpose":"conversation"});
+    usage
+}
+
+fn calculator_calls() -> Value {
+    json!([
+        {"id":"call_add","type":"function","function":{"name":"calculator","arguments":"{\"operation\":\"add\",\"left\":2,\"right\":3}"}},
+        {"id":"call_multiply","type":"function","function":{"name":"calculator","arguments":"{\"operation\":\"multiply\",\"left\":3,\"right\":4}"}}
+    ])
+}
+
+fn streamed_calculator_calls() -> llm_support::Reply {
+    let mut streamed = llm_support::Reply::stream_text("");
+    let mut calls = calculator_calls();
+    for (index, call) in calls.as_array_mut().unwrap().iter_mut().enumerate() {
+        call["index"] = json!(index);
+    }
+    let chunk = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":calls},"finish_reason":null}]});
+    let finish = json!({"id":"tool-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+    streamed.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    streamed
+}
+
 fn search_result() -> Value {
     json!({
         "rerank_score":2.4,"title":"DeepSeek release","url":"https://example.com/release",
@@ -38,7 +71,7 @@ fn search_result() -> Value {
     })
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 20] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 22] {
     [
         (
             "deepseek-fetch.json",
@@ -53,6 +86,11 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 20] {
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
         ("clustered-workflow.json", None, json!({"doubled": 42})),
+        (
+            "chat-calculator-flow.json",
+            None,
+            json!({"status":"succeeded", "text":CALCULATOR_ANSWER, "error":"", "usages":[agent_usage(0), agent_usage(1)]}),
+        ),
         (
             "chat-flow.json",
             None,
@@ -83,6 +121,7 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 20] {
         ),
         ("hello-workflow.json", None, json!({"answer": 42})),
         ("if-else.json", None, json!({"accepted": {"amount": 150}})),
+        ("router-flow.json", None, json!({"result": "First branch"})),
         ("iteration.json", None, json!({"results": [2, 5, 8]})),
         ("loop.json", None, json!({"count": 3})),
         (
@@ -150,22 +189,31 @@ fn documented_examples_compile_and_produce_expected_outputs() {
     fs::create_dir(&runtime).unwrap();
     // Preserve the examples' relative paths while keeping lock files out of the checkout.
     symlink(workspace().join("crates"), temporary.path().join("crates")).unwrap();
+    let auxiliary = definitions.join("agent-calculator");
+    fs::create_dir(&auxiliary).unwrap();
+    for entry in fs::read_dir(workspace().join("examples/agent-calculator")).unwrap() {
+        let source = entry.unwrap().path();
+        fs::copy(&source, auxiliary.join(source.file_name().unwrap())).unwrap();
+    }
 
     for (name, input, expected) in examples() {
         let definition = definitions.join(name);
         let server = (name.starts_with("llm-") || name.starts_with("chat-")).then(|| {
-            llm_support::Server::start(
-                if matches!(name, "chat-title-flow.json" | "chat-nested-title-flow.json") {
-                    vec![
-                        llm_support::Reply::stream_text("reply"),
-                        llm_support::Reply::text("reply"),
-                    ]
-                } else if name == "chat-loop-flow.json" {
-                    vec![llm_support::Reply::stream_text("reply"); 2]
-                } else {
-                    vec![llm_support::Reply::text("reply"); 2]
-                },
-            )
+            llm_support::Server::start(if name == "chat-calculator-flow.json" {
+                vec![
+                    streamed_calculator_calls(),
+                    llm_support::Reply::stream_text(CALCULATOR_ANSWER),
+                ]
+            } else if matches!(name, "chat-title-flow.json" | "chat-nested-title-flow.json") {
+                vec![
+                    llm_support::Reply::stream_text("reply"),
+                    llm_support::Reply::text("reply"),
+                ]
+            } else if name == "chat-loop-flow.json" {
+                vec![llm_support::Reply::stream_text("reply"); 2]
+            } else {
+                vec![llm_support::Reply::text("reply"); 2]
+            })
         });
         let deepseek_server = name.starts_with("deepseek-").then(|| {
             let reply = if name == "deepseek-search.json" {
@@ -238,7 +286,12 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             let inputs = if name == "llm-loop.json" {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
             } else if name.starts_with("chat-") {
-                json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
+                let prompt = if name == "chat-calculator-flow.json" {
+                    "Calculate 2 + 3 and 3 * 4."
+                } else {
+                    "Hello"
+                };
+                json!({"params.prompt":prompt, "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-tools.json" {
                 json!({"model.messages":[{"role":"user","content":"Hello"}]})
             } else if name == "llm-parameters.json" {
@@ -283,7 +336,10 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         );
         let mut actual: Value = if matches!(
             name,
-            "chat-title-flow.json" | "chat-nested-title-flow.json" | "chat-loop-flow.json"
+            "chat-title-flow.json"
+                | "chat-nested-title-flow.json"
+                | "chat-loop-flow.json"
+                | "chat-calculator-flow.json"
         ) {
             let records: Vec<Value> = serde_json::Deserializer::from_slice(&output.stdout)
                 .into_iter()
@@ -298,6 +354,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 answer,
                 if name == "chat-loop-flow.json" {
                     "replyreply"
+                } else if name == "chat-calculator-flow.json" {
+                    CALCULATOR_ANSWER
                 } else {
                     "reply"
                 }
@@ -327,6 +385,44 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             }
         }
         assert_eq!(actual, expected, "{name}: unexpected workflow output");
+        if name == "chat-calculator-flow.json" {
+            let requests = server.as_ref().unwrap().requests();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[1].body["model"], "example-model");
+            assert_eq!(requests[1].body["stream"], true);
+            assert_eq!(
+                requests[1].body["messages"],
+                json!([
+                    {"role":"user","content":"Calculate 2 + 3 and 3 * 4."},
+                    {"role":"assistant","tool_calls":[
+                        {"id":"call_add","type":"function","function":{"name":"calculator","arguments":"{\"left\":2,\"operation\":\"add\",\"right\":3}"}},
+                        {"id":"call_multiply","type":"function","function":{"name":"calculator","arguments":"{\"left\":3,\"operation\":\"multiply\",\"right\":4}"}}
+                    ]},
+                    {"role":"tool","tool_call_id":"call_add","content":"5.0"},
+                    {"role":"tool","tool_call_id":"call_multiply","content":"12.0"}
+                ])
+            );
+            assert_eq!(
+                requests[1].body["tools"],
+                json!([{
+                    "type":"function",
+                    "function":{
+                        "name":"calculator",
+                        "description":CALCULATOR_DESCRIPTION,
+                        "parameters":{
+                            "type":"object",
+                            "properties":{
+                                "left":{"type":"number", "description":"Left operand."},
+                                "operation":{"type":"string", "description":"Operation to perform: add, subtract, multiply, or divide."},
+                                "right":{"type":"number", "description":"Right operand; must be nonzero for division."}
+                            },
+                            "required":["left","operation","right"],
+                            "additionalProperties":false
+                        }
+                    }
+                }])
+            );
+        }
         if name == "exclusive-inputs.json" {
             for ci in [false, true] {
                 let output = Command::new(env!("CARGO_BIN_EXE_mf"))

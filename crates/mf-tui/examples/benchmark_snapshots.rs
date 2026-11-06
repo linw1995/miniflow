@@ -9,6 +9,7 @@ use std::{hint::black_box, time::Instant};
 pub fn description(nodes: usize) -> WorkflowDescription {
     let order: Vec<_> = (0..nodes).map(|index| format!("n{index:06}")).collect();
     WorkflowDescription {
+        injected_bodies: Vec::new(),
         order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::from_definition(&json!({"nodes": nodes}), &order).unwrap(),

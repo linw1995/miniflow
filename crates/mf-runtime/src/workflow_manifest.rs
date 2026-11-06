@@ -248,11 +248,14 @@ pub fn describe_definition(
         }
     );
     let mut loop_bodies = Vec::new();
+    let mut injected_paths = Vec::new();
     describe_loops(
         &definition.nodes,
+        &definition.flow_arguments,
         &mut Vec::new(),
         &mut orders,
         &mut loop_bodies,
+        &mut injected_paths,
         definition.has_order_edges() || definition.version.supports_clusters(),
     )?;
     ensure!(
@@ -280,7 +283,8 @@ pub fn describe_definition(
                 | crate::WorkflowDefinitionVersion::V2026_10_19
                 | crate::WorkflowDefinitionVersion::V2026_10_23
                 | crate::WorkflowDefinitionVersion::V2026_10_25
-                | crate::WorkflowDefinitionVersion::V2026_10_28 => {
+                | crate::WorkflowDefinitionVersion::V2026_10_28
+                | crate::WorkflowDefinitionVersion::V2026_11_01 => {
                     WorkflowDescriptionVersion::V2026_10_03
                 }
             }
@@ -307,6 +311,7 @@ pub fn describe_definition(
         control_edges: control_edges(&definition.control_edges),
         execution_order: execution_order.to_vec(),
         loop_bodies,
+        injected_bodies: injected_paths,
         clusters: clusters(&definition.clusters),
     };
     description.validate()?;
@@ -396,14 +401,58 @@ fn order_edges(edges: &[crate::OrderEdgeDefinition]) -> Vec<OrderEdge> {
 
 fn describe_loops(
     nodes: &[crate::NodeDefinition],
+    arguments: &BTreeMap<String, crate::ResolvedFlowArgument>,
     path: &mut Vec<String>,
     orders: &mut BTreeMap<Vec<String>, &[String]>,
     bodies: &mut Vec<LoopBodyDescription>,
+    injected_paths: &mut Vec<Vec<String>>,
     include_iterations: bool,
 ) -> Result<(), ContractError> {
     for node in nodes {
+        if node.accepts_flow_arguments() {
+            for (name, (_, argument)) in node.selected_flow_arguments(arguments)? {
+                let body = &argument.definition;
+                path.push(mf_telemetry::event::ScopePathEntry::binding_key(
+                    node.id.as_str(),
+                    &name,
+                ));
+                injected_paths.push(path.clone());
+                let order = orders
+                    .remove(path)
+                    .with_context(|| mf_telemetry::InvalidSnafu {
+                        message: format!("missing compiled Flow parameter order at {path:?}"),
+                    })?;
+                bodies.push(LoopBodyDescription {
+                    path: path.clone(),
+                    nodes: ordered_nodes(
+                        body.nodes
+                            .iter()
+                            .map(|node| (node.id.as_str(), node.kind.as_str())),
+                        order,
+                    )?,
+                    data_edges: data_edges(&body.edges),
+                    control_edges: control_edges(&body.control_edges),
+                    order_edges: order_edges(&body.order_edges),
+                    execution_order: order.to_vec(),
+                    clusters: clusters(&body.clusters),
+                });
+                describe_loops(
+                    &body.nodes,
+                    &body.flow_arguments,
+                    path,
+                    orders,
+                    bodies,
+                    injected_paths,
+                    include_iterations,
+                )?;
+                path.pop();
+            }
+            continue;
+        }
         let iteration;
         let call;
+        let mut child_arguments = arguments;
+        let mut injected_body = false;
         let (nodes, data, controls, successes, body_clusters, source_id, source_kind) =
             if let Some(definition) = &node.loop_definition {
                 let body = &definition.body;
@@ -424,6 +473,8 @@ fn describe_loops(
                     }
                     .build()
                 })?;
+                injected_body = call.injected;
+                child_arguments = &body.flow_arguments;
                 (
                     &body.nodes,
                     &body.edges,
@@ -449,6 +500,9 @@ fn describe_loops(
                 continue;
             };
         path.push(node.id.to_string());
+        if injected_body {
+            injected_paths.push(path.clone());
+        }
         let order = orders
             .remove(path)
             .with_context(|| mf_telemetry::InvalidSnafu {
@@ -472,7 +526,15 @@ fn describe_loops(
             execution_order: order.to_vec(),
             clusters: clusters(body_clusters),
         });
-        describe_loops(nodes, path, orders, bodies, include_iterations)?;
+        describe_loops(
+            nodes,
+            child_arguments,
+            path,
+            orders,
+            bodies,
+            injected_paths,
+            include_iterations,
+        )?;
         path.pop();
     }
     Ok(())

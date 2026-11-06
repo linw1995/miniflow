@@ -708,6 +708,28 @@ impl ExecutionContext {
         nodes: &[crate::NodeIdentity],
         run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
     ) -> Result<T, WorkflowRunError> {
+        self.run_call_target(id, None, arguments, nodes, run)
+    }
+
+    pub fn run_call_binding<T>(
+        &mut self,
+        id: &str,
+        binding: &str,
+        arguments: crate::WorkflowArguments,
+        nodes: &[crate::NodeIdentity],
+        run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
+    ) -> Result<T, WorkflowRunError> {
+        self.run_call_target(id, Some(binding), arguments, nodes, run)
+    }
+
+    fn run_call_target<T>(
+        &mut self,
+        id: &str,
+        binding: Option<&str>,
+        arguments: crate::WorkflowArguments,
+        nodes: &[crate::NodeIdentity],
+        run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
+    ) -> Result<T, WorkflowRunError> {
         snafu::ensure!(
             !id.trim().is_empty() && self.invocation_path().len() < mf_telemetry::MAX_SCOPE_DEPTH,
             ContextSnafu {
@@ -715,16 +737,21 @@ impl ExecutionContext {
                 message: "invalid or excessively nested Flow call scope"
             }
         );
+        let entry = match binding {
+            Some(binding) => LoopPathEntry::CallBinding {
+                call_id: id.into(),
+                binding: binding.into(),
+            },
+            None => LoopPathEntry::Call { call_id: id.into() },
+        };
         let body_observation = self
             .body_observation
             .as_ref()
-            .map(|observation| observation.for_call_node(id, nodes));
+            .map(|observation| observation.for_call_node(&entry.body_key(), nodes));
         let mut child = self.fork_body(body_observation);
         child.remaining_steps = self.remaining_steps.clone();
         child.observation = self.observation.clone();
-        child
-            .scope_prefix
-            .push(LoopPathEntry::Call { call_id: id.into() });
+        child.scope_prefix.push(entry);
         child.set_workflow_arguments(arguments);
         let path = child.invocation_path();
         if let Some(observation) = child

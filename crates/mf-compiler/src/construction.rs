@@ -802,6 +802,12 @@ impl FlowBuilder {
 }
 #[derive(Debug, Snafu)]
 pub enum WorkflowBuildError {
+    #[snafu(display("could not inspect subgraph for `{definition_id}`: {source}"))]
+    MetadataInspection {
+        definition_id: DefinitionId,
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
+    },
     #[snafu(transparent)]
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(transparent)]
@@ -891,6 +897,74 @@ pub fn instantiate_node_with_metadata(
             definition_id: DefinitionId::from(definition_id),
         })?;
     Ok(crate::FlowNode::new(definition_id, node))
+}
+
+pub fn instantiate_metadata_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+) -> Result<crate::FlowNode, WorkflowBuildError> {
+    let registration = registry.get(kind).context(UnknownKindSnafu {
+        definition_id,
+        kind,
+    })?;
+    let config: Value =
+        serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu { definition_id })?;
+    let definition = crate::NodeDefinition {
+        id: definition_id.into(),
+        kind: kind.into(),
+        config: config.clone(),
+        loop_definition: None,
+    };
+    let metadata = crate::compiler::describe_subgraph(&definition, registry)
+        .context(MetadataInspectionSnafu { definition_id })?;
+    let mf_runtime::NodeFactory::Metadata(factory) = registration.factory else {
+        return InvalidDefinitionSnafu {
+            definition_id,
+            message: "node does not accept subgraph metadata",
+        }
+        .fail();
+    };
+    let node = factory(config, metadata).context(NodeConstructionSnafu { definition_id })?;
+    Ok(crate::FlowNode::new(definition_id, node))
+}
+
+pub fn instantiate_flow_reference_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    config_json: &str,
+    arguments: mf_runtime::PreparedFlowArguments,
+) -> Result<crate::FlowNode, WorkflowBuildError> {
+    instantiate_flow_arguments_with_metadata(
+        registry,
+        definition_id,
+        mf_runtime::CALL_KIND,
+        config_json,
+        arguments,
+    )
+}
+
+pub fn instantiate_flow_arguments_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+    arguments: mf_runtime::PreparedFlowArguments,
+) -> Result<crate::FlowNode, WorkflowBuildError> {
+    let registration = registry.get(kind).with_context(|| UnknownKindSnafu {
+        definition_id: DefinitionId::from(definition_id),
+        kind: kind.to_owned(),
+    })?;
+    let config = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
+        definition_id: DefinitionId::from(definition_id),
+    })?;
+    let prepared = registration
+        .instantiate_flow_reference(definition_id, config, arguments)
+        .context(NodeConstructionSnafu {
+            definition_id: DefinitionId::from(definition_id),
+        })?;
+    Ok(crate::FlowNode::new(definition_id, prepared))
 }
 
 pub fn instantiate_subgraph_with_metadata(
@@ -1741,6 +1815,80 @@ mod tests {
         },
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn embedded_flow_reference_construction_preserves_validation_errors() {
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let arguments = mf_runtime::PreparedFlowArguments::default;
+        let error = instantiate_flow_arguments_with_metadata(
+            &registry,
+            "invoke",
+            "missing.flow",
+            "{}",
+            arguments(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            matches!(error, WorkflowBuildError::UnknownKind { ref definition_id, ref kind }
+            if definition_id.as_str() == "invoke" && kind == "missing.flow")
+        );
+
+        let error = instantiate_flow_reference_with_metadata(&registry, "invoke", "{", arguments())
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, WorkflowBuildError::InvalidEmbeddedConfig { ref definition_id, .. }
+            if definition_id.as_str() == "invoke")
+        );
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .is::<serde_json::Error>()
+        );
+
+        let error = instantiate_flow_arguments_with_metadata(
+            &registry,
+            "invoke",
+            mfn_core::CONSTANT_KIND,
+            "{\"value\":1}",
+            arguments(),
+        )
+        .err()
+        .unwrap();
+        let WorkflowBuildError::NodeConstruction {
+            definition_id,
+            source,
+        } = error
+        else {
+            panic!("expected node construction context");
+        };
+        assert_eq!(definition_id.as_str(), "invoke");
+        assert!(matches!(
+            source,
+            mf_runtime::NodeBuildError::InvalidSubgraph { .. }
+        ));
+        assert!(
+            source
+                .to_string()
+                .contains("does not accept Flow parameter references")
+        );
+
+        let node = instantiate_flow_reference_with_metadata(
+            &registry,
+            "invoke",
+            r#"{"flow_ref":{"$ref":"params.target"},"arguments_object":true,"capture_errors":true}"#,
+            arguments(),
+        ).unwrap();
+        assert_eq!(node.definition_id.as_str(), "invoke");
+        assert_eq!(
+            node.metadata.context_references,
+            vec![mf_runtime::ContextReference::new(
+                "params.target",
+                "flow_ref"
+            )]
+        );
+    }
 
     struct EmptyNode;
 

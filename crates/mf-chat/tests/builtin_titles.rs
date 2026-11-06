@@ -249,7 +249,9 @@ fn embedded_application_declares_and_prepares_the_builtin_title_call() {
     assert_eq!(
         authored.flows["title"],
         mf_runtime::FlowSource::Builtin {
-            builtin: "mf-chat.chat-title".into()
+            builtin: "mf-chat.chat-title".into(),
+            config: serde_json::Value::Null,
+            flows: Default::default(),
         }
     );
     let plan = mf_chat::flows::conversation::plan().unwrap();
