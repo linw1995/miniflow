@@ -85,13 +85,14 @@ fn resolves_instance_ports_and_transitive_references() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     assert_eq!(
-        plan.execution_order
+        plan.graph
+            .execution_order
             .iter()
             .map(|id| id.as_str())
             .collect::<Vec<_>>(),
         ["a", "b", "c"]
     );
-    assert_eq!(plan.definition.control_edges.len(), 2);
+    assert_eq!(plan.graph.definition.control_edges.len(), 2);
     let mut reordered = definition.clone();
     reordered.control_edges.reverse();
     assert_eq!(plan, compile_definition(&reordered, &registry).unwrap());
@@ -249,7 +250,7 @@ fn plans_union_dependencies_once_and_rejects_mixed_cycles() {
     value["edges"] =
         json!([{"from_node":"a","from_output":"value","to_node":"b","to_input":"input"}]);
     let plan = plan_definition(&definition(value.clone())).unwrap();
-    assert_eq!(plan.execution_order.len(), 3);
+    assert_eq!(plan.graph.execution_order.len(), 3);
     value["edges"][0] =
         json!({"from_node":"c","from_output":"yes","to_node":"a","to_input":"input"});
     assert!(
@@ -259,6 +260,6 @@ fn plans_union_dependencies_once_and_rejects_mixed_cycles() {
             .contains("cycle")
     );
     let mut invalid_order = plan;
-    invalid_order.execution_order.reverse();
+    invalid_order.graph.execution_order.reverse();
     assert!(invalid_order.generate_artifacts().is_err());
 }

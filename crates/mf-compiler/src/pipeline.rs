@@ -76,7 +76,7 @@ pub fn compile_project_with_options(
     let plan = at(
         "structural validation",
         &inputs.definition,
-        crate::compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts),
+        crate::compiler::plan_resolved_workflow(&resolved),
     )?;
     let guard_path = inputs.lock.with_extension("lock.guard");
     let _guard = at(
@@ -154,7 +154,7 @@ fn check_source_destinations(
 
 /// Discover the complete provider closure before touching the user-selected build
 /// directory. Every pass reads the original authoring file: a frozen partial pass
-/// must not hide fields whose contracts become available after linking a provider.
+/// must not hide fields whose receiver callbacks become available after linking a provider.
 fn resolve_provider_flows(
     request: &CompileRequest<'_>,
     options: &RunnerOptions,
@@ -180,7 +180,7 @@ fn resolve_provider_flows(
     check_source_destinations(inputs, output, &initial.sources)?;
     let mut builtin_catalog = BTreeMap::new();
     // A static public builtin can itself supply the first provider dependencies.
-    // Only explicitly requested names are snapshotted, never host node contracts.
+    // Only explicitly requested names are snapshotted, never host receiver callbacks.
     for _ in 0..64 {
         if !initial.definition.dependencies.is_empty() || initial.pending.is_empty() {
             break;
@@ -245,7 +245,7 @@ fn resolve_provider_flows(
             "Flow source discovery",
             &inputs.definition,
             format!(
-                "no selected provider supplies the required contracts: {:?}",
+                "no selected provider supplies the required receiver callbacks: {:?}",
                 initial.pending
             ),
         ));
@@ -369,7 +369,7 @@ fn resolve_provider_flows(
                     "Flow source discovery",
                     &inputs.definition,
                     format!(
-                        "selected providers do not supply the required Flow contracts or builtins: {:?}",
+                        "selected providers do not supply the required Flow receivers or builtins: {:?}",
                         discovery.pending
                     ),
                 ));
@@ -776,9 +776,10 @@ mod tests {
         mf_runtime::NodeRegistration {
             kind: "fixture.first",
             factory: mf_runtime::NodeFactory::Subgraph {
-                parameter_types: || BTreeMap::from([
-                    ("host_extra".into(), mf_runtime::ConfigParameterType::Flow),
-                ]), plain: host_plain, prepared: host_prepared,
+                flow_parameters: |config| config.get("host_extra").filter(|value| !value.is_null())
+                    .map(|value| BTreeMap::from([("host_extra".into(), value.clone())]))
+                    .unwrap_or_default(),
+                plain: host_plain, prepared: host_prepared,
             },
         }
     }
@@ -858,10 +859,9 @@ checksum = "original"
     const CALL_REGISTRATION: &str = r#"
 inventory::submit! {
     NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
-        parameter_types: || BTreeMap::from([
-            ("body".into(), mf_runtime::ConfigParameterType::Flow),
-            ("host_extra".into(), mf_runtime::ConfigParameterType::Value),
-        ]), plain, prepared,
+        flow_parameters: |config| config.get("body").filter(|value| !value.is_null())
+            .map(|body| BTreeMap::from([("body".into(), body.clone())]))
+            .unwrap_or_default(), plain, prepared,
     } }
 }
 "#;
@@ -1073,10 +1073,9 @@ fn prepared(_: &str, _: Value, _: BTreeMap<String, PreparedSubgraph>) -> Result<
 }}
 inventory::submit! {{
     NodeRegistration {{ kind: {kind:?}, factory: NodeFactory::Subgraph {{
-        parameter_types: || BTreeMap::from([
-            ("body".into(), mf_runtime::ConfigParameterType::Flow),
-            ("host_extra".into(), mf_runtime::ConfigParameterType::Value),
-        ]), plain, prepared,
+        flow_parameters: |config| config.get("body").filter(|value| !value.is_null())
+            .map(|body| BTreeMap::from([("body".into(), body.clone())]))
+            .unwrap_or_default(), plain, prepared,
     }} }}
 }}
 {extra}
@@ -1138,18 +1137,17 @@ inventory::submit! {{
                 resolved.sources,
                 BTreeSet::from([inputs.definition.clone()])
             );
-            assert_eq!(
-                resolved.contracts["fixture.first"]["host_extra"],
-                mf_runtime::ConfigParameterType::Value
-            );
+            let catalog_scope = &resolved.children[&"call".into()]["body"];
+            assert_eq!(catalog_scope.children[&"catalog-node".into()].len(), 1);
+            assert!(catalog_scope.children[&"catalog-node".into()].contains_key("body"));
+            assert!(!catalog_scope.children[&"catalog-node".into()].contains_key("host_extra"));
             let config = &resolved.definition.nodes[0].config["body"]["nodes"][0]["config"];
             assert!(config["body"].get("nodes").is_some());
             assert_eq!(
                 config["host_extra"],
                 json!({"path":"must-never-use-host-contract.json"})
             );
-            crate::compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts)
-                .unwrap();
+            crate::compiler::plan_resolved_workflow(&resolved).unwrap();
             assert!(!inputs.lock.exists());
         }
         let mut authored: serde_json::Value =
@@ -1274,14 +1272,17 @@ mf_runtime::register_builtin_flow!("feature", builtin);
                 json!(fs::canonicalize(root.path().join(package)).unwrap())
             );
         }
-        assert_eq!(
-            resolved.contracts["fixture.first"]["body"],
-            mf_runtime::ConfigParameterType::Flow
+        let first_scope = &resolved.children[&"first".into()]["body"];
+        let second_scope = &first_scope.children[&"second".into()]["body"];
+        let builtin_scope = &second_scope.children[&"builtin".into()]["body"];
+        assert_eq!(builtin_scope.definition.nodes[0].kind, "fixture.feature");
+        assert!(builtin_scope.children.is_empty());
+        assert!(
+            first_scope
+                .sources
+                .contains(&fs::canonicalize(child_directory.join("flow.json")).unwrap())
         );
-        assert_eq!(
-            resolved.contracts["fixture.first"]["host_extra"],
-            mf_runtime::ConfigParameterType::Value
-        );
+        assert!(!first_scope.sources.contains(&inputs.definition));
         let first = resolved
             .definition
             .dependencies
@@ -1296,13 +1297,14 @@ mf_runtime::register_builtin_flow!("feature", builtin);
         assert_eq!(resolved.definition.dependencies.len(), 2);
         // Production uses this source-free planning entrypoint. Host inventory
         // deliberately disagrees with the selected provider's `body` contract.
-        let selected_plan =
-            crate::compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts)
-                .unwrap();
-        assert_eq!(selected_plan.loop_orders.len(), 3);
+        let selected_plan = crate::compiler::plan_resolved_workflow(&resolved).unwrap();
+        let selected_first = &selected_plan.graph.children[&"first".into()]["body"];
+        let selected_second = &selected_first.children[&"second".into()]["body"];
+        let selected_builtin = &selected_second.children[&"builtin".into()]["body"];
+        assert_eq!(selected_builtin.definition.nodes[0].kind, "fixture.feature");
         let host_plan = crate::plan_definition(&resolved.definition).unwrap();
-        assert!(host_plan.loop_orders.is_empty());
-        assert_eq!(host_plan.definition, resolved.definition);
+        assert!(host_plan.graph.children.is_empty());
+        assert_eq!(host_plan.graph.definition, resolved.definition);
         let child = &resolved.definition.nodes[0].config["body"];
         let grandchild = &child["nodes"][0]["config"]["body"];
         assert_eq!(

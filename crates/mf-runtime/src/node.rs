@@ -1339,9 +1339,11 @@ impl PreparedNode {
     }
 }
 
-/// Reflects serialized configuration parameter types and injects prepared Flow values.
+/// Selects executable configuration fields and injects their prepared Flow values.
 pub trait NodeConfig: Sized {
-    fn parameter_types() -> crate::ConfigParameterTypes;
+    /// Returns only declared, present, non-null Flow fields under their canonical wire names.
+    /// All other provider configuration remains opaque.
+    fn flow_parameters(config: &Value) -> BTreeMap<String, Value>;
 
     /// Decodes ordinary configuration and injects the explicitly prepared Flow fields.
     /// The derive implements this without requiring executable Flow values to be deserializable.
@@ -1355,7 +1357,7 @@ pub trait NodeConfig: Sized {
 pub enum NodeFactory {
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
     Subgraph {
-        parameter_types: fn() -> crate::ConfigParameterTypes,
+        flow_parameters: fn(&Value) -> BTreeMap<String, Value>,
         plain: fn(Value) -> Result<PreparedNode, NodeBuildError>,
         #[expect(
             clippy::type_complexity,
@@ -1381,30 +1383,42 @@ impl NodeRegistration {
         matches!(self.factory, NodeFactory::Subgraph { .. })
     }
 
-    pub fn parameter_types(&self) -> crate::ConfigParameterTypes {
+    pub fn flow_parameters(&self, config: &Value) -> BTreeMap<String, Value> {
         match self.factory {
             NodeFactory::Subgraph {
-                parameter_types, ..
-            } => parameter_types(),
+                flow_parameters, ..
+            } => flow_parameters(config),
             NodeFactory::Plain(_) => BTreeMap::new(),
         }
     }
 
-    /// Validates declarations and their normalized definitions before preparing child bodies.
-    /// Undeclared provider configuration is always opaque.
+    /// Decodes receiver-selected child definitions in resolved authoring input.
+    /// Undeclared provider configuration is always opaque. Already prepared children
+    /// use binding-key validation in [`Self::instantiate_subgraphs`] instead.
     pub fn validate_flow_parameters(
         &self,
         node: &crate::NodeDefinition,
     ) -> Result<BTreeMap<String, crate::WorkflowDefinition>, NodeBuildError> {
-        let parameter_types = self.parameter_types();
-        let names = parameter_types
-            .iter()
-            .filter(|(_, parameter_type)| parameter_type.is_flow())
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>();
-        node.flow_parameters(&names).context(FlowParametersSnafu)
+        self.flow_parameters(&node.config)
+            .into_iter()
+            .map(|(parameter, value)| {
+                ensure!(
+                    !parameter.trim().is_empty(),
+                    crate::definition::InvalidSnafu {
+                        message: "Flow parameter field names must be nonblank"
+                    }
+                );
+                let body = serde_json::from_value(value).context(crate::definition::JsonSnafu {
+                    parameter: &parameter,
+                })?;
+                Ok((parameter, body))
+            })
+            .collect::<Result<_, crate::FlowParameterError>>()
+            .context(FlowParametersSnafu)
     }
 
+    /// Checks receiver-selected binding names and passes authoritative prepared children
+    /// to the provider decoder without reparsing their configuration values.
     pub fn instantiate_subgraphs(
         &self,
         id: &str,
@@ -1413,22 +1427,29 @@ impl NodeRegistration {
     ) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
             NodeFactory::Subgraph { prepared, .. } => {
-                let node = crate::NodeDefinition {
-                    id: crate::DefinitionId::new(id),
-                    kind: self.kind.into(),
-                    config,
-                };
-                let parameters = self.validate_flow_parameters(&node)?;
+                // Prepared children are authoritative. The receiver selects binding
+                // names here, but decoding child definitions belongs to authoring.
+                let parameters = self.flow_parameters(&config);
+                if parameters
+                    .keys()
+                    .any(|parameter| parameter.trim().is_empty())
+                {
+                    return crate::definition::InvalidSnafu {
+                        message: "Flow parameter field names must be nonblank",
+                    }
+                    .fail()
+                    .context(FlowParametersSnafu);
+                }
                 ensure!(
                     parameters.keys().eq(arguments.keys()),
                     InvalidSubgraphSnafu {
                         message: format!(
-                            "node `{}` prepared Flow arguments do not match its normalized configuration fields",
+                            "node `{}` prepared Flow arguments do not match its receiver-selected configuration fields",
                             self.kind
                         )
                     }
                 );
-                prepared(id, node.config, arguments)
+                prepared(id, config, arguments)
             }
             _ => crate::NodeInvalidSubgraphSnafu {
                 message: format!(

@@ -35,7 +35,7 @@ fn rejects_linked_project_directories_before_writing_outside_the_build() {
         fs::create_dir(&project).unwrap();
         fs::create_dir(&outside).unwrap();
         let plan = common::fixture_plan();
-        let original = serde_json::to_string(&plan.definition).unwrap();
+        let original = serde_json::to_string(&plan.graph.definition).unwrap();
         fs::write(outside.join("workflow.rs"), &original).unwrap();
         symlink(&outside, project.join(name)).unwrap();
         assert!(

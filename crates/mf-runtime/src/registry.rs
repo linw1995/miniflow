@@ -154,10 +154,25 @@ impl NodeRegistry {
         self.registrations.values().copied()
     }
 
-    /// Includes plain kinds with empty metadata so bootstrap can distinguish unknown kinds.
-    pub fn parameter_types(&self) -> crate::NodeParameterTypes {
+    /// Includes empty callbacks for plain kinds so bootstrap can distinguish unknown kinds.
+    #[expect(
+        clippy::type_complexity,
+        reason = "Receiver callbacks use standard maps."
+    )]
+    pub fn flow_extractors(
+        &self,
+    ) -> BTreeMap<String, fn(&serde_json::Value) -> BTreeMap<String, serde_json::Value>> {
         self.iter()
-            .map(|registration| (registration.kind.to_owned(), registration.parameter_types()))
+            .map(|registration| {
+                let extractor: fn(&serde_json::Value) -> BTreeMap<String, serde_json::Value> =
+                    match registration.factory {
+                        crate::NodeFactory::Subgraph {
+                            flow_parameters, ..
+                        } => flow_parameters,
+                        crate::NodeFactory::Plain(_) => |_| BTreeMap::new(),
+                    };
+                (registration.kind.to_owned(), extractor)
+            })
             .collect()
     }
 
@@ -330,8 +345,13 @@ mod tests {
         let registration = NodeRegistration {
             kind: "test.subgraph",
             factory: crate::NodeFactory::Subgraph {
-                parameter_types: || {
-                    BTreeMap::from([("body".into(), crate::ConfigParameterType::Flow)])
+                flow_parameters: |config| {
+                    config
+                        .get("body")
+                        .filter(|value| !value.is_null())
+                        .map(|value| ("body".into(), value.clone()))
+                        .into_iter()
+                        .collect()
                 },
                 plain: first_factory,
                 prepared: |_, config, _| first_factory(config),
@@ -342,36 +362,49 @@ mod tests {
     }
 
     #[test]
-    fn parameter_types_include_plain_kinds() {
-        use crate::ConfigParameterType::{Flow, Optional, Value};
-
+    fn flow_extractors_include_plain_kinds_and_preserve_receiver_selection() {
         static FLOW: NodeRegistration = NodeRegistration {
             kind: "test.flow",
             factory: crate::NodeFactory::Subgraph {
-                parameter_types: || {
-                    BTreeMap::from([
-                        ("selected".into(), Flow),
-                        ("fallback".into(), Optional(Box::new(Flow))),
-                        ("option".into(), Value),
-                    ])
+                flow_parameters: |config| {
+                    ["selected", "fallback"]
+                        .into_iter()
+                        .filter_map(|name| {
+                            config
+                                .get(name)
+                                .filter(|value| !value.is_null())
+                                .map(|value| (name.into(), value.clone()))
+                        })
+                        .collect()
                 },
                 plain: first_factory,
                 prepared: |_, config, _| first_factory(config),
             },
         };
         let registry = NodeRegistry::from_registrations([&FIRST, &FLOW]).unwrap();
+        let extractors = registry.flow_extractors();
+        assert_eq!(extractors.len(), 2);
+        assert!(!extractors.contains_key("unknown"));
+        for config in [
+            Value::Null,
+            serde_json::json!({
+                "selected": {"nodes": []}, "fallback": null,
+                "option": {"nodes": []}, "unknown": {"nodes": []},
+            }),
+        ] {
+            assert!(extractors["test.duplicate"](&config).is_empty());
+            assert_eq!(
+                extractors["test.flow"](&config),
+                FLOW.flow_parameters(&config)
+            );
+        }
         assert_eq!(
-            registry.parameter_types(),
+            extractors["test.flow"](
+                &serde_json::json!({"selected": 1, "fallback": 2, "option": 3})
+            ),
             BTreeMap::from([
-                ("test.duplicate".into(), BTreeMap::new()),
-                (
-                    "test.flow".into(),
-                    BTreeMap::from([
-                        ("selected".into(), Flow),
-                        ("fallback".into(), Optional(Box::new(Flow))),
-                        ("option".into(), Value),
-                    ])
-                ),
+                ("selected".into(), Value::from(1)),
+                ("fallback".into(), Value::from(2))
             ])
         );
     }

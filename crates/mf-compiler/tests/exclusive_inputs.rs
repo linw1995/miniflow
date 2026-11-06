@@ -505,6 +505,7 @@ fn executable_builders_require_proof_and_valid_task_output_contracts() {
     let definition = definition(true, json!(1), json!(2));
     let order = mf_compiler::plan_definition(&definition)
         .unwrap()
+        .graph
         .execution_order;
     for case in [
         "valid",

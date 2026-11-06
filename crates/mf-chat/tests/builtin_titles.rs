@@ -259,13 +259,15 @@ fn embedded_application_declares_and_prepares_the_builtin_title_call() {
         ("finish", "mf_chat.conversation.finish"),
     ] {
         assert!(
-            plan.definition
+            plan.graph
+                .definition
                 .nodes
                 .iter()
                 .any(|node| node.id.as_str() == id && node.kind == kind)
         );
     }
     let call = plan
+        .graph
         .definition
         .nodes
         .iter()
@@ -277,5 +279,5 @@ fn embedded_application_declares_and_prepares_the_builtin_title_call() {
     let body = configuration.body.unwrap();
     let registered = mf_chat::flows::title_definition().unwrap();
     let registered_plan = mf_compiler::plan_definition(&registered).unwrap();
-    assert_eq!(*body, registered_plan.definition);
+    assert_eq!(*body, registered_plan.graph.definition);
 }

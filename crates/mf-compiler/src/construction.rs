@@ -808,6 +808,19 @@ pub enum WorkflowBuildError {
     FlowBuild { source: FlowBuildError },
     #[snafu(transparent)]
     StreamBuild { source: StreamBuildError },
+    #[snafu(display("invalid compiled graph: {source}"))]
+    CompiledGraph { source: mf_telemetry::ContractError },
+    #[snafu(display("invalid compiled graph structure: {source}"))]
+    CompiledStructure {
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
+    },
+    #[snafu(display("invalid host Flow binding on `{definition_id}`: {source}"))]
+    HostFlowBinding {
+        definition_id: DefinitionId,
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
+    },
     #[snafu(
         display("node `{definition_id}` references unavailable kind `{kind}`"),
         visibility(pub)
@@ -832,8 +845,6 @@ pub enum WorkflowBuildError {
         source: NodeBuildError,
         definition_id: DefinitionId,
     },
-    #[snafu(transparent)]
-    ParameterTypes { source: ParameterTypeError },
     #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
     LoopVariables {
         definition_id: DefinitionId,
@@ -871,43 +882,83 @@ pub enum WorkflowBuildError {
     },
 }
 
-#[derive(Debug, Snafu)]
-pub enum ParameterTypeError {
-    #[snafu(display("compiled parameter types reference unknown node kind `{kind}`"))]
-    UnknownParameterKind { kind: String },
-    #[snafu(display(
-        "configuration parameter types for node kind `{kind}` differ from the compiled contract"
-    ))]
-    ParameterTypeDrift { kind: String },
+/// Validate the stored tree and every construction-reachable receiving boundary
+/// before invoking a provider factory. Host Call executors own their body providers;
+/// this exemption is local to that body, never a global exemption for its kinds.
+pub fn validate_compiled_graph(
+    registry: &NodeRegistry,
+    graph: &mf_runtime::CompiledGraph,
+) -> Result<(), WorkflowBuildError> {
+    crate::compiler::validate_graph_structure(graph, None, 0, 0).context(CompiledStructureSnafu)?;
+    mf_runtime::describe_graph(graph).context(CompiledGraphSnafu)?;
+    validate_compiled_providers(registry, graph)
 }
 
-/// Preflight the complete typed configuration contract without invoking factories.
-pub fn validate_parameter_types(
+fn validate_compiled_providers(
     registry: &NodeRegistry,
-    expected: &mf_runtime::NodeParameterTypes,
-) -> Result<(), ParameterTypeError> {
-    for (kind, parameter_types) in expected {
-        // These nodes are lowered and constructed by the compiler, not providers.
+    graph: &mf_runtime::CompiledGraph,
+) -> Result<(), WorkflowBuildError> {
+    for node in &graph.definition.nodes {
+        let children = graph.children.get(&node.id);
         if matches!(
-            kind.as_str(),
+            node.kind.as_str(),
             crate::LOOP_SOURCE_ID
                 | mf_runtime::ITERATION_INPUT_KIND
                 | crate::LOOP_ASSIGN_KIND
                 | crate::EXIT_LOOP_KIND
         ) {
             ensure!(
-                parameter_types.is_empty(),
-                ParameterTypeDriftSnafu { kind: kind.clone() }
+                children.is_none_or(BTreeMap::is_empty),
+                InvalidDefinitionSnafu {
+                    definition_id: node.id.clone(),
+                    message: "compiler-owned nodes cannot receive child graphs",
+                }
             );
             continue;
         }
-        let registration = registry
-            .get(kind)
-            .with_context(|| UnknownParameterKindSnafu { kind: kind.clone() })?;
+        let registration = registry.get(&node.kind).with_context(|| UnknownKindSnafu {
+            definition_id: node.id.clone(),
+            kind: node.kind.clone(),
+        })?;
+        let fields = registration.flow_parameters(&node.config);
         ensure!(
-            registration.parameter_types() == *parameter_types,
-            ParameterTypeDriftSnafu { kind: kind.clone() }
+            fields
+                .keys()
+                .eq(children.into_iter().flat_map(BTreeMap::keys)),
+            InvalidDefinitionSnafu {
+                definition_id: node.id.clone(),
+                message: "receiving Flow parameter declarations differ from the compiled binding set",
+            }
         );
+        if node.kind == mf_runtime::CALL_KIND {
+            let mut selector = node.config.clone();
+            if let Some(config) = selector.as_object_mut() {
+                config.remove("body");
+            }
+            let config: mf_runtime::CallConfig =
+                serde_json::from_value(selector).context(InvalidEmbeddedConfigSnafu {
+                    definition_id: node.id.clone(),
+                })?;
+            if let Some(registered) = registry.flow(&config.flow) {
+                let body = children
+                    .and_then(|children| children.get("body"))
+                    .with_context(|| InvalidDefinitionSnafu {
+                        definition_id: node.id.clone(),
+                        message: "host Flow call requires its compiled body binding",
+                    })?;
+                crate::compiler::validate_host_flow_binding(node, body, registered).context(
+                    HostFlowBindingSnafu {
+                        definition_id: node.id.clone(),
+                    },
+                )?;
+                continue;
+            }
+        }
+        for body in children.into_iter().flat_map(BTreeMap::values) {
+            validate_compiled_providers(registry, body).context(SubgraphSnafu {
+                definition_id: node.id.clone(),
+            })?;
+        }
     }
     Ok(())
 }
@@ -943,11 +994,7 @@ fn validated_node_config(
             definition_id: DefinitionId::from(definition_id),
         })?,
     };
-    let fields = registration
-        .validate_flow_parameters(&node)
-        .context(NodeConstructionSnafu {
-            definition_id: DefinitionId::from(definition_id),
-        })?;
+    let fields = registration.flow_parameters(&node.config);
     ensure!(
         fields
             .keys()

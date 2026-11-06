@@ -89,17 +89,15 @@ fn registered_calls_use_host_execution_without_loading_child_providers() {
         }))
         .unwrap(),
     );
-    let plan =
-        mf_compiler::plan_resolved_definition(&outside, &registry.parameter_types()).unwrap();
+    let plan = mf_compiler::plan_resolved_definition(&outside, &registry).unwrap();
     let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
-    assert_eq!(saved.execution_order[0].as_str(), "a_before");
+    assert_eq!(saved.graph.execution_order[0].as_str(), "a_before");
     // Constructing the earlier constant would fail on its missing value; instead
     // availability preflight must report the later unlinked provider first.
     assert!(matches!(
         mf_compiler::instantiate_compiled(&saved, &registry).err().unwrap(),
-        mf_compiler::WorkflowCompileError::ParameterTypes {
-            source: mf_compiler::ParameterTypeError::UnknownParameterKind { kind }
-        } if kind == "unlinked.provider"
+        mf_compiler::WorkflowCompileError::UnknownNodeKind { definition_id, kind }
+        if definition_id.as_str() == "z_missing" && kind == "unlinked.provider"
     ));
 }
 

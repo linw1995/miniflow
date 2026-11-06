@@ -277,7 +277,7 @@ fn exclusive_bindings_preserve_groups_and_validate_all_predecessors() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let definition: WorkflowDefinition = serde_json::from_value(exclusive_definition()).unwrap();
     let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
-    assert_eq!(plan.execution_order.last().unwrap().as_str(), "sink");
+    assert_eq!(plan.graph.execution_order.last().unwrap().as_str(), "sink");
     let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
     assert_eq!(flow.connections().len(), 2);
     assert!(flow.connections().iter().all(|edge| edge.exclusive));
@@ -299,7 +299,7 @@ fn exclusive_bindings_preserve_groups_and_validate_all_predecessors() {
     mf_compiler::FlowBuilder::prepare(
         nodes,
         definition.edges.clone(),
-        plan.execution_order.clone(),
+        plan.graph.execution_order.clone(),
         definition.outputs.clone(),
     )
     .unwrap();
@@ -311,6 +311,7 @@ fn exclusive_bindings_reject_conflicts_and_invalid_candidates() {
     let valid: WorkflowDefinition = serde_json::from_value(exclusive_definition()).unwrap();
     let order = mf_compiler::plan_definition(&valid)
         .unwrap()
+        .graph
         .execution_order;
     for case in [
         "single",

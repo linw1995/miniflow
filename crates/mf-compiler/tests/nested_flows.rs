@@ -220,14 +220,16 @@ fn builtin_sources_are_resolved_from_linked_providers() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     assert_eq!(
-        plan.definition.dependencies["provider"].version.as_deref(),
+        plan.graph.definition.dependencies["provider"]
+            .version
+            .as_deref(),
         Some("=2")
     );
     assert_eq!(
-        plan.definition.dependencies["provider"].features,
+        plan.graph.definition.dependencies["provider"].features,
         ["required", "selected"]
     );
-    assert!(plan.definition.dependencies["provider"].default_features);
+    assert!(plan.graph.definition.dependencies["provider"].default_features);
     assert_eq!(
         instantiate_compiled(&plan, &registry)
             .unwrap()
@@ -359,34 +361,57 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
     .unwrap();
     for config in [json!({"flow":1}), json!({"flow":"child"})] {
         let mut corrupt = plan.clone();
-        corrupt.definition.nodes[0].config = config;
+        corrupt.graph.definition.nodes[0].config = config;
         assert!(instantiate_compiled(&corrupt, &registry).is_err());
-        assert!(corrupt.generate_runner_artifacts().is_err());
     }
+    let mut missing = plan.clone();
+    missing.graph.children.clear();
+    assert!(instantiate_compiled(&missing, &registry).is_err());
+    assert!(missing.generate_runner_artifacts().is_err());
+
     let mut manifest = plan.manifest(&registry).unwrap();
-    manifest.definition.nodes[0]
+    let description = manifest.description().unwrap();
+    manifest.graph.definition.nodes[0]
         .config
         .as_object_mut()
         .unwrap()
         .remove("body");
-    assert!(manifest.validate().is_err());
-    let mut cycle = child();
-    cycle.edges.push(mf_runtime::EdgeDefinition {
-        exclusive: false,
-        from_node: "echo".into(),
-        from_output: "value".into(),
-        to_node: "input".into(),
-        to_input: "value".into(),
-    });
-    let mut invalid = plan;
-    invalid.definition.nodes[0].config["body"] = serde_json::to_value(cycle).unwrap();
-    assert!(
-        invalid
-            .generate_runner_artifacts()
-            .unwrap_err()
-            .to_string()
-            .contains("Flow call")
+    // Offline inspection trusts the compiled graph, not the authoring config.
+    assert_eq!(
+        manifest.description().unwrap().loop_bodies,
+        description.loop_bodies
     );
+    manifest.validate().unwrap();
+    manifest
+        .graph
+        .children
+        .get_mut(&"invoke".into())
+        .unwrap()
+        .get_mut("body")
+        .unwrap()
+        .execution_order
+        .clear();
+    assert!(manifest.validate().is_err());
+    let mut invalid = plan;
+    invalid
+        .graph
+        .children
+        .get_mut(&"invoke".into())
+        .unwrap()
+        .get_mut("body")
+        .unwrap()
+        .definition
+        .edges
+        .push(mf_runtime::EdgeDefinition {
+            exclusive: false,
+            from_node: "echo".into(),
+            from_output: "value".into(),
+            to_node: "input".into(),
+            to_input: "value".into(),
+        });
+    let error = invalid.generate_runner_artifacts().unwrap_err();
+    assert!(error.to_string().contains("Flow call"), "{error}");
+    assert!(error.to_string().contains("cycle"), "{error}");
 }
 
 #[test]
@@ -821,7 +846,7 @@ fn generated_calls_match_memory_without_flow_sources() {
             .contains("PreparedSubgraph::from_flow")
     );
     let frozen = mf_runtime::WorkflowManifest::from_bytes(&execution.manifest_bytes).unwrap();
-    assert_eq!(frozen.definition, plan.definition);
+    assert_eq!(frozen.graph.definition, plan.graph.definition);
     let targets: Vec<mf_runtime::NodeTarget> =
         serde_json::from_str(&execution.node_targets_json).unwrap();
     assert_eq!(targets[0].id, "outer");

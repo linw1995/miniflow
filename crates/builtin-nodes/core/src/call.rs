@@ -157,7 +157,7 @@ inventory::submit! {
     NodeRegistration {
         kind: mf_runtime::CALL_KIND,
         factory: NodeFactory::Subgraph {
-            parameter_types: Config::parameter_types,
+            flow_parameters: Config::flow_parameters,
             plain,
             prepared: factory,
         },
@@ -184,12 +184,12 @@ mod tests {
             .get(mf_runtime::CALL_KIND)
             .unwrap();
         assert_eq!(
-            registration.parameter_types(),
-            BTreeMap::from([
-                ("body".into(), mf_runtime::ConfigParameterType::Flow),
-                ("flow".into(), mf_runtime::ConfigParameterType::Value),
-            ])
+            registration.flow_parameters(&config),
+            BTreeMap::from([("body".into(), config["body"].clone())])
         );
+        for config in [json!({}), json!({"body": null, "flow": {"nodes": []}})] {
+            assert!(registration.flow_parameters(&config).is_empty());
+        }
         assert!(registration.instantiate(config.clone()).is_err());
         for bodies in [
             BTreeMap::new(),

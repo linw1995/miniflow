@@ -1,6 +1,6 @@
 extern crate mf_runtime as runtime_alias;
 
-use mf_runtime::{ConfigParameterType, Flow, NodeConfig, PreparedSubgraph};
+use mf_runtime::{Flow, NodeConfig, PreparedSubgraph};
 use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeMap;
 
@@ -45,18 +45,16 @@ fn prepared() -> PreparedSubgraph {
 #[test]
 fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
     assert_eq!(
-        DirectConfig::parameter_types(),
+        DirectConfig::flow_parameters(&json!({
+            "requestBody": {"request": true},
+            "left-hand": {"left": true},
+            "right": null,
+            "settings": {"body": {}},
+            "unknown": {"nodes": []},
+        })),
         BTreeMap::from([
-            ("requestBody".into(), ConfigParameterType::Flow),
-            (
-                "left-hand".into(),
-                ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
-            ),
-            (
-                "right".into(),
-                ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
-            ),
-            ("settings".into(), ConfigParameterType::Value),
+            ("requestBody".into(), json!({"request": true})),
+            ("left-hand".into(), json!({"left": true})),
         ])
     );
     let config = DirectConfig::from_config(
@@ -82,14 +80,8 @@ fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
 #[test]
 fn actual_derive_accepts_qualified_types_with_a_runtime_crate_alias() {
     assert_eq!(
-        AliasedRuntimeConfig::parameter_types(),
-        BTreeMap::from([
-            ("body".into(), ConfigParameterType::Flow),
-            (
-                "left".into(),
-                ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow))
-            ),
-        ])
+        AliasedRuntimeConfig::flow_parameters(&json!({"body": {}, "left": null})),
+        BTreeMap::from([("body".into(), json!({}))])
     );
     let config = AliasedRuntimeConfig::from_config(
         json!({"body": {}, "left": null}),
@@ -209,8 +201,8 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
             // Keep identical fields but independent derives: Serde is the oracle
             // even for the executable placeholders removed by NodeConfig.
             macro_rules! config {
-                ($name:ident, $derive:path, $flow:ident) => {
-                    #[derive($derive)]
+                ($name:ident, $derive:meta, $flow:ident) => {
+                    #[$derive]
                     #[serde(rename_all = $rule, deny_unknown_fields)]
                     struct $name {
                         request_body: $flow,
@@ -228,35 +220,32 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
                     }
                 };
             }
-            config!(Config, NodeConfig, Flow);
-            config!(SerdeConfig, serde::Deserialize, JsonValue);
+            config!(Config, derive(NodeConfig), Flow);
+            config!(SerdeConfig, derive(serde::Serialize, serde::Deserialize), JsonValue);
 
-            let parameters = Config::parameter_types();
-            assert_eq!(parameters.len(), 9, "{}", $rule);
-            assert_eq!(
-                parameters.get("input-only"),
-                Some(&ConfigParameterType::Value)
-            );
-            assert_eq!(
-                parameters.get($settings_name),
-                Some(&ConfigParameterType::Value)
-            );
-            assert!(!parameters.contains_key("output-only"));
-            assert!(!parameters.contains_key("legacy-preferences"));
-            let canonical = serde_json::Value::Object(
-                parameters
-                    .iter()
-                    .map(|(name, ty)| {
-                        let value = match ty {
-                            ConfigParameterType::Value => json!(17),
-                            ConfigParameterType::Flow | ConfigParameterType::Optional(_) => {
-                                json!({})
-                            }
-                        };
-                        (name.clone(), value)
-                    })
-                    .collect(),
-            );
+            // Construct canonical input independently of the receiver callback.
+            // Serde's serializer provides the names; the directional ordinary
+            // field deliberately uses its deserialize name on the input wire.
+            let mut canonical = serde_json::to_value(SerdeConfig {
+                request_body: json!({"request": true}),
+                optional_body: Some(json!({"optional": true})),
+                r#type: json!({"type": true}),
+                ordinary_field: 17,
+                mixedCase: 17,
+                r#match: 17,
+                directional_field: 17,
+                user_settings: 17,
+                __: json!({"explicit": true}),
+            }).unwrap();
+            let fields = canonical.as_object_mut().unwrap();
+            let directional = fields.remove("output-only").unwrap();
+            fields.insert("input-only".into(), directional);
+            let expected = fields.iter()
+                .filter(|(_, value)| value.is_object())
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(expected.len(), 4, "{}", $rule);
+            assert_eq!(Config::flow_parameters(&canonical), expected);
             let mut aliased = canonical.clone();
             let fields = aliased.as_object_mut().unwrap();
             let settings = fields.remove($settings_name).unwrap();
@@ -271,7 +260,10 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
                         decoded.r#type,
                         decoded.__
                     ],
-                    [json!({}), json!({}), json!({}), json!({})]
+                    [
+                        json!({"request": true}), json!({"optional": true}),
+                        json!({"type": true}), json!({"explicit": true}),
+                    ]
                 );
                 let ordinary = [
                     decoded.ordinary_field,
@@ -282,11 +274,12 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
                 ];
                 assert_eq!(ordinary, [17; 5]);
 
-                let flows = parameters
-                    .iter()
-                    .filter(|(_, ty)| **ty != ConfigParameterType::Value)
-                    .map(|(name, _)| (name.clone(), prepared()))
-                    .collect();
+                let extracted = Config::flow_parameters(&input);
+                assert_eq!(extracted, expected);
+                assert!(!extracted.contains_key($settings_name));
+                assert!(!extracted.contains_key("input-only"));
+                assert!(!extracted.contains_key("legacy-preferences"));
+                let flows = extracted.into_keys().map(|name| (name, prepared())).collect();
                 let config = Config::from_config(input, flows).unwrap();
                 for flow in [
                     config.request_body,
@@ -318,6 +311,49 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
     assert_parity!("SCREAMING_SNAKE_CASE", "USER_SETTINGS");
     assert_parity!("kebab-case", "user-settings");
     assert_parity!("SCREAMING-KEBAB-CASE", "USER-SETTINGS");
+}
+
+#[test]
+fn extraction_selects_all_executable_field_forms_without_decoding_provider_data() {
+    #[derive(NodeConfig)]
+    #[allow(dead_code)]
+    struct Config {
+        required: Flow,
+        optional: Option<Flow>,
+        callback: PreparedSubgraph,
+        optional_callback: Option<PreparedSubgraph>,
+        ordinary: Option<JsonValue>,
+    }
+    let input = json!({
+        "required": false,
+        "optional": 0,
+        "callback": ["not decoded here"],
+        "optional_callback": "source.json",
+        "ordinary": {"version": "2026-10-28", "dependencies": {}, "nodes": []},
+        "unknown": {"body": {}},
+    });
+    let original = input.clone();
+    assert_eq!(
+        Config::flow_parameters(&input),
+        BTreeMap::from([
+            ("required".into(), json!(false)),
+            ("optional".into(), json!(0)),
+            ("callback".into(), json!(["not decoded here"])),
+            ("optional_callback".into(), json!("source.json")),
+        ])
+    );
+    assert_eq!(input, original);
+    for input in [
+        JsonValue::Null,
+        json!(false),
+        json!(42),
+        json!("opaque"),
+        json!([]),
+        json!({}),
+        json!({"required": null, "optional": null, "callback": null, "optional_callback": null}),
+    ] {
+        assert!(Config::flow_parameters(&input).is_empty());
+    }
 }
 
 #[test]

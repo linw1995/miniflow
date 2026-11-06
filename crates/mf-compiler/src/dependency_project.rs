@@ -60,13 +60,8 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes)?;
     // The manifest has resolved execution modes; its sources are already frozen.
     // Retain the validated order without running source resolution a second time.
-    let workflow = mf_compiler::CompiledWorkflow {
-        definition: manifest.definition,
-        execution_order: workflow.execution_order,
-        loop_orders: workflow.loop_orders,
-        parameter_types: workflow.parameter_types,
-    };
-    if workflow.definition.execution.is_some() {
+    let workflow = mf_compiler::CompiledWorkflow { graph: manifest.graph };
+    if workflow.graph.definition.execution.is_some() {
         println!("cargo:rustc-cfg=mf_streaming");
     }
     let source = workflow.generate_runner_artifacts()?;
@@ -404,7 +399,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         #[cfg(unix)]
         {
             let manifest = workflow_manifest()?;
-            let definition = &manifest.definition;
+            let definition = &manifest.graph.definition;
             if definition.version.supports_startup_inputs() {
                 state.set_stdin(mf_runtime::TextInput::claim()?);
             }
@@ -454,7 +449,7 @@ pub fn write_dependency_project_with_options(
     options: &RunnerOptions,
 ) -> Result<(), DependencyProjectError> {
     let plan_json = plan.to_json().context(PlanSnafu)?;
-    let (manifest, imports) = project_manifest(&plan.definition, support, options)?;
+    let (manifest, imports) = project_manifest(&plan.graph.definition, support, options)?;
     let build = format!("{imports}{BUILD}");
     let main = format!("{imports}{MAIN}");
     write_project_files(
@@ -652,6 +647,10 @@ mod tests {
         );
         assert!(main.contains("args.next().as_deref() == Some(std::ffi::OsStr::new(\"resolve\"))"));
         assert!(main.contains("&source, &registry, catalog, selected_packages,"));
+        assert!(main.contains("serde_json::to_vec(&resolved)?"));
+        assert!(main.contains("serde_json::to_vec(&discovery)?"));
+        assert!(!main.contains("parameter_types"));
+        assert!(!main.contains("contracts"));
         assert!(!main.contains(".bundle"));
     }
 }

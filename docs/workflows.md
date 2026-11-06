@@ -144,8 +144,8 @@ its native stream coordinator, without rebuilding it or linking its custom nodes
 
 ## Passed subgraphs for custom nodes
 
-Providers expose Flow-valued fields through their existing node parameter types. `NodeConfig` reflects
-fields typed `Flow` (or `Option<Flow>`); users do not add a separate declaration or change workflow
+Providers expose executable child values through receiver callbacks. `NodeConfig` derives extraction
+for fields typed `Flow` (or `Option<Flow>`); users do not add a separate declaration or change workflow
 versions. A declared field accepts a local path, a built-in name, or an inline definition:
 
 ```json
@@ -170,15 +170,16 @@ versions. A declared field accepts a local path, a built-in name, or an inline d
 ```
 
 This fragment assumes a provider registering `my-provider.dispatch` with `NodeFactory::Subgraph`
-and `Config::parameter_types` reflecting a `body: Flow` field; it is not a new core built-in. Alternatively, use
+and `Config::flow_parameters` extracting a `body: Flow` field; it is not a new core built-in. Alternatively, use
 `"body": {"path": "./worker.json"}` or `"body": {"builtin": "my-provider.worker"}`. Relative paths
 belong to the source file that declares them. Providers decide their own input ports, selection,
 child arguments, execution policy, result shape, and error handling. There is no global Flow environment
 or parameter-alias mapping: the configuration field name is the prepared-child map key and static scope identity.
 
-Source loading reads the selected receiving node's parameter types, resolves only its declared Flow
-fields, and merges child dependencies for standalone compilation. Resolved definitions are compiled
-into executable Flow objects and injected into those fields. JSON shape alone grants no executable
+Source loading calls the selected receiver's `flow_parameters` callback, resolves only the returned
+child values, and merges child dependencies for standalone compilation. Planning freezes that selected
+child tree as explicit `CompiledGraph.children`; saved plans do not rediscover children from JSON.
+Resolved child graphs are compiled into executable Flow objects and injected into those fields. JSON shape alone grants no executable
 authority; ordinary fields containing `definition` or `path` remain ordinary data.
 Missing required fields and malformed values fail configuration validation;
 omitted optional Flow fields grant no handle. Every supplied body is validated before execution,
@@ -278,7 +279,7 @@ Paths resolve relative to the canonical definition's directory, including when t
 CLI provider discovery and final source resolution are separate phases. Temporary provider probes may repeat
 metadata discovery until the selected dependency closure stabilizes. Their partial handoff is a `FlowDiscovery`,
 not a `ResolvedWorkflow`. The stable provider-linked process then fully resolves the original sources once,
-using its selected registrations rather than the CLI host's registry. The CLI calls `plan_resolved_definition`
+using its selected registrations rather than the CLI host's registry. The CLI calls `plan_resolved_workflow`
 with that result to freeze the standalone plan. Source and provider paths retain their declaring-file semantics,
 including sources outside the root's directory. The runner does not perform startup source resolution.
 Existing `--locked` validation, authoritative-lock handling, and discovery retries remain unchanged.

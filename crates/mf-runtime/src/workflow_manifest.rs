@@ -1,5 +1,5 @@
 use crate::{
-    WorkflowInputError, WorkflowInputSchema, WorkflowInterface,
+    CompiledGraph, DefinitionId, WorkflowInputError, WorkflowInputSchema, WorkflowInterface,
     workflow_inputs::{from_unique_json, pointer},
 };
 use mf_telemetry::description::{
@@ -20,28 +20,17 @@ pub const MAX_MANIFEST_PADDING_BYTES: usize = 4096;
 pub const MAX_MANIFEST_SECTION_BYTES: usize =
     MANIFEST_HEADER_BYTES + MAX_MANIFEST_PAYLOAD_BYTES + MAX_MANIFEST_PADDING_BYTES;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LoopExecutionOrder {
-    pub path: Vec<String>,
-    pub execution_order: Vec<String>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowManifestVersion {
-    #[serde(rename = "2026-11-04")]
-    V2026_11_04,
+    #[serde(rename = "2026-11-06")]
+    V2026_11_06,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowManifest {
     pub version: WorkflowManifestVersion,
-    pub definition: crate::WorkflowDefinition,
-    pub parameter_types: crate::NodeParameterTypes,
-    pub execution_order: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub loop_orders: Vec<LoopExecutionOrder>,
+    pub graph: CompiledGraph,
     pub input_schema: WorkflowInputSchema,
 }
 
@@ -69,24 +58,19 @@ pub enum WorkflowManifestError {
 impl WorkflowManifest {
     /// Borrows an original root node without preparing or executing its provider.
     pub fn node_definition(&self, id: &str) -> Option<&crate::NodeDefinition> {
-        self.definition
+        self.graph
+            .definition
             .nodes
             .iter()
             .find(|node| node.id.as_str() == id)
     }
 
     pub fn workflow_id(&self) -> Result<WorkflowId, WorkflowManifestError> {
-        WorkflowId::from_definition(&self.definition, &self.execution_order).context(GraphSnafu)
+        self.graph.workflow_id().context(GraphSnafu)
     }
 
     pub fn description(&self) -> Result<WorkflowDescription, WorkflowManifestError> {
-        describe_definition(
-            &self.definition,
-            &self.execution_order,
-            &self.loop_orders,
-            &self.parameter_types,
-        )
-        .context(GraphSnafu)
+        describe_graph(&self.graph).context(GraphSnafu)
     }
 
     pub fn interface(&self) -> Result<WorkflowInterface, WorkflowManifestError> {
@@ -100,7 +84,9 @@ impl WorkflowManifest {
 
     fn interface_for(&self, description: &WorkflowDescription) -> WorkflowInterface {
         let mut schema = self.input_schema.clone();
-        if !self.definition.version.supports_startup_inputs() && description.execution.is_some() {
+        if !self.graph.definition.version.supports_startup_inputs()
+            && description.execution.is_some()
+        {
             // A newer child can require a newer observation schema, whose interface
             // describes every initial node. Preserve the old root's startup policy:
             // these declarations expose no input ports, bindings, or stdin ownership.
@@ -271,40 +257,20 @@ impl WorkflowManifest {
     }
 }
 
-/// Projects the observation view without planning or providers.
-pub fn describe_definition(
-    definition: &crate::WorkflowDefinition,
-    execution_order: &[String],
-    loop_orders: &[LoopExecutionOrder],
-    parameter_types: &crate::NodeParameterTypes,
-) -> Result<WorkflowDescription, ContractError> {
-    let mut orders: BTreeMap<_, _> = loop_orders
-        .iter()
-        .map(|order| (order.path.clone(), order.execution_order.as_slice()))
-        .collect();
-    ensure!(
-        orders.len() == loop_orders.len(),
-        mf_telemetry::InvalidSnafu {
-            message: "duplicate compiled Loop execution order"
-        }
-    );
+/// Projects the observation view from actual compiled scopes, without planning,
+/// providers, or discovery from configuration JSON.
+pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, ContractError> {
+    let definition = &graph.definition;
+    let execution_order = string_order(&graph.execution_order);
     let mut loop_bodies = Vec::new();
     let mut omitted_iterations = Vec::new();
-    describe_loops(
-        definition,
+    describe_children(
+        graph,
         &mut Vec::new(),
-        &mut orders,
         &mut loop_bodies,
         definition.has_order_edges() || definition.version.supports_clusters(),
         &mut omitted_iterations,
-        parameter_types,
     )?;
-    ensure!(
-        orders.is_empty(),
-        mf_telemetry::InvalidSnafu {
-            message: "compiled execution order names an unknown Loop body"
-        }
-    );
     // Validate every supplied scope, including scopes omitted by the historical
     // observation projection, using an existing schema that supports all features.
     let mut description = WorkflowDescription {
@@ -317,13 +283,13 @@ pub fn describe_definition(
                 ExecutionMode::Single
             },
         }),
-        workflow_id: WorkflowId::from_definition(definition, execution_order)?,
+        workflow_id: graph.workflow_id()?,
         nodes: ordered_nodes(
             definition
                 .nodes
                 .iter()
                 .map(|node| (node.id.as_str(), node.kind.as_str())),
-            execution_order,
+            &execution_order,
         )?,
         data_edges: data_edges(&definition.edges),
         control_edges: control_edges(&definition.control_edges),
@@ -339,8 +305,8 @@ pub fn describe_definition(
                 && (!body.order_edges.is_empty() || !body.clusters.is_empty())
         })
     });
+    description.validate()?;
     if !omitted_iterations.is_empty() {
-        description.validate()?;
         description.loop_bodies.retain(|body| {
             !omitted_iterations
                 .iter()
@@ -465,71 +431,83 @@ fn order_edges(edges: &[crate::OrderEdgeDefinition]) -> Vec<OrderEdge> {
         .collect()
 }
 
-fn describe_loops(
-    parent: &crate::WorkflowDefinition,
+fn string_order(order: &[DefinitionId]) -> Vec<String> {
+    order.iter().map(ToString::to_string).collect()
+}
+
+fn describe_children(
+    parent: &CompiledGraph,
     path: &mut Vec<String>,
-    orders: &mut BTreeMap<Vec<String>, &[String]>,
     bodies: &mut Vec<LoopBodyDescription>,
     include_iterations: bool,
     omitted_iterations: &mut Vec<Vec<String>>,
-    parameter_types: &crate::NodeParameterTypes,
 ) -> Result<(), ContractError> {
-    for node in &parent.nodes {
-        let omit_iteration = !include_iterations && node.kind == crate::ITERATION_KIND;
-        if omit_iteration {
-            let mut body_path = path.clone();
-            body_path.push(node.flow_scope_key("body"));
-            // Validate every declared child and its order before applying the
-            // historical observation projection, even if all orders were deleted.
-            omitted_iterations.push(body_path);
+    ensure!(
+        path.len() <= mf_telemetry::MAX_SCOPE_DEPTH,
+        mf_telemetry::InvalidSnafu {
+            message: "invalid compiled child scope depth"
         }
-        // Translate definition errors only at the observation projection boundary.
-        // Keep the original JSON source rather than stringifying it.
-        let flows = node
-            .declared_flows(parameter_types)
-            .or_else(|error| match error {
-                crate::FlowParameterError::Invalid { message } => {
-                    mf_telemetry::InvalidSnafu { message }.fail()
+    );
+    for owner in parent.children.keys() {
+        ensure!(
+            parent.definition.nodes.iter().any(|node| node.id == *owner),
+            mf_telemetry::InvalidSnafu {
+                message: format!("compiled child names unknown owner `{owner}` at {path:?}")
+            }
+        );
+    }
+    // Walk authored node order and sorted binding names, preserving the stable
+    // observation order without using kinds or config shapes to discover children.
+    for node in &parent.definition.nodes {
+        let Some(children) = parent.children.get(&node.id) else {
+            continue;
+        };
+        for (name, child) in children {
+            ensure!(
+                !name.trim().is_empty(),
+                mf_telemetry::InvalidSnafu {
+                    message: "compiled child binding names must be nonblank",
                 }
-                crate::FlowParameterError::Json { source, .. } => Err(ContractError::from(source)),
-            })?;
-        for (name, body) in flows {
-            path.push(node.flow_scope_key(&name));
-            let order = orders
-                .remove(path)
-                .with_context(|| mf_telemetry::InvalidSnafu {
-                    message: format!(
-                        "missing compiled {} at {path:?}",
-                        if node.flow_scope_key(&name) == node.id.as_str() {
-                            "body execution order"
-                        } else {
-                            "Flow parameter order"
-                        }
-                    ),
-                })?;
+            );
+            let key = node.flow_scope_key(name);
+            ensure!(
+                key == node.id.as_str()
+                    || !parent
+                        .definition
+                        .nodes
+                        .iter()
+                        .any(|other| other.id.as_str() == key),
+                mf_telemetry::InvalidSnafu {
+                    message: "compiled child scope key collides with another node ID"
+                }
+            );
+            path.push(key);
+            // Only an actual builtin body receives historical Iteration projection.
+            // All scopes remain present until the complete graph has been validated.
+            if !include_iterations && node.kind == crate::ITERATION_KIND && name == "body" {
+                omitted_iterations.push(path.clone());
+            }
+            let body = &child.definition;
+            // Each actual child has its own authored version and wire invariants.
+            // Validate those without decoding any configuration field as a graph,
+            // retaining serde's typed source for malformed in-memory definitions.
+            serde_json::to_writer(std::io::sink(), body)?;
+            let order = string_order(&child.execution_order);
             bodies.push(LoopBodyDescription {
                 path: path.clone(),
                 nodes: ordered_nodes(
                     body.nodes
                         .iter()
                         .map(|node| (node.id.as_str(), node.kind.as_str())),
-                    order,
+                    &order,
                 )?,
                 data_edges: data_edges(&body.edges),
                 control_edges: control_edges(&body.control_edges),
                 order_edges: order_edges(&body.order_edges),
-                execution_order: order.to_vec(),
+                execution_order: order,
                 clusters: clusters(&body.clusters),
             });
-            describe_loops(
-                &body,
-                path,
-                orders,
-                bodies,
-                include_iterations,
-                omitted_iterations,
-                parameter_types,
-            )?;
+            describe_children(child, path, bodies, include_iterations, omitted_iterations)?;
             path.pop();
         }
     }

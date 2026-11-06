@@ -5,17 +5,18 @@ use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 fn manifest() -> WorkflowManifest {
     serde_json::from_value(serde_json::json!({
-        "version": "2026-11-04",
-        "parameter_types": {"fixture.source": {}, "fixture.transform": {}},
-        "definition": {
-            "version": "2026-10-03", "dependencies": {},
-            "nodes": [
-                {"id": "source", "kind": "fixture.source"},
-                {"id": "transform", "kind": "fixture.transform"}
-            ],
-            "edges": [{"from_node": "source", "from_output": "value", "to_node": "transform", "to_input": "amount"}]
+        "version": "2026-11-06",
+        "graph": {
+            "definition": {
+                "version": "2026-10-03", "dependencies": {},
+                "nodes": [
+                    {"id": "source", "kind": "fixture.source"},
+                    {"id": "transform", "kind": "fixture.transform"}
+                ],
+                "edges": [{"from_node": "source", "from_output": "value", "to_node": "transform", "to_input": "amount"}]
+            },
+            "execution_order": ["source", "transform"]
         },
-        "execution_order": ["source", "transform"],
         "input_schema": {"inputs": {"source": {"path": {
             "type": "string", "required": true,
             "binding": {"env": "FLOW_PATH", "default": "hidden-default", "secret": true}

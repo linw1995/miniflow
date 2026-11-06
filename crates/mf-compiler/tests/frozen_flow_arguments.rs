@@ -46,7 +46,7 @@ inventory::submit! {
     mf_runtime::NodeRegistration {
         kind: "test.mixed_version_owner",
         factory: mf_runtime::NodeFactory::Subgraph {
-            parameter_types: Config::parameter_types,
+            flow_parameters: Config::flow_parameters,
             plain: plain_owner,
             prepared: prepared_owner,
         },
@@ -100,6 +100,7 @@ fn frozen_arguments_resolve_relative_files_and_survive_without_source_files() {
     );
     let call: CallConfig = serde_json::from_value(argument.nodes[0].config.clone()).unwrap();
     assert_eq!(*call.body.unwrap(), definition(leaf()));
+    let selected_plan = mf_compiler::plan_resolved_workflow(&resolved).unwrap();
     let frozen = serde_json::to_string(&resolved.definition).unwrap();
     directory.close().unwrap();
     let frozen = WorkflowDefinition::from_json(&frozen).unwrap();
@@ -107,7 +108,8 @@ fn frozen_arguments_resolve_relative_files_and_survive_without_source_files() {
     assert_eq!(offline.definition, frozen);
     assert!(offline.sources.is_empty());
     let plan = plan_definition(&frozen).unwrap();
-    assert_eq!(plan_definition(&plan.definition).unwrap(), plan);
+    assert_eq!(plan, selected_plan);
+    assert_eq!(plan_definition(&plan.graph.definition).unwrap(), plan);
 }
 
 #[test]
@@ -131,7 +133,7 @@ fn mixed_version_child_iterations_retain_body_paths_for_static_and_mapped_calls(
         "version": "2026-10-28", "dependencies": {},
         "nodes": [
             {"id": "invoke", "kind": "workflow.call", "config": {"flow": "static", "body": child}},
-            owner(child)
+            owner(child.clone())
         ]
     }));
     let registry = mf_compiler::NodeRegistry::from_inventory().unwrap();
@@ -155,10 +157,9 @@ fn mixed_version_child_iterations_retain_body_paths_for_static_and_mapped_calls(
     };
     assert_iteration_paths(mf_compiler::describe_compiled(&plan).unwrap());
     let replanned =
-        mf_compiler::plan_resolved_definition(&plan.definition, &registry.parameter_types())
-            .unwrap();
+        mf_compiler::plan_resolved_definition(&plan.graph.definition, &registry).unwrap();
     assert_eq!(
-        plan.loop_orders, replanned.loop_orders,
+        plan.graph.children, replanned.graph.children,
         "mixed-version scope orders must remain canonical after preparation"
     );
     assert_iteration_paths(plan.manifest(&registry).unwrap().description().unwrap());
@@ -168,6 +169,44 @@ fn mixed_version_child_iterations_retain_body_paths_for_static_and_mapped_calls(
         let manifest = mf_runtime::WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
         assert_iteration_paths(manifest.description().unwrap());
     }
+    // Historical projection omits this Iteration body, but its actual compiled
+    // graph must still identify the run independently of the duplicate raw JSON.
+    let mut legacy = definition(child);
+    legacy.version = mf_compiler::WorkflowDefinitionVersion::V2026_09_26;
+    let mut legacy = mf_compiler::compile_definition(&legacy, &registry).unwrap();
+    let original = legacy.graph.definition.clone();
+    let mut identities = Vec::new();
+    for value in [7, 8] {
+        legacy
+            .graph
+            .children
+            .get_mut(&"iteration".into())
+            .unwrap()
+            .get_mut("body")
+            .unwrap()
+            .definition
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "value")
+            .unwrap()
+            .config["value"] = json!(value);
+        assert_eq!(legacy.graph.definition, original);
+        assert!(
+            mf_compiler::describe_compiled(&legacy)
+                .unwrap()
+                .loop_bodies
+                .is_empty()
+        );
+        let expected = legacy.graph.workflow_id().unwrap();
+        let harness = capture::Harness::new(true);
+        let observation = legacy
+            .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
+            .unwrap();
+        assert!(!observation.supports_loops());
+        assert_eq!(harness.records()[0].decode().unwrap().workflow_id, expected);
+        identities.push(expected);
+    }
+    assert_ne!(identities[0], identities[1]);
 }
 
 #[test]
@@ -198,7 +237,7 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
         }));
         let plan = mf_compiler::compile_definition(&root, &registry).unwrap();
         assert_eq!(
-            plan.definition.version,
+            plan.graph.definition.version,
             mf_compiler::WorkflowDefinitionVersion::V2026_09_26
         );
         let graph = mf_compiler::describe_compiled(&plan).unwrap();
@@ -222,7 +261,7 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
             assert_eq!(body.clusters[0].nodes, ["before", "value"]);
         }
         let manifest = plan.manifest(&registry).unwrap();
-        assert_eq!(manifest.definition.version, root.version);
+        assert_eq!(manifest.graph.definition.version, root.version);
         assert_eq!(manifest.description().unwrap(), graph);
         let harness = capture::Harness::new(true);
         let observation = plan
@@ -247,7 +286,7 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
             let generated = plan.generate_execution_plans(&registry).unwrap();
             let embedded =
                 mf_runtime::WorkflowManifest::from_bytes(&generated.manifest_bytes).unwrap();
-            assert_eq!(embedded.definition.version, root.version);
+            assert_eq!(embedded.graph.definition.version, root.version);
             assert_eq!(embedded.description().unwrap(), graph);
         }
     }
@@ -289,16 +328,23 @@ fn frozen_argument_normalization_canonicalizes_every_body() {
         "version": "2026-10-28", "dependencies": {}, "nodes": [owner(argument)]
     }));
     let plan = plan_definition(&authored).unwrap();
-    let parameters = plan.definition.nodes[0]
-        .flow_parameters(&["local"])
-        .unwrap();
-    let body = &parameters["local"];
+    let child = &plan.graph.children[&mf_compiler::DefinitionId::from("custom")]["local"];
     assert_eq!(
-        body.nodes
+        child
+            .execution_order
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "z"]
+    );
+    assert_eq!(
+        child
+            .definition
+            .nodes
             .iter()
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>(),
         ["a", "z"]
     );
-    assert_eq!(plan_definition(&plan.definition).unwrap(), plan);
+    assert_eq!(plan_definition(&plan.graph.definition).unwrap(), plan);
 }

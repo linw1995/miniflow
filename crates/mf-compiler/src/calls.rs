@@ -1,5 +1,5 @@
 use crate::{NodeDefinition, WorkflowCompileError, WorkflowDefinition};
-use mf_runtime::CallConfig;
+use mf_runtime::{CallConfig, CompiledGraph};
 use snafu::{ResultExt, ensure};
 use std::collections::BTreeMap;
 
@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 pub fn validate_owner(
     parent: &WorkflowDefinition,
     node: &NodeDefinition,
+    body: Option<&WorkflowDefinition>,
 ) -> Result<(), WorkflowCompileError> {
+    let policy_node = node_with_actual_body(node, body)?;
+    let node = &policy_node;
     if node.kind == mf_runtime::LOOP_KIND {
         crate::loops::validate_boundary(parent, node)?;
     } else if node.kind == mf_runtime::ITERATION_KIND {
@@ -18,24 +21,67 @@ pub fn validate_owner(
             },
         )?;
     } else if node.kind == mf_runtime::CALL_KIND {
-        // Preserve the authored Call configuration / unresolved-reference errors.
         validate_call(node)?;
     }
     Ok(())
 }
 
-/// Registry-free traversal uses frozen receiver declarations, never JSON keys or
-/// order paths. Order facts remain independently validated execution prerequisites.
-pub fn compiled_node_flows(
-    parent: &WorkflowDefinition,
+/// Built-in decoders may inspect business fields only after the stored body
+/// binding is confirmed. Replace their authoring-only body value with that actual
+/// child for decoding; this is never a child-discovery path.
+pub fn node_with_actual_body(
     node: &NodeDefinition,
-    declarations: &mf_runtime::NodeParameterTypes,
-) -> Result<BTreeMap<String, WorkflowDefinition>, WorkflowCompileError> {
-    validate_owner(parent, node)?;
-    node.declared_flows(declarations)
-        .context(crate::compiler::FlowParametersSnafu {
-            definition_id: node.id.clone(),
-        })
+    body: Option<&WorkflowDefinition>,
+) -> Result<NodeDefinition, WorkflowCompileError> {
+    let mut node = node.clone();
+    if matches!(
+        node.kind.as_str(),
+        mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND | mf_runtime::CALL_KIND
+    ) {
+        let Some(body) = body else {
+            // Decode the owner's ordinary configuration for its typed diagnostic,
+            // but never use a raw body when no actual binding was supplied.
+            if let Some(config) = node.config.as_object_mut() {
+                config.remove("body");
+            }
+            match node.kind.as_str() {
+                mf_runtime::LOOP_KIND => {
+                    crate::loops::parse_config(&node)?;
+                }
+                mf_runtime::ITERATION_KIND => {
+                    crate::iteration::parse_config(&node)?;
+                }
+                mf_runtime::CALL_KIND => {
+                    validate_call(&node)?;
+                }
+                _ => unreachable!("known built-in container"),
+            }
+            return crate::compiler::InvalidCallSnafu {
+                definition_id: node.id.clone(),
+                message: "built-in container requires its compiled body binding",
+            }
+            .fail();
+        };
+        node.set_node_flow("body", body.clone())
+            .context(crate::compiler::FlowParametersSnafu {
+                definition_id: node.id.clone(),
+            })?;
+    }
+    Ok(node)
+}
+
+/// The persisted child tree is the only authority for executable scopes.
+pub fn compiled_node_flows<'a>(
+    parent: &'a CompiledGraph,
+    node: &NodeDefinition,
+) -> Result<BTreeMap<String, &'a CompiledGraph>, WorkflowCompileError> {
+    Ok(parent
+        .children
+        .get(&node.id)
+        .into_iter()
+        .flatten()
+        .map(|(name, graph)| (name.clone(), graph))
+        .collect())
 }
 
 /// Ordinary Flow arguments and Calls bind startup inputs and project selected
@@ -66,25 +112,34 @@ pub fn child_result<T>(
 
 pub fn validate_child(
     node: &NodeDefinition,
-    body: &WorkflowDefinition,
+    body: &CompiledGraph,
     inside_iteration: bool,
-    contracts: &mf_runtime::NodeParameterTypes,
 ) -> Result<(), WorkflowCompileError> {
-    crate::validate_execution(body).context(crate::compiler::StreamConstructionSnafu)?;
+    crate::validate_execution(&body.definition)
+        .context(crate::compiler::StreamConstructionSnafu)?;
     if call_like(node) {
-        ensure!(
-            !inside_iteration || !contains_iteration_containers(body, contracts)?,
-            crate::compiler::InvalidCallSnafu {
-                definition_id: node.id.clone(),
-                message: if node.kind == mf_runtime::CALL_KIND {
-                    "calls inside Iteration cannot contain Loop or Iteration constructs"
-                } else {
-                    "Flow parameter calls inside Iteration cannot contain Loop or Iteration constructs"
-                }
-            }
-        );
-        crate::loops::validate_structure(body)?;
+        validate_iteration_child(node, inside_iteration, contains_iteration_containers(body))?;
+        crate::loops::validate_structure(&crate::compiler::project_graph_definition(body)?)?;
     }
+    Ok(())
+}
+
+pub fn validate_iteration_child(
+    node: &NodeDefinition,
+    inside_iteration: bool,
+    contains_containers: bool,
+) -> Result<(), WorkflowCompileError> {
+    ensure!(
+        !call_like(node) || !inside_iteration || !contains_containers,
+        crate::compiler::InvalidCallSnafu {
+            definition_id: node.id.clone(),
+            message: if node.kind == mf_runtime::CALL_KIND {
+                "calls inside Iteration cannot contain Loop or Iteration constructs"
+            } else {
+                "Flow parameter calls inside Iteration cannot contain Loop or Iteration constructs"
+            }
+        }
+    );
     Ok(())
 }
 
@@ -104,35 +159,15 @@ fn validate_call(node: &NodeDefinition) -> Result<(), WorkflowCompileError> {
     Ok(())
 }
 
-pub fn contains_iteration_containers(
-    definition: &WorkflowDefinition,
-    contracts: &mf_runtime::NodeParameterTypes,
-) -> Result<bool, WorkflowCompileError> {
-    for node in &definition.nodes {
-        if matches!(
+pub fn contains_iteration_containers(graph: &CompiledGraph) -> bool {
+    graph.definition.nodes.iter().any(|node| {
+        matches!(
             node.kind.as_str(),
             mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND
-        ) {
-            return Ok(true);
-        }
-        let parameters = contracts
-            .get(&node.kind)
-            .into_iter()
-            .flat_map(|parameters| parameters.iter())
-            .filter(|(_, value_type)| value_type.is_flow())
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>();
-        for body in node
-            .flow_parameters(&parameters)
-            .context(crate::compiler::FlowParametersSnafu {
-                definition_id: node.id.clone(),
-            })?
-            .values()
-        {
-            if contains_iteration_containers(body, contracts)? {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+        )
+    }) || graph
+        .children
+        .values()
+        .flat_map(BTreeMap::values)
+        .any(contains_iteration_containers)
 }

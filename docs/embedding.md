@@ -60,7 +60,7 @@ Each workflow emits one file, `OUT_DIR/mf-embedded/<name>/workflow.rs`, containi
 only the package-relative entry and UTF-8 resources, never a partial `ResolvedWorkflow` or selected
 node contracts. The helper neither loads provider metadata nor constructs nodes or starts a nested
 Cargo build. Generated `plan(registry)` resolves that bundle with the host registry and passes the
-result to `plan_resolved_definition`. Configured node contracts and ports are validated during
+result to `plan_resolved_workflow`. Configured node contracts and ports are validated during
 preparation, not by Rust type checking.
 
 The helper emits `cargo:rerun-if-changed` for the root and every explicitly supplied source. Retain
@@ -130,25 +130,31 @@ to stop a running instance. Generated modules do not claim global stdio or initi
 ## Plans, manifests, and observation
 
 Every module exposes `plan(&NodeRegistry) -> Result<CompiledWorkflow, PlanError>`. It resolves the
-`FlowSourceBundle` into a host `ResolvedWorkflow`, then calls `plan_resolved_definition` once. Declared
+`FlowSourceBundle` into a host `ResolvedWorkflow`, then calls `plan_resolved_workflow` once. Declared
 child Flows come from packed resources and the host's built-in catalog before structural planning.
 The selected receiving registrations determine which configuration fields are executable children;
 ordinary provider data is not interpreted as a Flow source. Planning uses registration metadata without
 constructing nodes and supports existing description and observation APIs.
 
-The plan freezes unified configuration parameter types for reachable node kinds. `NodeConfig`
-derives this metadata for every field: ordinary data remains opaque `Value`, while executable fields
-are `Flow` or `Optional(Flow)`. Missing optional values retain their types, and plain factories have
-explicit empty metadata. There is no separate Flow-name constant or declaration list.
+The plan stores an explicit `CompiledGraph`: a definition, its canonical `execution_order`, and a
+`children` map keyed by receiving node ID and configuration field name. `NodeConfig::flow_parameters`
+extracts executable child values from configuration during source resolution; ordinary JSON remains
+opaque, and absent optional children produce no graph entry. The resolved tree is handed directly to
+`plan_resolved_workflow`, so planning retains the selected receiver's child decisions.
+For an already resolved inline definition, `plan_resolved_definition(&definition, &registry)` is an
+authoring convenience that selects children using that registry. Do not use it to replan saved artifacts.
+Registered plain factories extract no children; an unavailable registration is not a registered plain kind.
 
-Offline descriptions and generated code select executable fields by scanning these frozen types;
-configuration keys and scope-order paths never establish field roles. Scope orders remain separate
-execution prerequisites. Saved-plan and generated preparation validate the complete receiver type
-metadata before constructing providers, not merely the set of present children.
+Offline descriptions, generated code, and saved-plan preparation traverse this explicit child graph.
+They never rediscover children by inspecting configuration keys or order paths. Preparation checks
+provider availability and actual compiled-child binding keys at the receiving boundary. Required,
+default, and ordinary-field validation remains the receiver decoder's responsibility; complete
+configuration schemas are neither persisted nor compared.
 
-Manifest payload version `2026-11-04` requires the frozen parameter types; framing remains version 1.
-Older payloads and saved plans without types are rejected rather than inferred from JSON or
-order paths. This is an explicit format change, not a legacy-format adapter.
+Manifest payload version `2026-11-06` contains `version`, `graph`, and prepared `input_schema`;
+saved plans contain a required `graph` wrapper. Neither format stores `parameter_types` or
+`loop_orders`. Framing remains version 1. Older payloads and saved-plan formats are rejected rather
+than inferred or adapted.
 
 `manifest(&registry) -> Result<WorkflowManifest, PlanError>` derives the current configured interface
 from the host registry. Inspection prepares separate nodes without executing them. There is no

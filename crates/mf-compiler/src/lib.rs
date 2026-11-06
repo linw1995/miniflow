@@ -59,8 +59,8 @@ pub use compiler::{
     compile_definition, compile_resolved_definition, describe_compiled, describe_interface,
     describe_workflow_inputs, execute_compiled, execute_compiled_with_inputs, instantiate_compiled,
     instantiate_compiled_with_observation, plan_definition, plan_resolved_definition,
-    prepare_definition, resolve_execution, resolve_nodes, structural_order, topological_order,
-    validate_definition,
+    plan_resolved_workflow, prepare_compiled_graph_with_layouts, prepare_definition,
+    resolve_execution, resolve_nodes, structural_order, topological_order, validate_definition,
 };
 #[cfg(feature = "codegen")]
 pub use dependency_project::{
@@ -108,12 +108,12 @@ pub use construction::{
     FlowBuildError, FlowBuilder, InvalidDefinitionSnafu as WorkflowInvalidDefinitionSnafu,
     InvalidEmbeddedConfigSnafu as WorkflowInvalidEmbeddedConfigSnafu,
     MetadataSnafu as WorkflowMetadataSnafu, NodeConstructionSnafu as WorkflowNodeConstructionSnafu,
-    ParameterTypeError, StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
+    StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
     UnknownKindSnafu as WorkflowUnknownKindSnafu, WorkflowBuildError, bind_workflow_inputs,
     build_flow, build_stream_program, instantiate_node_with_metadata,
     instantiate_subgraphs_with_metadata, into_task, partition_execution_domains, prepare_stream,
     prepared_loop_assign_from_json, prepared_loop_source_from_json, stream_workflow_inputs,
-    validate_execution, validate_node_flow_parameters, validate_parameter_types,
+    validate_compiled_graph, validate_execution, validate_node_flow_parameters,
     validate_stream_limits, validate_success_connection, workflow_input_schema,
 };
 pub use mf_runtime::{

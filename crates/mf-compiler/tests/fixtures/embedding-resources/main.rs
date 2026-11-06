@@ -76,7 +76,7 @@ inventory::submit! {
     runtime::NodeRegistration {
         kind: "host.invoke",
         factory: runtime::NodeFactory::Subgraph {
-            parameter_types: Config::parameter_types,
+            flow_parameters: Config::flow_parameters,
             plain,
             prepared: factory,
         },
@@ -120,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let plan = answer::plan(&registry)?;
-    assert_eq!(plan.definition.nodes[0].kind, "host.invoke");
+    assert_eq!(plan.graph.definition.nodes[0].kind, "host.invoke");
     let _ = repeat::plan(&registry)?;
     let _ = iteration::plan(&registry)?;
     assert_eq!(FACTORIES.load(Ordering::SeqCst), 0);

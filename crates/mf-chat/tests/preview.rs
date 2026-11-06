@@ -269,7 +269,13 @@ fn embedded_call_without_a_subscription_joins_with_its_terminal_result() {
 fn embedded_call_drains_public_streams_without_an_answer_export() {
     let original = embedded_profile();
     let backend = original.backend();
-    let mut definition = backend.embedded_workflow().unwrap().0.definition.clone();
+    let mut definition = backend
+        .embedded_workflow()
+        .unwrap()
+        .0
+        .graph
+        .definition
+        .clone();
     definition
         .outputs
         .iter_mut()

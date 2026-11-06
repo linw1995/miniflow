@@ -1,6 +1,6 @@
 use mf_runtime::{
-    CallConfig, ConfigParameterType, ConfigParameterTypes, IterationConfig, LoopDefinition,
-    NodeDefinition, NodeFactory, NodeRegistration, WorkflowDefinition, WorkflowDefinitionVersion,
+    CallConfig, CompiledGraph, IterationConfig, LoopDefinition, NodeDefinition, NodeFactory,
+    NodeRegistration, WorkflowDefinition, WorkflowDefinitionVersion,
 };
 use serde_json::{Value, json};
 use std::error::Error;
@@ -43,34 +43,29 @@ fn parameter(node: &NodeDefinition) -> &'static str {
     }
 }
 
-fn parameter_types(kind: &str) -> ConfigParameterTypes {
-    use ConfigParameterType::{Flow, Optional, Value};
-    match kind {
-        "workflow.call" => [
-            ("body".into(), Optional(Box::new(Flow))),
-            ("flow".into(), Value),
-        ]
-        .into(),
-        "workflow.loop" => [
-            ("body".into(), Flow),
-            ("max_iterations".into(), Value),
-            ("variables".into(), Value),
-        ]
-        .into(),
-        "builtin.iteration" => [
-            ("body".into(), Flow),
-            ("mode".into(), Value),
-            ("on_error".into(), Value),
-        ]
-        .into(),
-        "user.dispatch" => [
-            ("selected".into(), Flow),
-            ("option".into(), Value),
-            ("nested".into(), Value),
-        ]
-        .into(),
-        "%loop" | "builtin.iteration_input" => Default::default(),
-        _ => panic!("unknown fixture kind: {kind}"),
+fn extract(config: &Value, name: &str) -> std::collections::BTreeMap<String, Value> {
+    config
+        .get(name)
+        .filter(|value| !value.is_null())
+        .map(|value| (name.into(), value.clone()))
+        .into_iter()
+        .collect()
+}
+
+fn receiver(node: &NodeDefinition) -> NodeRegistration {
+    NodeRegistration {
+        kind: "test.child",
+        factory: NodeFactory::Subgraph {
+            flow_parameters: match node.kind.as_str() {
+                "workflow.call" | "workflow.loop" | "builtin.iteration" => {
+                    |config| extract(config, "body")
+                }
+                "user.dispatch" => |config| extract(config, "selected"),
+                kind => panic!("unknown fixture kind: {kind}"),
+            },
+            plain: |_| panic!("no providers needed"),
+            prepared: |_, _, _| panic!("no providers needed"),
+        },
     }
 }
 
@@ -88,8 +83,7 @@ fn all_child_kinds_use_declared_fields_without_inheriting_parent_schema_or_depen
         assert!(node.flow_parameters(&[]).unwrap().is_empty());
         let flows = node.flow_parameters(&[name]).unwrap();
         assert_eq!(
-            node.declared_flows(&[(node.kind.clone(), parameter_types(&node.kind))].into())
-                .unwrap(),
+            receiver(&node).validate_flow_parameters(&node).unwrap(),
             flows
         );
         assert_eq!(flows.len(), 1);
@@ -107,22 +101,10 @@ fn all_child_kinds_use_declared_fields_without_inheriting_parent_schema_or_depen
             );
         }
         assert_ne!(node.flow_scope_key("other"), node.id.to_string());
-        NodeRegistration {
-            kind: "test.child",
-            factory: NodeFactory::Subgraph {
-                parameter_types: match node.kind.as_str() {
-                    "workflow.call" => || parameter_types("workflow.call"),
-                    "workflow.loop" => || parameter_types("workflow.loop"),
-                    "builtin.iteration" => || parameter_types("builtin.iteration"),
-                    "user.dispatch" => || parameter_types("user.dispatch"),
-                    _ => unreachable!(),
-                },
-                plain: |_| panic!("no providers needed"),
-                prepared: |_, _, _| panic!("no providers needed"),
-            },
-        }
-        .validate_flow_parameters(&node)
-        .unwrap();
+        assert_eq!(
+            receiver(&node).flow_parameters(&node.config),
+            [(name.into(), node.config[name].clone())].into()
+        );
     }
 }
 
@@ -179,33 +161,34 @@ fn manifest_projects_explicit_compiled_sources_with_complete_child_orders() {
     let order = parent
         .nodes
         .iter()
-        .map(|node| node.id.to_string())
+        .map(|node| node.id.clone())
         .collect::<Vec<_>>();
-    let child_orders = parent
+    let children = parent
         .nodes
         .iter()
         .map(|node| {
-            let name = parameter(node);
-            let body = node.flow_parameters(&[name]).unwrap().remove(name).unwrap();
-            mf_runtime::LoopExecutionOrder {
-                path: vec![node.flow_scope_key(name)],
-                execution_order: body.nodes.iter().map(|node| node.id.to_string()).collect(),
-            }
+            let bodies = receiver(node)
+                .validate_flow_parameters(node)
+                .unwrap()
+                .into_iter()
+                .map(|(name, body)| {
+                    let graph = CompiledGraph {
+                        execution_order: body.nodes.iter().map(|node| node.id.clone()).collect(),
+                        definition: body,
+                        children: Default::default(),
+                    };
+                    (name, graph)
+                })
+                .collect();
+            (node.id.clone(), bodies)
         })
-        .collect::<Vec<_>>();
-    let declarations = [
-        "workflow.call",
-        "workflow.loop",
-        "builtin.iteration",
-        "user.dispatch",
-        "%loop",
-        "builtin.iteration_input",
-    ]
-    .into_iter()
-    .map(|kind| (kind.into(), parameter_types(kind)))
-    .collect();
-    let description =
-        mf_runtime::describe_definition(&parent, &order, &child_orders, &declarations).unwrap();
+        .collect();
+    let graph = CompiledGraph {
+        definition: parent,
+        execution_order: order,
+        children,
+    };
+    let description = mf_runtime::describe_graph(&graph).unwrap();
     assert_eq!(description.loop_bodies.len(), 4);
     for child in &description.loop_bodies {
         match child.path[0].as_str() {
@@ -233,11 +216,10 @@ fn missing_and_null_fields_are_optional_and_unresolved_calls_are_not_special_cas
         .unwrap();
         assert!(node.flow_parameters(&["body"]).unwrap().is_empty());
         assert!(
-            node.declared_flows(
-                &[("workflow.call".into(), parameter_types("workflow.call"))].into()
-            )
-            .unwrap()
-            .is_empty()
+            receiver(&node)
+                .validate_flow_parameters(&node)
+                .unwrap()
+                .is_empty()
         );
     }
 }

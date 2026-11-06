@@ -4679,11 +4679,12 @@ mod tests {
             stdin.insert("source/id".into(), serde_json::json!(resource));
         }
         let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_11_04,
-            parameter_types: [("third-party.dynamic_source".into(), Default::default())].into(),
-            definition: serde_json::from_value(definition).unwrap(),
-            execution_order: vec!["source/id".into()],
-            loop_orders: vec![],
+            version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
+            graph: mf_runtime::CompiledGraph {
+                definition: serde_json::from_value(definition).unwrap(),
+                execution_order: vec!["source/id".into()],
+                children: Default::default(),
+            },
             input_schema: serde_json::from_value(serde_json::json!({
                 "inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin
             }))

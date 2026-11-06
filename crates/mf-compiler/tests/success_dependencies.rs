@@ -674,7 +674,7 @@ fn success_edges_change_identity_even_when_execution_order_is_unchanged() {
     let id = with.manifest(&registry).unwrap().workflow_id().unwrap();
     graph.order_edges.clear();
     let without = compile_definition(&graph, &registry).unwrap();
-    assert_eq!(with.execution_order, without.execution_order);
+    assert_eq!(with.graph.execution_order, without.graph.execution_order);
     let manifest = without.manifest(&registry).unwrap();
     assert_ne!(id, manifest.workflow_id().unwrap());
     assert_eq!(

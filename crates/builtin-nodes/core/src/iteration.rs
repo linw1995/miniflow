@@ -61,7 +61,7 @@ inventory::submit! {
     NodeRegistration {
         kind: KIND,
         factory: mf_runtime::NodeFactory::Subgraph {
-            parameter_types: Config::parameter_types,
+            flow_parameters: Config::flow_parameters,
             plain,
             prepared: factory,
         },
@@ -550,18 +550,18 @@ mod tests {
     #[test]
     fn registers_iteration_and_checks_its_configuration_shape() {
         let registration = NodeRegistry::from_inventory().unwrap().get(KIND).unwrap();
+        let config = json!({
+            "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]},
+            "mode": {"nodes": []}, "on_error": {"nodes": []},
+            "stream_outputs": {"nodes": []},
+        });
         assert_eq!(
-            registration.parameter_types(),
-            BTreeMap::from([
-                ("body".into(), mf_runtime::ConfigParameterType::Flow),
-                ("mode".into(), mf_runtime::ConfigParameterType::Value),
-                ("on_error".into(), mf_runtime::ConfigParameterType::Value),
-                (
-                    "stream_outputs".into(),
-                    mf_runtime::ConfigParameterType::Value
-                ),
-            ])
+            registration.flow_parameters(&config),
+            BTreeMap::from([("body".into(), config["body"].clone())])
         );
+        for config in [json!({}), json!({"body": null})] {
+            assert!(registration.flow_parameters(&config).is_empty());
+        }
         assert!(registration.instantiate(json!({})).is_err());
         let node = registration
             .instantiate_subgraphs(

@@ -107,6 +107,7 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
         ),
     ] {
         let node = normalized
+            .graph
             .definition
             .nodes
             .iter()
@@ -123,9 +124,10 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
         assert_eq!(sources[0].kind, kind);
         assert_eq!(sources[0].config, json!({}));
     }
-    let round_trip =
-        WorkflowDefinition::from_json(&serde_json::to_string(&normalized.definition).unwrap())
-            .unwrap();
+    let round_trip = WorkflowDefinition::from_json(
+        &serde_json::to_string(&normalized.graph.definition).unwrap(),
+    )
+    .unwrap();
     assert_eq!(plan_definition(&round_trip).unwrap(), normalized);
 }
 
@@ -312,9 +314,7 @@ fn executable_body_clusters_are_preserved_in_descriptions() {
         legacy.nodes[0].config["body"]["version"] = json!("2026-10-19");
         let error = mf_compiler::plan_resolved_definition(
             &legacy,
-            &mf_compiler::NodeRegistry::from_inventory()
-                .unwrap()
-                .parameter_types(),
+            &mf_compiler::NodeRegistry::from_inventory().unwrap(),
         )
         .unwrap_err()
         .to_string();

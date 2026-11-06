@@ -64,7 +64,8 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
             .iter()
             .map(|target| target.id.as_str())
             .collect::<Vec<_>>(),
-        plan.execution_order
+        plan.graph
+            .execution_order
             .iter()
             .map(|id| id.as_str())
             .collect::<Vec<_>>()
@@ -149,6 +150,7 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
 
     let mut unavailable = plan.clone();
     unavailable
+        .graph
         .definition
         .nodes
         .iter_mut()
@@ -170,7 +172,7 @@ fn public_target_preparation_rejects_incomplete_or_unresolved_metadata() {
     let _guard = PREPARATION_LOCK.lock().unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition(), &registry).unwrap();
-    let mut nodes = mf_compiler::resolve_nodes(&plan.definition, &registry).unwrap();
+    let mut nodes = mf_compiler::resolve_nodes(&plan.graph.definition, &registry).unwrap();
     assert!(matches!(
         plan.node_targets(&nodes[..1]),
         Err(mf_compiler::PlanError::InvalidExecutionOrder)

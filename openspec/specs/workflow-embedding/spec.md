@@ -15,7 +15,7 @@ source files into a `FlowSourceBundle`, emitting Cargo input tracking and named 
 interpreting provider configuration, executing node constructors, business operations, or a nested
 Cargo build. The build-product bundle SHALL contain only its entry and resources, not a partial
 `ResolvedWorkflow` or selected contracts. Generated `plan(registry)` SHALL resolve that bundle into a
-host `ResolvedWorkflow` and pass it to `plan_resolved_definition`. Declared child resolution and complete
+host `ResolvedWorkflow` and pass it to `plan_resolved_workflow`. Declared child resolution and complete
 structural planning SHALL occur in the host with its selected registry.
 
 #### Scenario: Build without node build dependencies
@@ -102,12 +102,18 @@ the supplied registry, resolve sources from the packed resources and host builti
 and reuse shared compiler normalization without constructing nodes. Ordinary configuration SHALL remain
 opaque. Inspection SHALL prepare metadata without executing business operations. Embedding SHALL NOT
 freeze a build-time startup schema or emit executable manifest sections. Compiled plans and manifest
-payload version `2026-11-04` SHALL retain unified selected configuration parameter types for each
-reachable kind, including absent optional fields and empty plain-kind metadata. Flow parameters SHALL
-be selected by their types, without a separate Flow-name list. Offline traversal SHALL NOT infer roles
-from configuration keys or order paths. Saved-plan and generated preparation SHALL reject complete
-parameter-type drift before factories. Older payloads and saved plans missing these types SHALL be
-rejected without inference or adaptation.
+payload version `2026-11-06` SHALL retain an explicit `graph` containing its definition, canonical
+execution order, and recursively compiled children keyed by receiving node ID and field name.
+Receiver callbacks SHALL select child values during source resolution; ordinary JSON SHALL remain
+opaque and absent optional children SHALL have no graph entry. `ResolvedWorkflow` SHALL preserve the
+actual selected child tree for `plan_resolved_workflow`. Offline traversal SHALL use graph children,
+not infer roles from configuration keys or order paths. Saved-plan and generated preparation SHALL
+validate provider availability and actual compiled-child binding keys at the receiving boundary;
+required/default and ordinary-field validation SHALL remain receiver-decoder responsibilities.
+Neither saved plans nor manifests SHALL persist parameter-type schemas or separate loop orders.
+Manifests SHALL contain `version`, `graph`, and prepared `input_schema`; saved plans SHALL require the
+`graph` wrapper. Older formats SHALL be rejected without inference or adaptation; framing SHALL
+remain version 1.
 
 #### Scenario: Use current node metadata
 

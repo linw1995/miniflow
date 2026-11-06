@@ -190,37 +190,15 @@ pub struct NodeDefinition {
     pub config: Value,
 }
 
-/// Reflected configuration parameter type; ordinary provider data remains opaque.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigParameterType {
-    Value,
-    Flow,
-    Optional(Box<ConfigParameterType>),
-}
-
-impl ConfigParameterType {
-    pub fn is_flow(&self) -> bool {
-        match self {
-            Self::Flow => true,
-            Self::Optional(inner) => inner.is_flow(),
-            Self::Value => false,
-        }
-    }
-}
-
-/// Configuration wire field names and their reflected types.
-pub type ConfigParameterTypes = BTreeMap<String, ConfigParameterType>;
-
-/// Frozen configuration parameter types by node kind, including empty plain entries.
-pub type NodeParameterTypes = BTreeMap<String, ConfigParameterTypes>;
-
 /// Errors reading or replacing declared executable configuration fields.
 #[derive(Debug, Snafu)]
 pub enum FlowParameterError {
-    #[snafu(display("invalid Flow parameters: {message}"))]
+    #[snafu(display("invalid Flow parameters: {message}"), visibility(pub(super)))]
     Invalid { message: &'static str },
-    #[snafu(display("invalid Flow parameter `{parameter}`: {source}"))]
+    #[snafu(
+        display("invalid Flow parameter `{parameter}`: {source}"),
+        visibility(pub(super))
+    )]
     Json {
         parameter: String,
         source: serde_json::Error,
@@ -240,26 +218,6 @@ impl NodeDefinition {
         } else {
             mf_telemetry::event::ScopePathEntry::binding_key(self.id.as_str(), name)
         }
-    }
-
-    /// Reads executable fields exclusively from frozen parameter type metadata.
-    /// Missing kind metadata is invalid, even for ordinary provider nodes.
-    pub fn declared_flows(
-        &self,
-        parameter_types: &NodeParameterTypes,
-    ) -> Result<BTreeMap<String, WorkflowDefinition>, FlowParameterError> {
-        let parameters = parameter_types.get(&self.kind).ok_or_else(|| {
-            InvalidSnafu {
-                message: "missing parameter types for node kind",
-            }
-            .build()
-        })?;
-        let names = parameters
-            .iter()
-            .filter(|(_, parameter_type)| parameter_type.is_flow())
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>();
-        self.flow_parameters(&names)
     }
 
     /// Writes a normalized child into its declared configuration field.

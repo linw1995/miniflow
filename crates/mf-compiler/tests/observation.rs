@@ -246,9 +246,9 @@ fn failures_report_real_phases_and_never_publish_a_success_first() {
 #[test]
 fn output_selection_failure_preserves_prior_node_outcomes() {
     let mut plan = plan(success_config());
-    plan.definition.outputs[0].node = "a".into();
-    plan.definition.outputs[0].port = "inactive".into();
-    plan.definition.outputs[0].optional = false;
+    plan.graph.definition.outputs[0].node = "a".into();
+    plan.graph.definition.outputs[0].port = "inactive".into();
+    plan.graph.definition.outputs[0].optional = false;
     let (result, harness) = run(&plan, true);
     assert!(result.is_err());
     let records = harness.records();
@@ -266,7 +266,8 @@ fn output_selection_failure_preserves_prior_node_outcomes() {
 #[test]
 fn missing_dependency_takes_precedence_over_a_skip_without_invocation() {
     let mut plan = plan(json!({"ports":["value","inactive"],"skipped":["inactive"]}));
-    plan.definition
+    plan.graph
+        .definition
         .control_edges
         .push(mf_compiler::ControlEdgeDefinition {
             from_node: "a".into(),
@@ -533,7 +534,7 @@ fn preparation_errors_without_a_node_still_close_the_run() {
     let observer = harness.observer();
     let mut plan = plan(success_config());
     let observation = plan.start_observation(&observer, RunId::new()).unwrap();
-    plan.execution_order.reverse();
+    plan.graph.execution_order.reverse();
     assert!(
         execute_compiled(
             &plan,
@@ -562,12 +563,16 @@ fn observation_setup_rejects_bad_identity_metadata_before_emitting_a_run() {
         let mut plan = original.clone();
         match mode {
             "incomplete" => {
-                plan.execution_order.pop();
+                plan.graph.execution_order.pop();
             }
-            "unknown" => plan.execution_order[0] = "missing".into(),
-            "duplicate_order" => plan.execution_order[1] = plan.execution_order[0].clone(),
-            "duplicate_node" => plan.definition.nodes[1].id = plan.definition.nodes[0].id.clone(),
-            _ => plan.definition.nodes[0].kind.clear(),
+            "unknown" => plan.graph.execution_order[0] = "missing".into(),
+            "duplicate_order" => {
+                plan.graph.execution_order[1] = plan.graph.execution_order[0].clone()
+            }
+            "duplicate_node" => {
+                plan.graph.definition.nodes[1].id = plan.graph.definition.nodes[0].id.clone()
+            }
+            _ => plan.graph.definition.nodes[0].kind.clear(),
         }
         assert!(
             plan.start_observation(&harness.observer(), RunId::new())
@@ -643,11 +648,11 @@ fn generated_execution_matches_memory_for_success_and_failures() {
         (success_config(), true),
     ] {
         let mut plan = plan(config);
-        plan.definition.dependencies = common::fixture_definition().dependencies;
+        plan.graph.definition.dependencies = common::fixture_definition().dependencies;
         if output_failure {
-            plan.definition.outputs[0].node = "a".into();
-            plan.definition.outputs[0].port = "inactive".into();
-            plan.definition.outputs[0].optional = false;
+            plan.graph.definition.outputs[0].node = "a".into();
+            plan.graph.definition.outputs[0].port = "inactive".into();
+            plan.graph.definition.outputs[0].optional = false;
         }
         let (memory, harness) = run(&plan, true);
         mf_compiler::write_dependency_project(

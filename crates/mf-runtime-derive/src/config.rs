@@ -78,7 +78,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut ordinary_idents = Vec::new();
     let mut flow_initializers = Vec::new();
     let mut flow_idents = Vec::new();
-    let mut parameters = Vec::new();
+    let mut flow_extractions = Vec::new();
     let mut flow_names = BTreeMap::new();
     let mut ordinary_names = BTreeSet::new();
     let mut ordinary_wire_names = BTreeSet::new();
@@ -143,7 +143,6 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 ));
             }
             ordinary_names.insert(wire.value());
-            parameters.push((wire, quote!(#runtime::ConfigParameterType::Value)));
             continue;
         };
         let ident = field.ident.clone().expect("named field");
@@ -207,14 +206,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         };
         flow_initializers.push(quote!(let #ident = #value;));
         flow_idents.push(ident);
-        let parameter_type = if optional {
-            quote!(#runtime::ConfigParameterType::Optional(::std::boxed::Box::new(
-                #runtime::ConfigParameterType::Flow
-            )))
-        } else {
-            quote!(#runtime::ConfigParameterType::Flow)
-        };
-        parameters.push((wire, parameter_type));
+        flow_extractions.push(quote! {
+            if let ::core::option::Option::Some(value) = #config_value.get(#wire).filter(|value| !value.is_null()) {
+                flows.insert(::std::string::String::from(#wire), value.clone());
+            }
+        });
     }
     if !flow_names.is_empty()
         && let Some(span) = flatten
@@ -258,13 +254,15 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     }
     let container_attrs =
         (!container_options.is_empty()).then(|| quote!(#[serde(#(#container_options),*)]));
-    let (parameter_names, parameter_types): (Vec<_>, Vec<_>) = parameters.into_iter().unzip();
     Ok(quote! {
         impl #runtime::NodeConfig for #name {
-            fn parameter_types() -> #runtime::ConfigParameterTypes {
-                #runtime::ConfigParameterTypes::from([
-                    #((#parameter_names.into(), #parameter_types)),*
-                ])
+            #[allow(unused_mut)]
+            fn flow_parameters(
+                #config_value: &::serde_json::Value,
+            ) -> ::std::collections::BTreeMap<::std::string::String, ::serde_json::Value> {
+                let mut flows = ::std::collections::BTreeMap::new();
+                #(#flow_extractions)*
+                flows
             }
 
             #[allow(unused_mut)]

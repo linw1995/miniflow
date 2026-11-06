@@ -289,7 +289,7 @@ fn external_combined_provider_retains_terminal_execution_in_both_flow_modes() {
         }
         let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
-        assert!(plan.definition.execution.is_none());
+        assert!(plan.graph.definition.execution.is_none());
         let arguments = WorkflowArguments::from_json(br#"{"count.count":100}"#).unwrap();
         let output = if streaming {
             let instance = instantiate_stream(&plan, &registry)
@@ -340,6 +340,7 @@ fn planner_separates_terminal_and_stream_domains_and_rejects_implicit_joins() {
             &registry
         )
         .unwrap()
+        .graph
         .definition
         .execution
         .is_some()
@@ -558,7 +559,7 @@ fn selected_incremental_outputs_infer_streaming_without_configuration() {
     value.as_object_mut().unwrap().remove("execution");
     let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
     assert_eq!(
-        plan.definition.execution,
+        plan.graph.definition.execution,
         Some(mf_runtime::StreamExecution::default())
     );
     assert!(
@@ -595,7 +596,7 @@ fn data_and_control_dependencies_infer_streaming_from_incremental_ports() {
         let definition = serde_json::from_value(value).unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
         assert_eq!(
-            plan.definition.execution,
+            plan.graph.definition.execution,
             Some(mf_runtime::StreamExecution::default())
         );
         let instance = instantiate_stream(&plan, &registry)
@@ -688,7 +689,7 @@ fn direct_finite_builders_reject_stream_edges_and_context_reads() {
     let plan =
         compile_definition(&serde_json::from_value(stream_export()).unwrap(), &registry).unwrap();
     for context_read in [false, true] {
-        let mut nodes = mf_compiler::resolve_nodes(&plan.definition, &registry).unwrap();
+        let mut nodes = mf_compiler::resolve_nodes(&plan.graph.definition, &registry).unwrap();
         if context_read {
             nodes
                 .iter_mut()
@@ -703,8 +704,8 @@ fn direct_finite_builders_reject_stream_edges_and_context_reads() {
         }
         let builder = mf_compiler::FlowBuilder::prepare(
             nodes,
-            plan.definition.edges.clone(),
-            plan.execution_order.clone(),
+            plan.graph.definition.edges.clone(),
+            plan.graph.execution_order.clone(),
             Vec::new(),
         )
         .unwrap();
@@ -734,7 +735,7 @@ fn generated_streams_bind_executable_functions_without_runtime_domain_tables() {
         assert!(source.contains("initialize_stream_message_0"));
         assert!(source.contains("select_stream_outputs_"));
         assert!(source.contains("group.count.delta"));
-        if plan.definition.nodes.len() > 1 {
+        if plan.graph.definition.nodes.len() > 1 {
             assert!(source.contains("execute_stream_domain_"));
             assert!(source.contains("resolve_stream_input_1(plan, ctx, inputs"));
         }

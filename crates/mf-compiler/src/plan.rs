@@ -1,6 +1,6 @@
+use crate::DefinitionId;
 #[cfg(feature = "codegen")]
-use crate::LoopDefinition;
-use crate::{DefinitionId, WorkflowDefinition};
+use crate::{LoopDefinition, WorkflowDefinition};
 #[cfg(feature = "codegen")]
 use mf_runtime::ITERATION_INPUT_KIND;
 #[cfg(feature = "codegen")]
@@ -18,13 +18,7 @@ use syn::LitStr;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledWorkflow {
-    pub definition: WorkflowDefinition,
-    pub execution_order: Vec<DefinitionId>,
-    /// Compiler-produced scope facts. Offline traversal must not infer roles from JSON.
-    #[serde(default)]
-    pub loop_orders: Vec<mf_runtime::LoopExecutionOrder>,
-    /// Unified configuration parameter types frozen from the selected registrations.
-    pub parameter_types: mf_runtime::NodeParameterTypes,
+    pub graph: mf_runtime::CompiledGraph,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,7 +119,7 @@ pub fn generate_embedded_source(
         ) -> Result<mf_compiler::CompiledWorkflow, mf_compiler::PlanError> {
             let workflow = mf_compiler::FlowSourceBundle::from_json(#source)?;
             let resolved = workflow.resolve(registry)?;
-            Ok(mf_compiler::plan_resolved_definition(&resolved.definition, &resolved.contracts)?)
+            Ok(mf_compiler::plan_resolved_workflow(&resolved)?)
         }
 
         pub fn manifest(
@@ -167,15 +161,8 @@ impl CompiledWorkflow {
         input_schema: mf_runtime::WorkflowInputSchema,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
         let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_11_04,
-            definition: self.definition.clone(),
-            execution_order: self
-                .execution_order
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            loop_orders: self.loop_orders.clone(),
-            parameter_types: self.parameter_types.clone(),
+            version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
+            graph: self.graph.clone(),
             input_schema,
         };
         manifest.validate()?;
@@ -187,9 +174,10 @@ impl CompiledWorkflow {
         &self,
         nodes: &[mf_runtime::FlowNode],
     ) -> Result<Vec<mf_runtime::NodeTarget>, PlanError> {
-        crate::validate_execution(&self.definition).map_err(crate::WorkflowBuildError::from)?;
+        crate::validate_execution(&self.graph.definition)
+            .map_err(crate::WorkflowBuildError::from)?;
         ensure!(
-            nodes.len() == self.execution_order.len(),
+            nodes.len() == self.graph.execution_order.len(),
             InvalidExecutionOrderSnafu
         );
         let original = crate::describe_compiled(self)?;
@@ -218,7 +206,7 @@ impl CompiledWorkflow {
             .collect();
         nodes.iter().enumerate().map(|(index, node)| {
             let id = node.definition_id.to_string();
-            ensure!(self.execution_order.get(index) == Some(&node.definition_id), InvalidExecutionOrderSnafu);
+            ensure!(self.graph.execution_order.get(index) == Some(&node.definition_id), InvalidExecutionOrderSnafu);
             let kind = match node.node.as_ref() {
                 Some(mf_runtime::NodeExecution::Task(_) | mf_runtime::NodeExecution::TaskStream(_)) => mf_runtime::NodeTargetKind::Task,
                 Some(mf_runtime::NodeExecution::Event(_)) => mf_runtime::NodeTargetKind::Event,
@@ -256,7 +244,7 @@ impl CompiledWorkflow {
             }).collect::<Result<_, PlanError>>()?;
             Ok(mf_runtime::NodeTarget {
                 id, index, kind, inputs, outputs: mf_runtime::target_ports(&node.metadata.ports.outputs),
-                worker_limit: self.definition.execution.as_ref().and_then(|execution| std::num::NonZeroUsize::new(execution.limits.workers)),
+                worker_limit: self.graph.definition.execution.as_ref().and_then(|execution| std::num::NonZeroUsize::new(execution.limits.workers)),
                 context,
                 original_workflow_id: original.workflow_id.clone(), description,
             })
@@ -283,13 +271,13 @@ impl CompiledWorkflow {
         run_id: mf_telemetry::identity::RunId,
     ) -> Result<mf_runtime::RunObservation, crate::DescriptionError> {
         ensure!(
-            self.definition.execution.is_none(),
+            self.graph.definition.execution.is_none(),
             crate::compiler::InvalidObservationSnafu {
                 message: "use start_stream_observation for streaming workflows",
             }
         );
-        if self.definition.version != mf_runtime::WorkflowDefinitionVersion::V2026_09_26
-            || !self.loop_orders.is_empty()
+        if self.graph.definition.version != mf_runtime::WorkflowDefinitionVersion::V2026_09_26
+            || !self.graph.children.is_empty()
         {
             let description = crate::describe_compiled(self)?;
             if description.version.supports_loops() {
@@ -299,31 +287,30 @@ impl CompiledWorkflow {
             }
         }
         ensure!(
-            self.execution_order.len() == self.definition.nodes.len(),
+            self.graph.execution_order.len() == self.graph.definition.nodes.len(),
             crate::compiler::InvalidObservationSnafu {
                 message: "observation order is incomplete",
             }
         );
         let nodes_by_id: BTreeMap<_, _> = self
+            .graph
             .definition
             .nodes
             .iter()
             .map(|node| (&node.id, node))
             .collect();
         ensure!(
-            nodes_by_id.len() == self.definition.nodes.len(),
+            nodes_by_id.len() == self.graph.definition.nodes.len(),
             crate::compiler::InvalidObservationSnafu {
                 message: "duplicate observation node ID",
             }
         );
-        let order: Vec<String> = self
-            .execution_order
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let id = mf_telemetry::identity::WorkflowId::from_definition(&self.definition, &order)
+        let id = self
+            .graph
+            .workflow_id()
             .context(crate::compiler::ContractSnafu)?;
         let nodes = self
+            .graph
             .execution_order
             .iter()
             .map(|id| {
@@ -350,7 +337,8 @@ impl CompiledWorkflow {
 
     pub fn from_json(input: &str) -> Result<Self, PlanError> {
         let plan: Self = serde_json::from_str(input).context(ParseSnafu)?;
-        crate::validate_execution(&plan.definition).map_err(crate::WorkflowBuildError::from)?;
+        crate::validate_execution(&plan.graph.definition)
+            .map_err(crate::WorkflowBuildError::from)?;
         crate::describe_compiled(&plan)?;
         Ok(plan)
     }
@@ -359,7 +347,8 @@ impl CompiledWorkflow {
     #[cfg(feature = "codegen")]
     pub fn generate_embedded_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
         ensure!(
-            crate::structural_order(&self.definition)? == self.execution_order,
+            crate::compiler::structural_order_graph(&self.graph.definition)?
+                == self.graph.execution_order,
             InvalidExecutionOrderSnafu
         );
         crate::describe_compiled(self)?;
@@ -418,20 +407,21 @@ impl CompiledWorkflow {
         &self,
         include_helpers: bool,
     ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-        if self.definition.execution.is_some() {
+        if self.graph.definition.execution.is_some() {
             return generate_stream_artifacts(self);
         }
-        if self.execution_order.len() != self.definition.nodes.len() {
+        if self.graph.execution_order.len() != self.graph.definition.nodes.len() {
             return InvalidExecutionOrderSnafu.fail();
         }
         let nodes_by_id: BTreeMap<DefinitionId, _> = self
+            .graph
             .definition
             .nodes
             .iter()
             .map(|node| (node.id.clone(), node))
             .collect();
         let mut indices = BTreeMap::new();
-        for (index, definition_id) in self.execution_order.iter().enumerate() {
+        for (index, definition_id) in self.graph.execution_order.iter().enumerate() {
             if !nodes_by_id.contains_key(definition_id)
                 || indices.insert(definition_id.clone(), index).is_some()
             {
@@ -440,18 +430,21 @@ impl CompiledWorkflow {
         }
 
         for (from_node, to_node) in self
+            .graph
             .definition
             .edges
             .iter()
             .map(|edge| (&edge.from_node, &edge.to_node))
             .chain(
-                self.definition
+                self.graph
+                    .definition
                     .control_edges
                     .iter()
                     .map(|edge| (&edge.from_node, &edge.to_node)),
             )
             .chain(
-                self.definition
+                self.graph
+                    .definition
                     .order_edges
                     .iter()
                     .map(|edge| (&edge.from_node, &edge.to_node)),
@@ -479,19 +472,11 @@ impl CompiledWorkflow {
         }
 
         crate::describe_compiled(self)?;
-        let (preparations, _, root_flow) = generate_scope(
-            &self.definition,
-            &self.execution_order,
-            "root",
-            &[],
-            None,
-            None,
-            ScopeBuild::Dynamic,
-            &self.parameter_types,
-        )?;
+        let (preparations, _, root_flow) =
+            generate_scope(&self.graph, "root", &[], None, None, ScopeBuild::Dynamic)?;
 
         let mut output_names = BTreeSet::new();
-        for output in &self.definition.outputs {
+        for output in &self.graph.definition.outputs {
             if !output_names.insert(output.name.as_ref()) {
                 return DuplicateOutputNameSnafu {
                     name: output.name.clone(),
@@ -593,21 +578,21 @@ impl CompiledWorkflow {
 fn generate_stream_artifacts(
     plan: &CompiledWorkflow,
 ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-    if crate::structural_order(&plan.definition).context(StreamSnafu)? != plan.execution_order {
+    if crate::compiler::structural_order_graph(&plan.graph.definition).context(StreamSnafu)?
+        != plan.graph.execution_order
+    {
         return InvalidExecutionOrderSnafu.fail();
     }
     crate::describe_compiled(plan)?;
-    let definition = &plan.definition;
-    let order = &plan.execution_order;
+    let definition = &plan.graph.definition;
+    let order = &plan.graph.execution_order;
     let (preparations, _, _) = generate_scope(
-        definition,
-        order,
+        &plan.graph,
         "stream",
         &[],
         None,
         None,
         ScopeBuild::PreparationOnly,
-        &plan.parameter_types,
     )?;
     let nodes = (0..order.len()).map(|index| format_ident!("node_stream_{index}"));
     let initial = initial_nodes(definition, order);
@@ -671,53 +656,36 @@ enum ScopeBuild<'a> {
 }
 
 #[cfg(feature = "codegen")]
-fn parameter_type_tokens(value_type: &mf_runtime::ConfigParameterType) -> TokenStream {
-    match value_type {
-        mf_runtime::ConfigParameterType::Value => quote!(mf_runtime::ConfigParameterType::Value),
-        mf_runtime::ConfigParameterType::Flow => quote!(mf_runtime::ConfigParameterType::Flow),
-        mf_runtime::ConfigParameterType::Optional(inner) => {
-            let inner = parameter_type_tokens(inner);
-            quote!(mf_runtime::ConfigParameterType::Optional(::std::boxed::Box::new(#inner)))
-        }
-    }
+fn graph_preflight_tokens(graph: &mf_runtime::CompiledGraph) -> Result<TokenStream, PlanError> {
+    let graph = LitStr::new(
+        &serde_json::to_string(graph).context(SerializeSnafu)?,
+        Span::call_site(),
+    );
+    Ok(quote! {
+        let compiled_graph: mf_runtime::CompiledGraph = serde_json::from_str(#graph)
+            .context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
+                definition_id: mf_runtime::DefinitionId::from("<workflow>"),
+            })?;
+        mf_compiler::validate_compiled_graph(registry, &compiled_graph)
+            .inspect_err(|error| {
+                if let Some(observation) = observation.as_deref_mut() {
+                    observation.preparation_failed_unattributed(error.to_string());
+                }
+            })?;
+    })
 }
 
 #[cfg(feature = "codegen")]
-fn parameter_preflight_tokens(parameter_types: &mf_runtime::NodeParameterTypes) -> TokenStream {
-    let kinds = parameter_types.iter().map(|(kind, fields)| {
-        let fields = fields.iter().map(|(name, value_type)| {
-            let value_type = parameter_type_tokens(value_type);
-            quote!((#name.into(), #value_type))
-        });
-        quote!((#kind.into(), mf_runtime::ConfigParameterTypes::from([#(#fields),*])))
-    });
-    quote! {
-        mf_compiler::validate_parameter_types(
-            registry,
-            &mf_runtime::NodeParameterTypes::from([#(#kinds),*]),
-        ).inspect_err(|error| {
-            if let Some(observation) = observation.as_deref_mut() {
-                observation.preparation_failed_unattributed(error.to_string());
-            }
-        })?;
-    }
-}
-
-#[cfg(feature = "codegen")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Thread compiled parameter types alongside the existing code-generation context."
-)]
 fn generate_scope(
-    definition: &WorkflowDefinition,
-    order: &[DefinitionId],
+    graph: &mf_runtime::CompiledGraph,
     scope: &str,
     static_scope: &[String],
     enclosing: Option<&LoopDefinition>,
     preparation_error_override: Option<&TokenStream>,
     build: ScopeBuild<'_>,
-    parameter_types: &mf_runtime::NodeParameterTypes,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>, syn::Ident), PlanError> {
+    let definition = &graph.definition;
+    let order = &graph.execution_order;
     let nodes_by_id: BTreeMap<_, _> = definition
         .nodes
         .iter()
@@ -725,8 +693,8 @@ fn generate_scope(
         .collect();
     let inference_ident = format_ident!("inference_{scope}");
     let mut preparations = Vec::new();
-    if static_scope.is_empty() {
-        preparations.push(parameter_preflight_tokens(parameter_types));
+    if static_scope.is_empty() && !definition.nodes.is_empty() {
+        preparations.push(graph_preflight_tokens(graph)?);
     }
     preparations.push(quote! {
         let mut #inference_ident = mf_compiler::TypeInferenceState::default();
@@ -747,16 +715,14 @@ fn generate_scope(
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         let bindings = dependency_tokens(dependencies);
-        let flows = crate::calls::compiled_node_flows(definition, node, parameter_types)?;
-        if !flows.is_empty() {
+        if let Some(flows) = graph.children.get(id).filter(|flows| !flows.is_empty()) {
             preparations.push(subgraphs_preparation(
                 node,
-                &flows,
+                flows,
                 scope,
                 index,
                 static_scope,
                 &bindings,
-                parameter_types,
             )?);
             node_idents.push(node_ident);
             continue;
@@ -934,12 +900,11 @@ fn child_scope_name(
 #[cfg(feature = "codegen")]
 fn subgraphs_preparation(
     node: &crate::NodeDefinition,
-    flows: &BTreeMap<String, WorkflowDefinition>,
+    flows: &BTreeMap<String, mf_runtime::CompiledGraph>,
     scope: &str,
     index: usize,
     static_scope: &[String],
     bindings: &[TokenStream],
-    parameter_types: &mf_runtime::NodeParameterTypes,
 ) -> Result<TokenStream, PlanError> {
     let node_ident = format_ident!("node_{scope}_{index}");
     let inference_ident = format_ident!("inference_{scope}");
@@ -950,7 +915,17 @@ fn subgraphs_preparation(
     );
     let kind = LitStr::new(&node.kind, Span::call_site());
     let loop_definition = if node.kind == crate::LOOP_KIND {
-        Some(crate::loops::parse_config(node)?)
+        let body = flows.get("body").with_context(|| InvalidLoopConfigSnafu {
+            definition_id: node.id.clone(),
+            message: "compiled Loop is missing its body".to_owned(),
+        })?;
+        let mut policy = node.clone();
+        policy
+            .set_node_flow("body", body.definition.clone())
+            .context(crate::compiler::FlowParametersSnafu {
+                definition_id: node.id.clone(),
+            })?;
+        Some(crate::loops::parse_config(&policy)?)
     } else {
         None
     };
@@ -960,8 +935,6 @@ fn subgraphs_preparation(
         let body_scope = child_scope_name(scope, index, binding_index, node, name);
         let mut path = static_scope.to_vec();
         path.push(node.flow_scope_key(name));
-        let order =
-            crate::calls::child_result(node, crate::compiler::structural_order_graph(body))?;
         let preparation_error = (node.kind == mf_runtime::ITERATION_KIND).then(|| {
             quote! {
                 if let Some(observation) = observation.as_deref_mut() {
@@ -971,7 +944,6 @@ fn subgraphs_preparation(
         });
         let (preparations, _, flow) = generate_scope(
             body,
-            &order,
             &body_scope,
             &path,
             loop_definition.as_ref(),
@@ -981,11 +953,10 @@ fn subgraphs_preparation(
             } else {
                 ScopeBuild::Dynamic
             },
-            parameter_types,
         )?;
         let body_ident = format_ident!("subgraph_{body_scope}");
         let bind_streams = format_ident!("bind_stream_outputs_{body_scope}");
-        let identities = body.nodes.iter()
+        let identities = body.definition.nodes.iter()
             .filter(|node| node.kind != ITERATION_INPUT_KIND && node.kind != crate::LOOP_SOURCE_ID)
             .map(|node| {
                 let id = LitStr::new(node.id.as_str(), Span::call_site());
@@ -1074,25 +1045,24 @@ impl CompiledWorkflow {
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
         ensure!(
-            self.execution_order == crate::compiler::structural_order(&self.definition)?,
+            self.graph.execution_order
+                == crate::compiler::structural_order_graph(&self.graph.definition)?,
             InvalidExecutionOrderSnafu
         );
         crate::compiler::validate_compiled_scope_orders(self, registry)?;
         let mut body_layouts = BTreeMap::new();
-        let (nodes, order) = crate::compiler::prepare_definition_with_layouts(
-            &self.definition,
+        let (nodes, order) = crate::compiler::prepare_compiled_graph_with_layouts(
+            &self.graph,
             registry,
             Some(&mut body_layouts),
         )?;
-        if order != self.execution_order {
+        if order != self.graph.execution_order {
             return InvalidExecutionOrderSnafu.fail();
         }
-        let resolved = Self {
-            definition: crate::compiler::resolve_execution(&self.definition, &nodes)?,
-            execution_order: order.clone(),
-            loop_orders: self.loop_orders.clone(),
-            parameter_types: self.parameter_types.clone(),
-        };
+        let mut resolved = self.clone();
+        resolved.graph.definition =
+            crate::compiler::resolve_execution(&self.graph.definition, &nodes)?;
+        resolved.graph.execution_order = order.clone();
         resolved.generate_resolved_execution_plans(nodes, order, body_layouts, standard)
     }
 
@@ -1107,14 +1077,14 @@ impl CompiledWorkflow {
             serde_json::to_string(&self.node_targets(&nodes)?).context(SerializeSnafu)?;
         let flow = crate::FlowBuilder::prepare(
             nodes,
-            self.definition.edges.clone(),
+            self.graph.definition.edges.clone(),
             order.clone(),
-            self.definition.outputs.clone(),
+            self.graph.definition.outputs.clone(),
         )
-        .and_then(|flow| flow.with_control_edges(self.definition.control_edges.clone()))
-        .and_then(|flow| flow.with_order_edges(self.definition.order_edges.clone()))
+        .and_then(|flow| flow.with_control_edges(self.graph.definition.control_edges.clone()))
+        .and_then(|flow| flow.with_order_edges(self.graph.definition.order_edges.clone()))
         .map_err(crate::WorkflowBuildError::from)?;
-        let flow = if self.definition.version.supports_startup_inputs() {
+        let flow = if self.graph.definition.version.supports_startup_inputs() {
             flow.with_workflow_inputs()
                 .map_err(crate::WorkflowBuildError::from)?
         } else {
@@ -1123,8 +1093,9 @@ impl CompiledWorkflow {
         let schema = flow.input_schema().clone();
         let mut layouts = Vec::new();
         let mut typed_plan = crate::TypedPlan::default();
-        if let Some(execution) = &self.definition.execution {
+        if let Some(execution) = &self.graph.definition.execution {
             typed_plan.connections = self
+                .graph
                 .definition
                 .edges
                 .iter()
@@ -1166,22 +1137,20 @@ impl CompiledWorkflow {
             });
             layouts.push(stream_program_tokens(
                 prepared.plan(),
-                &self.definition,
+                &self.graph.definition,
                 &order,
             ));
             layouts.push(stream_guard_tokens(
-                &self.definition,
+                &self.graph.definition,
                 &order,
                 prepared.plan(),
             ));
             collect_body_layouts(
-                &self.definition,
-                &order,
+                &self.graph,
                 "stream",
                 &mut Vec::new(),
                 &body_layouts,
                 &mut layouts,
-                &self.parameter_types,
             )?;
         } else {
             let flow = flow.into_tasks().map_err(crate::WorkflowBuildError::from)?;
@@ -1190,19 +1159,17 @@ impl CompiledWorkflow {
                 layouts.push(typed_preparation_tokens(self, &flow, &typed_plan)?);
             }
             layouts.push(task_layout_tokens(
-                &self.definition,
+                &self.graph.definition,
                 &order,
                 "root",
                 flow.execution_domains(),
             ));
             collect_body_layouts(
-                &self.definition,
-                &order,
+                &self.graph,
                 "root",
                 &mut Vec::new(),
                 &body_layouts,
                 &mut layouts,
-                &self.parameter_types,
             )?;
         }
         let syntax: syn::File =
@@ -1313,12 +1280,13 @@ fn typed_preparation_tokens(
             .expect("planned typed provider");
         let alias = generation
             .constructor
-            .dependency_alias(&workflow.definition.dependencies)
+            .dependency_alias(&workflow.graph.definition.dependencies)
             .with_context(|_| TypedConstructorSnafu {
                 definition_id: node.definition_id.clone(),
             })?;
         // Dependency projects deliberately use ordinal Rust crate names, independently of user aliases.
         let index = workflow
+            .graph
             .definition
             .dependencies
             .keys()
@@ -1333,6 +1301,7 @@ fn typed_preparation_tokens(
             .collect();
         let id = LitStr::new(node.definition_id.as_str(), Span::call_site());
         let definition = workflow
+            .graph
             .definition
             .nodes
             .iter()
@@ -1390,14 +1359,12 @@ fn typed_preparation_tokens(
         }, expected));
     }
     let (preparations, _, root) = generate_scope(
-        &workflow.definition,
-        &workflow.execution_order,
+        &workflow.graph,
         "root",
         &[],
         None,
         None,
         ScopeBuild::Typed(&constructors),
-        &workflow.parameter_types,
     )?;
     let mut bindings = Vec::new();
     for domain in flow.execution_domains().domains() {
@@ -1497,7 +1464,7 @@ fn typed_preparation_tokens(
             Ok(())
         }) as std::sync::Arc<mf_runtime::GeneratedDomainExecutor>) });
     }
-    let registry_binding = if workflow.definition.nodes.is_empty() {
+    let registry_binding = if workflow.graph.definition.nodes.is_empty() {
         quote!(let _registry = $registry;)
     } else {
         quote!(let registry = $registry;)
@@ -1634,44 +1601,39 @@ fn subgraph_stream_tokens(
 
 #[cfg(feature = "codegen")]
 fn collect_body_layouts(
-    definition: &WorkflowDefinition,
-    order: &[DefinitionId],
+    graph: &mf_runtime::CompiledGraph,
     scope: &str,
     path: &mut Vec<DefinitionId>,
     body_layouts: &crate::compiler::ScopeLayouts,
     layouts: &mut Vec<TokenStream>,
-    parameter_types: &mf_runtime::NodeParameterTypes,
 ) -> Result<(), PlanError> {
-    for (index, id) in order.iter().enumerate() {
-        let node = definition
+    for (index, id) in graph.execution_order.iter().enumerate() {
+        let node = graph
+            .definition
             .nodes
             .iter()
             .find(|node| &node.id == id)
             .expect("validated node ID");
-        for (binding_index, (name, mut body)) in
-            crate::calls::compiled_node_flows(definition, node, parameter_types)?
-                .into_iter()
-                .enumerate()
+        for (binding_index, (name, body)) in
+            graph.children.get(id).into_iter().flatten().enumerate()
         {
-            let order = crate::compiler::structural_order_graph(&body)?;
-            path.push(node.flow_scope_key(&name).into());
+            let mut body = body.clone();
+            path.push(node.flow_scope_key(name).into());
             let (domains, streams) = &body_layouts[path.as_slice()];
-            let body_scope = child_scope_name(scope, index, binding_index, node, &name);
+            let body_scope = child_scope_name(scope, index, binding_index, node, name);
             layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
             if crate::calls::call_like(node) {
-                body.outputs
+                body.definition
+                    .outputs
                     .retain(|output| !streams.iter().any(|stream| stream.name == output.name));
             }
-            layouts.push(task_layout_tokens(&body, &order, &body_scope, domains));
-            collect_body_layouts(
-                &body,
-                &order,
+            layouts.push(task_layout_tokens(
+                &body.definition,
+                &body.execution_order,
                 &body_scope,
-                path,
-                body_layouts,
-                layouts,
-                parameter_types,
-            )?;
+                domains,
+            ));
+            collect_body_layouts(&body, &body_scope, path, body_layouts, layouts)?;
             path.pop();
         }
     }

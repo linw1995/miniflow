@@ -26,17 +26,18 @@ impl Runner {
             })).chain([serde_json::json!({"name":"answer","node":"remote","port":"answer","optional":true})]).collect();
         Self {
             manifest: WorkflowManifest {
-                version: mf_runtime::WorkflowManifestVersion::V2026_11_04,
-                parameter_types: [("unlinked.chat_provider".into(), Default::default())].into(),
-                definition: serde_json::from_value(serde_json::json!({
-                    "version":"2026-10-28", "dependencies":{},
-                    "execution":{},
-                    "nodes":[{"id":"remote","kind":"unlinked.chat_provider"}],
-                    "outputs":outputs
-                }))
-                .unwrap(),
-                execution_order: vec!["remote".into()],
-                loop_orders: vec![],
+                version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
+                graph: mf_runtime::CompiledGraph {
+                    definition: serde_json::from_value(serde_json::json!({
+                        "version":"2026-10-28", "dependencies":{},
+                        "execution":{},
+                        "nodes":[{"id":"remote","kind":"unlinked.chat_provider"}],
+                        "outputs":outputs
+                    }))
+                    .unwrap(),
+                    execution_order: vec!["remote".into()],
+                    children: Default::default(),
+                },
                 input_schema: mf_runtime::WorkflowInputSchema {
                     inputs: [(
                         "remote".into(),

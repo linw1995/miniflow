@@ -1,10 +1,12 @@
 use mf_runtime::{
-    ConfigParameterType, ConfigParameterTypes, NodeBuildError, NodeDefinition, NodeFactory,
-    NodeRegistration, Outputs, PreparedNode, PreparedSubgraph, WorkflowDefinition,
+    NodeBuildError, NodeConfig, NodeDefinition, NodeFactory, NodeRegistration, Outputs,
+    PreparedNode, PreparedSubgraph, WorkflowDefinition,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::error::Error;
+
+type Extractor = fn(&Value) -> BTreeMap<String, Value>;
 
 fn definition() -> WorkflowDefinition {
     serde_json::from_value(json!({
@@ -32,15 +34,89 @@ fn factory(_: Value) -> Result<PreparedNode, NodeBuildError> {
     panic!("validation must happen before calling the provider")
 }
 
-fn registration(parameter_types: fn() -> ConfigParameterTypes) -> NodeRegistration {
+fn extract(config: &Value, names: &[&str]) -> BTreeMap<String, Value> {
+    names
+        .iter()
+        .filter_map(|&name| {
+            config
+                .get(name)
+                .filter(|value| !value.is_null())
+                .map(|value| (name.into(), value.clone()))
+        })
+        .collect()
+}
+
+fn selected(config: &Value) -> BTreeMap<String, Value> {
+    extract(config, &["selected"])
+}
+
+fn registration(flow_parameters: fn(&Value) -> BTreeMap<String, Value>) -> NodeRegistration {
     NodeRegistration {
         kind: "user.dispatch",
         factory: NodeFactory::Subgraph {
-            parameter_types,
+            flow_parameters,
             plain: factory,
             prepared: |_, _, _| factory(Value::Null),
         },
     }
+}
+
+#[derive(NodeConfig)]
+#[serde(deny_unknown_fields)]
+struct DispatchConfig {
+    selected: PreparedSubgraph,
+    option: u32,
+}
+
+impl mf_runtime::NodePortContract for DispatchConfig {
+    fn ports(&self) -> mf_runtime::NodePorts {
+        mf_runtime::NodePorts {
+            inputs: Vec::new(),
+            outputs: self.selected.outputs.clone(),
+        }
+    }
+}
+
+impl mf_runtime::TaskNode for DispatchConfig {
+    fn execute(
+        &self,
+        _: mf_runtime::Inputs,
+        context: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
+        Ok(self.selected.execute_in_context(context)?.into())
+    }
+}
+
+fn dispatch_registration() -> NodeRegistration {
+    NodeRegistration {
+        kind: "user.dispatch",
+        factory: NodeFactory::Subgraph {
+            flow_parameters: DispatchConfig::flow_parameters,
+            plain: factory,
+            prepared: |_, config, arguments| {
+                let config = DispatchConfig::from_config(config, arguments)?;
+                if config.option != 42 {
+                    return mf_runtime::NodeInvalidSubgraphSnafu {
+                        message: "provider requires option 42",
+                    }
+                    .fail();
+                }
+                PreparedNode::new(config, mf_runtime::NodePorts::default())
+            },
+        },
+    }
+}
+
+fn actual_body() -> PreparedSubgraph {
+    PreparedSubgraph::new(
+        Vec::new(),
+        vec![mf_runtime::PortSpec::new(
+            "actual",
+            mf_runtime::ValueType::String,
+            true,
+        )],
+        |_| Ok(Outputs::from([("actual".into(), "prepared child".into())])),
+    )
 }
 
 fn preparation_error(
@@ -68,18 +144,12 @@ fn legacy_provider_config_remains_opaque() {
     }))
     .unwrap();
     let manifest = mf_runtime::WorkflowManifest {
-        version: mf_runtime::WorkflowManifestVersion::V2026_11_04,
-        definition,
-        parameter_types: [(
-            "user.dispatch".into(),
-            BTreeMap::from([
-                ("selected".into(), ConfigParameterType::Value),
-                ("subgraphs".into(), ConfigParameterType::Value),
-            ]),
-        )]
-        .into(),
-        execution_order: vec!["custom".into()],
-        loop_orders: vec![],
+        version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
+        graph: mf_runtime::CompiledGraph {
+            definition,
+            execution_order: vec!["custom".into()],
+            children: BTreeMap::new(),
+        },
         input_schema: mf_runtime::WorkflowInputSchema {
             inputs: [("custom".into(), Default::default())].into(),
             ..Default::default()
@@ -166,45 +236,38 @@ fn malformed_declared_fields_are_rejected_but_absent_and_null_fields_are_optiona
 #[test]
 fn declarations_are_validated_but_unknown_json_is_opaque() {
     // Duplicate keys cannot be represented by a map; derive tests reject duplicate wire names.
-    let invalid_types: [fn() -> ConfigParameterTypes; 2] = [
-        || [("".into(), ConfigParameterType::Flow)].into(),
-        || [(" ".into(), ConfigParameterType::Flow)].into(),
+    let invalid_extractors: [Extractor; 2] = [
+        |_| [("".into(), frozen())].into(),
+        |_| [(" ".into(), frozen())].into(),
     ];
-    for parameter_types in invalid_types {
-        let declarations = [("user.dispatch".into(), parameter_types())].into();
+    for extractor in invalid_extractors {
         for config in [json!({}), json!({"selected": null})] {
-            let node = node(config);
-            assert!(
-                registration(parameter_types)
-                    .validate_flow_parameters(&node)
-                    .is_err()
-            );
             assert!(matches!(
-                node.declared_flows(&declarations),
-                Err(mf_runtime::FlowParameterError::Invalid { .. })
+                registration(extractor).validate_flow_parameters(&node(config.clone())),
+                Err(NodeBuildError::FlowParameters {
+                    source: mf_runtime::FlowParameterError::Invalid { .. }
+                })
             ));
+            for keys in [&[][..], &[""], &[" "]] {
+                assert!(matches!(
+                    preparation_error(registration(extractor), config.clone(), keys),
+                    NodeBuildError::FlowParameters {
+                        source: mf_runtime::FlowParameterError::Invalid { .. }
+                    }
+                ));
+            }
         }
     }
-    for kind in ["user.dispatch", "user.plain"] {
-        let mut node = node(json!({"selected": {"version": "opaque"}}));
-        node.kind = kind.into();
-        assert!(matches!(
-            node.declared_flows(&BTreeMap::new()),
-            Err(mf_runtime::FlowParameterError::Invalid { .. })
-        ));
-        assert!(
-            node.declared_flows(
-                &[(
-                    kind.into(),
-                    [("selected".into(), ConfigParameterType::Value)].into()
-                )]
-                .into()
-            )
+    let opaque = registration(|_| BTreeMap::new());
+    let malformed = node(json!({"selected": {"version": "opaque"}}));
+    assert!(opaque.flow_parameters(&malformed.config).is_empty());
+    assert!(
+        opaque
+            .validate_flow_parameters(&malformed)
             .unwrap()
             .is_empty()
-        );
-    }
-    let registration = registration(|| [("selected".into(), ConfigParameterType::Flow)].into());
+    );
+    let registration = registration(selected);
     for config in [json!({"selected": frozen()}), json!({"unknown": frozen()})] {
         registration
             .validate_flow_parameters(&node(config))
@@ -214,7 +277,11 @@ fn declarations_are_validated_but_unknown_json_is_opaque() {
         kind: "user.plain",
         factory: NodeFactory::Plain(factory),
     };
-    assert!(plain.parameter_types().is_empty());
+    assert!(
+        plain
+            .flow_parameters(&json!({"selected": frozen()}))
+            .is_empty()
+    );
     plain
         .validate_flow_parameters(&node(json!({"selected": frozen()})))
         .unwrap();
@@ -223,53 +290,101 @@ fn declarations_are_validated_but_unknown_json_is_opaque() {
 }
 
 #[test]
-fn prepared_argument_keys_must_exactly_match_frozen_config_fields() {
-    let registration = registration(|| {
-        [
-            ("selected".into(), ConfigParameterType::Flow),
-            (
-                "other".into(),
-                ConfigParameterType::Optional(Box::new(ConfigParameterType::Flow)),
-            ),
-        ]
-        .into()
+fn validation_parses_the_receiver_callback_values_not_same_named_raw_json() {
+    let registration = registration(|config| {
+        BTreeMap::from([("selected".into(), config["provider"]["normalized"].clone())])
     });
-    for keys in [&[][..], &["other"], &["selected", "other"]] {
-        let error = preparation_error(registration, json!({"selected": frozen()}), keys);
-        assert!(error.to_string().contains("do not match"));
+    let node = node(json!({
+        "selected": {"version": "opaque provider data"},
+        "provider": {"normalized": frozen()},
+    }));
+    let original = node.clone();
+    assert_eq!(
+        registration.validate_flow_parameters(&node).unwrap(),
+        BTreeMap::from([("selected".into(), definition())])
+    );
+    assert!(node.flow_parameters(&["selected"]).is_err());
+    assert_eq!(node, original);
+}
+
+#[test]
+fn prepared_argument_keys_must_exactly_match_frozen_config_fields() {
+    let registration = registration(|config| extract(config, &["selected", "other"]));
+    for value in [frozen(), json!({"path": "unresolved-child.json"})] {
+        for keys in [&[][..], &["other"], &["selected", "other"]] {
+            let error = preparation_error(registration, json!({"selected": value.clone()}), keys);
+            assert!(matches!(error, NodeBuildError::InvalidSubgraph { message }
+                if message.contains("do not match")));
+        }
     }
 }
 
 #[test]
-fn malformed_declared_frozen_fields_preserve_the_typed_error_chain() {
-    let registration = registration(|| [("selected".into(), ConfigParameterType::Flow)].into());
+fn authoring_preserves_typed_errors_but_preparation_executes_the_supplied_child() {
+    let registration = dispatch_registration();
     for value in [
         json!({"version": "2099-01-01", "dependencies": {}, "nodes": []}),
         json!({"definition": definition()}),
+        json!({"path": "unresolved-child.json"}),
+        json!("unresolved-child"),
     ] {
-        let node = node(json!({"selected": value}));
+        let node = node(json!({"selected": value, "option": 42}));
         let original = node.clone();
-        let validation_error = registration.validate_flow_parameters(&node).unwrap_err();
-        let preparation_error = preparation_error(registration, node.config.clone(), &["selected"]);
-        for error in [validation_error, preparation_error] {
-            assert!(matches!(&error, NodeBuildError::FlowParameters {
-                source: mf_runtime::FlowParameterError::Json { parameter, source }
-            } if parameter == "selected" && source.is_data()));
-            let parameters = error
-                .source()
-                .unwrap()
-                .downcast_ref::<mf_runtime::FlowParameterError>()
-                .unwrap();
-            let json = parameters
-                .source()
-                .unwrap()
-                .downcast_ref::<serde_json::Error>()
-                .unwrap();
-            assert!(json.is_data());
-            assert!(json.source().is_none());
-        }
+        let error = registration.validate_flow_parameters(&node).unwrap_err();
+        assert!(matches!(&error, NodeBuildError::FlowParameters {
+            source: mf_runtime::FlowParameterError::Json { parameter, source }
+        } if parameter == "selected" && source.is_data()));
+        let parameters = error
+            .source()
+            .unwrap()
+            .downcast_ref::<mf_runtime::FlowParameterError>()
+            .unwrap();
+        let json = parameters
+            .source()
+            .unwrap()
+            .downcast_ref::<serde_json::Error>()
+            .unwrap();
+        assert!(json.is_data());
+        assert!(json.source().is_none());
+
+        let prepared = registration
+            .instantiate_subgraphs(
+                "custom",
+                node.config.clone(),
+                BTreeMap::from([("selected".into(), actual_body())]),
+            )
+            .unwrap();
+        let result = prepared
+            .execution
+            .as_task_node()
+            .unwrap()
+            .execute(Default::default(), &mut Default::default())
+            .unwrap();
+        assert_eq!(
+            result.outputs,
+            Outputs::from([("actual".into(), "prepared child".into())])
+        );
         assert_eq!(node, original);
     }
+}
+
+#[test]
+fn prepared_children_do_not_bypass_ordinary_decoding_or_provider_business_rules() {
+    let registration = dispatch_registration();
+    for config in [
+        json!({"selected": {"path": "child.json"}}),
+        json!({"selected": {"path": "child.json"}, "option": "not an integer"}),
+        json!({"selected": {"path": "child.json"}, "option": 42, "unexpected": true}),
+    ] {
+        assert!(matches!(
+            preparation_error(registration, config, &["selected"]),
+            NodeBuildError::InvalidConfiguration { source } if source.is_data()
+        ));
+    }
+    assert!(matches!(
+        preparation_error(registration, json!({"selected": {"path": "child.json"}, "option": 7}), &["selected"]),
+        NodeBuildError::InvalidSubgraph { message } if message == "provider requires option 42"
+    ));
 }
 
 #[test]
@@ -291,13 +406,7 @@ fn matching_arguments_leave_nonobject_and_business_validation_to_the_provider() 
     let registration = NodeRegistration {
         kind: "user.dispatch",
         factory: NodeFactory::Subgraph {
-            parameter_types: || {
-                [
-                    ("selected".into(), ConfigParameterType::Flow),
-                    ("option".into(), ConfigParameterType::Value),
-                ]
-                .into()
-            },
+            flow_parameters: selected,
             plain: factory,
             prepared: |id, config, arguments| {
                 assert_eq!(id, "custom");

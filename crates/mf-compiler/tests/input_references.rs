@@ -24,13 +24,24 @@ fn references_normalize_before_every_compiler_entry() {
     let structural = plan_definition(&definition).unwrap();
     let prepared = compile_definition(&definition, &registry).unwrap();
     assert_eq!(structural, prepared);
-    assert_eq!(structural.execution_order[0].as_str(), "source.with.dots");
+    assert_eq!(
+        structural.graph.execution_order[0].as_str(),
+        "source.with.dots"
+    );
     let result = mf_compiler::execute_compiled(&prepared, &registry, None).unwrap();
     assert_eq!(serde_json::to_value(result).unwrap(), json!({"result":42}));
     assert_eq!(definition, original);
     let encoded = serde_json::to_value(&prepared).unwrap();
-    assert!(encoded["definition"].get("control_edges").is_none());
-    assert!(encoded["definition"]["nodes"][1].get("inputs").is_some());
+    assert!(
+        encoded["graph"]["definition"]
+            .get("control_edges")
+            .is_none()
+    );
+    assert!(
+        encoded["graph"]["definition"]["nodes"][1]
+            .get("inputs")
+            .is_some()
+    );
     let decoded: mf_compiler::CompiledWorkflow = serde_json::from_value(encoded).unwrap();
     assert_eq!(decoded, prepared);
 }
@@ -46,8 +57,8 @@ fn legacy_and_reference_bindings_have_equivalent_graphs() {
     let decoded: WorkflowDefinition = serde_json::from_value(encoded).unwrap();
     assert_eq!(decoded, legacy);
     assert_eq!(
-        plan_definition(&legacy).unwrap().execution_order,
-        plan_definition(&modern).unwrap().execution_order
+        plan_definition(&legacy).unwrap().graph.execution_order,
+        plan_definition(&modern).unwrap().graph.execution_order
     );
 }
 
@@ -112,7 +123,7 @@ fn success_edges_participate_in_structural_order_and_cycles() {
     value["edges"] = json!([{"from_node":"source.with.dots","to_node":"consumer"}]);
     let definition: WorkflowDefinition = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(
-        plan_definition(&definition).unwrap().execution_order[0].as_str(),
+        plan_definition(&definition).unwrap().graph.execution_order[0].as_str(),
         "source.with.dots"
     );
     assert_eq!(
@@ -159,12 +170,12 @@ fn migrated_conditional_example_preserves_legacy_branches_and_interfaces() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let modern = compile_definition(&modern, &registry).unwrap();
     let legacy = compile_definition(&legacy, &registry).unwrap();
-    assert_eq!(modern.execution_order, legacy.execution_order);
-    assert_eq!(modern.definition.nodes, legacy.definition.nodes);
-    assert_eq!(modern.definition.edges, legacy.definition.edges);
+    assert_eq!(modern.graph.execution_order, legacy.graph.execution_order);
+    assert_eq!(modern.graph.definition.nodes, legacy.graph.definition.nodes);
+    assert_eq!(modern.graph.definition.edges, legacy.graph.definition.edges);
     assert_eq!(
-        modern.definition.control_edges,
-        legacy.definition.control_edges
+        modern.graph.definition.control_edges,
+        legacy.graph.definition.control_edges
     );
     assert_eq!(
         mf_compiler::describe_workflow_inputs(&modern, &registry).unwrap(),

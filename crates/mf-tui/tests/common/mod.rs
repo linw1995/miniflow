@@ -4,14 +4,15 @@ use mf_runtime::{WorkflowInputSchema, WorkflowManifest, WorkflowManifestVersion}
 
 pub fn sample_manifest() -> WorkflowManifest {
     WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_11_04,
-        parameter_types: Default::default(),
-        definition: serde_json::from_value(serde_json::json!({
-            "version": "2026-10-03", "dependencies": {}, "nodes": []
-        }))
-        .unwrap(),
-        execution_order: vec![],
-        loop_orders: vec![],
+        version: WorkflowManifestVersion::V2026_11_06,
+        graph: mf_runtime::CompiledGraph {
+            definition: serde_json::from_value(serde_json::json!({
+                "version": "2026-10-03", "dependencies": {}, "nodes": []
+            }))
+            .unwrap(),
+            execution_order: vec![],
+            children: Default::default(),
+        },
         input_schema: WorkflowInputSchema::default(),
     }
 }

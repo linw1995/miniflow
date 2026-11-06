@@ -3,30 +3,23 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, Path, parse_quote};
 
-enum ParameterType {
-    Value,
-    Flow,
-    OptionalFlow,
-}
-
-use ParameterType::{Flow, OptionalFlow, Value};
-
-fn assert_expansion(input: DeriveInput, runtime: Path, parameters: &[(&str, ParameterType)]) {
+fn assert_expansion(input: DeriveInput, runtime: Path, parameters: &[&str]) {
     let name = &input.ident;
     let prefix = quote! { impl #runtime::NodeConfig for #name }.to_string();
-    let entries = parameters.iter().map(|(name, ty)| {
-        let ty = match ty {
-            Value => quote!(#runtime::ConfigParameterType::Value),
-            Flow => quote!(#runtime::ConfigParameterType::Flow),
-            OptionalFlow => quote!(#runtime::ConfigParameterType::Optional(::std::boxed::Box::new(
-                #runtime::ConfigParameterType::Flow
-            ))),
-        };
-        quote!((#name.into(), #ty))
+    let extractions = parameters.iter().map(|name| {
+        quote! {
+            if let ::core::option::Option::Some(value) = __mf_config.get(#name).filter(|value| !value.is_null()) {
+                flows.insert(::std::string::String::from(#name), value.clone());
+            }
+        }
     });
     let declaration = quote! {
-        fn parameter_types() -> #runtime::ConfigParameterTypes {
-            #runtime::ConfigParameterTypes::from([#(#entries),*])
+        fn flow_parameters(
+            __mf_config: &::serde_json::Value,
+        ) -> ::std::collections::BTreeMap<::std::string::String, ::serde_json::Value> {
+            let mut flows = ::std::collections::BTreeMap::new();
+            #(#extractions)*
+            flows
         }
     }
     .to_string();
@@ -84,15 +77,7 @@ fn discovers_direct_and_optional_fields_in_declaration_order() {
             }
         },
         parse_quote!(::mf_runtime),
-        &[
-            ("body", Flow),
-            ("count", Value),
-            ("left", OptionalFlow),
-            ("right", OptionalFlow),
-            ("qualified", Flow),
-            ("ordinary", Value),
-            ("type", Flow),
-        ],
+        &["body", "left", "right", "qualified", "type"],
     );
 }
 
@@ -116,7 +101,7 @@ fn supports_empty_and_ordinary_configs() {
             }
         },
         parse_quote!(::mf_runtime),
-        &[("ordinary", Value), ("value", Value), ("body", Value)],
+        &[],
     );
 }
 
@@ -136,12 +121,7 @@ fn honors_runtime_alias_and_serde_names_and_defaults() {
             }
         },
         parse_quote!(::runtime_alias),
-        &[
-            ("requestBody", Flow),
-            ("left-hand", OptionalFlow),
-            ("rightSide", Flow),
-            ("settings", Value),
-        ],
+        &["requestBody", "left-hand", "rightSide"],
     );
 }
 
@@ -233,7 +213,7 @@ fn supports_all_serde_field_rename_rules() {
                 struct Config { #field: Flow }
             },
             parse_quote!(::mf_runtime),
-            &[(expected, Flow)],
+            &[expected],
         );
     }
 }
@@ -298,12 +278,7 @@ fn ordinary_deserialize_names_ignore_serialize_names_and_custom_codecs() {
             }
         },
         parse_quote!(::mf_runtime),
-        &[
-            ("settings", Value),
-            ("otherSettings", Value),
-            ("extraSettings", Value),
-            ("body", Flow),
-        ],
+        &["body"],
     );
 }
 
@@ -335,7 +310,7 @@ fn discovers_literal_type_spellings_and_ignores_differently_named_aliases() {
             }
         },
         parse_quote!(::mf_runtime),
-        &[("body", Flow), ("left", OptionalFlow), ("alias", Value)],
+        &["body", "left"],
     );
 }
 
@@ -669,12 +644,7 @@ fn ignores_ordinary_associated_types_and_unparameterized_option_names() {
             }
         },
         parse_quote!(::mf_runtime),
-        &[
-            ("ordinary", Value),
-            ("named_option", Value),
-            ("qualified_option", Value),
-            ("body", Flow),
-        ],
+        &["body"],
     );
     assert_error(
         parse_quote! {
@@ -698,12 +668,7 @@ fn injects_flow_and_existing_host_policy_handles_without_deserializing_them() {
             }
         },
         parse_quote!(::mf_runtime),
-        &[
-            ("compiled", Flow),
-            ("optional", OptionalFlow),
-            ("callback", Flow),
-            ("optional_callback", OptionalFlow),
-        ],
+        &["compiled", "optional", "callback", "optional_callback"],
     );
     let expanded = expand(parse_quote! {
         #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -793,6 +758,6 @@ fn explicit_rename_gives_underscore_only_fields_a_valid_wire_name() {
             }
         },
         parse_quote!(::mf_runtime),
-        &[("body", Flow)],
+        &["body"],
     );
 }
