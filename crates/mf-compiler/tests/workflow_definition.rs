@@ -477,7 +477,27 @@ fn cluster_validation_rejects_unknown_duplicate_and_synthetic_members() {
     let mut synthetic = base;
     synthetic.clusters[0].nodes = vec!["%loop".into()];
     let error = plan_definition(&synthetic).unwrap_err().to_string();
-    assert!(error.contains("synthetic nodes"), "{error}");
+    assert!(error.contains("unknown node `%loop`"), "{error}");
+
+    // A source is special because it is the frame's input endpoint, not because
+    // its ID happens to have a reserved spelling in an unrelated root scope.
+    let scoped: WorkflowDefinition = serde_json::from_value(serde_json::json!({
+        "version": "2026-10-23", "dependencies": {},
+        "nodes": [{"id": "repeat", "kind": "workflow.loop", "config": {
+            "max_iterations": 1,
+            "variables": [{"name": "count", "type": "int"}],
+            "body": synthetic
+        }}]
+    }))
+    .unwrap();
+    let error = plan_definition(&scoped).unwrap_err();
+    assert!(
+        matches!(&error, mf_compiler::WorkflowCompileError::ChildGraph { definition_id, source }
+        if definition_id.as_str() == "repeat"
+            && matches!(source.as_ref(), mf_compiler::WorkflowCompileError::InvalidCluster { message }
+                if message == "scope inputs cannot belong to a cluster")),
+        "{error:?}"
+    );
 
     value["clusters"][0]["label"] = serde_json::json!("");
     let empty_label = WorkflowDefinition::from_json(&value.to_string()).unwrap();
