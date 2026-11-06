@@ -347,6 +347,9 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
         "empty bindings",
         "blank field",
         "scope collision",
+        "foreign owner key",
+        "foreign binding key",
+        "unbound alias",
     ] {
         let mut authored = definition();
         let (owner, field) = match case {
@@ -362,10 +365,17 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
         }
         let mut plan = compile_definition(&authored, &registry).unwrap();
         let mut handoff = resolved(authored);
+        let mut child = leaf.graph.clone();
+        child.relations.key = match case {
+            "foreign owner key" => Some(mf_runtime::ScopePathEntry::binding_key("other", field)),
+            "foreign binding key" => Some(mf_runtime::ScopePathEntry::binding_key(owner, "other")),
+            "unbound alias" => Some("unbound".into()),
+            _ => None,
+        };
         let bindings = if case == "empty bindings" {
             BTreeMap::new()
         } else {
-            BTreeMap::from([(field.to_owned(), leaf.graph.clone())])
+            BTreeMap::from([(field.to_owned(), child.clone())])
         };
         plan.graph.children.insert(owner.into(), bindings);
         handoff.children.insert(
@@ -373,7 +383,7 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
             if case == "empty bindings" {
                 BTreeMap::new()
             } else {
-                BTreeMap::from([(field.to_owned(), resolved(definition()))])
+                BTreeMap::from([(field.to_owned(), resolved_graph(&child))])
             },
         );
         let expected = match case {
@@ -381,6 +391,9 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
                 "child graphs require a known owner and nonempty binding set"
             }
             "blank field" => "blank receiving Flow parameter declaration",
+            "foreign owner key" | "foreign binding key" | "unbound alias" => {
+                "scope keys must reference their actual receiving owner and binding"
+            }
             _ => "Flow parameter body key collides with an authored node ID",
         };
         assert_invalid_graph(

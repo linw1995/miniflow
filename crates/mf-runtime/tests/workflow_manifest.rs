@@ -1043,6 +1043,21 @@ fn explicit_child_keys_cannot_collide_even_when_legacy_projection_omits_them() {
 
 #[test]
 fn binding_scope_keys_cannot_be_claimed_by_another_authored_node() {
+    for key in [
+        mf_telemetry::event::ScopePathEntry::binding_key("other", "selected"),
+        mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "other"),
+        "unbound".into(),
+    ] {
+        let mut manifest = binding_manifest();
+        child(&mut manifest.graph, "dispatch", "selected")
+            .relations
+            .key = Some(key);
+        for error in errors(&manifest) {
+            assert!(matches!(error, WorkflowManifestError::Graph {
+                source: mf_telemetry::ContractError::Invalid { message }
+            } if message == "compiled scope keys must reference their actual receiving owner and binding"));
+        }
+    }
     let mut manifest = binding_manifest();
     let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
     manifest
