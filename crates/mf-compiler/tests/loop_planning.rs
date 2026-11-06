@@ -18,7 +18,38 @@ use mf_telemetry::{
     identity::RunId,
 };
 use serde_json::{Value, json};
-use std::{fs, process::Command};
+use std::{error::Error, fs, process::Command};
+
+fn find_source<'a, T: Error + 'static>(error: &'a (dyn Error + 'static)) -> Option<&'a T> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(source) = error.downcast_ref::<T>() {
+            return Some(source);
+        }
+        current = error.source();
+    }
+    None
+}
+
+fn prepared_loop_body() -> (Value, mf_runtime::PreparedSubgraph) {
+    let body = json!({
+        "version": "2026-10-28", "dependencies": {},
+        "nodes": [{"id": "tick", "kind": "builtin.constant", "config": {"value": true}}],
+    });
+    let nodes = parse(body.clone())
+        .nodes
+        .into_iter()
+        .map(|node| mf_telemetry::event::NodeIdentity {
+            id: node.id.to_string(),
+            kind: node.kind,
+            path: Vec::new(),
+        })
+        .collect();
+    (
+        body,
+        mf_runtime::PreparedSubgraph::new(nodes, Vec::new(), |_| Ok(Outputs::new())),
+    )
+}
 
 struct OmitOnSecond;
 
@@ -156,11 +187,24 @@ fn rejects_old_schema_and_invalid_loop_structure() {
 
     let mut value = definition();
     value["nodes"][1]["config"]["max_iterations"] = json!(0);
+    let authored = parse(value);
+    // The planner only lowers structure; the prepared Loop factory owns the bound.
+    plan_definition(&authored).unwrap();
+    let error =
+        compile_definition(&authored, &NodeRegistry::from_inventory().unwrap()).unwrap_err();
     assert!(
-        plan_definition(&parse(value))
-            .unwrap_err()
+        matches!(&error, mf_compiler::WorkflowCompileError::NodeConstruction { definition_id, kind, .. }
+            if definition_id.as_str() == "repeat" && kind == mf_runtime::LOOP_KIND),
+        "{error}"
+    );
+    assert!(matches!(
+        find_source::<mfn_core::LoopBuildError>(&error).unwrap(),
+        mfn_core::LoopBuildError::InvalidMaximum
+    ));
+    assert!(
+        error
             .to_string()
-            .contains("max_iterations")
+            .contains("max_iterations must be in 1..=1000")
     );
 
     let mut value = definition();
@@ -193,11 +237,16 @@ fn rejects_old_schema_and_invalid_loop_structure() {
                 json!({})
             }
         }));
+        let error = plan_definition(&parse(value)).unwrap_err();
+        let expected = if kind == mf_runtime::LOOP_ASSIGN_KIND {
+            "assignment requires a state scope"
+        } else {
+            "exit requires a state scope"
+        };
         assert!(
-            plan_definition(&parse(value))
-                .unwrap_err()
-                .to_string()
-                .contains("requires a Loop")
+            matches!(&error, mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+                if path == "[\"outside\"]" && message == expected),
+            "{error}"
         );
     }
 }
@@ -227,21 +276,18 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
         let error = plan_definition(&parse(value)).unwrap_err().to_string();
         assert!(error.contains(expected), "{error}");
 
+        let (body, prepared_body) = prepared_loop_body();
         let config = json!({
             "max_iterations": 5,
             "variables": variables,
-            "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]},
+            "body": body,
         });
         let error = mf_compiler::instantiate_subgraphs_with_metadata(
             &NodeRegistry::from_inventory().unwrap(),
             "repeat",
             mf_runtime::LOOP_KIND,
             &config.to_string(),
-            [(
-                "body".into(),
-                mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
-            )]
-            .into(),
+            [("body".into(), prepared_body)].into(),
         )
         .err()
         .unwrap()
@@ -249,12 +295,27 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
         assert!(error.contains(expected), "{error}");
     }
 
+    let (body, prepared_body) = prepared_loop_body();
     let mut complete_definition = definition()["nodes"][1]["config"].clone();
-    complete_definition["body"] = json!({
-        "version":"2026-10-28", "dependencies":{}, "nodes":[],
-    });
+    complete_definition["body"] = body;
+    let registry = NodeRegistry::from_inventory().unwrap();
     let prepared = mf_compiler::instantiate_subgraphs_with_metadata(
-        &NodeRegistry::from_inventory().unwrap(),
+        &registry,
+        "repeat",
+        mf_runtime::LOOP_KIND,
+        &complete_definition.to_string(),
+        [("body".into(), prepared_body)].into(),
+    )
+    .unwrap();
+    assert_eq!(prepared.metadata.ports.inputs[0].name, "count");
+
+    // An empty prepared body is a Loop business-policy failure, not a lowering error.
+    complete_definition["body"]["nodes"] = json!([]);
+    let mut authored = definition();
+    authored["nodes"][1]["config"] = complete_definition.clone();
+    plan_definition(&parse(authored)).unwrap();
+    let error = mf_compiler::instantiate_subgraphs_with_metadata(
+        &registry,
         "repeat",
         mf_runtime::LOOP_KIND,
         &complete_definition.to_string(),
@@ -264,8 +325,17 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
         )]
         .into(),
     )
+    .err()
     .unwrap();
-    assert_eq!(prepared.metadata.ports.inputs[0].name, "count");
+    assert!(matches!(
+        find_source::<mfn_core::LoopBuildError>(&error).unwrap(),
+        mfn_core::LoopBuildError::EmptyBody
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("Loop body must contain at least one node")
+    );
 }
 
 #[test]
@@ -413,8 +483,29 @@ fn assert_invalid_loop_edits_preserve_installed_binary_and_lock(
     let lock = fs::read(&lock_path).unwrap();
     value["nodes"][1]["config"]["max_iterations"] = json!(0);
     fs::write(definition_path, value.to_string()).unwrap();
-    let error = compile_project(request).unwrap_err();
-    assert_eq!(error.stage, "structural validation");
+    let error: mf_compiler::PipelineError = compile_project(request).unwrap_err();
+    assert_eq!(error.stage, "Cargo build");
+    assert_eq!(
+        error.project,
+        fs::canonicalize(request.build_dir.unwrap()).unwrap()
+    );
+    let source = find_source::<std::io::Error>(&error).unwrap();
+    assert_eq!(source.kind(), std::io::ErrorKind::Other);
+    assert!(source.to_string().contains("Cargo build failed with"));
+    // Cargo owns the subprocess boundary, so the pipeline retains a typed I/O
+    // status source. Capture the generated build's diagnostic separately to prove
+    // the failure came from the Loop factory rather than a different build error.
+    let build = mf_compiler::cargo_command(&error.project)
+        .args(["build", "--release", "--offline", "--locked"])
+        .output()
+        .unwrap();
+    assert!(!build.status.success());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("failed to construct node `repeat` of kind `workflow.loop`")
+            && stderr.contains("max_iterations must be in 1..=1000"),
+        "{stderr}"
+    );
     assert_eq!(fs::read(executable).unwrap(), installed);
     assert_eq!(fs::read(&lock_path).unwrap(), lock);
 
@@ -1211,11 +1302,15 @@ fn descriptions_reject_damaged_loop_authoring_boundaries_with_typed_owners() {
     )
     .unwrap_err();
     assert!(
-        matches!(&error, mf_compiler::WorkflowCompileError::LoopConfiguration { path, .. }
-            if path == "[\"repeat\"]"),
+        matches!(&error, mf_compiler::WorkflowCompileError::FlowParameters { definition_id, .. }
+            if definition_id.as_str() == "repeat"),
         "{error}"
     );
-    assert!(error.source().unwrap().is::<serde_json::Error>());
+    assert!(matches!(
+        error.source().unwrap().downcast_ref::<mf_runtime::FlowParameterError>().unwrap(),
+        mf_runtime::FlowParameterError::Json { parameter, .. } if parameter == "body"
+    ));
+    assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
     let mut malformed = serde_json::to_value(&valid).unwrap();
     malformed["graph"]["children"]["repeat"]["body"]["definition"] = json!("not a workflow");
     let error = mf_compiler::CompiledWorkflow::from_json(&malformed.to_string()).unwrap_err();
@@ -1230,14 +1325,17 @@ fn descriptions_reject_damaged_loop_authoring_boundaries_with_typed_owners() {
     for (case, expected) in [
         (
             "wrong owner",
-            "`%loop` is reserved for the canonical Loop body source",
+            "reserved scope source requires its canonical enclosing scope",
         ),
         (
             "old version",
-            "Loop constructs require definition version 2026-09-29",
+            "scope constructs require definition version 2026-09-29",
         ),
         ("malformed child", "invalid type"),
-        ("missing body", "missing field `body`"),
+        (
+            "missing body",
+            "built-in container requires its compiled body binding",
+        ),
     ] {
         let mut damaged = valid.clone();
         match case {
@@ -1280,39 +1378,60 @@ fn descriptions_reject_damaged_loop_authoring_boundaries_with_typed_owners() {
         };
         assert!(path.is_empty(), "{case}: {error}");
         match case {
-            "malformed child" => {
+            "malformed child" | "wrong owner" => {
+                let mf_compiler::WorkflowCompileError::ChildGraph {
+                    definition_id,
+                    source: child,
+                } = source.as_ref()
+                else {
+                    panic!("{case}: expected a child graph error: {error}");
+                };
+                assert_eq!(definition_id.as_str(), "repeat");
                 assert!(
-                    matches!(source.as_ref(), mf_compiler::WorkflowCompileError::LoopAssignmentConfiguration { path, .. }
-                        if path == "[\"repeat\",\"assign\"]"),
-                    "{case}: {error}"
+                    source
+                        .source()
+                        .unwrap()
+                        .is::<Box<mf_compiler::WorkflowCompileError>>()
                 );
-                assert!(source.source().unwrap().is::<serde_json::Error>());
-                assert!(error.to_string().contains(expected), "{error}");
+                if case == "malformed child" {
+                    assert!(
+                        matches!(child.as_ref(), mf_compiler::WorkflowCompileError::ScopeConfiguration { path, .. }
+                            if path == "[\"repeat\",\"assign\"]"),
+                        "{case}: {error}"
+                    );
+                    assert!(child.source().unwrap().is::<serde_json::Error>());
+                    assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
+                } else {
+                    // The canonical child source retains both the owner wrapper
+                    // and its full authoring path when ownership is damaged.
+                    assert!(
+                        matches!(child.as_ref(), mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+                            if path == "[\"repeat\",\"%loop\"]" && message == expected),
+                        "{case}: {error}"
+                    );
+                    assert!(child.source().is_none());
+                }
             }
             "missing body" => {
                 assert!(
-                    matches!(source.as_ref(), mf_compiler::WorkflowCompileError::LoopConfiguration { path, .. }
-                        if path == "[\"repeat\"]"),
+                    matches!(source.as_ref(), mf_compiler::WorkflowCompileError::InvalidGraph { definition_id, message }
+                        if definition_id.as_str() == "repeat" && message == expected),
                     "{case}: {error}"
                 );
-                assert!(source.source().unwrap().is::<serde_json::Error>());
-                assert!(error.to_string().contains(expected), "{error}");
+                assert!(source.source().is_none());
+                assert!(find_source::<serde_json::Error>(&error).is_none());
             }
-            _ => {
-                // The explicit child's canonical source carries the wrong-owner
-                // violation; no removed loop-order metadata establishes ownership.
-                let owner = if case == "wrong owner" {
-                    "[\"%loop\"]"
-                } else {
-                    "[\"repeat\"]"
-                };
+            "old version" => {
                 assert!(
-                    matches!(source.as_ref(), mf_compiler::WorkflowCompileError::InvalidLoop { path, message }
-                        if path == owner && message == expected),
+                    matches!(source.as_ref(), mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+                        if path == "[\"repeat\"]" && message == expected),
                     "{case}: {error}"
                 );
+                assert!(source.source().is_none());
             }
+            _ => unreachable!(),
         }
+        assert!(error.to_string().contains(expected), "{case}: {error}");
         assert!(
             error
                 .source()
@@ -1333,26 +1452,54 @@ fn resolved_graphs_reject_missing_loop_bodies_before_factory_preparation() {
             .iter_mut()
             .find(|node| node.id.as_str() == "repeat")
             .unwrap();
-        let expected_path = if nested {
+        let expected_owner = if nested {
             // The outer graph is valid; the error belongs to this nested authoring node.
             owner.config["body"]["nodes"]
                 .as_array_mut()
                 .unwrap()
                 .push(json!({"id": "inner", "kind": "workflow.loop"}));
-            "[\"repeat\",\"inner\"]"
+            "inner"
         } else {
             owner.config.as_object_mut().unwrap().remove("body");
-            "[\"repeat\"]"
+            "repeat"
         };
         let error = mf_compiler::compile_resolved_definition(&authored, &registry).unwrap_err();
+        let leaf = if nested {
+            let mf_compiler::WorkflowCompileError::ChildGraph {
+                definition_id,
+                source,
+            } = &error
+            else {
+                panic!("expected the outer owner context: {error}");
+            };
+            assert_eq!(definition_id.as_str(), "repeat");
+            assert!(
+                error
+                    .source()
+                    .unwrap()
+                    .is::<Box<mf_compiler::WorkflowCompileError>>()
+            );
+            assert!(std::ptr::eq(
+                error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<Box<mf_compiler::WorkflowCompileError>>()
+                    .unwrap()
+                    .as_ref(),
+                source.as_ref()
+            ));
+            source.as_ref()
+        } else {
+            &error
+        };
         assert!(
-            matches!(
-                &error,
-                mf_compiler::WorkflowCompileError::LoopConfiguration { path, .. }
-                    if path == expected_path
-            ),
+            matches!(leaf, mf_compiler::WorkflowCompileError::InvalidGraph { definition_id, message }
+                if definition_id.as_str() == expected_owner
+                    && message == "built-in container requires its compiled body binding"),
             "{error}"
         );
-        assert!(error.source().unwrap().is::<serde_json::Error>());
+        assert!(leaf.source().is_none());
+        assert!(find_source::<serde_json::Error>(&error).is_none());
+        assert!(find_source::<NodeBuildError>(&error).is_none());
     }
 }

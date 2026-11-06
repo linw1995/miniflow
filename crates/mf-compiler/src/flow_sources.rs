@@ -1,6 +1,6 @@
 use crate::{NodeDependency, WorkflowDefinition};
 use mf_runtime::{
-    CALL_KIND, CallConfig, DefinitionId, FlowSource, MAX_CALL_DEPTH, NodeDefinition, NodeRegistry,
+    CALL_KIND, DefinitionId, FlowSource, MAX_CALL_DEPTH, NodeDefinition, NodeRegistry,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
@@ -38,10 +38,10 @@ pub enum FlowResolutionError {
         node: String,
         source: serde_json::Error,
     },
-    #[snafu(display("invalid Iteration body on `{node}`: {source}"))]
-    IterationBody {
+    #[snafu(display("invalid child scope on `{node}`: {source}"))]
+    ChildStructure {
         node: String,
-        source: crate::iteration::IterationValidationError,
+        source: crate::ScopeStructureError,
     },
     #[snafu(display("invalid Flow reference `{reference}`: {message}"))]
     Invalid { reference: String, message: String },
@@ -840,7 +840,7 @@ impl Resolver {
                     ParameterSource::Source(_) => None,
                 };
                 if let Some(body) = body {
-                    self.validate_iteration_body(node, body, version)?;
+                    self.validate_iteration_body(node, &body)?;
                 }
             }
             let call_body = node.kind == CALL_KIND && field == "body";
@@ -869,7 +869,7 @@ impl Resolver {
         if node.kind == mf_runtime::ITERATION_KIND
             && let Some(body) = children.get("body")
         {
-            self.validate_iteration_body(node, body.definition.clone(), version)?;
+            self.validate_iteration_body(node, &body.definition)?;
         }
         Ok(children)
     }
@@ -877,20 +877,11 @@ impl Resolver {
     fn validate_iteration_body(
         &self,
         node: &NodeDefinition,
-        body: WorkflowDefinition,
-        version: mf_runtime::WorkflowDefinitionVersion,
+        body: &WorkflowDefinition,
     ) -> Result<(), FlowResolutionError> {
-        let mut config = node.config.clone();
-        config["body"] = serde_json::to_value(&body).context(ConfigurationSnafu {
-            node: node.id.as_str(),
-        })?;
-        let config: mf_runtime::IterationConfig =
-            serde_json::from_value(config).context(ConfigurationSnafu {
-                node: node.id.as_str(),
-            })?;
-        // The owner version gates its projected streams; the body keeps its own
-        // syntax/version authority and was parsed independently above.
-        crate::iteration::validate_body_structure(version, &config).context(IterationBodySnafu {
+        // Check supported scope grammar before descending, without decoding the
+        // receiver's ordinary configuration or its result-interface policy.
+        crate::iteration::validate_body_structure(body).context(ChildStructureSnafu {
             node: node.id.as_str(),
         })
     }
@@ -910,12 +901,12 @@ impl Resolver {
                 let explicit_body = node.config.get("body").is_some_and(|body| !body.is_null());
                 // Validate the named selector without interpreting
                 // the receiving field before its selected metadata authorizes it.
-                let mut selector = node.config.clone();
-                if let Some(config) = selector.as_object_mut() {
-                    config.remove("body");
+                #[derive(Deserialize)]
+                struct CallSelector {
+                    flow: String,
                 }
-                let mut config: CallConfig =
-                    serde_json::from_value(selector).context(ConfigurationSnafu {
+                let config: CallSelector =
+                    serde_json::from_value(node.config.clone()).context(ConfigurationSnafu {
                         node: node.id.as_str(),
                     })?;
                 ensure!(
@@ -971,11 +962,12 @@ impl Resolver {
                             );
                             // Bootstrap facts do not grant receiving authority:
                             // this definition is deliberately absent from children.
-                            config.body = Some(Box::new(child.definition));
+                            node.config["body"] = serde_json::to_value(child.definition).context(
+                                ConfigurationSnafu {
+                                    node: node.id.as_str(),
+                                },
+                            )?;
                         }
-                        node.config = serde_json::to_value(config).context(ConfigurationSnafu {
-                            node: node.id.as_str(),
-                        })?;
                         continue;
                     }
                     // Ask the receiver about the selected alias value without
@@ -1026,6 +1018,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mf_runtime::CallConfig;
     use serde_json::json;
 
     fn definition(nodes: serde_json::Value) -> WorkflowDefinition {
@@ -1161,7 +1154,7 @@ mod tests {
             }
             assert!(matches!(
                 error,
-                crate::WorkflowCompileError::CallBody { definition_id, source }
+                crate::WorkflowCompileError::ChildGraph { definition_id, source }
                     if definition_id.as_str() == "receiver"
                         && matches!(source.as_ref(), crate::WorkflowCompileError::UnknownNodeKind {
                             definition_id, kind
@@ -2192,13 +2185,18 @@ mod tests {
                 serde_json::from_value(parent.nodes[0].config.clone()).unwrap();
             assert_eq!(*config.body.unwrap(), call_codec_body().unwrap());
         }
+        let body = definition(json!([{
+            "id":"value", "kind":"builtin.constant", "config":{"value":1}
+        }]));
         let mut parent = definition(json!([{
             "id":"call", "kind":CALL_KIND,
-            "config":{"flow":"alias", "body":{"path":"must-not-read.json"}, "unexpected":true}
+            "config":{"flow":"alias", "body":body, "unexpected":true}
         }]));
-        let error = source_resolver().resolve(&mut parent, None).unwrap_err();
-        assert!(matches!(error, FlowResolutionError::Configuration { .. }));
-        assert!(error.to_string().contains("unexpected"));
+        // Resolution owns the selector, not the receiver's ordinary schema. It
+        // must preserve unknown fields for the actual provider decoder to reject.
+        source_resolver().resolve(&mut parent, None).unwrap();
+        assert_eq!(parent.nodes[0].config["unexpected"], json!(true));
+        assert_eq!(parent.nodes[0].config["body"], json!(body));
     }
 
     #[test]
@@ -2466,8 +2464,8 @@ mod tests {
         let error = resolver.resolve(&mut parent, None).unwrap_err();
         assert!(matches!(
             error,
-            FlowResolutionError::IterationBody {
-                source: crate::iteration::IterationValidationError::NestedIteration { .. },
+            FlowResolutionError::ChildStructure {
+                source: crate::ScopeStructureError::NestedScope { .. },
                 ..
             }
         ));

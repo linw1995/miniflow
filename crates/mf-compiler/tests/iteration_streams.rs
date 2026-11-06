@@ -382,11 +382,14 @@ fn iteration_stream_bindings_reject_invalid_versions_aliases_sources_and_stream_
     }
     let mut value = definition("sequential", json!({}));
     value["nodes"][0]["config"]["body"]["outputs"][0]["port"] = json!("delta");
+    let error = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap_err();
     assert!(
-        compile_definition(&serde_json::from_value(value).unwrap(), &registry)
-            .unwrap_err()
-            .to_string()
-            .contains("terminal body output")
+        matches!(&error, mf_compiler::WorkflowCompileError::FlowConstruction {
+            source: mf_compiler::FlowBuildError::SynchronousStreamEdge {
+                from_node, port, to_node,
+            },
+        } if from_node == "step" && port == "delta" && to_node == "<workflow output>"),
+        "{error:?}"
     );
     for (from, to) in [("edge", "each"), ("each", "edge")] {
         let mut value = definition("parallel", json!({}));

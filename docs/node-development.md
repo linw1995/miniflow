@@ -1141,6 +1141,13 @@ those contracts in your prepared factory; do not execute children during prepara
 `PreparedNode` with your own ports and policy. The runtime does not prescribe selector inputs, argument
 objects, error envelopes, invocation count, or result aggregation.
 
+Keep business validation and its error types in the owning node crate. Return typed sources through
+`NodeBuildError::FactoryFailed`; compiler preparation adds generic node or child-scope context without
+recreating node-specific diagnostics. Offline graph planning and description check structure and
+lowering contracts, not the complete business configuration. Prepared injection does not reparse a raw
+child definition: the original stored configuration reaches the factory with actual prepared handles.
+This also applies to Loop, Iteration, and Call; their ordinary business validation is factory-owned.
+
 The current authored/compiler-prepared child path remains finite, including compatible TaskStream
 forwarding and calls from parent Stream messages. Its preparation rejects autonomous Event/Stream
 children. This is separate from the runtime lifecycle API above: factory-backed Event handles can use

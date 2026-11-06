@@ -8,9 +8,10 @@ extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    CompileRequest, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry,
-    Outputs, PortSpec, SupportPackages, TaskNode, ValueType, WorkflowDefinition,
-    compile_definition, compile_project, execute_compiled, instantiate_compiled, plan_definition,
+    CompileRequest, FlowResolutionError, Inputs, NodeBuildError, NodeExecutionError,
+    NodeRegistration, NodeRegistry, Outputs, PortSpec, ScopeStructureError, SupportPackages,
+    TaskNode, ValueType, WorkflowCompileError, WorkflowDefinition, compile_definition,
+    compile_project, execute_compiled, instantiate_compiled, plan_definition,
 };
 use mf_telemetry::identity::RunId;
 use opentelemetry::trace::TraceContextExt;
@@ -245,21 +246,27 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     let mut invalid = definition(json!([1]), "sequential", "terminate");
     invalid["nodes"][1]["config"]["body"]["nodes"][0]["id"] = json!("%iteration");
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
+    let error = plan_definition(&invalid_definition).unwrap_err();
     assert!(
-        plan_definition(&invalid_definition)
-            .unwrap_err()
-            .to_string()
-            .contains("reserved")
+        matches!(&error, WorkflowCompileError::FlowResolution {
+            source: FlowResolutionError::ChildStructure { node, source },
+        } if node == "iteration"
+            && matches!(source, ScopeStructureError::ReservedNode { node }
+                if node.as_str() == "%iteration")),
+        "{error:?}"
     );
 
     let mut invalid = definition(json!([1]), "sequential", "terminate");
     invalid["nodes"][1]["config"]["body"]["nodes"][0]["kind"] = json!("builtin.iteration");
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
+    let error = plan_definition(&invalid_definition).unwrap_err();
     assert!(
-        plan_definition(&invalid_definition)
-            .unwrap_err()
-            .to_string()
-            .contains("nested")
+        matches!(&error, WorkflowCompileError::FlowResolution {
+            source: FlowResolutionError::ChildStructure { node, source },
+        } if node == "iteration"
+            && matches!(source, ScopeStructureError::NestedScope { node }
+                if node.as_str() == "map")),
+        "{error:?}"
     );
 
     let mut invalid = definition(json!([1]), "sequential", "terminate");
@@ -273,23 +280,28 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
         }
     });
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
+    let error = plan_definition(&invalid_definition).unwrap_err();
     assert!(
-        plan_definition(&invalid_definition)
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported Loop")
+        matches!(&error, WorkflowCompileError::FlowResolution {
+            source: FlowResolutionError::ChildStructure { node, source },
+        } if node == "iteration"
+            && matches!(source, ScopeStructureError::StateScope { node }
+                if node.as_str() == "inner_loop")),
+        "{error:?}"
     );
 
     let mut invalid = definition(json!([1]), "sequential", "terminate");
     invalid["nodes"][1]["config"]["body"]["outputs"][0]["port"] = json!("missing");
     let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
-    let error = compile_definition(&definition, &registry)
-        .unwrap_err()
-        .to_string();
+    let error = compile_definition(&definition, &registry).unwrap_err();
     assert!(
-        error.contains("iteration") && error.contains("missing port"),
-        "{error}"
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "iteration"
+                && matches!(source.as_ref(), WorkflowCompileError::UnknownWorkflowOutputPort {
+                    name, node_id, port,
+                } if name == "result" && node_id.as_str() == "map" && port == "missing")),
+        "{error:?}"
     );
 }
 

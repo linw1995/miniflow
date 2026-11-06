@@ -11,15 +11,17 @@ mod readline;
 
 pub use assert::KIND as ASSERT_KIND;
 pub use batch::KIND as BATCH_KIND;
+pub use call::CallBuildError;
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
 pub use identity::{
     IdentityInputs, IdentityOutputs, KIND as IDENTITY_KIND, kind as identity_kind, prepare_identity,
 };
 pub use if_else::KIND as IF_ELSE_KIND;
 pub use iteration::{
-    IterationInputs, IterationNode, IterationOutputs, KIND as ITERATION_KIND, MAX_PARALLEL_ITEMS,
+    IterationInputs, IterationNode, IterationOutputs, IterationValidationError,
+    KIND as ITERATION_KIND, MAX_PARALLEL_ITEMS,
 };
-pub use loop_declaration::KIND as LOOP_KIND;
+pub use loop_declaration::{KIND as LOOP_KIND, LoopBuildError};
 pub use parameters::KIND as PARAMETERS_KIND;
 
 #[cfg(test)]

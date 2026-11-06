@@ -845,13 +845,13 @@ pub enum WorkflowBuildError {
         source: NodeBuildError,
         definition_id: DefinitionId,
     },
-    #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
-    LoopVariables {
+    #[snafu(display("invalid scope variables for node `{definition_id}`: {source}"))]
+    ScopeVariables {
         definition_id: DefinitionId,
         source: mf_runtime::LoopVariableError,
     },
-    #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
-    LoopVariableDescriptor {
+    #[snafu(display("invalid scope variable descriptor for node `{definition_id}`: {source}"))]
+    ScopeVariableDescriptor {
         definition_id: DefinitionId,
         source: mf_runtime::TypeDescriptorError,
     },
@@ -931,14 +931,15 @@ fn validate_compiled_providers(
             }
         );
         if node.kind == mf_runtime::CALL_KIND {
-            let mut selector = node.config.clone();
-            if let Some(config) = selector.as_object_mut() {
-                config.remove("body");
+            #[derive(serde::Deserialize)]
+            struct CallSelector {
+                flow: String,
             }
-            let config: mf_runtime::CallConfig =
-                serde_json::from_value(selector).context(InvalidEmbeddedConfigSnafu {
+            let config: CallSelector = serde_json::from_value(node.config.clone()).context(
+                InvalidEmbeddedConfigSnafu {
                     definition_id: node.id.clone(),
-                })?;
+                },
+            )?;
             if let Some(registered) = registry.flow(&config.flow) {
                 let body = children
                     .and_then(|children| children.get("body"))
@@ -1053,7 +1054,7 @@ pub fn prepared_loop_source_from_json(
         serde_json::from_str(variables_json).context(InvalidEmbeddedConfigSnafu {
             definition_id: crate::LOOP_SOURCE_ID,
         })?;
-    let types = mf_runtime::loop_variable_types(&variables).context(LoopVariablesSnafu {
+    let types = mf_runtime::loop_variable_types(&variables).context(ScopeVariablesSnafu {
         definition_id: crate::LOOP_SOURCE_ID,
     })?;
     Ok(mf_runtime::prepared_loop_source_types(&types))
@@ -1067,7 +1068,7 @@ pub fn prepared_loop_assign_from_json(
     let descriptor: Value = serde_json::from_str(type_json)
         .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
     let value_type = ValueType::parse_descriptor(&descriptor)
-        .context(LoopVariableDescriptorSnafu { definition_id: id })?;
+        .context(ScopeVariableDescriptorSnafu { definition_id: id })?;
     Ok(mf_runtime::prepared_loop_assign(id, variable, value_type))
 }
 #[derive(Debug, Snafu)]

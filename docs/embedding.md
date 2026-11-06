@@ -151,6 +151,15 @@ provider availability and actual compiled-child binding keys at the receiving bo
 default, and ordinary-field validation remains the receiver decoder's responsibility; complete
 configuration schemas are neither persisted nor compared.
 
+Provider-free planning and offline description validate graph structure and supported scope grammar,
+not the receiving node's complete business configuration. Preparation invokes the registered factory,
+which decodes ordinary fields and validates its actual prepared child interfaces. Loop bounds and
+conditions, Iteration result shape, and Call stdin policy are checked there before execution. Compiler
+lowering reads only the fields it needs for synthetic inputs, stream projections, or host selection;
+those views never deserialize the redundant raw child body. Factories receive the original stored
+configuration alongside authoritative prepared children. Node-owned errors retain their typed sources
+under generic compiler node or child-scope context.
+
 Manifest payload version `2026-11-06` contains `version`, `graph`, and prepared `input_schema`;
 saved plans contain a required `graph` wrapper. Neither format stores `parameter_types` or
 `loop_orders`. Framing remains version 1. Older payloads and saved-plan formats are rejected rather

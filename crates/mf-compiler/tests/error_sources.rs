@@ -199,11 +199,25 @@ fn subgraph_compilation_preserves_nested_configuration_errors() {
 fn malformed_iteration_configuration_remains_a_typed_json_error() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-26", "dependencies": {},
-        "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {"mode": "invalid"}}]
+        "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {
+            "mode": "invalid", "body": {
+                "version": "2026-09-26", "dependencies": {},
+                "nodes": [{"id": "value", "kind": "builtin.constant", "config": {"value": 1}}],
+                "outputs": [{"name": "result", "node": "value", "port": "value"}]
+            }
+        }}]
     }))
     .unwrap();
-    let error = plan_definition(&definition).unwrap_err();
-    assert!(error.to_string().contains("each"));
+    // Ordinary receiver configuration is decoded only after its valid child is prepared.
+    plan_definition(&definition).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let error = compile_definition(&definition, &registry).unwrap_err();
+    assert!(
+        matches!(&error, WorkflowCompileError::NodeConstruction {
+            definition_id, kind, source: NodeBuildError::InvalidConfiguration { source },
+        } if definition_id.as_str() == "each" && kind == "builtin.iteration" && source.is_data()),
+        "{error:?}"
+    );
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
 }
 
@@ -214,8 +228,11 @@ fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
     }]}));
     let error = plan_definition(&definition).unwrap_err();
     assert!(
-        matches!(error, WorkflowCompileError::LoopAssignmentConfiguration { ref path, .. }
-        if path == "[\"repeat\",\"assign\"]")
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "repeat"
+                && matches!(source.as_ref(), WorkflowCompileError::ScopeConfiguration { path, .. }
+                    if path == "[\"repeat\",\"assign\"]")),
+        "{error:?}"
     );
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
 
@@ -223,11 +240,13 @@ fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
         "id": "assign", "kind": "workflow.loop_assign", "config": {"variable": " "}
     }]}));
     let error = plan_definition(&definition).unwrap_err();
-    assert!(matches!(error, WorkflowCompileError::InvalidLoop { .. }));
     assert!(
-        error
-            .to_string()
-            .contains("assignment variable must not be blank")
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "repeat"
+                && matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
+                    if path == "[\"repeat\",\"assign\"]"
+                        && message == "assignment variable must not be blank")),
+        "{error:?}"
     );
 }
 
@@ -239,8 +258,8 @@ fn loop_structure_errors_preserve_the_typed_inner_compilation_error() {
     }));
     let error = plan_definition(&definition).unwrap_err();
     assert!(
-        matches!(error, WorkflowCompileError::LoopBody { ref path, .. }
-        if path == "[\"repeat\"]")
+        matches!(error, WorkflowCompileError::ChildGraph { ref definition_id, .. }
+        if definition_id.as_str() == "repeat")
     );
     assert!(
         matches!(find_source::<Box<WorkflowCompileError>>(&error).unwrap().as_ref(),
@@ -481,7 +500,7 @@ fn loop_validation_preserves_variable_and_descriptor_sources() {
     definition.nodes[1].config["variables"][0]["type"] = json!("unknown");
     let error = plan_definition(&definition).unwrap_err();
     assert!(
-        matches!(&error, WorkflowCompileError::LoopVariables { path, .. } if path == "[\"repeat\"]")
+        matches!(&error, WorkflowCompileError::ScopeVariables { path, .. } if path == "[\"repeat\"]")
     );
     assert!(find_source::<mf_runtime::LoopVariableError>(&error).is_some());
     assert!(
@@ -501,7 +520,7 @@ fn loop_validation_preserves_variable_and_descriptor_sources() {
 }
 
 #[test]
-fn iteration_validation_preserves_the_structural_source() {
+fn iteration_validation_preserves_the_structural_graph_error() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-26", "dependencies": {},
         "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {"body": {"version":"2026-09-26", "dependencies":{},
@@ -514,20 +533,31 @@ fn iteration_validation_preserves_the_structural_source() {
     for error in [
         plan_definition(&definition).unwrap_err(),
         compile_definition(&definition, &registry).unwrap_err(),
-        // Saved definitions enter preparation without the resolver's validation wrapper.
-        mf_compiler::compile_resolved_definition(&definition, &registry).unwrap_err(),
         mf_compiler::resolve_nodes(&definition, &registry)
             .err()
             .unwrap(),
     ] {
         assert!(
-            matches!(&error, WorkflowCompileError::IterationValidation { definition_id, .. } if definition_id.as_str() == "each")
+            matches!(&error, WorkflowCompileError::FlowResolution {
+                source: mf_compiler::FlowResolutionError::ChildStructure { node, source },
+            } if node == "each"
+                && matches!(source, mf_compiler::ScopeStructureError::ReservedNode { node }
+                    if node.as_str() == "%iteration")),
+            "{error:?}"
         );
-        assert!(
-            matches!(find_source::<mf_compiler::IterationValidationError>(&error).unwrap(),
-            mf_compiler::IterationValidationError::ReservedNode { node } if node.as_str() == "%iteration")
-        );
+        assert!(find_source::<mf_compiler::ScopeStructureError>(&error).is_some());
     }
+
+    // Already-resolved definitions still enforce the compiler-owned scope grammar.
+    let error = mf_compiler::compile_resolved_definition(&definition, &registry).unwrap_err();
+    assert!(
+        matches!(&error, WorkflowCompileError::ScopeStructure { definition_id, source }
+            if definition_id.as_str() == "each"
+                && matches!(source, mf_compiler::ScopeStructureError::ReservedNode { node }
+                    if node.as_str() == "%iteration")),
+        "{error:?}"
+    );
+    assert!(find_source::<mf_compiler::ScopeStructureError>(&error).is_some());
 }
 
 #[test]
@@ -543,7 +573,7 @@ fn frozen_graphs_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
         assert!(
             matches!(
                 &error,
-                WorkflowCompileError::InvalidIteration { definition_id, message }
+                WorkflowCompileError::InvalidGraph { definition_id, message }
                     if definition_id.as_str() == id
                         && message == "internal iteration input is reserved for iteration bodies"
             ),
@@ -562,9 +592,9 @@ fn frozen_graphs_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
         assert!(
             matches!(
                 &error,
-                WorkflowCompileError::CallBody { definition_id, source }
+                WorkflowCompileError::ChildGraph { definition_id, source }
                     if definition_id.as_str() == "invoke"
-                        && matches!(source.as_ref(), WorkflowCompileError::InvalidIteration { definition_id, .. }
+                        && matches!(source.as_ref(), WorkflowCompileError::InvalidGraph { definition_id, .. }
                             if definition_id.as_str() == id)
             ),
             "{error}"

@@ -228,7 +228,7 @@ fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
             panic!("{case}: {source}");
         };
         assert_eq!(definition_id.as_str(), "invoke", "{case}");
-        let mf_compiler::WorkflowCompileError::InvalidCall {
+        let mf_compiler::WorkflowCompileError::InvalidGraph {
             definition_id,
             message,
         } = source.as_ref()

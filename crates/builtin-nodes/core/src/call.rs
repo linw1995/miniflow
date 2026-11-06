@@ -104,24 +104,28 @@ impl SubgraphNode for CallNode {
     }
 }
 
+#[derive(Debug, Snafu)]
+pub enum CallBuildError {
+    #[snafu(display("Flow alias must not be blank"))]
+    BlankFlow,
+    #[snafu(display("Flow calls cannot read stdin"))]
+    Stdin,
+}
+
+impl From<CallBuildError> for NodeBuildError {
+    fn from(source: CallBuildError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
 fn factory(
     id: &str,
     config: Value,
     bodies: BTreeMap<String, PreparedSubgraph>,
 ) -> Result<PreparedNode, NodeBuildError> {
     let Config { flow, body } = Config::from_config(config, bodies)?;
-    ensure!(
-        !flow.trim().is_empty(),
-        mf_runtime::NodeInvalidSubgraphSnafu {
-            message: "Flow alias must not be blank"
-        }
-    );
-    ensure!(
-        body.inputs.stdin.is_empty(),
-        mf_runtime::NodeInvalidSubgraphSnafu {
-            message: "Flow calls cannot read stdin"
-        }
-    );
+    ensure!(!flow.trim().is_empty(), BlankFlowSnafu);
+    ensure!(body.inputs.stdin.is_empty(), StdinSnafu);
     let input_bindings = body
         .inputs
         .inputs
@@ -205,32 +209,52 @@ mod tests {
     }
 
     #[test]
-    fn direct_call_factories_reject_blank_names_and_stdin_before_execution() {
+    fn call_factory_uses_actual_body_and_keeps_codec_errors_typed() {
+        let config = json!({"flow":"child", "body":{"version":false, "poison":true}});
         assert!(
             factory(
                 "invoke",
-                json!({"flow":" ", "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}}),
+                config.clone(),
                 BTreeMap::from([("body".into(), body())]),
             )
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("must not be blank")
+            .is_ok()
         );
+        let mut invalid = config;
+        invalid["flow"] = json!(false);
+        let error = factory("invoke", invalid, BTreeMap::from([("body".into(), body())]))
+            .err()
+            .unwrap();
+        assert!(matches!(error, NodeBuildError::InvalidConfiguration { .. }));
+    }
+
+    fn business_error(error: &NodeBuildError) -> &CallBuildError {
+        let NodeBuildError::FactoryFailed { source } = error else {
+            panic!("expected owning-node business error, got {error}");
+        };
+        source.downcast_ref().unwrap()
+    }
+
+    #[test]
+    fn direct_call_factories_reject_blank_names_and_stdin_before_execution() {
+        let error = factory(
+            "invoke",
+            json!({"flow":" ", "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}}),
+            BTreeMap::from([("body".into(), body())]),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(business_error(&error), CallBuildError::BlankFlow));
         let mut inputs = mf_runtime::WorkflowInputSchema::default();
         inputs
             .stdin
             .insert("read".into(), mf_runtime::StdinRequirement::Always);
-        assert!(
-            factory(
-                "invoke",
-                json!({"flow":"child", "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}}),
-                BTreeMap::from([("body".into(), body().with_input_schema(inputs))]),
-            )
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("cannot read stdin")
-        );
+        let error = factory(
+            "invoke",
+            json!({"flow":"child", "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}}),
+            BTreeMap::from([("body".into(), body().with_input_schema(inputs))]),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(business_error(&error), CallBuildError::Stdin));
     }
 }

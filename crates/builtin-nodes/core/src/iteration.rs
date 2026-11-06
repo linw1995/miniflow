@@ -47,8 +47,9 @@ fn factory(
         body,
         mode,
         on_error,
-        stream_outputs: _stream_outputs,
+        stream_outputs,
     } = Config::from_config(config, bodies)?;
+    validate_stream_names(stream_outputs.keys().map(String::as_str))?;
     let node = IterationNode::new(id, mode, on_error, body)?;
     let metadata = mf_runtime::NodeMetadata {
         output_derivations: vec![node.result_derivation()],
@@ -66,6 +67,32 @@ inventory::submit! {
             prepared: factory,
         },
     }
+}
+
+#[derive(Debug, Snafu)]
+pub enum IterationValidationError {
+    #[snafu(display("Iteration stream names must be nonblank and distinct from results"))]
+    InvalidStreamName,
+    #[snafu(display("Iteration body must declare exactly one required output named `result`"))]
+    InvalidResult,
+}
+
+impl From<IterationValidationError> for NodeBuildError {
+    fn from(source: IterationValidationError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
+fn validate_stream_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), IterationValidationError> {
+    ensure!(
+        names
+            .into_iter()
+            .all(|name| !name.trim().is_empty() && name != "results"),
+        InvalidStreamNameSnafu
+    );
+    Ok(())
 }
 
 pub struct IterationNode {
@@ -108,23 +135,12 @@ impl IterationNode {
         on_error: IterationErrorPolicy,
         body: PreparedSubgraph,
     ) -> Result<Self, NodeBuildError> {
+        validate_stream_names(body.stream_outputs.iter().map(|port| port.name.as_ref()))?;
         ensure!(
-            body.stream_outputs
-                .iter()
-                .all(|port| port.name != "results"),
-            mf_runtime::NodeInvalidSubgraphSnafu {
-                message: "Iteration stream outputs must not overlap results"
-            }
+            body.outputs.len() == 1 && body.outputs[0].name == "result" && body.outputs[0].required,
+            InvalidResultSnafu
         );
-        let result_type = body
-            .outputs
-            .iter()
-            .find(|port| port.name == "result" && port.required)
-            .with_context(|| mf_runtime::NodeInvalidSubgraphSnafu {
-                message: "iteration body must declare a required result output",
-            })?
-            .value_type
-            .clone();
+        let result_type = body.outputs[0].value_type.clone();
         Ok(Self {
             id: id.into(),
             mode,
@@ -423,6 +439,122 @@ mod tests {
             let error = factory("each", config.clone(), bodies).err().unwrap();
             assert!(error.to_string().contains("prepared Flow field"), "{error}");
         }
+    }
+
+    fn result_body() -> PreparedSubgraph {
+        PreparedSubgraph::new(
+            Vec::new(),
+            vec![PortSpec::new("result", ValueType::Any, true)],
+            |_| Ok(Outputs::new()),
+        )
+    }
+
+    fn business_error(error: &NodeBuildError) -> &IterationValidationError {
+        let NodeBuildError::FactoryFailed { source } = error else {
+            panic!("expected owning-node business error, got {error}");
+        };
+        source.downcast_ref().unwrap()
+    }
+
+    #[test]
+    fn iteration_requires_exactly_one_required_result() {
+        for outputs in [
+            vec![],
+            vec![PortSpec::new("other", ValueType::Any, true)],
+            vec![PortSpec::new("result", ValueType::Any, false)],
+            vec![
+                PortSpec::new("result", ValueType::Any, true),
+                PortSpec::new("other", ValueType::Any, true),
+            ],
+            vec![
+                PortSpec::new("result", ValueType::Any, true),
+                PortSpec::new("result", ValueType::Any, true),
+            ],
+        ] {
+            let mut body = result_body();
+            body.outputs = outputs;
+            let error = IterationNode::new(
+                "each",
+                IterationMode::Sequential,
+                IterationErrorPolicy::Terminate,
+                body,
+            )
+            .err()
+            .unwrap();
+            assert!(matches!(
+                business_error(&error),
+                IterationValidationError::InvalidResult
+            ));
+        }
+    }
+
+    #[test]
+    fn iteration_checks_prepared_and_configured_stream_names() {
+        for name in ["", " ", "results"] {
+            let mut body = result_body();
+            body.stream_outputs
+                .push(PortSpec::owned(name, ValueType::Any, true));
+            let error = IterationNode::new(
+                "each",
+                IterationMode::Sequential,
+                IterationErrorPolicy::Terminate,
+                body,
+            )
+            .err()
+            .unwrap();
+            assert!(matches!(
+                business_error(&error),
+                IterationValidationError::InvalidStreamName
+            ));
+
+            let error = factory(
+                "each",
+                json!({
+                    "body": {"poison": "not a workflow"},
+                    "stream_outputs": {(name): {"node":"identity", "port":"value"}},
+                }),
+                BTreeMap::from([("body".into(), result_body())]),
+            )
+            .err()
+            .unwrap();
+            assert!(matches!(
+                business_error(&error),
+                IterationValidationError::InvalidStreamName
+            ));
+        }
+    }
+
+    #[test]
+    fn iteration_uses_actual_prepared_body_and_keeps_codec_errors_typed() {
+        let config = json!({"body": {"outputs": "poison", "version": false}});
+        assert!(
+            factory(
+                "each",
+                config.clone(),
+                BTreeMap::from([("body".into(), result_body())]),
+            )
+            .is_ok()
+        );
+        let mut invalid = config.clone();
+        invalid["mode"] = json!(false);
+        let error = factory(
+            "each",
+            invalid,
+            BTreeMap::from([("body".into(), result_body())]),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(error, NodeBuildError::InvalidConfiguration { .. }));
+
+        let mut body = result_body();
+        body.outputs.clear();
+        let error = factory("each", config, BTreeMap::from([("body".into(), body)]))
+            .err()
+            .unwrap();
+        assert!(matches!(
+            business_error(&error),
+            IterationValidationError::InvalidResult
+        ));
     }
 
     #[test]

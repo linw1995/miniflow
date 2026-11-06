@@ -9,7 +9,7 @@ use mf_telemetry::{
     event::{LoopPassOutcome, LoopStopReason, LoopSummary},
 };
 use serde_json::Value;
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 pub const KIND: &str = mf_runtime::LOOP_KIND;
@@ -34,15 +34,115 @@ fn plain(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(display("invalid prepared subgraph: {source}"))]
-struct LoopBuildError {
-    source: mf_runtime::LoopVariableError,
+pub enum LoopBuildError {
+    #[snafu(display("Loop stream names must be nonblank and distinct from variables"))]
+    InvalidStreamName,
+    #[snafu(display("max_iterations must be in 1..=1000"))]
+    InvalidMaximum,
+    #[snafu(display("invalid Loop variables: {source}"))]
+    Variables {
+        source: mf_runtime::LoopVariableError,
+    },
+    #[snafu(display("unknown condition variable `{variable}`"))]
+    UnknownConditionVariable { variable: String },
+    #[snafu(display("condition comparison value must be scalar"))]
+    NonScalarConditionValue,
+    #[snafu(display("ordering condition requires numeric operands"))]
+    NonNumericOrdering,
+    #[snafu(display("condition variable must have a scalar-compatible type"))]
+    NonScalarConditionVariable,
+    #[snafu(display("condition literal conflicts with variable type"))]
+    IncompatibleConditionLiteral,
+    #[snafu(display("Loop body must contain at least one node"))]
+    EmptyBody,
+    #[snafu(display("Loop body outputs must be empty"))]
+    BodyOutputs,
 }
 
 impl From<LoopBuildError> for NodeBuildError {
     fn from(source: LoopBuildError) -> Self {
         Box::<dyn std::error::Error + Send + Sync>::from(source).into()
     }
+}
+
+/// Validate the owning node's options against the prepared stream boundary.
+fn validate_options<'a>(
+    max_iterations: u16,
+    variables: &[LoopVariableDefinition],
+    until: Option<&LoopConditionDefinition>,
+    stream_names: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, ValueType>, LoopBuildError> {
+    ensure!(
+        (1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&max_iterations),
+        InvalidMaximumSnafu
+    );
+    let types = loop_variable_types(variables).context(VariablesSnafu)?;
+    ensure!(
+        stream_names
+            .into_iter()
+            .all(|name| !name.trim().is_empty() && !types.contains_key(name)),
+        InvalidStreamNameSnafu
+    );
+    if let Some(condition) = until {
+        let value_type =
+            types
+                .get(&condition.variable)
+                .with_context(|| UnknownConditionVariableSnafu {
+                    variable: &condition.variable,
+                })?;
+        ensure!(
+            !condition.value.is_array() && !condition.value.is_object(),
+            NonScalarConditionValueSnafu
+        );
+        let numeric = matches!(
+            value_type,
+            ValueType::Any
+                | ValueType::Number
+                | ValueType::Int64
+                | ValueType::Uint64
+                | ValueType::Usize
+                | ValueType::Float32
+                | ValueType::Float64
+        );
+        let order = matches!(
+            condition.operator,
+            LoopComparisonOperator::Gt
+                | LoopComparisonOperator::Gte
+                | LoopComparisonOperator::Lt
+                | LoopComparisonOperator::Lte
+        );
+        ensure!(
+            !order || (numeric && condition.value.is_number()),
+            NonNumericOrderingSnafu
+        );
+        if !order {
+            ensure!(
+                !matches!(
+                    value_type,
+                    ValueType::Array | ValueType::Object | ValueType::List(_) | ValueType::Map(_)
+                ),
+                NonScalarConditionVariableSnafu
+            );
+            let compatible = match value_type {
+                ValueType::Any => true,
+                ValueType::Number
+                | ValueType::Int64
+                | ValueType::Uint64
+                | ValueType::Usize
+                | ValueType::Float32
+                | ValueType::Float64 => condition.value.is_number(),
+                ValueType::Null => condition.value.is_null(),
+                ValueType::Boolean => condition.value.is_boolean(),
+                ValueType::String => condition.value.is_string(),
+                ValueType::Nullable(_) => value_type.validate_value(&condition.value).is_ok(),
+                ValueType::Array | ValueType::Object | ValueType::List(_) | ValueType::Map(_) => {
+                    false
+                }
+            };
+            ensure!(compatible, IncompatibleConditionLiteralSnafu);
+        }
+    }
+    Ok(types)
 }
 
 fn factory(
@@ -55,23 +155,19 @@ fn factory(
         max_iterations,
         variables,
         until,
-        stream_outputs: _stream_outputs,
+        stream_outputs,
     } = Config::from_config(config, bodies)?;
-    ensure!(
-        (1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&max_iterations),
-        mf_runtime::NodeInvalidSubgraphSnafu {
-            message: "max_iterations must be in 1..=1000",
-        }
-    );
-    let types = loop_variable_types(&variables).context(LoopBuildSnafu)?;
-    ensure!(
-        body.stream_outputs
-            .iter()
-            .all(|port| !types.contains_key(port.name.as_ref())),
-        mf_runtime::NodeInvalidSubgraphSnafu {
-            message: "Loop stream outputs must not overlap loop variables"
-        }
-    );
+    let types = validate_options(
+        max_iterations,
+        &variables,
+        until.as_ref(),
+        stream_outputs
+            .keys()
+            .map(String::as_str)
+            .chain(body.stream_outputs.iter().map(|port| port.name.as_ref())),
+    )?;
+    ensure!(!body.nodes.is_empty(), EmptyBodySnafu);
+    ensure!(body.outputs.is_empty(), BodyOutputsSnafu);
     let node = LoopNode {
         id: id.into(),
         max_iterations,
@@ -98,6 +194,40 @@ mod tests {
     use super::*;
     use mf_runtime::NodeRegistry;
     use serde_json::json;
+    use std::error::Error;
+
+    fn body() -> PreparedSubgraph {
+        PreparedSubgraph::new(
+            vec![mf_telemetry::event::NodeIdentity {
+                id: "identity".into(),
+                kind: "builtin.identity".into(),
+                path: Vec::new(),
+            }],
+            Vec::new(),
+            |_| Ok(Outputs::new()),
+        )
+    }
+
+    fn config() -> Value {
+        json!({
+            "max_iterations": 1,
+            "variables": [{"name":"x", "type":"int"}],
+            "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]},
+        })
+    }
+
+    fn build_error(config: Value, body: PreparedSubgraph) -> NodeBuildError {
+        factory("repeat", config, BTreeMap::from([("body".into(), body)]))
+            .err()
+            .unwrap()
+    }
+
+    fn business_error(error: &NodeBuildError) -> &LoopBuildError {
+        let NodeBuildError::FactoryFailed { source } = error else {
+            panic!("expected owning-node business error, got {error}");
+        };
+        source.downcast_ref().unwrap()
+    }
 
     #[test]
     fn loop_factory_rejects_missing_and_unexpected_body_handles() {
@@ -108,13 +238,170 @@ mod tests {
         });
         for bodies in [
             BTreeMap::new(),
-            BTreeMap::from([(
-                "unexpected".into(),
-                PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
-            )]),
+            BTreeMap::from([("unexpected".into(), body())]),
         ] {
             let error = factory("repeat", config.clone(), bodies).err().unwrap();
             assert!(error.to_string().contains("prepared Flow field"), "{error}");
+        }
+    }
+
+    #[test]
+    fn loop_factory_uses_prepared_boundary_not_raw_body() {
+        let mut config = config();
+        config["body"] = json!({"not": "a workflow", "outputs": ["poison"]});
+        assert!(factory("repeat", config, BTreeMap::from([("body".into(), body())])).is_ok());
+
+        let mut empty = body();
+        empty.nodes.clear();
+        let error = build_error(self::config(), empty);
+        assert!(matches!(business_error(&error), LoopBuildError::EmptyBody));
+
+        let mut terminal = body();
+        terminal
+            .outputs
+            .push(PortSpec::new("result", ValueType::Any, true));
+        let error = build_error(self::config(), terminal);
+        assert!(matches!(
+            business_error(&error),
+            LoopBuildError::BodyOutputs
+        ));
+    }
+
+    #[test]
+    fn loop_factory_preserves_typed_variable_sources_and_codec_errors() {
+        let mut config = config();
+        config["variables"][0]["type"] = json!("not-a-type");
+        let error = build_error(config, body());
+        let business = business_error(&error);
+        assert!(matches!(
+            business,
+            LoopBuildError::Variables {
+                source: mf_runtime::LoopVariableError::VariableType { .. }
+            }
+        ));
+        let variables = business.source().unwrap();
+        assert!(
+            variables
+                .downcast_ref::<mf_runtime::LoopVariableError>()
+                .is_some()
+        );
+        assert!(variables.source().is_some());
+
+        let mut config = self::config();
+        config["max_iterations"] = json!("wrong JSON type");
+        assert!(matches!(
+            build_error(config, body()),
+            NodeBuildError::InvalidConfiguration { .. }
+        ));
+    }
+
+    #[test]
+    fn loop_factory_enforces_maximum_variables_and_stream_names() {
+        for maximum in [0, mf_runtime::MAX_LOOP_ITERATIONS + 1] {
+            let mut config = config();
+            config["max_iterations"] = json!(maximum);
+            let error = build_error(config, body());
+            assert!(matches!(
+                business_error(&error),
+                LoopBuildError::InvalidMaximum
+            ));
+        }
+        for variables in [
+            json!([]),
+            json!([{"name":" ", "type":"int"}]),
+            json!([{"name":"index", "type":"int"}]),
+            json!([{"name":"x", "type":"int"}, {"name":"x", "type":"int"}]),
+        ] {
+            let mut config = config();
+            config["variables"] = variables;
+            let error = build_error(config, body());
+            assert!(matches!(
+                business_error(&error),
+                LoopBuildError::Variables { .. }
+            ));
+        }
+        for name in [" ", "x"] {
+            let mut prepared = body();
+            prepared
+                .stream_outputs
+                .push(PortSpec::owned(name, ValueType::Any, true));
+            let error = build_error(config(), prepared);
+            assert!(matches!(
+                business_error(&error),
+                LoopBuildError::InvalidStreamName
+            ));
+
+            let mut config = config();
+            config["stream_outputs"] = json!({(name): {"node":"identity", "port":"value"}});
+            let error = build_error(config, body());
+            assert!(matches!(
+                business_error(&error),
+                LoopBuildError::InvalidStreamName
+            ));
+        }
+    }
+
+    #[test]
+    fn loop_factory_checks_condition_semantics() {
+        for (descriptor, condition, expected) in [
+            (
+                json!("int"),
+                json!({"variable":"missing", "operator":"eq", "value":0}),
+                "unknown",
+            ),
+            (
+                json!("int"),
+                json!({"variable":"x", "operator":"eq", "value":[]}),
+                "value",
+            ),
+            (
+                json!("string"),
+                json!({"variable":"x", "operator":"gt", "value":0}),
+                "ordering",
+            ),
+            (
+                json!("int"),
+                json!({"variable":"x", "operator":"gte", "value":"0"}),
+                "ordering",
+            ),
+            (
+                json!("array"),
+                json!({"variable":"x", "operator":"eq", "value":0}),
+                "variable",
+            ),
+            (
+                json!("int"),
+                json!({"variable":"x", "operator":"ne", "value":"0"}),
+                "literal",
+            ),
+        ] {
+            let mut config = config();
+            config["variables"][0]["type"] = descriptor;
+            config["until"] = condition;
+            let error = build_error(config, body());
+            assert!(
+                matches!(
+                    (business_error(&error), expected),
+                    (LoopBuildError::UnknownConditionVariable { .. }, "unknown")
+                        | (LoopBuildError::NonScalarConditionValue, "value")
+                        | (LoopBuildError::NonNumericOrdering, "ordering")
+                        | (LoopBuildError::NonScalarConditionVariable, "variable")
+                        | (LoopBuildError::IncompatibleConditionLiteral, "literal")
+                ),
+                "{error}"
+            );
+        }
+        for (descriptor, value) in [
+            (json!("int"), json!(0)),
+            (json!("string"), json!("done")),
+            (json!("bool"), json!(true)),
+            (json!("null"), Value::Null),
+            (json!("any"), json!(true)),
+        ] {
+            let mut config = config();
+            config["variables"][0]["type"] = descriptor;
+            config["until"] = json!({"variable":"x", "operator":"eq", "value":value});
+            assert!(factory("repeat", config, BTreeMap::from([("body".into(), body())])).is_ok());
         }
     }
 
@@ -150,10 +437,7 @@ mod tests {
             let prepared = registration.instantiate_subgraphs(
                 "repeat",
                 config,
-                BTreeMap::from([(
-                    "body".into(),
-                    PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
-                )]),
+                BTreeMap::from([("body".into(), body())]),
             );
             assert_eq!(prepared.is_ok(), valid);
         }

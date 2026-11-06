@@ -181,18 +181,21 @@ fn iteration_calls_cannot_hide_loop_containers_from_either_preparation_path() {
     );
     let definition = iteration_call_graph(&body, "sequential");
     let registry = NodeRegistry::from_inventory().unwrap();
-    assert!(
-        compile_definition(&definition, &registry)
-            .unwrap_err()
-            .to_string()
-            .contains("cannot contain Loop or Iteration")
-    );
-    assert!(
-        mf_compiler::plan_definition(&definition)
-            .unwrap_err()
-            .to_string()
-            .contains("cannot contain Loop or Iteration")
-    );
+    for error in [
+        compile_definition(&definition, &registry).unwrap_err(),
+        mf_compiler::plan_definition(&definition).unwrap_err(),
+    ] {
+        assert!(
+            matches!(&error, mf_compiler::WorkflowCompileError::ChildGraph {
+                definition_id, source,
+            } if definition_id.as_str() == "each"
+                && matches!(source.as_ref(), mf_compiler::WorkflowCompileError::InvalidGraph {
+                    definition_id, message,
+                } if definition_id.as_str() == "invoke"
+                    && message == "child scopes inside an item scope cannot contain container scopes")),
+            "{error:?}"
+        );
+    }
 }
 
 fn builtin_echo() -> Result<WorkflowDefinition, mf_runtime::DefinitionParseError> {
@@ -410,8 +413,17 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
             to_input: "value".into(),
         });
     let error = invalid.generate_runner_artifacts().unwrap_err();
-    assert!(error.to_string().contains("Flow call"), "{error}");
-    assert!(error.to_string().contains("cycle"), "{error}");
+    assert!(
+        matches!(&error, mf_compiler::PlanError::Description {
+            source: mf_compiler::DescriptionError::DescriptionOrder { path, source },
+        } if path == &["invoke"]
+            && matches!(source.as_ref(), mf_compiler::WorkflowCompileError::ChildGraph {
+                definition_id, source,
+            } if definition_id.as_str() == "invoke"
+                && matches!(source.as_ref(), mf_compiler::WorkflowCompileError::Cycle { path }
+                    if path.nodes().iter().map(|id| id.as_str()).eq(["echo", "input", "echo"])))),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -784,6 +796,28 @@ fn call_rejects_stdin_and_streaming_children() {
     );
     let definition = graph(json!([call("call", &body)]), json!([]));
     assert!(compile_definition(&definition, &registry).is_err());
+
+    let body = graph(
+        json!([{"id":"value", "kind":"builtin.constant", "config":{"value":1}}]),
+        json!([]),
+    );
+    let mut definition = graph(json!([call("call", &body)]), json!([]));
+    definition.nodes[0].config["unexpected"] = json!(true);
+    // Source selection preserves ordinary fields; only the selected receiver
+    // decoder owns their schema and must reject the unknown field.
+    let resolved = mf_compiler::resolve_flows_with_registry(&definition, None, &registry).unwrap();
+    assert_eq!(
+        resolved.definition.nodes[0].config["unexpected"],
+        json!(true)
+    );
+    let error = compile_definition(&definition, &registry).unwrap_err();
+    assert!(
+        matches!(&error, mf_compiler::WorkflowCompileError::NodeConstruction {
+        definition_id, source: mf_runtime::NodeBuildError::InvalidConfiguration { source }, ..
+    } if definition_id.as_str() == "call" && source.is_data()),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("unexpected"));
 }
 
 #[test]

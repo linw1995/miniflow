@@ -285,13 +285,13 @@ fn saved_structure_error(plan: &CompiledWorkflow) -> WorkflowCompileError {
     *source
 }
 
-fn assert_invalid_call(error: WorkflowCompileError, owner: &str, expected: &str) {
-    let WorkflowCompileError::InvalidCall {
+fn assert_invalid_graph(error: WorkflowCompileError, owner: &str, expected: &str) {
+    let WorkflowCompileError::InvalidGraph {
         definition_id,
         message,
     } = error
     else {
-        panic!("expected InvalidCall, got {error:?}");
+        panic!("expected InvalidGraph, got {error:?}");
     };
     assert_eq!(definition_id.as_str(), owner);
     assert_eq!(message, expected);
@@ -341,7 +341,7 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
             "blank field" => "blank receiving Flow parameter declaration",
             _ => "Flow parameter body key collides with an authored node ID",
         };
-        assert_invalid_call(
+        assert_invalid_graph(
             plan_resolved_workflow(&handoff).unwrap_err(),
             owner,
             expected,
@@ -359,7 +359,7 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
                     && message == "Flow parameter field names must be nonblank"
             ));
         } else {
-            assert_invalid_call(saved_error, owner, expected);
+            assert_invalid_graph(saved_error, owner, expected);
         }
     }
 }
@@ -383,7 +383,7 @@ fn resolved_handoffs_reject_noncanonical_loop_sources_before_freezing() {
         let error = plan_resolved_workflow(&resolved(authored)).unwrap_err();
         assert!(matches!(
             error,
-            WorkflowCompileError::InvalidLoop { path, message }
+            WorkflowCompileError::InvalidScope { path, message }
                 if path == expected_path
                     && message == "`%loop` is reserved for the canonical Loop body source"
         ));
@@ -426,7 +426,7 @@ fn saved_containers_require_their_actual_body_and_canonical_source() {
         let mut extra = plan.clone();
         let bindings = extra.graph.children.get_mut(&"container".into()).unwrap();
         bindings.insert("extra".to_owned(), bindings["body"].clone());
-        assert_invalid_call(
+        assert_invalid_graph(
             saved_structure_error(&extra),
             "container",
             "built-in container requires its compiled body binding",
@@ -435,20 +435,11 @@ fn saved_containers_require_their_actual_body_and_canonical_source() {
         let mut missing = plan.clone();
         missing.graph.children.clear();
         // The still-present authored body is not an executable fallback.
-        let error = saved_structure_error(&missing);
-        if kind == mf_runtime::LOOP_KIND {
-            assert!(matches!(
-                error,
-                WorkflowCompileError::LoopConfiguration { path, .. }
-                    if path == r#"["container"]"#
-            ));
-        } else {
-            assert!(matches!(
-                error,
-                WorkflowCompileError::IterationConfiguration { definition_id, .. }
-                    if definition_id.as_str() == "container"
-            ));
-        }
+        assert_invalid_graph(
+            saved_structure_error(&missing),
+            "container",
+            "built-in container requires its compiled body binding",
+        );
 
         let mut missing_source = plan;
         let body = missing_source
@@ -467,7 +458,7 @@ fn saved_containers_require_their_actual_body_and_canonical_source() {
             .nodes
             .retain(|node| node.id.as_str() != source);
         body.execution_order.retain(|id| id.as_str() != source);
-        assert_invalid_call(
+        assert_invalid_graph(
             saved_structure_error(&missing_source),
             "container",
             "compiled container body is missing its canonical source",
@@ -501,36 +492,36 @@ fn actual_child_trees_enforce_normalization_projection_and_call_depth_limits() {
         if depth == mf_runtime::MAX_CALL_DEPTH + 1 {
             let mut error = saved_structure_error(&plan);
             for _ in 0..depth {
-                let WorkflowCompileError::CallBody {
+                let WorkflowCompileError::ChildGraph {
                     definition_id,
                     source,
                 } = error
                 else {
-                    panic!("expected nested CallBody, got {error:?}");
+                    panic!("expected nested ChildGraph, got {error:?}");
                 };
                 assert_eq!(definition_id.as_str(), "source");
                 error = *source;
             }
-            assert_invalid_call(error, "workflow", "Flow nesting exceeds sixteen calls");
+            assert_invalid_graph(error, "workflow", "Flow nesting exceeds sixteen calls");
         }
     }
     let message = "combined container nesting exceeds twenty scopes";
     let mut error = plan_resolved_workflow(&handoff).unwrap_err();
     for _ in 0..=mf_telemetry::MAX_SCOPE_DEPTH {
-        let WorkflowCompileError::CallBody {
+        let WorkflowCompileError::ChildGraph {
             definition_id,
             source,
         } = error
         else {
-            panic!("expected nested CallBody, got {error:?}");
+            panic!("expected nested ChildGraph, got {error:?}");
         };
         assert_eq!(definition_id.as_str(), "source");
         error = *source;
     }
-    assert_invalid_call(error, "workflow", message);
+    assert_invalid_graph(error, "workflow", message);
     // Preparation projects the actual tree before node construction; no private
     // depth counter is injected to bypass the public traversal.
-    assert_invalid_call(
+    assert_invalid_graph(
         instantiate_compiled(&plan, &registry).err().unwrap(),
         "workflow",
         message,

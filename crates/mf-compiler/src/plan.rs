@@ -1,6 +1,6 @@
 use crate::DefinitionId;
 #[cfg(feature = "codegen")]
-use crate::{LoopDefinition, WorkflowDefinition};
+use crate::WorkflowDefinition;
 #[cfg(feature = "codegen")]
 use mf_runtime::ITERATION_INPUT_KIND;
 #[cfg(feature = "codegen")]
@@ -89,15 +89,10 @@ pub enum PlanError {
     #[cfg(feature = "codegen")]
     #[snafu(display("generated Rust code is invalid: {source}"))]
     GeneratedSyntax { source: syn::Error },
-    #[snafu(display("invalid embedded Loop node `{definition_id}`: {message}"))]
-    InvalidLoopConfig {
+    #[snafu(display("invalid lowering configuration for node `{definition_id}`: {message}"))]
+    InvalidLoweringConfig {
         definition_id: DefinitionId,
         message: String,
-    },
-    #[snafu(display("could not generate iteration node `{definition_id}`: {source}"))]
-    Iteration {
-        definition_id: DefinitionId,
-        source: crate::IterationValidationError,
     },
 }
 
@@ -680,7 +675,7 @@ fn generate_scope(
     graph: &mf_runtime::CompiledGraph,
     scope: &str,
     static_scope: &[String],
-    enclosing: Option<&LoopDefinition>,
+    enclosing: Option<&crate::loops::LoweringConfig>,
     preparation_error_override: Option<&TokenStream>,
     build: ScopeBuild<'_>,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>, syn::Ident), PlanError> {
@@ -739,7 +734,7 @@ fn generate_scope(
                 quote! {
                     if let Some(observation) = observation.as_deref_mut() {
                         observation.preparation_failed_unattributed(format!(
-                            "Loop scope {} node `{}`: {}",
+                            "child scope {} node `{}`: {}",
                             serde_json::to_string(&[#(#scope_literals),*]).expect("scope IDs serialize"),
                             #id_lit, error,
                         ));
@@ -782,7 +777,7 @@ fn generate_scope(
                             .iter()
                             .find(|variable| variable.name == target)
                     })
-                    .with_context(|| InvalidLoopConfigSnafu {
+                    .with_context(|| InvalidLoweringConfigSnafu {
                         definition_id: id.clone(),
                         message: format!("unknown assignment variable `{target}`"),
                     })?;
@@ -795,9 +790,9 @@ fn generate_scope(
             crate::EXIT_LOOP_KIND => quote! { mf_runtime::prepared_loop_exit(#id_lit) },
             ITERATION_INPUT_KIND => quote! { mf_runtime::iteration_input_flow_node() },
             crate::LOOP_SOURCE_ID => {
-                let variables = enclosing.with_context(|| InvalidLoopConfigSnafu {
+                let variables = enclosing.with_context(|| InvalidLoweringConfigSnafu {
                     definition_id: id.clone(),
-                    message: "Loop source has no parent Loop",
+                    message: "scope source has no enclosing state scope",
                 })?;
                 let variables_json =
                     serde_json::to_string(&variables.variables).context(SerializeSnafu)?;
@@ -915,17 +910,7 @@ fn subgraphs_preparation(
     );
     let kind = LitStr::new(&node.kind, Span::call_site());
     let loop_definition = if node.kind == crate::LOOP_KIND {
-        let body = flows.get("body").with_context(|| InvalidLoopConfigSnafu {
-            definition_id: node.id.clone(),
-            message: "compiled Loop is missing its body".to_owned(),
-        })?;
-        let mut policy = node.clone();
-        policy
-            .set_node_flow("body", body.definition.clone())
-            .context(crate::compiler::FlowParametersSnafu {
-                definition_id: node.id.clone(),
-            })?;
-        Some(crate::loops::parse_config(&policy)?)
+        Some(crate::loops::parse_config(node)?)
     } else {
         None
     };
@@ -998,7 +983,7 @@ fn subgraphs_preparation(
         quote! {
             if let Some(observation) = observation.as_deref_mut() {
                 observation.preparation_failed_unattributed(format!(
-                    "Loop scope {} node `{}`: {}",
+                    "child scope {} node `{}`: {}",
                     serde_json::to_string(&[#(#scopes),*]).expect("scope IDs serialize"),
                     #id, error,
                 ));
