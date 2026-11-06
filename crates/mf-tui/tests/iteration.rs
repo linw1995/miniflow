@@ -18,7 +18,7 @@ fn graph() -> WorkflowDescription {
         "nodes":[{"id":"each","kind":"builtin.iteration"},{"id":"other","kind":"builtin.iteration"}],
         "execution_order":["each","other"], "data_edges":[],"control_edges":[],
         "loop_bodies": (["each", "other"].map(|id| serde_json::json!({
-            "path":[id], "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
+            "path":[id], "source":"%iteration", "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
             "execution_order":["%iteration","work"],"data_edges":[],"control_edges":[]
         })))
     })).unwrap()
@@ -66,6 +66,112 @@ fn finished(outcome: Outcome) -> IterationEvent {
             phase: FailurePhase::Execution,
             message: "fixture failure".into(),
         }),
+    }
+}
+
+#[test]
+fn replay_marks_only_the_explicit_scope_source_as_succeeded() {
+    for source in [Some("renamed-input".to_owned()), None] {
+        let mut description = graph();
+        let body = &mut description.loop_bodies[0];
+        body.source = source.clone();
+        body.nodes[0].id = "renamed-input".into();
+        body.nodes[0].kind = "fixture.scope-input".into();
+        body.execution_order[0] = "renamed-input".into();
+        // A presentation label alone must not synthesize an execution result.
+        body.nodes[1].kind = "builtin.iteration_input".into();
+        let mut state = SessionState::new(description, RunId::new()).unwrap();
+        let admission = state.apply_iteration(record(1, 0, 1, IterationEvent::ItemStarted));
+        if source.is_none() {
+            assert!(admission.is_err());
+            continue;
+        }
+        admission.unwrap();
+        let snapshot = state.snapshot();
+        let nodes = snapshot.iterations.items[0].display_nodes(
+            &["each".into()],
+            [
+                ("renamed-input", "fixture.scope-input"),
+                ("work", "builtin.iteration_input"),
+            ],
+        );
+        assert_eq!(nodes[0].status, NodeStatus::Succeeded);
+        assert_eq!(nodes[1].status, NodeStatus::Pending);
+        assert_eq!(nodes[0].produced_ports, ["item", "key"]);
+    }
+}
+
+#[test]
+fn foreign_providers_admit_iteration_frames_at_direct_and_encoded_scope_keys() {
+    use mf_telemetry::event::ScopePathEntry;
+
+    for encoded in [false, true] {
+        let loop_key = if encoded {
+            ScopePathEntry::binding_key("repeat", "body")
+        } else {
+            "repeat".to_owned()
+        };
+        let iteration_key = if encoded {
+            ScopePathEntry::binding_key("each", "body")
+        } else {
+            "each".to_owned()
+        };
+        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":graph().workflow_id,
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"repeat", "kind":"foreign.repeater"}],
+            "execution_order":["repeat"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[{
+                "path":[loop_key], "source":"state-input", "state_outputs":{"value":"value"},
+                "nodes":[{"id":"state-input", "kind":"foreign.state-input"},
+                         {"id":"each", "kind":"foreign.iterator"}],
+                "execution_order":["state-input", "each"], "data_edges":[], "control_edges":[]
+            }, {
+                "path":[loop_key, iteration_key], "source":"item-input", "state_outputs":{},
+                "nodes":[{"id":"item-input", "kind":"foreign.item-input"},
+                         {"id":"work", "kind":"fixture.work"}],
+                "execution_order":["item-input", "work"], "data_edges":[], "control_edges":[]
+            }]
+        }))
+        .unwrap();
+        let mut item = record(1, 0, 1, IterationEvent::ItemStarted);
+        item.context.iteration_path = vec![loop_key.clone(), iteration_key];
+        item.context.body_path = item.context.iteration_path.clone();
+        item.context.parent_path = vec![ScopePathEntry::Loop {
+            loop_id: loop_key.clone(),
+            index: Count::ZERO,
+        }];
+        let mut state = SessionState::new(description.clone(), RunId::new()).unwrap();
+        assert_eq!(
+            state.apply_iteration(item.clone()).unwrap(),
+            Admission::Applied
+        );
+        let snapshot = state.snapshot();
+        let nodes = snapshot.iterations.items[0].display_nodes(
+            &item.context.iteration_path,
+            [
+                ("item-input", "foreign.item-input"),
+                ("work", "fixture.work"),
+            ],
+        );
+        assert_eq!(nodes[0].status, NodeStatus::Succeeded);
+
+        // The same provider label cannot make a stateful frame into an Iteration.
+        let mut stateful = description.clone();
+        stateful.loop_bodies[1].state_outputs = [("value".into(), "value".into())].into();
+        let mut state = SessionState::new(stateful, RunId::new()).unwrap();
+        assert!(state.apply_iteration(item.clone()).is_err());
+
+        let mut callable = description.clone();
+        callable.loop_bodies[1].source = None;
+        let mut state = SessionState::new(callable, RunId::new()).unwrap();
+        assert!(state.apply_iteration(item.clone()).is_err());
+
+        let mut wrong_parent_operator = item;
+        wrong_parent_operator.context.parent_path =
+            vec![ScopePathEntry::Call { call_id: loop_key }];
+        let mut state = SessionState::new(description, RunId::new()).unwrap();
+        assert!(state.apply_iteration(wrong_parent_operator).is_err());
     }
 }
 

@@ -260,6 +260,7 @@ impl WorkflowManifest {
 /// Projects the observation view from actual compiled scopes, without planning,
 /// providers, or discovery from configuration JSON.
 pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, ContractError> {
+    validate_relations(graph)?;
     let definition = &graph.definition;
     let execution_order = string_order(&graph.execution_order);
     let mut loop_bodies = Vec::new();
@@ -348,6 +349,107 @@ pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, Cont
     }
     description.validate()?;
     Ok(description)
+}
+
+/// Validate provider-free endpoints before any observation-only projection.
+fn validate_relations(graph: &CompiledGraph) -> Result<(), ContractError> {
+    ensure!(
+        graph
+            .relations
+            .host
+            .as_ref()
+            .is_none_or(|name| graph.relations.is_callable() && !name.trim().is_empty()),
+        mf_telemetry::InvalidSnafu {
+            message: "compiled host references require a callable scope and nonblank name"
+        }
+    );
+    let nodes = graph
+        .definition
+        .nodes
+        .iter()
+        .map(|node| &node.id)
+        .collect::<BTreeSet<_>>();
+    for (name, output) in &graph.relations.streams {
+        ensure!(
+            !name.trim().is_empty()
+                && !output.port.trim().is_empty()
+                && nodes.contains(&output.node),
+            mf_telemetry::InvalidSnafu {
+                message: "compiled stream relation has an invalid output endpoint"
+            }
+        );
+    }
+    let Some(scope) = &graph.relations.scope else {
+        return Ok(());
+    };
+    let mut instructions = BTreeSet::new();
+    for id in std::iter::once(&scope.input)
+        .chain(scope.writes.keys())
+        .chain(scope.exits.iter())
+    {
+        ensure!(
+            nodes.contains(id),
+            mf_telemetry::InvalidSnafu {
+                message: format!("compiled scope instruction names unknown node `{id}`")
+            }
+        );
+        ensure!(
+            instructions.insert(id),
+            mf_telemetry::InvalidSnafu {
+                message: "compiled scope instruction roles collide"
+            }
+        );
+    }
+    ensure!(
+        scope
+            .values
+            .keys()
+            .all(|name| !name.trim().is_empty() && name != "index"),
+        mf_telemetry::InvalidSnafu {
+            message: "compiled scope variable names must be nonblank"
+        }
+    );
+    for variable in scope.writes.values().chain(scope.state_outputs.keys()) {
+        ensure!(
+            scope.values.contains_key(variable),
+            mf_telemetry::InvalidSnafu {
+                message: format!("compiled scope relation names unknown variable `{variable}`")
+            }
+        );
+    }
+    let mut outputs = BTreeSet::new();
+    for (variable, output) in &scope.state_outputs {
+        ensure!(
+            output == variable && outputs.insert(output),
+            mf_telemetry::InvalidSnafu {
+                message: "compiled state outputs must preserve current-frame variable names"
+            }
+        );
+    }
+    ensure!(
+        scope
+            .writes
+            .values()
+            .all(|variable| scope.state_outputs.contains_key(variable)),
+        mf_telemetry::InvalidSnafu {
+            message: "compiled scope writes require declared state outputs"
+        }
+    );
+    ensure!(
+        scope.is_stateful() || scope.exits.is_empty(),
+        mf_telemetry::InvalidSnafu {
+            message: "compiled scope exits require a stateful frame"
+        }
+    );
+    ensure!(
+        instructions
+            .iter()
+            .all(|id| !graph.children.contains_key(*id)),
+        mf_telemetry::InvalidSnafu {
+            message: "compiled scope instructions cannot own child graphs"
+        }
+    );
+    Ok(())
 }
 
 fn ordered_nodes<'a>(
@@ -458,6 +560,7 @@ fn describe_children(
     }
     // Walk authored node order and sorted binding names, preserving the stable
     // observation order without using kinds or config shapes to discover children.
+    let mut scope_keys = BTreeSet::new();
     for node in &parent.definition.nodes {
         let Some(children) = parent.children.get(&node.id) else {
             continue;
@@ -469,7 +572,20 @@ fn describe_children(
                     message: "compiled child binding names must be nonblank",
                 }
             );
-            let key = node.flow_scope_key(name);
+            let key = child.child_scope_key(node, name);
+            ensure!(
+                key == node.id.as_str()
+                    || key == crate::ScopePathEntry::binding_key(node.id.as_str(), name),
+                mf_telemetry::InvalidSnafu {
+                    message: "compiled scope keys must reference their actual receiving owner and binding",
+                }
+            );
+            ensure!(
+                scope_keys.insert(key.clone()),
+                mf_telemetry::InvalidSnafu {
+                    message: "compiled child scope keys collide"
+                }
+            );
             ensure!(
                 key == node.id.as_str()
                     || !parent
@@ -482,11 +598,18 @@ fn describe_children(
                 }
             );
             path.push(key);
-            // Only an actual builtin body receives historical Iteration projection.
-            // All scopes remain present until the complete graph has been validated.
-            if !include_iterations && node.kind == crate::ITERATION_KIND && name == "body" {
+            // Historical projection omits stateless execution frames, independently
+            // of provider names. Keep every scope until full graph validation passes.
+            if !include_iterations
+                && child
+                    .relations
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| !scope.is_stateful())
+            {
                 omitted_iterations.push(path.clone());
             }
+            validate_relations(child)?;
             let body = &child.definition;
             // Each actual child has its own authored version and wire invariants.
             // Validate those without decoding any configuration field as a graph,
@@ -495,6 +618,17 @@ fn describe_children(
             let order = string_order(&child.execution_order);
             bodies.push(LoopBodyDescription {
                 path: path.clone(),
+                source: child
+                    .relations
+                    .scope
+                    .as_ref()
+                    .map(|frame| frame.input.to_string()),
+                state_outputs: child
+                    .relations
+                    .scope
+                    .as_ref()
+                    .map(|frame| frame.state_outputs.clone())
+                    .unwrap_or_default(),
                 nodes: ordered_nodes(
                     body.nodes
                         .iter()

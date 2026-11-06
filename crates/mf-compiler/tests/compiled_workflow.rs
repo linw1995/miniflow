@@ -1,3 +1,7 @@
+extern crate mfn_core as _;
+
+mod common;
+
 use mf_compiler::{
     CompiledWorkflow, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry,
     Outputs, PortSpec, TaskNode, ValueType, WorkflowCompileError, compile_definition,
@@ -240,6 +244,21 @@ fn saved_plans_require_explicit_graph_and_reject_parameter_metadata() {
     let plan = compile_definition(&definition(), &registry).unwrap();
     let encoded = serde_json::to_value(&plan).unwrap();
     assert!(CompiledWorkflow::from_json(&encoded["graph"].to_string()).is_err());
+    let mut missing_relations = encoded.clone();
+    missing_relations["graph"]
+        .as_object_mut()
+        .unwrap()
+        .remove("relations");
+    assert!(matches!(
+        CompiledWorkflow::from_json(&missing_relations.to_string()).unwrap_err(),
+        mf_compiler::PlanError::Parse { source } if source.is_data()
+    ));
+    let mut missing_relations = serde_json::to_value(resolved(definition())).unwrap();
+    missing_relations
+        .as_object_mut()
+        .unwrap()
+        .remove("relations");
+    assert!(serde_json::from_value::<mf_compiler::ResolvedWorkflow>(missing_relations).is_err());
     for field in ["parameter_types", "loop_orders"] {
         let mut legacy = encoded.clone();
         legacy[field] = json!({});
@@ -268,8 +287,30 @@ fn rejects_a_plan_with_a_modified_execution_order() {
 fn resolved(definition: WorkflowDefinition) -> mf_compiler::ResolvedWorkflow {
     mf_compiler::ResolvedWorkflow {
         definition,
+        relations: Default::default(),
         sources: BTreeSet::new(),
         children: BTreeMap::new(),
+    }
+}
+
+fn resolved_graph(graph: &mf_runtime::CompiledGraph) -> mf_compiler::ResolvedWorkflow {
+    mf_compiler::ResolvedWorkflow {
+        definition: graph.definition.clone(),
+        relations: graph.relations.clone(),
+        sources: BTreeSet::new(),
+        children: graph
+            .children
+            .iter()
+            .map(|(owner, bindings)| {
+                (
+                    owner.clone(),
+                    bindings
+                        .iter()
+                        .map(|(binding, child)| (binding.clone(), resolved_graph(child)))
+                        .collect(),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -315,7 +356,8 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
         };
         if case == "scope collision" {
             let mut collision = authored.nodes[2].clone();
-            collision.id = collision.flow_scope_key(field).into();
+            collision.id =
+                mf_runtime::ScopePathEntry::binding_key(collision.id.as_str(), field).into();
             authored.nodes.push(collision);
         }
         let mut plan = compile_definition(&authored, &registry).unwrap();
@@ -346,26 +388,14 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
             owner,
             expected,
         );
-        let saved_error = saved_structure_error(&plan);
-        if case == "blank field" {
-            // Projection writes actual children through the public field setter,
-            // which rejects blank names before the later compiled-binding guard.
-            assert!(matches!(
-                saved_error,
-                WorkflowCompileError::FlowParameters {
-                    definition_id,
-                    source: mf_runtime::FlowParameterError::Invalid { message },
-                } if definition_id.as_str() == owner
-                    && message == "Flow parameter field names must be nonblank"
-            ));
-        } else {
-            assert_invalid_graph(saved_error, owner, expected);
-        }
+        // Offline inspection validates the binding itself, without projecting or
+        // reparsing the owner's configuration through an authoring field setter.
+        assert_invalid_graph(saved_structure_error(&plan), owner, expected);
     }
 }
 
 #[test]
-fn resolved_handoffs_reject_noncanonical_loop_sources_before_freezing() {
+fn authoring_rejects_noncanonical_loop_sources_before_lowering() {
     for (id, kind, config) in [
         ("source", "%loop", json!({})),
         ("%loop", "example.constant", json!({"value": 41})),
@@ -373,25 +403,38 @@ fn resolved_handoffs_reject_noncanonical_loop_sources_before_freezing() {
         ("%loop", "%loop", json!({"unexpected": true})),
     ] {
         let mut authored = definition();
+        authored.version = mf_compiler::WorkflowDefinitionVersion::V2026_10_28;
         authored.nodes.retain(|node| node.id.as_str() == "source");
         authored.edges.clear();
         authored.outputs.clear();
         authored.nodes[0].id = id.into();
         authored.nodes[0].kind = kind.into();
         authored.nodes[0].config = config;
-        let expected_path = format!("{:?}", authored.nodes[0].id);
-        let error = plan_resolved_workflow(&resolved(authored)).unwrap_err();
-        assert!(matches!(
-            error,
-            WorkflowCompileError::InvalidScope { path, message }
-                if path == expected_path
-                    && message == "`%loop` is reserved for the canonical Loop body source"
-        ));
+        let expected_path = json!([id]).to_string();
+        let expected = if kind == "%loop" {
+            "reserved scope source requires its canonical enclosing scope"
+        } else {
+            "reserved scope source must use its canonical declaration"
+        };
+        let error = mf_compiler::plan_resolved_definition(
+            &authored,
+            &NodeRegistry::from_inventory().unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                WorkflowCompileError::InvalidScope { path, message }
+                    if path == &expected_path
+                        && message == expected
+            ),
+            "unexpected source error for {id}/{kind}: {error:?}"
+        );
     }
 }
 
 #[test]
-fn saved_containers_require_their_actual_body_and_canonical_source() {
+fn saved_container_frames_require_known_instruction_endpoints_and_distinct_bindings() {
     for kind in [mf_runtime::LOOP_KIND, mf_runtime::ITERATION_KIND] {
         let mut body = definition();
         body.version = mf_compiler::WorkflowDefinitionVersion::V2026_10_28;
@@ -412,16 +455,150 @@ fn saved_containers_require_their_actual_body_and_canonical_source() {
         } else {
             json!({})
         };
-        let mut handoff = resolved(authored);
-        handoff.children.insert(
-            "container".into(),
-            BTreeMap::from([("body".to_owned(), resolved(body))]),
-        );
-        let plan = plan_resolved_workflow(&handoff).unwrap();
+        authored.nodes[0].set_node_flow("body", body).unwrap();
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let plan = mf_compiler::plan_resolved_definition(&authored, &registry).unwrap();
+        let mut handoff = resolved_graph(&plan.graph);
+        assert_eq!(plan_resolved_workflow(&handoff).unwrap(), plan);
         assert_eq!(
             CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap(),
             plan
         );
+
+        let mut old_streams = plan.clone();
+        old_streams.graph.definition.version = mf_compiler::WorkflowDefinitionVersion::V2026_10_25;
+        old_streams
+            .graph
+            .children
+            .get_mut(&"container".into())
+            .unwrap()
+            .get_mut("body")
+            .unwrap()
+            .relations
+            .streams
+            .insert(
+                "events".into(),
+                mf_runtime::OutputReferenceDefinition {
+                    node: "source".into(),
+                    port: "events".into(),
+                },
+            );
+        assert_invalid_graph(
+            saved_structure_error(&old_streams),
+            "container",
+            "child stream exports require definition version 2026-10-28",
+        );
+
+        if kind == mf_runtime::LOOP_KIND {
+            let template = handoff.clone();
+            for depth in 2..=5 {
+                // Reuse the actual lowered frame, not the container's authoring kind.
+                let scope = &template.children[&"container".into()]["body"];
+                handoff.relations = scope.relations.clone();
+                let input = &scope.relations.scope.as_ref().unwrap().input;
+                handoff.definition.nodes.push(
+                    scope
+                        .definition
+                        .nodes
+                        .iter()
+                        .find(|node| &node.id == input)
+                        .unwrap()
+                        .clone(),
+                );
+                let mut parent = template.clone();
+                parent
+                    .children
+                    .get_mut(&"container".into())
+                    .unwrap()
+                    .insert("body".to_owned(), handoff);
+                handoff = parent;
+                if depth <= 4 {
+                    let nested = plan_resolved_workflow(&handoff).unwrap();
+                    assert_eq!(
+                        CompiledWorkflow::from_json(&nested.to_json().unwrap()).unwrap(),
+                        nested
+                    );
+                } else {
+                    let mut error = plan_resolved_workflow(&handoff).unwrap_err();
+                    for _ in 0..depth {
+                        let WorkflowCompileError::ChildGraph {
+                            definition_id,
+                            source,
+                        } = error
+                        else {
+                            panic!("expected nested ChildGraph, got {error:?}");
+                        };
+                        assert_eq!(definition_id.as_str(), "container");
+                        error = *source;
+                    }
+                    assert!(
+                        matches!(
+                            &error,
+                            WorkflowCompileError::InvalidScope { path, message }
+                                if path == &json!(vec!["container"; depth]).to_string()
+                                    && message == "state-scope nesting exceeds four"
+                        ),
+                        "unexpected state-depth leaf: {error:?}"
+                    );
+                }
+            }
+
+            let mut inline = template.children[&"container".into()]["body"]
+                .definition
+                .clone();
+            for _ in 0..=mf_telemetry::MAX_SCOPE_DEPTH {
+                let mut parent = template.definition.clone();
+                parent.nodes[0].set_node_flow("body", inline).unwrap();
+                inline = parent;
+            }
+            let registry = NodeRegistry::from_inventory().unwrap();
+            let mut error = mf_compiler::plan_resolved_definition(&inline, &registry).unwrap_err();
+            for _ in 0..=mf_telemetry::MAX_SCOPE_DEPTH {
+                let WorkflowCompileError::ChildGraph {
+                    definition_id,
+                    source,
+                } = error
+                else {
+                    panic!("expected inline ChildGraph, got {error:?}");
+                };
+                assert_eq!(definition_id.as_str(), "container");
+                error = *source;
+            }
+            assert_invalid_graph(
+                error,
+                "workflow",
+                "combined container nesting exceeds twenty scopes",
+            );
+        } else {
+            let mut unsupported = authored.clone();
+            unsupported.nodes[0].config["body"]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "unsupported-loop", "kind": mf_runtime::LOOP_KIND}));
+            // Raw kind restrictions belong to the authoring boundary, not saved graphs.
+            let error = mf_compiler::plan_resolved_definition(&unsupported, &registry).unwrap_err();
+            let WorkflowCompileError::ChildGraph {
+                definition_id,
+                source,
+            } = &error
+            else {
+                panic!("expected the Iteration owner, got {error:?}");
+            };
+            assert_eq!(definition_id.as_str(), "container");
+            assert!(matches!(
+                source.as_ref(),
+                WorkflowCompileError::ScopeStructure { source, .. }
+                    if matches!(source, mf_compiler::ScopeStructureError::StateScope { node }
+                        if node.as_str() == "unsupported-loop")
+            ));
+            assert!(matches!(
+                std::error::Error::source(source.as_ref())
+                    .unwrap()
+                    .downcast_ref::<mf_compiler::ScopeStructureError>(),
+                Some(mf_compiler::ScopeStructureError::StateScope { node })
+                    if node.as_str() == "unsupported-loop"
+            ));
+        }
 
         let mut extra = plan.clone();
         let bindings = extra.graph.children.get_mut(&"container".into()).unwrap();
@@ -429,17 +606,32 @@ fn saved_containers_require_their_actual_body_and_canonical_source() {
         assert_invalid_graph(
             saved_structure_error(&extra),
             "container",
-            "built-in container requires its compiled body binding",
+            "Flow parameter body key collides with an authored node ID",
         );
 
         let mut missing = plan.clone();
         missing.graph.children.clear();
-        // The still-present authored body is not an executable fallback.
-        assert_invalid_graph(
-            saved_structure_error(&missing),
-            "container",
-            "built-in container requires its compiled body binding",
-        );
+        // Provider-free inspection/generation cannot infer a required field from
+        // kind/config. A selected receiving contract rejects the missing binding
+        // before a factory is invoked, for both dynamic and generated execution.
+        let saved = CompiledWorkflow::from_json(&missing.to_json().unwrap()).unwrap();
+        assert!(saved.graph.children.is_empty());
+        saved.generate_artifacts().unwrap();
+        saved.generate_runner_artifacts().unwrap();
+        let error = instantiate_compiled(&saved, &registry).err().unwrap();
+        common::assert_receiver_binding_preflight(&error, "container");
+        #[cfg(feature = "codegen")]
+        for error in [
+            saved.generate_execution_plans(&registry).unwrap_err(),
+            saved
+                .generate_runner_execution_plans(&registry)
+                .unwrap_err(),
+        ] {
+            let mf_compiler::PlanError::Compilation { source } = error else {
+                panic!("expected generated receiver-binding preflight, got {error:?}");
+            };
+            common::assert_receiver_binding_preflight(source.as_ref(), "container");
+        }
 
         let mut missing_source = plan;
         let body = missing_source
@@ -458,21 +650,25 @@ fn saved_containers_require_their_actual_body_and_canonical_source() {
             .nodes
             .retain(|node| node.id.as_str() != source);
         body.execution_order.retain(|id| id.as_str() != source);
-        assert_invalid_graph(
-            saved_structure_error(&missing_source),
-            "container",
-            "compiled container body is missing its canonical source",
-        );
+        let error = saved_structure_error(&missing_source);
+        assert!(matches!(
+            error,
+            WorkflowCompileError::ChildGraph { definition_id, source }
+                if definition_id.as_str() == "container"
+                    && matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
+                        if path == "[\"container\"]"
+                            && message == "scope instruction relationships must be disjoint and reference known nodes")
+        ));
     }
 }
 
 #[test]
-fn actual_child_trees_enforce_normalization_projection_and_call_depth_limits() {
+fn actual_child_trees_enforce_call_depth_before_the_combined_scope_limit() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let leaf = compile_definition(&definition(), &registry).unwrap();
     let mut handoff = resolved(definition());
     let mut plan = leaf.clone();
-    for depth in 1..=mf_telemetry::MAX_SCOPE_DEPTH + 1 {
+    for depth in 1..=mf_runtime::MAX_CALL_DEPTH + 1 {
         let mut parent = resolved(definition());
         parent.children.insert(
             "source".into(),
@@ -489,42 +685,128 @@ fn actual_child_trees_enforce_normalization_projection_and_call_depth_limits() {
             assert!(plan_resolved_workflow(&handoff).is_ok());
             assert!(CompiledWorkflow::from_json(&plan.to_json().unwrap()).is_ok());
         }
-        if depth == mf_runtime::MAX_CALL_DEPTH + 1 {
-            let mut error = saved_structure_error(&plan);
-            for _ in 0..depth {
-                let WorkflowCompileError::ChildGraph {
-                    definition_id,
-                    source,
-                } = error
-                else {
-                    panic!("expected nested ChildGraph, got {error:?}");
-                };
-                assert_eq!(definition_id.as_str(), "source");
-                error = *source;
-            }
-            assert_invalid_graph(error, "workflow", "Flow nesting exceeds sixteen calls");
-        }
     }
-    let message = "combined container nesting exceeds twenty scopes";
-    let mut error = plan_resolved_workflow(&handoff).unwrap_err();
+    // Callable trees exhaust their call budget before they can reach the larger
+    // combined-scope budget. All entry points retain every actual owner wrapper.
+    for mut error in [
+        plan_resolved_workflow(&handoff).unwrap_err(),
+        saved_structure_error(&plan),
+        instantiate_compiled(&plan, &registry).err().unwrap(),
+    ] {
+        for _ in 0..=mf_runtime::MAX_CALL_DEPTH {
+            let WorkflowCompileError::ChildGraph {
+                definition_id,
+                source,
+            } = error
+            else {
+                panic!("expected nested ChildGraph, got {error:?}");
+            };
+            assert_eq!(definition_id.as_str(), "source");
+            error = *source;
+        }
+        assert_invalid_graph(error, "workflow", "Flow nesting exceeds sixteen calls");
+    }
+}
+
+#[test]
+fn mixed_actual_frames_reach_the_combined_scope_limit_without_exhausting_other_budgets() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plain = compile_definition(&definition(), &registry).unwrap();
+    let mut body = definition();
+    body.version = mf_compiler::WorkflowDefinitionVersion::V2026_10_28;
+    body.outputs.clear();
+    let authored: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-10-28", "dependencies": {},
+        "nodes": [{"id": "container", "kind": mf_runtime::LOOP_KIND, "config": {
+            "max_iterations": 1, "variables": [{"name": "count", "type": "int"}],
+            "body": body
+        }}]
+    }))
+    .unwrap();
+    let lowered = mf_compiler::plan_resolved_definition(&authored, &registry).unwrap();
+    let state = &lowered.graph.children[&"container".into()]["body"];
+    let chain = |depth: usize| {
+        // Four complete state frames, then a callable boundary that resets the
+        // state-depth budget. At depth 21 there are only four calls in total.
+        let at = |level: usize| {
+            if level.is_multiple_of(5) {
+                plain.graph.clone()
+            } else {
+                state.clone()
+            }
+        };
+        let mut graph = at(depth);
+        for level in (0..depth).rev() {
+            let mut parent = at(level);
+            // This attachment belongs to source/local, not the original template
+            // owner. Use its generic binding key for every actual child frame.
+            graph.relations.key = None;
+            parent
+                .children
+                .insert("source".into(), BTreeMap::from([("local".into(), graph)]));
+            graph = parent;
+        }
+        CompiledWorkflow { graph }
+    };
+    let boundary = chain(mf_telemetry::MAX_SCOPE_DEPTH);
+    let boundary = plan_resolved_workflow(&resolved_graph(&boundary.graph)).unwrap();
+    assert_eq!(
+        CompiledWorkflow::from_json(&boundary.to_json().unwrap()).unwrap(),
+        boundary
+    );
+
+    let over = chain(mf_telemetry::MAX_SCOPE_DEPTH + 1);
+    let mut error = plan_resolved_workflow(&resolved_graph(&over.graph)).unwrap_err();
     for _ in 0..=mf_telemetry::MAX_SCOPE_DEPTH {
         let WorkflowCompileError::ChildGraph {
             definition_id,
             source,
         } = error
         else {
-            panic!("expected nested ChildGraph, got {error:?}");
+            panic!("expected every mixed-scope owner, got {error:?}");
         };
         assert_eq!(definition_id.as_str(), "source");
         error = *source;
     }
-    assert_invalid_graph(error, "workflow", message);
-    // Preparation projects the actual tree before node construction; no private
-    // depth counter is injected to bypass the public traversal.
     assert_invalid_graph(
-        instantiate_compiled(&plan, &registry).err().unwrap(),
+        error,
         "workflow",
-        message,
+        "combined container nesting exceeds twenty scopes",
+    );
+
+    let mut expected_path = Vec::new();
+    let mut graph = &over.graph;
+    while let Some(bindings) = graph.children.get(&"source".into()) {
+        let owner = graph
+            .definition
+            .nodes
+            .iter()
+            .find(|node| node.id.as_str() == "source")
+            .unwrap();
+        let child = &bindings["local"];
+        expected_path.push(child.child_scope_key(owner, "local"));
+        graph = child;
+    }
+    let error = CompiledWorkflow::from_json(&over.to_json().unwrap()).unwrap_err();
+    let mf_compiler::PlanError::Description {
+        source: mf_compiler::DescriptionError::DescriptionOrder { path, source },
+    } = error
+    else {
+        panic!("expected the saved mixed-scope traversal error, got {error:?}");
+    };
+    assert_eq!(path, expected_path);
+    let WorkflowCompileError::ChildGraph {
+        definition_id,
+        source,
+    } = *source
+    else {
+        panic!("expected the saved boundary's typed owner");
+    };
+    assert_eq!(definition_id.as_str(), "source");
+    assert_invalid_graph(
+        *source,
+        "workflow",
+        "combined container nesting exceeds twenty scopes",
     );
 }
 

@@ -224,6 +224,9 @@ pub struct PreparedSubgraph {
     pub inputs: crate::WorkflowInputSchema,
     pub outputs: Vec<PortSpec>,
     pub stream_outputs: Vec<PortSpec>,
+    /// Engine relationships supplied by a compiled graph's preparer.
+    /// `None` denotes a manually prepared body without compiled graph facts.
+    pub relations: Option<crate::GraphRelations>,
     input_metadata: SubgraphInputMetadata,
     body: PreparedSubgraphBody,
 }
@@ -337,6 +340,7 @@ impl PreparedSubgraph {
             inputs,
             outputs,
             stream_outputs,
+            relations: None,
             input_metadata,
             body: PreparedSubgraphBody::Flow(flow),
         }
@@ -384,6 +388,7 @@ impl PreparedSubgraph {
             inputs: Default::default(),
             outputs,
             stream_outputs,
+            relations: None,
             input_metadata: Default::default(),
             body: PreparedSubgraphBody::Finite(Arc::new(body)),
         }
@@ -405,6 +410,7 @@ impl PreparedSubgraph {
             inputs,
             outputs: Vec::new(),
             stream_outputs,
+            relations: None,
             input_metadata: Default::default(),
             body: PreparedSubgraphBody::Event(Arc::new(factory)),
         }
@@ -437,6 +443,32 @@ impl PreparedSubgraph {
                     .map(crate::FlowInvocation::from_stream)
             }
         }
+    }
+
+    /// Records the actual engine relationships of the compiled body.
+    pub fn with_relations(mut self, relations: crate::GraphRelations) -> Self {
+        self.relations = Some(relations);
+        self
+    }
+
+    /// Returns the compiled child edge key, or the owner ID for a manually prepared body.
+    pub fn scope_key(&self, owner: &str, binding: &str) -> String {
+        match &self.relations {
+            None => owner.to_owned(),
+            Some(relations) => relations
+                .key
+                .clone()
+                .unwrap_or_else(|| crate::ScopePathEntry::binding_key(owner, binding)),
+        }
+    }
+
+    /// Returns the frame input declared by the compiled body's relationships.
+    pub fn scope_input(&self) -> Option<&crate::DefinitionId> {
+        self.relations
+            .as_ref()?
+            .scope
+            .as_ref()
+            .map(|scope| &scope.input)
     }
 
     /// Sets a manually supplied flat schema without inferring independent Flows.
@@ -575,6 +607,7 @@ mod tests {
             WorkflowInputSchema::default(),
         );
         let prepared = PreparedSubgraph::from_flow(flow.clone(), Vec::new());
+        assert!(prepared.relations.is_none());
         assert_eq!(&prepared.inputs, flow.input_schema());
         assert_eq!(
             prepared.input_metadata(),
@@ -597,12 +630,61 @@ mod tests {
             || panic!("conversion must not instantiate an Event flow"),
         );
         for prepared in [callback, event] {
+            assert!(prepared.relations.is_none());
             assert!(matches!(
                 prepared.into_flow(),
                 Err(crate::NodeBuildError::InvalidSubgraph { message })
                     if message.contains("prepared body") && message.contains("compiled finite Flow")
             ));
         }
+    }
+
+    #[test]
+    fn relations_builder_is_retained_by_clones_without_changing_the_original() {
+        let original = PreparedSubgraph::streaming(Vec::new(), Vec::new(), Vec::new(), |_, _| {
+            panic!("metadata changes must not execute the callback")
+        });
+        assert!(original.relations.is_none());
+        assert!(original.scope_input().is_none());
+        let relations = crate::GraphRelations {
+            scope: Some(crate::ScopeRelations {
+                input: "custom-input".into(),
+                values: Default::default(),
+                state_outputs: Default::default(),
+                writes: Default::default(),
+                exits: Default::default(),
+            }),
+            ..Default::default()
+        };
+        let prepared = original.clone().with_relations(relations.clone());
+        assert_eq!(prepared.relations.as_ref(), Some(&relations));
+        assert_eq!(prepared.scope_input().unwrap().as_str(), "custom-input");
+        let cloned = prepared.clone();
+        assert_eq!(cloned.relations, prepared.relations);
+        assert!(original.relations.is_none());
+        let callable = cloned.with_relations(crate::GraphRelations::default());
+        assert!(callable.relations.is_some());
+        assert!(callable.scope_input().is_none());
+        assert_eq!(prepared.scope_input().unwrap().as_str(), "custom-input");
+    }
+
+    #[test]
+    fn scope_keys_distinguish_manual_compiled_and_explicit_bindings() {
+        let manual = PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
+            panic!("reading scope keys must not execute the body")
+        });
+        assert_eq!(manual.scope_key("owner", "body"), "owner");
+        let compiled = manual.with_relations(crate::GraphRelations::default());
+        assert_eq!(
+            compiled.scope_key("owner", "body"),
+            crate::ScopePathEntry::binding_key("owner", "body")
+        );
+        let mapped_key = crate::ScopePathEntry::binding_key("mapped-owner", "selected");
+        let mapped = compiled.with_relations(crate::GraphRelations {
+            key: Some(mapped_key.clone()),
+            ..Default::default()
+        });
+        assert_eq!(mapped.scope_key("owner", "body"), mapped_key);
     }
 
     #[test]

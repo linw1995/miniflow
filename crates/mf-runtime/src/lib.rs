@@ -37,7 +37,7 @@ mod workflow_manifest;
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
-pub use compiled_graph::CompiledGraph;
+pub use compiled_graph::{CompiledGraph, GraphRelations, ScopeInstruction, ScopeRelations};
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
     ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult, NodeResult,

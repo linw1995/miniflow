@@ -206,20 +206,6 @@ pub enum FlowParameterError {
 }
 
 impl NodeDefinition {
-    /// Stable observation/compilation scope for an executable child field.
-    pub fn flow_scope_key(&self, name: &str) -> String {
-        if name == "body"
-            && matches!(
-                self.kind.as_str(),
-                CALL_KIND | LOOP_KIND | crate::ITERATION_KIND
-            )
-        {
-            self.id.to_string()
-        } else {
-            mf_telemetry::event::ScopePathEntry::binding_key(self.id.as_str(), name)
-        }
-    }
-
     /// Writes a normalized child into its declared configuration field.
     pub fn set_node_flow(
         &mut self,

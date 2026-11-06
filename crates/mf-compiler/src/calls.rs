@@ -1,6 +1,6 @@
 use crate::{NodeDefinition, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::CompiledGraph;
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 use std::collections::BTreeMap;
 
 /// Project every authoritative child binding without interpreting its receiver.
@@ -34,15 +34,6 @@ pub fn compiled_node_flows<'a>(
         .collect())
 }
 
-/// Ordinary Flow parameters and Calls bind startup inputs and project selected
-/// stream outputs. Loop and Iteration instead have synthetic scope inputs.
-pub fn call_like(node: &NodeDefinition) -> bool {
-    !matches!(
-        node.kind.as_str(),
-        mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND
-    )
-}
-
 pub fn child_result<T>(
     node: &NodeDefinition,
     result: Result<T, WorkflowCompileError>,
@@ -52,43 +43,15 @@ pub fn child_result<T>(
     })
 }
 
+/// Child execution constraints are independent of the receiving provider's kind.
+/// Relationship integrity and nesting are validated over the actual graph tree.
 pub fn validate_child(
     node: &NodeDefinition,
     body: &CompiledGraph,
-    inside_iteration: bool,
 ) -> Result<(), WorkflowCompileError> {
-    crate::validate_execution(&body.definition)
-        .context(crate::compiler::StreamConstructionSnafu)?;
-    if call_like(node) {
-        validate_iteration_child(node, inside_iteration, contains_iteration_containers(body))?;
-    }
-    Ok(())
-}
-
-pub fn validate_iteration_child(
-    node: &NodeDefinition,
-    inside_iteration: bool,
-    contains_containers: bool,
-) -> Result<(), WorkflowCompileError> {
-    ensure!(
-        !call_like(node) || !inside_iteration || !contains_containers,
-        crate::compiler::InvalidGraphSnafu {
-            definition_id: node.id.clone(),
-            message: "child scopes inside an item scope cannot contain container scopes"
-        }
-    );
-    Ok(())
-}
-
-pub fn contains_iteration_containers(graph: &CompiledGraph) -> bool {
-    graph.definition.nodes.iter().any(|node| {
-        matches!(
-            node.kind.as_str(),
-            mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND
-        )
-    }) || graph
-        .children
-        .values()
-        .flat_map(BTreeMap::values)
-        .any(contains_iteration_containers)
+    child_result(
+        node,
+        crate::validate_execution(&body.definition)
+            .context(crate::compiler::StreamConstructionSnafu),
+    )
 }

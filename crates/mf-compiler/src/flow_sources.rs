@@ -1,6 +1,7 @@
-use crate::{NodeDependency, WorkflowDefinition};
+use crate::{NodeDependency, WorkflowDefinition, lowering::ScopeContext};
 use mf_runtime::{
-    CALL_KIND, DefinitionId, FlowSource, MAX_CALL_DEPTH, NodeDefinition, NodeRegistry,
+    CALL_KIND, DefinitionId, FlowSource, GraphRelations, MAX_CALL_DEPTH, NodeDefinition,
+    NodeRegistry,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
@@ -38,10 +39,16 @@ pub enum FlowResolutionError {
         node: String,
         source: serde_json::Error,
     },
-    #[snafu(display("invalid child scope on `{node}`: {source}"))]
-    ChildStructure {
-        node: String,
-        source: crate::ScopeStructureError,
+    #[snafu(display("could not resolve child scope for node `{definition_id}`: {source}"))]
+    ChildScope {
+        definition_id: DefinitionId,
+        #[snafu(source(from(FlowResolutionError, Box::new)))]
+        source: Box<FlowResolutionError>,
+    },
+    #[snafu(display("could not lower authored scope: {source}"))]
+    Lowering {
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
     },
     #[snafu(display("invalid Flow reference `{reference}`: {message}"))]
     Invalid { reference: String, message: String },
@@ -65,6 +72,7 @@ enum ParameterSource {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedWorkflow {
+    pub relations: GraphRelations,
     pub definition: WorkflowDefinition,
     pub sources: BTreeSet<PathBuf>,
     pub children: BTreeMap<DefinitionId, BTreeMap<String, Self>>,
@@ -141,7 +149,8 @@ impl FlowSourceBundle {
             extractors: registry.flow_extractors(),
             ..Default::default()
         };
-        let definition = resolver.file(&self.entry, &BTreeMap::new(), 0)?;
+        let definition =
+            resolver.file(&self.entry, &BTreeMap::new(), 0, ScopeContext::default())?;
         Ok(resolver.finish_resolution(definition))
     }
 }
@@ -187,6 +196,7 @@ pub fn normalize_embedded_path(path: &Path) -> Result<PathBuf, FlowResolutionErr
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowDiscovery {
+    pub relations: GraphRelations,
     /// Definition carrying selected provider dependencies. Children contain actual
     /// scopes confirmed by receiver callbacks, never pending source placeholders.
     /// Root sources/pending aggregate descendants; children keep scope-local facts.
@@ -203,6 +213,7 @@ type ScopeChildren = BTreeMap<DefinitionId, BTreeMap<String, Scope>>;
 /// Only strict entrypoints turn these scopes into a ResolvedWorkflow.
 #[derive(Debug)]
 struct Scope {
+    relations: GraphRelations,
     definition: WorkflowDefinition,
     sources: BTreeSet<PathBuf>,
     pending: BTreeSet<String>,
@@ -212,6 +223,7 @@ struct Scope {
 impl Scope {
     fn into_resolved(self) -> ResolvedWorkflow {
         ResolvedWorkflow {
+            relations: self.relations,
             definition: self.definition,
             sources: self.sources,
             children: self
@@ -232,6 +244,7 @@ impl Scope {
 
     fn into_discovery(self) -> FlowDiscovery {
         FlowDiscovery {
+            relations: self.relations,
             definition: self.definition,
             sources: self.sources,
             pending: self.pending,
@@ -281,7 +294,7 @@ pub fn load_workflow_with_registry(
         extractors: registry.flow_extractors(),
         ..Default::default()
     };
-    let definition = resolver.file(path, &BTreeMap::new(), 0)?;
+    let definition = resolver.file(path, &BTreeMap::new(), 0, ScopeContext::default())?;
     Ok(resolver.finish_resolution(definition))
 }
 
@@ -293,7 +306,7 @@ pub fn load_embedded_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResol
         extractors: registry.flow_extractors(),
         ..Default::default()
     };
-    let definition = resolver.file(path, &BTreeMap::new(), 0)?;
+    let definition = resolver.file(path, &BTreeMap::new(), 0, ScopeContext::default())?;
     Ok(resolver.into_resolved(definition))
 }
 
@@ -314,7 +327,14 @@ pub fn resolve_flows_with_registry(
         ..Default::default()
     };
     let mut definition = definition.clone();
-    let scope = resolver.definition(&mut definition, directory, &BTreeMap::new(), 0, "workflow")?;
+    let scope = resolver.definition(
+        &mut definition,
+        directory,
+        &BTreeMap::new(),
+        0,
+        "workflow",
+        ScopeContext::default(),
+    )?;
     Ok(resolver.finish_resolution(scope))
 }
 
@@ -356,7 +376,14 @@ fn resolve_using(
     directory: Option<&Path>,
 ) -> Result<FlowDiscovery, FlowResolutionError> {
     let mut definition = definition.clone();
-    let scope = resolver.definition(&mut definition, directory, &BTreeMap::new(), 0, "workflow")?;
+    let scope = resolver.definition(
+        &mut definition,
+        directory,
+        &BTreeMap::new(),
+        0,
+        "workflow",
+        ScopeContext::default(),
+    )?;
     Ok(resolver.finish_discovery(scope))
 }
 
@@ -367,7 +394,9 @@ impl FlowDiscovery {
     #[cfg(feature = "codegen")]
     pub fn check_pending_nodes(&self) -> Result<(), crate::WorkflowCompileError> {
         for node in &self.definition.nodes {
-            if self.pending.contains(&format!("node:{}", node.kind)) {
+            if self.relations.instruction(&node.id).is_none()
+                && self.pending.contains(&format!("node:{}", node.kind))
+            {
                 return Err(crate::WorkflowCompileError::UnknownNodeKind {
                     definition_id: node.id.clone(),
                     kind: node.kind.clone(),
@@ -407,7 +436,7 @@ impl FlowDiscovery {
             selected_packages,
             ..Default::default()
         };
-        let definition = resolver.file(path, &BTreeMap::new(), 0)?;
+        let definition = resolver.file(path, &BTreeMap::new(), 0, ScopeContext::default())?;
         Ok(resolver.finish_resolution(definition))
     }
 
@@ -495,7 +524,7 @@ fn discover_file(
     path: &Path,
     mut resolver: Resolver,
 ) -> Result<FlowDiscovery, FlowResolutionError> {
-    let scope = resolver.file(path, &BTreeMap::new(), 0)?;
+    let scope = resolver.file(path, &BTreeMap::new(), 0, ScopeContext::default())?;
     Ok(resolver.finish_discovery(scope))
 }
 
@@ -570,6 +599,7 @@ impl Resolver {
         path: &Path,
         inherited: &BTreeMap<String, NodeDependency>,
         depth: usize,
+        context: ScopeContext,
     ) -> Result<Scope, FlowResolutionError> {
         let path = if self.embedded_sources.is_some() {
             normalize_embedded_path(path)?
@@ -604,6 +634,7 @@ impl Resolver {
             inherited,
             depth,
             &path.display().to_string(),
+            context,
         );
         self.stack.pop();
         let mut scope = result.context(SourceSnafu { path: &path })?;
@@ -618,7 +649,9 @@ impl Resolver {
         inherited: &BTreeMap<String, NodeDependency>,
         depth: usize,
         reference: &str,
+        mut context: ScopeContext,
     ) -> Result<Scope, FlowResolutionError> {
+        context.lower_scope(definition).context(LoweringSnafu)?;
         ensure!(
             depth <= MAX_CALL_DEPTH,
             InvalidSnafu {
@@ -663,16 +696,10 @@ impl Resolver {
             );
         }
         self.pending_scopes.push(BTreeSet::new());
-        let result = self.nodes(
-            &mut definition.nodes,
-            &flows,
-            directory,
-            &available,
-            depth,
-            definition.version,
-        );
+        let result = self.nodes(definition, &flows, directory, &available, depth, &context);
         let pending = self.pending_scopes.pop().expect("active definition scope");
         Ok(Scope {
+            relations: context.relations,
             definition: definition.clone(),
             sources: BTreeSet::new(),
             pending,
@@ -716,6 +743,7 @@ impl Resolver {
         available: &BTreeMap<String, NodeDependency>,
         depth: usize,
         reference: &str,
+        context: ScopeContext,
     ) -> Result<Option<Scope>, FlowResolutionError> {
         match source {
             FlowSource::Path { path } => {
@@ -723,7 +751,12 @@ impl Resolver {
                     reference,
                     message: "local Flow references require load_workflow or a source directory",
                 })?;
-                Ok(Some(self.file(&directory.join(path), available, depth)?))
+                Ok(Some(self.file(
+                    &directory.join(path),
+                    available,
+                    depth,
+                    context,
+                )?))
             }
             FlowSource::Builtin { builtin } => {
                 let registry = if self.unlinked {
@@ -769,7 +802,7 @@ impl Resolver {
                         dependency.default_features |= default_features;
                     }
                 }
-                self.definition(&mut definition, None, available, depth, builtin)
+                self.definition(&mut definition, None, available, depth, builtin, context)
                     .map(Some)
             }
         }
@@ -782,19 +815,28 @@ impl Resolver {
         available: &BTreeMap<String, NodeDependency>,
         depth: usize,
         reference: &str,
+        context: ScopeContext,
     ) -> Result<Option<Scope>, FlowResolutionError> {
         self.with_scope(reference, |resolver| {
             let source: ParameterSource = serde_json::from_value(parameter)
                 .context(ConfigurationSnafu { node: reference })?;
             let mut definition = match source {
                 ParameterSource::Source(source) => {
-                    return resolver.source(&source, directory, available, depth, reference);
+                    return resolver
+                        .source(&source, directory, available, depth, reference, context);
                 }
                 ParameterSource::Definition { definition } => *definition,
                 ParameterSource::Resolved(definition) => definition,
             };
             resolver
-                .definition(&mut definition, directory, available, depth, reference)
+                .definition(
+                    &mut definition,
+                    directory,
+                    available,
+                    depth,
+                    reference,
+                    context,
+                )
                 .map(Some)
         })
     }
@@ -806,6 +848,7 @@ impl Resolver {
         available: &BTreeMap<String, NodeDependency>,
         depth: usize,
         version: mf_runtime::WorkflowDefinitionVersion,
+        context: &ScopeContext,
     ) -> Result<BTreeMap<String, Scope>, FlowResolutionError> {
         let Some(extractor) = self.extractors.get(&node.kind) else {
             // Only the selected receiving provider grants source authority.
@@ -827,30 +870,26 @@ impl Resolver {
         }
         for (field, value) in &parameters {
             let reference = format!("{}.config.{field}", node.id);
-            // Validate an authorized inline Iteration boundary before descending
-            // into its nodes, so malformed nested containers cannot obscure the
-            // owner's typed policy error. Source-backed bodies use the same codec
-            // and are validated after resolution below.
-            if node.kind == mf_runtime::ITERATION_KIND && field == "body" {
-                let parameter: ParameterSource = serde_json::from_value(value.clone())
-                    .context(ConfigurationSnafu { node: &reference })?;
-                let body = match parameter {
-                    ParameterSource::Definition { definition } => Some(*definition),
-                    ParameterSource::Resolved(definition) => Some(definition),
-                    ParameterSource::Source(_) => None,
-                };
-                if let Some(body) = body {
-                    self.validate_iteration_body(node, &body)?;
-                }
-            }
-            let call_body = node.kind == CALL_KIND && field == "body";
-            let child_depth = if field == "body" && !crate::calls::call_like(node) {
-                depth
-            } else {
-                depth + 1
-            };
-            let child =
-                self.parameter(value.clone(), directory, available, child_depth, &reference)?;
+            // Receiving metadata grants authority first. The lowering boundary
+            // then supplies relationships for inline, file and builtin children alike.
+            let child = (|| {
+                let child_context = context.child(version, node, field).context(LoweringSnafu)?;
+                let call_body = child_context.relations.host.is_some();
+                let child_depth = depth + usize::from(child_context.relations.is_callable());
+                let child = self.parameter(
+                    value.clone(),
+                    directory,
+                    available,
+                    child_depth,
+                    &reference,
+                    child_context,
+                )?;
+                Ok((call_body, child))
+            })()
+            .context(ChildScopeSnafu {
+                definition_id: node.id.clone(),
+            })?;
+            let (call_body, child) = child;
             if let Some(child) = child {
                 if call_body {
                     ensure!(
@@ -866,37 +905,24 @@ impl Resolver {
                 children.insert(field.clone(), child);
             }
         }
-        if node.kind == mf_runtime::ITERATION_KIND
-            && let Some(body) = children.get("body")
-        {
-            self.validate_iteration_body(node, &body.definition)?;
-        }
         Ok(children)
-    }
-
-    fn validate_iteration_body(
-        &self,
-        node: &NodeDefinition,
-        body: &WorkflowDefinition,
-    ) -> Result<(), FlowResolutionError> {
-        // Check supported scope grammar before descending, without decoding the
-        // receiver's ordinary configuration or its result-interface policy.
-        crate::iteration::validate_body_structure(body).context(ChildStructureSnafu {
-            node: node.id.as_str(),
-        })
     }
 
     fn nodes(
         &mut self,
-        nodes: &mut [NodeDefinition],
+        definition: &mut WorkflowDefinition,
         flows: &BTreeMap<String, FlowSource>,
         directory: Option<&Path>,
         available: &BTreeMap<String, NodeDependency>,
         depth: usize,
-        version: mf_runtime::WorkflowDefinitionVersion,
+        context: &ScopeContext,
     ) -> Result<ScopeChildren, FlowResolutionError> {
+        let version = definition.version;
         let mut children = BTreeMap::new();
-        for node in nodes {
+        for node in &mut definition.nodes {
+            if context.relations.instruction(&node.id).is_some() {
+                continue;
+            }
             if node.kind == CALL_KIND {
                 let explicit_body = node.config.get("body").is_some_and(|body| !body.is_null());
                 // Validate the named selector without interpreting
@@ -950,7 +976,14 @@ impl Resolver {
                         // Call's receiving provider is selected. Explicit bodies
                         // never take this business-only source-selection path.
                         if let Some(child) = self.with_scope(&config.flow, |resolver| {
-                            resolver.source(source, directory, available, depth + 1, &config.flow)
+                            resolver.source(
+                                source,
+                                directory,
+                                available,
+                                depth + 1,
+                                &config.flow,
+                                ScopeContext::default(),
+                            )
                         })? {
                             ensure!(
                                 child.definition.execution.is_none()
@@ -994,19 +1027,10 @@ impl Resolver {
                         }
                     );
                 }
-            } else if self.discovery
-                && !self.extractors.contains_key(&node.kind)
-                && !matches!(
-                    node.kind.as_str(),
-                    mf_runtime::LOOP_ASSIGN_KIND
-                        | mf_runtime::EXIT_LOOP_KIND
-                        | mf_runtime::LOOP_SOURCE_ID
-                        | mf_runtime::ITERATION_INPUT_KIND
-                )
-            {
+            } else if self.discovery && !self.extractors.contains_key(&node.kind) {
                 self.mark_pending(format!("node:{}", node.kind));
             }
-            let fields = self.parameters(node, directory, available, depth, version)?;
+            let fields = self.parameters(node, directory, available, depth, version, context)?;
             if !fields.is_empty() {
                 children.insert(node.id.clone(), fields);
             }
@@ -1079,7 +1103,14 @@ mod tests {
             definition: &mut WorkflowDefinition,
             directory: Option<&Path>,
         ) -> Result<Scope, FlowResolutionError> {
-            self.definition(definition, directory, &BTreeMap::new(), 0, "test")
+            self.definition(
+                definition,
+                directory,
+                &BTreeMap::new(),
+                0,
+                "test",
+                ScopeContext::default(),
+            )
         }
 
         fn plan(
@@ -1095,6 +1126,52 @@ mod tests {
         let path = root.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, serde_json::to_string(value).unwrap()).unwrap();
+    }
+
+    #[cfg(feature = "codegen")]
+    #[test]
+    fn pending_classification_uses_relations_without_hiding_instruction_children() {
+        let pending = BTreeSet::from(["node:missing.kind".into()]);
+        let mut discovery = FlowDiscovery {
+            relations: GraphRelations {
+                scope: Some(mf_runtime::ScopeRelations {
+                    input: "input".into(),
+                    values: BTreeMap::new(),
+                    state_outputs: BTreeMap::new(),
+                    writes: BTreeMap::new(),
+                    exits: BTreeSet::new(),
+                }),
+                ..Default::default()
+            },
+            definition: definition(json!([{"id":"input", "kind":"missing.kind"}])),
+            sources: BTreeSet::new(),
+            pending: pending.clone(),
+            children: BTreeMap::new(),
+        };
+        discovery.check_pending_nodes().unwrap();
+        // Invalid handoffs must still expose their children to diagnostics;
+        // structural validation separately rejects instruction-owned children.
+        discovery.children.insert(
+            "input".into(),
+            BTreeMap::from([(
+                "body".into(),
+                FlowDiscovery {
+                    relations: GraphRelations::default(),
+                    definition: definition(json!([{"id":"leaf", "kind":"missing.kind"}])),
+                    sources: BTreeSet::new(),
+                    pending,
+                    children: BTreeMap::new(),
+                },
+            )]),
+        );
+        assert!(matches!(
+            discovery.check_pending_nodes().unwrap_err(),
+            crate::WorkflowCompileError::ChildGraph { definition_id, source }
+                if definition_id.as_str() == "input"
+                    && matches!(source.as_ref(), crate::WorkflowCompileError::UnknownNodeKind {
+                        definition_id, ..
+                    } if definition_id.as_str() == "leaf")
+        ));
     }
 
     #[cfg(feature = "codegen")]
@@ -1303,7 +1380,8 @@ mod tests {
 
     fn source_cause(error: &FlowResolutionError) -> &FlowResolutionError {
         match error {
-            FlowResolutionError::Source { source, .. } => source_cause(source),
+            FlowResolutionError::Source { source, .. }
+            | FlowResolutionError::ChildScope { source, .. } => source_cause(source),
             error => error,
         }
     }
@@ -1788,7 +1866,10 @@ mod tests {
                     definition(json!([]))
                 } else {
                     definition(json!([{
-                        "id":"owner", "kind":kind, "config":{"body":{"path":format!("{}.json", index + 1)}}
+                        "id":"owner", "kind":kind, "config":{
+                            "variables":[{"name":"count", "type":"int"}],
+                            "body":{"path":format!("{}.json", index + 1)}
+                        }
                     }]))
                 };
                 archive.sources.insert(
@@ -1803,7 +1884,7 @@ mod tests {
                 ..Default::default()
             };
             let error = resolver
-                .file(&archive.entry, &BTreeMap::new(), 0)
+                .file(&archive.entry, &BTreeMap::new(), 0, ScopeContext::default())
                 .unwrap_err();
             assert_eq!(resolver.scope_depth, 0);
             assert!(resolver.stack.is_empty());
@@ -1907,7 +1988,7 @@ mod tests {
         ] {
             let error = source_resolver().resolve(&mut parent, None).unwrap_err();
             assert!(
-                matches!(error, FlowResolutionError::Configuration { node, source }
+                matches!(source_cause(&error), FlowResolutionError::Configuration { node, source }
                 if node == reference && source.is_data())
             );
         }
@@ -1921,7 +2002,7 @@ mod tests {
         );
         let error = source_resolver().resolve(&mut parent, None).unwrap_err();
         assert!(
-            matches!(error, FlowResolutionError::Invalid { reference, message }
+            matches!(source_cause(&error), FlowResolutionError::Invalid { reference, message }
             if reference == "owner.config.body" && message.contains("source directory"))
         );
     }
@@ -2354,7 +2435,8 @@ mod tests {
                     None,
                     &BTreeMap::new(),
                     0,
-                    "replay"
+                    "replay",
+                    ScopeContext::default()
                 )
                 .unwrap()
                 .is_some()
@@ -2390,7 +2472,7 @@ mod tests {
             receiver.scope_depth = mf_telemetry::MAX_SCOPE_DEPTH;
             let error = receiver.resolve(&mut over, Some(root.path())).unwrap_err();
             assert!(
-                matches!(error, FlowResolutionError::Invalid { ref message, .. }
+                matches!(source_cause(&error), FlowResolutionError::Invalid { message, .. }
                 if message == "combined container nesting exceeds twenty scopes")
             );
             assert_eq!(receiver.scope_depth, mf_telemetry::MAX_SCOPE_DEPTH);
@@ -2439,7 +2521,7 @@ mod tests {
                 assert_eq!(replay.graph, plan.graph);
             } else {
                 assert!(
-                    matches!(result, Err(FlowResolutionError::Invalid { ref message, .. })
+                    matches!(source_cause(result.as_ref().unwrap_err()), FlowResolutionError::Invalid { message, .. }
                     if message == "Flow nesting exceeds sixteen calls")
                 );
             }
@@ -2463,11 +2545,11 @@ mod tests {
             .insert(mf_runtime::ITERATION_KIND.into(), body_parameter);
         let error = resolver.resolve(&mut parent, None).unwrap_err();
         assert!(matches!(
-            error,
-            FlowResolutionError::ChildStructure {
-                source: crate::ScopeStructureError::NestedScope { .. },
-                ..
-            }
+            source_cause(&error),
+            FlowResolutionError::Lowering { source }
+                if matches!(source.as_ref(), crate::WorkflowCompileError::ScopeStructure {
+                    source: crate::ScopeStructureError::NestedScope { .. }, ..
+                })
         ));
         assert!(error.to_string().contains("nested"));
         resolver
@@ -2477,6 +2559,80 @@ mod tests {
         resolver.resolve(&mut parent, None).unwrap();
         assert_eq!(parent, original);
         assert!(resolver.sources.is_empty());
+    }
+
+    #[test]
+    fn item_ancestry_and_typed_owners_survive_callable_and_file_descent() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = definition(json!([{
+            "id":"repeat", "kind":mf_runtime::LOOP_KIND, "config":{
+                "variables":false, "body":{"path":"must-not-read.json"}
+            }
+        }]));
+        let callable = definition(json!([{
+            "id":"invoke", "kind":CALL_KIND, "config":{"flow":"explicit", "body":nested}
+        }]));
+        write_definition(root.path(), "callable.json", &callable);
+        for value in [json!(callable), json!({"path":"callable.json"})] {
+            let mut parent = definition(json!([{
+                "id":"outer", "kind":mf_runtime::ITERATION_KIND, "config":{
+                    "body":definition(json!([{
+                        "id":"owner", "kind":"test.flow-source-owner", "config":{"body":value}
+                    }]))
+                }
+            }]));
+            let mut resolver = source_resolver();
+            resolver
+                .extractors
+                .insert(mf_runtime::ITERATION_KIND.into(), body_parameter);
+            resolver
+                .extractors
+                .insert(mf_runtime::LOOP_KIND.into(), body_parameter);
+            let error = resolver
+                .resolve(&mut parent, Some(root.path()))
+                .unwrap_err();
+            let expected_path = crate::loops::path_label(&[
+                "outer".into(),
+                mf_runtime::ScopePathEntry::binding_key("owner", "body").into(),
+                "invoke".into(),
+                "repeat".into(),
+            ]);
+            assert!(
+                matches!(
+                    source_cause(&error),
+                    FlowResolutionError::Lowering { source }
+                        if matches!(source.as_ref(), crate::WorkflowCompileError::InvalidScope {
+                            path, message
+                        } if path == &expected_path
+                            && message == "child scopes inside an item scope cannot contain container scopes")
+                ),
+                "{error}"
+            );
+            let mut owners = Vec::new();
+            let mut cause = &error;
+            loop {
+                match cause {
+                    FlowResolutionError::ChildScope {
+                        definition_id,
+                        source,
+                    } => {
+                        owners.push(definition_id.as_str());
+                        cause = source;
+                    }
+                    FlowResolutionError::Source { source, .. } => cause = source,
+                    _ => break,
+                }
+            }
+            assert_eq!(owners, ["outer", "owner", "invoke", "repeat"]);
+            assert!(
+                resolver
+                    .sources
+                    .iter()
+                    .all(|path| path.ends_with("callable.json"))
+            );
+            assert_eq!(resolver.scope_depth, 0);
+            assert!(resolver.stack.is_empty());
+        }
     }
 
     #[test]
@@ -2572,7 +2728,7 @@ mod tests {
         let path = root.path().join("flow.json");
         write_definition(root.path(), "flow.json", &parent);
         let error = source_resolver()
-            .file(&path, &BTreeMap::new(), 0)
+            .file(&path, &BTreeMap::new(), 0, ScopeContext::default())
             .err()
             .unwrap();
         assert!(error.to_string().contains("recursive Flow reference"));

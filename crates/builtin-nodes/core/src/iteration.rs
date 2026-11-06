@@ -75,6 +75,10 @@ pub enum IterationValidationError {
     InvalidStreamName,
     #[snafu(display("Iteration body must declare exactly one required output named `result`"))]
     InvalidResult,
+    #[snafu(display(
+        "Iteration body scope bindings must be immutable item/key values of type Any"
+    ))]
+    InvalidScopeBindings,
 }
 
 impl From<IterationValidationError> for NodeBuildError {
@@ -97,6 +101,7 @@ fn validate_stream_names<'a>(
 
 pub struct IterationNode {
     id: String,
+    scope_key: String,
     mode: IterationMode,
     on_error: IterationErrorPolicy,
     result_type: ValueType,
@@ -136,13 +141,31 @@ impl IterationNode {
         body: PreparedSubgraph,
     ) -> Result<Self, NodeBuildError> {
         validate_stream_names(body.stream_outputs.iter().map(|port| port.name.as_ref()))?;
+        if let Some(relations) = &body.relations {
+            ensure!(
+                relations.scope.as_ref().is_some_and(|scope| {
+                    scope.values
+                        == BTreeMap::from([
+                            ("item".into(), ValueType::Any),
+                            ("key".into(), ValueType::Any),
+                        ])
+                        && scope.state_outputs.is_empty()
+                        && scope.writes.is_empty()
+                        && scope.exits.is_empty()
+                }),
+                InvalidScopeBindingsSnafu
+            );
+        }
         ensure!(
             body.outputs.len() == 1 && body.outputs[0].name == "result" && body.outputs[0].required,
             InvalidResultSnafu
         );
         let result_type = body.outputs[0].value_type.clone();
+        let id = id.into();
+        let scope_key = body.scope_key(&id, "body");
         Ok(Self {
-            id: id.into(),
+            id,
+            scope_key,
             mode,
             on_error,
             result_type,
@@ -164,7 +187,7 @@ impl IterationNode {
     }
 
     fn run_item(
-        id: &str,
+        scope_key: &str,
         body: &PreparedSubgraph,
         (key, item): (ValueRef, ValueRef),
         index: usize,
@@ -177,8 +200,11 @@ impl IterationNode {
         let body_observation = step.as_ref().map(ItemObservation::body_observation);
         let mut state = parent.fork_body(body_observation);
         let result = ExecutionScope::new(
-            id,
-            mf_runtime::ITERATION_INPUT_ID,
+            scope_key,
+            body.scope_input().map_or(
+                mf_runtime::ITERATION_INPUT_ID,
+                mf_runtime::DefinitionId::as_str,
+            ),
             index,
             Outputs::from([("item".into(), item), ("key".into(), key)]),
             BTreeMap::from([
@@ -239,7 +265,7 @@ impl IterationNode {
                         return Err(error.into());
                     }
                     results.push(Self::run_item(
-                        &self.id,
+                        &self.scope_key,
                         &self.body,
                         (key, item),
                         index,
@@ -269,7 +295,7 @@ impl IterationNode {
                                     let completed = Arc::clone(&completed);
                                     let stopped = Arc::clone(&stopped);
                                     let observation = observation.clone();
-                                    let id = self.id.clone();
+                                    let scope_key = self.scope_key.clone();
                                     let on_error = self.on_error;
                                     let body = Arc::clone(&self.body);
                                     let parent = parent.fork_body(None);
@@ -292,7 +318,7 @@ impl IterationNode {
                                             None => &mut mf_runtime::DiscardSink,
                                         };
                                         let result = Self::run_item(
-                                            &id,
+                                            &scope_key,
                                             &body,
                                             (key, item),
                                             index,
@@ -359,7 +385,12 @@ impl TypedTaskNode for IterationNode {
         ctx: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         let observation = ctx.observation().and_then(|run| {
-            run.iteration_observation(&self.id, &ctx.invocation_path(), self.body.nodes.clone())
+            run.iteration_observation(
+                &self.id,
+                &self.scope_key,
+                &ctx.invocation_path(),
+                self.body.nodes.clone(),
+            )
         });
         let mut discard = mf_runtime::DiscardSink;
         let mut stream = SubgraphStream::new(self.id.as_str(), ctx, &mut discard);
@@ -406,6 +437,7 @@ impl SubgraphNode for IterationNode {
         let observation = context.observation().and_then(|run| {
             run.iteration_observation(
                 &self.id,
+                &self.scope_key,
                 &context.invocation_path(),
                 self.body.nodes.clone(),
             )
@@ -441,6 +473,22 @@ mod tests {
         }
     }
 
+    fn body_relations(input: &str) -> mf_runtime::GraphRelations {
+        mf_runtime::GraphRelations {
+            scope: Some(mf_runtime::ScopeRelations {
+                input: input.into(),
+                values: BTreeMap::from([
+                    ("item".into(), ValueType::Any),
+                    ("key".into(), ValueType::Any),
+                ]),
+                state_outputs: BTreeMap::new(),
+                writes: BTreeMap::new(),
+                exits: Default::default(),
+            }),
+            ..Default::default()
+        }
+    }
+
     fn result_body() -> PreparedSubgraph {
         PreparedSubgraph::new(
             Vec::new(),
@@ -454,6 +502,109 @@ mod tests {
             panic!("expected owning-node business error, got {error}");
         };
         source.downcast_ref().unwrap()
+    }
+
+    #[test]
+    fn iteration_invocation_paths_use_the_actual_child_edge_key() {
+        for mode in [IterationMode::Sequential, IterationMode::Parallel] {
+            for compiled in [false, true] {
+                let key = mf_runtime::ScopePathEntry::binding_key("mapped-owner", "selected");
+                let expected = if compiled { key.clone() } else { "each".into() };
+                let mut body = PreparedSubgraph::new(
+                    Vec::new(),
+                    vec![PortSpec::new("result", ValueType::Any, true)],
+                    move |state| {
+                        let path = state.invocation_path();
+                        assert_eq!(path.len(), 1);
+                        assert_eq!(path[0].node_id(), expected);
+                        assert_eq!(path[0].index().get(), 0);
+                        Ok(Outputs::from([("result".into(), 1.into())]))
+                    },
+                );
+                if compiled {
+                    let mut relations = body_relations("input");
+                    relations.key = Some(key);
+                    body = body.with_relations(relations);
+                }
+                let node = IterationNode::new("each", mode, IterationErrorPolicy::Terminate, body)
+                    .unwrap();
+                let mut context = ExecutionContext::default();
+                context
+                    .with_node("each".into(), |context| {
+                        let result = TaskNode::execute(
+                            &node,
+                            Inputs::from([("items".into(), json!([7]).into())]),
+                            context,
+                        );
+                        assert_eq!(context.current_node(), Some("each"));
+                        assert!(context.invocation_path().is_empty());
+                        result
+                    })
+                    .unwrap();
+                assert!(context.current_node().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn iteration_checks_compiled_scope_bindings_before_execution() {
+        assert!(
+            IterationNode::new(
+                "each",
+                IterationMode::Sequential,
+                IterationErrorPolicy::Terminate,
+                result_body().with_relations(body_relations("custom-input")),
+            )
+            .is_ok()
+        );
+        let mut invalid = vec![mf_runtime::GraphRelations::default()];
+        for mismatch in 0..7 {
+            let mut relations = body_relations("custom-input");
+            let scope = relations.scope.as_mut().unwrap();
+            match mismatch {
+                0 => scope.values.clear(),
+                1 => {
+                    scope.values.insert("item".into(), ValueType::String);
+                }
+                2 => {
+                    scope.values.remove("key");
+                }
+                3 => {
+                    scope.values.insert("extra".into(), ValueType::Any);
+                }
+                4 => {
+                    scope.state_outputs.insert("item".into(), "item".into());
+                }
+                5 => {
+                    scope.writes.insert("assign".into(), "item".into());
+                }
+                6 => {
+                    scope.exits.insert("exit".into());
+                }
+                _ => unreachable!(),
+            }
+            invalid.push(relations);
+        }
+        for relations in invalid {
+            let body = PreparedSubgraph::new(
+                Vec::new(),
+                vec![PortSpec::new("result", ValueType::Any, true)],
+                |_| panic!("invalid scope bindings must be rejected before execution"),
+            )
+            .with_relations(relations);
+            let error = IterationNode::new(
+                "each",
+                IterationMode::Sequential,
+                IterationErrorPolicy::Terminate,
+                body,
+            )
+            .err()
+            .unwrap();
+            assert!(matches!(
+                business_error(&error),
+                IterationValidationError::InvalidScopeBindings
+            ));
+        }
     }
 
     #[test]
@@ -555,6 +706,62 @@ mod tests {
             business_error(&error),
             IterationValidationError::InvalidResult
         ));
+    }
+
+    #[test]
+    fn iteration_assignment_refreshes_the_prepared_scope_input_or_manual_default() {
+        for scope_input in [None, Some("custom-iteration-input")] {
+            let source_id = scope_input.unwrap_or(mf_runtime::ITERATION_INPUT_ID);
+            let source = mf_runtime::prepared_scope_source(
+                source_id,
+                &BTreeMap::from([
+                    ("item".into(), ValueType::Any),
+                    ("key".into(), ValueType::Any),
+                ]),
+            )
+            .into_task()
+            .unwrap();
+            let assign = mf_runtime::prepared_loop_assign("assign", "item", ValueType::Any)
+                .into_task()
+                .unwrap();
+            let mut body = PreparedSubgraph::new(
+                Vec::new(),
+                vec![PortSpec::new("result", ValueType::Any, true)],
+                move |state| {
+                    execute_node_in_context(&source, &[], state)?;
+                    execute_node_in_context(
+                        &assign,
+                        &[mf_runtime::ExecutionDependency {
+                            exclusive: false,
+                            input: Some("value"),
+                            source_node: source_id,
+                            source_output: "index",
+                            source_key: mf_runtime::output_id(source_id, "index").into(),
+                        }],
+                        state,
+                    )?;
+                    let item = state
+                        .select_output("result", source_id, "item", false)?
+                        .unwrap();
+                    Ok(Outputs::from([("result".into(), item)]))
+                },
+            );
+            if let Some(input) = scope_input {
+                body = body.with_relations(body_relations(input));
+            }
+            for mode in [IterationMode::Sequential, IterationMode::Parallel] {
+                let node =
+                    IterationNode::new("each", mode, IterationErrorPolicy::Terminate, body.clone())
+                        .unwrap();
+                let result = TaskNode::execute(
+                    &node,
+                    Inputs::from([("items".into(), json!([7, 8]).into())]),
+                    &mut ExecutionContext::default(),
+                )
+                .unwrap();
+                assert_eq!(result.outputs["results"], json!([0, 1]));
+            }
+        }
     }
 
     #[test]

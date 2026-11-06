@@ -1,7 +1,8 @@
 use mf_runtime::{
     CompiledGraph, DefinitionId, MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC,
-    MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, WorkflowInput, WorkflowInputSchema,
-    WorkflowInterfaceVersion, WorkflowManifest, WorkflowManifestError, WorkflowManifestVersion,
+    MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, ScopeRelations, ValueType,
+    WorkflowInput, WorkflowInputSchema, WorkflowInterfaceVersion, WorkflowManifest,
+    WorkflowManifestError, WorkflowManifestVersion,
 };
 use mf_telemetry::identity::WorkflowId;
 use serde_json::{Value, json};
@@ -11,6 +12,7 @@ fn graph(definition: Value, order: &[&str]) -> CompiledGraph {
     CompiledGraph {
         definition: serde_json::from_value(definition).unwrap(),
         execution_order: order.iter().map(|id| (*id).into()).collect(),
+        relations: Default::default(),
         children: Default::default(),
     }
 }
@@ -134,7 +136,7 @@ fn compiled_manifests_derive_views_from_original_facts() {
             Err(WorkflowManifestError::Json { .. })
         ));
     }
-    for missing in ["definition", "execution_order"] {
+    for missing in ["definition", "execution_order", "relations"] {
         let mut invalid = payload.clone();
         invalid["graph"].as_object_mut().unwrap().remove(missing);
         assert!(matches!(
@@ -420,18 +422,30 @@ fn loop_manifest() -> WorkflowManifest {
         }),
         &["%loop", "inner"],
     );
-    bind(
-        &mut body,
-        "inner",
-        "body",
-        graph(
-            json!({
-                "version": "2026-09-29", "dependencies": {},
-                "nodes": [{"id": "%loop", "kind": "%loop"}]
-            }),
-            &["%loop"],
-        ),
+    body.relations.key = Some("repeat".into());
+    body.relations.scope = Some(ScopeRelations {
+        input: "%loop".into(),
+        values: [("counter".into(), ValueType::Int64)].into(),
+        state_outputs: [("counter".into(), "counter".into())].into(),
+        writes: Default::default(),
+        exits: Default::default(),
+    });
+    let mut inner = graph(
+        json!({
+            "version": "2026-09-29", "dependencies": {},
+            "nodes": [{"id": "%loop", "kind": "%loop"}]
+        }),
+        &["%loop"],
     );
+    inner.relations.key = Some("inner".into());
+    inner.relations.scope = Some(ScopeRelations {
+        input: "%loop".into(),
+        values: [("counter".into(), ValueType::Int64)].into(),
+        state_outputs: [("counter".into(), "counter".into())].into(),
+        writes: Default::default(),
+        exits: Default::default(),
+    });
+    bind(&mut body, "inner", "body", inner);
     bind(&mut root, "repeat", "body", body);
     WorkflowManifest {
         version: WorkflowManifestVersion::V2026_11_06,
@@ -454,6 +468,9 @@ fn nested_builtin_bodies_use_actual_orders_and_validate_synthetic_sources() {
         ["%loop", "inner"]
     );
     assert_eq!(description.loop_bodies[1].path, ["repeat", "inner"]);
+    for body in &description.loop_bodies {
+        assert_eq!(body.source.as_deref(), Some("%loop"));
+    }
     let mut reordered = manifest.clone();
     child(&mut reordered.graph, "repeat", "body")
         .execution_order
@@ -469,6 +486,7 @@ fn nested_builtin_bodies_use_actual_orders_and_validate_synthetic_sources() {
         "duplicate_node",
         "duplicate_order",
         "missing_source",
+        "unknown_source_relation",
         "incomplete_body_order",
         "incomplete_root",
         "schema",
@@ -494,6 +512,14 @@ fn nested_builtin_bodies_use_actual_orders_and_validate_synthetic_sources() {
                 let body = child(&mut invalid.graph, "repeat", "body");
                 body.definition.nodes.remove(0);
                 body.execution_order.remove(0);
+            }
+            "unknown_source_relation" => {
+                child(&mut invalid.graph, "repeat", "body")
+                    .relations
+                    .scope
+                    .as_mut()
+                    .unwrap()
+                    .input = "unknown".into();
             }
             "incomplete_body_order" => {
                 child(&mut invalid.graph, "repeat", "body")
@@ -628,6 +654,14 @@ fn historical_iteration_manifest() -> WorkflowManifest {
         }),
         &["%iteration", "dispatch"],
     );
+    body.relations.key = Some("map".into());
+    body.relations.scope = Some(ScopeRelations {
+        input: "%iteration".into(),
+        values: [("item".into(), ValueType::String)].into(),
+        state_outputs: Default::default(),
+        writes: Default::default(),
+        exits: Default::default(),
+    });
     bind(
         &mut body,
         "dispatch",
@@ -737,6 +771,274 @@ fn historical_iteration_projection_validates_all_actual_descendants_first() {
             .len(),
         2
     );
+}
+
+#[test]
+fn historical_projection_follows_explicit_stateless_frames_not_provider_names() {
+    let mut manifest = historical_iteration_manifest();
+    manifest.graph.definition.nodes[0].kind = "renamed.dispatch".into();
+    let bindings = manifest.graph.children.get_mut(&"map".into()).unwrap();
+    let mut body = bindings.remove("body").unwrap();
+    body.relations.key = None;
+    body.definition.nodes[0].id = "item-source".into();
+    body.definition.nodes[0].kind = "renamed.input".into();
+    body.execution_order[0] = "item-source".into();
+    body.relations.scope.as_mut().unwrap().input = "item-source".into();
+    bindings.insert("selected".into(), body);
+    assert!(
+        round_trip(&manifest)
+            .description()
+            .unwrap()
+            .loop_bodies
+            .is_empty()
+    );
+
+    let mut callable = manifest.clone();
+    child(&mut callable.graph, "map", "selected")
+        .relations
+        .scope = None;
+    assert_eq!(
+        round_trip(&callable)
+            .description()
+            .unwrap()
+            .loop_bodies
+            .len(),
+        2
+    );
+    let mut stateful = manifest;
+    child(&mut stateful.graph, "map", "selected")
+        .relations
+        .scope
+        .as_mut()
+        .unwrap()
+        .state_outputs
+        .insert("item".into(), "item".into());
+    assert_eq!(
+        round_trip(&stateful)
+            .description()
+            .unwrap()
+            .loop_bodies
+            .len(),
+        2
+    );
+
+    let mut builtin_without_frame = historical_iteration_manifest();
+    child(&mut builtin_without_frame.graph, "map", "body")
+        .relations
+        .scope = None;
+    assert_eq!(
+        round_trip(&builtin_without_frame)
+            .description()
+            .unwrap()
+            .loop_bodies
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisions() {
+    let mut manifest = historical_iteration_manifest();
+    let body = child(&mut manifest.graph, "map", "body");
+    body.definition.nodes.push(
+        serde_json::from_value(json!({"id": "instruction", "kind": "foreign.instruction"}))
+            .unwrap(),
+    );
+    body.execution_order.push("instruction".into());
+    assert!(
+        round_trip(&manifest)
+            .description()
+            .unwrap()
+            .loop_bodies
+            .is_empty()
+    );
+    for case in [
+        "unknown_input",
+        "unknown_write",
+        "unknown_exit",
+        "input_write_collision",
+        "input_exit_collision",
+        "unknown_write_variable",
+        "unknown_state_variable",
+        "blank_variable",
+        "blank_state_output",
+        "colliding_state_outputs",
+        "nonidentity_state_output",
+        "index_override",
+        "immutable_write",
+        "immutable_exit",
+        "write_exit_collision",
+        "source_owning_children",
+        "write_owning_children",
+        "exit_owning_children",
+        "unknown_stream_node",
+        "blank_stream_port",
+        "blank_stream_name",
+    ] {
+        let mut corrupt = manifest.clone();
+        let body = child(&mut corrupt.graph, "map", "body");
+        let scope = body.relations.scope.as_mut().unwrap();
+        match case {
+            "unknown_input" => scope.input = "missing".into(),
+            "unknown_write" => {
+                scope.writes.insert("missing".into(), "item".into());
+            }
+            "unknown_exit" => {
+                scope.exits.insert("missing".into());
+            }
+            "input_write_collision" => {
+                scope.writes.insert("%iteration".into(), "item".into());
+            }
+            "input_exit_collision" => {
+                scope.exits.insert("%iteration".into());
+            }
+            "unknown_write_variable" => {
+                scope.writes.insert("dispatch".into(), "missing".into());
+            }
+            "unknown_state_variable" => {
+                scope
+                    .state_outputs
+                    .insert("missing".into(), "result".into());
+            }
+            "blank_variable" => {
+                scope.values.insert(" ".into(), ValueType::String);
+            }
+            "blank_state_output" => {
+                scope.state_outputs.insert("item".into(), " ".into());
+            }
+            "colliding_state_outputs" => {
+                scope.values.insert("other".into(), ValueType::String);
+                scope.state_outputs.insert("item".into(), "result".into());
+                scope.state_outputs.insert("other".into(), "result".into());
+            }
+            "nonidentity_state_output" => {
+                scope.state_outputs.insert("item".into(), "result".into());
+            }
+            "index_override" => {
+                scope.values.insert("index".into(), ValueType::Int64);
+            }
+            "immutable_write" => {
+                scope.writes.insert("instruction".into(), "item".into());
+            }
+            "immutable_exit" => {
+                scope.exits.insert("instruction".into());
+            }
+            "write_exit_collision" => {
+                scope.state_outputs.insert("item".into(), "item".into());
+                scope.writes.insert("instruction".into(), "item".into());
+                scope.exits.insert("instruction".into());
+            }
+            "source_owning_children" => scope.input = "dispatch".into(),
+            "write_owning_children" => {
+                scope.state_outputs.insert("item".into(), "item".into());
+                scope.writes.insert("dispatch".into(), "item".into());
+            }
+            "exit_owning_children" => {
+                scope.state_outputs.insert("item".into(), "item".into());
+                scope.exits.insert("dispatch".into());
+            }
+            _ => {
+                let (name, node, port) = match case {
+                    "unknown_stream_node" => ("events", "missing", "item"),
+                    "blank_stream_port" => ("events", "%iteration", " "),
+                    _ => (" ", "%iteration", "item"),
+                };
+                body.relations.streams.insert(
+                    name.into(),
+                    serde_json::from_value(json!({"node": node, "port": port})).unwrap(),
+                );
+            }
+        }
+        let failures = errors(&corrupt).into_iter().chain([
+            corrupt.description().unwrap_err(),
+            corrupt.interface().unwrap_err(),
+        ]);
+        for error in failures {
+            assert!(
+                matches!(
+                    &error,
+                    WorkflowManifestError::Graph {
+                        source: mf_telemetry::ContractError::Invalid { .. }
+                    }
+                ),
+                "{case}: {error}"
+            );
+            assert!(error.source().unwrap().is::<mf_telemetry::ContractError>());
+            if case == "nonidentity_state_output" {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("preserve current-frame variable names")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_relations_round_trip_without_kind_or_configuration_inference() {
+    let mut manifest = binding_manifest();
+    let body = child(&mut manifest.graph, "dispatch", "selected");
+    for id in ["source", "other-source", "store", "leave"] {
+        body.definition.nodes.push(
+            serde_json::from_value(json!({"id": id, "kind": "renamed.instruction"})).unwrap(),
+        );
+        body.execution_order.push(id.into());
+    }
+    body.relations.scope = Some(ScopeRelations {
+        input: "source".into(),
+        values: [("item".into(), ValueType::String)].into(),
+        state_outputs: [("item".into(), "item".into())].into(),
+        writes: [("store".into(), "item".into())].into(),
+        exits: ["leave".into()].into(),
+    });
+    body.relations.streams.insert(
+        "events".into(),
+        serde_json::from_value(json!({"node": "value", "port": "item"})).unwrap(),
+    );
+    let decoded = round_trip(&manifest);
+    let description = decoded.description().unwrap();
+    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
+    assert_eq!(
+        description.loop_body(&[key]).unwrap().source.as_deref(),
+        Some("source")
+    );
+    decoded
+        .interface()
+        .unwrap()
+        .validate_for_description(&description)
+        .unwrap();
+    let original_id = decoded.workflow_id().unwrap();
+    let mut changed = decoded;
+    child(&mut changed.graph, "dispatch", "selected")
+        .relations
+        .scope
+        .as_mut()
+        .unwrap()
+        .input = "other-source".into();
+    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
+    assert_eq!(
+        changed
+            .description()
+            .unwrap()
+            .loop_body(&[key])
+            .unwrap()
+            .source
+            .as_deref(),
+        Some("other-source")
+    );
+    assert_eq!(changed.graph.definition, manifest.graph.definition);
+    assert_ne!(round_trip(&changed).workflow_id().unwrap(), original_id);
+}
+
+#[test]
+fn explicit_child_keys_cannot_collide_even_when_legacy_projection_omits_them() {
+    let mut manifest = historical_iteration_manifest();
+    let body = child(&mut manifest.graph, "map", "body").clone();
+    bind(&mut manifest.graph, "map", "other", body);
+    for error in errors(&manifest) {
+        assert!(error.to_string().contains("scope keys collide"));
+    }
 }
 
 #[test]

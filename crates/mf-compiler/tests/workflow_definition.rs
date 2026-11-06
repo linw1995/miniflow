@@ -46,12 +46,6 @@ fn every_executable_child_uses_direct_canonical_flow_parameters() {
             children["body"]
         );
         assert!(config.get("definition").is_none());
-        let expected_scope = if node.id.as_str() == "apply" {
-            mf_telemetry::event::ScopePathEntry::binding_key("apply", "body")
-        } else {
-            node.id.to_string()
-        };
-        assert_eq!(node.flow_scope_key("body"), expected_scope);
         let mut round_trip = node.clone();
         round_trip
             .set_node_flow("body", children["body"].clone())
@@ -87,6 +81,11 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
             {"id":"each", "kind":"builtin.iteration", "config":{"body":{
                 "version":"2026-10-03", "dependencies":{}, "nodes":[],
                 "outputs":[{"name":"result", "node":"%iteration", "port":"item"}]
+            }}},
+            {"id":"callA", "kind":"workflow.call", "config":{"flow":"A", "body":{
+                "version":"2026-10-28", "dependencies":{},
+                "nodes":[{"id":"leaf", "kind":"builtin.constant", "config":{"value":42}}],
+                "outputs":[{"name":"answer", "node":"leaf", "port":"value"}]
             }}}
         ]
     }))
@@ -113,6 +112,9 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
             .iter()
             .find(|node| node.id.as_str() == owner)
             .unwrap();
+        let child = &normalized.graph.children[&node.id]["body"];
+        assert_eq!(child.relations.key.as_deref(), Some(owner));
+        assert_eq!(child.child_scope_key(node, "body"), owner);
         let children = node.flow_parameters(&["body"]).unwrap();
         assert_eq!(children["body"].version, version);
         let sources: Vec<_> = children["body"]
@@ -124,6 +126,16 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
         assert_eq!(sources[0].kind, kind);
         assert_eq!(sources[0].config, json!({}));
     }
+    let call = normalized
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "callA")
+        .unwrap();
+    let child = &normalized.graph.children[&call.id]["body"];
+    assert_eq!(child.relations.key.as_deref(), Some("callA"));
+    assert_eq!(child.child_scope_key(call, "body"), "callA");
     let round_trip = WorkflowDefinition::from_json(
         &serde_json::to_string(&normalized.graph.definition).unwrap(),
     )

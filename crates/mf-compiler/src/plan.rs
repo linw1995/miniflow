@@ -2,8 +2,6 @@ use crate::DefinitionId;
 #[cfg(feature = "codegen")]
 use crate::WorkflowDefinition;
 #[cfg(feature = "codegen")]
-use mf_runtime::ITERATION_INPUT_KIND;
-#[cfg(feature = "codegen")]
 use proc_macro2::{Span, TokenStream};
 #[cfg(feature = "codegen")]
 use quote::{format_ident, quote};
@@ -222,7 +220,8 @@ impl CompiledWorkflow {
             if original.version.supports_clusters() {
                 description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23;
                 description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
-            } else if description.loop_bodies.iter().any(|body| !body.order_edges.is_empty() || body.nodes.iter().any(|node| node.id == mf_runtime::ITERATION_INPUT_ID)) {
+            } else if self.graph.children.get(&node.definition_id).into_iter()
+                .flat_map(BTreeMap::values).any(requires_scope_order_description) {
                 description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_19;
                 description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
             }
@@ -468,7 +467,7 @@ impl CompiledWorkflow {
 
         crate::describe_compiled(self)?;
         let (preparations, _, root_flow) =
-            generate_scope(&self.graph, "root", &[], None, None, ScopeBuild::Dynamic)?;
+            generate_scope(&self.graph, "root", &[], None, ScopeBuild::Dynamic)?;
 
         let mut output_names = BTreeSet::new();
         for output in &self.graph.definition.outputs {
@@ -569,6 +568,20 @@ impl CompiledWorkflow {
     }
 }
 
+fn requires_scope_order_description(graph: &mf_runtime::CompiledGraph) -> bool {
+    !graph.definition.order_edges.is_empty()
+        || graph
+            .relations
+            .scope
+            .as_ref()
+            .is_some_and(|frame| !frame.is_stateful())
+        || graph
+            .children
+            .values()
+            .flat_map(BTreeMap::values)
+            .any(requires_scope_order_description)
+}
+
 #[cfg(feature = "codegen")]
 fn generate_stream_artifacts(
     plan: &CompiledWorkflow,
@@ -585,7 +598,6 @@ fn generate_stream_artifacts(
         &plan.graph,
         "stream",
         &[],
-        None,
         None,
         ScopeBuild::PreparationOnly,
     )?;
@@ -675,7 +687,6 @@ fn generate_scope(
     graph: &mf_runtime::CompiledGraph,
     scope: &str,
     static_scope: &[String],
-    enclosing: Option<&crate::loops::LoweringConfig>,
     preparation_error_override: Option<&TokenStream>,
     build: ScopeBuild<'_>,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>, syn::Ident), PlanError> {
@@ -713,6 +724,7 @@ fn generate_scope(
         if let Some(flows) = graph.children.get(id).filter(|flows| !flows.is_empty()) {
             preparations.push(subgraphs_preparation(
                 node,
+                definition.version,
                 flows,
                 scope,
                 index,
@@ -742,7 +754,8 @@ fn generate_scope(
                 }
             }
         });
-        if let ScopeBuild::Typed(constructors) = &build
+        if graph.relations.instruction(id).is_none()
+            && let ScopeBuild::Typed(constructors) = &build
             && let Some((constructor, expected)) = constructors.get(id)
         {
             let handle = format_ident!("typed_root_{index}");
@@ -762,44 +775,47 @@ fn generate_scope(
             node_idents.push(node_ident);
             continue;
         }
-        let constructor = match node.kind.as_str() {
-            crate::LOOP_ASSIGN_KIND => {
-                let mut path: Vec<_> = static_scope
-                    .iter()
-                    .map(|id| DefinitionId::from(id.as_str()))
-                    .collect();
-                path.push(id.clone());
-                let target = crate::loops::assignment_target(&node.config, &path)?;
-                let variable = enclosing
-                    .and_then(|loop_definition| {
-                        loop_definition
-                            .variables
-                            .iter()
-                            .find(|variable| variable.name == target)
-                    })
+        let constructor = match graph.relations.instruction(id) {
+            Some(mf_runtime::ScopeInstruction::Write(target)) => {
+                let value_type = graph
+                    .relations
+                    .scope
+                    .as_ref()
+                    .and_then(|frame| frame.values.get(target))
                     .with_context(|| InvalidLoweringConfigSnafu {
                         definition_id: id.clone(),
-                        message: format!("unknown assignment variable `{target}`"),
+                        message: format!("unknown scope variable `{target}`"),
                     })?;
-                let target_lit = LitStr::new(&target, Span::call_site());
-                let type_json =
-                    serde_json::to_string(&variable.value_type).context(SerializeSnafu)?;
+                let target_lit = LitStr::new(target, Span::call_site());
+                let type_json = serde_json::to_string(value_type).context(SerializeSnafu)?;
                 let type_lit = LitStr::new(&type_json, Span::call_site());
-                quote! { mf_compiler::prepared_loop_assign_from_json(#id_lit, #target_lit, #type_lit)? }
+                quote! {
+                    mf_compiler::prepared_loop_assign_from_json(#id_lit, #target_lit, #type_lit)
+                        .inspect_err(|error| { #preparation_report })?
+                }
             }
-            crate::EXIT_LOOP_KIND => quote! { mf_runtime::prepared_loop_exit(#id_lit) },
-            ITERATION_INPUT_KIND => quote! { mf_runtime::iteration_input_flow_node() },
-            crate::LOOP_SOURCE_ID => {
-                let variables = enclosing.with_context(|| InvalidLoweringConfigSnafu {
-                    definition_id: id.clone(),
-                    message: "scope source has no enclosing state scope",
-                })?;
-                let variables_json =
-                    serde_json::to_string(&variables.variables).context(SerializeSnafu)?;
-                let variables_lit = LitStr::new(&variables_json, Span::call_site());
-                quote! { mf_compiler::prepared_loop_source_from_json(#variables_lit)? }
+            Some(mf_runtime::ScopeInstruction::Exit) => {
+                quote! { mf_runtime::prepared_loop_exit(#id_lit) }
             }
-            _ => {
+            Some(mf_runtime::ScopeInstruction::Input) => {
+                let frame =
+                    graph
+                        .relations
+                        .scope
+                        .as_ref()
+                        .with_context(|| InvalidLoweringConfigSnafu {
+                            definition_id: id.clone(),
+                            message: "scope input has no scope relations",
+                        })?;
+                let input_lit = LitStr::new(frame.input.as_str(), Span::call_site());
+                let types_json = serde_json::to_string(&frame.values).context(SerializeSnafu)?;
+                let types_lit = LitStr::new(&types_json, Span::call_site());
+                quote! {
+                    mf_compiler::prepared_scope_source_from_json(#input_lit, #types_lit)
+                        .inspect_err(|error| { #preparation_report })?
+                }
+            }
+            None => {
                 let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
                 let config_lit = LitStr::new(&config_json, Span::call_site());
                 quote! {
@@ -884,8 +900,9 @@ fn child_scope_name(
     binding_index: usize,
     node: &crate::NodeDefinition,
     name: &str,
+    body: &mf_runtime::CompiledGraph,
 ) -> String {
-    if node.flow_scope_key(name) == node.id.as_str() {
+    if body.child_scope_key(node, name) == node.id.as_str() {
         format!("{scope}_{index}")
     } else {
         format!("{scope}_{index}_binding_{binding_index}")
@@ -895,6 +912,7 @@ fn child_scope_name(
 #[cfg(feature = "codegen")]
 fn subgraphs_preparation(
     node: &crate::NodeDefinition,
+    version: mf_runtime::WorkflowDefinitionVersion,
     flows: &BTreeMap<String, mf_runtime::CompiledGraph>,
     scope: &str,
     index: usize,
@@ -909,31 +927,31 @@ fn subgraphs_preparation(
         Span::call_site(),
     );
     let kind = LitStr::new(&node.kind, Span::call_site());
-    let loop_definition = if node.kind == crate::LOOP_KIND {
-        Some(crate::loops::parse_config(node)?)
-    } else {
-        None
-    };
     let mut prepared = Vec::new();
     let mut entries = Vec::new();
+    let mut scope_entries = Vec::new();
     for (binding_index, (name, body)) in flows.iter().enumerate() {
-        let body_scope = child_scope_name(scope, index, binding_index, node, name);
+        let body_scope = child_scope_name(scope, index, binding_index, node, name, body);
         let mut path = static_scope.to_vec();
-        path.push(node.flow_scope_key(name));
-        let preparation_error = (node.kind == mf_runtime::ITERATION_KIND).then(|| {
-            quote! {
-                if let Some(observation) = observation.as_deref_mut() {
-                    observation.preparation_failed(#id, error.to_string());
+        path.push(body.child_scope_key(node, name));
+        let preparation_error = body
+            .relations
+            .scope
+            .as_ref()
+            .is_some_and(|frame| !frame.is_stateful())
+            .then(|| {
+                quote! {
+                    if let Some(observation) = observation.as_deref_mut() {
+                        observation.preparation_failed(#id, error.to_string());
+                    }
                 }
-            }
-        });
+            });
         let (preparations, _, flow) = generate_scope(
             body,
             &body_scope,
             &path,
-            loop_definition.as_ref(),
             preparation_error.as_ref(),
-            if crate::calls::call_like(node) {
+            if body.relations.is_callable() {
                 ScopeBuild::Call
             } else {
                 ScopeBuild::Dynamic
@@ -942,12 +960,30 @@ fn subgraphs_preparation(
         let body_ident = format_ident!("subgraph_{body_scope}");
         let bind_streams = format_ident!("bind_stream_outputs_{body_scope}");
         let identities = body.definition.nodes.iter()
-            .filter(|node| node.kind != ITERATION_INPUT_KIND && node.kind != crate::LOOP_SOURCE_ID)
+            .filter(|node| body.relations.scope.as_ref().is_none_or(|frame| node.id != frame.input))
             .map(|node| {
                 let id = LitStr::new(node.id.as_str(), Span::call_site());
                 let kind = LitStr::new(&node.kind, Span::call_site());
                 quote! { mf_runtime::NodeIdentity { id: #id.into(), kind: #kind.into(), path: Vec::new() } }
             });
+        let relations = LitStr::new(
+            &serde_json::to_string(&body.relations).context(SerializeSnafu)?,
+            Span::call_site(),
+        );
+        let stream_version_check = if version.supports_child_streams() {
+            TokenStream::new()
+        } else {
+            quote! {
+                if !#body_ident.stream_outputs.is_empty() {
+                    return mf_compiler::WorkflowInvalidDefinitionSnafu {
+                        definition_id: #id,
+                        message: "child stream exports require definition version 2026-10-28",
+                    }.fail();
+                }
+            }
+        };
+        let relations_ident = format_ident!("relations_{body_scope}");
+        scope_entries.push(quote!(#relations_ident));
         prepared.push(quote! {
             let #flow = (|| -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
                 #(#preparations)*
@@ -964,7 +1000,13 @@ fn subgraphs_preparation(
                         message: format!("body output `{}` is unavailable", output.port),
                     }.build())?;
             }
-            let #body_ident = mf_runtime::PreparedSubgraph::from_flow(#flow, vec![#(#identities),*]);
+            let #relations_ident: mf_runtime::GraphRelations = serde_json::from_str(#relations)
+                .context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
+                    definition_id: mf_runtime::DefinitionId::from(#id),
+                })?;
+            let #body_ident = mf_runtime::PreparedSubgraph::from_flow(#flow, vec![#(#identities),*])
+                .with_relations(#relations_ident.clone());
+            #stream_version_check
         });
         let name = LitStr::new(name, Span::call_site());
         entries.push(quote! { (#name.into(), #body_ident) });
@@ -994,13 +1036,34 @@ fn subgraphs_preparation(
         .keys()
         .map(|name| LitStr::new(name, Span::call_site()))
         .collect::<Vec<_>>();
+    let scope_bindings = if flows.values().any(|body| {
+        body.relations
+            .scope
+            .as_ref()
+            .is_some_and(|frame| frame.is_stateful())
+    }) {
+        quote! {
+            mf_compiler::validate_scope_bindings(
+                &#node_ident.definition_id, &#node_ident.metadata, &scope_relations,
+            ).inspect_err(|error| { #report })?;
+        }
+    } else {
+        TokenStream::new()
+    };
+    let capture_scope_relations = if scope_bindings.is_empty() {
+        TokenStream::new()
+    } else {
+        quote!(let scope_relations = vec![#(#scope_entries),*];)
+    };
     Ok(quote! {
         mf_compiler::validate_node_flow_parameters(registry, #id, #kind, #config, &[#(#names),*])
             .inspect_err(|error| { #report })?;
         #(#prepared)*
+        #capture_scope_relations
         let subgraphs = std::collections::BTreeMap::from([#(#entries),*]);
         let mut #node_ident = mf_compiler::instantiate_subgraphs_with_metadata(registry, #id, #kind, #config, subgraphs)
             .inspect_err(|error| { #report })?;
+        #scope_bindings
         #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
             .inspect_err(|error| { #report })
             .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id })?;
@@ -1348,7 +1411,6 @@ fn typed_preparation_tokens(
         "root",
         &[],
         None,
-        None,
         ScopeBuild::Typed(&constructors),
     )?;
     let mut bindings = Vec::new();
@@ -1603,11 +1665,11 @@ fn collect_body_layouts(
             graph.children.get(id).into_iter().flatten().enumerate()
         {
             let mut body = body.clone();
-            path.push(node.flow_scope_key(name).into());
+            path.push(body.child_scope_key(node, name).into());
             let (domains, streams) = &body_layouts[path.as_slice()];
-            let body_scope = child_scope_name(scope, index, binding_index, node, name);
+            let body_scope = child_scope_name(scope, index, binding_index, node, name, &body);
             layouts.push(subgraph_stream_tokens(&body_scope, &node.id, streams)?);
-            if crate::calls::call_like(node) {
+            if body.relations.is_callable() {
                 body.definition
                     .outputs
                     .retain(|output| !streams.iter().any(|stream| stream.name == output.name));
@@ -1858,5 +1920,71 @@ fn stream_guard_tokens(
         fn bind_stream_guards(prepared: mf_runtime::PreparedStream) -> mf_runtime::PreparedStream {
             prepared.with_prepared_domains(vec![#(#bindings),*])
         }
+    }
+}
+
+#[cfg(all(test, feature = "codegen"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_scope_constructors_follow_relations_not_kinds_or_config() {
+        let graph = mf_runtime::CompiledGraph {
+            definition: WorkflowDefinition {
+                version: mf_runtime::WorkflowDefinitionVersion::V2026_09_26,
+                execution: None,
+                dependencies: BTreeMap::new(),
+                flows: BTreeMap::new(),
+                nodes: [
+                    ("custom-input", "custom.source"),
+                    ("custom-write", "custom.write"),
+                    ("custom-exit", "custom.exit"),
+                    ("ordinary", crate::LOOP_ASSIGN_KIND),
+                ]
+                .into_iter()
+                .map(|(id, kind)| crate::NodeDefinition {
+                    id: id.into(),
+                    kind: kind.into(),
+                    config: serde_json::Value::Null,
+                })
+                .collect(),
+                edges: Vec::new(),
+                control_edges: Vec::new(),
+                outputs: Vec::new(),
+                order_edges: Vec::new(),
+                clusters: Vec::new(),
+            },
+            execution_order: ["custom-input", "custom-write", "custom-exit", "ordinary"]
+                .into_iter()
+                .map(DefinitionId::from)
+                .collect(),
+            relations: mf_runtime::GraphRelations {
+                scope: Some(mf_runtime::ScopeRelations {
+                    input: "custom-input".into(),
+                    values: BTreeMap::from([("item".into(), mf_runtime::ValueType::String)]),
+                    state_outputs: BTreeMap::from([("item".into(), "result".into())]),
+                    writes: BTreeMap::from([("custom-write".into(), "item".into())]),
+                    exits: BTreeSet::from(["custom-exit".into()]),
+                }),
+                ..Default::default()
+            },
+            children: BTreeMap::new(),
+        };
+        let (preparations, _, _) = generate_scope(
+            &graph,
+            "child",
+            &["owner".into()],
+            None,
+            ScopeBuild::PreparationOnly,
+        )
+        .unwrap();
+        let source = quote! { #(#preparations)* }.to_string();
+        assert!(source.contains("prepared_scope_source_from_json"));
+        assert!(source.contains("prepared_loop_assign_from_json"));
+        assert!(source.contains("prepared_loop_exit"));
+        assert_eq!(source.matches("instantiate_node_with_metadata").count(), 1);
+        assert!(source.contains("\"ordinary\""));
+        assert!(!source.contains("iteration_input_flow_node"));
+        assert!(!source.contains("prepared_loop_source_from_json"));
     }
 }

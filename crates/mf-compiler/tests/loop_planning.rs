@@ -146,6 +146,47 @@ fn parse(value: Value) -> WorkflowDefinition {
 }
 
 #[test]
+fn public_structural_order_validates_root_scope_syntax() {
+    let mut value = definition();
+    let order = mf_compiler::structural_order(&parse(value.clone())).unwrap();
+    assert_eq!(
+        order.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        ["seed", "repeat"]
+    );
+    value["nodes"].as_array_mut().unwrap().push(json!({
+        "id": "outside", "kind": "workflow.exit_loop"
+    }));
+    let error = mf_compiler::structural_order(&parse(value)).unwrap_err();
+    assert!(matches!(error,
+        mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+            if path == "[\"outside\"]" && message == "exit requires a state scope"));
+}
+
+#[test]
+fn exit_configuration_must_be_empty_inside_an_actual_loop() {
+    let mut value = exit_definition();
+    let exit = value["nodes"][1]["config"]["body"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "exit")
+        .unwrap();
+    exit["config"] = json!({"unexpected": true});
+    let error = plan_definition(&parse(value)).unwrap_err();
+    let mf_compiler::WorkflowCompileError::ChildGraph {
+        definition_id,
+        source,
+    } = &error
+    else {
+        panic!("expected the enclosing Loop owner: {error}");
+    };
+    assert_eq!(definition_id.as_str(), "repeat");
+    assert!(matches!(source.as_ref(),
+        mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+            if path == "[\"repeat\",\"exit\"]" && message == "exit config must be empty"));
+}
+
+#[test]
 fn plans_and_type_checks_nested_loop_body() {
     let definition = parse(definition());
     assert_eq!(definition.version, WorkflowDefinitionVersion::V2026_09_29);
@@ -570,6 +611,136 @@ fn exit_definition() -> Value {
         {"from_node": "route", "from_output": "stop", "to_node": "zz_after"}
     ]);
     value
+}
+
+#[test]
+fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut authored = exit_definition();
+    authored["nodes"][1]["config"]["variables"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "observed", "type": "int"}));
+    authored["edges"].as_array_mut().unwrap().push(json!({
+        "from_node": "seed", "from_output": "value", "to_node": "repeat", "to_input": "observed"
+    }));
+    authored["outputs"].as_array_mut().unwrap().push(json!({
+        "name": "observed", "node": "repeat", "port": "observed"
+    }));
+    let authored_body = &mut authored["nodes"][1]["config"]["body"];
+    authored_body["nodes"].as_array_mut().unwrap().extend([
+        json!({"id": "read_updated", "kind": "builtin.identity"}),
+        json!({"id": "capture_updated", "kind": "workflow.loop_assign", "config": {"variable": "observed"}}),
+    ]);
+    authored_body["edges"].as_array_mut().unwrap().extend([
+        json!({"from_node": "%loop", "from_output": "count", "to_node": "read_updated", "to_input": "input"}),
+        json!({"from_node": "read_updated", "from_output": "value", "to_node": "capture_updated", "to_input": "value"}),
+    ]);
+    authored_body["control_edges"][0] = json!({
+        "from_node": "capture_updated", "from_output": "done", "to_node": "route"
+    });
+    authored_body["control_edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "from_node": "assign", "from_output": "done", "to_node": "read_updated"
+        }));
+    let mut plan = compile_definition(&parse(authored), &registry).unwrap();
+    let expected = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap();
+    // This is a fixed semantic expectation, not merely equivalence to the old path:
+    // a source read after a write must see the newly committed value on both passes.
+    assert_eq!(expected["count"], json!(2));
+    assert_eq!(expected["observed"], json!(2));
+    let body = plan
+        .graph
+        .children
+        .get_mut(&"repeat".into())
+        .unwrap()
+        .get_mut("body")
+        .unwrap();
+    let relations = body.relations.clone();
+    let frame = relations.scope.as_ref().unwrap();
+    assert!(!frame.writes.is_empty());
+    assert!(!frame.exits.is_empty());
+    let original_input = frame.input.clone();
+    let renamed_input = mf_runtime::DefinitionId::from("%actual-input");
+    let rename = |id: &mut mf_runtime::DefinitionId| {
+        if id == &original_input {
+            *id = renamed_input.clone();
+        }
+    };
+    for node in &mut body.definition.nodes {
+        if relations.instruction(&node.id).is_some() {
+            node.kind = "unlinked.scope_instruction".into();
+            node.config = json!({"opaque": "not an instruction configuration"});
+        }
+        rename(&mut node.id);
+    }
+    for edge in &mut body.definition.edges {
+        rename(&mut edge.from_node);
+        rename(&mut edge.to_node);
+    }
+    for edge in &mut body.definition.control_edges {
+        rename(&mut edge.from_node);
+        rename(&mut edge.to_node);
+    }
+    for edge in &mut body.definition.order_edges {
+        rename(&mut edge.from_node);
+        rename(&mut edge.to_node);
+    }
+    for output in &mut body.definition.outputs {
+        rename(&mut output.node);
+    }
+    for id in &mut body.execution_order {
+        rename(id);
+    }
+    body.relations.scope.as_mut().unwrap().input = renamed_input;
+    assert_eq!(body.relations.scope.as_ref().unwrap().writes, frame.writes);
+    assert_eq!(body.relations.scope.as_ref().unwrap().exits, frame.exits);
+    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    assert_eq!(
+        instantiate_compiled(&saved, &registry)
+            .unwrap()
+            .execute()
+            .unwrap(),
+        expected
+    );
+    assert_eq!(expected["count"], json!(2));
+    let manifest = saved.manifest(&registry).unwrap();
+    manifest.validate().unwrap();
+    mf_compiler::describe_compiled(&saved).unwrap();
+    #[cfg(feature = "codegen")]
+    {
+        let execution = saved.generate_execution_plans(&registry).unwrap();
+        let generated = saved.generate_artifacts().unwrap();
+        for source in [&execution.rust_source, &generated.rust_source] {
+            assert!(source.contains("%actual-input"));
+        }
+        assert!(generated.rust_source.contains("with_relations"));
+        let runner = saved.generate_runner_artifacts().unwrap();
+        assert!(
+            runner
+                .rust_source
+                .contains("mf_prepare_generated_workflow!")
+        );
+        assert_eq!(runner.plan_json, generated.plan_json);
+    }
+
+    // The identical label outside a relationship endpoint remains a provider node.
+    let ordinary = parse(json!({
+        "version": "2026-10-28", "dependencies": {},
+        "nodes": [{"id": "ordinary", "kind": "unlinked.scope_instruction"}]
+    }));
+    let plan = plan_definition(&ordinary).unwrap();
+    assert_eq!(plan.graph.relations, mf_runtime::GraphRelations::default());
+    let error = instantiate_compiled(&plan, &registry).err().unwrap();
+    assert!(
+        matches!(error, mf_compiler::WorkflowCompileError::UnknownNodeKind { definition_id, kind }
+        if definition_id.as_str() == "ordinary" && kind == "unlinked.scope_instruction")
+    );
 }
 
 #[test]
@@ -1254,6 +1425,129 @@ fn snapshots_preserve_inputs_and_outputs_from_all_loop_passes() {
 }
 
 #[test]
+fn observed_preparation_attributes_damaged_loop_graphs_to_the_root_owner() {
+    use mf_compiler::WorkflowCompileError;
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let valid = compile_definition(&parse(definition()), &registry).unwrap();
+    for case in ["input relationship", "child factory", "write relationship"] {
+        let harness = capture::Harness::new(true);
+        let mut observation = valid
+            .start_observation(&harness.observer(), RunId::new())
+            .unwrap();
+        let mut damaged = valid.clone();
+        match case {
+            "input relationship" => {
+                damaged
+                    .graph
+                    .children
+                    .get_mut(&"repeat".into())
+                    .unwrap()
+                    .get_mut("body")
+                    .unwrap()
+                    .relations
+                    .scope
+                    .as_mut()
+                    .unwrap()
+                    .input = "missing-input".into();
+            }
+            "child factory" => {
+                let child = damaged
+                    .graph
+                    .children
+                    .get_mut(&"repeat".into())
+                    .unwrap()
+                    .get_mut("body")
+                    .unwrap()
+                    .definition
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id.as_str() == "increment")
+                    .unwrap();
+                child.kind = "builtin.constant".into();
+                child.config = json!(17);
+            }
+            "write relationship" => {
+                damaged
+                    .graph
+                    .children
+                    .get_mut(&"repeat".into())
+                    .unwrap()
+                    .get_mut("body")
+                    .unwrap()
+                    .relations
+                    .scope
+                    .as_mut()
+                    .unwrap()
+                    .writes
+                    .insert("assign".into(), "unknown".into());
+            }
+            _ => unreachable!(),
+        }
+        let error = mf_compiler::instantiate_compiled_with_observation(
+            &damaged,
+            &registry,
+            Some(&mut observation),
+        )
+        .err()
+        .unwrap();
+        match (&error, case) {
+            (
+                WorkflowCompileError::ChildGraph {
+                    definition_id,
+                    source,
+                },
+                "input relationship" | "write relationship",
+            ) => {
+                assert_eq!(definition_id.as_str(), "repeat");
+                let expected = if case == "input relationship" {
+                    "scope instruction relationships must be disjoint and reference known nodes"
+                } else {
+                    "scope write target must name an available state output and value"
+                };
+                assert!(matches!(source.as_ref(),
+                    WorkflowCompileError::InvalidScope { path, message }
+                        if path == "[\"repeat\"]" && message == expected));
+            }
+            (
+                WorkflowCompileError::ChildGraph {
+                    definition_id,
+                    source,
+                },
+                "child factory",
+            ) => {
+                assert_eq!(definition_id.as_str(), "repeat");
+                assert!(matches!(source.as_ref(),
+                    WorkflowCompileError::NodeConstruction { definition_id, kind, source }
+                        if definition_id.as_str() == "increment" && kind == "builtin.constant"
+                            && matches!(source, NodeBuildError::InvalidConfiguration { .. })));
+                assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
+            }
+            _ => panic!("{case}: unexpected preparation error: {error}"),
+        }
+        observation.finish(Some(&error));
+        let records = harness.records();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.event_name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "mf.workflow.started",
+                "mf.node.finished",
+                "mf.workflow.finished"
+            ],
+            "{case}"
+        );
+        assert_eq!(records[1].attributes["mf.node.id"], "repeat");
+        assert_eq!(records[1].attributes["mf.failure.phase"], "preparation");
+        assert_eq!(records[1].attributes["mf.outcome"], "failed");
+        assert_eq!(records[1].body["produced_ports"], json!([]));
+        assert_eq!(records[2].body["failure_node_id"], "repeat");
+        assert_eq!(records[2].attributes["mf.failure.phase"], "preparation");
+    }
+}
+
+#[test]
 fn observation_preserves_description_and_structural_order_errors() {
     use std::error::Error;
     let mut plan = plan_definition(&parse(definition())).unwrap();
@@ -1288,7 +1582,7 @@ fn observation_preserves_description_and_structural_order_errors() {
 }
 
 #[test]
-fn descriptions_reject_damaged_loop_authoring_boundaries_with_typed_owners() {
+fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
     use std::error::Error;
     let valid = plan_definition(&parse(definition())).unwrap();
     // A malformed raw body is rejected while validating already-resolved authoring
@@ -1320,56 +1614,52 @@ fn descriptions_reject_damaged_loop_authoring_boundaries_with_typed_owners() {
     );
     assert!(error.source().unwrap().is::<serde_json::Error>());
 
-    // CompiledWorkflow is public persisted data. Damage the actual graph or its
-    // owning policy, not the redundant authoring body JSON.
+    let mut old_version = parse(definition());
+    old_version.version = WorkflowDefinitionVersion::V2026_09_26;
+    let error = mf_compiler::plan_resolved_definition(
+        &old_version,
+        &NodeRegistry::from_inventory().unwrap(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+        if path == "[\"repeat\"]"
+            && message == "scope constructs require definition version 2026-09-29")
+    );
+
+    // Persisted instructions are relationships, not authoring kind/config tokens.
     for (case, expected) in [
         (
-            "wrong owner",
-            "reserved scope source requires its canonical enclosing scope",
+            "overlapping roles",
+            "scope instruction relationships must be disjoint and reference known nodes",
         ),
         (
-            "old version",
-            "scope constructs require definition version 2026-09-29",
+            "unknown write target",
+            "scope write target must name an available state output and value",
         ),
-        ("malformed child", "invalid type"),
         (
-            "missing body",
-            "built-in container requires its compiled body binding",
+            "missing input",
+            "scope instruction relationships must be disjoint and reference known nodes",
         ),
     ] {
         let mut damaged = valid.clone();
+        let frame = damaged
+            .graph
+            .children
+            .get_mut(&"repeat".into())
+            .unwrap()
+            .get_mut("body")
+            .unwrap()
+            .relations
+            .scope
+            .as_mut()
+            .unwrap();
         match case {
-            "wrong owner" => {
-                damaged
-                    .graph
-                    .definition
-                    .nodes
-                    .iter_mut()
-                    .find(|node| node.id.as_str() == "repeat")
-                    .unwrap()
-                    .kind = "builtin.constant".into();
+            "overlapping roles" => frame.input = "assign".into(),
+            "unknown write target" => {
+                frame.writes.insert("assign".into(), "unknown".into());
             }
-            "old version" => {
-                damaged.graph.definition.version = WorkflowDefinitionVersion::V2026_09_26
-            }
-            "malformed child" => {
-                damaged
-                    .graph
-                    .children
-                    .get_mut(&"repeat".into())
-                    .unwrap()
-                    .get_mut("body")
-                    .unwrap()
-                    .definition
-                    .nodes
-                    .iter_mut()
-                    .find(|node| node.id.as_str() == "assign")
-                    .unwrap()
-                    .config["variable"] = json!(17);
-            }
-            "missing body" => {
-                damaged.graph.children.remove(&"repeat".into());
-            }
+            "missing input" => frame.input = "missing".into(),
             _ => unreachable!(),
         }
         let error = mf_compiler::describe_compiled(&damaged).unwrap_err();
@@ -1377,60 +1667,27 @@ fn descriptions_reject_damaged_loop_authoring_boundaries_with_typed_owners() {
             panic!("{case}: expected an ordering error: {error}");
         };
         assert!(path.is_empty(), "{case}: {error}");
-        match case {
-            "malformed child" | "wrong owner" => {
-                let mf_compiler::WorkflowCompileError::ChildGraph {
-                    definition_id,
-                    source: child,
-                } = source.as_ref()
-                else {
-                    panic!("{case}: expected a child graph error: {error}");
-                };
-                assert_eq!(definition_id.as_str(), "repeat");
-                assert!(
-                    source
-                        .source()
-                        .unwrap()
-                        .is::<Box<mf_compiler::WorkflowCompileError>>()
-                );
-                if case == "malformed child" {
-                    assert!(
-                        matches!(child.as_ref(), mf_compiler::WorkflowCompileError::ScopeConfiguration { path, .. }
-                            if path == "[\"repeat\",\"assign\"]"),
-                        "{case}: {error}"
-                    );
-                    assert!(child.source().unwrap().is::<serde_json::Error>());
-                    assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
-                } else {
-                    // The canonical child source retains both the owner wrapper
-                    // and its full authoring path when ownership is damaged.
-                    assert!(
-                        matches!(child.as_ref(), mf_compiler::WorkflowCompileError::InvalidScope { path, message }
-                            if path == "[\"repeat\",\"%loop\"]" && message == expected),
-                        "{case}: {error}"
-                    );
-                    assert!(child.source().is_none());
-                }
-            }
-            "missing body" => {
-                assert!(
-                    matches!(source.as_ref(), mf_compiler::WorkflowCompileError::InvalidGraph { definition_id, message }
-                        if definition_id.as_str() == "repeat" && message == expected),
-                    "{case}: {error}"
-                );
-                assert!(source.source().is_none());
-                assert!(find_source::<serde_json::Error>(&error).is_none());
-            }
-            "old version" => {
-                assert!(
-                    matches!(source.as_ref(), mf_compiler::WorkflowCompileError::InvalidScope { path, message }
-                        if path == "[\"repeat\"]" && message == expected),
-                    "{case}: {error}"
-                );
-                assert!(source.source().is_none());
-            }
-            _ => unreachable!(),
-        }
+        let mf_compiler::WorkflowCompileError::ChildGraph {
+            definition_id,
+            source: child,
+        } = source.as_ref()
+        else {
+            panic!("{case}: expected a child graph error: {error}");
+        };
+        assert_eq!(definition_id.as_str(), "repeat");
+        assert!(
+            source
+                .source()
+                .unwrap()
+                .is::<Box<mf_compiler::WorkflowCompileError>>()
+        );
+        assert!(
+            matches!(child.as_ref(), mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+            if path == "[\"repeat\"]" && message == expected),
+            "{case}: {error}"
+        );
+        assert!(child.source().is_none());
+        assert!(find_source::<serde_json::Error>(&error).is_none());
         assert!(error.to_string().contains(expected), "{case}: {error}");
         assert!(
             error
@@ -1442,7 +1699,7 @@ fn descriptions_reject_damaged_loop_authoring_boundaries_with_typed_owners() {
 }
 
 #[test]
-fn resolved_graphs_reject_missing_loop_bodies_before_factory_preparation() {
+fn resolved_authoring_missing_loop_bodies_fail_at_the_receiving_factory() {
     use std::error::Error;
     let registry = NodeRegistry::from_inventory().unwrap();
     for nested in [false, true] {
@@ -1493,13 +1750,15 @@ fn resolved_graphs_reject_missing_loop_bodies_before_factory_preparation() {
             &error
         };
         assert!(
-            matches!(leaf, mf_compiler::WorkflowCompileError::InvalidGraph { definition_id, message }
+            matches!(leaf, mf_compiler::WorkflowCompileError::NodeConstruction { definition_id, kind, source }
                 if definition_id.as_str() == expected_owner
-                    && message == "built-in container requires its compiled body binding"),
+                    && kind == mf_runtime::LOOP_KIND
+                    && matches!(source, NodeBuildError::InvalidSubgraph { message }
+                        if message == "workflow.loop requires a prepared `body` binding")),
             "{error}"
         );
-        assert!(leaf.source().is_none());
+        assert!(leaf.source().unwrap().is::<NodeBuildError>());
         assert!(find_source::<serde_json::Error>(&error).is_none());
-        assert!(find_source::<NodeBuildError>(&error).is_none());
+        assert!(find_source::<NodeBuildError>(&error).is_some());
     }
 }

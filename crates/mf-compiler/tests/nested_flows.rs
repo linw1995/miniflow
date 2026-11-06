@@ -185,14 +185,22 @@ fn iteration_calls_cannot_hide_loop_containers_from_either_preparation_path() {
         compile_definition(&definition, &registry).unwrap_err(),
         mf_compiler::plan_definition(&definition).unwrap_err(),
     ] {
+        let mut leaf = &error;
+        for owner in ["each", "invoke", "inner", "repeat"] {
+            let mf_compiler::WorkflowCompileError::ChildGraph {
+                definition_id,
+                source,
+            } = leaf
+            else {
+                panic!("expected owner {owner}, got {leaf:?}; full error: {error:?}");
+            };
+            assert_eq!(definition_id.as_str(), owner);
+            leaf = source.as_ref();
+        }
         assert!(
-            matches!(&error, mf_compiler::WorkflowCompileError::ChildGraph {
-                definition_id, source,
-            } if definition_id.as_str() == "each"
-                && matches!(source.as_ref(), mf_compiler::WorkflowCompileError::InvalidGraph {
-                    definition_id, message,
-                } if definition_id.as_str() == "invoke"
-                    && message == "child scopes inside an item scope cannot contain container scopes")),
+            matches!(leaf, mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+            if path == "[\"each\",\"invoke\",\"inner\",\"repeat\"]"
+                && message == "child scopes inside an item scope cannot contain container scopes"),
             "{error:?}"
         );
     }
@@ -347,10 +355,10 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
     )
     .unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("streams require version 2026-10-28"),
-        "{error}"
+        matches!(&error, mf_compiler::WorkflowCompileError::InvalidGraph { definition_id, message }
+        if definition_id.as_str() == "invoke"
+            && message == "child stream exports require definition version 2026-10-28"),
+        "{error:?}"
     );
 }
 
@@ -369,8 +377,22 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
     }
     let mut missing = plan.clone();
     missing.graph.children.clear();
-    assert!(instantiate_compiled(&missing, &registry).is_err());
-    assert!(missing.generate_runner_artifacts().is_err());
+    let error = instantiate_compiled(&missing, &registry).err().unwrap();
+    common::assert_receiver_binding_preflight(&error, "invoke");
+    // Structural generators have no selected receiver contract to interpret.
+    missing.generate_artifacts().unwrap();
+    missing.generate_runner_artifacts().unwrap();
+    for error in [
+        missing.generate_execution_plans(&registry).unwrap_err(),
+        missing
+            .generate_runner_execution_plans(&registry)
+            .unwrap_err(),
+    ] {
+        let mf_compiler::PlanError::Compilation { source } = error else {
+            panic!("expected generated receiver-binding preflight, got {error:?}");
+        };
+        common::assert_receiver_binding_preflight(source.as_ref(), "invoke");
+    }
 
     let mut manifest = plan.manifest(&registry).unwrap();
     let description = manifest.description().unwrap();

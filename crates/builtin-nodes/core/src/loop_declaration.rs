@@ -57,6 +57,10 @@ pub enum LoopBuildError {
     EmptyBody,
     #[snafu(display("Loop body outputs must be empty"))]
     BodyOutputs,
+    #[snafu(display(
+        "Loop body scope bindings must match its variables and identity state outputs"
+    ))]
+    InvalidScopeBindings,
 }
 
 impl From<LoopBuildError> for NodeBuildError {
@@ -166,10 +170,24 @@ fn factory(
             .map(String::as_str)
             .chain(body.stream_outputs.iter().map(|port| port.name.as_ref())),
     )?;
+    if let Some(relations) = &body.relations {
+        ensure!(
+            relations.scope.as_ref().is_some_and(|scope| {
+                scope.values == types
+                    && scope.state_outputs
+                        == types
+                            .keys()
+                            .map(|name| (name.clone(), name.clone()))
+                            .collect()
+            }),
+            InvalidScopeBindingsSnafu
+        );
+    }
     ensure!(!body.nodes.is_empty(), EmptyBodySnafu);
     ensure!(body.outputs.is_empty(), BodyOutputsSnafu);
     let node = LoopNode {
         id: id.into(),
+        scope_key: body.scope_key(id, "body"),
         max_iterations,
         until,
         types,
@@ -208,6 +226,19 @@ mod tests {
         )
     }
 
+    fn body_relations(input: &str) -> mf_runtime::GraphRelations {
+        mf_runtime::GraphRelations {
+            scope: Some(mf_runtime::ScopeRelations {
+                input: input.into(),
+                values: BTreeMap::from([("x".into(), ValueType::Int64)]),
+                state_outputs: BTreeMap::from([("x".into(), "x".into())]),
+                writes: BTreeMap::new(),
+                exits: Default::default(),
+            }),
+            ..Default::default()
+        }
+    }
+
     fn config() -> Value {
         json!({
             "max_iterations": 1,
@@ -227,6 +258,163 @@ mod tests {
             panic!("expected owning-node business error, got {error}");
         };
         source.downcast_ref().unwrap()
+    }
+
+    #[test]
+    fn loop_assignment_refreshes_the_prepared_scope_input_or_manual_default() {
+        for scope_input in [None, Some("custom-loop-input")] {
+            let source_id = scope_input.unwrap_or(mf_runtime::LOOP_SOURCE_ID);
+            let types = BTreeMap::from([("x".into(), ValueType::Int64)]);
+            let source = mf_runtime::prepared_scope_source(source_id, &types)
+                .into_task()
+                .unwrap();
+            let assign = mf_runtime::prepared_loop_assign("assign", "x", ValueType::Int64)
+                .into_task()
+                .unwrap();
+            let mut prepared = PreparedSubgraph::new(body().nodes, Vec::new(), move |state| {
+                mf_runtime::execute_node_in_context(&source, &[], state)?;
+                mf_runtime::execute_node_in_context(
+                    &assign,
+                    &[mf_runtime::ExecutionDependency {
+                        exclusive: false,
+                        input: Some("value"),
+                        source_node: source_id,
+                        source_output: "index",
+                        source_key: mf_runtime::output_id(source_id, "index").into(),
+                    }],
+                    state,
+                )?;
+                let value = state
+                    .select_output("current", source_id, "x", false)?
+                    .unwrap();
+                assert_eq!(value, json!(0));
+                if source_id != mf_runtime::LOOP_SOURCE_ID {
+                    assert!(
+                        state
+                            .output(&mf_runtime::output_id(mf_runtime::LOOP_SOURCE_ID, "x"))
+                            .is_err()
+                    );
+                }
+                Ok(Outputs::new())
+            });
+            if let Some(input) = scope_input {
+                prepared = prepared.with_relations(body_relations(input));
+            }
+            let node = LoopNode {
+                id: "repeat".into(),
+                scope_key: prepared.scope_key("repeat", "body"),
+                max_iterations: 1,
+                until: None,
+                types,
+                body: prepared,
+            };
+            let result = SubgraphNode::execute(
+                &node,
+                Inputs::from([("x".into(), 7.into())]),
+                &mut ExecutionContext::default(),
+                &mut mf_runtime::DiscardSink,
+            )
+            .unwrap();
+            assert_eq!(result.outputs["x"], json!(0));
+        }
+    }
+
+    #[test]
+    fn loop_invocation_paths_use_the_actual_child_edge_key() {
+        for compiled in [false, true] {
+            for mapped in [false, true] {
+                let key = mf_runtime::ScopePathEntry::binding_key("mapped-owner", "selected");
+                let expected = if !compiled {
+                    "repeat".to_owned()
+                } else if mapped {
+                    key.clone()
+                } else {
+                    mf_runtime::ScopePathEntry::binding_key("repeat", "body")
+                };
+                let mut body = PreparedSubgraph::new(body().nodes, Vec::new(), move |state| {
+                    let path = state.invocation_path();
+                    assert_eq!(path.len(), 1);
+                    assert_eq!(path[0].node_id(), expected);
+                    assert_eq!(path[0].index(), Count::ZERO);
+                    assert_eq!(state.current_node(), Some("repeat"));
+                    Ok(Outputs::new())
+                });
+                if compiled {
+                    let mut relations = body_relations("input");
+                    relations.key = mapped.then_some(key);
+                    body = body.with_relations(relations);
+                }
+                let node = mf_runtime::FlowNode::new(
+                    "repeat",
+                    factory("repeat", config(), BTreeMap::from([("body".into(), body)])).unwrap(),
+                )
+                .into_task()
+                .unwrap();
+                let mut context = ExecutionContext::default();
+                context
+                    .with_node("repeat".into(), |context| {
+                        let result = node
+                            .node
+                            .execute(Inputs::from([("x".into(), 7.into())]), context);
+                        assert_eq!(context.current_node(), Some("repeat"));
+                        assert!(context.invocation_path().is_empty());
+                        result
+                    })
+                    .unwrap();
+                assert!(context.current_node().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn loop_factory_checks_compiled_scope_bindings_before_execution() {
+        let prepared = body().with_relations(body_relations("custom-input"));
+        assert!(
+            factory(
+                "repeat",
+                config(),
+                BTreeMap::from([("body".into(), prepared)]),
+            )
+            .is_ok()
+        );
+        let mut invalid = vec![mf_runtime::GraphRelations::default()];
+        for mismatch in 0..7 {
+            let mut relations = body_relations("custom-input");
+            let scope = relations.scope.as_mut().unwrap();
+            match mismatch {
+                0 => scope.values.clear(),
+                1 => {
+                    scope.values.insert("x".into(), ValueType::String);
+                }
+                2 => {
+                    scope.values.insert("extra".into(), ValueType::Any);
+                }
+                3 => scope.state_outputs.clear(),
+                4 => {
+                    scope.state_outputs.insert("x".into(), "renamed".into());
+                }
+                5 => {
+                    scope.state_outputs.insert("extra".into(), "extra".into());
+                }
+                6 => {
+                    scope.values.insert("extra".into(), ValueType::Int64);
+                    scope.state_outputs.insert("extra".into(), "extra".into());
+                }
+                _ => unreachable!(),
+            }
+            invalid.push(relations);
+        }
+        for relations in invalid {
+            let prepared = PreparedSubgraph::new(body().nodes, Vec::new(), |_| {
+                panic!("invalid scope bindings must be rejected before execution")
+            })
+            .with_relations(relations);
+            let error = build_error(config(), prepared);
+            assert!(matches!(
+                business_error(&error),
+                LoopBuildError::InvalidScopeBindings
+            ));
+        }
     }
 
     #[test]
@@ -370,8 +558,23 @@ mod tests {
                 "variable",
             ),
             (
+                json!({"list": "int"}),
+                json!({"variable":"x", "operator":"eq", "value":0}),
+                "variable",
+            ),
+            (
+                json!({"map": "int"}),
+                json!({"variable":"x", "operator":"eq", "value":0}),
+                "variable",
+            ),
+            (
                 json!("int"),
                 json!({"variable":"x", "operator":"ne", "value":"0"}),
+                "literal",
+            ),
+            (
+                json!({"nullable": "int"}),
+                json!({"variable":"x", "operator":"eq", "value":"0"}),
                 "literal",
             ),
         ] {
@@ -396,6 +599,8 @@ mod tests {
             (json!("string"), json!("done")),
             (json!("bool"), json!(true)),
             (json!("null"), Value::Null),
+            (json!({"nullable": "int"}), Value::Null),
+            (json!({"nullable": "int"}), json!(0)),
             (json!("any"), json!(true)),
         ] {
             let mut config = config();
@@ -453,6 +658,7 @@ fn structural_error(message: impl Into<String>) -> NodeExecutionError {
 
 struct LoopNode {
     id: String,
+    scope_key: String,
     max_iterations: u16,
     until: Option<LoopConditionDefinition>,
     types: BTreeMap<String, ValueType>,
@@ -508,8 +714,10 @@ impl SubgraphNode for LoopNode {
         let mut reason = LoopStopReason::Maximum;
         for index in 0..usize::from(self.max_iterations) {
             let scope = ExecutionScope::new(
-                &self.id,
-                mf_runtime::LOOP_SOURCE_ID,
+                &self.scope_key,
+                self.body
+                    .scope_input()
+                    .map_or(mf_runtime::LOOP_SOURCE_ID, mf_runtime::DefinitionId::as_str),
                 index,
                 std::mem::take(&mut variables),
                 self.types.clone(),

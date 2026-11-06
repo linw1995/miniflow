@@ -125,7 +125,3 @@ pub fn validate_scope(
     }
     Ok(())
 }
-
-pub fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
-    validate_scope(definition, None, &[])
-}

@@ -611,9 +611,13 @@ fn validate_graph(
                     loop_summary: Some(_),
                     ..
                 } = event
-                    && node.kind != "workflow.loop"
+                    && !description
+                        .body_paths_for_node(&path, &node.id)
+                        .iter()
+                        .filter_map(|path| description.body(path))
+                        .any(|body| body.source.is_some() && !body.state_outputs.is_empty())
                 {
-                    return Err(invalid("Loop summary belongs to a Loop node"));
+                    return Err(invalid("Loop summary requires an owned stateful body"));
                 }
                 for selection in event.selected_inputs() {
                     if !data.iter().any(|edge| {
@@ -684,14 +688,27 @@ impl StreamState {
         };
         let identity = record.identity.as_ref().unwrap();
         let (last, parent) = path.split_last().expect("validated path");
+        let physical_owner = LoopPathEntry::binding_owner(last.node_id());
+        let owner_id = physical_owner.as_deref().unwrap_or(last.node_id());
+        let parent_path: Vec<_> = parent
+            .iter()
+            .map(|entry| entry.node_id().to_owned())
+            .collect();
+        let owners = if parent_path.is_empty() {
+            &description.nodes
+        } else {
+            &description
+                .body(&parent_path)
+                .ok_or_else(|| invalid("unknown stream scope parent"))?
+                .nodes
+        };
+        let owner = owners
+            .iter()
+            .find(|node| node.id == owner_id)
+            .ok_or_else(|| invalid("unknown stream scope owner"))?;
         let node = mf_telemetry::event::NodeIdentity {
-            id: last.node_id().to_owned(),
-            kind: if last.is_call() {
-                "workflow.call"
-            } else {
-                "workflow.loop"
-            }
-            .into(),
+            id: owner.id.clone(),
+            kind: owner.kind.clone(),
             path: parent.to_vec(),
         };
         let admission = self.ensure_invocation(record, &node)?;
@@ -791,15 +808,17 @@ impl StreamState {
         };
         let key = (owner, node.path.clone());
         let (last, parent) = node.path.split_last().unwrap();
+        let physical_owner = LoopPathEntry::binding_owner(last.node_id());
+        let owner_id = physical_owner.as_deref().unwrap_or(last.node_id());
         let owner_key = (
             parent
                 .iter()
                 .map(|entry| entry.node_id().to_owned())
                 .collect(),
-            last.node_id().to_owned(),
+            owner_id.to_owned(),
         );
         if let Some(invocation) = self.invocations.get(&owner) {
-            if invocation.node.id != last.node_id()
+            if invocation.node.id != owner_id
                 || invocation.path != parent
                 || invocation.identity.message != identity.message
                 || invocation.identity.trigger != identity.trigger
@@ -1542,6 +1561,8 @@ mod tests {
         graph.loop_bodies = vec![LoopBodyDescription {
             order_edges: Vec::new(),
             path: vec!["repeat".into()],
+            source: Some("%loop".into()),
+            state_outputs: [("value".into(), "value".into())].into(),
             nodes: vec![NodeDescription {
                 id: "%loop".into(),
                 kind: "%loop".into(),
@@ -1689,6 +1710,294 @@ mod tests {
         (graph, records)
     }
 
+    fn encoded_scope_records(
+        run: RunId,
+        callable: bool,
+    ) -> (WorkflowDescription, Vec<StreamRecord>) {
+        let (mut graph, mut records) = loop_records(run, 1, 2);
+        let key = LoopPathEntry::binding_key("repeat", "body");
+        let path = if callable {
+            vec![LoopPathEntry::Call {
+                call_id: key.clone(),
+            }]
+        } else {
+            vec![LoopPathEntry::Loop {
+                loop_id: key.clone(),
+                index: Count::ZERO,
+            }]
+        };
+        graph.version = WorkflowDescriptionVersion::V2026_10_23;
+        graph.nodes[1].kind = "foreign.container".into();
+        let body = &mut graph.loop_bodies[0];
+        body.path = vec![key];
+        body.source = (!callable).then(|| "frame-input".into());
+        if callable {
+            body.state_outputs.clear();
+        }
+        body.nodes[0] = NodeDescription {
+            id: "frame-input".into(),
+            kind: "foreign.input".into(),
+        };
+        body.execution_order = vec!["frame-input".into()];
+        for record in &mut records {
+            let StreamPayload::Execution(event) = &mut record.payload else {
+                continue;
+            };
+            match event {
+                Event::NodeStarted { node, .. } | Event::NodeFinished { node, .. } => {
+                    if node.id == "repeat" {
+                        node.kind = "foreign.container".into();
+                    }
+                    if !node.path.is_empty() {
+                        node.path = path.clone();
+                        node.id = "frame-input".into();
+                        node.kind = "foreign.input".into();
+                    }
+                    if callable && let Event::NodeFinished { loop_summary, .. } = event {
+                        *loop_summary = None;
+                    }
+                }
+                Event::LoopPassStarted { elapsed_ns, .. } if callable => {
+                    *event = Event::CallStarted {
+                        path: path.clone(),
+                        elapsed_ns: *elapsed_ns,
+                    };
+                }
+                Event::LoopPassFinished {
+                    elapsed_ns,
+                    outcome,
+                    ..
+                } if callable => {
+                    *event = Event::CallFinished {
+                        path: path.clone(),
+                        elapsed_ns: *elapsed_ns,
+                        outcome: *outcome,
+                    };
+                }
+                Event::LoopPassStarted {
+                    path: event_path, ..
+                }
+                | Event::LoopPassFinished {
+                    path: event_path, ..
+                } => {
+                    *event_path = path.clone();
+                }
+                _ => {}
+            }
+        }
+        graph.validate().unwrap();
+        (graph, records)
+    }
+
+    #[test]
+    fn serialized_encoded_scopes_keep_physical_owners_and_foreign_provider_kinds() {
+        for callable in [false, true] {
+            let run = RunId::new();
+            let (graph, records) = encoded_scope_records(run, callable);
+            let body_path = graph.loop_bodies[0].path.clone();
+            for reverse in [false, true] {
+                let mut state = SessionState::new(graph.clone(), run).unwrap();
+                let mut ordered = records.clone();
+                if reverse {
+                    ordered.reverse();
+                }
+                for record in ordered {
+                    let wire = record.to_wire(1, None).unwrap();
+                    let wire = serde_json::from_slice(&serde_json::to_vec(&wire).unwrap()).unwrap();
+                    let decoded = StreamRecord::decode(&wire).unwrap();
+                    assert_eq!(decoded, record);
+                    assert_eq!(
+                        state.apply_stream(decoded.clone()).unwrap(),
+                        Admission::Applied
+                    );
+                    assert_eq!(state.apply_stream(decoded).unwrap(), Admission::Duplicate);
+                }
+                let snapshot = state.snapshot();
+                assert_eq!(
+                    snapshot.lifecycle.completeness,
+                    Completeness::Complete,
+                    "{snapshot:?}"
+                );
+                assert_eq!(snapshot.observation.protocol_conflicts, 0);
+                assert_eq!(snapshot.nodes[1].status, NodeStatus::Succeeded);
+                assert_eq!(snapshot.nodes[1].kind, "foreign.container");
+                assert_eq!(snapshot.loop_passes.len(), 2);
+                for pass in &snapshot.loop_passes {
+                    assert_eq!(
+                        pass.path
+                            .iter()
+                            .map(|entry| entry.node_id().to_owned())
+                            .collect::<Vec<_>>(),
+                        body_path
+                    );
+                    assert_eq!(pass.nodes[0].id, "frame-input");
+                    assert_eq!(pass.nodes[0].status, NodeStatus::Succeeded);
+                    assert_eq!(pass.compact_statuses, vec![Some(NodeStatus::Succeeded)]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_scopes_reject_wrong_owners_unknown_paths_and_changed_child_paths() {
+        for callable in [false, true] {
+            let run = RunId::new();
+            let (mut graph, records) = encoded_scope_records(run, callable);
+            // Both extra paths are genuinely described, so correlation rather than
+            // unknown-path validation must reject their use for another invocation.
+            let mut other = graph.loop_bodies[0].clone();
+            other.path = vec![LoopPathEntry::binding_key("source", "body")];
+            graph.loop_bodies.push(other);
+            let mut alternate = graph.loop_bodies[0].clone();
+            alternate.path = vec![LoopPathEntry::binding_key("repeat", "alternate")];
+            graph.loop_bodies.push(alternate);
+            graph.validate().unwrap();
+            let changed_path = |record: &StreamRecord, key: &str| {
+                let mut changed = record.clone();
+                let path = if callable {
+                    vec![LoopPathEntry::Call {
+                        call_id: key.into(),
+                    }]
+                } else {
+                    vec![LoopPathEntry::Loop {
+                        loop_id: key.into(),
+                        index: Count::ZERO,
+                    }]
+                };
+                match &mut changed.payload {
+                    StreamPayload::Execution(
+                        Event::LoopPassStarted { path: target, .. }
+                        | Event::CallStarted { path: target, .. },
+                    ) => *target = path,
+                    StreamPayload::Execution(Event::NodeFinished { node, .. }) => {
+                        node.path = path;
+                    }
+                    _ => panic!("expected boundary or child completion"),
+                }
+                changed
+            };
+            let mut state = SessionState::new(graph.clone(), run).unwrap();
+            for record in &records[..3] {
+                state.apply_stream(record.clone()).unwrap();
+            }
+            let wrong_owner = changed_path(&records[3], &graph.loop_bodies[1].path[0]);
+            assert_eq!(
+                state.apply_stream(wrong_owner).unwrap(),
+                Admission::Conflict
+            );
+
+            let unknown = changed_path(
+                &records[3],
+                &LoopPathEntry::binding_key("repeat", "missing"),
+            );
+            assert!(
+                SessionState::new(graph.clone(), run)
+                    .unwrap()
+                    .apply_stream(unknown)
+                    .is_err()
+            );
+            let mut wrong_operator = records[3].clone();
+            let key = graph.loop_bodies[0].path[0].clone();
+            wrong_operator.payload = StreamPayload::Execution(if callable {
+                Event::LoopPassStarted {
+                    path: vec![LoopPathEntry::Loop {
+                        loop_id: key,
+                        index: Count::ZERO,
+                    }],
+                    elapsed_ns: count(4),
+                }
+            } else {
+                Event::CallStarted {
+                    path: vec![LoopPathEntry::Call { call_id: key }],
+                    elapsed_ns: count(4),
+                }
+            });
+            assert!(
+                SessionState::new(graph.clone(), run)
+                    .unwrap()
+                    .apply_stream(wrong_operator)
+                    .is_err()
+            );
+
+            let mut state = SessionState::new(graph.clone(), run).unwrap();
+            for record in &records[..5] {
+                state.apply_stream(record.clone()).unwrap();
+            }
+            let changed = changed_path(&records[5], &graph.loop_bodies[2].path[0]);
+            assert_eq!(state.apply_stream(changed).unwrap(), Admission::Conflict);
+
+            let mut wrong_parent = records[4].clone();
+            wrong_parent.identity.as_mut().unwrap().parent = Some(0);
+            let mut state = SessionState::new(graph.clone(), run).unwrap();
+            for record in &records[..4] {
+                state.apply_stream(record.clone()).unwrap();
+            }
+            state.apply_stream(wrong_parent).unwrap();
+            assert!(state.snapshot().observation.protocol_conflicts > 0);
+
+            let mut wrong_kind = records[2].clone();
+            if let StreamPayload::Execution(Event::NodeStarted { node, .. }) =
+                &mut wrong_kind.payload
+            {
+                node.kind = "different.provider".into();
+            }
+            assert!(
+                SessionState::new(graph, run)
+                    .unwrap()
+                    .apply_stream(wrong_kind)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn stream_loop_summaries_require_owned_stateful_body_facts() {
+        for callable in [false, true] {
+            let run = RunId::new();
+            let (graph, records) = encoded_scope_records(run, callable);
+            let completion = records
+                .iter()
+                .find(|record| matches!(
+                    &record.payload,
+                    StreamPayload::Execution(Event::NodeFinished { node, .. }) if node.id == "repeat"
+                ))
+                .unwrap()
+                .clone();
+            for source in [None, Some("frame-input".to_owned())] {
+                let mut invalid = graph.clone();
+                invalid.nodes[1].kind = "workflow.loop".into();
+                invalid.loop_bodies[0].source = source;
+                invalid.loop_bodies[0].state_outputs.clear();
+                // A different owner's stateful body cannot authorize this summary.
+                let mut other = graph.loop_bodies[0].clone();
+                other.path = vec![LoopPathEntry::binding_key("source", "body")];
+                other.source = Some("frame-input".into());
+                other.state_outputs.insert("value".into(), "value".into());
+                invalid.loop_bodies.push(other);
+                let mut completion = completion.clone();
+                if let StreamPayload::Execution(Event::NodeFinished {
+                    node, loop_summary, ..
+                }) = &mut completion.payload
+                {
+                    node.kind = "workflow.loop".into();
+                    *loop_summary = Some(LoopSummary {
+                        pass_count: count(1),
+                        reason: LoopStopReason::Maximum,
+                    });
+                }
+                // The wire has no graph; only description-aware admission rejects it.
+                let wire = completion.to_wire(1, None).unwrap();
+                let decoded = StreamRecord::decode(&wire).unwrap();
+                assert!(
+                    SessionState::new(invalid, run)
+                        .unwrap()
+                        .apply_stream(decoded)
+                        .is_err()
+                );
+            }
+        }
+    }
+
     #[test]
     fn loop_passes_keep_their_owner_across_messages_and_reordered_delivery() {
         let run = RunId::new();
@@ -1732,6 +2041,8 @@ mod tests {
         let (mut graph, mut records) = loop_records(run, 1, 2);
         graph.version = WorkflowDescriptionVersion::V2026_10_23;
         graph.nodes[1].kind = "workflow.call".into();
+        graph.loop_bodies[0].source = None;
+        graph.loop_bodies[0].state_outputs.clear();
         graph.loop_bodies[0].nodes[0] = NodeDescription {
             id: "leaf".into(),
             kind: "fixture.task".into(),

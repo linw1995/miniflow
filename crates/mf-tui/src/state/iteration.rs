@@ -75,6 +75,7 @@ pub struct IterationItemObservation {
     pub closed: bool,
     pub latest: Count,
     pub nodes: Vec<IterationNodeObservation>,
+    source: Option<String>,
 }
 
 impl IterationItemObservation {
@@ -96,7 +97,8 @@ impl IterationItemObservation {
                     || NodeObservation::pending(id, kind),
                     |node| (*node).clone(),
                 );
-                if node.kind == "builtin.iteration_input"
+                if path == self.iteration_path
+                    && self.source.as_deref() == Some(id)
                     && self.started
                     && node.status == NodeStatus::Pending
                 {
@@ -199,12 +201,25 @@ impl IterationState {
                 })?
                 .nodes
         };
+        let physical_owner = mf_telemetry::event::ScopePathEntry::binding_owner(owner);
         ensure!(
             owners
                 .iter()
-                .any(|node| node.id == *owner && node.kind == "builtin.iteration"),
+                .any(|node| node.id == physical_owner.as_deref().unwrap_or(owner)),
             InvalidIterationSnafu {
-                message: "iteration owner is absent or has the wrong kind"
+                message: "iteration owner is absent"
+            }
+        );
+        let iteration_body =
+            description
+                .body(&context.iteration_path)
+                .context(InvalidIterationSnafu {
+                    message: "iteration scope is absent",
+                })?;
+        ensure!(
+            iteration_body.source.is_some() && iteration_body.state_outputs.is_empty(),
+            InvalidIterationSnafu {
+                message: "iteration scope does not describe an immutable frame"
             }
         );
         let body = description
@@ -370,6 +385,9 @@ impl IterationState {
                 closed: false,
                 latest: context.elapsed_ns,
                 nodes: Vec::new(),
+                source: description
+                    .body(&context.iteration_path)
+                    .and_then(|body| body.source.clone()),
             },
             started: None,
             finished: None,

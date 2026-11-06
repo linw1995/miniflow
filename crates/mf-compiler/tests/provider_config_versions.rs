@@ -336,6 +336,7 @@ fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() 
     // registration of the same kind must not reinterpret this handoff's JSON.
     let ordinary = mf_compiler::plan_resolved_workflow(&mf_compiler::ResolvedWorkflow {
         definition: authored.clone(),
+        relations: Default::default(),
         sources: Default::default(),
         children: Default::default(),
     })

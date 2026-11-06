@@ -1,0 +1,309 @@
+//! Translate authoring syntax into concrete scope relationships once, before
+//! discovery or compilation consumes the graph. Compiled-artifact readers do not
+//! reconstruct these relationships from node kinds or configuration.
+
+use crate::{DefinitionId, NodeDefinition, ValueType, WorkflowCompileError, WorkflowDefinition};
+use mf_runtime::{GraphRelations, ScopeRelations, WorkflowDefinitionVersion};
+use serde::Deserialize;
+use serde_json::json;
+use snafu::{ResultExt, ensure};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Authoring-only traversal state. Only `relations` crosses a phase boundary;
+/// ancestry and diagnostic paths are carried explicitly during source lowering.
+#[derive(Clone, Debug, Default)]
+pub struct ScopeContext {
+    pub relations: GraphRelations,
+    pub path: Vec<DefinitionId>,
+    inside_items: bool,
+}
+
+impl ScopeContext {
+    /// Enter a child only after its receiving callback authorizes this binding.
+    pub fn child(
+        &self,
+        version: WorkflowDefinitionVersion,
+        owner: &NodeDefinition,
+        binding: &str,
+    ) -> Result<Self, WorkflowCompileError> {
+        // Reject a new frame before decoding its configuration. Callable scopes
+        // reset state ownership, but do not erase an immutable-item ancestor.
+        if self.inside_items
+            && binding == "body"
+            && matches!(
+                owner.kind.as_str(),
+                mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND
+            )
+        {
+            let mut path = self.path.clone();
+            path.push(owner.id.clone());
+            return crate::compiler::InvalidScopeSnafu {
+                path: crate::loops::path_label(&path),
+                message: "child scopes inside an item scope cannot contain container scopes",
+            }
+            .fail();
+        }
+        let relations = child_relations_at(version, owner, binding, &self.path)?;
+        let mut path = self.path.clone();
+        path.push(
+            relations
+                .key
+                .clone()
+                .unwrap_or_else(|| {
+                    mf_runtime::ScopePathEntry::binding_key(owner.id.as_str(), binding)
+                })
+                .into(),
+        );
+        let inside_items = self.inside_items
+            || relations
+                .scope
+                .as_ref()
+                .is_some_and(|scope| !scope.is_stateful());
+        Ok(Self {
+            relations,
+            path,
+            inside_items,
+        })
+    }
+
+    pub fn lower_scope(
+        &mut self,
+        definition: &mut WorkflowDefinition,
+    ) -> Result<(), WorkflowCompileError> {
+        lower_scope_at(definition, &mut self.relations, &self.path)
+    }
+}
+
+pub fn child_relations(
+    version: WorkflowDefinitionVersion,
+    owner: &NodeDefinition,
+    binding: &str,
+) -> Result<GraphRelations, WorkflowCompileError> {
+    child_relations_at(version, owner, binding, &[])
+}
+
+/// Lower child relationships with the enclosing authored scope's full path.
+pub fn child_relations_at(
+    version: WorkflowDefinitionVersion,
+    owner: &NodeDefinition,
+    binding: &str,
+    path: &[DefinitionId],
+) -> Result<GraphRelations, WorkflowCompileError> {
+    let mut owner_path = path.to_vec();
+    owner_path.push(owner.id.clone());
+    let mut relations = GraphRelations::default();
+    if binding != "body" {
+        return Ok(relations);
+    }
+    match owner.kind.as_str() {
+        mf_runtime::LOOP_KIND => {
+            let config = crate::loops::parse_config(owner)?;
+            let values = mf_runtime::loop_variable_types(&config.variables).context(
+                crate::compiler::ScopeVariablesSnafu {
+                    path: crate::loops::path_label(&owner_path),
+                },
+            )?;
+            let state_outputs = values
+                .keys()
+                .map(|name| (name.clone(), name.clone()))
+                .collect();
+            relations.scope = Some(ScopeRelations {
+                input: mf_runtime::LOOP_SOURCE_ID.into(),
+                values,
+                state_outputs,
+                writes: BTreeMap::new(),
+                exits: BTreeSet::new(),
+            });
+            relations.streams = config.stream_outputs;
+            relations.key = Some(owner.id.to_string());
+        }
+        mf_runtime::ITERATION_KIND => {
+            let config = crate::iteration::parse_config(owner)?;
+            relations.scope = Some(ScopeRelations {
+                input: mf_runtime::ITERATION_INPUT_ID.into(),
+                values: BTreeMap::from([
+                    ("item".into(), ValueType::Any),
+                    ("key".into(), ValueType::Any),
+                ]),
+                state_outputs: BTreeMap::new(),
+                writes: BTreeMap::new(),
+                exits: BTreeSet::new(),
+            });
+            relations.streams = config.stream_outputs;
+            relations.key = Some(owner.id.to_string());
+        }
+        mf_runtime::CALL_KIND => {
+            #[derive(Deserialize)]
+            struct Selector {
+                flow: String,
+            }
+            let selector: Selector = serde_json::from_value(owner.config.clone()).context(
+                crate::compiler::NodeConfigurationSnafu {
+                    definition_id: owner.id.clone(),
+                },
+            )?;
+            relations.host = Some(selector.flow);
+            relations.key = Some(owner.id.to_string());
+        }
+        _ => {}
+    }
+    ensure!(
+        relations.streams.is_empty() || version.supports_child_streams(),
+        crate::compiler::InvalidGraphSnafu {
+            definition_id: owner.id.clone(),
+            message: "child stream exports require definition version 2026-10-28",
+        }
+    );
+    Ok(relations)
+}
+
+/// Lower only the current authored scope. Executable children are selected by
+/// receiving callbacks and enter this boundary with their own relationship record.
+pub fn lower_scope(
+    definition: &mut WorkflowDefinition,
+    relations: &mut GraphRelations,
+) -> Result<(), WorkflowCompileError> {
+    lower_scope_at(definition, relations, &[])
+}
+
+pub fn lower_scope_at(
+    definition: &mut WorkflowDefinition,
+    relations: &mut GraphRelations,
+    path: &[DefinitionId],
+) -> Result<(), WorkflowCompileError> {
+    if let Some(scope) = &relations.scope {
+        if !scope.is_stateful() {
+            crate::iteration::validate_body_structure(definition).context(
+                crate::compiler::ScopeStructureSnafu {
+                    definition_id: DefinitionId::from("workflow"),
+                },
+            )?;
+        }
+        let expected_kind = if scope.is_stateful() {
+            mf_runtime::LOOP_SOURCE_ID
+        } else {
+            mf_runtime::ITERATION_INPUT_KIND
+        };
+        if !definition.nodes.iter().any(|node| node.id == scope.input) {
+            definition.nodes.insert(
+                0,
+                NodeDefinition {
+                    id: scope.input.clone(),
+                    kind: expected_kind.into(),
+                    config: json!({}),
+                },
+            );
+        }
+    }
+    // Validate authoring source/control syntax before turning it into operands.
+    // This is the only boundary that interprets these node-kind tokens.
+    crate::loops::validate_scope(
+        definition,
+        relations
+            .scope
+            .as_ref()
+            .filter(|scope| scope.is_stateful())
+            .map(|scope| &scope.values),
+        path,
+    )?;
+    if let Some(scope) = relations.scope.as_mut() {
+        scope.writes.clear();
+        scope.exits.clear();
+    }
+    for node in &definition.nodes {
+        let mut node_path = path.to_vec();
+        node_path.push(node.id.clone());
+        let path = node_path.as_slice();
+        match node.kind.as_str() {
+            mf_runtime::LOOP_SOURCE_ID | mf_runtime::ITERATION_INPUT_KIND => {
+                let scope = relations.scope.as_ref();
+                let valid = scope.is_some_and(|scope| {
+                    let expected_kind = if scope.is_stateful() {
+                        mf_runtime::LOOP_SOURCE_ID
+                    } else {
+                        mf_runtime::ITERATION_INPUT_KIND
+                    };
+                    node.id == scope.input && node.kind == expected_kind && node.config == json!({})
+                });
+                ensure!(
+                    valid,
+                    crate::compiler::InvalidScopeSnafu {
+                        path: crate::loops::path_label(path),
+                        message: "reserved scope source requires its canonical enclosing scope",
+                    }
+                );
+            }
+            mf_runtime::LOOP_ASSIGN_KIND => {
+                // validate_scope checked ownership, target existence and spelling.
+                let target = crate::loops::assignment_target(&node.config, path)?;
+                let scope = relations.scope.as_mut().expect("validated state scope");
+                scope.writes.insert(node.id.clone(), target);
+            }
+            mf_runtime::EXIT_LOOP_KIND => {
+                relations
+                    .scope
+                    .as_mut()
+                    .expect("validated state scope")
+                    .exits
+                    .insert(node.id.clone());
+            }
+            _ => {
+                ensure!(
+                    node.id.as_str() != mf_runtime::LOOP_SOURCE_ID
+                        && node.id.as_str() != mf_runtime::ITERATION_INPUT_ID,
+                    crate::compiler::InvalidScopeSnafu {
+                        path: crate::loops::path_label(path),
+                        message: "reserved scope source must use its canonical declaration",
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lower_scope_keeps_full_authoring_paths_across_generic_bindings() {
+        let owner = NodeDefinition {
+            id: "receiver".into(),
+            kind: "test.receiver".into(),
+            config: json!({}),
+        };
+        let outer = ScopeContext::default()
+            .child(WorkflowDefinitionVersion::CURRENT, &owner, "selected")
+            .unwrap();
+        let frame = NodeDefinition {
+            id: "repeat".into(),
+            kind: mf_runtime::LOOP_KIND.into(),
+            config: json!({"variables":[{"name":"count", "type":"int"}]}),
+        };
+        let mut context = outer
+            .child(WorkflowDefinitionVersion::CURRENT, &frame, "body")
+            .unwrap();
+        assert_eq!(context.relations.key.as_deref(), Some("repeat"));
+        let mut definition = WorkflowDefinition::from_json(
+            &json!({
+                "version":"2026-10-28", "dependencies":{}, "nodes":[{
+                    "id":"write", "kind":mf_runtime::LOOP_ASSIGN_KIND,
+                    "config":{"variable":"missing"}
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = context.lower_scope(&mut definition).unwrap_err();
+        let expected_path = crate::loops::path_label(&[
+            mf_runtime::ScopePathEntry::binding_key("receiver", "selected").into(),
+            "repeat".into(),
+            "write".into(),
+        ]);
+        assert!(
+            matches!(error, WorkflowCompileError::InvalidScope { path, message }
+            if path == expected_path && message == "unknown variable `missing`")
+        );
+    }
+}

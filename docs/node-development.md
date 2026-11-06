@@ -1148,6 +1148,14 @@ lowering contracts, not the complete business configuration. Prepared injection 
 child definition: the original stored configuration reaches the factory with actual prepared handles.
 This also applies to Loop, Iteration, and Call; their ordinary business validation is factory-owned.
 
+Compiler-prepared children carry `PreparedSubgraph::relations` with the actual graph's scope contract.
+A callable child and a frame-backed child are distinct; a scoped receiver validates the supplied frame
+values and state-port links before executing it. Frame inputs and write/exit targets come from these
+relationships, not from instruction kind labels. The actual source endpoint is also used for state
+refresh after assignments. Directly supplied manual callbacks have no compiled relationship record and
+retain their existing caller-defined preparation semantics. These are concrete execution relationships,
+not persisted receiving-type schemas or a new factory callback interface.
+
 The current authored/compiler-prepared child path remains finite, including compatible TaskStream
 forwarding and calls from parent Stream messages. Its preparation rejects autonomous Event/Stream
 children. This is separate from the runtime lifecycle API above: factory-backed Event handles can use

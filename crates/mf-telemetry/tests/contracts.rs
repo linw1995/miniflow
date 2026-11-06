@@ -225,6 +225,8 @@ fn nested_descriptions_validate_scope_ownership_and_version() {
         value["execution_order"] = json!(["repeat"]);
         value["loop_bodies"] = json!([{
             "path": ["repeat"],
+            "source": source,
+            "state_outputs": {"value": "value"},
             "nodes": [{"id": source, "kind": source}, {"id": "child", "kind": "fixture.echo"}],
             "data_edges": [{"from_node": source, "from_output": "value", "to_node": "child", "to_input": "input"}],
             "control_edges": [],
@@ -235,8 +237,12 @@ fn nested_descriptions_validate_scope_ownership_and_version() {
         assert_eq!(description.loop_bodies[0].nodes[0].id, source);
         assert_eq!(description.workflow_id, graph().workflow_id);
 
+        let mut renamed_source_kind = value.clone();
+        renamed_source_kind["loop_bodies"][0]["nodes"][0]["kind"] = json!("fixture.source");
+        WorkflowDescription::from_json(&serde_json::to_vec(&renamed_source_kind).unwrap()).unwrap();
+
         let mut invalid_source = value.clone();
-        invalid_source["loop_bodies"][0]["nodes"][0]["kind"] = json!("fixture.source");
+        invalid_source["loop_bodies"][0]["source"] = json!("missing");
         assert!(
             WorkflowDescription::from_json(&serde_json::to_vec(&invalid_source).unwrap()).is_err()
         );
@@ -249,17 +255,253 @@ fn nested_descriptions_validate_scope_ownership_and_version() {
     }
 }
 
+#[test]
+fn body_sources_are_explicit_endpoints_independent_of_instruction_labels() {
+    for kind in ["workflow.loop", "builtin.iteration", "workflow.call"] {
+        let value = json!({
+            "version": "2026-10-23",
+            "workflow_id": graph().workflow_id,
+            "execution": {"mode": "single"},
+            "nodes": [{"id": "owner", "kind": kind}],
+            "data_edges": [], "control_edges": [], "execution_order": ["owner"],
+            "loop_bodies": [{
+                "path": ["owner"], "source": "renamed-input",
+                "nodes": [
+                    {"id": "renamed-input", "kind": "fixture.scope-input"},
+                    {"id": "%loop", "kind": "fixture.authored"}
+                ],
+                "data_edges": [{
+                    "from_node": "renamed-input", "from_output": "value",
+                    "to_node": "%loop", "to_input": "input"
+                }],
+                "control_edges": [], "execution_order": ["renamed-input", "%loop"],
+                "clusters": [{
+                    "label": "Authored node", "annotation": "Not a synthetic endpoint.",
+                    "nodes": ["%loop"]
+                }]
+            }]
+        });
+        let description =
+            WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            description.loop_bodies[0].source.as_deref(),
+            Some("renamed-input")
+        );
+        assert_eq!(
+            WorkflowDescription::from_json(&description.to_json().unwrap()).unwrap(),
+            description
+        );
+
+        let mut unknown = description.clone();
+        unknown.loop_bodies[0].source = Some("missing".into());
+        assert!(matches!(
+            unknown.validate().unwrap_err(),
+            mf_telemetry::ContractError::Invalid { message }
+                if message == "unknown body source endpoint"
+        ));
+
+        let mut clustered_source = description.clone();
+        clustered_source.loop_bodies[0].clusters[0].nodes = vec!["renamed-input".into()];
+        assert!(clustered_source.validate().is_err());
+
+        let mut duplicate = description.clone();
+        let duplicate_node = duplicate.loop_bodies[0].nodes[0].clone();
+        duplicate.loop_bodies[0].nodes.push(duplicate_node);
+        assert!(duplicate.validate().is_err());
+
+        // No relationship means there is no implicit source, even if an authored
+        // node happens to use a historical synthetic ID or kind.
+        let mut callable = description;
+        callable.loop_bodies[0].source = None;
+        callable.validate().unwrap();
+        let encoded = serde_json::to_value(&callable).unwrap();
+        assert!(encoded["loop_bodies"][0].get("source").is_none());
+        assert_eq!(
+            WorkflowDescription::from_json(&serde_json::to_vec(&encoded).unwrap()).unwrap(),
+            callable
+        );
+    }
+}
+
+#[test]
+fn scope_operators_follow_frame_relations_for_direct_and_encoded_body_keys() {
+    let binding_key = mf_telemetry::event::ScopePathEntry::binding_key("owner", "body");
+    for key in ["owner".to_owned(), binding_key] {
+        for (source, state_outputs, accepts_loop, accepts_call) in [
+            (Some("input"), json!({"state":"state"}), true, false),
+            (Some("input"), json!({}), false, false),
+            (None, json!({}), false, true),
+        ] {
+            let value = json!({
+                "version":"2026-10-23", "workflow_id":graph().workflow_id,
+                "execution":{"mode":"single"},
+                "nodes":[{"id":"owner", "kind":"foreign.provider"}],
+                "data_edges":[], "control_edges":[], "execution_order":["owner"],
+                "loop_bodies":[{
+                    "path":[key], "source":source, "state_outputs":state_outputs,
+                    "nodes":[{"id":"input", "kind":"foreign.instruction"}],
+                    "data_edges":[], "control_edges":[], "execution_order":["input"]
+                }]
+            });
+            let description =
+                WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+            let loop_path = vec![LoopPathEntry::Loop {
+                loop_id: key.clone(),
+                index: Count::ZERO,
+            }];
+            let call_path = vec![LoopPathEntry::Call {
+                call_id: key.clone(),
+            }];
+            assert_eq!(
+                description.validate_scope_path(&loop_path).is_ok(),
+                accepts_loop
+            );
+            assert_eq!(
+                description.validate_scope_path(&call_path).is_ok(),
+                accepts_call
+            );
+            assert_eq!(
+                description.loop_body(std::slice::from_ref(&key)).is_some(),
+                accepts_loop || accepts_call
+            );
+            for (event, accepted) in [
+                (
+                    Event::LoopPassStarted {
+                        path: loop_path,
+                        elapsed_ns: Count::ZERO,
+                    },
+                    accepts_loop,
+                ),
+                (
+                    Event::CallStarted {
+                        path: call_path,
+                        elapsed_ns: Count::ZERO,
+                    },
+                    accepts_call,
+                ),
+            ] {
+                let event = LifecycleEvent {
+                    workflow_id: description.workflow_id.clone(),
+                    run_id: RunId::new(),
+                    sequence: Count::try_from(2).unwrap(),
+                    event,
+                };
+                assert_eq!(event.validate_for(&description).is_ok(), accepted);
+            }
+            assert_eq!(
+                WorkflowDescription::from_json(&description.to_json().unwrap()).unwrap(),
+                description
+            );
+        }
+    }
+}
+
+#[test]
+fn loop_summaries_require_owned_stateful_bodies_instead_of_provider_labels() {
+    use mf_telemetry::event::{LoopStopReason, LoopSummary, NodeIdentity, Outcome};
+
+    for kind in ["foreign.provider", "workflow.loop"] {
+        for key in [
+            "owner".to_owned(),
+            LoopPathEntry::binding_key("owner", "body"),
+        ] {
+            for (source, state_outputs, accepted) in [
+                (Some("renamed-input"), json!({"state":"state"}), true),
+                (Some("renamed-input"), json!({}), false),
+                (None, json!({}), false),
+            ] {
+                let description = WorkflowDescription::from_json(
+                    &serde_json::to_vec(&json!({
+                        "version":"2026-10-23", "workflow_id":graph().workflow_id,
+                        "execution":{"mode":"single"},
+                        "nodes":[{"id":"outer", "kind":"foreign.caller"}],
+                        "execution_order":["outer"], "data_edges":[], "control_edges":[],
+                        "loop_bodies":[{
+                            "path":["outer"],
+                            "nodes":[{"id":"owner", "kind":kind}, {"id":"other", "kind":kind}],
+                            "execution_order":["owner", "other"], "data_edges":[], "control_edges":[]
+                        }, {
+                            "path":["outer", key], "source":source, "state_outputs":state_outputs,
+                            "nodes":[{"id":"renamed-input", "kind":"foreign.input"}],
+                            "execution_order":["renamed-input"], "data_edges":[], "control_edges":[]
+                        }, {
+                            "path":["outer", "other"], "source":"input",
+                            "state_outputs":{"state":"state"},
+                            "nodes":[{"id":"input", "kind":"foreign.input"}],
+                            "execution_order":["input"], "data_edges":[], "control_edges":[]
+                        }]
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                let event = LifecycleEvent {
+                    workflow_id: description.workflow_id.clone(),
+                    run_id: RunId::new(),
+                    sequence: Count::try_from(3).unwrap(),
+                    event: Event::NodeFinished {
+                        node: NodeIdentity {
+                            id: "owner".into(),
+                            kind: kind.into(),
+                            path: vec![LoopPathEntry::Call {
+                                call_id: "outer".into(),
+                            }],
+                        },
+                        position: Count::ZERO,
+                        elapsed_ns: Count::try_from(2).unwrap(),
+                        duration_ns: Some(Count::try_from(1).unwrap()),
+                        outcome: Outcome::Succeeded,
+                        produced_ports: vec!["state".into()],
+                        skipped_ports: Vec::new(),
+                        failure: None,
+                        loop_summary: Some(LoopSummary {
+                            pass_count: Count::try_from(1).unwrap(),
+                            reason: LoopStopReason::Maximum,
+                        }),
+                    },
+                };
+                // Wire validation has no description and cannot infer frame ownership.
+                let wire = WireRecord::from_event(&event, 1, None).unwrap();
+                let wire =
+                    serde_json::from_slice::<WireRecord>(&serde_json::to_vec(&wire).unwrap())
+                        .unwrap();
+                let decoded = wire.decode().unwrap();
+                assert_eq!(decoded, event);
+                assert_eq!(decoded.validate_for(&description).is_ok(), accepted);
+
+                let mut wrong_kind = event.clone();
+                if let Event::NodeFinished { node, .. } = &mut wrong_kind.event {
+                    node.kind = "different.provider".into();
+                }
+                assert!(wrong_kind.validate_for(&description).is_err());
+
+                let mut excessive = event;
+                if let Event::NodeFinished {
+                    loop_summary: Some(summary),
+                    ..
+                } = &mut excessive.event
+                {
+                    summary.pass_count =
+                        Count::try_from(i64::from(mf_telemetry::MAX_LOOP_ITERATIONS) + 1).unwrap();
+                }
+                assert!(excessive.event.validate().is_err());
+            }
+        }
+    }
+}
+
 fn static_custom_children() -> WorkflowDescription {
     let key = mf_telemetry::event::ScopePathEntry::binding_key;
-    // A real authored ID can resemble an encoded field scope. It owns its body
-    // directly and must not also be attributed to `dispatch`.
+    // Encoded descriptor keys identify their physical owner independently of
+    // unrelated authored IDs or presentation labels.
     let claimed = key("dispatch", "claimed");
-    let body = |path: Vec<String>, id: &str, kind: &str| {
-        json!({
-            "path": path, "nodes": [{"id": id, "kind": kind}],
-            "data_edges": [], "control_edges": [], "execution_order": [id]
-        })
-    };
+    let body =
+        |path: Vec<String>, id: &str, kind: &str, source: Option<&str>, state_outputs: Value| {
+            json!({
+                "path": path, "source": source, "state_outputs": state_outputs,
+                "nodes": [{"id": id, "kind": kind}],
+                "data_edges": [], "control_edges": [], "execution_order": [id]
+            })
+        };
     let value = json!({
         "version": "2026-09-29", "workflow_id": graph().workflow_id,
         "nodes": [
@@ -270,11 +512,11 @@ fn static_custom_children() -> WorkflowDescription {
         "execution_order": ["dispatch", "repeat", claimed],
         "data_edges": [], "control_edges": [],
         "loop_bodies": [
-            body(vec![key("dispatch", "selected")], "inner", "user.dispatch"),
-            body(vec![key("dispatch", "fallback")], "inner", "fixture.fallback"),
-            body(vec![key("dispatch", "selected"), key("inner", "selected")], "leaf", "fixture.leaf"),
-            body(vec!["repeat".into()], "%loop", "%loop"),
-            body(vec![claimed.clone()], "%loop", "%loop")
+            body(vec![key("dispatch", "selected")], "inner", "user.dispatch", None, json!({})),
+            body(vec![key("dispatch", "fallback")], "inner", "fixture.fallback", None, json!({})),
+            body(vec![key("dispatch", "selected"), key("inner", "selected")], "leaf", "fixture.leaf", None, json!({})),
+            body(vec!["repeat".into()], "%loop", "%loop", Some("%loop"), json!({"value":"value"})),
+            body(vec![claimed.clone()], "%loop", "%loop", Some("%loop"), json!({"value":"value"}))
         ]
     });
     WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap()
@@ -290,13 +532,13 @@ fn static_custom_child_lookup_respects_field_ownership_and_parent_scope() {
     let claimed = vec![key("dispatch", "claimed")];
     let repeat = vec!["repeat".to_owned()];
     for (parent, node, expected) in [
-        (vec![], "dispatch", vec![&selected, &fallback]),
+        (vec![], "dispatch", vec![&selected, &fallback, &claimed]),
         (selected.clone(), "inner", vec![&nested]),
         // Identical IDs in another child cannot claim this child's descendants.
         (fallback.clone(), "inner", vec![]),
         (vec!["missing".into()], "inner", vec![]),
         (vec![], "inner", vec![]),
-        (vec![], claimed[0].as_str(), vec![&claimed]),
+        (vec![], claimed[0].as_str(), vec![]),
         (vec![], "repeat", vec![&repeat]),
     ] {
         assert_eq!(
@@ -342,10 +584,12 @@ fn static_custom_children_reject_corrupt_scope_facts_with_typed_errors() {
             "wrong_order",
             "execution order contains an unknown or duplicate node",
         ),
+        ("unknown_source", "unknown body source endpoint"),
         (
-            "claimed_id",
-            "body path does not name a supported container",
+            "state_without_source",
+            "body state outputs require a source endpoint",
         ),
+        ("invalid_state_output", "invalid body state output relation"),
     ] {
         let mut corrupt = description.clone();
         match case {
@@ -355,8 +599,13 @@ fn static_custom_children_reject_corrupt_scope_facts_with_typed_errors() {
             }
             "duplicate_scope" => corrupt.loop_bodies.push(corrupt.loop_bodies[0].clone()),
             "wrong_order" => corrupt.loop_bodies[1].execution_order[0] = "leaf".into(),
-            // Exact authored IDs take precedence over decoding a field's owner.
-            "claimed_id" => corrupt.nodes[2].kind = "fixture.not-a-container".into(),
+            "unknown_source" => corrupt.loop_bodies[4].source = Some("missing".into()),
+            "state_without_source" => corrupt.loop_bodies[4].source = None,
+            "invalid_state_output" => {
+                corrupt.loop_bodies[4]
+                    .state_outputs
+                    .insert("value".into(), "other".into());
+            }
             _ => unreachable!(),
         }
         for error in [

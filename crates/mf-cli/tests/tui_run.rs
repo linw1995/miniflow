@@ -358,6 +358,7 @@ fn tui_displays_parallel_running_nodes_in_pips_until_they_finish() {
             }))
             .unwrap(),
             execution_order: vec!["parallel-0".into(), "parallel-1".into()],
+            relations: Default::default(),
             children: Default::default(),
         },
         input_schema: mf_runtime::WorkflowInputSchema::default(),
@@ -994,6 +995,7 @@ fn manifest() -> mf_runtime::WorkflowManifest {
             }))
             .unwrap(),
             execution_order: vec!["step".into()],
+            relations: Default::default(),
             children: Default::default(),
         },
         input_schema: mf_runtime::WorkflowInputSchema::default(),

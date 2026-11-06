@@ -36,6 +36,7 @@ impl Runner {
                     }))
                     .unwrap(),
                     execution_order: vec!["remote".into()],
+                    relations: Default::default(),
                     children: Default::default(),
                 },
                 input_schema: mf_runtime::WorkflowInputSchema {

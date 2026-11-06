@@ -500,7 +500,10 @@ fn loop_validation_preserves_variable_and_descriptor_sources() {
     definition.nodes[1].config["variables"][0]["type"] = json!("unknown");
     let error = plan_definition(&definition).unwrap_err();
     assert!(
-        matches!(&error, WorkflowCompileError::ScopeVariables { path, .. } if path == "[\"repeat\"]")
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "repeat"
+                && matches!(source.as_ref(), WorkflowCompileError::ScopeVariables { path, .. }
+                    if path == "[\"repeat\"]"))
     );
     assert!(find_source::<mf_runtime::LoopVariableError>(&error).is_some());
     assert!(
@@ -536,32 +539,22 @@ fn iteration_validation_preserves_the_structural_graph_error() {
         mf_compiler::resolve_nodes(&definition, &registry)
             .err()
             .unwrap(),
+        mf_compiler::compile_resolved_definition(&definition, &registry).unwrap_err(),
     ] {
         assert!(
-            matches!(&error, WorkflowCompileError::FlowResolution {
-                source: mf_compiler::FlowResolutionError::ChildStructure { node, source },
-            } if node == "each"
-                && matches!(source, mf_compiler::ScopeStructureError::ReservedNode { node }
-                    if node.as_str() == "%iteration")),
+            matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+                if definition_id.as_str() == "each"
+                    && matches!(source.as_ref(), WorkflowCompileError::ScopeStructure { source, .. }
+                        if matches!(source, mf_compiler::ScopeStructureError::ReservedNode { node }
+                            if node.as_str() == "%iteration"))),
             "{error:?}"
         );
         assert!(find_source::<mf_compiler::ScopeStructureError>(&error).is_some());
     }
-
-    // Already-resolved definitions still enforce the compiler-owned scope grammar.
-    let error = mf_compiler::compile_resolved_definition(&definition, &registry).unwrap_err();
-    assert!(
-        matches!(&error, WorkflowCompileError::ScopeStructure { definition_id, source }
-            if definition_id.as_str() == "each"
-                && matches!(source, mf_compiler::ScopeStructureError::ReservedNode { node }
-                    if node.as_str() == "%iteration")),
-        "{error:?}"
-    );
-    assert!(find_source::<mf_compiler::ScopeStructureError>(&error).is_some());
 }
 
 #[test]
-fn frozen_graphs_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
+fn authoring_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for id in [mf_runtime::ITERATION_INPUT_ID, "authored-input"] {
         let child: WorkflowDefinition = serde_json::from_value(json!({
@@ -573,9 +566,9 @@ fn frozen_graphs_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
         assert!(
             matches!(
                 &error,
-                WorkflowCompileError::InvalidGraph { definition_id, message }
-                    if definition_id.as_str() == id
-                        && message == "internal iteration input is reserved for iteration bodies"
+                WorkflowCompileError::InvalidScope { path, message }
+                    if path == &json!([id]).to_string()
+                        && message == "reserved scope source requires its canonical enclosing scope"
             ),
             "{error}"
         );
@@ -594,8 +587,9 @@ fn frozen_graphs_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
                 &error,
                 WorkflowCompileError::ChildGraph { definition_id, source }
                     if definition_id.as_str() == "invoke"
-                        && matches!(source.as_ref(), WorkflowCompileError::InvalidGraph { definition_id, .. }
-                            if definition_id.as_str() == id)
+                        && matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
+                            if path == &json!(["invoke", id]).to_string()
+                                && message == "reserved scope source requires its canonical enclosing scope")
             ),
             "{error}"
         );

@@ -8,10 +8,10 @@ extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    CompileRequest, FlowResolutionError, Inputs, NodeBuildError, NodeExecutionError,
-    NodeRegistration, NodeRegistry, Outputs, PortSpec, ScopeStructureError, SupportPackages,
-    TaskNode, ValueType, WorkflowCompileError, WorkflowDefinition, compile_definition,
-    compile_project, execute_compiled, instantiate_compiled, plan_definition,
+    CompileRequest, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry,
+    Outputs, PortSpec, ScopeStructureError, SupportPackages, TaskNode, ValueType,
+    WorkflowCompileError, WorkflowDefinition, compile_definition, compile_project,
+    execute_compiled, instantiate_compiled, plan_definition,
 };
 use mf_telemetry::identity::RunId;
 use opentelemetry::trace::TraceContextExt;
@@ -248,11 +248,11 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
     let error = plan_definition(&invalid_definition).unwrap_err();
     assert!(
-        matches!(&error, WorkflowCompileError::FlowResolution {
-            source: FlowResolutionError::ChildStructure { node, source },
-        } if node == "iteration"
-            && matches!(source, ScopeStructureError::ReservedNode { node }
-                if node.as_str() == "%iteration")),
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "iteration"
+                && matches!(source.as_ref(), WorkflowCompileError::ScopeStructure { source, .. }
+                    if matches!(source, ScopeStructureError::ReservedNode { node }
+                        if node.as_str() == "%iteration"))),
         "{error:?}"
     );
 
@@ -261,11 +261,11 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
     let error = plan_definition(&invalid_definition).unwrap_err();
     assert!(
-        matches!(&error, WorkflowCompileError::FlowResolution {
-            source: FlowResolutionError::ChildStructure { node, source },
-        } if node == "iteration"
-            && matches!(source, ScopeStructureError::NestedScope { node }
-                if node.as_str() == "map")),
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "iteration"
+                && matches!(source.as_ref(), WorkflowCompileError::ScopeStructure { source, .. }
+                    if matches!(source, ScopeStructureError::NestedScope { node }
+                        if node.as_str() == "map"))),
         "{error:?}"
     );
 
@@ -282,11 +282,11 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
     let error = plan_definition(&invalid_definition).unwrap_err();
     assert!(
-        matches!(&error, WorkflowCompileError::FlowResolution {
-            source: FlowResolutionError::ChildStructure { node, source },
-        } if node == "iteration"
-            && matches!(source, ScopeStructureError::StateScope { node }
-                if node.as_str() == "inner_loop")),
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "iteration"
+                && matches!(source.as_ref(), WorkflowCompileError::ScopeStructure { source, .. }
+                    if matches!(source, ScopeStructureError::StateScope { node }
+                        if node.as_str() == "inner_loop"))),
         "{error:?}"
     );
 

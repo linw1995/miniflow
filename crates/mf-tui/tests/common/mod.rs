@@ -11,6 +11,7 @@ pub fn sample_manifest() -> WorkflowManifest {
             }))
             .unwrap(),
             execution_order: vec![],
+            relations: Default::default(),
             children: Default::default(),
         },
         input_schema: WorkflowInputSchema::default(),

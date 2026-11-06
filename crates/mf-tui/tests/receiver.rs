@@ -458,7 +458,7 @@ fn observed_iteration_graph() -> WorkflowDescription {
         "version":"2026-10-23", "workflow_id":graph().workflow_id,
         "execution":{"mode":"single"}, "nodes":[{"id":"each","kind":"builtin.iteration"}],
         "execution_order":["each"], "data_edges":[],"control_edges":[],
-        "loop_bodies":[{"path":["each"],"nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
+        "loop_bodies":[{"path":["each"],"source":"%iteration","nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
             "execution_order":["%iteration","work"],"data_edges":[],"control_edges":[]}]
     }))
     .unwrap()

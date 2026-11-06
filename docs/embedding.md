@@ -137,7 +137,15 @@ ordinary provider data is not interpreted as a Flow source. Planning uses regist
 constructing nodes and supports existing description and observation APIs.
 
 The plan stores an explicit `CompiledGraph`: a definition, its canonical `execution_order`, and a
-`children` map keyed by receiving node ID and configuration field name. `NodeConfig::flow_parameters`
+`children` map keyed by receiving node ID and configuration field name, plus required `relations`.
+These relationships name scope input sources, current-frame variable writes and exits, stream export
+endpoints, host bindings, and scope-edge identity. Discovery, provider checking, preparation, and codegen
+consume those relationships rather than reclassifying instructions by their node-kind labels. Only the
+authoring lowering boundary interprets the language's structural syntax. Scope keys must name their
+actual receiving owner or that exact encoded owner/binding pair; runtime invocation paths and
+telemetry descriptions use the same key while routing and errors retain the physical owner ID.
+Description bodies carry their actual input source and state-output relationships, so lifecycle
+validation does not infer frame semantics from provider labels. `NodeConfig::flow_parameters`
 extracts executable child values from configuration during source resolution; ordinary JSON remains
 opaque, and absent optional children produce no graph entry. The resolved tree is handed directly to
 `plan_resolved_workflow`, so planning retains the selected receiver's child decisions.

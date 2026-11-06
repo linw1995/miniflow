@@ -340,6 +340,8 @@ pub fn body_description(
     mf_telemetry::description::LoopBodyDescription {
         order_edges: Vec::new(),
         path: vec!["repeat".into()],
+        source: None,
+        state_outputs: Default::default(),
         nodes: fixture.nodes.clone(),
         data_edges: fixture.data_edges.clone(),
         control_edges: fixture.control_edges.clone(),

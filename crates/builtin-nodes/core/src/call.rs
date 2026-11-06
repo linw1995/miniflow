@@ -23,6 +23,7 @@ fn plain(_config: Value) -> Result<PreparedNode, NodeBuildError> {
 
 struct CallNode {
     id: String,
+    scope_key: String,
     flow: String,
     body: PreparedSubgraph,
 }
@@ -80,7 +81,7 @@ impl SubgraphNode for CallNode {
         let mut stream = SubgraphStream::new(self.id.as_str(), context, sink);
         let outputs = context
             .run_call(
-                &self.id,
+                &self.scope_key,
                 WorkflowArguments(inputs),
                 &self.body.nodes,
                 |state| self.body.execute_with_sink(state, &mut stream),
@@ -110,6 +111,10 @@ pub enum CallBuildError {
     BlankFlow,
     #[snafu(display("Flow calls cannot read stdin"))]
     Stdin,
+    #[snafu(display(
+        "Flow calls require a callable prepared child without an implicit scope frame"
+    ))]
+    ScopedBody,
 }
 
 impl From<CallBuildError> for NodeBuildError {
@@ -126,6 +131,12 @@ fn factory(
     let Config { flow, body } = Config::from_config(config, bodies)?;
     ensure!(!flow.trim().is_empty(), BlankFlowSnafu);
     ensure!(body.inputs.stdin.is_empty(), StdinSnafu);
+    ensure!(
+        body.relations
+            .as_ref()
+            .is_none_or(|relations| relations.is_callable()),
+        ScopedBodySnafu
+    );
     let input_bindings = body
         .inputs
         .inputs
@@ -147,6 +158,7 @@ fn factory(
         .collect();
     let node = CallNode {
         id: id.into(),
+        scope_key: body.scope_key(id, "body"),
         flow,
         body,
     };
@@ -175,6 +187,56 @@ mod tests {
 
     fn body() -> PreparedSubgraph {
         PreparedSubgraph::new(vec![], vec![], |_| Ok(Default::default()))
+    }
+
+    #[test]
+    fn call_invocation_paths_use_the_actual_child_edge_key() {
+        for compiled in [false, true] {
+            for mapped in [false, true] {
+                let key = mf_runtime::ScopePathEntry::binding_key("mapped-owner", "selected");
+                let expected = if !compiled {
+                    "invoke".to_owned()
+                } else if mapped {
+                    key.clone()
+                } else {
+                    mf_runtime::ScopePathEntry::binding_key("invoke", "body")
+                };
+                let mut body = PreparedSubgraph::new(Vec::new(), Vec::new(), move |state| {
+                    let path = state.invocation_path();
+                    assert_eq!(path.len(), 1);
+                    assert_eq!(path[0].node_id(), expected);
+                    assert!(path[0].is_call());
+                    Ok(Default::default())
+                });
+                if compiled {
+                    body = body.with_relations(mf_runtime::GraphRelations {
+                        key: mapped.then_some(key),
+                        ..Default::default()
+                    });
+                }
+                let node = mf_runtime::FlowNode::new(
+                    "invoke",
+                    factory(
+                        "invoke",
+                        json!({"flow":"child", "body":{}}),
+                        BTreeMap::from([("body".into(), body)]),
+                    )
+                    .unwrap(),
+                )
+                .into_task()
+                .unwrap();
+                let mut context = ExecutionContext::default();
+                context
+                    .with_node("invoke".into(), |context| {
+                        let result = node.node.execute(Inputs::new(), context);
+                        assert_eq!(context.current_node(), Some("invoke"));
+                        assert!(context.invocation_path().is_empty());
+                        result
+                    })
+                    .unwrap();
+                assert!(context.current_node().is_none());
+            }
+        }
     }
 
     #[test]
@@ -256,5 +318,23 @@ mod tests {
         .err()
         .unwrap();
         assert!(matches!(business_error(&error), CallBuildError::Stdin));
+        let scoped = body().with_relations(mf_runtime::GraphRelations {
+            scope: Some(mf_runtime::ScopeRelations {
+                input: "scope".into(),
+                values: BTreeMap::new(),
+                state_outputs: BTreeMap::new(),
+                writes: BTreeMap::new(),
+                exits: Default::default(),
+            }),
+            ..Default::default()
+        });
+        let error = factory(
+            "invoke",
+            json!({"flow":"child", "body":{}}),
+            BTreeMap::from([("body".into(), scoped)]),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(business_error(&error), CallBuildError::ScopedBody));
     }
 }

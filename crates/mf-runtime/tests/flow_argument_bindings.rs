@@ -148,6 +148,7 @@ fn legacy_provider_config_remains_opaque() {
         graph: mf_runtime::CompiledGraph {
             definition,
             execution_order: vec!["custom".into()],
+            relations: Default::default(),
             children: BTreeMap::new(),
         },
         input_schema: mf_runtime::WorkflowInputSchema {

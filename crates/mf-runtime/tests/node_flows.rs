@@ -92,15 +92,17 @@ fn all_child_kinds_use_declared_fields_without_inheriting_parent_schema_or_depen
         assert!(body.dependencies.is_empty());
         assert!(body.nodes.is_empty());
         assert_eq!(json!(body), node.config[name]);
-        if name == "body" {
-            assert_eq!(node.flow_scope_key(name), node.id.to_string());
-        } else {
-            assert_eq!(
-                node.flow_scope_key(name),
-                mf_telemetry::event::ScopePathEntry::binding_key("custom", name)
-            );
-        }
-        assert_ne!(node.flow_scope_key("other"), node.id.to_string());
+        let child = CompiledGraph {
+            definition: body.clone(),
+            execution_order: Vec::new(),
+            relations: Default::default(),
+            children: Default::default(),
+        };
+        assert_eq!(
+            child.child_scope_key(&node, name),
+            mf_telemetry::event::ScopePathEntry::binding_key(node.id.as_str(), name)
+        );
+        assert_ne!(child.child_scope_key(&node, "other"), node.id.to_string());
         assert_eq!(
             receiver(&node).flow_parameters(&node.config),
             [(name.into(), node.config[name].clone())].into()
@@ -175,6 +177,7 @@ fn manifest_projects_explicit_compiled_sources_with_complete_child_orders() {
                     let graph = CompiledGraph {
                         execution_order: body.nodes.iter().map(|node| node.id.clone()).collect(),
                         definition: body,
+                        relations: Default::default(),
                         children: Default::default(),
                     };
                     (name, graph)
@@ -186,18 +189,19 @@ fn manifest_projects_explicit_compiled_sources_with_complete_child_orders() {
     let graph = CompiledGraph {
         definition: parent,
         execution_order: order,
+        relations: Default::default(),
         children,
     };
     let description = mf_runtime::describe_graph(&graph).unwrap();
     assert_eq!(description.loop_bodies.len(), 4);
     for child in &description.loop_bodies {
         match child.path[0].as_str() {
-            "loop" => {
+            key if key == mf_telemetry::event::ScopePathEntry::binding_key("loop", "body") => {
                 assert_eq!(child.nodes.len(), 1);
                 assert_eq!(child.nodes[0].id, "%loop");
                 assert_eq!(child.nodes[0].kind, "%loop");
             }
-            "iteration" => {
+            key if key == mf_telemetry::event::ScopePathEntry::binding_key("iteration", "body") => {
                 assert_eq!(child.nodes.len(), 1);
                 assert_eq!(child.nodes[0].id, "%iteration");
                 assert_eq!(child.nodes[0].kind, "builtin.iteration_input");
