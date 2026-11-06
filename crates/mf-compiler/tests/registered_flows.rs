@@ -128,6 +128,130 @@ fn registered_host_calls_cannot_be_emitted_into_generated_runners() {
 }
 
 #[test]
+fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
+    let mut body = caller(&child());
+    body.nodes[0].id = "nested".into();
+    body.outputs[0].node = "nested".into();
+    let mut loop_body = child();
+    loop_body.outputs.clear();
+    body.nodes.push(
+        serde_json::from_value(json!({
+            "id":"repeat", "kind":"workflow.loop", "config":{
+                "max_iterations":1, "variables":[{"name":"count", "type":"int"}],
+                "body":loop_body
+            }
+        }))
+        .unwrap(),
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = mf_compiler::plan_resolved_definition(&caller(&body), &registry).unwrap();
+    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+
+    for case in [
+        "matching",
+        "stale raw body",
+        "compiled child drift",
+        "missing registered body",
+    ] {
+        let mut plan = saved.clone();
+        let mut registered = body.clone();
+        let host = plan
+            .graph
+            .children
+            .get_mut(&"invoke".into())
+            .unwrap()
+            .get_mut("body")
+            .unwrap();
+        match case {
+            "stale raw body" => {
+                // Only the stored child tree is executable, not this inline copy.
+                let nested = host
+                    .definition
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id.as_str() == "nested")
+                    .unwrap();
+                nested.config["body"]["nodes"][0]["config"] = json!({"changed":true});
+            }
+            "compiled child drift" => {
+                let nested = host
+                    .children
+                    .get_mut(&"nested".into())
+                    .unwrap()
+                    .get_mut("body")
+                    .unwrap();
+                nested.definition.nodes[0].config = json!({"changed":true});
+            }
+            "missing registered body" => {
+                // The registered owner still exists, but has no raw body for the
+                // actual nested binding selected by the compiled graph.
+                registered.nodes[0]
+                    .config
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("body");
+            }
+            _ => {}
+        }
+        // Authoring order and synthesized Loop sources are not definition drift.
+        registered.nodes.reverse();
+        let mut registry = NodeRegistry::from_inventory().unwrap();
+        registry
+            .register_flow(
+                "host.runner",
+                registered,
+                PreparedSubgraph::new(
+                    vec![],
+                    vec![PortSpec::new("value", ValueType::String, true)],
+                    |_| Ok([("value".into(), "host result".into())].into()),
+                ),
+            )
+            .unwrap();
+        let result = mf_compiler::instantiate_compiled(&plan, &registry);
+        if matches!(case, "matching" | "stale raw body") {
+            // Unknown providers in both nested bodies remain host-local exemptions.
+            assert_eq!(
+                result.unwrap().execute().unwrap()["value"],
+                json!("host result")
+            );
+            continue;
+        }
+        let error = result.err().unwrap();
+        let mf_compiler::WorkflowCompileError::CompiledGraph { source } = &error else {
+            panic!("{case}: {error}");
+        };
+        let mf_compiler::WorkflowBuildError::HostFlowBinding {
+            definition_id,
+            source,
+        } = source.as_ref()
+        else {
+            panic!("{case}: {source}");
+        };
+        assert_eq!(definition_id.as_str(), "invoke", "{case}");
+        let mf_compiler::WorkflowCompileError::InvalidCall {
+            definition_id,
+            message,
+        } = source.as_ref()
+        else {
+            panic!("{case}: {source}");
+        };
+        let expected = if case == "missing registered body" {
+            ("nested", "host Flow body does not match compiled bindings")
+        } else {
+            (
+                "invoke",
+                "host Flow binding differs from the frozen call definition",
+            )
+        };
+        assert_eq!(
+            (definition_id.as_str(), message.as_str()),
+            expected,
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn registered_calls_reject_definition_drift_and_duplicate_names() {
     let mut registry = NodeRegistry::from_inventory().unwrap();
     let body = child();
