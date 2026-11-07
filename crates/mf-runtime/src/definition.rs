@@ -68,7 +68,11 @@ struct DefinitionFields {
         skip_serializing_if = "Option::is_none"
     )]
     pub execution: Option<crate::StreamExecution>,
-    #[serde(deserialize_with = "deserialize_dependencies")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_dependencies",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub dependencies: BTreeMap<String, NodeDependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flows: BTreeMap<String, FlowSource>,
@@ -93,16 +97,51 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 
 impl WorkflowDefinition {
     pub fn has_order_edges(&self) -> bool {
-        !self.order_edges.is_empty() || self.nodes.iter().any(NodeDefinition::has_order_edges)
+        !self.order_edges.is_empty()
     }
 
     pub fn from_json(input: &str) -> Result<Self, DefinitionParseError> {
-        let value: Value = serde_json::from_str(input).context(JsonParseSnafu)?;
+        Self::parse_json(input, None)
+    }
+
+    /// Parse a receiver-authorized child, inheriting the original root version only
+    /// when this definition omits `version`. Node configuration remains opaque.
+    pub fn from_value_with_version(
+        mut value: Value,
+        inherited: WorkflowDefinitionVersion,
+    ) -> Result<Self, serde_json::Error> {
+        if let Some(scope) = value.as_object_mut()
+            && !scope.contains_key("version")
+        {
+            scope.insert("version".into(), serde_json::to_value(inherited)?);
+        }
+        serde_json::from_value(value)
+    }
+
+    /// Parse an authorized child source while retaining duplicate-key rejection
+    /// and the same typed JSON and legacy-version errors as the root parser.
+    pub fn from_json_with_version(
+        input: &str,
+        inherited: WorkflowDefinitionVersion,
+    ) -> Result<Self, DefinitionParseError> {
+        Self::parse_json(input, Some(inherited))
+    }
+
+    fn parse_json(
+        input: &str,
+        inherited: Option<WorkflowDefinitionVersion>,
+    ) -> Result<Self, DefinitionParseError> {
+        let value = serde_json::from_str::<crate::workflow_inputs::UniqueValue>(input)
+            .context(JsonParseSnafu)?
+            .0;
         if value.get("version").and_then(Value::as_str) == Some("2026-09-24") {
             return LegacyVersionSnafu.fail();
         }
-        let definition: Self = serde_json::from_str(input).context(JsonParseSnafu)?;
-        Ok(definition)
+        match inherited {
+            Some(version) => Self::from_value_with_version(value, version),
+            None => serde_json::from_value(value),
+        }
+        .context(JsonParseSnafu)
     }
 }
 
@@ -178,7 +217,7 @@ pub enum FlowSource {
 pub struct CallConfig {
     pub flow: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition: Option<Box<WorkflowDefinition>>,
+    pub body: Option<Box<WorkflowDefinition>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -188,25 +227,69 @@ pub struct NodeDefinition {
     pub kind: String,
     #[serde(default = "empty_object")]
     pub config: Value,
-    #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
-    pub loop_definition: Option<Box<LoopDefinition>>,
+}
+
+/// Errors reading or replacing declared executable configuration fields.
+#[derive(Debug, Snafu)]
+pub enum FlowParameterError {
+    #[snafu(display("invalid Flow parameters: {message}"), visibility(pub(super)))]
+    Invalid { message: &'static str },
+    #[snafu(
+        display("invalid Flow parameter `{parameter}`: {source}"),
+        visibility(pub(super))
+    )]
+    Json {
+        parameter: String,
+        source: serde_json::Error,
+    },
 }
 
 impl NodeDefinition {
-    pub fn has_order_edges(&self) -> bool {
-        self.loop_definition
-            .as_ref()
-            .is_some_and(|definition| definition.body.has_order_edges())
-            || (self.kind == crate::ITERATION_KIND
-                && self.config["body"]["order_edges"]
-                    .as_array()
-                    .is_some_and(|edges| !edges.is_empty()))
+    /// Writes a normalized child into its declared configuration field.
+    pub fn set_node_flow(
+        &mut self,
+        name: &str,
+        body: WorkflowDefinition,
+    ) -> Result<(), FlowParameterError> {
+        ensure!(
+            !name.trim().is_empty(),
+            InvalidSnafu {
+                message: "Flow parameter field names must be nonblank"
+            }
+        );
+        let config = self.config.as_object_mut().ok_or_else(|| {
+            InvalidSnafu {
+                message: "Flow parameters require an object configuration",
+            }
+            .build()
+        })?;
+        let value = serde_json::to_value(body).context(JsonSnafu { parameter: name })?;
+        config.insert(name.into(), value);
+        Ok(())
     }
-}
 
-impl LoopBodyDefinition {
-    pub fn has_order_edges(&self) -> bool {
-        !self.order_edges.is_empty() || self.nodes.iter().any(NodeDefinition::has_order_edges)
+    /// Reads only the declared, present, non-null executable configuration fields.
+    /// Source resolution must normalize these fields to direct workflow definitions first.
+    /// Every other field remains opaque provider data.
+    pub fn flow_parameters(
+        &self,
+        parameters: &[&str],
+    ) -> Result<BTreeMap<String, WorkflowDefinition>, FlowParameterError> {
+        let mut flows = BTreeMap::new();
+        for &name in parameters {
+            ensure!(
+                !name.trim().is_empty(),
+                InvalidSnafu {
+                    message: "Flow parameter field names must be nonblank"
+                }
+            );
+            if let Some(value) = self.config.get(name).filter(|value| !value.is_null()) {
+                let body =
+                    serde_json::from_value(value.clone()).context(JsonSnafu { parameter: name })?;
+                flows.insert(name.to_owned(), body);
+            }
+        }
+        Ok(flows)
     }
 }
 
@@ -227,7 +310,7 @@ pub struct LoopDefinition {
     pub variables: Vec<LoopVariableDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<LoopConditionDefinition>,
-    pub body: LoopBodyDefinition,
+    pub body: Box<WorkflowDefinition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -236,20 +319,6 @@ pub struct LoopVariableDefinition {
     pub name: String,
     #[serde(rename = "type")]
     pub value_type: Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LoopBodyDefinition {
-    pub nodes: Vec<NodeDefinition>,
-    #[serde(default)]
-    pub edges: Vec<EdgeDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub control_edges: Vec<ControlEdgeDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub order_edges: Vec<OrderEdgeDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub clusters: Vec<ClusterDefinition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

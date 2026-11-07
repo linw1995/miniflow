@@ -216,9 +216,9 @@ fn loop_accumulation_fails_atomically_when_conversion_budget_is_exhausted() {
             "version":"2026-09-29", "dependencies":{},
             "nodes":[
                 {"id":"seed", "kind":"builtin.constant", "config":{"value":[]}},
-                {"id":"repeat", "kind":"workflow.loop", "loop":{
+                {"id":"repeat", "kind":"workflow.loop", "config":{
                     "max_iterations":iterations, "variables":[{"name":"items", "type":{"list":"object"}}],
-                    "body":{
+                    "body":{"version":"2026-09-29", "dependencies":{},
                         "nodes":[
                             {"id":"chunk", "kind":"builtin.constant", "config":{"value":vec![json!({}); 1000]}},
                             {"id":"collect", "kind":"builtin.code", "config":{

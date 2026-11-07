@@ -88,12 +88,12 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         let before = PREPARATIONS.load(Ordering::SeqCst);
         assert_eq!(plan.manifest(&registry).unwrap(), manifest);
         assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
-        let mut expected = plan.definition.clone();
+        let mut expected = plan.graph.definition.clone();
         expected.execution = stream.then(mf_runtime::StreamExecution::default);
-        assert_eq!(manifest.definition, expected);
+        assert_eq!(manifest.graph.definition, expected);
         assert_eq!(
             manifest.node_definition("source./~").unwrap().config,
-            plan.definition.nodes[0].config
+            plan.graph.definition.nodes[0].config
         );
         assert_eq!(manifest.description().unwrap().is_streaming(), stream);
         assert_eq!(

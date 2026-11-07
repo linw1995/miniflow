@@ -347,17 +347,20 @@ fn tui_displays_parallel_running_nodes_in_pips_until_they_finish() {
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("parallel-runner");
     let manifest = mf_runtime::WorkflowManifest {
-        version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
-        definition: serde_json::from_value(serde_json::json!({
-            "version": "2026-09-26", "dependencies": {},
-            "nodes": [
-                {"id": "parallel-0", "kind": "test.parallel"},
-                {"id": "parallel-1", "kind": "test.parallel"}
-            ]
-        }))
-        .unwrap(),
-        execution_order: vec!["parallel-0".into(), "parallel-1".into()],
-        loop_orders: vec![],
+        version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
+        graph: mf_runtime::CompiledGraph {
+            definition: serde_json::from_value(serde_json::json!({
+                "version": "2026-09-26", "dependencies": {},
+                "nodes": [
+                    {"id": "parallel-0", "kind": "test.parallel"},
+                    {"id": "parallel-1", "kind": "test.parallel"}
+                ]
+            }))
+            .unwrap(),
+            execution_order: vec!["parallel-0".into(), "parallel-1".into()],
+            relations: Default::default(),
+            children: Default::default(),
+        },
         input_schema: mf_runtime::WorkflowInputSchema::default(),
     };
     let description = manifest.description().unwrap();
@@ -984,14 +987,17 @@ fn failed_stdout_delivery_uses_cli_error_or_preserves_child_failure() {
 
 fn manifest() -> mf_runtime::WorkflowManifest {
     mf_runtime::WorkflowManifest {
-        version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
-        definition: serde_json::from_value(serde_json::json!({
-            "version": "2026-09-26", "dependencies": {},
-            "nodes": [{"id": "step", "kind": "test.step"}]
-        }))
-        .unwrap(),
-        execution_order: vec!["step".into()],
-        loop_orders: vec![],
+        version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
+        graph: mf_runtime::CompiledGraph {
+            definition: serde_json::from_value(serde_json::json!({
+                "version": "2026-09-26", "dependencies": {},
+                "nodes": [{"id": "step", "kind": "test.step"}]
+            }))
+            .unwrap(),
+            execution_order: vec!["step".into()],
+            relations: Default::default(),
+            children: Default::default(),
+        },
         input_schema: mf_runtime::WorkflowInputSchema::default(),
     }
 }

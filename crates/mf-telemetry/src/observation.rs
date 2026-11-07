@@ -333,6 +333,7 @@ impl RunObservation {
     pub fn iteration_observation(
         &self,
         id: &str,
+        scope_key: &str,
         path: &[LoopPathEntry],
         body_nodes: Vec<NodeIdentity>,
     ) -> Option<IterationObservation> {
@@ -357,7 +358,7 @@ impl RunObservation {
             .iter()
             .map(|entry| entry.node_id().to_owned())
             .collect();
-        body_path.push(id.to_owned());
+        body_path.push(scope_key.to_owned());
         IterationObservation::new(
             Arc::clone(&self.backend),
             self.workflow_id.clone(),

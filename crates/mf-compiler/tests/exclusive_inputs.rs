@@ -106,7 +106,7 @@ fn loop_rounds_and_parallel_iterations_select_within_each_scope() {
             }
             json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
                 {"id":"start", "kind":"builtin.constant", "config":{"value":false}},
-                {"id":"loop", "kind":"workflow.loop", "loop":{"max_iterations":3, "variables":[{"name":"state", "type":"bool"}], "body":{
+                {"id":"loop", "kind":"workflow.loop", "config":{"max_iterations":3, "variables":[{"name":"state", "type":"bool"}], "body":{"version":"2026-10-03", "dependencies":{},
                     "nodes":body["nodes"], "control_edges":body["control_edges"], "edges":body["edges"]
                 }}}
             ], "edges":[{"from_node":"start", "from_output":"value", "to_node":"loop", "to_input":"state"}],
@@ -114,18 +114,14 @@ fn loop_rounds_and_parallel_iterations_select_within_each_scope() {
         } else {
             json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
                 {"id":"start", "kind":"builtin.constant", "config":{"value":[true,false,true,false]}},
-                {"id":"iterate", "kind":"builtin.iteration", "config":{"mode":mode, "body":{
-                    "nodes":body["nodes"], "control_edges":body["control_edges"], "edges":body["edges"], "result":{"node":"consume", "port":"value"}
+                {"id":"iterate", "kind":"builtin.iteration", "config":{"mode":mode, "body":{"version":"2026-10-03", "dependencies":{},
+                    "nodes":body["nodes"], "control_edges":body["control_edges"], "edges":body["edges"], "outputs": [{"name":"result", "node":"consume", "port":"value"}]
                 }}}
             ], "edges":[{"from_node":"start", "from_output":"value", "to_node":"iterate", "to_input":"items"}],
             "outputs":[{"name":"result", "node":"iterate", "port":"results"}]})
         };
         let mut invalid = definition.clone();
-        let body = if mode == "loop" {
-            &mut invalid["nodes"][1]["loop"]["body"]
-        } else {
-            &mut invalid["nodes"][1]["config"]["body"]
-        };
+        let body = &mut invalid["nodes"][1]["config"]["body"];
         body["control_edges"].as_array_mut().unwrap().truncate(1);
         let error =
             compile_definition(&serde_json::from_value(invalid).unwrap(), &registry).unwrap_err();
@@ -509,6 +505,7 @@ fn executable_builders_require_proof_and_valid_task_output_contracts() {
     let definition = definition(true, json!(1), json!(2));
     let order = mf_compiler::plan_definition(&definition)
         .unwrap()
+        .graph
         .execution_order;
     for case in [
         "valid",

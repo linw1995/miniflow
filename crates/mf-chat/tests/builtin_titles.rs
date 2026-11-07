@@ -252,19 +252,22 @@ fn embedded_application_declares_and_prepares_the_builtin_title_call() {
             builtin: "mf-chat.chat-title".into()
         }
     );
-    let plan = mf_chat::flows::conversation::plan().unwrap();
+    let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+    let plan = mf_chat::flows::conversation::plan(&registry).unwrap();
     for (id, kind) in [
         ("prepare_title", "mf_chat.title.prepare"),
         ("finish", "mf_chat.conversation.finish"),
     ] {
         assert!(
-            plan.definition
+            plan.graph
+                .definition
                 .nodes
                 .iter()
                 .any(|node| node.id.as_str() == id && node.kind == kind)
         );
     }
     let call = plan
+        .graph
         .definition
         .nodes
         .iter()
@@ -273,8 +276,8 @@ fn embedded_application_declares_and_prepares_the_builtin_title_call() {
     assert_eq!(call.kind, mf_runtime::CALL_KIND);
     let configuration: mf_runtime::CallConfig =
         serde_json::from_value(call.config.clone()).unwrap();
-    let body = configuration.definition.unwrap();
+    let body = configuration.body.unwrap();
     let registered = mf_chat::flows::title_definition().unwrap();
     let registered_plan = mf_compiler::plan_definition(&registered).unwrap();
-    assert_eq!(*body, registered_plan.definition);
+    assert_eq!(*body, registered_plan.graph.definition);
 }

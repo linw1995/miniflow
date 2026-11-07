@@ -16,6 +16,34 @@ use mf_compiler::{
 use serde_json::{Value, json};
 use std::{error::Error, fs, fs::TryLockError, io};
 
+#[test]
+fn compiled_graph_error_boundaries_preserve_the_runtime_domain_source() {
+    let graph = mf_runtime::CompiledGraph {
+        definition: serde_json::from_value(json!({
+            "version": "2026-10-28", "dependencies": {},
+            "nodes": [{"id": "value", "kind": "builtin.constant", "config": {"value": 1}}]
+        }))
+        .unwrap(),
+        execution_order: Vec::new(),
+        relations: Default::default(),
+        children: Default::default(),
+    };
+    let build_error = mf_compiler::WorkflowBuildError::CompiledGraph {
+        source: mf_runtime::describe_graph(&graph).unwrap_err(),
+    };
+    let description_error = mf_compiler::DescriptionError::Graph {
+        source: mf_runtime::describe_graph(&graph).unwrap_err(),
+    };
+    for error in [&build_error as &dyn Error, &description_error as &dyn Error] {
+        assert!(matches!(
+            find_source::<mf_runtime::GraphDescriptionError>(error),
+            Some(mf_runtime::GraphDescriptionError::Invalid { message })
+                if message == "compiled execution order does not match the node count"
+        ));
+        assert!(error.source().unwrap().source().is_none());
+    }
+}
+
 fn find_source<'a, T: Error + 'static>(error: &'a (dyn Error + 'static)) -> Option<&'a T> {
     let mut current = Some(error);
     while let Some(error) = current {
@@ -57,12 +85,14 @@ inventory::submit! {
     NodeRegistration { kind: "test.error_source", factory: NodeFactory::Plain(fail_factory) }
 }
 
-fn loop_definition(body: Value) -> WorkflowDefinition {
+fn loop_definition(mut body: Value) -> WorkflowDefinition {
+    body["version"] = json!("2026-09-29");
+    body["dependencies"] = json!({});
     serde_json::from_value(json!({
         "version": "2026-09-29", "dependencies": {},
         "nodes": [
             {"id": "seed", "kind": "builtin.constant", "config": {"value": 0}},
-            {"id": "repeat", "kind": "workflow.loop", "loop": {
+            {"id": "repeat", "kind": "workflow.loop", "config": {
                 "max_iterations": 1, "variables": [{"name": "x", "type": "int"}],
                 "body": body
             }}
@@ -93,7 +123,7 @@ fn call_failures_preserve_typed_plugin_sources_and_call_context() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25", "dependencies":{},
         "nodes":[{"id":"invoke","kind":"workflow.call","config":{
-            "flow":"failing", "definition":{
+            "flow":"failing", "body":{
                 "version":"2026-10-25", "dependencies":{},
                 "nodes":[{"id":"fail","kind":"test.error_source"}],
                 "outputs":[{"name":"result","node":"fail","port":"result"}]
@@ -123,9 +153,9 @@ fn iteration_failures_preserve_item_context_and_typed_workflow_sources() {
             "nodes": [
                 {"id": "items", "kind": "builtin.constant", "config": {"value": [1]}},
                 {"id": "each", "kind": "builtin.iteration", "config": {
-                    "mode": mode, "body": {
+                    "mode": mode, "body": {"version":"2026-09-26", "dependencies":{},
                         "nodes": [{"id": "fail", "kind": "test.error_source"}],
-                        "result": {"node": "fail", "port": "result"}
+                        "outputs": [{"name":"result", "node": "fail", "port": "result"}]
                     }
                 }}
             ],
@@ -178,8 +208,8 @@ fn subgraph_compilation_preserves_nested_configuration_errors() {
         "version": "2026-09-26", "dependencies": {},
         "nodes": [
             {"id": "seed", "kind": "builtin.constant", "config": {"value": []}},
-            {"id": "each", "kind": "builtin.iteration", "config": {"body": {
-                "nodes": [broken], "result": {"node": "broken", "port": "value"}
+            {"id": "each", "kind": "builtin.iteration", "config": {"body": {"version":"2026-09-26", "dependencies":{},
+                "nodes": [broken], "outputs": [{"name":"result", "node": "broken", "port": "value"}]
             }}}
         ],
         "edges": [{"from_node": "seed", "from_output": "value", "to_node": "each", "to_input": "items"}]
@@ -197,11 +227,25 @@ fn subgraph_compilation_preserves_nested_configuration_errors() {
 fn malformed_iteration_configuration_remains_a_typed_json_error() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-26", "dependencies": {},
-        "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {"mode": "invalid"}}]
+        "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {
+            "mode": "invalid", "body": {
+                "version": "2026-09-26", "dependencies": {},
+                "nodes": [{"id": "value", "kind": "builtin.constant", "config": {"value": 1}}],
+                "outputs": [{"name": "result", "node": "value", "port": "value"}]
+            }
+        }}]
     }))
     .unwrap();
-    let error = plan_definition(&definition).unwrap_err();
-    assert!(error.to_string().contains("each"));
+    // Ordinary receiver configuration is decoded only after its valid child is prepared.
+    plan_definition(&definition).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let error = compile_definition(&definition, &registry).unwrap_err();
+    assert!(
+        matches!(&error, WorkflowCompileError::NodeConstruction {
+            definition_id, kind, source: NodeBuildError::InvalidConfiguration { source },
+        } if definition_id.as_str() == "each" && kind == "builtin.iteration" && source.is_data()),
+        "{error:?}"
+    );
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
 }
 
@@ -212,8 +256,11 @@ fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
     }]}));
     let error = plan_definition(&definition).unwrap_err();
     assert!(
-        matches!(error, WorkflowCompileError::LoopAssignmentConfiguration { ref path, .. }
-        if path == "[\"repeat\",\"assign\"]")
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "repeat"
+                && matches!(source.as_ref(), WorkflowCompileError::ScopeConfiguration { path, .. }
+                    if path == "[\"repeat\",\"assign\"]")),
+        "{error:?}"
     );
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
 
@@ -221,11 +268,13 @@ fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
         "id": "assign", "kind": "workflow.loop_assign", "config": {"variable": " "}
     }]}));
     let error = plan_definition(&definition).unwrap_err();
-    assert!(matches!(error, WorkflowCompileError::InvalidLoop { .. }));
     assert!(
-        error
-            .to_string()
-            .contains("assignment variable must not be blank")
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "repeat"
+                && matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
+                    if path == "[\"repeat\",\"assign\"]"
+                        && message == "assignment variable must not be blank")),
+        "{error:?}"
     );
 }
 
@@ -237,8 +286,8 @@ fn loop_structure_errors_preserve_the_typed_inner_compilation_error() {
     }));
     let error = plan_definition(&definition).unwrap_err();
     assert!(
-        matches!(error, WorkflowCompileError::LoopBody { ref path, .. }
-        if path == "[\"repeat\"]")
+        matches!(error, WorkflowCompileError::ChildGraph { ref definition_id, .. }
+        if definition_id.as_str() == "repeat")
     );
     assert!(
         matches!(find_source::<Box<WorkflowCompileError>>(&error).unwrap().as_ref(),
@@ -411,6 +460,7 @@ fn filesystem_contexts_preserve_the_failing_path_and_io_source() {
 
     let directory = root.path().join("managed");
     fs::create_dir(&directory).unwrap();
+    let directory = fs::canonicalize(directory).unwrap();
     let marker = directory.join(".mf-owner.json");
     fs::create_dir(&marker).unwrap();
     let error = mf_compiler::BuildDirectory::open(&definition, Some(&directory))
@@ -475,15 +525,13 @@ fn pipeline_context_preserves_definition_parse_errors() {
 #[test]
 fn loop_validation_preserves_variable_and_descriptor_sources() {
     let mut definition = loop_definition(json!({"nodes": []}));
-    definition.nodes[1]
-        .loop_definition
-        .as_mut()
-        .unwrap()
-        .variables[0]
-        .value_type = json!("unknown");
+    definition.nodes[1].config["variables"][0]["type"] = json!("unknown");
     let error = plan_definition(&definition).unwrap_err();
     assert!(
-        matches!(&error, WorkflowCompileError::LoopVariables { path, .. } if path == "[\"repeat\"]")
+        matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+            if definition_id.as_str() == "repeat"
+                && matches!(source.as_ref(), WorkflowCompileError::ScopeVariables { path, .. }
+                    if path == "[\"repeat\"]"))
     );
     assert!(find_source::<mf_runtime::LoopVariableError>(&error).is_some());
     assert!(
@@ -503,21 +551,76 @@ fn loop_validation_preserves_variable_and_descriptor_sources() {
 }
 
 #[test]
-fn iteration_validation_preserves_the_structural_source() {
+fn iteration_validation_preserves_the_structural_graph_error() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-26", "dependencies": {},
-        "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {"body": {
+        "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {"body": {"version":"2026-09-26", "dependencies":{},
             "nodes": [{"id": "%iteration", "kind": "builtin.constant", "config": {"value": 1}}],
-            "result": {"node": "%iteration", "port": "value"}
+            "outputs": [{"name":"result", "node": "%iteration", "port": "value"}]
         }}}]
     }))
     .unwrap();
-    let error = plan_definition(&definition).unwrap_err();
-    assert!(
-        matches!(&error, WorkflowCompileError::IterationValidation { definition_id, .. } if definition_id.as_str() == "each")
-    );
-    assert!(
-        matches!(find_source::<mf_compiler::IterationValidationError>(&error).unwrap(),
-        mf_compiler::IterationValidationError::ReservedNode { node } if node.as_str() == "%iteration")
-    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for error in [
+        plan_definition(&definition).unwrap_err(),
+        compile_definition(&definition, &registry).unwrap_err(),
+        mf_compiler::resolve_nodes(&definition, &registry)
+            .err()
+            .unwrap(),
+        mf_compiler::compile_resolved_definition(&definition, &registry).unwrap_err(),
+    ] {
+        assert!(
+            matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
+                if definition_id.as_str() == "each"
+                    && matches!(source.as_ref(), WorkflowCompileError::ScopeStructure { source, .. }
+                        if matches!(source, mf_compiler::ScopeStructureError::ReservedNode { node }
+                            if node.as_str() == "%iteration"))),
+            "{error:?}"
+        );
+        assert!(find_source::<mf_compiler::ScopeStructureError>(&error).is_some());
+    }
+}
+
+#[test]
+fn authoring_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for id in [mf_runtime::ITERATION_INPUT_ID, "authored-input"] {
+        let child: WorkflowDefinition = serde_json::from_value(json!({
+            "version": "2026-10-28", "dependencies": {},
+            "nodes": [{"id": id, "kind": mf_runtime::ITERATION_INPUT_KIND}]
+        }))
+        .unwrap();
+        let error = mf_compiler::compile_resolved_definition(&child, &registry).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                WorkflowCompileError::InvalidScope { path, message }
+                    if path == &json!([id]).to_string()
+                        && message == "reserved scope source requires its canonical enclosing scope"
+            ),
+            "{error}"
+        );
+        assert!(error.source().is_none());
+
+        let caller: WorkflowDefinition = serde_json::from_value(json!({
+            "version": "2026-10-28", "dependencies": {},
+            "nodes": [{"id": "invoke", "kind": "workflow.call", "config": {
+                "flow": "frozen-child", "body": child
+            }}]
+        }))
+        .unwrap();
+        let error = mf_compiler::compile_resolved_definition(&caller, &registry).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                WorkflowCompileError::ChildGraph { definition_id, source }
+                    if definition_id.as_str() == "invoke"
+                        && matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
+                            if path == &json!(["invoke", id]).to_string()
+                                && message == "reserved scope source requires its canonical enclosing scope")
+            ),
+            "{error}"
+        );
+        assert!(find_source::<Box<WorkflowCompileError>>(&error).is_some());
+    }
 }

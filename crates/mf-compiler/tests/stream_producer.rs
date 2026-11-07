@@ -570,6 +570,7 @@ fn preparation_infers_root_producers_and_rejects_invalid_explicit_bindings() {
     assert!(
         compile_definition(&definition, &registry)
             .unwrap()
+            .graph
             .definition
             .execution
             .is_some()

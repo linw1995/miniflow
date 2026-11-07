@@ -1,4 +1,8 @@
 #![allow(dead_code)]
+
+#[cfg(feature = "codegen")]
+pub mod embedding_coverage;
+
 use mf_compiler::{CompiledWorkflow, WorkflowDefinition};
 use std::path::{Path, PathBuf};
 
@@ -27,9 +31,31 @@ pub fn fixture_definition() -> WorkflowDefinition {
         "outputs":[{"name":"result","node":"b","port":"value"}]
     }).to_string()).unwrap()
 }
+pub fn assert_receiver_binding_preflight(error: &mf_compiler::WorkflowCompileError, owner: &str) {
+    let mf_compiler::WorkflowCompileError::CompiledGraph { source } = error else {
+        panic!("expected compiled receiver-binding preflight, got {error:?}");
+    };
+    let mf_compiler::WorkflowBuildError::InvalidDefinition {
+        definition_id,
+        message,
+    } = source.as_ref()
+    else {
+        panic!("expected receiver-binding rejection before a factory, got {error:?}");
+    };
+    assert_eq!(definition_id.as_str(), owner);
+    assert_eq!(
+        message,
+        "receiving Flow parameter declarations differ from the compiled binding set"
+    );
+}
+
 pub fn fixture_plan() -> CompiledWorkflow {
     CompiledWorkflow {
-        definition: fixture_definition(),
-        execution_order: vec!["a".into(), "b".into()],
+        graph: mf_runtime::CompiledGraph {
+            definition: fixture_definition(),
+            execution_order: vec!["a".into(), "b".into()],
+            relations: Default::default(),
+            children: Default::default(),
+        },
     }
 }

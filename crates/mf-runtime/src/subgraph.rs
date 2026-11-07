@@ -224,12 +224,16 @@ pub struct PreparedSubgraph {
     pub inputs: crate::WorkflowInputSchema,
     pub outputs: Vec<PortSpec>,
     pub stream_outputs: Vec<PortSpec>,
+    /// Engine relationships supplied by a compiled graph's preparer.
+    /// `None` denotes a manually prepared body without compiled graph facts.
+    pub relations: Option<crate::GraphRelations>,
     input_metadata: SubgraphInputMetadata,
     body: PreparedSubgraphBody,
 }
 
 #[derive(Clone)]
 enum PreparedSubgraphBody {
+    Flow(Flow),
     Finite(Arc<SubgraphBody>),
     Event(Arc<dyn Fn() -> Result<crate::PreparedStream, WorkflowRunError> + Send + Sync>),
 }
@@ -306,6 +310,56 @@ impl<N: SubgraphNode> crate::TaskStreamNode for SubgraphTask<N> {
 }
 
 impl PreparedSubgraph {
+    /// Retains an already compiled Flow and captures its execution interface metadata.
+    pub fn from_flow(flow: Flow, nodes: Vec<NodeIdentity>) -> Self {
+        let outputs = flow
+            .plan()
+            .outputs
+            .iter()
+            .map(|output| {
+                let port = flow
+                    .node_metadata(&output.node_id)
+                    .expect("validated output node")
+                    .ports
+                    .outputs
+                    .iter()
+                    .find(|port| port.name == output.port)
+                    .expect("validated output port");
+                PortSpec::owned(
+                    output.name.as_ref(),
+                    port.value_type.clone(),
+                    !output.optional,
+                )
+            })
+            .collect();
+        let inputs = flow.input_schema().clone();
+        let input_metadata = SubgraphInputMetadata::from_flow(&flow);
+        let stream_outputs = flow.stream_output_ports();
+        Self {
+            nodes,
+            inputs,
+            outputs,
+            stream_outputs,
+            relations: None,
+            input_metadata,
+            body: PreparedSubgraphBody::Flow(flow),
+        }
+    }
+
+    /// Recovers an actual compiled Flow for injection into a typed node configuration.
+    /// Host callbacks and Event factories have no equivalent finite Flow representation.
+    pub fn into_flow(self) -> Result<Flow, crate::NodeBuildError> {
+        match self.body {
+            PreparedSubgraphBody::Flow(flow) => Ok(flow),
+            PreparedSubgraphBody::Finite(_) | PreparedSubgraphBody::Event(_) => {
+                crate::NodeInvalidSubgraphSnafu {
+                    message: "prepared body is not backed by a compiled finite Flow",
+                }
+                .fail()
+            }
+        }
+    }
+
     pub fn new(
         nodes: Vec<NodeIdentity>,
         outputs: Vec<PortSpec>,
@@ -334,6 +388,7 @@ impl PreparedSubgraph {
             inputs: Default::default(),
             outputs,
             stream_outputs,
+            relations: None,
             input_metadata: Default::default(),
             body: PreparedSubgraphBody::Finite(Arc::new(body)),
         }
@@ -355,6 +410,7 @@ impl PreparedSubgraph {
             inputs,
             outputs: Vec::new(),
             stream_outputs,
+            relations: None,
             input_metadata: Default::default(),
             body: PreparedSubgraphBody::Event(Arc::new(factory)),
         }
@@ -371,6 +427,13 @@ impl PreparedSubgraph {
         context: ExecutionContext,
     ) -> Result<crate::FlowInvocation, WorkflowRunError> {
         match &self.body {
+            PreparedSubgraphBody::Flow(flow) => {
+                let flow = flow.clone();
+                crate::FlowInvocation::start_body(
+                    Arc::new(move |state, sink| flow.execute_with_sink(state, sink)),
+                    context,
+                )
+            }
             PreparedSubgraphBody::Finite(body) => {
                 crate::FlowInvocation::start_body(body.clone(), context)
             }
@@ -380,6 +443,32 @@ impl PreparedSubgraph {
                     .map(crate::FlowInvocation::from_stream)
             }
         }
+    }
+
+    /// Records the actual engine relationships of the compiled body.
+    pub fn with_relations(mut self, relations: crate::GraphRelations) -> Self {
+        self.relations = Some(relations);
+        self
+    }
+
+    /// Returns the compiled child edge key, or the owner ID for a manually prepared body.
+    pub fn scope_key(&self, owner: &str, binding: &str) -> String {
+        match &self.relations {
+            None => owner.to_owned(),
+            Some(relations) => relations
+                .key
+                .clone()
+                .unwrap_or_else(|| crate::ScopePathEntry::binding_key(owner, binding)),
+        }
+    }
+
+    /// Returns the frame input declared by the compiled body's relationships.
+    pub fn scope_input(&self) -> Option<&crate::DefinitionId> {
+        self.relations
+            .as_ref()?
+            .scope
+            .as_ref()
+            .map(|scope| &scope.input)
     }
 
     /// Sets a manually supplied flat schema without inferring independent Flows.
@@ -425,6 +514,7 @@ impl PreparedSubgraph {
         sink: &mut dyn crate::EmissionSink,
     ) -> Result<FlowOutputs, WorkflowRunError> {
         match &self.body {
+            PreparedSubgraphBody::Flow(flow) => flow.execute_with_sink(state, sink),
             PreparedSubgraphBody::Finite(body) => body(state, sink),
             PreparedSubgraphBody::Event(_) => {
                 let context = state.fork_domain_with_observation(state.observation().cloned());
@@ -499,6 +589,103 @@ impl crate::EmissionSink for ProjectedSink<'_> {
 mod tests {
     use super::*;
     use crate::{EmissionSink, NodeId, NodeResult, ValueRef, ValueType};
+
+    #[test]
+    fn compiled_body_recovers_the_same_shared_flow_and_interface() {
+        let flow = Flow::from_plan(
+            Vec::new(),
+            crate::FlowPlan {
+                connections: Vec::new().into(),
+                dependencies: Vec::new().into(),
+                execution_order: Vec::new().into(),
+                outputs: Vec::new().into(),
+                execution_domains: crate::ExecutionDomains::from_parts(
+                    Vec::new().into(),
+                    Vec::new().into(),
+                ),
+            },
+            WorkflowInputSchema::default(),
+        );
+        let prepared = PreparedSubgraph::from_flow(flow.clone(), Vec::new());
+        assert!(prepared.relations.is_none());
+        assert_eq!(&prepared.inputs, flow.input_schema());
+        assert_eq!(
+            prepared.input_metadata(),
+            &SubgraphInputMetadata::from_flow(&flow)
+        );
+        assert!(!prepared.is_event_stream());
+        let injected = prepared.into_flow().unwrap();
+        assert!(std::ptr::eq(flow.plan(), injected.plan()));
+    }
+
+    #[test]
+    fn callbacks_and_events_cannot_be_injected_as_compiled_flows() {
+        let callback = PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
+            panic!("conversion must not execute the callback")
+        });
+        let event = PreparedSubgraph::from_stream_factory(
+            Vec::new(),
+            WorkflowInputSchema::default(),
+            Vec::new(),
+            || panic!("conversion must not instantiate an Event flow"),
+        );
+        for prepared in [callback, event] {
+            assert!(prepared.relations.is_none());
+            assert!(matches!(
+                prepared.into_flow(),
+                Err(crate::NodeBuildError::InvalidSubgraph { message })
+                    if message.contains("prepared body") && message.contains("compiled finite Flow")
+            ));
+        }
+    }
+
+    #[test]
+    fn relations_builder_is_retained_by_clones_without_changing_the_original() {
+        let original = PreparedSubgraph::streaming(Vec::new(), Vec::new(), Vec::new(), |_, _| {
+            panic!("metadata changes must not execute the callback")
+        });
+        assert!(original.relations.is_none());
+        assert!(original.scope_input().is_none());
+        let relations = crate::GraphRelations {
+            scope: Some(crate::ScopeRelations {
+                input: "custom-input".into(),
+                values: Default::default(),
+                state_outputs: Default::default(),
+                writes: Default::default(),
+                exits: Default::default(),
+            }),
+            ..Default::default()
+        };
+        let prepared = original.clone().with_relations(relations.clone());
+        assert_eq!(prepared.relations.as_ref(), Some(&relations));
+        assert_eq!(prepared.scope_input().unwrap().as_str(), "custom-input");
+        let cloned = prepared.clone();
+        assert_eq!(cloned.relations, prepared.relations);
+        assert!(original.relations.is_none());
+        let callable = cloned.with_relations(crate::GraphRelations::default());
+        assert!(callable.relations.is_some());
+        assert!(callable.scope_input().is_none());
+        assert_eq!(prepared.scope_input().unwrap().as_str(), "custom-input");
+    }
+
+    #[test]
+    fn scope_keys_distinguish_manual_compiled_and_explicit_bindings() {
+        let manual = PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
+            panic!("reading scope keys must not execute the body")
+        });
+        assert_eq!(manual.scope_key("owner", "body"), "owner");
+        let compiled = manual.with_relations(crate::GraphRelations::default());
+        assert_eq!(
+            compiled.scope_key("owner", "body"),
+            crate::ScopePathEntry::binding_key("owner", "body")
+        );
+        let mapped_key = crate::ScopePathEntry::binding_key("mapped-owner", "selected");
+        let mapped = compiled.with_relations(crate::GraphRelations {
+            key: Some(mapped_key.clone()),
+            ..Default::default()
+        });
+        assert_eq!(mapped.scope_key("owner", "body"), mapped_key);
+    }
 
     #[test]
     fn projection_preserves_nested_sensitivity_and_marks_other_children_skipped() {

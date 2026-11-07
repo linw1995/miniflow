@@ -282,6 +282,8 @@ fn call_scopes_preserve_body_outcomes_and_complete_integrity() {
     });
     description.loop_bodies = vec![LoopBodyDescription {
         path: vec!["call".into()],
+        source: None,
+        state_outputs: Default::default(),
         nodes: description.nodes.clone(),
         data_edges: description.data_edges.clone(),
         control_edges: vec![],
@@ -426,6 +428,8 @@ fn loop_graph() -> WorkflowDescription {
         loop_bodies: vec![LoopBodyDescription {
             order_edges: Vec::new(),
             path: vec!["repeat".into()],
+            source: Some("%loop".into()),
+            state_outputs: [("value".into(), "value".into())].into(),
             nodes: vec![
                 NodeDescription {
                     id: "%loop".into(),

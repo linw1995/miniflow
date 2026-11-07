@@ -9,9 +9,14 @@ node validation, execution, and portable distribution.
 
 ### Requirement: Generate source without linked nodes
 
-The compiler SHALL provide a build helper that reads and structurally plans definitions without a
-registry or linked node crates. It SHALL emit Cargo input tracking and named source modules without
-executing node constructors, business operations, or a nested Cargo build.
+The compiler SHALL provide a build helper that parses and checks the entry graph's endpoints, IDs,
+and cycles without a registry or linked node crates. It SHALL pack the entry and explicitly listed
+source files into a `FlowSourceBundle`, emitting Cargo input tracking and named source modules without
+interpreting provider configuration, executing node constructors, business operations, or a nested
+Cargo build. The build-product bundle SHALL contain only its entry and resources, not a partial
+`ResolvedWorkflow` or selected contracts. Generated `plan(registry)` SHALL resolve that bundle into a
+host `ResolvedWorkflow` and pass it to `plan_resolved_workflow`. Declared child resolution and complete
+structural planning SHALL occur in the host with its selected registry.
 
 #### Scenario: Build without node build dependencies
 
@@ -22,6 +27,22 @@ executing node constructors, business operations, or a nested Cargo build.
 
 - **WHEN** a definition is malformed or has invalid endpoints, duplicate IDs, or a cycle
 - **THEN** source generation fails with typed sources before replacing modules
+
+### Requirement: Separate CLI discovery from final resolution
+
+The CLI SHALL discover the selected provider dependency closure before final source resolution. Partial
+`FlowDiscovery` results SHALL NOT be represented as `ResolvedWorkflow`. Once the closure stabilizes,
+the selected provider-linked process SHALL fully resolve the original sources once, preserving lexical
+source and dependency paths, selected-provider contracts, and public builtin namespace ownership.
+The CLI SHALL freeze the resulting plan before runner compilation; standalone startup SHALL NOT load
+or resolve authoring sources. Locked discovery and authoritative-lock validation SHALL retain their
+existing behavior.
+
+#### Scenario: Resolve after provider closure convergence
+
+- **WHEN** nested sources add provider packages or features during discovery
+- **THEN** final resolution uses the stable selected registrations, not the CLI host inventory
+- **AND** relative provider and child-source paths keep their declaring-file directory semantics
 
 ### Requirement: Include isolated modules in Rust hosts
 
@@ -75,9 +96,24 @@ and snapshots through existing runtime APIs.
 
 ### Requirement: Expose plans and current manifests
 
-Modules SHALL expose their structural `CompiledWorkflow` and derive existing-format manifests from
-current host metadata. Inspection SHALL prepare metadata without executing business operations.
-Embedding SHALL NOT freeze a build-time startup schema or emit executable manifest sections.
+Modules SHALL expose `plan(&NodeRegistry)` returning their structural `CompiledWorkflow` and derive
+runtime manifests from current host metadata. Planning SHALL authorize child fields through
+the supplied registry, resolve sources from the packed resources and host builtin Flow registrations,
+and reuse shared compiler normalization without constructing nodes. Ordinary configuration SHALL remain
+opaque. Inspection SHALL prepare metadata without executing business operations. Embedding SHALL NOT
+freeze a build-time startup schema or emit executable manifest sections. Compiled plans and manifest
+payload version `2026-11-06` SHALL retain an explicit `graph` containing its definition, canonical
+execution order, and recursively compiled children keyed by receiving node ID and field name.
+Receiver callbacks SHALL select child values during source resolution; ordinary JSON SHALL remain
+opaque and absent optional children SHALL have no graph entry. `ResolvedWorkflow` SHALL preserve the
+actual selected child tree for `plan_resolved_workflow`. Offline traversal SHALL use graph children,
+not infer roles from configuration keys or order paths. Saved-plan and generated preparation SHALL
+validate provider availability and actual compiled-child binding keys at the receiving boundary;
+required/default and ordinary-field validation SHALL remain receiver-decoder responsibilities.
+Neither saved plans nor manifests SHALL persist parameter-type schemas or separate loop orders.
+Manifests SHALL contain `version`, `graph`, and prepared `input_schema`; saved plans SHALL require the
+`graph` wrapper. Older formats SHALL be rejected without inference or adaptation; framing SHALL
+remain version 1.
 
 #### Scenario: Use current node metadata
 
@@ -91,14 +127,29 @@ Embedding SHALL NOT freeze a build-time startup schema or emit executable manife
 
 ### Requirement: Rebuild inputs and run without sources
 
-Definition edits SHALL regenerate source in warm builds. Node changes SHALL be normal dependency
-rebuilds and affect preparation without build-time node validation. Built programs SHALL prepare
-and execute without definitions, generated files, or build tools.
+Entry and explicitly listed source edits SHALL regenerate source in warm builds. Source paths SHALL
+be manifest-relative package-contained files without symlink traversal; relative references SHALL
+resolve from the declaring file's embedded directory. The helper SHALL NOT infer resources from
+ordinary JSON or collect undeclared files. Missing packed resources SHALL fail with typed errors
+without filesystem fallback, even if a matching file exists on disk. Node changes SHALL be normal
+dependency rebuilds and affect preparation without build-time node validation. Built programs SHALL
+prepare and execute without definitions, generated files, or build tools.
 
 #### Scenario: Edit a definition
 
 - **WHEN** a host rebuilds after editing its definition without cleaning
 - **THEN** the module and execution reflect the edit
+
+#### Scenario: Resolve declared children using host-only providers
+
+- **WHEN** only normal dependencies register a custom Flow receiver or builtin Flow
+- **THEN** host planning resolves its children using those registrations without build-linked providers
+- **AND** unregistered ordinary configuration never gains child-source authority
+
+#### Scenario: Refer to an unpacked source
+
+- **WHEN** an authorized child references a file not listed as an embedded source
+- **THEN** host planning fails without reading any matching build-machine or deployment file
 
 #### Scenario: Change a target node
 

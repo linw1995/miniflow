@@ -2,7 +2,7 @@
 
 ## JSON format
 
-Use version `2026-10-25` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+Use version `2026-10-28` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
 `outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
 display-only [node clusters](#node-clusters).
@@ -10,6 +10,13 @@ display-only [node clusters](#node-clusters).
 The [conditional convergence example](../examples/exclusive-inputs.json) and the [basic
 example](../examples/hello-workflow.json) use this format with annotated clusters. Existing supported versions keep their
 original field meanings and feature restrictions; new fields are not inferred from their shape.
+
+The root graph must specify `version`. An executable child may omit it to inherit the original root
+version, including children loaded from another file. An explicit child version overrides that default
+for that child only: a versionless grandchild still inherits the root version, not its immediate
+parent's override. Invalid or null versions are rejected. `dependencies` may be omitted when empty;
+provider dependencies are not inherited by this shorthand. Canonical serialization omits empty
+`dependencies` and records each resolved child's effective version.
 
 ### Input references
 
@@ -32,8 +39,10 @@ transformation nodes to select fields or construct another value.
 
 Input names must match the provider's ports. Duplicate keys, unknown fields, null bindings, and mixed binding variants
 fail. A connected optional input still skips its consumer when its source skips. Unbound inputs keep their existing
-required, optional, and startup parameter rules. Loop and Iteration bodies use the root version and the same binding
-syntax within their existing scope and message-domain restrictions.
+required, optional, and startup parameter rules. Loop and Iteration bodies are complete Flow definitions
+with an optional version override, independent dependency declarations, and local `flows` aliases, subject to their scope and
+message-domain restrictions. Source-file aliases used by a nested Call belong to its containing Flow,
+not an outer body's table.
 
 ## Reusable Flows
 
@@ -64,6 +73,13 @@ Paths resolve relative to their owning canonical definition file. Sources can ca
 recursive references and more than sixteen nested calls fail. The combined Call/Loop/Iteration
 container depth is bounded at twenty. The compiler freezes resolved bodies in the executable; running,
 inspecting, and isolating a compiled call do not require the original JSON files.
+
+Call bodies use the same receiving-field contract as other nodes. An explicit `config.body` can contain
+a full Flow definition or a declared source such as `{"path": "./normalize.json"}`,
+`{"builtin": "package.normalize"}`, or `{"definition": <WorkflowDefinition>}`. The required `flow`
+string remains the named selector or host-binding label; an explicit non-null body takes precedence
+over alias lookup. Resolution requires the selected Call provider to declare `body`, and freezes the
+result directly in `config.body`. The old resolved `config.definition` field is not supported.
 
 A call exposes the child startup interface using qualified port names such as `input.text`, and
 exposes its selected outputs using `outputs.name`. These names form the reusable Flow's public
@@ -114,8 +130,12 @@ for inspecting the equivalent composition.
 Rust callers loading local references use `mf_compiler::load_workflow(path)?.definition` or
 `resolve_flows(&definition, Some(directory))?.definition` before preparing the graph. Definitions with
 only built-in references can also use the existing planning and compilation entry points directly.
-`embed_workflows` resolves sources and emits Cargo rebuild dependencies for every referenced file.
-For host-owned Cargo dependencies, use `load_embedded_workflow` followed by
+`embed_workflows` packs the root and files explicitly listed with `EmbedRequest::with_source`, emitting
+Cargo rebuild dependencies for those files without linking providers in the build script. Generated
+modules resolve declared children with the host registry in `plan(&registry)`, `manifest(&registry)`,
+and preparation. They never fall back to the filesystem for missing packed sources. See
+[embedding workflows](embedding.md) for the two-stage API. For dynamic loading with host-owned Cargo
+dependencies, use `load_embedded_workflow` followed by
 `compile_resolved_definition`; provider declarations remain provenance and their paths need not exist.
 `mf_chat::WorkflowProfile::from_path` provides this path-loading behavior for chat profiles.
 
@@ -128,6 +148,66 @@ these process-local bindings are not serialized into generated runners. Executor
 call arguments through `ExecutionContext::workflow_arguments` and implement their own transport and
 startup binding. `mf run runner --chat` uses this mechanism to invoke a precompiled runner, including
 its native stream coordinator, without rebuilding it or linking its custom nodes into the CLI.
+
+## Passed subgraphs for custom nodes
+
+Providers expose executable child values through receiver callbacks. `NodeConfig` derives extraction
+for fields typed `Flow` (or `Option<Flow>`); users do not add a separate declaration or change workflow
+versions. A declared field accepts a local path, a built-in name, or an inline definition:
+
+```json
+{
+  "version": "2026-10-28",
+  "dependencies": {},
+  "nodes": [{
+    "id": "dispatch",
+    "kind": "my-provider.dispatch",
+    "config": {
+      "body": {
+        "definition": {
+          "version": "2026-10-28",
+          "dependencies": {},
+          "nodes": [{"id": "value", "kind": "builtin.constant", "config": {"value": "hello"}}],
+          "outputs": [{"name": "content", "node": "value", "port": "value"}]
+        }
+      }
+    }
+  }]
+}
+```
+
+This fragment assumes a provider registering `my-provider.dispatch` with `NodeFactory::Subgraph`
+and `Config::flow_parameters` extracting a `body: Flow` field; it is not a new core built-in. Alternatively, use
+`"body": {"path": "./worker.json"}` or `"body": {"builtin": "my-provider.worker"}`. Relative paths
+belong to the source file that declares them. Providers decide their own input ports, selection,
+child arguments, execution policy, result shape, and error handling. There is no global Flow environment
+or parameter-alias mapping: the configuration field name is the prepared-child map key and static scope identity.
+
+Source loading calls the selected receiver's `flow_parameters` callback, resolves only the returned
+child values, and merges child dependencies for standalone compilation. Planning freezes that selected
+child tree as explicit `CompiledGraph.children`; saved plans do not rediscover children from JSON.
+Resolved child graphs are compiled into executable Flow objects and injected into those fields. JSON shape alone grants no executable
+authority; ordinary fields containing `definition` or `path` remain ordinary data.
+Missing required fields and malformed values fail configuration validation;
+omitted optional Flow fields grant no handle. Every supplied body is validated before execution,
+including unselected ones. Metadata inspection and child preparation never execute workflow work.
+
+Generated runners construct prepared children from compiled plans without loading source files or
+interpreting executable JSON at runtime. Runtime selector data cannot add children or discover unpassed
+global registrations. Explicit host-executor bindings retain the existing frozen-definition checks and
+cannot be emitted into standalone runners. The current authored/compiler-prepared child path supports
+finite callable bodies, including compatible TaskStream forwarding, but does not prepare autonomous
+Event/Stream children. The runtime separately supports factory-backed Event handles through
+`PreparedSubgraph::from_stream_factory` and the shared `FlowInvocation` lifecycle. That runtime capability
+does not itself add authored Event-child preparation or generated fresh-state factories.
+
+This feature does not add dynamic call targets, prescribe routers, or introduce a standard
+argument/result envelope. Call, Loop, Iteration, and custom nodes share one declared-child preparation
+and map-based factory contract. Every body uses the same complete Flow definition format under
+ordinary configuration; no legacy Loop/Iteration body adapter is retained. Per-pass/per-item scope
+and lifecycle semantics remain distinct. This does not wrap loops in Calls or expand child
+Event/Stream scheduler support. See
+[node development](node-development.md#receive-and-execute-passed-subgraphs) for the public APIs.
 
 ## Node clusters
 
@@ -203,9 +283,17 @@ relative to the definition in `examples/`):
 
 Paths resolve relative to the canonical definition's directory, including when the definition is accessed through a symlink. `order.json` uses `order.lock`; `order.flow.json` uses `order.flow.lock`. An extensionless definition has `.lock` appended. Different Flows can use independent dependencies in one directory. Compilation never rewrites the definition.
 
+CLI provider discovery and final source resolution are separate phases. Temporary provider probes may repeat
+metadata discovery until the selected dependency closure stabilizes. Their partial handoff is a `FlowDiscovery`,
+not a `ResolvedWorkflow`. The stable provider-linked process then fully resolves the original sources once,
+using its selected registrations rather than the CLI host's registry. The CLI calls `plan_resolved_workflow`
+with that result to freeze the standalone plan. Source and provider paths retain their declaring-file semantics,
+including sources outside the root's directory. The runner does not perform startup source resolution.
+Existing `--locked` validation, authoritative-lock handling, and discovery retries remain unchanged.
+
 ## Migrate older definitions
 
-Definitions with version `2026-09-24` are rejected with a migration diagnostic. Change the version to `2026-09-26` and add `dependencies` declaring the packages that provide every node kind, including built-ins. An empty object is valid for definitions that require no plugins. Node configuration, connections, and selected outputs retain their meanings.
+Definitions with version `2026-09-24` are rejected with a migration diagnostic. Change the version to `2026-09-26` and add `dependencies` declaring the packages that provide every node kind, including built-ins. Definitions that require no plugin declarations may omit `dependencies` or use an empty object. Node configuration, connections, and selected outputs retain their meanings.
 
 Built-in body sources use the `%` prefix: `%loop` for Loop variables and `%iteration` for Iteration
 items. In earlier definitions, replace `$loop` with `%loop` and `@iteration` with `%iteration` in
@@ -225,14 +313,14 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
-| `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
+| `mfn-core` | [`workflow.loop`](#structured-loop) | `config`: required `max_iterations`, `variables`, and full Flow `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
 | `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
 | `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
 | `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
 
-The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
-field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
+The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's ordinary `config`
+object, including the complete Flow definition in `config.body`. See [Structured Loop](#structured-loop) for its body and control kinds.
 
 `mfn-core` registers `builtin.iteration` for explicit dependency selection. The compiler and runtime orchestrate its
 body because an ordinary node invocation does not schedule a subgraph. Body nodes can use other linked packages
@@ -858,10 +946,12 @@ The compiler replaces the Loop declaration with an engine-prepared executor. `wo
 register. The outer graph and every Loop body remain acyclic. The engine repeats a body's fixed
 execution order instead of adding a graph back edge.
 
-A Loop node has a typed `loop` field with required `max_iterations`, a nonempty `variables` list, an
-optional `until` condition, and a `body` containing ordinary nodes and bindings in the root definition's format.
+A Loop node's `config` has required `max_iterations`, a nonempty `variables` list, an optional `until`
+condition, and a `body` using the same Flow definition grammar. Its `version` may inherit the root,
+and empty `dependencies` may be omitted. The old top-level `loop` field is not supported.
 Each variable creates a required Loop input for its initial value and a required Loop output for its
-final value. The body reads current values and a zero-based `index` through the synthetic `%loop`
+final value. The body's terminal `outputs` must be empty; Loop returns its variables rather than a
+second set of child results. The body reads current values and a zero-based `index` through the synthetic `%loop`
 node. Every body node ID is local to that body; `%loop` and `index` are reserved there. Cross-scope
 edges and implicit reads of outer outputs are rejected. Import an outer value through a Loop input,
 including when initializing a nested Loop.
@@ -870,20 +960,19 @@ including when initializing a nested Loop.
 {
   "id": "repeat",
   "kind": "workflow.loop",
-  "loop": {
+  "config": {
     "max_iterations": 5,
     "variables": [{"name": "count", "type": "int"}],
     "until": {"variable": "count", "operator": "gte", "value": 3},
     "body": {
+      "version": "2026-10-28",
+      "dependencies": {},
       "nodes": [
         {"id": "increment", "kind": "builtin.code", "config": {
           "language": "cel", "inputs": {"count": "int"}, "code": {"next": "count + 1"}
-        }},
-        {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
-      ],
-      "edges": [
-        {"from_node": "%loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
-        {"from_node": "increment", "from_output": "next", "to_node": "assign", "to_input": "value"}
+        }, "inputs": {"count": {"from": {"node": "%loop", "port": "count"}}}},
+        {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"},
+         "inputs": {"value": {"from": {"node": "increment", "port": "next"}}}}
       ]
     }
   }
@@ -923,7 +1012,7 @@ conversation variables, parallel execution, and error-continue modes are separat
 
 ### Forwarding child streams
 
-Version `2026-10-28` adds an optional `loop.stream_outputs` map. Each key is a stream port on the Loop;
+Version `2026-10-28` adds an optional `config.stream_outputs` map. Each key is a stream port on the Loop;
 its value selects a TaskStream output from a node in that body's local scope:
 
 ```json
@@ -991,11 +1080,12 @@ array after the body has passed validation. Other input shapes fail at execution
     "mode": "sequential",
     "on_error": "terminate",
     "body": {
-      "nodes": [{ "id": "copy", "kind": "builtin.identity" }],
-      "edges": [
-        { "from_node": "%iteration", "from_output": "item", "to_node": "copy", "to_input": "input" }
-      ],
-      "result": { "node": "copy", "port": "value" }
+      "version": "2026-10-28",
+      "dependencies": {},
+      "nodes": [{ "id": "copy", "kind": "builtin.identity",
+        "inputs": { "input": { "from": { "node": "%iteration", "port": "item" } } }
+      }],
+      "outputs": [{ "name": "result", "node": "copy", "port": "value" }]
     }
   }
 }
@@ -1008,8 +1098,9 @@ and `index` (a zero-based signed integer). Maps are visited in lexicographic key
 results use that order in both execution modes. The outer `items` input holds the complete collection.
 For example, the body above maps `{"b":2,"a":1}` to `[1,2]`.
 Connect `%iteration.key` to a body input to include the key in a transformation. Body
-nodes, data bindings, and execution prerequisites use the root version's ordinary graph rules. The required `result` selects
-one body port for each item. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes
+nodes, data bindings, and execution prerequisites use the body's own Flow version and ordinary graph rules.
+The body exports exactly one required output named `result` through the standard `outputs` array,
+selecting one terminal body port for each item; the old `body.result` field is not supported. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes
 are constructed and validated before the runner is installed, including when the input collection is empty.
 
 `mode` defaults to `sequential`. `parallel` schedules up to ten item jobs through the runtime worker pool and keeps

@@ -1,6 +1,4 @@
-use crate::{
-    ControlEdgeDefinition, DefinitionId, EdgeDefinition, FlowNode, NodeDefinition, ValueType,
-};
+use crate::{FlowNode, ValueType, WorkflowDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -34,29 +32,7 @@ pub struct IterationConfig {
     pub mode: IterationMode,
     #[serde(default)]
     pub on_error: IterationErrorPolicy,
-    pub body: IterationBodyDefinition,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct IterationBodyDefinition {
-    pub nodes: Vec<NodeDefinition>,
-    #[serde(default)]
-    pub edges: Vec<EdgeDefinition>,
-    #[serde(default)]
-    pub control_edges: Vec<ControlEdgeDefinition>,
-    pub result: IterationResultDefinition,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub order_edges: Vec<crate::OrderEdgeDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub clusters: Vec<crate::ClusterDefinition>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct IterationResultDefinition {
-    pub node: DefinitionId,
-    pub port: String,
+    pub body: Box<WorkflowDefinition>,
 }
 
 pub fn iteration_input_flow_node() -> FlowNode {

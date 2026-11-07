@@ -72,7 +72,7 @@ fn structural_planning_does_not_need_a_plugin_registry() {
     let mut definition = common::fixture_definition();
     definition.nodes.reverse();
     assert_eq!(
-        plan_definition(&definition).unwrap().execution_order,
+        plan_definition(&definition).unwrap().graph.execution_order,
         vec![mf_compiler::DefinitionId::from("a"), "b".into()]
     );
     definition.edges[0].from_node = "missing".into();

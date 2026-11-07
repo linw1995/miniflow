@@ -1,4 +1,5 @@
 mod cancellation;
+mod compiled_graph;
 mod config_template;
 mod context;
 mod definition;
@@ -36,6 +37,7 @@ mod workflow_manifest;
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
+pub use compiled_graph::{CompiledGraph, GraphRelations, ScopeInstruction, ScopeRelations};
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
     ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult, NodeResult,
@@ -44,8 +46,8 @@ pub use context::{
 };
 pub use definition::{
     CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
-    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, FlowSource,
-    InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
+    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, FlowParameterError,
+    FlowSource, InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID,
     LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
     MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
     NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
@@ -67,22 +69,21 @@ pub use future_execution::FutureExecutionError;
 #[doc(hidden)]
 pub use inventory::submit as __submit_builtin_flow;
 pub use iteration::{
-    ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
-    IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
-    iteration_input_flow_node,
+    ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationConfig,
+    IterationErrorPolicy, IterationMode, iteration_input_flow_node,
 };
 pub use loop_node::{
     LoopVariableError, loop_variable_types, prepared_loop_assign, prepared_loop_exit,
     prepared_loop_source_types, prepared_scope_source,
 };
-pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
+pub use mf_runtime_derive::{NodeConfig, NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{NodeIdentity, ScopePathEntry, SkipCause};
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
     ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
     FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs,
-    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeExecution,
+    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeConfig, NodeExecution,
     NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
     NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
@@ -166,7 +167,8 @@ pub use workflow_inputs::{
 };
 
 pub use workflow_manifest::{
-    LoopExecutionOrder, MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC,
+    GraphDescriptionError, MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC,
     MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES,
-    WorkflowManifest, WorkflowManifestError, WorkflowManifestVersion, describe_definition,
+    ObservationSnafu as GraphObservationSnafu, WorkflowManifest, WorkflowManifestError,
+    WorkflowManifestVersion, describe_graph,
 };

@@ -84,7 +84,7 @@
     {
       "id": "repeat",
       "kind": "workflow.loop",
-      "loop": {
+      "config": {
         "max_iterations": 2,
         "variables": [
           {
@@ -138,6 +138,8 @@
           "value": "failed"
         },
         "body": {
+          "version": "2026-10-28",
+          "dependencies": {},
           "nodes": [
             {
               "id": "chat",

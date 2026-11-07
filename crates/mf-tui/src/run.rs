@@ -1844,11 +1844,10 @@ fn scope_passes<'a>(
 
 fn is_static_body(description: &WorkflowDescription, path: &[String]) -> bool {
     (1..=path.len()).any(|depth| {
-        description.body(&path[..depth]).is_some_and(|body| {
-            body.nodes
-                .iter()
-                .any(|node| node.kind == mf_runtime::ITERATION_INPUT_KIND)
-        })
+        let scope = &path[..depth];
+        description
+            .body(scope)
+            .is_some_and(|body| body.source.is_some() && body.state_outputs.is_empty())
     })
 }
 
@@ -2275,7 +2274,10 @@ fn details_text(
                         message.domain, message.sequence
                     ));
                 }
-                if node.kind == "workflow.loop" {
+                if invocation.completed_passes > 0
+                    || invocation.active_pass.is_some()
+                    || invocation.loop_summary.is_some()
+                {
                     details.push_str(&format!(
                         "Completed passes: {}\n",
                         invocation.completed_passes
@@ -2330,18 +2332,18 @@ fn details_text(
         if node.possibly_missing_events || node.conflicted {
             details.push_str("Node observation may be incomplete\n");
         }
-        if node.kind == "workflow.loop"
-            && snapshot.stream.as_ref().is_none_or(|stream| {
-                parent_path.is_empty()
-                    && !stream.invocations.iter().any(|invocation| {
-                        invocation.node.id == node.id && invocation.path.is_empty()
-                    })
-            })
-            && let Some(loop_state) = snapshot
-                .loop_overviews
-                .iter()
-                .find(|overview| overview.parent_path == parent_path && overview.loop_id == node.id)
-        {
+        if snapshot.stream.as_ref().is_none_or(|stream| {
+            parent_path.is_empty()
+                && !stream
+                    .invocations
+                    .iter()
+                    .any(|invocation| invocation.node.id == node.id && invocation.path.is_empty())
+        }) && let Some(loop_state) = snapshot.loop_overviews.iter().find(|overview| {
+            overview.parent_path == parent_path
+                && mf_telemetry::event::ScopePathEntry::binding_owner(&overview.loop_id)
+                    .unwrap_or_else(|| overview.loop_id.clone())
+                    == node.id
+        }) {
             details.push_str(&format!(
                 "Completed passes: {}\n",
                 loop_state.completed_passes
@@ -3090,7 +3092,7 @@ mod tests {
             "nodes":[{"id":"first","kind":"workflow.loop"},{"id":"second","kind":"workflow.loop"}],
             "data_edges":[],"control_edges":[],"execution_order":["first","second"],
             "loop_bodies":(["first","second"].map(|id| serde_json::json!({
-                "path":[id],"nodes":[{"id":"%loop","kind":"%loop"},{"id":"source","kind":"fixture.task"},{"id":"target","kind":"fixture.task"}],
+                "path":[id],"source":"%loop","state_outputs":{"value":"value"},"nodes":[{"id":"%loop","kind":"%loop"},{"id":"source","kind":"fixture.task"},{"id":"target","kind":"fixture.task"}],
                 "data_edges":[{"from_node":"source","from_output":"value","to_node":"target","to_input":"input"}],
                 "control_edges":[],"execution_order":["%loop","source","target"]
             })))
@@ -3206,9 +3208,9 @@ mod tests {
             "nodes":[{"id":"repeat","kind":"workflow.loop"}],
             "execution_order":["repeat"], "data_edges":[], "control_edges":[],
             "loop_bodies":[
-                {"path":["repeat"], "nodes":[{"id":"%loop","kind":"%loop"},{"id":"each","kind":"builtin.iteration"}],
+                {"path":["repeat"], "source":"%loop", "state_outputs":{"value":"value"}, "nodes":[{"id":"%loop","kind":"%loop"},{"id":"each","kind":"builtin.iteration"}],
                  "execution_order":["%loop","each"], "data_edges":[], "control_edges":[]},
-                {"path":["repeat","each"], "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
+                {"path":["repeat","each"], "source":"%iteration", "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
                  "execution_order":["%iteration","work"], "data_edges":[], "control_edges":[]}
             ]
         })).unwrap();
@@ -3305,7 +3307,7 @@ mod tests {
             "version":"2026-10-23", "workflow_id":format!("sha256:{}", "9".repeat(64)),
             "execution":{"mode":"single"}, "nodes":[{"id":"each","kind":"builtin.iteration"},{"id":"other","kind":"builtin.iteration"}],
             "execution_order":["each","other"], "data_edges":[], "control_edges":[],
-            "loop_bodies":(["each", "other"].map(|id| serde_json::json!({"path":[id], "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
+            "loop_bodies":(["each", "other"].map(|id| serde_json::json!({"path":[id], "source":"%iteration", "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"work","kind":"fixture.work"}],
             "execution_order":["%iteration","work"], "data_edges":[], "control_edges":[]})))
         })).unwrap();
         let run = RunId::new();
@@ -3478,7 +3480,7 @@ mod tests {
             "execution":{"mode":"single"}, "nodes":[{"id":"each","kind":"builtin.iteration"}],
             "execution_order":["each"], "data_edges":[], "control_edges":[],
             "loop_bodies":[
-                {"path":["each"], "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"call","kind":"workflow.call"}],
+                {"path":["each"], "source":"%iteration", "nodes":[{"id":"%iteration","kind":"builtin.iteration_input"},{"id":"call","kind":"workflow.call"}],
                  "execution_order":["%iteration","call"], "data_edges":[], "control_edges":[]},
                 {"path":["each","call"], "nodes":[{"id":"work","kind":"fixture.work"}],
                  "execution_order":["work"], "data_edges":[], "control_edges":[]}
@@ -4233,6 +4235,8 @@ mod tests {
             .push("nested".into());
         let mut nested = description.loop_bodies[1].clone();
         nested.path = vec!["first".into(), "nested".into()];
+        nested.source = None;
+        nested.state_outputs.clear();
         nested.nodes.remove(0);
         nested.execution_order.remove(0);
         description.loop_bodies.push(nested);
@@ -4622,18 +4626,23 @@ mod tests {
     #[test]
     fn iteration_bodies_are_static_and_cannot_be_used_as_loop_lifecycle_paths() {
         let mut description = scope_fixture();
+        description.loop_bodies[0].nodes[1].kind = "builtin.iteration_input".into();
+        assert!(!is_static_body(&description, &["first".into()]));
         description.version = WorkflowDescriptionVersion::V2026_10_19;
         description.execution = Some(mf_telemetry::description::ExecutionDescription {
             mode: mf_telemetry::description::ExecutionMode::Single,
         });
-        description.nodes[0].kind = "builtin.iteration".into();
-        description.loop_bodies[0].nodes[0].id = mf_runtime::ITERATION_INPUT_ID.into();
-        description.loop_bodies[0].nodes[0].kind = mf_runtime::ITERATION_INPUT_KIND.into();
-        description.loop_bodies[0].execution_order[0] = mf_runtime::ITERATION_INPUT_ID.into();
+        description.nodes[0].kind = "foreign.iterator".into();
+        description.loop_bodies[0].source = Some("renamed-input".into());
+        description.loop_bodies[0].state_outputs.clear();
+        description.loop_bodies[0].nodes[0].id = "renamed-input".into();
+        description.loop_bodies[0].nodes[0].kind = "fixture.scope-input".into();
+        description.loop_bodies[0].execution_order[0] = "renamed-input".into();
         description.validate().unwrap();
         let path = vec!["first".into()];
         assert!(description.body(&path).is_some());
         assert!(description.loop_body(&path).is_none());
+        assert!(is_static_body(&description, &path));
         let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
             .unwrap()
             .snapshot();
@@ -4679,10 +4688,13 @@ mod tests {
             stdin.insert("source/id".into(), serde_json::json!(resource));
         }
         let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
-            definition: serde_json::from_value(definition).unwrap(),
-            execution_order: vec!["source/id".into()],
-            loop_orders: vec![],
+            version: mf_runtime::WorkflowManifestVersion::V2026_11_06,
+            graph: mf_runtime::CompiledGraph {
+                definition: serde_json::from_value(definition).unwrap(),
+                execution_order: vec!["source/id".into()],
+                relations: Default::default(),
+                children: Default::default(),
+            },
             input_schema: serde_json::from_value(serde_json::json!({
                 "inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin
             }))
@@ -5099,6 +5111,8 @@ mod tests {
             loop_bodies: vec![LoopBodyDescription {
                 order_edges: Vec::new(),
                 path: vec!["repeat".into()],
+                source: Some("%loop".into()),
+                state_outputs: [("value".into(), "value".into())].into(),
                 nodes: vec![
                     NodeDescription {
                         id: "%loop".into(),
@@ -5212,6 +5226,10 @@ mod tests {
         let text = details_text(snapshot.nodes.first(), None, &snapshot, &capture, "");
         assert!(text.contains("Completed passes: 1000"));
         assert!(text.contains("Older invocation details hidden: 1000"));
+        snapshot.nodes[0].kind = "fixture.stateful".into();
+        snapshot.loop_overviews[0].loop_id = LoopPathEntry::binding_key("repeat", "body");
+        let text = details_text(snapshot.nodes.first(), None, &snapshot, &capture, "");
+        assert!(text.contains("Completed passes: 1000"));
     }
 
     #[test]

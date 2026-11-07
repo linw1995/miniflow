@@ -1,19 +1,7 @@
 #[path = "build/title.rs"]
 mod title;
 
-use std::{env, fs, path::Path, process::Command, sync::OnceLock};
-
-static TITLE_DEFINITION: OnceLock<mf_runtime::WorkflowDefinition> = OnceLock::new();
-
-fn title_definition() -> Result<mf_runtime::WorkflowDefinition, mf_runtime::DefinitionParseError> {
-    Ok(TITLE_DEFINITION
-        .get()
-        .expect("title definition is bound before embedding")
-        .clone())
-}
-
-// The build program resolves the same provider-owned call as the linked application.
-mf_runtime::register_builtin_flow!("chat-title", title_definition);
+use std::{env, fs, path::Path, process::Command};
 
 fn cargo_manifest_output(
     command: &str,
@@ -60,9 +48,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Path::new(&env::var("OUT_DIR")?).join("title.json"),
         serde_json::to_vec(&definition)?,
     )?;
-    TITLE_DEFINITION
-        .set(serde_json::from_value(definition)?)
-        .expect("title definition is initialized once");
     mf_compiler::embed_workflows(&[mf_compiler::EmbedRequest::new(
         "conversation",
         "workflows/conversation.json",

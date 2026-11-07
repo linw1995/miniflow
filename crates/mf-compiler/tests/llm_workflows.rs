@@ -309,9 +309,6 @@ fn configure(value: &mut Value, server: &Server) {
             if node["kind"] == "builtin.llm" {
                 node["config"] = json!({"model": "example-model", "base_url": server.base_url, "api_key_env": "OPENAI_API_KEY"});
             }
-            if let Some(body) = node.get_mut("loop").and_then(|value| value.get_mut("body")) {
-                configure(body, server);
-            }
             if let Some(body) = node
                 .get_mut("config")
                 .and_then(|value| value.get_mut("body"))
@@ -395,7 +392,7 @@ fn llm_workflows_match_memory_and_standalone_runners() {
             2,
         ),
         (
-            json!({"version": "2026-10-03", "nodes": [{"id": "iteration", "kind": "builtin.iteration", "config": {"mode": "parallel", "on_error": "terminate", "body": {"nodes": [{"id": "chat", "kind": "builtin.llm"}], "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "chat", "to_input": "messages"}], "result": {"node": "chat", "port": "text"}}}}], "outputs": [{"name": "results", "node": "iteration", "port": "results"}]}),
+            json!({"version": "2026-10-03", "nodes": [{"id": "iteration", "kind": "builtin.iteration", "config": {"mode": "parallel", "on_error": "terminate", "body": {"version":"2026-10-03", "dependencies":{}, "nodes": [{"id": "chat", "kind": "builtin.llm"}], "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "chat", "to_input": "messages"}], "outputs": [{"name":"result", "node": "chat", "port": "text"}]}}}], "outputs": [{"name": "results", "node": "iteration", "port": "results"}]}),
             json!({"iteration.items":[[{"role":"user","content":"one"}],[{"role":"user","content":"two"}]]}),
             2,
         ),

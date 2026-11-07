@@ -104,7 +104,7 @@ impl WorkflowProfile {
         Self::with_backend(
             name,
             Arc::new(EmbeddedBackend {
-                call: compile_call(&plan.definition, registry)?,
+                call: compile_call(&plan.graph.definition, registry)?,
                 plan,
                 contract,
                 parameters,
@@ -194,7 +194,7 @@ fn compile_call_wrapper(
     let definition = serde_json::from_value(serde_json::json!({
         "version": "2026-10-28", "dependencies": {},
         "nodes": [{"id": "workflow", "kind": "workflow.call", "config": {
-            "flow": name, "definition": definition
+            "flow": name, "body": definition
         }}],
         "outputs": outputs
     }))
@@ -1031,7 +1031,7 @@ fn register_runner(
         .registered_workflow()
         .expect("executable Flow interface");
     let contract = ChatContract::from_manifest(manifest)?;
-    let definition = manifest.definition.clone();
+    let definition = manifest.graph.definition.clone();
     let inputs = manifest.input_schema.clone();
     let outputs: Vec<_> = ConversationResult::ports()
         .into_iter()
@@ -1095,14 +1095,14 @@ fn compose_conversation(
 ) -> Result<ConversationPlan, ChatError> {
     let contract = ChatContract::from_manifest(manifest)?;
     let call = if registry.flow(RUNNER_FLOW).is_some() {
-        compile_call_wrapper(&manifest.definition, RUNNER_FLOW, registry)?
+        compile_call_wrapper(&manifest.graph.definition, RUNNER_FLOW, registry)?
     } else {
-        compile_call(&manifest.definition, registry)?.context(InvalidSnafu {
+        compile_call(&manifest.graph.definition, registry)?.context(InvalidSnafu {
             field: "embedded workflow",
             reason: "requires a finite Flow without internal stream dataflow",
         })?
     };
-    let call_node = mf_compiler::prepare_definition(&call.definition, registry)?
+    let call_node = mf_compiler::prepare_definition(&call.graph.definition, registry)?
         .0
         .remove(0);
     let targets: std::collections::BTreeSet<_> = parameters
@@ -1149,7 +1149,8 @@ fn compose_conversation(
         ..Default::default()
     };
     let mut definition =
-        serde_json::to_value(flows::conversation::plan()?.definition).context(JsonSnafu)?;
+        serde_json::to_value(flows::conversation::plan(registry)?.graph.definition)
+            .context(JsonSnafu)?;
     let nodes = definition["nodes"]
         .as_array_mut()
         .expect("conversation nodes");
@@ -1159,7 +1160,7 @@ fn compose_conversation(
         .expect("conversation invocation");
     let inputs = workflow["inputs"].take();
     *workflow = serde_json::json!({
-        "id":"workflow", "kind":"workflow.call", "config":call.definition.nodes[0].config,
+        "id":"workflow", "kind":"workflow.call", "config":call.graph.definition.nodes[0].config,
         "inputs": argument_ports.iter().map(|port| (port.name.to_string(), serde_json::json!({
             "from":{"node":"prepare_workflow","port":port.name}
         }))).collect::<serde_json::Map<_, _>>()
@@ -1346,11 +1347,11 @@ pub fn run_conversation_with_preview(
         )
         .context(BackendBuildSnafu)?;
         ConversationPlan {
-            plan: flows::conversation::plan()?,
+            plan: flows::conversation::plan(&registry)?,
             bindings: vec![("workflow", bound)],
         }
     };
-    let (mut nodes, order) = mf_compiler::prepare_definition(&plan.definition, &registry)?;
+    let (mut nodes, order) = mf_compiler::prepare_definition(&plan.graph.definition, &registry)?;
     for (id, bound) in bindings {
         let node = nodes
             .iter_mut()
@@ -1375,18 +1376,19 @@ pub fn run_conversation_with_preview(
         )
         .context(BackendBuildSnafu)?,
     );
-    plan.definition = mf_compiler::resolve_execution(&plan.definition, &nodes)?;
+    plan.graph.definition = mf_compiler::resolve_execution(&plan.graph.definition, &nodes)?;
     let flow = FlowBuilder::prepare(
         nodes,
-        plan.definition.edges.clone(),
+        plan.graph.definition.edges.clone(),
         order,
-        plan.definition.outputs.clone(),
+        plan.graph.definition.outputs.clone(),
     )?
-    .with_control_edges(plan.definition.control_edges.clone())?
-    .with_order_edges(plan.definition.order_edges.clone())?
+    .with_control_edges(plan.graph.definition.control_edges.clone())?
+    .with_order_edges(plan.graph.definition.order_edges.clone())?
     .with_workflow_inputs()?
     .into_stream(
-        plan.definition
+        plan.graph
+            .definition
             .execution
             .clone()
             .expect("conversation is a Stream Flow"),

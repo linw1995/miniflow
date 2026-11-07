@@ -62,6 +62,19 @@ impl ScopePathEntry {
     pub fn is_call(&self) -> bool {
         matches!(self, Self::Call { .. })
     }
+
+    pub fn binding_key(call_id: &str, binding: &str) -> String {
+        format!(
+            "%flow:{}",
+            serde_json::to_string(&(call_id, binding)).expect("strings serialize")
+        )
+    }
+
+    pub fn binding_owner(key: &str) -> Option<String> {
+        let (owner, _): (String, String) =
+            serde_json::from_str(key.strip_prefix("%flow:")?).ok()?;
+        Some(owner)
+    }
 }
 
 pub type LoopPathEntry = ScopePathEntry;
@@ -328,6 +341,10 @@ impl Event {
                         *outcome == Outcome::Succeeded && summary.pass_count.get() > 0,
                         "Loop summary requires a successful node and positive pass count",
                     )?;
+                    require(
+                        summary.pass_count.get() <= i64::from(crate::MAX_LOOP_ITERATIONS),
+                        "Loop pass count exceeds limit",
+                    )?;
                 }
             }
             Self::NodeSkipped {
@@ -528,17 +545,17 @@ impl LifecycleEvent {
                 .expect("validated graph contains ordered node");
             require(node.kind == identity.kind, "node kind mismatch")?;
             if let Event::NodeFinished {
-                loop_summary: Some(summary),
+                loop_summary: Some(_),
                 ..
             } = &self.event
             {
                 require(
-                    identity.kind == "workflow.loop",
-                    "Loop summary belongs to a Loop node",
-                )?;
-                require(
-                    summary.pass_count.get() <= i64::from(crate::MAX_LOOP_ITERATIONS),
-                    "Loop pass count exceeds limit",
+                    graph
+                        .body_paths_for_node(&static_path, &identity.id)
+                        .iter()
+                        .filter_map(|path| graph.body(path))
+                        .any(|body| body.source.is_some() && !body.state_outputs.is_empty()),
+                    "Loop summary requires an owned stateful body",
                 )?;
             }
             for selection in self.event.selected_inputs() {

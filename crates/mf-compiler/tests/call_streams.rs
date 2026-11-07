@@ -63,7 +63,7 @@ fn child(config: Value) -> Value {
 
 fn caller(child: Value) -> Value {
     json!({"version":"2026-10-28","dependencies":{},
-        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"child","definition":child}}],
+        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"child","body":child}}],
         "outputs":[{"name":"increment","node":"invoke","port":"increment"},
                    {"name":"count","node":"invoke","port":"count"}]
     })
@@ -150,10 +150,10 @@ fn nested_calls_project_public_streams_and_keep_terminal_adaptation_unsubscribed
 #[test]
 fn calls_export_loop_streams_without_exposing_loop_state() {
     let body = json!({"version":"2026-10-28","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","loop":{
+        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{
             "max_iterations":2,"variables":[{"name":"count","type":"usize"}],
             "stream_outputs":{"delta":{"node":"step","port":"delta"}},
-            "body":{"nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"from":{"node":"%loop","port":"count"}}}}]}
+            "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"from":{"node":"%loop","port":"count"}}}}]}
         }}],
         "outputs":[{"name":"increment","node":"repeat","port":"delta"}, {"name":"count","node":"repeat","port":"count"}]
     });
@@ -267,7 +267,7 @@ fn standalone_calls_forward_frozen_streams_without_sources() {
     parent["nodes"][0]["config"]
         .as_object_mut()
         .unwrap()
-        .remove("definition");
+        .remove("body");
     parent["flows"] = json!({"child":{"path":"child.json"}});
     parent["dependencies"] = json!({"core":{"package":"mfn-core","path":common::crates_dir().join("builtin-nodes/core")}});
     fs::write(&source, parent.to_string()).unwrap();
@@ -354,8 +354,8 @@ fn calls_forward_parallel_iteration_streams_and_keep_collected_results() {
             {"id":"items","kind":"builtin.constant","config":{"value":[1,2]}},
             {"id":"each","kind":"builtin.iteration","inputs":{"items":{"from":{"node":"items","port":"value"}}},
              "config":{"mode":"parallel","stream_outputs":{"result":{"node":"step","port":"delta"}},
-                "body":{"nodes":[{"id":"step","kind":"fixture.iteration_stream","inputs":{"count":{"from":{"node":"%iteration","port":"item"}}}}],
-                        "result":{"node":"step","port":"total"}}}}
+                "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.iteration_stream","inputs":{"count":{"from":{"node":"%iteration","port":"item"}}}}],
+                        "outputs": [{"name":"result", "node":"step","port":"total"}]}}}
         ],
         "outputs":[{"name":"increment","node":"each","port":"result"},{"name":"count","node":"each","port":"results"}]
     });

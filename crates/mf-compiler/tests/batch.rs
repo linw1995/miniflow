@@ -125,9 +125,16 @@ fn conditional_skips_do_not_add_items_or_skip_a_pending_batch() {
 
 #[test]
 fn a_batch_provider_must_be_linked_explicitly() {
-    let definition = definition();
-    let error = compile_definition(&definition, &NodeRegistry::default())
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("builtin.batch"), "{error}");
+    let mut definition = definition();
+    // Isolate the missing provider: a wholly empty registry also lacks the
+    // controlled source, whose earlier lookup would obscure this assertion.
+    definition.nodes.retain(|node| node.kind == "builtin.batch");
+    definition.edges.clear();
+    definition.outputs.clear();
+    let error = compile_definition(&definition, &NodeRegistry::default()).unwrap_err();
+    assert!(
+        matches!(&error, mf_compiler::WorkflowCompileError::UnknownNodeKind { definition_id, kind }
+        if definition_id.as_str() == "collect" && kind == "builtin.batch"),
+        "{error}"
+    );
 }

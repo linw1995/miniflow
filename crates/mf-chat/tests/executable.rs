@@ -27,10 +27,10 @@ fn parameters(contract: &ChatContract) -> WorkflowArguments {
 }
 
 fn add_provider_input(manifest: &mut WorkflowManifest, name: &str) {
-    let mut node = manifest.definition.nodes[0].clone();
+    let mut node = manifest.graph.definition.nodes[0].clone();
     node.id = "provider".into();
-    manifest.definition.nodes.push(node);
-    manifest.execution_order.insert(0, "provider".into());
+    manifest.graph.definition.nodes.push(node);
+    manifest.graph.execution_order.insert(0, "provider".into());
     let port = manifest.input_schema.inputs["params"][name].clone();
     manifest
         .input_schema
@@ -117,7 +117,7 @@ fn builtin_titles_skip_missing_ambiguous_wrongly_typed_or_empty_provider_inputs(
 #[test]
 fn declared_title_output_reserves_title_generation_for_the_user_flow() {
     let mut manifest = manifest();
-    manifest.definition.outputs.push(
+    manifest.graph.definition.outputs.push(
         serde_json::from_value(json!({
             "name":"title", "node":"chat", "port":"text", "optional":true
         }))
@@ -168,15 +168,16 @@ fn conversation_inputs_are_bound_separately_from_parameters() {
 #[test]
 fn contract_accepts_multiple_models_and_arbitrary_output_sources() {
     let mut manifest = manifest();
-    let mut second = manifest.definition.nodes[1].clone();
+    let mut second = manifest.graph.definition.nodes[1].clone();
     second.id = "another-model".into();
-    manifest.definition.nodes.push(second);
-    manifest.execution_order.push("another-model".into());
-    for mut edge in manifest.definition.edges.clone() {
+    manifest.graph.definition.nodes.push(second);
+    manifest.graph.execution_order.push("another-model".into());
+    for mut edge in manifest.graph.definition.edges.clone() {
         edge.to_node = "another-model".into();
-        manifest.definition.edges.push(edge);
+        manifest.graph.definition.edges.push(edge);
     }
     manifest
+        .graph
         .definition
         .outputs
         .iter_mut()
@@ -184,8 +185,8 @@ fn contract_accepts_multiple_models_and_arbitrary_output_sources() {
         .unwrap()
         .node = "another-model".into();
     ChatContract::from_manifest(&manifest).unwrap();
-    manifest.definition.nodes[1].kind = "custom.generator".into();
-    manifest.definition.nodes[1].config = json!({});
+    manifest.graph.definition.nodes[1].kind = "custom.generator".into();
+    manifest.graph.definition.nodes[1].config = json!({});
     ChatContract::from_manifest(&manifest).unwrap();
 }
 
@@ -209,10 +210,10 @@ fn preflight_checks_transport_and_external_ports() {
         .unwrap()
         .remove("prompt");
     let mut ambiguous = original.clone();
-    let mut source = ambiguous.definition.nodes[0].clone();
+    let mut source = ambiguous.graph.definition.nodes[0].clone();
     source.id = "other".into();
-    ambiguous.definition.nodes.push(source);
-    ambiguous.execution_order.insert(0, "other".into());
+    ambiguous.graph.definition.nodes.push(source);
+    ambiguous.graph.execution_order.insert(0, "other".into());
     ambiguous.input_schema.inputs.insert(
         "other".into(),
         original.input_schema.inputs["params"].clone(),
@@ -223,7 +224,7 @@ fn preflight_checks_transport_and_external_ports() {
         .stdin
         .insert("params".into(), mf_runtime::StdinRequirement::Always);
     let mut streaming = original.clone();
-    streaming.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
+    streaming.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
     assert!(ChatContract::from_manifest(&streaming).unwrap().streaming);
     assert!(!ChatContract::from_manifest(&original).unwrap().streaming);
     for invalid in [wrong_type, missing, ambiguous, stdin] {
@@ -232,6 +233,7 @@ fn preflight_checks_transport_and_external_ports() {
     for name in ["status", "text", "usages"] {
         let mut invalid = original.clone();
         invalid
+            .graph
             .definition
             .outputs
             .retain(|output| output.name != name);
@@ -239,6 +241,7 @@ fn preflight_checks_transport_and_external_ports() {
     }
     let mut optional = original;
     optional
+        .graph
         .definition
         .outputs
         .iter_mut()
@@ -490,7 +493,7 @@ fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_p
             None,
         )
         .unwrap();
-    let mut definition = manifest().definition;
+    let mut definition = manifest().graph.definition;
     definition.nodes[0].config["parameters"]["context"] = json!({"type":"object"});
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
     let manifest = mf_compiler::compile_definition(&definition, &registry)

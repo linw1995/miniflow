@@ -21,6 +21,6 @@ pub fn instantiate_stream(
     registry: &NodeRegistry,
 ) -> Result<PreparedStream, WorkflowCompileError> {
     let (resolved, flow) = crate::compiler::prepare_compiled_plan(plan, registry)?;
-    let execution = resolved.definition.execution.unwrap_or_default();
+    let execution = resolved.graph.definition.execution.unwrap_or_default();
     flow.into_stream(execution).context(StreamConstructionSnafu)
 }

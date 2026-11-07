@@ -2,6 +2,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
@@ -677,6 +678,8 @@ pub enum NodeBuildError {
     InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"), context(false))]
     InvalidConfiguration { source: serde_json::Error },
+    #[snafu(display("invalid Flow parameters: {source}"))]
+    FlowParameters { source: crate::FlowParameterError },
     #[snafu(display("node factory failed: {source}"), visibility(pub))]
     FactoryFailed {
         source: Box<dyn Error + Send + Sync + 'static>,
@@ -1336,12 +1339,36 @@ impl PreparedNode {
     }
 }
 
+/// Selects executable configuration fields and injects their prepared Flow values.
+pub trait NodeConfig: Sized {
+    /// Returns only declared, present, non-null Flow fields under their canonical wire names.
+    /// All other provider configuration remains opaque.
+    fn flow_parameters(config: &Value) -> BTreeMap<String, Value>;
+
+    /// Decodes ordinary configuration and injects the explicitly prepared Flow fields.
+    /// The derive implements this without requiring executable Flow values to be deserializable.
+    fn from_config(
+        config: Value,
+        flows: BTreeMap<String, crate::PreparedSubgraph>,
+    ) -> Result<Self, NodeBuildError>;
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum NodeFactory {
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
-    Subgraph(
-        fn(&str, Value, Value, crate::PreparedSubgraph) -> Result<PreparedNode, NodeBuildError>,
-    ),
+    Subgraph {
+        flow_parameters: fn(&Value) -> BTreeMap<String, Value>,
+        plain: fn(Value) -> Result<PreparedNode, NodeBuildError>,
+        #[expect(
+            clippy::type_complexity,
+            reason = "Keep prepared Flow bindings as a standard map, not a dedicated wrapper type."
+        )]
+        prepared: fn(
+            &str,
+            Value,
+            BTreeMap<String, crate::PreparedSubgraph>,
+        ) -> Result<PreparedNode, NodeBuildError>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1351,29 +1378,97 @@ pub struct NodeRegistration {
 }
 
 impl NodeRegistration {
-    pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
+    /// Whether this factory can receive prepared Flow parameters.
+    pub fn accepts_subgraphs(&self) -> bool {
+        matches!(self.factory, NodeFactory::Subgraph { .. })
+    }
+
+    pub fn flow_parameters(&self, config: &Value) -> BTreeMap<String, Value> {
         match self.factory {
-            NodeFactory::Plain(factory) => factory(config),
-            NodeFactory::Subgraph(_) => crate::NodeInvalidSubgraphSnafu {
-                message: format!("node `{}` requires a prepared body", self.kind),
+            NodeFactory::Subgraph {
+                flow_parameters, ..
+            } => flow_parameters(config),
+            NodeFactory::Plain(_) => BTreeMap::new(),
+        }
+    }
+
+    /// Decodes receiver-selected child definitions in resolved authoring input.
+    /// Undeclared provider configuration is always opaque. Already prepared children
+    /// use binding-key validation in [`Self::instantiate_subgraphs`] instead.
+    pub fn validate_flow_parameters(
+        &self,
+        node: &crate::NodeDefinition,
+        inherited_version: crate::WorkflowDefinitionVersion,
+    ) -> Result<BTreeMap<String, crate::WorkflowDefinition>, NodeBuildError> {
+        self.flow_parameters(&node.config)
+            .into_iter()
+            .map(|(parameter, value)| {
+                ensure!(
+                    !parameter.trim().is_empty(),
+                    crate::definition::InvalidSnafu {
+                        message: "Flow parameter field names must be nonblank"
+                    }
+                );
+                let body =
+                    crate::WorkflowDefinition::from_value_with_version(value, inherited_version)
+                        .context(crate::definition::JsonSnafu {
+                            parameter: &parameter,
+                        })?;
+                Ok((parameter, body))
+            })
+            .collect::<Result<_, crate::FlowParameterError>>()
+            .context(FlowParametersSnafu)
+    }
+
+    /// Checks receiver-selected binding names and passes authoritative prepared children
+    /// to the provider decoder without reparsing their configuration values.
+    pub fn instantiate_subgraphs(
+        &self,
+        id: &str,
+        config: Value,
+        arguments: BTreeMap<String, crate::PreparedSubgraph>,
+    ) -> Result<PreparedNode, NodeBuildError> {
+        match self.factory {
+            NodeFactory::Subgraph { prepared, .. } => {
+                // Prepared children are authoritative. The receiver selects binding
+                // names here, but decoding child definitions belongs to authoring.
+                let parameters = self.flow_parameters(&config);
+                if parameters
+                    .keys()
+                    .any(|parameter| parameter.trim().is_empty())
+                {
+                    return crate::definition::InvalidSnafu {
+                        message: "Flow parameter field names must be nonblank",
+                    }
+                    .fail()
+                    .context(FlowParametersSnafu);
+                }
+                ensure!(
+                    parameters.keys().eq(arguments.keys()),
+                    InvalidSubgraphSnafu {
+                        message: format!(
+                            "node `{}` prepared Flow arguments do not match its receiver-selected configuration fields",
+                            self.kind
+                        )
+                    }
+                );
+                prepared(id, config, arguments)
+            }
+            _ => crate::NodeInvalidSubgraphSnafu {
+                message: format!(
+                    "node `{}` does not accept prepared Flow arguments",
+                    self.kind
+                ),
             }
             .fail(),
         }
     }
 
-    pub fn instantiate_subgraph(
-        &self,
-        id: &str,
-        config: Value,
-        options: Value,
-        body: crate::PreparedSubgraph,
-    ) -> Result<PreparedNode, NodeBuildError> {
+    pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
         match self.factory {
-            NodeFactory::Subgraph(factory) => factory(id, config, options, body),
-            NodeFactory::Plain(_) => crate::NodeInvalidSubgraphSnafu {
-                message: format!("node `{}` does not accept a prepared body", self.kind),
+            NodeFactory::Plain(factory) | NodeFactory::Subgraph { plain: factory, .. } => {
+                factory(config)
             }
-            .fail(),
         }
     }
 }
@@ -1386,6 +1481,35 @@ mod tests {
     use serde_json::json;
 
     static INTEGER_PORTS: &[PortSpec] = &[PortSpec::new("count", ValueType::Int64, true)];
+
+    #[test]
+    fn config_field_names_do_not_shadow_prepared_injection_state() {
+        #[derive(crate::NodeConfig)]
+        #[config(runtime = "crate")]
+        #[serde(deny_unknown_fields)]
+        struct Config {
+            config: crate::PreparedSubgraph,
+            flows: crate::PreparedSubgraph,
+            __mf_config: Option<crate::PreparedSubgraph>,
+            __mf_flows: Option<Value>,
+        }
+        let body = || {
+            crate::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(crate::FlowOutputs::new()))
+        };
+        let decoded = Config::from_config(
+            json!({"config": {}, "flows": {}, "__mf_config": {}, "__mf_flows": "ordinary"}),
+            BTreeMap::from([
+                ("config".into(), body()),
+                ("flows".into(), body()),
+                ("__mf_config".into(), body()),
+            ]),
+        )
+        .unwrap();
+        assert!(decoded.config.nodes.is_empty());
+        assert!(decoded.flows.nodes.is_empty());
+        assert!(decoded.__mf_config.is_some());
+        assert_eq!(decoded.__mf_flows, Some(json!("ordinary")));
+    }
 
     fn list(inner: ValueType) -> ValueType {
         ValueType::List(Box::new(inner))

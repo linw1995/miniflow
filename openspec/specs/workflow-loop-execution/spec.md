@@ -10,7 +10,9 @@ Execute bounded, stateful workflow loops over validated DAG bodies, with typed v
 
 `mfn-core` SHALL register `workflow.loop`. The system SHALL accept Loop containers only in the `2026-09-29` workflow definition version. A Loop
 SHALL declare a nonempty typed variable set, a body DAG, and a maximum pass count from 1 through
-1000. Each variable SHALL be a required Loop input and required Loop output of the declared type.
+1000. These settings SHALL reside in ordinary node `config`; `config.body` SHALL be a complete Flow
+definition with its own version and dependencies, not a partial body or a top-level `loop` field.
+Each variable SHALL be a required Loop input and required Loop output of the declared type.
 The body SHALL have a synthetic `%loop` source exposing current variable values and a zero-based
 `index`. A Loop container SHALL resolve a `workflow.loop` declaration from the selected node
 packages; the compiler SHALL bind the engine-prepared body to that registered implementation.

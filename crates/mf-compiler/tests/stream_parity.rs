@@ -52,15 +52,15 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         }
         "nested" => {
             nodes = vec![
-                json!({"id":"repeat", "kind":"workflow.loop", "loop":{"max_iterations":2, "variables":[{"name":"x", "type":"int"}], "body":{
+                json!({"id":"repeat", "kind":"workflow.loop", "config":{"max_iterations":2, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
                     "nodes":[{"id":"increment", "kind":"builtin.code", "config":{"language":"cel", "inputs":{"x":"int"}, "code":{"value":"x + 1"}}},
                         {"id":"assign", "kind":"workflow.loop_assign", "config":{"variable":"x"}}],
                     "edges":[edge("%loop", "x", "increment", "x"), edge("increment", "value", "assign", "value")]
                 }}}),
                 json!({"id":"collect", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}}),
-                json!({"id":"consume", "kind":"builtin.iteration", "config":{"body":{
+                json!({"id":"consume", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-03", "dependencies":{},
                     "nodes":[{"id":"double", "kind":"builtin.code", "config":{"language":"cel", "inputs":{"x":"int"}, "code":{"value":"x * 2"}}}],
-                    "edges":[edge("%iteration", "item", "double", "x")], "result":{"node":"double", "port":"value"}
+                    "edges":[edge("%iteration", "item", "double", "x")], "outputs": [{"name":"result", "node":"double", "port":"value"}]
                 }}}),
             ];
             edges = vec![
@@ -75,7 +75,7 @@ fn definition(scenario: &str) -> WorkflowDefinition {
     }
     if scenario == "nested" {
         add_body_join(
-            &mut nodes[0]["loop"]["body"],
+            &mut nodes[0]["config"]["body"],
             ("%loop", "x"),
             ("increment", "value"),
             ("assign", "value"),
@@ -90,7 +90,8 @@ fn definition(scenario: &str) -> WorkflowDefinition {
             ("double", "value"),
             ("join", "input"),
         );
-        nodes[2]["config"]["body"]["result"] = json!({"node":"join", "port":"value"});
+        nodes[2]["config"]["body"]["outputs"][0] =
+            json!({"name":"result", "node":"join", "port":"value"});
     }
     if scenario == "windows" {
         nodes.push(json!({"id":"alternative", "kind":"builtin.identity"}));

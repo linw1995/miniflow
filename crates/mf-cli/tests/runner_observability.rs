@@ -220,11 +220,13 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
         },
         "nodes": [
             {"id": "seed", "kind": "builtin.constant", "config": {"value": 0}},
-            {"id": "repeat", "kind": "workflow.loop", "loop": {
+            {"id": "repeat", "kind": "workflow.loop", "config": {
                 "max_iterations": 5,
                 "variables": [{"name": "count", "type": "int"}],
                 "until": {"variable": "count", "operator": "gte", "value": 3},
                 "body": {
+                    "version": "2026-09-29",
+                    "dependencies": {},
                     "nodes": [
                         {"id": "increment", "kind": "builtin.code", "config": {
                             "language": "cel", "inputs": {"count": "int"},

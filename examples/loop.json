@@ -21,7 +21,7 @@
     {
       "id": "repeat",
       "kind": "workflow.loop",
-      "loop": {
+      "config": {
         "max_iterations": 5,
         "variables": [
           {

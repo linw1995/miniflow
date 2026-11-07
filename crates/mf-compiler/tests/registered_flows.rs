@@ -16,7 +16,7 @@ fn child() -> WorkflowDefinition {
 fn caller(body: &WorkflowDefinition) -> WorkflowDefinition {
     serde_json::from_value(json!({
         "version":"2026-10-28", "dependencies":{},
-        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"host.runner","definition":body}}],
+        "nodes":[{"id":"invoke","kind":"workflow.call","config":{"flow":"host.runner","body":body}}],
         "outputs":[{"name":"value","node":"invoke","port":"value"}]
     }))
     .unwrap()
@@ -71,6 +71,202 @@ fn registered_calls_use_host_execution_without_loading_child_providers() {
         let result =
             mf_compiler::execute_compiled_with_inputs(&plan, &registry, arguments, None).unwrap();
         assert_eq!(result["value"].as_str(), Some(prompt));
+    }
+
+    // A host body does not grant a global exemption for its unlinked node kinds.
+    // The same kind outside that body needs a provider before any factory runs.
+    let mut outside = definition;
+    outside.nodes.insert(
+        0,
+        serde_json::from_value(json!({
+            "id": "a_before", "kind": "builtin.constant", "config": {}
+        }))
+        .unwrap(),
+    );
+    outside.nodes.push(
+        serde_json::from_value(json!({
+            "id": "z_missing", "kind": "unlinked.provider"
+        }))
+        .unwrap(),
+    );
+    let plan = mf_compiler::plan_resolved_definition(&outside, &registry).unwrap();
+    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    assert_eq!(saved.graph.execution_order[0].as_str(), "a_before");
+    // Constructing the earlier constant would fail on its missing value; instead
+    // availability preflight must report the later unlinked provider first.
+    assert!(matches!(
+        mf_compiler::instantiate_compiled(&saved, &registry).err().unwrap(),
+        mf_compiler::WorkflowCompileError::UnknownNodeKind { definition_id, kind }
+        if definition_id.as_str() == "z_missing" && kind == "unlinked.provider"
+    ));
+}
+
+#[cfg(feature = "codegen")]
+#[test]
+fn registered_host_calls_cannot_be_emitted_into_generated_runners() {
+    let mut registry = NodeRegistry::from_inventory().unwrap();
+    let body = child();
+    registry
+        .register_flow(
+            "host.runner",
+            body.clone(),
+            PreparedSubgraph::new(
+                vec![],
+                vec![PortSpec::new("value", ValueType::String, true)],
+                |_| panic!("code generation must not execute a host closure"),
+            ),
+        )
+        .unwrap();
+    let plan = compile_resolved_definition(&caller(&body), &registry).unwrap();
+    let error = plan.generate_execution_plans(&registry).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("host Flow executors cannot be emitted"),
+        "{error}"
+    );
+}
+
+#[test]
+fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
+    let mut body = caller(&child());
+    body.nodes[0].id = "nested".into();
+    body.outputs[0].node = "nested".into();
+    let mut loop_body = child();
+    loop_body.outputs.clear();
+    body.nodes.push(
+        serde_json::from_value(json!({
+            "id":"repeat", "kind":"workflow.loop", "config":{
+                "max_iterations":1, "variables":[{"name":"count", "type":"int"}],
+                "body":loop_body
+            }
+        }))
+        .unwrap(),
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = mf_compiler::plan_resolved_definition(&caller(&body), &registry).unwrap();
+    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+
+    for case in [
+        "matching",
+        "root inherited version",
+        "stale raw body",
+        "compiled child drift",
+        "missing registered body",
+    ] {
+        let mut plan = saved.clone();
+        let mut registered = body.clone();
+        let host = plan
+            .graph
+            .children
+            .get_mut(&"invoke".into())
+            .unwrap()
+            .get_mut("body")
+            .unwrap();
+        match case {
+            "root inherited version" => {
+                registered.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_25;
+                host.definition.version = registered.version;
+                for node in &mut registered.nodes {
+                    let body = node.config["body"].as_object_mut().unwrap();
+                    body.remove("version");
+                    body.remove("dependencies");
+                }
+                assert!(
+                    host.children
+                        .values()
+                        .flat_map(|bindings| bindings.values())
+                        .all(|child| child.definition.version == saved.graph.definition.version)
+                );
+            }
+            "stale raw body" => {
+                // Only the stored child tree is executable, not this inline copy.
+                let nested = host
+                    .definition
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id.as_str() == "nested")
+                    .unwrap();
+                nested.config["body"]["nodes"][0]["config"] = json!({"changed":true});
+            }
+            "compiled child drift" => {
+                let nested = host
+                    .children
+                    .get_mut(&"nested".into())
+                    .unwrap()
+                    .get_mut("body")
+                    .unwrap();
+                nested.definition.nodes[0].config = json!({"changed":true});
+            }
+            "missing registered body" => {
+                // The registered owner still exists, but has no raw body for the
+                // actual nested binding selected by the compiled graph.
+                registered.nodes[0]
+                    .config
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("body");
+            }
+            _ => {}
+        }
+        // Authoring order and synthesized Loop sources are not definition drift.
+        registered.nodes.reverse();
+        let mut registry = NodeRegistry::from_inventory().unwrap();
+        registry
+            .register_flow(
+                "host.runner",
+                registered,
+                PreparedSubgraph::new(
+                    vec![],
+                    vec![PortSpec::new("value", ValueType::String, true)],
+                    |_| Ok([("value".into(), "host result".into())].into()),
+                ),
+            )
+            .unwrap();
+        let result = mf_compiler::instantiate_compiled(&plan, &registry);
+        if matches!(
+            case,
+            "matching" | "root inherited version" | "stale raw body"
+        ) {
+            // Unknown providers in both nested bodies remain host-local exemptions.
+            assert_eq!(
+                result.unwrap().execute().unwrap()["value"],
+                json!("host result")
+            );
+            continue;
+        }
+        let error = result.err().unwrap();
+        let mf_compiler::WorkflowCompileError::CompiledGraph { source } = &error else {
+            panic!("{case}: {error}");
+        };
+        let mf_compiler::WorkflowBuildError::HostFlowBinding {
+            definition_id,
+            source,
+        } = source.as_ref()
+        else {
+            panic!("{case}: {source}");
+        };
+        assert_eq!(definition_id.as_str(), "invoke", "{case}");
+        let mf_compiler::WorkflowCompileError::InvalidGraph {
+            definition_id,
+            message,
+        } = source.as_ref()
+        else {
+            panic!("{case}: {source}");
+        };
+        let expected = if case == "missing registered body" {
+            ("nested", "host Flow body does not match compiled bindings")
+        } else {
+            (
+                "invoke",
+                "host Flow binding differs from the frozen call definition",
+            )
+        };
+        assert_eq!(
+            (definition_id.as_str(), message.as_str()),
+            expected,
+            "{case}"
+        );
     }
 }
 

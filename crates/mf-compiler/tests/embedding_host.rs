@@ -2,6 +2,7 @@
 
 mod common;
 
+use common::embedding_coverage::{assert_success, build_command, executable};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -80,19 +81,62 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 fn build(root: &Path) -> Output {
-    mf_compiler::cargo_command(root)
-        .args(["build", "--offline", "--release"])
-        .env("CARGO_TERM_COLOR", "never")
-        .output()
-        .unwrap()
+    build_command(root).output().unwrap()
 }
 
-fn executable(root: &Path) -> PathBuf {
-    std::env::var_os("MF_TEST_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target"))
-        .join("release")
-        .join(format!("mf-embedded-host{}", std::env::consts::EXE_SUFFIX))
+#[test]
+fn build_script_coverage_requires_both_launcher_marker_and_record() {
+    use common::embedding_coverage::build_script_executable;
+
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("build-script");
+    let record = root.path().join(".kache-launch");
+    let preserved = root.path().join("preserved build script");
+    fs::write(&preserved, b"coverage-bearing Rust executable").unwrap();
+    let launcher = b"launcher prefix\nKACHE_BUILD_SCRIPT_PATH=launcher suffix";
+
+    // A marker alone does not supply a preserved executable's path.
+    fs::write(&script, launcher).unwrap();
+    assert_eq!(build_script_executable(&script), script);
+
+    // A stale record must not redirect an ordinary Cargo build-script artifact.
+    fs::write(
+        &record,
+        b"preserved build script\0ignored launcher metadata\0",
+    )
+    .unwrap();
+    fs::write(&script, b"ordinary Cargo build-script executable").unwrap();
+    assert_eq!(build_script_executable(&script), script);
+
+    // Only the exact marker plus the first NUL-delimited record field authorize it.
+    fs::write(&script, launcher).unwrap();
+    let selected = build_script_executable(&script);
+    assert_eq!(selected, preserved);
+    assert_eq!(
+        fs::read(selected).unwrap(),
+        b"coverage-bearing Rust executable"
+    );
+}
+
+#[test]
+fn coverage_command_failures_report_captured_stdout_and_stderr() {
+    let output = Command::new("rustc")
+        .arg("--not-a-real-embedding-coverage-flag")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not-a-real-embedding-coverage-flag"));
+    let panic = std::panic::catch_unwind(|| common::embedding_coverage::assert_success(&output))
+        .expect_err("failed coverage commands must not be silently accepted");
+    let diagnostic = panic.downcast_ref::<String>().unwrap();
+    assert_eq!(
+        diagnostic,
+        &format!(
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    );
 }
 
 #[test]
@@ -110,15 +154,9 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     );
     let input = root.path().join("lines.txt");
     fs::write(&input, "first\nsecond\n").unwrap();
-    let executable = executable(root.path());
-    let output = Command::new(&executable).arg(&input).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let executable = executable(root.path(), "mf-embedded-host");
     assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        run(&executable, &input),
         json!({
             "answer": {"answer":42}, "events":[{"line":"first"},{"line":"second"}]
         })
@@ -163,7 +201,10 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     assert_build_success(root.path());
     assert_eq!(run(&executable, &input)["answer"]["answer"], 43);
     for (mutation, expected) in [
-        ("kind", "UnknownNodeKind"),
+        (
+            "kind",
+            "UnknownNodeKind { definition_id: DefinitionId(\"source\"), kind: \"missing.kind\" }",
+        ),
         ("config", "NodeConstruction"),
         ("port", "UnknownOutputPort"),
     ] {
@@ -204,7 +245,17 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         source.replace("ValueType::String, false", "ValueType::Boolean, false"),
     )
     .unwrap();
-    assert_build_success(root.path());
+    let output = assert_build_success(root.path());
+    if let Some(coverage) = std::env::var_os("MF_COVERAGE_BINARIES_DIR") {
+        common::embedding_coverage::preserve(
+            Path::new(&coverage),
+            root.path(),
+            &output,
+            &executable,
+            "embedding-host",
+            "src/main.rs",
+        );
+    }
     let described = Command::new(&executable)
         .env("MF_EMBEDDING_DESCRIBE", "1")
         .output()
@@ -242,11 +293,7 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         .env("PATH", "")
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_success(&output);
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap()["answer"]["answer"],
         43
@@ -268,45 +315,24 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     );
     fs::write(manifest, content).unwrap();
     assert_build_success(example.path());
-    let example_binary = executable.with_file_name(format!(
-        "embedded-workflows{}",
-        std::env::consts::EXE_SUFFIX
-    ));
-    let example_binary = if std::env::var_os("MF_TEST_TARGET_DIR").is_some() {
-        example_binary
-    } else {
-        example
-            .path()
-            .join("target/release")
-            .join(example_binary.file_name().unwrap())
-    };
+    let example_binary =
+        common::embedding_coverage::executable(example.path(), "embedded-workflows");
     let output = Command::new(example_binary).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_success(&output);
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         json!({"answer":42})
     );
 }
 
-fn assert_build_success(root: &Path) {
+fn assert_build_success(root: &Path) -> Output {
     let output = build(root);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_success(&output);
+    output
 }
 
 fn run(executable: &Path, input: &Path) -> Value {
     let output = Command::new(executable).arg(input).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_success(&output);
     serde_json::from_slice(&output.stdout).unwrap()
 }

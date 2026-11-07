@@ -1807,6 +1807,7 @@ dependencies = [
  "snafu",
  "syn 3.0.6",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -1836,6 +1837,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "serde_derive_internals",
  "syn 3.0.6",
 ]
 

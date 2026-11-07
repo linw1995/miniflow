@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         let harness = capture::Harness::new(true);
-        let observation = contract::plan()?
+        let observation = contract::plan(&registry)?
             .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())?;
         let result = runtime::ExecutionContext::run(Some(observation), |state| {
             contract::prepare_workflow(&registry, state.observation_mut())

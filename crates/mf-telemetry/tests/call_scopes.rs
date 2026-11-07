@@ -12,28 +12,35 @@ fn count(value: i64) -> Count {
     Count::try_from(value).unwrap()
 }
 
-fn graph(kinds: &[&str]) -> WorkflowDescription {
+type ScopeFixture<'a> = (&'a str, Option<&'a str>, &'a [(&'a str, &'a str)]);
+
+const LOOP: ScopeFixture<'static> = ("workflow.loop", Some("%loop"), &[("value", "value")]);
+const CALL: ScopeFixture<'static> = ("workflow.call", None, &[]);
+
+fn graph(scopes: &[ScopeFixture<'_>]) -> WorkflowDescription {
     let mut bodies = Vec::new();
-    for (index, kind) in kinds.iter().enumerate() {
+    for (index, (_, source, state_outputs)) in scopes.iter().enumerate() {
         let mut nodes = Vec::new();
-        if *kind == "workflow.loop" {
-            nodes.push(json!({"id":"%loop", "kind":"%loop"}));
+        if let Some(source) = source {
+            nodes.push(json!({"id":source, "kind":"fixture.scope-input"}));
         }
-        nodes.push(if let Some(next) = kinds.get(index + 1) {
-            json!({"id":format!("scope{}", index + 1), "kind":next})
+        nodes.push(if let Some((kind, _, _)) = scopes.get(index + 1) {
+            json!({"id":format!("scope{}", index + 1), "kind":kind})
         } else {
             json!({"id":"leaf", "kind":"fixture.task"})
         });
         bodies.push(json!({
             "path":(0..=index).map(|index| format!("scope{index}")).collect::<Vec<_>>(),
             "execution_order":nodes.iter().map(|node| node["id"].clone()).collect::<Vec<_>>(),
+            "source":source,
+            "state_outputs":state_outputs.iter().copied().collect::<std::collections::BTreeMap<_, _>>(),
             "nodes":nodes, "data_edges":[], "control_edges":[]
         }));
     }
     serde_json::from_value(json!({
         "version":"2026-10-23", "workflow_id":format!("sha256:{}", "a".repeat(64)),
         "execution":{"mode":"single"},
-        "nodes":[{"id":"scope0", "kind":kinds[0]}],
+        "nodes":[{"id":"scope0", "kind":scopes[0].0}],
         "execution_order":["scope0"], "data_edges":[], "control_edges":[],
         "loop_bodies":bodies
     }))
@@ -76,7 +83,7 @@ fn loop_wire_shape_is_preserved_and_scope_tags_are_strict() {
 
 #[test]
 fn call_lifecycles_round_trip_in_finite_and_stream_wire_records() {
-    let graph = graph(&["workflow.call"]);
+    let graph = graph(&[CALL]);
     graph.validate().unwrap();
     for event in [
         Event::CallStarted {
@@ -155,51 +162,47 @@ fn call_depth_is_independent_of_versions_and_preserves_loop_only_limits() {
             .map(|index| format!("scope{index}"))
             .collect::<Vec<_>>()
     };
-    let loops = graph(&["workflow.loop"; mf_telemetry::MAX_LOOP_DEPTH]);
+    let loops = graph(&[LOOP; mf_telemetry::MAX_LOOP_DEPTH]);
     loops.validate().unwrap();
     assert!(
         loops
             .loop_body(&path(mf_telemetry::MAX_LOOP_DEPTH))
             .is_some()
     );
-    let excessive = graph(&["workflow.loop"; mf_telemetry::MAX_LOOP_DEPTH + 1]);
+    let excessive = graph(&[LOOP; mf_telemetry::MAX_LOOP_DEPTH + 1]);
     assert!(excessive.validate().is_err());
     assert!(
         excessive
             .loop_body(&path(mf_telemetry::MAX_LOOP_DEPTH + 1))
             .is_none()
     );
-    let mut kinds = vec!["workflow.loop"; mf_telemetry::MAX_LOOP_DEPTH];
-    kinds.push("workflow.call");
-    kinds.extend(["workflow.loop"; mf_telemetry::MAX_LOOP_DEPTH]);
-    let mixed = graph(&kinds);
+    let mut scopes = vec![LOOP; mf_telemetry::MAX_LOOP_DEPTH];
+    scopes.push(CALL);
+    scopes.extend([LOOP; mf_telemetry::MAX_LOOP_DEPTH]);
+    let mixed = graph(&scopes);
     mixed.validate().unwrap();
-    assert!(mixed.loop_body(&path(kinds.len())).is_some());
-    let calls = graph(&["workflow.call"; MAX_SCOPE_DEPTH]);
+    assert!(mixed.loop_body(&path(scopes.len())).is_some());
+    let calls = graph(&[CALL; MAX_SCOPE_DEPTH]);
     calls.validate().unwrap();
     assert!(calls.loop_body(&path(MAX_SCOPE_DEPTH)).is_some());
     assert!(calls.loop_body(&[]).is_none());
     assert!(calls.loop_body(&path(MAX_SCOPE_DEPTH + 1)).is_none());
-    assert!(
-        graph(&["workflow.call"; MAX_SCOPE_DEPTH + 1])
-            .validate()
-            .is_err()
-    );
+    assert!(graph(&[CALL; MAX_SCOPE_DEPTH + 1]).validate().is_err());
     let event = Event::CallStarted {
         path: vec![call_path()[0].clone(); MAX_SCOPE_DEPTH + 1],
         elapsed_ns: Count::ZERO,
     };
     assert!(lifecycle(event, &calls).validate().is_err());
-    let mut ordinary = graph(&["fixture.task"]);
-    assert!(ordinary.validate().is_err());
-    assert!(ordinary.loop_body(&path(1)).is_none());
+    let mut ordinary = graph(&[("fixture.task", None, &[])]);
+    ordinary.validate().unwrap();
+    assert!(ordinary.loop_body(&path(1)).is_some());
     ordinary.loop_bodies.clear();
     assert!(ordinary.loop_body(&path(1)).is_none());
 }
 
 #[test]
-fn scope_paths_check_container_kinds() {
-    let graph = graph(&["workflow.loop", "workflow.call", "workflow.loop"]);
+fn scope_paths_check_frame_relations() {
+    let graph = graph(&[LOOP, CALL, LOOP]);
     graph.validate().unwrap();
     let path = vec![
         ScopePathEntry::Loop {
@@ -239,7 +242,7 @@ fn scope_paths_check_container_kinds() {
 
 #[test]
 fn call_events_reject_loop_semantics_and_invalid_paths() {
-    let graph = graph(&["workflow.call"]);
+    let graph = graph(&[CALL]);
     for path in [
         Vec::new(),
         vec![ScopePathEntry::Call {

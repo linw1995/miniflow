@@ -124,10 +124,12 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 ## Embedded manifest format
 
-Manifest payload version `2026-10-16` stores only the compiled `definition`, root `execution_order`, optional nested
-`loop_orders`, and prepared `input_schema`. Graph descriptions, interface wrappers, and workflow IDs are not duplicated
-in the payload. `description()`, `interface()`, and `workflow_id()` derive those views from the stored facts without
-planning a DAG or preparing providers. Original definition and input schema are directly accessible fields;
+Manifest payload version `2026-11-06` stores an explicit compiled `graph` and prepared `input_schema`.
+Each graph contains its `definition`, canonical `execution_order`, and child graphs keyed by receiving node ID and
+field name. Parameter-type schemas and separate `loop_orders` are not persisted. Graph descriptions, interface wrappers,
+and workflow IDs are not duplicated in the payload. `description()`, `interface()`, and `workflow_id()` derive those views
+from the stored graph without scanning configuration for children, planning a DAG, or preparing providers.
+The original definition is accessible through `graph.definition` (or field dereferencing), and the input schema is a direct field;
 `node_definition(id)` borrows a root node by exact ID. Input contracts remain stored because provider-declared ports,
 bindings, and stdin requirements cannot be inferred from definition JSON alone.
 The definition contains full static configuration, including private literals, parameter defaults, and dependencies.

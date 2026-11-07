@@ -909,6 +909,8 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
     graph.loop_bodies = vec![LoopBodyDescription {
         order_edges: Vec::new(),
         path: vec!["repeat".into()],
+        source: Some("%loop".into()),
+        state_outputs: [("value".into(), "value".into())].into(),
         nodes: vec![
             NodeDescription {
                 id: "%loop".into(),
@@ -1277,6 +1279,8 @@ fn body_clusters_collapse_within_their_scope() {
     graph.execution_order = vec!["repeat".into()];
     graph.loop_bodies = vec![LoopBodyDescription {
         path: vec!["repeat".into()],
+        source: Some("%loop".into()),
+        state_outputs: [("value".into(), "value".into())].into(),
         nodes: vec![
             NodeDescription {
                 id: "%loop".into(),
@@ -1885,6 +1889,8 @@ fn root_and_loop_body_share_routing_geometry() {
     description.loop_bodies = vec![LoopBodyDescription {
         order_edges: Vec::new(),
         path: vec!["repeat".into()],
+        source: None,
+        state_outputs: Default::default(),
         nodes: body_graph.nodes.clone(),
         data_edges: body_graph.data_edges.clone(),
         control_edges: body_graph.control_edges.clone(),

@@ -5,7 +5,7 @@ use std::{fs, os::unix::fs::PermissionsExt, time::Instant};
 
 pub fn launch(directory: &Path) -> ChatLaunch {
     let mut manifest = crate::test_support::sample_manifest();
-    manifest.definition = serde_json::from_value(json!({
+    manifest.graph.definition = serde_json::from_value(json!({
         "version":"2026-10-03", "dependencies":{},
         "nodes":[{"id":"start","kind":"builtin.llm","config":{"model":"fixture-model"}}],
         "outputs":[
@@ -15,7 +15,7 @@ pub fn launch(directory: &Path) -> ChatLaunch {
         ]
     }))
     .unwrap();
-    manifest.execution_order = vec!["start".into()];
+    manifest.graph.execution_order = vec!["start".into()];
     manifest.input_schema = serde_json::from_value(json!({"inputs":{"start":{
         "prompt":{"type":"string","required":true},
         "system":{"type":"string","required":false},
@@ -422,8 +422,8 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
 
 fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf) {
     let mut launch = launch(directory);
-    launch.manifest.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
-    launch.manifest.definition.outputs.push(
+    launch.manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
+    launch.manifest.graph.definition.outputs.push(
         serde_json::from_value(json!({"name":"answer","node":"start","port":"delta"})).unwrap(),
     );
     launch.contract = ChatContract::from_manifest(&launch.manifest).unwrap();
@@ -585,7 +585,7 @@ fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes()
 fn answer_selection_requires_native_streaming_execution() {
     let root = tempfile::tempdir().unwrap();
     let (mut launch, _) = live_launch(root.path(), "prefix");
-    launch.manifest.definition.execution = None;
+    launch.manifest.graph.definition.execution = None;
     assert!(ChatContract::from_manifest(&launch.manifest).is_err());
 }
 

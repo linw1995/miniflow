@@ -640,6 +640,7 @@ fn step_observations_enter_captured_contexts_and_restore_the_receiver_context() 
         let iteration = run
             .iteration_observation(
                 "outer",
+                "outer-body",
                 &[],
                 vec![NodeIdentity {
                     id: "inner".into(),

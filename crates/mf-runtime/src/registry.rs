@@ -154,6 +154,28 @@ impl NodeRegistry {
         self.registrations.values().copied()
     }
 
+    /// Includes empty callbacks for plain kinds so bootstrap can distinguish unknown kinds.
+    #[expect(
+        clippy::type_complexity,
+        reason = "Receiver callbacks use standard maps."
+    )]
+    pub fn flow_extractors(
+        &self,
+    ) -> BTreeMap<String, fn(&serde_json::Value) -> BTreeMap<String, serde_json::Value>> {
+        self.iter()
+            .map(|registration| {
+                let extractor: fn(&serde_json::Value) -> BTreeMap<String, serde_json::Value> =
+                    match registration.factory {
+                        crate::NodeFactory::Subgraph {
+                            flow_parameters, ..
+                        } => flow_parameters,
+                        crate::NodeFactory::Plain(_) => |_| BTreeMap::new(),
+                    };
+                (registration.kind.to_owned(), extractor)
+            })
+            .collect()
+    }
+
     fn from_registrations(
         registrations: impl IntoIterator<Item = &'static NodeRegistration>,
     ) -> Result<Self, NodeRegistryError> {
@@ -301,16 +323,89 @@ mod tests {
     };
 
     #[test]
-    fn plain_factory_rejects_a_subgraph_during_preparation() {
-        let body = crate::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new()));
+    fn plain_factory_rejects_prepared_subgraphs() {
+        assert!(!FIRST.accepts_subgraphs());
+        let arguments = BTreeMap::from([(
+            "selected".into(),
+            crate::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+        )]);
         let error = FIRST
-            .instantiate_subgraph("node", Value::Null, Value::Null, body)
+            .instantiate_subgraphs("node", Value::Null, arguments)
             .err()
             .unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("does not accept a prepared body")
+        assert!(matches!(
+            error,
+            NodeBuildError::InvalidSubgraph { message }
+                if message == "node `test.duplicate` does not accept prepared Flow arguments"
+        ));
+    }
+
+    #[test]
+    fn subgraph_factory_retains_plain_instantiation() {
+        let registration = NodeRegistration {
+            kind: "test.subgraph",
+            factory: crate::NodeFactory::Subgraph {
+                flow_parameters: |config| {
+                    config
+                        .get("body")
+                        .filter(|value| !value.is_null())
+                        .map(|value| ("body".into(), value.clone()))
+                        .into_iter()
+                        .collect()
+                },
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        };
+        assert!(registration.accepts_subgraphs());
+        assert!(registration.instantiate(Value::Null).is_ok());
+    }
+
+    #[test]
+    fn flow_extractors_include_plain_kinds_and_preserve_receiver_selection() {
+        static FLOW: NodeRegistration = NodeRegistration {
+            kind: "test.flow",
+            factory: crate::NodeFactory::Subgraph {
+                flow_parameters: |config| {
+                    ["selected", "fallback"]
+                        .into_iter()
+                        .filter_map(|name| {
+                            config
+                                .get(name)
+                                .filter(|value| !value.is_null())
+                                .map(|value| (name.into(), value.clone()))
+                        })
+                        .collect()
+                },
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        };
+        let registry = NodeRegistry::from_registrations([&FIRST, &FLOW]).unwrap();
+        let extractors = registry.flow_extractors();
+        assert_eq!(extractors.len(), 2);
+        assert!(!extractors.contains_key("unknown"));
+        for config in [
+            Value::Null,
+            serde_json::json!({
+                "selected": {"nodes": []}, "fallback": null,
+                "option": {"nodes": []}, "unknown": {"nodes": []},
+            }),
+        ] {
+            assert!(extractors["test.duplicate"](&config).is_empty());
+            assert_eq!(
+                extractors["test.flow"](&config),
+                FLOW.flow_parameters(&config)
+            );
+        }
+        assert_eq!(
+            extractors["test.flow"](
+                &serde_json::json!({"selected": 1, "fallback": 2, "option": 3})
+            ),
+            BTreeMap::from([
+                ("selected".into(), Value::from(1)),
+                ("fallback".into(), Value::from(2))
+            ])
         );
     }
 

@@ -808,6 +808,21 @@ pub enum WorkflowBuildError {
     FlowBuild { source: FlowBuildError },
     #[snafu(transparent)]
     StreamBuild { source: StreamBuildError },
+    #[snafu(display("invalid compiled graph: {source}"))]
+    CompiledGraph {
+        source: mf_runtime::GraphDescriptionError,
+    },
+    #[snafu(display("invalid compiled graph structure: {source}"))]
+    CompiledStructure {
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
+    },
+    #[snafu(display("invalid host Flow binding on `{definition_id}`: {source}"))]
+    HostFlowBinding {
+        definition_id: DefinitionId,
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
+    },
     #[snafu(
         display("node `{definition_id}` references unavailable kind `{kind}`"),
         visibility(pub)
@@ -832,13 +847,13 @@ pub enum WorkflowBuildError {
         source: NodeBuildError,
         definition_id: DefinitionId,
     },
-    #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
-    LoopVariables {
+    #[snafu(display("invalid scope variables for node `{definition_id}`: {source}"))]
+    ScopeVariables {
         definition_id: DefinitionId,
         source: mf_runtime::LoopVariableError,
     },
-    #[snafu(display("invalid definition for node `{definition_id}`: {source}"))]
-    LoopVariableDescriptor {
+    #[snafu(display("invalid scope variable descriptor for node `{definition_id}`: {source}"))]
+    ScopeVariableDescriptor {
         definition_id: DefinitionId,
         source: mf_runtime::TypeDescriptorError,
     },
@@ -869,22 +884,172 @@ pub enum WorkflowBuildError {
     },
 }
 
+/// Validate the stored tree and every construction-reachable receiving boundary
+/// before invoking a provider factory. Registered host executors own their body providers;
+/// this exemption is local to that body, never a global exemption for its kinds.
+pub fn validate_compiled_graph(
+    registry: &NodeRegistry,
+    graph: &mf_runtime::CompiledGraph,
+) -> Result<(), WorkflowBuildError> {
+    crate::compiler::validate_graph_structure(graph).context(CompiledStructureSnafu)?;
+    mf_runtime::describe_graph(graph).context(CompiledGraphSnafu)?;
+    validate_compiled_providers(registry, graph, graph.definition.version)
+}
+
+fn validate_compiled_providers(
+    registry: &NodeRegistry,
+    graph: &mf_runtime::CompiledGraph,
+    root_version: crate::WorkflowDefinitionVersion,
+) -> Result<(), WorkflowBuildError> {
+    for node in &graph.definition.nodes {
+        let children = graph.children.get(&node.id);
+        if graph.relations.instruction(&node.id).is_some() {
+            ensure!(
+                children.is_none_or(BTreeMap::is_empty),
+                InvalidDefinitionSnafu {
+                    definition_id: node.id.clone(),
+                    message: "compiler-owned nodes cannot receive child graphs",
+                }
+            );
+            continue;
+        }
+        let registration = registry.get(&node.kind).with_context(|| UnknownKindSnafu {
+            definition_id: node.id.clone(),
+            kind: node.kind.clone(),
+        })?;
+        let fields = registration.flow_parameters(&node.config);
+        ensure!(
+            fields
+                .keys()
+                .eq(children.into_iter().flat_map(BTreeMap::keys)),
+            InvalidDefinitionSnafu {
+                definition_id: node.id.clone(),
+                message: "receiving Flow parameter declarations differ from the compiled binding set",
+            }
+        );
+        for body in children.into_iter().flat_map(BTreeMap::values) {
+            if let Some(registered) = body
+                .relations
+                .host
+                .as_deref()
+                .and_then(|name| registry.flow(name))
+            {
+                crate::compiler::validate_host_flow_binding(node, body, registered, root_version)
+                    .context(HostFlowBindingSnafu {
+                    definition_id: node.id.clone(),
+                })?;
+                continue;
+            }
+            validate_compiled_providers(registry, body, root_version).context(SubgraphSnafu {
+                definition_id: node.id.clone(),
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate state boundaries against actual prepared ports before type inference.
+/// Unrelated owner ports need not participate in any child scope binding.
+pub fn validate_scope_bindings<'a>(
+    definition_id: &DefinitionId,
+    metadata: &mf_runtime::NodeMetadata,
+    relations: impl IntoIterator<Item = &'a mf_runtime::GraphRelations>,
+) -> Result<(), WorkflowBuildError> {
+    for relations in relations {
+        let Some(frame) = &relations.scope else {
+            continue;
+        };
+        for (variable, output) in &frame.state_outputs {
+            let value_type =
+                frame
+                    .values
+                    .get(variable)
+                    .with_context(|| InvalidDefinitionSnafu {
+                        definition_id: definition_id.clone(),
+                        message: format!(
+                            "scope state variable `{variable}` has no relation value type"
+                        ),
+                    })?;
+            ensure!(
+                metadata.ports.inputs.iter().any(|port| {
+                    port.name.as_ref() == variable.as_str() && &port.value_type == value_type
+                }),
+                InvalidDefinitionSnafu {
+                    definition_id: definition_id.clone(),
+                    message: format!(
+                        "scope state input `{variable}` must be declared with its relation value type"
+                    ),
+                }
+            );
+            ensure!(
+                metadata.ports.outputs.iter().any(|port| {
+                    port.name.as_ref() == output.as_str() && &port.value_type == value_type
+                }),
+                InvalidDefinitionSnafu {
+                    definition_id: definition_id.clone(),
+                    message: format!(
+                        "scope state output `{output}` for variable `{variable}` must be declared with its relation value type"
+                    ),
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Validate the receiving registration and the compiled binding set before children
+/// are constructed. Configuration outside its declarations remains opaque.
+pub fn validate_node_flow_parameters(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+    expected: &[&str],
+) -> Result<(), WorkflowBuildError> {
+    validated_node_config(registry, definition_id, kind, config_json, expected)?;
+    Ok(())
+}
+
+fn validated_node_config(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+    expected: &[&str],
+) -> Result<(&'static mf_runtime::NodeRegistration, Value), WorkflowBuildError> {
+    let registration = registry.get(kind).with_context(|| UnknownKindSnafu {
+        definition_id: DefinitionId::from(definition_id),
+        kind: kind.to_owned(),
+    })?;
+    let node = crate::NodeDefinition {
+        id: definition_id.into(),
+        kind: kind.into(),
+        config: serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
+            definition_id: DefinitionId::from(definition_id),
+        })?,
+    };
+    let fields = registration.flow_parameters(&node.config);
+    ensure!(
+        fields
+            .keys()
+            .map(String::as_str)
+            .eq(expected.iter().copied()),
+        InvalidDefinitionSnafu {
+            definition_id: DefinitionId::from(definition_id),
+            message: "receiving Flow parameter declarations differ from the compiled binding set",
+        }
+    );
+    Ok((registration, node.config))
+}
+
 pub fn instantiate_node_with_metadata(
     registry: &NodeRegistry,
     definition_id: &str,
     kind: &str,
     config_json: &str,
 ) -> Result<crate::FlowNode, WorkflowBuildError> {
-    let Some(registration) = registry.get(kind) else {
-        return UnknownKindSnafu {
-            definition_id: DefinitionId::from(definition_id),
-            kind: kind.to_owned(),
-        }
-        .fail();
-    };
-    let config: Value = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
-        definition_id: DefinitionId::from(definition_id),
-    })?;
+    let (registration, config) =
+        validated_node_config(registry, definition_id, kind, config_json, &[])?;
     let node = registration
         .instantiate(config)
         .context(NodeConstructionSnafu {
@@ -893,37 +1058,35 @@ pub fn instantiate_node_with_metadata(
     Ok(crate::FlowNode::new(definition_id, node))
 }
 
-pub fn instantiate_subgraph_with_metadata(
+pub fn instantiate_subgraphs_with_metadata(
     registry: &NodeRegistry,
     definition_id: &str,
     kind: &str,
     config_json: &str,
-    options_json: &str,
-    body: mf_runtime::PreparedSubgraph,
+    arguments: BTreeMap<String, mf_runtime::PreparedSubgraph>,
 ) -> Result<crate::FlowNode, WorkflowBuildError> {
-    let Some(registration) = registry.get(kind) else {
-        return UnknownKindSnafu {
-            definition_id: DefinitionId::from(definition_id),
-            kind: kind.to_owned(),
-        }
-        .fail();
-    };
-    let parse = |value| {
-        serde_json::from_str(value).context(InvalidEmbeddedConfigSnafu {
-            definition_id: DefinitionId::from(definition_id),
-        })
-    };
+    let registration = registry.get(kind).with_context(|| UnknownKindSnafu {
+        definition_id: DefinitionId::from(definition_id),
+        kind: kind.to_owned(),
+    })?;
+    let config = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
+        definition_id: DefinitionId::from(definition_id),
+    })?;
     let prepared = registration
-        .instantiate_subgraph(
-            definition_id,
-            parse(config_json)?,
-            parse(options_json)?,
-            body,
-        )
+        .instantiate_subgraphs(definition_id, config, arguments)
         .context(NodeConstructionSnafu {
             definition_id: DefinitionId::from(definition_id),
         })?;
     Ok(crate::FlowNode::new(definition_id, prepared))
+}
+
+pub fn prepared_scope_source_from_json(
+    id: &str,
+    types_json: &str,
+) -> Result<FlowNode, WorkflowBuildError> {
+    let types: BTreeMap<String, ValueType> = serde_json::from_str(types_json)
+        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
+    Ok(mf_runtime::prepared_scope_source(id, &types))
 }
 
 pub fn prepared_loop_source_from_json(
@@ -933,7 +1096,7 @@ pub fn prepared_loop_source_from_json(
         serde_json::from_str(variables_json).context(InvalidEmbeddedConfigSnafu {
             definition_id: crate::LOOP_SOURCE_ID,
         })?;
-    let types = mf_runtime::loop_variable_types(&variables).context(LoopVariablesSnafu {
+    let types = mf_runtime::loop_variable_types(&variables).context(ScopeVariablesSnafu {
         definition_id: crate::LOOP_SOURCE_ID,
     })?;
     Ok(mf_runtime::prepared_loop_source_types(&types))
@@ -947,7 +1110,7 @@ pub fn prepared_loop_assign_from_json(
     let descriptor: Value = serde_json::from_str(type_json)
         .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
     let value_type = ValueType::parse_descriptor(&descriptor)
-        .context(LoopVariableDescriptorSnafu { definition_id: id })?;
+        .context(ScopeVariableDescriptorSnafu { definition_id: id })?;
     Ok(mf_runtime::prepared_loop_assign(id, variable, value_type))
 }
 #[derive(Debug, Snafu)]
@@ -1741,6 +1904,112 @@ mod tests {
         },
         time::{Duration, Instant},
     };
+
+    fn state_binding_relations(variable: &str) -> mf_runtime::GraphRelations {
+        mf_runtime::GraphRelations {
+            scope: Some(mf_runtime::ScopeRelations {
+                input: "scope-input".into(),
+                values: BTreeMap::from([(variable.into(), ValueType::String)]),
+                state_outputs: BTreeMap::from([(variable.into(), variable.into())]),
+                writes: BTreeMap::new(),
+                exits: BTreeSet::new(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scope_bindings_check_all_child_boundaries_and_allow_unrelated_ports() {
+        let relations = [
+            mf_runtime::GraphRelations::default(),
+            state_binding_relations("first"),
+            state_binding_relations("second"),
+        ];
+        let ports: Vec<_> = ["first", "second", "unrelated"]
+            .into_iter()
+            .map(|name| crate::PortSpec::new(name, ValueType::String, true))
+            .collect();
+        let mut metadata = mf_runtime::NodeMetadata::default();
+        metadata.ports.inputs = ports.clone();
+        metadata.ports.outputs = ports;
+        validate_scope_bindings(&"owner".into(), &metadata, &relations).unwrap();
+        metadata.ports.outputs.retain(|port| port.name != "second");
+        assert!(validate_scope_bindings(&"owner".into(), &metadata, &relations).is_err());
+    }
+
+    #[test]
+    fn scope_bindings_reject_missing_misnamed_and_mistyped_actual_ports() {
+        let relations = state_binding_relations("state");
+        for input in [true, false] {
+            for replacement in [
+                None,
+                Some(crate::PortSpec::new("other", ValueType::String, true)),
+                Some(crate::PortSpec::new("state", ValueType::Any, true)),
+            ] {
+                let mut metadata = mf_runtime::NodeMetadata::default();
+                metadata.ports.inputs =
+                    vec![crate::PortSpec::new("state", ValueType::String, true)];
+                metadata.ports.outputs = metadata.ports.inputs.clone();
+                let ports = if input {
+                    &mut metadata.ports.inputs
+                } else {
+                    &mut metadata.ports.outputs
+                };
+                *ports = replacement.into_iter().collect();
+                let error =
+                    validate_scope_bindings(&"owner".into(), &metadata, [&relations]).unwrap_err();
+                let WorkflowBuildError::InvalidDefinition { definition_id, .. } = error else {
+                    panic!("expected an invalid scope boundary definition");
+                };
+                assert_eq!(definition_id.as_str(), "owner");
+            }
+        }
+    }
+
+    #[test]
+    fn scope_source_json_preserves_named_values_and_adds_implicit_index() {
+        let types = BTreeMap::from([("item".to_owned(), ValueType::String)]);
+        let source = prepared_scope_source_from_json(
+            "custom-input",
+            &serde_json::to_string(&types).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(source.definition_id.as_str(), "custom-input");
+        assert!(source.metadata.ports.inputs.is_empty());
+        assert_eq!(source.metadata.ports.outputs.len(), 2);
+        let item = source
+            .metadata
+            .ports
+            .outputs
+            .iter()
+            .find(|port| port.name == "item")
+            .unwrap();
+        assert_eq!(item.value_type, ValueType::String);
+        assert!(
+            source
+                .metadata
+                .ports
+                .outputs
+                .iter()
+                .any(|port| port.name == "index")
+        );
+    }
+
+    #[test]
+    fn scope_source_json_preserves_parse_error_source() {
+        let error = prepared_scope_source_from_json("custom-input", "[]")
+            .err()
+            .unwrap();
+        let WorkflowBuildError::InvalidEmbeddedConfig {
+            definition_id,
+            source,
+        } = error
+        else {
+            panic!("expected the embedded configuration error");
+        };
+        assert_eq!(definition_id.as_str(), "custom-input");
+        assert!(source.is_data());
+    }
 
     struct EmptyNode;
 

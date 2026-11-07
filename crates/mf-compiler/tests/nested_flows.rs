@@ -34,7 +34,7 @@ fn child() -> WorkflowDefinition {
 }
 
 fn call(id: &str, body: &WorkflowDefinition) -> Value {
-    json!({"id":id,"kind":"workflow.call","config":{"flow":"child","definition":body}})
+    json!({"id":id,"kind":"workflow.call","config":{"flow":"child","body":body}})
 }
 
 fn iteration_call_graph(body: &WorkflowDefinition, mode: &str) -> WorkflowDefinition {
@@ -44,8 +44,8 @@ fn iteration_call_graph(body: &WorkflowDefinition, mode: &str) -> WorkflowDefini
     graph(
         json!([
             {"id":"items","kind":"builtin.constant","config":{"value":["first","second"]}},
-            {"id":"each","kind":"builtin.iteration","config":{"mode":mode,"body":{
-                "nodes":[invocation],"result":{"node":"invoke","port":"value"}
+            {"id":"each","kind":"builtin.iteration","config":{"mode":mode,"body":{"version":"2026-10-25", "dependencies":{},
+                "nodes":[invocation],"outputs": [{"name":"result", "node":"invoke","port":"value"}]
             }},"inputs":{"items":{"from":{"node":"items","port":"value"}}}}
         ]),
         json!([{"name":"results","node":"each","port":"results"}]),
@@ -172,7 +172,7 @@ fn iteration_calls_isolate_item_bindings_and_observe_nested_skips() {
 fn iteration_calls_cannot_hide_loop_containers_from_either_preparation_path() {
     let loop_body: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","loop":{"max_iterations":1,"variables":[{"name":"value","type":"string"}],"body":{"nodes":[]}}}],
+        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{"max_iterations":1,"variables":[{"name":"value","type":"string"}],"body":{"version":"2026-10-25", "dependencies":{}, "nodes":[]}}}],
         "outputs":[{"name":"value","node":"repeat","port":"value"}]
     })).unwrap();
     let body = graph(
@@ -181,18 +181,29 @@ fn iteration_calls_cannot_hide_loop_containers_from_either_preparation_path() {
     );
     let definition = iteration_call_graph(&body, "sequential");
     let registry = NodeRegistry::from_inventory().unwrap();
-    assert!(
-        compile_definition(&definition, &registry)
-            .unwrap_err()
-            .to_string()
-            .contains("cannot contain Loop or Iteration")
-    );
-    assert!(
-        mf_compiler::plan_definition(&definition)
-            .unwrap_err()
-            .to_string()
-            .contains("cannot contain Loop or Iteration")
-    );
+    for error in [
+        compile_definition(&definition, &registry).unwrap_err(),
+        mf_compiler::plan_definition(&definition).unwrap_err(),
+    ] {
+        let mut leaf = &error;
+        for owner in ["each", "invoke", "inner", "repeat"] {
+            let mf_compiler::WorkflowCompileError::ChildGraph {
+                definition_id,
+                source,
+            } = leaf
+            else {
+                panic!("expected owner {owner}, got {leaf:?}; full error: {error:?}");
+            };
+            assert_eq!(definition_id.as_str(), owner);
+            leaf = source.as_ref();
+        }
+        assert!(
+            matches!(leaf, mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+            if path == "[\"each\",\"invoke\",\"inner\",\"repeat\"]"
+                && message == "child scopes inside an item scope cannot contain container scopes"),
+            "{error:?}"
+        );
+    }
 }
 
 fn builtin_echo() -> Result<WorkflowDefinition, mf_runtime::DefinitionParseError> {
@@ -220,14 +231,16 @@ fn builtin_sources_are_resolved_from_linked_providers() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     assert_eq!(
-        plan.definition.dependencies["provider"].version.as_deref(),
+        plan.graph.definition.dependencies["provider"]
+            .version
+            .as_deref(),
         Some("=2")
     );
     assert_eq!(
-        plan.definition.dependencies["provider"].features,
+        plan.graph.definition.dependencies["provider"].features,
         ["required", "selected"]
     );
-    assert!(plan.definition.dependencies["provider"].default_features);
+    assert!(plan.graph.definition.dependencies["provider"].default_features);
     assert_eq!(
         instantiate_compiled(&plan, &registry)
             .unwrap()
@@ -342,10 +355,10 @@ fn source_resolution_rejects_unsupported_versions_names_depth_and_stream_modes()
     )
     .unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("streams require version 2026-10-28"),
-        "{error}"
+        matches!(&error, mf_compiler::WorkflowCompileError::InvalidGraph { definition_id, message }
+        if definition_id.as_str() == "invoke"
+            && message == "child stream exports require definition version 2026-10-28"),
+        "{error:?}"
     );
 }
 
@@ -359,33 +372,79 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
     .unwrap();
     for config in [json!({"flow":1}), json!({"flow":"child"})] {
         let mut corrupt = plan.clone();
-        corrupt.definition.nodes[0].config = config;
+        corrupt.graph.definition.nodes[0].config = config;
         assert!(instantiate_compiled(&corrupt, &registry).is_err());
-        assert!(corrupt.generate_runner_artifacts().is_err());
     }
+    let mut missing = plan.clone();
+    missing.graph.children.clear();
+    let error = instantiate_compiled(&missing, &registry).err().unwrap();
+    common::assert_receiver_binding_preflight(&error, "invoke");
+    // Structural generators have no selected receiver contract to interpret.
+    missing.generate_artifacts().unwrap();
+    missing.generate_runner_artifacts().unwrap();
+    for error in [
+        missing.generate_execution_plans(&registry).unwrap_err(),
+        missing
+            .generate_runner_execution_plans(&registry)
+            .unwrap_err(),
+    ] {
+        let mf_compiler::PlanError::Compilation { source } = error else {
+            panic!("expected generated receiver-binding preflight, got {error:?}");
+        };
+        common::assert_receiver_binding_preflight(source.as_ref(), "invoke");
+    }
+
     let mut manifest = plan.manifest(&registry).unwrap();
-    manifest.definition.nodes[0]
+    let description = manifest.description().unwrap();
+    manifest.graph.definition.nodes[0]
         .config
         .as_object_mut()
         .unwrap()
-        .remove("definition");
+        .remove("body");
+    // Offline inspection trusts the compiled graph, not the authoring config.
+    assert_eq!(
+        manifest.description().unwrap().loop_bodies,
+        description.loop_bodies
+    );
+    manifest.validate().unwrap();
+    manifest
+        .graph
+        .children
+        .get_mut(&"invoke".into())
+        .unwrap()
+        .get_mut("body")
+        .unwrap()
+        .execution_order
+        .clear();
     assert!(manifest.validate().is_err());
-    let mut cycle = child();
-    cycle.edges.push(mf_runtime::EdgeDefinition {
-        exclusive: false,
-        from_node: "echo".into(),
-        from_output: "value".into(),
-        to_node: "input".into(),
-        to_input: "value".into(),
-    });
     let mut invalid = plan;
-    invalid.definition.nodes[0].config["definition"] = serde_json::to_value(cycle).unwrap();
+    invalid
+        .graph
+        .children
+        .get_mut(&"invoke".into())
+        .unwrap()
+        .get_mut("body")
+        .unwrap()
+        .definition
+        .edges
+        .push(mf_runtime::EdgeDefinition {
+            exclusive: false,
+            from_node: "echo".into(),
+            from_output: "value".into(),
+            to_node: "input".into(),
+            to_input: "value".into(),
+        });
+    let error = invalid.generate_runner_artifacts().unwrap_err();
     assert!(
-        invalid
-            .generate_runner_artifacts()
-            .unwrap_err()
-            .to_string()
-            .contains("Flow call")
+        matches!(&error, mf_compiler::PlanError::Description {
+            source: mf_compiler::DescriptionError::DescriptionOrder { path, source },
+        } if path == &["invoke"]
+            && matches!(source.as_ref(), mf_compiler::WorkflowCompileError::ChildGraph {
+                definition_id, source,
+            } if definition_id.as_str() == "invoke"
+                && matches!(source.as_ref(), mf_compiler::WorkflowCompileError::Cycle { path }
+                    if path.nodes().iter().map(|id| id.as_str()).eq(["echo", "input", "echo"])))),
+        "{error:?}"
     );
 }
 
@@ -718,7 +777,7 @@ fn missing_inputs_unknown_aliases_and_incompatible_ports_fail_early() {
     let definition = graph(
         json!([
             {"id":"source","kind":"builtin.constant","config":{"value":1}},
-            {"id":"call","kind":"workflow.call","config":{"flow":"child","definition":body},"inputs":{"input.value":{"from":{"node":"source","port":"value"}}}}
+            {"id":"call","kind":"workflow.call","config":{"flow":"child","body":body},"inputs":{"input.value":{"from":{"node":"source","port":"value"}}}}
         ]),
         json!([]),
     );
@@ -759,6 +818,28 @@ fn call_rejects_stdin_and_streaming_children() {
     );
     let definition = graph(json!([call("call", &body)]), json!([]));
     assert!(compile_definition(&definition, &registry).is_err());
+
+    let body = graph(
+        json!([{"id":"value", "kind":"builtin.constant", "config":{"value":1}}]),
+        json!([]),
+    );
+    let mut definition = graph(json!([call("call", &body)]), json!([]));
+    definition.nodes[0].config["unexpected"] = json!(true);
+    // Source selection preserves ordinary fields; only the selected receiver
+    // decoder owns their schema and must reject the unknown field.
+    let resolved = mf_compiler::resolve_flows_with_registry(&definition, None, &registry).unwrap();
+    assert_eq!(
+        resolved.definition.nodes[0].config["unexpected"],
+        json!(true)
+    );
+    let error = compile_definition(&definition, &registry).unwrap_err();
+    assert!(
+        matches!(&error, mf_compiler::WorkflowCompileError::NodeConstruction {
+        definition_id, source: mf_runtime::NodeBuildError::InvalidConfiguration { source }, ..
+    } if definition_id.as_str() == "call" && source.is_data()),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("unexpected"));
 }
 
 #[test]
@@ -778,7 +859,7 @@ fn provider_features_merge_and_source_conflicts_are_rejected() {
     assert_eq!(dependency.features, ["child", "parent"]);
     assert!(dependency.default_features);
     body.dependencies.get_mut("child_provider").unwrap().version = Some("2.0".into());
-    definition.nodes[0].config["definition"] = serde_json::to_value(body).unwrap();
+    definition.nodes[0].config["body"] = serde_json::to_value(body).unwrap();
     assert!(
         mf_compiler::resolve_flows(&definition, None)
             .err()
@@ -815,14 +896,22 @@ fn generated_calls_match_memory_without_flow_sources() {
         .execute()
         .unwrap();
     let execution = plan.generate_runner_execution_plans(&registry).unwrap();
-    assert!(execution.rust_source.contains("with_input_metadata"));
+    assert!(
+        execution
+            .rust_source
+            .contains("PreparedSubgraph::from_flow")
+    );
     let frozen = mf_runtime::WorkflowManifest::from_bytes(&execution.manifest_bytes).unwrap();
-    assert_eq!(frozen.definition, plan.definition);
+    assert_eq!(frozen.graph.definition, plan.graph.definition);
     let targets: Vec<mf_runtime::NodeTarget> =
         serde_json::from_str(&execution.node_targets_json).unwrap();
     assert_eq!(targets[0].id, "outer");
     let artifacts = plan.generate_artifacts().unwrap();
-    assert!(artifacts.rust_source.contains("with_input_metadata"));
+    assert!(
+        artifacts
+            .rust_source
+            .contains("PreparedSubgraph::from_flow")
+    );
     let runner_artifacts = plan.generate_runner_artifacts().unwrap();
     assert!(!runner_artifacts.rust_source.is_empty());
     let project = root.path().join("build");
@@ -861,9 +950,9 @@ fn generated_calls_match_memory_without_flow_sources() {
 fn call_loop_call_execution_preserves_complete_observation_paths() {
     use mf_telemetry::event::{Event, ScopePathEntry};
     let body = graph(
-        json!([{"id":"repeat","kind":"workflow.loop","loop":{
+        json!([{"id":"repeat","kind":"workflow.loop","config":{
             "max_iterations":1,"variables":[{"name":"value","type":"string"}],
-            "body":{"nodes":[call("inner", &child())]}
+            "body":{"version":"2026-10-25", "dependencies":{}, "nodes":[call("inner", &child())]}
         }}]),
         json!([{"name":"value","node":"repeat","port":"value"}]),
     );
@@ -978,9 +1067,9 @@ fn calls_inside_loops_share_the_callers_step_budget_and_cancellation() {
     }
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","loop":{
+        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{
             "max_iterations":1000,"variables":[{"name":"value","type":"string"}],
-            "body":{"nodes":[call("call", &body)]}
+            "body":{"version":"2026-10-25", "dependencies":{}, "nodes":[call("call", &body)]}
         }}],
         "outputs":[{"name":"value","node":"repeat","port":"value"}]
     }))

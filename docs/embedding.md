@@ -1,14 +1,16 @@
 # Embedding workflows in Rust programs
 
 Use the `mf-compiler` build helper and `embed_workflow!` macro to include workflows in an existing
-application or library. The build checks definition structure and emits Rust source. Preparation
-uses the host registry to validate actual node configuration, inferred ports, and execution contracts.
-Execution uses existing runtime APIs without reading workflow or generated source files.
+application or library. Embedding has two stages: the build packs the root definition and explicitly
+listed source files, checking the root's syntax and structural cycles without node providers. The host
+then resolves declared child Flows and plans with its registry. Preparation validates actual node
+configuration, inferred ports, and execution contracts. Runtime planning and execution never read
+workflow or generated source files.
 
 ## Cargo setup
 
-Declare node crates only in normal dependencies. Enable compiler codegen in build dependencies and
-disable it in the normal dependency:
+Declare node and built-in Flow providers in normal dependencies only. Build scripts need no provider
+registrations or `NodeConfig` metadata. Enable compiler codegen only in build dependencies:
 
 ```toml
 [dependencies]
@@ -22,8 +24,10 @@ mf-compiler = { version = "=0.1.0", default-features = false, features = ["codeg
 
 Cargo and the host lockfile select packages and features. Dependency descriptors in workflow JSON
 retain their existing format but do not install packages, resolve paths, or override the host graph.
-No provider alias mapping or node build dependencies are required. Link node registrations in the
-host with ordinary Rust imports, such as `use core_nodes as _;`.
+No provider alias mapping is required. Link registrations in the host with ordinary Rust imports,
+such as `use core_nodes as _;`. This policy also applies to Call, Loop, Iteration, and custom providers
+with Flow-valued configuration: only the host registry supplies the receiving registration's declared
+Flow parameters. Built-in children use the same declared-parameter authority as file and inline children.
 
 ## Generate source during the build
 
@@ -31,26 +35,38 @@ host with ordinary Rust imports, such as `use core_nodes as _;`.
 // build.rs
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     mf_compiler::embed_workflows(&[
-        mf_compiler::EmbedRequest::new("answer", "workflows/answer.json"),
+        mf_compiler::EmbedRequest::new("answer", "workflows/answer.json")
+            .with_source("workflows/child.json"),
     ])?;
     Ok(())
 }
 ```
 
-The helper accepts definitions relative to `CARGO_MANIFEST_DIR`, or absolute paths. Submit all
-workflows in one batch. Names must be ASCII Rust module identifiers, excluding keywords, raw
-identifiers, and `_`. Invalid or duplicate names and invalid graph structure fail before modules
-from a prior successful build are replaced.
+The root path and every `with_source` path are relative to `CARGO_MANIFEST_DIR`; absolute paths must
+remain within that package directory. Symlinked sources and paths escaping the package are rejected.
+In this example, a root reference to `child.json` resolves relative to `workflows/answer.json`, while
+`with_source("workflows/child.json")` explicitly packs that resource. Repeat `with_source` for every
+additional UTF-8 source file required by any nested child; the root is included automatically. Only
+the root is parsed during packaging; other sources are parsed when an authorized field references
+them in the host. The helper does not scan JSON fields for paths, discover children, or collect whole
+directories.
 
-Each workflow emits one file, `OUT_DIR/mf-embedded/<name>/workflow.rs`, containing its normalized
-structural plan and preparation entry points. The helper does not load node crates, execute node
-constructors, or start a nested Cargo build. Unknown kinds, invalid node configuration, incompatible
-ports, and node execution contracts are validated during preparation, not by Rust type checking.
+Submit all workflows in one batch. Names must be ASCII Rust module identifiers, excluding keywords,
+raw identifiers, and `_`. Invalid or duplicate names and root syntax or structural-cycle errors fail
+before modules from a prior successful build are replaced.
 
-The helper emits `cargo:rerun-if-changed` for definitions. Retain tracking for other inputs when
-calling it from an existing build script. Keep workflow JSON in the host package because consumers
-compile its build script. Node source/feature changes are ordinary normal-dependency rebuilds;
-preparation uses their current metadata without a separate build-time node feature graph.
+Each workflow emits one file, `OUT_DIR/mf-embedded/<name>/workflow.rs`, containing a
+`FlowSourceBundle` and host planning/preparation entry points. This build-product handoff contains
+only the package-relative entry and UTF-8 resources, never a partial `ResolvedWorkflow` or selected
+node contracts. The helper neither loads provider metadata nor constructs nodes or starts a nested
+Cargo build. Generated `plan(registry)` resolves that bundle with the host registry and passes the
+result to `plan_resolved_workflow`. Configured node contracts and ports are validated during
+preparation, not by Rust type checking.
+
+The helper emits `cargo:rerun-if-changed` for the root and every explicitly supplied source. Retain
+tracking for other inputs when calling it from an existing build script. Keep these files in the host
+package because consumers compile its build script. Node source/feature changes follow ordinary Cargo
+dependency tracking; host planning and preparation use current registration metadata.
 
 ## Prepare and execute tasks
 
@@ -113,8 +129,52 @@ to stop a running instance. Generated modules do not claim global stdio or initi
 
 ## Plans, manifests, and observation
 
-Every module exposes `plan() -> Result<CompiledWorkflow, PlanError>`. It reads embedded program data
-and supports existing planning, description, and observation APIs without loading nodes.
+Every module exposes `plan(&NodeRegistry) -> Result<CompiledWorkflow, PlanError>`. It resolves the
+`FlowSourceBundle` into a host `ResolvedWorkflow`, then calls `plan_resolved_workflow` once. Declared
+child Flows come from packed resources and the host's built-in catalog before structural planning.
+The selected receiving registrations determine which configuration fields are executable children;
+ordinary provider data is not interpreted as a Flow source. Planning uses registration metadata without
+constructing nodes and supports existing description and observation APIs.
+
+The plan stores an explicit `CompiledGraph`: a definition, its canonical `execution_order`, and a
+`children` map keyed by receiving node ID and configuration field name, plus required `relations`.
+These relationships name scope input sources, current-frame variable writes and exits, stream export
+endpoints, host bindings, and scope-edge identity. Discovery, provider checking, preparation, and codegen
+consume those relationships rather than reclassifying instructions by their node-kind labels. Only the
+authoring lowering boundary interprets the language's structural syntax. Scope keys must name their
+actual receiving owner or that exact encoded owner/binding pair; runtime invocation paths and
+telemetry descriptions use the same key while routing and errors retain the physical owner ID.
+Compiled-graph integrity and description failures use runtime-owned `GraphDescriptionError`;
+compiler error contracts do not expose telemetry error definitions. Genuine observation projection
+failures retain their typed telemetry source behind the runtime observation boundary.
+Description bodies carry their actual input source and state-output relationships, so lifecycle
+validation does not infer frame semantics from provider labels. `NodeConfig::flow_parameters`
+extracts executable child values from configuration during source resolution; ordinary JSON remains
+opaque, and absent optional children produce no graph entry. The resolved tree is handed directly to
+`plan_resolved_workflow`, so planning retains the selected receiver's child decisions.
+For an already resolved inline definition, `plan_resolved_definition(&definition, &registry)` is an
+authoring convenience that selects children using that registry. Do not use it to replan saved artifacts.
+Registered plain factories extract no children; an unavailable registration is not a registered plain kind.
+
+Offline descriptions, generated code, and saved-plan preparation traverse this explicit child graph.
+They never rediscover children by inspecting configuration keys or order paths. Preparation checks
+provider availability and actual compiled-child binding keys at the receiving boundary. Required,
+default, and ordinary-field validation remains the receiver decoder's responsibility; complete
+configuration schemas are neither persisted nor compared.
+
+Provider-free planning and offline description validate graph structure and supported scope grammar,
+not the receiving node's complete business configuration. Preparation invokes the registered factory,
+which decodes ordinary fields and validates its actual prepared child interfaces. Loop bounds and
+conditions, Iteration result shape, and Call stdin policy are checked there before execution. Compiler
+lowering reads only the fields it needs for synthetic inputs, stream projections, or host selection;
+those views never deserialize the redundant raw child body. Factories receive the original stored
+configuration alongside authoritative prepared children. Node-owned errors retain their typed sources
+under generic compiler node or child-scope context.
+
+Manifest payload version `2026-11-06` contains `version`, `graph`, and prepared `input_schema`;
+saved plans contain a required `graph` wrapper. Neither format stores `parameter_types` or
+`loop_orders`. Framing remains version 1. Older payloads and saved-plan formats are rejected rather
+than inferred or adapted.
 
 `manifest(&registry) -> Result<WorkflowManifest, PlanError>` derives the current configured interface
 from the host registry. Inspection prepares separate nodes without executing them. There is no
@@ -124,7 +184,7 @@ obey the existing preparation contracts and remain stable for the same configura
 Start task observation from the structural plan before fallible preparation:
 
 ```rust
-let observation = answer::plan()?.start_observation(
+let observation = answer::plan(&registry)?.start_observation(
     &observer,
     mf_telemetry::identity::RunId::new(),
 )?;
@@ -138,6 +198,17 @@ The host supplies `observer` and its telemetry dependencies. For streaming prepa
 use the structural plan with existing `mf_compiler::start_stream` and `StreamOptions` APIs.
 Manifests are module data, without standalone executable sections; a multi-workflow host is not
 automatically a runner accepted by `mf run --tui`.
+
+## Standalone runner boundary
+
+`FlowSourceBundle` is the embedding build handoff, not the standalone runner format. CLI compilation
+first discovers the provider closure in temporary provider-linked processes, then performs one complete
+source resolution in the stable selected-provider process. It freezes the resulting `CompiledWorkflow`
+before generating the runner project. Standalone startup does not re-read files, discover providers,
+or resolve sources; deleting authoring files after compilation remains supported. This differs from
+an embedded module's explicit host `plan(registry)` entry point. The separate
+`CompiledWorkflow::generate_embedded_artifacts` API also retains its already-frozen, zero-argument
+`plan()` entry point rather than adopting resource-bundle resolution.
 
 ## Repository example
 
@@ -212,12 +283,20 @@ Standalone Cargo runners resolve this choice during their build and compile one 
 
 ## Referenced Flow sources
 
-`embed_workflows` resolves local and built-in `flows` before generating Rust and tracks every referenced
-JSON file with `cargo:rerun-if-changed`. Relative paths belong to the canonical file that declares them.
-All child bodies and their interfaces are frozen into the generated module; execution never loads them
-from disk. The host still links all required node crates through its normal Cargo dependencies. Provider source
-declarations remain provenance in this mode: the helper does not resolve their paths or merge provider
-requirements into Cargo. This also applies to providers used by nested bodies.
+`embed_workflows` packs only the root and files explicitly added with `EmbedRequest::with_source`.
+It does not resolve local or built-in children at build time. Host planning resolves relative child
+paths against the file that declares them, using only the packed resources. Every file resource must
+be listed explicitly, including transitive children. Built-in definitions have no source directory;
+they retain the existing requirement to use inline or built-in children rather than local file paths.
+A missing resource is an error even if the file still exists on the host filesystem: there is no
+runtime filesystem fallback. Unused packed files do not become executable children.
+
+The host links all required node and built-in Flow providers through its normal Cargo dependencies.
+Only the receiving registration's declared Flow parameters authorize child resolution; JSON key
+names or source-looking ordinary data do not. Child interfaces are derived from current host contracts,
+not frozen by the build helper. Provider source declarations remain provenance in this mode: embedding
+does not resolve provider paths or merge provider requirements into Cargo. This also applies to
+providers used by nested bodies.
 
 For dynamic embedding, load definitions containing local Flow references with
 `mf_compiler::load_embedded_workflow(path)?.definition`, then use `compile_resolved_definition`
@@ -227,14 +306,13 @@ shared values, and isolated scope contracts in both execution backends.
 
 Built-in Flow definitions are registered by their owning packages through
 `mf_runtime::register_builtin_flow!`. The macro captures the calling Cargo package, and the registry
-qualifies its local Flow name automatically. Link those packages in the build script as build dependencies
-when `embed_workflows` resolves their names. For example, `mf-chat` provides `mf-chat.chat-title` from its own
-`workflows/title.json`; the compiler does not depend on the chat package. The title source declares
-its provider packages, and the chat build fills their version requirements and feature policy from
-Cargo's resolved manifest declarations, including workspace inheritance. The embedded definition
-retains portable registry requirements rather than checkout paths. Source factories return
-metadata without executing workflow work. Once resolved, the embedded graph no longer needs the
-catalog to prepare or execute its nodes.
+qualifies its local Flow name automatically. Link those packages in the host, not the build script;
+`plan(&registry)`, `manifest(&registry)`, and preparation resolve built-in names from the host catalog.
+For example, `mf-chat` provides `mf-chat.chat-title` from its own `workflows/title.json`; the compiler
+does not depend on the chat package. The chat build still generates `title.json`, filling portable
+provider requirements and feature policy from Cargo's resolved manifest declarations, including
+workspace inheritance. The host registers that generated definition. No duplicate build-only
+registration is needed. Source factories return definitions without executing workflow work.
 
 ## Forwarding finite child emissions
 

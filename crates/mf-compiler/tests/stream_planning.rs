@@ -153,9 +153,9 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         ("2026-10-03", 0, "stream limits must be positive"),
     ] {
         let mut value = serde_json::to_value(&plan).unwrap();
-        value["definition"]["version"] = json!(version);
-        value["definition"]["execution"]["limits"]["workers"] = json!(workers);
-        let definition = serde_json::from_value(value["definition"].clone()).unwrap();
+        value["graph"]["definition"]["version"] = json!(version);
+        value["graph"]["definition"]["execution"]["limits"]["workers"] = json!(workers);
+        let definition = serde_json::from_value(value["graph"]["definition"].clone()).unwrap();
         let error = compile_definition(&definition, &registry)
             .unwrap_err()
             .to_string();
@@ -166,9 +166,10 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         assert!(error.contains(expected), "{error}");
     }
 
-    assert_eq!(plan.definition.nodes.len(), 3);
+    assert_eq!(plan.graph.definition.nodes.len(), 3);
     assert_eq!(
-        plan.execution_order
+        plan.graph
+            .execution_order
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
@@ -340,15 +341,16 @@ fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
     assert!(
         compile_definition(&definition, &NodeRegistry::from_inventory().unwrap())
             .unwrap()
+            .graph
             .definition
             .execution
             .is_some()
     );
 
-    let iteration = json!({"id":"iterate", "kind":"builtin.iteration", "config":{"body":{
+    let iteration = json!({"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"version":"2026-10-03", "dependencies":{},
         "nodes":[{"id":"collect", "kind":"test.collect"}],
         "edges":[edge("%iteration", "item", "collect", "item")],
-        "result":{"node":"collect", "port":"items"}
+        "outputs": [{"name":"result", "node":"collect", "port":"items"}]
     }}});
     let mut value = graph(
         json!([iteration]),
@@ -362,8 +364,8 @@ fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
         "{error}"
     );
 
-    let repeat = json!({"id":"repeat", "kind":"workflow.loop", "loop":{
-        "max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{
+    let repeat = json!({"id":"repeat", "kind":"workflow.loop", "config":{
+        "max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
             "nodes":[{"id":"collect", "kind":"test.collect"}], "edges":[edge("%loop", "x", "collect", "item")]
         }
     }});

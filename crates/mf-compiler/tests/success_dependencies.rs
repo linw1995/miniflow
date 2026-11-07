@@ -474,26 +474,22 @@ fn body_invocations_keep_success_conditions_local_and_containers_are_rejected() 
         let path = root.path().join("trace");
         let mut graph: WorkflowDefinition = serde_json::from_str(source).unwrap();
         let container = graph.nodes[1].id.clone();
-        if let Some(loop_definition) = &mut graph.nodes[1].loop_definition {
-            loop_definition.body.nodes.extend([
-                serde_json::from_value(task("a", &path)).unwrap(),
-                serde_json::from_value(task("b", &path)).unwrap(),
-            ]);
-            loop_definition
-                .body
-                .order_edges
-                .push(mf_compiler::OrderEdgeDefinition {
-                    from_node: "a".into(),
-                    to_node: "b".into(),
-                });
-        } else {
-            let body = &mut graph.nodes[1].config["body"];
-            body["nodes"]
-                .as_array_mut()
-                .unwrap()
-                .extend([task("a", &path), task("b", &path)]);
-            body["order_edges"] = json!([{"from_node":"a","to_node":"b"}]);
-        }
+        let mut body = registry
+            .get(&graph.nodes[1].kind)
+            .unwrap()
+            .validate_flow_parameters(&graph.nodes[1], graph.version)
+            .unwrap()
+            .remove("body")
+            .unwrap();
+        body.nodes.extend([
+            serde_json::from_value(task("a", &path)).unwrap(),
+            serde_json::from_value(task("b", &path)).unwrap(),
+        ]);
+        body.order_edges.push(mf_compiler::OrderEdgeDefinition {
+            from_node: "a".into(),
+            to_node: "b".into(),
+        });
+        graph.nodes[1].set_node_flow("body", body).unwrap();
         execute(&graph).unwrap();
         assert_eq!(trace(&path), ["a", "b", "a", "b", "a", "b"]);
         graph
@@ -680,7 +676,7 @@ fn success_edges_change_identity_even_when_execution_order_is_unchanged() {
     let id = with.manifest(&registry).unwrap().workflow_id().unwrap();
     graph.order_edges.clear();
     let without = compile_definition(&graph, &registry).unwrap();
-    assert_eq!(with.execution_order, without.execution_order);
+    assert_eq!(with.graph.execution_order, without.graph.execution_order);
     let manifest = without.manifest(&registry).unwrap();
     assert_ne!(id, manifest.workflow_id().unwrap());
     assert_eq!(
@@ -727,25 +723,22 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
         include_str!("../../../examples/iteration.json"),
     ] {
         let mut graph: WorkflowDefinition = serde_json::from_str(source).unwrap();
-        if let Some(definition) = &mut graph.nodes[1].loop_definition {
-            definition.body.nodes.extend([
-                serde_json::from_value(task("a", &path)).unwrap(),
-                serde_json::from_value(task("b", &path)).unwrap(),
-            ]);
-            definition
-                .body
-                .order_edges
-                .push(mf_compiler::OrderEdgeDefinition {
-                    from_node: "a".into(),
-                    to_node: "b".into(),
-                });
-        } else {
-            graph.nodes[1].config["body"]["nodes"]
-                .as_array_mut()
-                .unwrap()
-                .extend([task("a", &path), task("b", &path)]);
-            graph.nodes[1].config["body"]["order_edges"] = json!([{"from_node":"a","to_node":"b"}]);
-        }
+        let mut body = registry
+            .get(&graph.nodes[1].kind)
+            .unwrap()
+            .validate_flow_parameters(&graph.nodes[1], graph.version)
+            .unwrap()
+            .remove("body")
+            .unwrap();
+        body.nodes.extend([
+            serde_json::from_value(task("a", &path)).unwrap(),
+            serde_json::from_value(task("b", &path)).unwrap(),
+        ]);
+        body.order_edges.push(mf_compiler::OrderEdgeDefinition {
+            from_node: "a".into(),
+            to_node: "b".into(),
+        });
+        graph.nodes[1].set_node_flow("body", body).unwrap();
         cases.push(graph);
     }
     let mut stream = definition(
