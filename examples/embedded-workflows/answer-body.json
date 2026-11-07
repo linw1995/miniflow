@@ -1,0 +1,17 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {},
+  "nodes": [
+    {
+      "id": "echo",
+      "kind": "builtin.identity"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "echo",
+      "port": "value"
+    }
+  ]
+}

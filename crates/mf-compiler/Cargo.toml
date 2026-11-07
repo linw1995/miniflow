@@ -38,6 +38,7 @@ snafu.workspace = true
 
 [dev-dependencies]
 # Built-in nodes and test node registration.
+embedded-flow-provider = { path = "../../examples/embedded-workflows/provider" }
 inventory.workspace = true
 mfn-code.workspace = true
 mfn-core.workspace = true

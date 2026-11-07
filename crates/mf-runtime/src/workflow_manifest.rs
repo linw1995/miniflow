@@ -590,9 +590,9 @@ fn describe_children(
         };
         for (name, child) in children {
             ensure!(
-                !name.trim().is_empty(),
+                crate::NodeDefinition::validate_flow_parameter_path(name).is_ok(),
                 InvalidSnafu {
-                    message: "compiled child binding names must be nonblank",
+                    message: "compiled child bindings must be RFC 6901 pointers",
                 }
             );
             let key = child.child_scope_key(node, name);

@@ -3488,6 +3488,95 @@ fn monotonic_receipt_time_keeps_stale_source_emissions_visible() {
 }
 
 #[test]
+fn binding_transfer_animations_keep_sibling_scopes_separate() {
+    let paths: Vec<_> = ["/left", "/right"]
+        .into_iter()
+        .map(|binding| vec![ScopePathEntry::binding_key("router", binding)])
+        .collect();
+    let bodies: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            serde_json::json!({
+                "path": path,
+                "nodes": [
+                    {"id": "source", "kind": "fixture.task"},
+                    {"id": "sink", "kind": "fixture.task"}
+                ],
+                "execution_order": ["source", "sink"],
+                "data_edges": [{
+                    "from_node": "source", "from_output": "value",
+                    "to_node": "sink", "to_input": "input", "exclusive": false
+                }],
+                "control_edges": []
+            })
+        })
+        .collect();
+    let graph: WorkflowDescription = serde_json::from_value(serde_json::json!({
+        "version": "2026-10-23",
+        "workflow_id": format!("sha256:{}", "d".repeat(64)),
+        "execution": {"mode": "single"},
+        "nodes": [{"id": "router", "kind": "fixture.custom_router"}],
+        "execution_order": ["router"],
+        "data_edges": [], "control_edges": [],
+        "loop_bodies": bodies
+    }))
+    .unwrap();
+    let layout = GraphLayout::with_expanded_bodies(
+        &graph,
+        ConnectionView::Ports,
+        &paths.iter().cloned().collect(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let correlation = (vec![3; 16], vec![4; 8]);
+    let mut nodes = pending_nodes(&layout);
+    for node in &mut nodes {
+        // Even identical correlations must not conflate sibling bindings.
+        node.correlation = Some(correlation.clone());
+    }
+    let now = 20_000_000_000;
+    for binding in ["/left", "/right"] {
+        for outcome in [SnapshotOutcome::Emitted, SnapshotOutcome::Started] {
+            let mut store = snapshot_store([]);
+            store
+                .apply(SnapshotRecord::Node {
+                    scope: vec![ScopePathEntry::Call {
+                        call_id: ScopePathEntry::binding_key("router", binding),
+                    }],
+                    node: if outcome == SnapshotOutcome::Emitted {
+                        "source"
+                    } else {
+                        "sink"
+                    }
+                    .into(),
+                    inputs: value_object("input", 1),
+                    outputs: value_object("value", 1),
+                    skipped: Vec::new().into(),
+                    outcome,
+                    error: None,
+                })
+                .unwrap();
+            let history =
+                history_snapshot(&store, now, &[(300_000_000, Some(correlation.clone()))]);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 100));
+            GraphView::new(&layout)
+                .nodes(&nodes)
+                .data_snapshot(&history)
+                .observed_at_unix_nano(now)
+                .render(buffer.area, &mut buffer);
+            for (edge, described) in layout.edges().iter().enumerate() {
+                let path = layout.node_path(described.from);
+                assert_eq!(
+                    !route_transfer_cells(&buffer, &layout, edge).is_empty(),
+                    path == [ScopePathEntry::binding_key("router", binding)],
+                    "{binding}, {outcome:?}, {path:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn scoped_stream_history_requires_the_matching_correlation() {
     let graph = inline_description();
     let expanded = BTreeSet::from([vec!["box".into()]]);

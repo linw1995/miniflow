@@ -29,13 +29,13 @@ fn every_executable_child_uses_direct_canonical_flow_parameters() {
     }))
     .unwrap();
     for node in &definition.nodes {
-        let children = node.flow_parameters(&["body"]).unwrap();
+        let children = node.flow_parameters(&["/body"]).unwrap();
         assert_eq!(
             children.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["body"]
+            ["/body"]
         );
         assert!(
-            children["body"]
+            children["/body"]
                 .nodes
                 .iter()
                 .any(|child| child.id.as_str() == "leaf")
@@ -43,14 +43,14 @@ fn every_executable_child_uses_direct_canonical_flow_parameters() {
         let config = &node.config;
         assert_eq!(
             serde_json::from_value::<WorkflowDefinition>(config["body"].clone()).unwrap(),
-            children["body"]
+            children["/body"]
         );
         assert!(config.get("definition").is_none());
         let mut round_trip = node.clone();
         round_trip
-            .set_node_flow("body", children["body"].clone())
+            .set_node_flow("/body", children["/body"].clone())
             .unwrap();
-        assert_eq!(round_trip.flow_parameters(&["body"]).unwrap(), children);
+        assert_eq!(round_trip.flow_parameters(&["/body"]).unwrap(), children);
     }
     // Every executable child is authored directly as a full workflow in config.body.
     let authored = serde_json::to_value(&definition).unwrap();
@@ -111,12 +111,12 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
             .iter()
             .find(|node| node.id.as_str() == owner)
             .unwrap();
-        let child = &normalized.graph.children[&node.id]["body"];
+        let child = &normalized.graph.children[&node.id]["/body"];
         assert_eq!(child.relations.key.as_deref(), Some(owner));
-        assert_eq!(child.child_scope_key(node, "body"), owner);
-        let children = node.flow_parameters(&["body"]).unwrap();
-        assert_eq!(children["body"].version, version);
-        let sources: Vec<_> = children["body"]
+        assert_eq!(child.child_scope_key(node, "/body"), owner);
+        let children = node.flow_parameters(&["/body"]).unwrap();
+        assert_eq!(children["/body"].version, version);
+        let sources: Vec<_> = children["/body"]
             .nodes
             .iter()
             .filter(|node| node.id.as_str() == source)
@@ -132,10 +132,10 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
         .iter()
         .find(|node| node.id.as_str() == "callA")
         .unwrap();
-    let child = &normalized.graph.children[&call.id]["body"];
+    let child = &normalized.graph.children[&call.id]["/body"];
     assert_eq!(child.definition.version, WorkflowDefinitionVersion::CURRENT);
     assert_eq!(child.relations.key.as_deref(), Some("callA"));
-    assert_eq!(child.child_scope_key(call, "body"), "callA");
+    assert_eq!(child.child_scope_key(call, "/body"), "callA");
     let round_trip = WorkflowDefinition::from_json(
         &serde_json::to_string(&normalized.graph.definition).unwrap(),
     )
@@ -345,7 +345,7 @@ fn executable_body_clusters_are_preserved_in_descriptions() {
         );
         assert!(
             legacy.nodes[0]
-                .flow_parameters(&["body"])
+                .flow_parameters(&["/body"])
                 .unwrap_err()
                 .to_string()
                 .contains("node clusters require version 2026-10-23")

@@ -304,10 +304,23 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         .parent()
         .unwrap()
         .join("examples/embedded-workflows");
-    for file in ["Cargo.toml", "build.rs", "answer.json"] {
+    for file in [
+        "Cargo.toml",
+        "build.rs",
+        "answer.json",
+        "answer-apply.json",
+        "answer-body.json",
+    ] {
         fs::copy(source.join(file), example.path().join(file)).unwrap();
     }
     copy_tree(&source.join("src"), &example.path().join("src"));
+    copy_tree(&source.join("provider"), &example.path().join("provider"));
+    let provider_manifest = example.path().join("provider/Cargo.toml");
+    let content = fs::read_to_string(&provider_manifest).unwrap().replace(
+        "../../../crates/",
+        &format!("{}/", common::crates_dir().display()),
+    );
+    fs::write(provider_manifest, content).unwrap();
     let manifest = example.path().join("Cargo.toml");
     let content = fs::read_to_string(&manifest).unwrap().replace(
         "../../crates/",

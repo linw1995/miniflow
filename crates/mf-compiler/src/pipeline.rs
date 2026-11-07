@@ -776,9 +776,9 @@ mod tests {
         mf_runtime::NodeRegistration {
             kind: "fixture.first",
             factory: mf_runtime::NodeFactory::Subgraph {
-                flow_parameters: |config| config.get("host_extra").filter(|value| !value.is_null())
-                    .map(|value| BTreeMap::from([("host_extra".into(), value.clone())]))
-                    .unwrap_or_default(),
+                flow_parameters: |config| Ok(config.get("host_extra").filter(|value| !value.is_null())
+                    .map(|value| BTreeMap::from([("/host_extra".into(), value.clone())]))
+                    .unwrap_or_default()),
                 plain: host_plain, prepared: host_prepared,
             },
         }
@@ -859,9 +859,9 @@ checksum = "original"
     const CALL_REGISTRATION: &str = r#"
 inventory::submit! {
     NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
-        flow_parameters: |config| config.get("body").filter(|value| !value.is_null())
-            .map(|body| BTreeMap::from([("body".into(), body.clone())]))
-            .unwrap_or_default(), plain, prepared,
+        flow_parameters: |config| Ok(config.get("body").filter(|value| !value.is_null())
+            .map(|body| BTreeMap::from([("/body".into(), body.clone())]))
+            .unwrap_or_default()), plain, prepared,
     } }
 }
 "#;
@@ -1073,9 +1073,9 @@ fn prepared(_: &str, _: Value, _: BTreeMap<String, PreparedSubgraph>) -> Result<
 }}
 inventory::submit! {{
     NodeRegistration {{ kind: {kind:?}, factory: NodeFactory::Subgraph {{
-        flow_parameters: |config| config.get("body").filter(|value| !value.is_null())
-            .map(|body| BTreeMap::from([("body".into(), body.clone())]))
-            .unwrap_or_default(), plain, prepared,
+        flow_parameters: |config| Ok(config.get("body").filter(|value| !value.is_null())
+            .map(|body| BTreeMap::from([("/body".into(), body.clone())]))
+            .unwrap_or_default()), plain, prepared,
     }} }}
 }}
 {extra}
@@ -1137,10 +1137,10 @@ inventory::submit! {{
                 resolved.sources,
                 BTreeSet::from([inputs.definition.clone()])
             );
-            let catalog_scope = &resolved.children[&"call".into()]["body"];
+            let catalog_scope = &resolved.children[&"call".into()]["/body"];
             assert_eq!(catalog_scope.children[&"catalog-node".into()].len(), 1);
-            assert!(catalog_scope.children[&"catalog-node".into()].contains_key("body"));
-            assert!(!catalog_scope.children[&"catalog-node".into()].contains_key("host_extra"));
+            assert!(catalog_scope.children[&"catalog-node".into()].contains_key("/body"));
+            assert!(!catalog_scope.children[&"catalog-node".into()].contains_key("/host_extra"));
             let config = &resolved.definition.nodes[0].config["body"]["nodes"][0]["config"];
             assert!(config["body"].get("nodes").is_some());
             assert_eq!(
@@ -1272,9 +1272,9 @@ mf_runtime::register_builtin_flow!("feature", builtin);
                 json!(fs::canonicalize(root.path().join(package)).unwrap())
             );
         }
-        let first_scope = &resolved.children[&"first".into()]["body"];
-        let second_scope = &first_scope.children[&"second".into()]["body"];
-        let builtin_scope = &second_scope.children[&"builtin".into()]["body"];
+        let first_scope = &resolved.children[&"first".into()]["/body"];
+        let second_scope = &first_scope.children[&"second".into()]["/body"];
+        let builtin_scope = &second_scope.children[&"builtin".into()]["/body"];
         assert_eq!(builtin_scope.definition.nodes[0].kind, "fixture.feature");
         assert!(builtin_scope.children.is_empty());
         assert!(
@@ -1298,9 +1298,9 @@ mf_runtime::register_builtin_flow!("feature", builtin);
         // Production uses this source-free planning entrypoint. Host inventory
         // deliberately disagrees with the selected provider's `body` contract.
         let selected_plan = crate::compiler::plan_resolved_workflow(&resolved).unwrap();
-        let selected_first = &selected_plan.graph.children[&"first".into()]["body"];
-        let selected_second = &selected_first.children[&"second".into()]["body"];
-        let selected_builtin = &selected_second.children[&"builtin".into()]["body"];
+        let selected_first = &selected_plan.graph.children[&"first".into()]["/body"];
+        let selected_second = &selected_first.children[&"second".into()]["/body"];
+        let selected_builtin = &selected_second.children[&"builtin".into()]["/body"];
         assert_eq!(selected_builtin.definition.nodes[0].kind, "fixture.feature");
         let host_plan = crate::plan_definition(&resolved.definition).unwrap();
         assert!(host_plan.graph.children.is_empty());

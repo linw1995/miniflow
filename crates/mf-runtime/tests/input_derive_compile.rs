@@ -258,18 +258,20 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
         false,
         None,
     );
+    for declaration in [
+        "struct Config(Vec<runtime_alias::Flow>);",
+        "struct Config { body: Vec<runtime_alias::Flow> }",
+        "struct Config { #[serde(alias = \"other\")] body: runtime_alias::Flow }",
+        "struct Config;",
+        "enum Config { Body { body: runtime_alias::Flow }, Plain { value: serde_json::Value } }",
+    ] {
+        cases.add(&format!("{config_prefix}{declaration}"), false, None);
+    }
     for (declaration, diagnostic) in [
+        ("struct Config<T> { body: T }", "does not support generic"),
         (
-            "struct Config(Vec<runtime_alias::Flow>);",
-            "requires a named-field struct",
-        ),
-        (
-            "struct Config { body: Vec<runtime_alias::Flow> }",
-            "nested containers and wrappers are unsupported",
-        ),
-        (
-            "struct Config { #[serde(alias = \"other\")] body: runtime_alias::Flow }",
-            "unsupported serde option on a Flow parameter field",
+            "#[serde(untagged)] enum Config { Body { body: runtime_alias::Flow } }",
+            "unsupported serde container option",
         ),
     ] {
         cases.add(
@@ -291,7 +293,7 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
                 "mod other {{ pub struct Flow; pub struct PreparedSubgraph; pub struct Option<T>(pub T); }}\n{config_prefix}struct Config {{ body: {ty} }}"
             ),
             false,
-            Some("mismatched types"),
+            Some("Deserialize"),
         );
     }
     cases.check(root.path());

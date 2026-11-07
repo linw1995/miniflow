@@ -1,26 +1,51 @@
 {
-  "version": "2026-10-23",
+  "version": "2026-10-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
-      "version": "0.1.0"
+      "path": "../../crates/builtin-nodes/core"
+    },
+    "host": {
+      "package": "embedded-flow-provider",
+      "path": "./provider"
+    }
+  },
+  "flows": {
+    "flowA": {
+      "path": "./answer-apply.json"
     }
   },
   "nodes": [
     {
-      "id": "source",
-      "kind": "builtin.constant",
+      "id": "params",
+      "kind": "builtin.parameters",
       "config": {
-        "value": 42
+        "parameters": {
+          "value": {
+            "type": "int",
+            "default": 42,
+            "secret": false
+          }
+        }
       }
     },
     {
-      "id": "echo",
-      "kind": "builtin.identity",
+      "id": "callA",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "flowA",
+        "arguments": {
+          "apply": {
+            "/policy/body": {
+              "path": "./answer-body.json"
+            }
+          }
+        }
+      },
       "inputs": {
-        "input": {
+        "apply.value": {
           "from": {
-            "node": "source",
+            "node": "params",
             "port": "value"
           }
         }
@@ -30,17 +55,17 @@
   "outputs": [
     {
       "name": "answer",
-      "node": "echo",
-      "port": "value"
+      "node": "callA",
+      "port": "answer"
     }
   ],
   "clusters": [
     {
-      "label": "Embedded answer",
-      "annotation": "Pass the constant answer through the embedded workflow and export it to the host.",
+      "label": "Call A with Flow B",
+      "annotation": "Bind B to the typed policy.body leaf and forward the host value through both scopes.",
       "nodes": [
-        "source",
-        "echo"
+        "params",
+        "callA"
       ]
     }
   ]

@@ -103,9 +103,12 @@ and reuse shared compiler normalization without constructing nodes. Ordinary con
 opaque. Inspection SHALL prepare metadata without executing business operations. Embedding SHALL NOT
 freeze a build-time startup schema or emit executable manifest sections. Compiled plans and manifest
 payload version `2026-11-06` SHALL retain an explicit `graph` containing its definition, canonical
-execution order, and recursively compiled children keyed by receiving node ID and field name.
-Receiver callbacks SHALL select child values during source resolution; ordinary JSON SHALL remain
-opaque and absent optional children SHALL have no graph entry. `ResolvedWorkflow` SHALL preserve the
+execution order, and recursively compiled children keyed by receiving node ID and concrete RFC 6901
+configuration pointer. Receiver callbacks SHALL discover typed Flow roles through nested configuration
+and standard containers without running user defaults, codecs, factories, or business work. Ordinary
+JSON SHALL remain opaque. Missing/null authorized leaves SHALL remain available for compile-time
+binding, while only non-null values SHALL create actual children. Absent optional structured parents
+and empty containers SHALL not synthesize descendant roles or graph entries. `ResolvedWorkflow` SHALL preserve the
 actual selected child tree for `plan_resolved_workflow`. Offline traversal SHALL use graph children,
 not infer roles from configuration keys or order paths. Saved-plan and generated preparation SHALL
 validate provider availability and actual compiled-child binding keys at the receiving boundary;
@@ -139,6 +142,14 @@ prepare and execute without definitions, generated files, or build tools.
 
 - **WHEN** a host rebuilds after editing its definition without cleaning
 - **THEN** the module and execution reflect the edit
+
+#### Scenario: Bind a nested Flow at a Call site
+
+- **WHEN** a Call supplies a source for an authorized missing/null Flow leaf on a direct callee node
+- **THEN** the entire binding batch is authorized before argument I/O and before callee child reads
+- **AND** source paths resolve relative to the caller, using the original root's inherited version
+- **AND** ordinary fields, non-null overrides, missing intermediate parents, and array appends are rejected
+- **AND** actual children remain solely in the resolved and compiled graph trees, without another persisted authority table
 
 #### Scenario: Resolve declared children using host-only providers
 

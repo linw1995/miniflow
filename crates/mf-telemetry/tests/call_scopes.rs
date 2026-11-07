@@ -241,6 +241,62 @@ fn scope_paths_check_frame_relations() {
 }
 
 #[test]
+fn root_flow_binding_lifecycles_round_trip_and_match_description_paths() {
+    // The empty RFC 6901 pointer still produces a nonempty encoded Call ID.
+    for binding in [
+        "",
+        "/policies/a~1b/body",
+        "/policies/a~0b/body",
+        "/branches/0/body",
+    ] {
+        let key = ScopePathEntry::binding_key("scope0", binding);
+        let path = vec![ScopePathEntry::Call {
+            call_id: key.clone(),
+        }];
+        let mut value = serde_json::to_value(graph(&[CALL])).unwrap();
+        value["nodes"][0]["kind"] = json!("fixture.custom");
+        value["loop_bodies"][0]["path"] = json!([key]);
+        let graph = WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+        graph.validate_scope_path(&path).unwrap();
+        assert!(graph.loop_body(std::slice::from_ref(&key)).is_some());
+        for event in [
+            Event::CallStarted {
+                path: path.clone(),
+                elapsed_ns: count(1),
+            },
+            Event::CallFinished {
+                path: path.clone(),
+                elapsed_ns: count(2),
+                outcome: LoopPassOutcome::Completed,
+            },
+        ] {
+            let record = lifecycle(event, &graph);
+            record.validate_for(&graph).unwrap();
+            let wire = WireRecord::from_event(&record, 0, None).unwrap();
+            assert_eq!(wire.body["path"][0], json!({"call_id":key}));
+            let decoded = wire.decode().unwrap();
+            assert_eq!(decoded, record);
+            decoded.validate_for(&graph).unwrap();
+            let stream = StreamRecord {
+                workflow_id: graph.workflow_id.clone(),
+                run_id: record.run_id,
+                sequence: record.sequence,
+                emission_count: None,
+                identity: Some(StreamIdentity {
+                    invocation: 1,
+                    parent: None,
+                    trigger: StreamTrigger::Startup,
+                    message: None,
+                }),
+                payload: StreamPayload::Execution(record.event),
+            };
+            let decoded = StreamRecord::decode(&stream.to_wire(0, None).unwrap()).unwrap();
+            assert_eq!(decoded, stream);
+        }
+    }
+}
+
+#[test]
 fn call_events_reject_loop_semantics_and_invalid_paths() {
     let graph = graph(&[CALL]);
     for path in [

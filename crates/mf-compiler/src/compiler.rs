@@ -1401,10 +1401,10 @@ fn normalize_scope(
         let mut flows = BTreeMap::new();
         for (name, body) in resolved.children.get(&node.id).into_iter().flatten() {
             ensure!(
-                !name.trim().is_empty(),
+                crate::NodeDefinition::validate_flow_parameter_path(name).is_ok(),
                 InvalidGraphSnafu {
                     definition_id: node.id.clone(),
-                    message: "blank receiving Flow parameter declaration",
+                    message: "receiving Flow parameters must be RFC 6901 pointers",
                 }
             );
             let order = crate::calls::child_result(node, structural_order_graph(&body.definition))?;
@@ -1607,10 +1607,10 @@ fn validate_scope_graph(
         let flows = graph.children.get(&node.id);
         for (name, child) in flows.into_iter().flatten() {
             ensure!(
-                !name.trim().is_empty(),
+                crate::NodeDefinition::validate_flow_parameter_path(name).is_ok(),
                 InvalidGraphSnafu {
                     definition_id: node.id.clone(),
-                    message: "blank receiving Flow parameter declaration"
+                    message: "receiving Flow parameters must be RFC 6901 pointers"
                 }
             );
             ensure!(
@@ -1800,7 +1800,7 @@ fn canonical_host_definition(
         for (name, child) in shape.children.get(&node.id).into_iter().flatten() {
             let value = node
                 .config
-                .get(name)
+                .pointer(name)
                 .filter(|value| !value.is_null())
                 .with_context(|| InvalidGraphSnafu {
                     definition_id: node.id.clone(),
@@ -2310,9 +2310,19 @@ fn prepare_node_subgraphs(
         }
     );
     // Validate the actual frozen configuration before constructing any child.
-    let declared_flows = registration.flow_parameters(&node.config);
+    let declared_flows =
+        registration
+            .flow_parameters(&node.config)
+            .context(NodeConstructionSnafu {
+                definition_id: node.id.clone(),
+                kind: node.kind.clone(),
+            })?;
     ensure!(
-        declared_flows.keys().eq(flows.keys()),
+        declared_flows
+            .iter()
+            .filter(|(_, value)| !value.is_null())
+            .map(|(name, _)| name)
+            .eq(flows.keys()),
         InvalidGraphSnafu {
             definition_id: node.id.clone(),
             message: "receiving Flow parameter declarations differ from the prepared binding set",
@@ -2406,9 +2416,11 @@ fn resolve_nodes_in_scope(
             }
             let registration = registration_for(node, preparation.registry)?;
             let flows = graph.children.get(&node.id);
-            let declared_flows = registration.flow_parameters(&node.config);
+            let declared_flows = registration.flow_parameters(&node.config).context(NodeConstructionSnafu {
+                definition_id: node.id.clone(), kind: node.kind.clone(),
+            })?;
             ensure!(
-                declared_flows.keys().eq(flows.into_iter().flat_map(BTreeMap::keys)),
+                declared_flows.iter().filter(|(_, value)| !value.is_null()).map(|(name, _)| name).eq(flows.into_iter().flat_map(BTreeMap::keys)),
                 InvalidGraphSnafu {
                     definition_id: node.id.clone(),
                     message: "receiving Flow parameter declarations differ from the prepared binding set",

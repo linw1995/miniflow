@@ -27,7 +27,7 @@ fn child(graph: &mut CompiledGraph) -> &mut CompiledGraph {
         .children
         .get_mut(&"origin".into())
         .unwrap()
-        .get_mut("selected")
+        .get_mut("/selected")
         .unwrap()
 }
 
@@ -247,7 +247,7 @@ fn identity_preserves_child_relationships_bindings_definitions_and_orders() {
     let mut parent = graph();
     parent
         .children
-        .insert("origin".into(), [("selected".into(), graph())].into());
+        .insert("origin".into(), [("/selected".into(), graph())].into());
     let original = parent.workflow_id().unwrap();
     let mut changed = parent.clone();
     child(&mut changed).relations.key = Some("child-key".into());
@@ -260,7 +260,7 @@ fn identity_preserves_child_relationships_bindings_definitions_and_orders() {
     assert_ne!(changed.workflow_id().unwrap(), original);
     let mut changed = parent;
     let bindings = changed.children.get_mut(&"origin".into()).unwrap();
-    let child = bindings.remove("selected").unwrap();
-    bindings.insert("renamed".into(), child);
+    let child = bindings.remove("/selected").unwrap();
+    bindings.insert("/renamed".into(), child);
     assert_ne!(changed.workflow_id().unwrap(), original);
 }

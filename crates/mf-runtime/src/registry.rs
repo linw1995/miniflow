@@ -161,16 +161,25 @@ impl NodeRegistry {
     )]
     pub fn flow_extractors(
         &self,
-    ) -> BTreeMap<String, fn(&serde_json::Value) -> BTreeMap<String, serde_json::Value>> {
+    ) -> BTreeMap<
+        String,
+        fn(
+            &serde_json::Value,
+        ) -> Result<BTreeMap<String, serde_json::Value>, crate::NodeBuildError>,
+    > {
         self.iter()
             .map(|registration| {
-                let extractor: fn(&serde_json::Value) -> BTreeMap<String, serde_json::Value> =
-                    match registration.factory {
-                        crate::NodeFactory::Subgraph {
-                            flow_parameters, ..
-                        } => flow_parameters,
-                        crate::NodeFactory::Plain(_) => |_| BTreeMap::new(),
-                    };
+                let extractor: fn(
+                    &serde_json::Value,
+                ) -> Result<
+                    BTreeMap<String, serde_json::Value>,
+                    crate::NodeBuildError,
+                > = match registration.factory {
+                    crate::NodeFactory::Subgraph {
+                        flow_parameters, ..
+                    } => flow_parameters,
+                    crate::NodeFactory::Plain(_) => |_| Ok(BTreeMap::new()),
+                };
                 (registration.kind.to_owned(), extractor)
             })
             .collect()
@@ -346,12 +355,12 @@ mod tests {
             kind: "test.subgraph",
             factory: crate::NodeFactory::Subgraph {
                 flow_parameters: |config| {
-                    config
+                    Ok(config
                         .get("body")
                         .filter(|value| !value.is_null())
-                        .map(|value| ("body".into(), value.clone()))
+                        .map(|value| ("/body".into(), value.clone()))
                         .into_iter()
-                        .collect()
+                        .collect())
                 },
                 plain: first_factory,
                 prepared: |_, config, _| first_factory(config),
@@ -367,15 +376,15 @@ mod tests {
             kind: "test.flow",
             factory: crate::NodeFactory::Subgraph {
                 flow_parameters: |config| {
-                    ["selected", "fallback"]
+                    Ok(["selected", "fallback"]
                         .into_iter()
                         .filter_map(|name| {
                             config
                                 .get(name)
                                 .filter(|value| !value.is_null())
-                                .map(|value| (name.into(), value.clone()))
+                                .map(|value| (format!("/{name}"), value.clone()))
                         })
-                        .collect()
+                        .collect())
                 },
                 plain: first_factory,
                 prepared: |_, config, _| first_factory(config),
@@ -392,19 +401,20 @@ mod tests {
                 "option": {"nodes": []}, "unknown": {"nodes": []},
             }),
         ] {
-            assert!(extractors["test.duplicate"](&config).is_empty());
+            assert!(extractors["test.duplicate"](&config).unwrap().is_empty());
             assert_eq!(
-                extractors["test.flow"](&config),
-                FLOW.flow_parameters(&config)
+                extractors["test.flow"](&config).unwrap(),
+                FLOW.flow_parameters(&config).unwrap()
             );
         }
         assert_eq!(
             extractors["test.flow"](
                 &serde_json::json!({"selected": 1, "fallback": 2, "option": 3})
-            ),
+            )
+            .unwrap(),
             BTreeMap::from([
-                ("selected".into(), Value::from(1)),
-                ("fallback".into(), Value::from(2))
+                ("/selected".into(), Value::from(1)),
+                ("/fallback".into(), Value::from(2))
             ])
         );
     }

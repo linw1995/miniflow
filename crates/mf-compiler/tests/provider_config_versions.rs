@@ -175,7 +175,10 @@ fn subgraph_capable_providers_without_selected_children_keep_plain_factory_seman
         );
         assert_eq!(plan.graph.execution_order[0].as_str(), "before");
         assert!(plan.graph.children.is_empty());
-        assert!(OptionalFlowConfig::flow_parameters(&config).is_empty());
+        assert_eq!(
+            OptionalFlowConfig::flow_parameters(&config).unwrap(),
+            BTreeMap::from([("/body".into(), Value::Null)])
+        );
         assert!(!plan.to_json().unwrap().contains("parameter_types"));
         let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
         assert_eq!(saved, plan);
@@ -381,7 +384,7 @@ fn resolved_planning_uses_selected_contracts_instead_of_ambient_host_metadata() 
         mf_compiler::WorkflowCompileError::FlowParameters {
             definition_id,
             source: mf_runtime::FlowParameterError::Json { parameter, source },
-        } if definition_id.as_str() == "owner" && parameter == "body" && source.is_data()
+        } if definition_id.as_str() == "owner" && parameter == "/body" && source.is_data()
     ));
     // The exact chain excludes description/telemetry contract wrappers.
     let parameter_error = error.source().unwrap();
@@ -549,8 +552,8 @@ fn generated_receiving_contracts_reject_stale_binding_sets_before_factories() {
     }})
     .to_string();
     // This registration's prepared factory panics: declaration validation must not invoke it.
-    validate_node_flow_parameters(&registry, "owner", kind, &config, &["body"]).unwrap();
-    for (config, expected) in [(config.as_str(), vec![]), ("{}", vec!["body"])] {
+    validate_node_flow_parameters(&registry, "owner", kind, &config, &["/body"]).unwrap();
+    for (config, expected) in [(config.as_str(), vec![]), ("{}", vec!["/body"])] {
         let error =
             validate_node_flow_parameters(&registry, "owner", kind, config, &expected).unwrap_err();
         assert!(

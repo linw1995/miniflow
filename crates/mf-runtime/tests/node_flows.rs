@@ -37,19 +37,21 @@ fn nodes() -> Vec<NodeDefinition> {
 
 fn parameter(node: &NodeDefinition) -> &'static str {
     if node.kind == "user.dispatch" {
-        "selected"
+        "/selected"
     } else {
-        "body"
+        "/body"
     }
 }
 
-fn extract(config: &Value, name: &str) -> std::collections::BTreeMap<String, Value> {
-    config
-        .get(name)
-        .filter(|value| !value.is_null())
-        .map(|value| (name.into(), value.clone()))
-        .into_iter()
-        .collect()
+fn extract(
+    config: &Value,
+    name: &str,
+) -> Result<std::collections::BTreeMap<String, Value>, mf_runtime::NodeBuildError> {
+    Ok([(
+        name.into(),
+        config.pointer(name).cloned().unwrap_or(Value::Null),
+    )]
+    .into())
 }
 
 fn receiver(node: &NodeDefinition) -> NodeRegistration {
@@ -58,9 +60,9 @@ fn receiver(node: &NodeDefinition) -> NodeRegistration {
         factory: NodeFactory::Subgraph {
             flow_parameters: match node.kind.as_str() {
                 "workflow.call" | "workflow.loop" | "builtin.iteration" => {
-                    |config| extract(config, "body")
+                    |config| extract(config, "/body")
                 }
-                "user.dispatch" => |config| extract(config, "selected"),
+                "user.dispatch" => |config| extract(config, "/selected"),
                 kind => panic!("unknown fixture kind: {kind}"),
             },
             plain: |_| panic!("no providers needed"),
@@ -93,7 +95,7 @@ fn declared_children_keep_explicit_versions_and_independent_dependencies() {
         assert_eq!(body.version, WorkflowDefinitionVersion::V2026_10_25);
         assert!(body.dependencies.is_empty());
         assert!(body.nodes.is_empty());
-        let mut canonical = node.config[name].clone();
+        let mut canonical = node.config.pointer(name).unwrap().clone();
         canonical.as_object_mut().unwrap().remove("dependencies");
         assert_eq!(json!(body), canonical);
         let child = CompiledGraph {
@@ -108,8 +110,8 @@ fn declared_children_keep_explicit_versions_and_independent_dependencies() {
         );
         assert_ne!(child.child_scope_key(&node, "other"), node.id.to_string());
         assert_eq!(
-            receiver(&node).flow_parameters(&node.config),
-            [(name.into(), node.config[name].clone())].into()
+            receiver(&node).flow_parameters(&node.config).unwrap(),
+            [(name.into(), node.config.pointer(name).unwrap().clone())].into()
         );
     }
 }
@@ -137,14 +139,14 @@ fn setters_preserve_full_definitions_and_unrelated_configuration_for_every_kind(
         .unwrap();
         node.set_node_flow(name, body.clone()).unwrap();
         assert_eq!(node.flow_parameters(&[name]).unwrap()[name], body);
-        assert_eq!(node.config[name], json!(body));
+        assert_eq!(node.config.pointer(name).unwrap(), &json!(body));
         for (key, value) in original.as_object().unwrap() {
-            if key != name {
+            if key != name.trim_start_matches('/') {
                 assert_eq!(&node.config[key], value);
             }
         }
         assert!(node.config.get("definition").is_none());
-        assert!(node.config[name].get("result").is_none());
+        assert!(node.config.pointer(name).unwrap().get("result").is_none());
         parent.nodes.push(node);
     }
     let round_trip: WorkflowDefinition =
@@ -200,12 +202,14 @@ fn manifest_projects_explicit_compiled_sources_with_complete_child_orders() {
     assert_eq!(description.loop_bodies.len(), 4);
     for child in &description.loop_bodies {
         match child.path[0].as_str() {
-            key if key == mf_telemetry::event::ScopePathEntry::binding_key("loop", "body") => {
+            key if key == mf_telemetry::event::ScopePathEntry::binding_key("loop", "/body") => {
                 assert_eq!(child.nodes.len(), 1);
                 assert_eq!(child.nodes[0].id, "%loop");
                 assert_eq!(child.nodes[0].kind, "%loop");
             }
-            key if key == mf_telemetry::event::ScopePathEntry::binding_key("iteration", "body") => {
+            key if key
+                == mf_telemetry::event::ScopePathEntry::binding_key("iteration", "/body") =>
+            {
                 assert_eq!(child.nodes.len(), 1);
                 assert_eq!(child.nodes[0].id, "%iteration");
                 assert_eq!(child.nodes[0].kind, "builtin.iteration_input");
@@ -222,7 +226,7 @@ fn missing_and_null_fields_are_optional_and_unresolved_calls_are_not_special_cas
             "id": "call", "kind": "workflow.call", "config": config
         }))
         .unwrap();
-        assert!(node.flow_parameters(&["body"]).unwrap().is_empty());
+        assert!(node.flow_parameters(&["/body"]).unwrap().is_empty());
         assert!(
             receiver(&node)
                 .validate_flow_parameters(&node, mf_runtime::WorkflowDefinitionVersion::CURRENT)
@@ -236,16 +240,16 @@ fn missing_and_null_fields_are_optional_and_unresolved_calls_are_not_special_cas
 fn invalid_field_names_leave_existing_configuration_unchanged() {
     let body = definition("2026-10-28");
     let original = nodes().pop().unwrap();
-    for name in ["", " ", "\t\n"] {
+    for name in ["body", "/~", "/~2"] {
         let mut node = original.clone();
         let error = node.set_node_flow(name, body.clone()).unwrap_err();
         assert!(
             matches!(error, mf_runtime::FlowParameterError::Invalid { message }
-            if message == "Flow parameter field names must be nonblank")
+            if message.contains("JSON pointer"))
         );
         assert_eq!(node, original);
         assert!(node.flow_parameters(&[name]).is_err());
-        assert_eq!(node.flow_parameters(&["selected"]).unwrap().len(), 1);
+        assert_eq!(node.flow_parameters(&["/selected"]).unwrap().len(), 1);
     }
 }
 
@@ -261,13 +265,13 @@ fn nonobject_provider_configs_are_opaque_but_cannot_receive_flow_fields() {
         let mut node = nodes().pop().unwrap();
         node.config = config;
         let original = node.clone();
-        assert!(node.flow_parameters(&["selected"]).unwrap().is_empty());
+        assert!(node.flow_parameters(&["/selected"]).unwrap().is_empty());
         let error = node
-            .set_node_flow("selected", definition("2026-10-28"))
+            .set_node_flow("/selected", definition("2026-10-28"))
             .unwrap_err();
         assert!(
             matches!(error, mf_runtime::FlowParameterError::Invalid { message }
-            if message == "Flow parameters require an object configuration")
+            if message == "Flow parameter path has a missing parent or array element")
         );
         assert_eq!(node, original);
     }
@@ -283,7 +287,7 @@ fn malformed_declared_fields_preserve_json_sources_without_mutation() {
             json!(42),
             json!({"version": "2099-01-01"}),
         ] {
-            node.config[name] = value;
+            *node.config.pointer_mut(name).unwrap() = value;
             let original = node.clone();
             let error = node.flow_parameters(&[name]).unwrap_err();
             assert!(
@@ -346,9 +350,9 @@ fn definition_shaped_json_is_opaque_without_field_authority() {
             serde_json::from_value::<WorkflowDefinition>(json!(parent)).unwrap(),
             parent
         );
-        assert!(matches!(node.flow_parameters(&["selected"]).unwrap_err(),
+        assert!(matches!(node.flow_parameters(&["/selected"]).unwrap_err(),
             mf_runtime::FlowParameterError::Json { parameter, source }
-                if parameter == "selected" && source.is_data()));
+                if parameter == "/selected" && source.is_data()));
         assert_eq!(node, original);
     }
 }
@@ -358,12 +362,12 @@ fn definition_is_still_an_ordinary_custom_field_not_a_global_alias_for_body() {
     let mut node = nodes().pop().unwrap();
     let child = definition("2026-10-25");
     node.config = json!({"definition": child, "path": "child.json"});
-    assert!(node.flow_parameters(&["body"]).unwrap().is_empty());
+    assert!(node.flow_parameters(&["/body"]).unwrap().is_empty());
     assert_eq!(
-        node.flow_parameters(&["definition"]).unwrap()["definition"],
+        node.flow_parameters(&["/definition"]).unwrap()["/definition"],
         child
     );
-    node.set_node_flow("selected", definition("2026-10-28"))
+    node.set_node_flow("/selected", definition("2026-10-28"))
         .unwrap();
     assert_eq!(node.config["definition"], json!(child));
     assert_eq!(node.config["path"], "child.json");
@@ -454,7 +458,10 @@ fn parent_and_child_edge_formats_are_decoded_independently() {
     for node in &decoded.nodes {
         let name = parameter(node);
         assert_eq!(node.flow_parameters(&[name]).unwrap()[name], old_body);
-        assert_eq!(node.config[name]["edges"][0]["to_input"], "value");
+        assert_eq!(
+            node.config.pointer(name).unwrap()["edges"][0]["to_input"],
+            "value"
+        );
     }
     let modern_body: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-10-28", "dependencies": {},
@@ -463,7 +470,7 @@ fn parent_and_child_edge_formats_are_decoded_independently() {
     }))
     .unwrap();
     assert!(modern_body.has_order_edges());
-    parent.nodes[0].set_node_flow("body", modern_body).unwrap();
+    parent.nodes[0].set_node_flow("/body", modern_body).unwrap();
     assert!(!parent.has_order_edges());
     assert_eq!(
         serde_json::from_value::<WorkflowDefinition>(json!(parent)).unwrap(),

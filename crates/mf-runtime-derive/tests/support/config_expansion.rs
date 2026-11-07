@@ -1,527 +1,292 @@
 use crate::config::expand;
-use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, Path, parse_quote};
+use syn::{DeriveInput, parse_quote};
 
-fn assert_expansion(input: DeriveInput, runtime: Path, parameters: &[&str]) {
-    let name = &input.ident;
-    let prefix = quote! { impl #runtime::NodeConfig for #name }.to_string();
-    let extractions = parameters.iter().map(|name| {
-        quote! {
-            if let ::core::option::Option::Some(value) = __mf_config.get(#name).filter(|value| !value.is_null()) {
-                flows.insert(::std::string::String::from(#name), value.clone());
-            }
-        }
-    });
-    let declaration = quote! {
-        fn flow_parameters(
-            __mf_config: &::serde_json::Value,
-        ) -> ::std::collections::BTreeMap<::std::string::String, ::serde_json::Value> {
-            let mut flows = ::std::collections::BTreeMap::new();
-            #(#extractions)*
-            flows
-        }
-    }
-    .to_string();
-    let expanded = expand(input).unwrap().to_string();
-    assert!(expanded.starts_with(&prefix), "{expanded}");
-    for expected in [
-        declaration.as_str(),
-        "fn from_config",
-        "deserialize_config :: < __MfConfigOrdinaryConfig >",
-        "unexpected prepared Flow field",
-    ] {
-        assert!(
-            expanded.contains(expected),
-            "missing {expected:?}: {expanded}"
-        );
-    }
+fn expansion(input: DeriveInput) -> String {
+    expand(input).unwrap().to_string()
 }
-
-fn assert_error(input: DeriveInput, message: &str) {
+fn assert_error(input: DeriveInput, expected: &str) {
     let error = expand(input).unwrap_err().to_string();
     assert!(
-        error.contains(message),
-        "expected {message:?}, got {error:?}"
+        error.contains(expected),
+        "expected {expected:?}, got {error:?}"
     );
 }
 
-fn ordinary_config(attrs: TokenStream) -> DeriveInput {
-    parse_quote! {
+#[test]
+fn discovers_actual_field_types_instead_of_literal_flow_spellings() {
+    let result = expansion(parse_quote! {
+        struct Config { body: ExecutableAlias, ordinary: UserDefinedDeserialize, arbitrary: serde_json::Value }
+    });
+    assert!(
+        result.contains("ConfigField :: < ExecutableAlias >"),
+        "{result}"
+    );
+    assert!(
+        result.contains("ConfigField :: < UserDefinedDeserialize >"),
+        "{result}"
+    );
+    assert!(
+        result.contains("ConfigField :: < serde_json :: Value >"),
+        "{result}"
+    );
+    assert!(result.contains("field_collect"));
+    assert!(result.contains("field_decode"));
+    assert!(!result.contains("FLOW_PARAMETERS"));
+    assert!(!result.contains("serde_json :: from_value :: < ExecutableAlias"));
+}
+
+#[test]
+fn nested_standard_containers_dispatch_at_concrete_leaf_sites() {
+    let result = expansion(parse_quote! {
         struct Config {
-            #attrs
-            ordinary: String,
-            body: Flow,
+            body: Option<Box<Tree>>,
+            mixed: (Flow, UserDefinedDeserialize),
+            list: Vec<UserDefinedDeserialize>,
+            map: std::collections::BTreeMap<String, Vec<FlowAlias>>,
+            array: [Flow; 3],
         }
-    }
-}
-
-fn assert_field_order_errors(ordinary: TokenStream, flow: TokenStream, message: &str) {
-    for fields in [quote!(#ordinary #flow), quote!(#flow #ordinary)] {
-        assert_error(parse_quote!(struct Config { #fields }), message);
-    }
-}
-
-#[test]
-fn discovers_direct_and_optional_fields_in_declaration_order() {
-    assert_expansion(
-        parse_quote! {
-            struct Config {
-                body: Flow,
-                count: usize,
-                left: Option<Flow>,
-                right: ::std::option::Option<::mf_runtime::Flow>,
-                qualified: runtime_alias::Flow,
-                ordinary: Vec<String>,
-                r#type: Flow,
-            }
-        },
-        parse_quote!(::mf_runtime),
-        &["body", "left", "right", "qualified", "type"],
-    );
-}
-
-#[test]
-fn supports_empty_and_ordinary_configs() {
-    assert_expansion(
-        parse_quote!(
-            struct Config {}
-        ),
-        parse_quote!(::mf_runtime),
-        &[],
-    );
-    assert_expansion(
-        parse_quote! {
-            struct Config {
-                #[serde(flatten)]
-                ordinary: std::collections::BTreeMap<String, String>,
-                #[serde(alias = "other", skip_deserializing)]
-                value: String,
-                body: Option<Settings>,
-            }
-        },
-        parse_quote!(::mf_runtime),
-        &[],
-    );
-}
-
-#[test]
-fn honors_runtime_alias_and_serde_names_and_defaults() {
-    assert_expansion(
-        parse_quote! {
-            #[config(runtime = "::runtime_alias")]
-            #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
-            struct Config {
-                request_body: Flow,
-                #[serde(rename = "left-hand", default)]
-                left_side: Option<Flow>,
-                right_side: Flow,
-                #[serde(rename = "settings", alias = "legacy", default)]
-                user_settings: Settings,
-            }
-        },
-        parse_quote!(::runtime_alias),
-        &["requestBody", "left-hand", "rightSide"],
-    );
-}
-
-#[test]
-fn executable_fields_reject_defaults_that_could_construct_a_flow() {
-    for ty in [
-        quote!(Flow),
-        quote!(Option<Flow>),
-        quote!(PreparedSubgraph),
-        quote!(Option<PreparedSubgraph>),
-    ] {
-        for (default, message) in [
-            (
-                quote!(default = "make_flow"),
-                "executable defaults cannot construct a Flow",
-            ),
-            (
-                quote!(default = 42),
-                "expected serde default attribute to be a string",
-            ),
-            (quote!(default()), "expected `,`"),
-            (quote!(default(foo)), "expected `,`"),
-            (
-                quote!(default, default),
-                "duplicate serde attribute `default`",
-            ),
-        ] {
-            assert_error(
-                parse_quote! { struct Config { #[serde(#default)] body: #ty } },
-                message,
-            );
-        }
-    }
-    for ty in [quote!(Flow), quote!(PreparedSubgraph)] {
-        assert_error(
-            parse_quote! { struct Config { #[serde(default)] body: #ty } },
-            "bare `default` on optional fields",
-        );
-    }
-}
-
-#[test]
-fn helper_projection_preserves_the_original_config_scope() {
-    let expanded = expand(parse_quote! {
-        #[serde(default = "Self::defaults")]
-        struct OrdinaryConfig {
-            #[serde(default = "Self::default_count", deserialize_with = "Self::decode_count", serialize_with = "Self::encode_count", skip_serializing_if = "Self::skip_count")]
-            count: usize,
-            #[serde(with = "Self::codec")]
-            settings: Settings,
-            nested: OrdinaryConfig,
-        }
-    }).unwrap().to_string();
+    });
     for expected in [
-        "struct __MfOrdinaryConfigOrdinaryConfig",
-        "nested : OrdinaryConfig",
-        "OrdinaryConfig :: default_count",
-        "OrdinaryConfig :: decode_count",
-        "OrdinaryConfig :: encode_count",
-        "OrdinaryConfig :: skip_count",
-        "OrdinaryConfig :: codec",
-        "let _config = OrdinaryConfig :: defaults ()",
+        "ConfigField :: < Tree >",
+        "ConfigField :: < UserDefinedDeserialize >",
+        "ConfigField :: < FlowAlias >",
+        "take_array",
+        "take_object",
+        "join_config_path",
+        "values . len () != 3",
+        "try_into",
     ] {
-        assert!(
-            expanded.contains(expected),
-            "missing {expected:?}: {expanded}"
-        );
-    }
-    assert!(!expanded.contains("Self::"), "{expanded}");
-}
-
-#[test]
-fn supports_all_serde_field_rename_rules() {
-    for (rule, field, expected) in [
-        ("lowercase", quote!(request_body), "request_body"),
-        ("UPPERCASE", quote!(request_body), "REQUEST_BODY"),
-        ("PascalCase", quote!(request_body), "RequestBody"),
-        ("camelCase", quote!(request_body), "requestBody"),
-        ("snake_case", quote!(request_body), "request_body"),
-        ("SCREAMING_SNAKE_CASE", quote!(request_body), "REQUEST_BODY"),
-        ("kebab-case", quote!(request_body), "request-body"),
-        ("SCREAMING-KEBAB-CASE", quote!(request_body), "REQUEST-BODY"),
-        // Serde does not lowercase a field identifier for its `lowercase` rule.
-        ("lowercase", quote!(mixedCase), "mixedCase"),
-    ] {
-        assert_expansion(
-            parse_quote! {
-                #[serde(rename_all = #rule)]
-                struct Config { #field: Flow }
-            },
-            parse_quote!(::mf_runtime),
-            &[expected],
-        );
+        assert!(result.contains(expected), "missing {expected:?}: {result}");
     }
 }
 
 #[test]
-fn rejects_ordinary_deserialize_names_and_aliases_that_shadow_flow_names() {
-    for option in [
-        quote!(alias = "body"),
-        quote!(alias = "unused", alias = "body"),
-        quote!(rename = "body"),
-        quote!(rename(serialize = "output", deserialize = "body")),
-        quote!(rename(deserialize = "body")),
-        quote!(rename(deserialize = "body"), rename(serialize = "output")),
-        quote!(rename(serialize = "output"), rename(deserialize = "body")),
-    ] {
-        assert_field_order_errors(
-            quote! {
-                #[serde(#option)]
-                settings: Option<Value>,
-            },
-            quote!(body: Option<Flow>,),
-            "collides with an ordinary field's deserialize name or alias",
-        );
-    }
-    for (attrs, ordinary, wire_name) in [
-        (quote!(), quote!(body: String,), "body"),
-        (
-            quote!(#[serde(rename_all = "camelCase")]),
-            quote!(request_body: String,),
-            "requestBody",
-        ),
-        (
-            quote!(#[serde(rename_all = "camelCase")]),
-            quote!(#[serde(rename(serialize = "output"))] request_body: String,),
-            "requestBody",
-        ),
-    ] {
-        assert_error(
-            parse_quote! {
-                #attrs
-                struct Config { #ordinary #[serde(rename = #wire_name)] flow: Flow }
-            },
-            "collides with an ordinary field's deserialize name or alias",
-        );
-    }
-}
-
-#[test]
-fn ordinary_deserialize_names_ignore_serialize_names_and_custom_codecs() {
-    assert_expansion(
-        parse_quote! {
-            #[serde(rename_all = "camelCase")]
-            struct Config {
-                #[serde(rename(serialize = "body", deserialize = "settings"))]
-                body: String,
-                #[serde(rename(serialize = "body"), deserialize_with = "custom")]
-                other_settings: String,
-                #[serde(alias = "moreSettings")]
-                extra_settings: String,
-                #[serde(rename = "body")]
-                flow: Flow,
-            }
-        },
-        parse_quote!(::mf_runtime),
-        &["body"],
+fn container_syntax_requires_canonical_type_identity_before_generated_traversal() {
+    let result = expansion(parse_quote! {
+        struct Config { body: custom::Vec<Flow>, map: custom::BTreeMap<String, Flow> }
+    });
+    assert!(
+        result
+            .contains("ConfigField :: < custom :: Vec < Flow > , :: std :: vec :: Vec < Flow > >"),
+        "{result}"
+    );
+    assert!(result.contains("ConfigField :: < custom :: BTreeMap < String , Flow > , :: std :: collections :: BTreeMap < :: std :: string :: String , Flow > >"), "{result}");
+    assert!(result.contains("container_collect"));
+    assert!(result.contains("container_decode"));
+    assert!(result.contains("let mut result = :: std :: vec :: Vec :: new"));
+    assert!(
+        result.contains("__mf_paths : & mut :: std :: vec :: Vec < :: std :: string :: String >")
     );
 }
 
 #[test]
-fn rejects_any_flattened_field_when_flow_fields_exist() {
-    for ty in [
-        quote!(Settings),
-        quote!(std::collections::BTreeMap<String, Value>),
-    ] {
-        assert_field_order_errors(
-            quote! {
-                #[serde(flatten)]
-                settings: #ty,
-            },
-            quote!(body: Flow,),
-            "cannot combine Flow parameter fields with serde flatten",
-        );
-    }
+fn recursion_classification_is_cycle_guarded_but_traversal_is_value_driven() {
+    let result =
+        expansion(parse_quote! { struct Tree { next: Option<Box<Tree>>, body: Option<Flow> } });
+    assert!(result.contains("__mf_visited . insert"));
+    assert!(result.contains("__mf_visited . remove"));
+    assert!(result.contains("__mf_config . is_some_and"));
+    assert!(result.contains("field_is_leaf"));
 }
 
 #[test]
-fn discovers_literal_type_spellings_and_ignores_differently_named_aliases() {
-    assert_expansion(
-        parse_quote! {
-            struct Config {
-                body: other::Flow,
-                left: other::Option<other::Flow>,
-                alias: RenamedFlow,
-            }
-        },
-        parse_quote!(::mf_runtime),
-        &["body", "left"],
+fn metadata_uses_presence_only_and_preserves_serde_alias_duplicate_checks() {
+    let result = expansion(parse_quote! {
+        #[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"), deny_unknown_fields)]
+        struct Config {
+            #[serde(rename(deserialize = "request/body~", serialize = "ignored"), alias = "legacy")]
+            request_body: Flow,
+            #[serde(default = "Self::default_count", deserialize_with = "Self::decode_count")]
+            count: usize,
+        }
+    });
+    assert!(result.contains("Presence"));
+    assert!(result.contains("deny_unknown_fields"));
+    assert!(result.contains("rename = \"request/body~\" , alias = \"legacy\""));
+    assert!(result.contains("contains_key (\"legacy\")"));
+    assert!(result.contains("Config :: default_count"));
+    assert!(result.contains("Config :: decode_count"));
+    let collect = result
+        .split("fn collect")
+        .nth(1)
+        .unwrap()
+        .split("fn decode")
+        .next()
+        .unwrap();
+    assert!(!collect.contains("default_count"));
+    assert!(!collect.contains("decode_count"));
+    assert!(!collect.contains("as :: core :: default :: Default"));
+}
+
+#[test]
+fn raw_metadata_helpers_never_use_original_defaults_or_custom_codecs() {
+    let result = expansion(parse_quote! {
+        #[serde(default)]
+        struct Config { count: usize, body: Option<Flow> }
+    });
+    let raw = result
+        .split("impl :: mf_runtime :: NodeConfig")
+        .next()
+        .unwrap();
+    assert!(raw.contains("Presence"));
+    assert!(!raw.contains("Default for"));
+    assert!(!raw.contains("< Config as"));
+    assert!(result.contains("container default supplied executable Flow configuration"));
+}
+
+#[test]
+fn flatten_traverses_the_shared_object_not_a_synthetic_field_pointer() {
+    let result =
+        expansion(parse_quote! { struct Config { #[serde(flatten)] nested: NestedConfig } });
+    assert!(result.contains("serde (flatten)"));
+    assert!(result.contains("let __mf_field_prefix = __mf_prefix . to_owned ()"));
+    assert!(!result.contains("join_config_path"));
+    assert_error(
+        parse_quote! { struct Config { #[serde(flatten, default)] nested: NestedConfig } },
+        "flatten with custom decoding/defaults",
     );
 }
 
 #[test]
-fn rejects_non_named_structs_and_generics() {
+fn derives_newtypes_tuple_structs_and_unit_structs() {
     for input in [
         parse_quote!(
-            struct Config(Flow);
+            struct Newtype(FlowAlias);
         ),
         parse_quote!(
-            struct Config;
+            struct Tuple(Flow, Vec<Ordinary>);
         ),
         parse_quote!(
-            enum Config {
-                Body,
-            }
+            struct Unit;
         ),
-        parse_quote!(union Config { body: usize }),
     ] {
-        assert_error(input, "requires a named-field struct");
+        let result = expansion(input);
+        assert!(result.contains("fn collect"));
+        assert!(result.contains("fn decode"));
     }
-    for (generics, ty) in [
-        (quote!(<T>), quote!(T)),
-        (quote!(<'a>), quote!(&'a str)),
-        (quote!(<const N: usize>), quote!([u8; N])),
-    ] {
-        assert_error(
-            parse_quote!(struct Config #generics { ordinary: #ty }),
-            "does not support generic structs",
-        );
-    }
+    let unit = expansion(parse_quote!(
+        struct Unit;
+    ));
+    assert!(unit.contains("expected null for a unit configuration"));
+    assert!(unit.contains("missing unit configuration"));
 }
 
 #[test]
-fn rejects_nested_flow_parameters_instead_of_silently_ignoring_them() {
-    for ty in [
-        quote!(Vec<Flow>),
-        quote!(std::collections::BTreeMap<String, runtime::Flow>),
-        quote!(Option<Vec<Flow>>),
-        quote!(Option<Option<Flow>>),
-        quote!(Box<Flow>),
-        quote!([Flow; 2]),
-        quote!((String, Flow)),
-        quote!(&Flow),
-    ] {
-        assert_error(
-            parse_quote!(struct Config { body: #ty }),
-            "only direct Flow or Option<Flow>",
-        );
-    }
+fn externally_tagged_enums_select_only_the_present_variant() {
+    let result = expansion(parse_quote! {
+        #[serde(rename_all = "snake_case")]
+        enum Config { UnitVariant, #[serde(alias = "legacy")] WithBody { body: Flow }, Tuple(Flow, usize), Newtype(Nested) }
+    });
+    assert!(result.contains("\"unit_variant\""));
+    assert!(result.contains("\"with_body\" | \"legacy\""));
+    assert!(result.contains("match __mf_variant"));
+    assert!(result.contains("object . len () == 1"));
+    assert!(result.contains("expected null for a unit configuration"));
 }
 
 #[test]
-fn rejects_serde_options_that_change_flow_field_contracts() {
+fn internally_tagged_enums_remove_the_tag_before_decoding_fields() {
+    let result = expansion(parse_quote! {
+        #[serde(tag = "kind", deny_unknown_fields, rename_all_fields = "camelCase")]
+        enum Config { Unit, WithBody { request_body: Flow }, Wrapped(Nested) }
+    });
+    assert!(result.contains("__mf_payload . remove (\"kind\")"));
+    assert!(result.contains("rename = \"requestBody\""));
+    assert!(result.contains("unknown field in internally tagged unit variant"));
+}
+
+#[test]
+fn adjacently_tagged_enums_check_outer_keys_and_descend_into_content() {
+    let result = expansion(parse_quote! {
+        #[serde(tag = "kind", content = "data", deny_unknown_fields)]
+        enum Config { Unit, Body(Flow) }
+    });
+    assert!(result.contains("unknown field in adjacently tagged configuration enum"));
+    assert!(result.contains("join_config_path (__mf_prefix , \"data\")"));
+    assert!(!result.contains("__mf_missing"));
+}
+
+#[test]
+fn ambiguous_wire_layouts_are_rejected_explicitly() {
+    assert_error(
+        parse_quote! { #[serde(untagged)] enum Config { Body { body: Flow } } },
+        "unsupported serde container option",
+    );
     for option in [
-        quote!(flatten),
-        quote!(alias = "other"),
-        quote!(deserialize_with = "custom"),
-        quote!(serialize_with = "custom"),
-        quote!(with = "custom"),
-        quote!(skip),
-        quote!(skip_deserializing),
-        quote!(skip_serializing),
-        quote!(skip_serializing_if = "Option::is_none"),
-    ] {
-        assert_error(
-            parse_quote! {
-                struct Config {
-                    #[serde(#option)]
-                    body: Option<Flow>,
-                }
-            },
-            "unsupported serde option on a Flow parameter field",
-        );
-    }
-    for option in [
-        quote!(from = "Other"),
-        quote!(try_from = "Other"),
         quote!(transparent),
+        quote!(from = "String"),
+        quote!(try_from = "String"),
     ] {
         assert_error(
-            parse_quote! {
-                #[serde(#option)]
-                struct Config { body: Flow }
-            },
+            parse_quote! { #[serde(#option)] struct Config { body: Flow } },
             "unsupported serde container option",
         );
     }
-}
-
-#[test]
-fn rejects_directional_renames_and_invalid_rules() {
-    for (container, field, message) in [
-        (
-            quote!(),
-            quote!(#[serde(rename(deserialize = "body"))]),
-            "directional Serde renames are unsupported",
-        ),
-        (
-            quote!(#[serde(rename_all(deserialize = "camelCase"))]),
-            quote!(),
-            "directional Serde renames are unsupported",
-        ),
-        (
-            quote!(#[serde(rename_all = "unknown")]),
-            quote!(),
-            "unknown rename rule",
-        ),
-    ] {
-        assert_error(
-            parse_quote!(#container struct Config { #field body: Flow }),
-            message,
-        );
-    }
-}
-
-#[test]
-fn rejects_duplicate_names_and_attributes() {
     assert_error(
-        parse_quote! {
-            struct Config {
-                #[serde(rename = "body")]
-                left: Flow,
-                #[serde(rename = "body")]
-                right: Flow,
-            }
-        },
-        "duplicate Flow parameter wire name",
+        parse_quote! { #[serde(content = "data")] enum Config { Body(Flow) } },
+        "must be used together",
     );
-    for input in [
-        parse_quote! {
-            struct Config {
-                #[serde(rename = "settings")]
-                left: String,
-                #[serde(rename = "settings")]
-                right: Settings,
-            }
-        },
-        parse_quote! {
-            #[serde(rename_all = "camelCase")]
-            struct Config {
-                user_settings: String,
-                userSettings: Settings,
-                body: Flow,
-            }
-        },
-    ] {
-        assert_error(input, "duplicate configuration parameter wire name");
-    }
     assert_error(
-        parse_quote! {
-            struct Config {
-                #[serde(rename = "a", rename = "b")]
-                body: Flow,
-            }
-        },
+        parse_quote! { union Config { count: usize } },
+        "does not support derive for unions",
+    );
+    assert_error(
+        parse_quote! { struct Config<T> { body: T } },
+        "does not support generic",
+    );
+}
+
+#[test]
+fn duplicate_wire_names_and_aliases_are_rejected() {
+    assert_error(
+        parse_quote! { struct Config { #[serde(rename = "same")] body: Flow, #[serde(alias = "same")] other: usize } },
+        "duplicate configuration field",
+    );
+    assert_error(
+        parse_quote! { enum Config { #[serde(rename = "same")] First, #[serde(alias = "same")] Second } },
+        "duplicate NodeConfig enum variant",
+    );
+    assert_error(
+        parse_quote! { struct Config { #[serde(rename(deserialize = "a", deserialize = "b"))] body: Flow } },
         "duplicate serde attribute `rename`",
     );
-    for (attrs, message) in [
-        (
-            quote!(#[serde(rename_all = "camelCase", rename_all = "snake_case")]),
-            "duplicate serde attribute `rename_all`",
-        ),
-        (
-            quote!(#[config(runtime = "::a", runtime = "::b")]),
-            "duplicate runtime path",
-        ),
-    ] {
-        assert_error(parse_quote!(#attrs struct Config { body: Flow }), message);
-    }
-}
-
-#[test]
-fn rejects_unknown_config_keys_instead_of_ignoring_runtime_typos() {
-    for option in [
-        quote!(runtme = "::runtime_alias"),
-        quote!(rename = "Config"),
-    ] {
-        assert_error(
-            parse_quote! {
-                #[config(#option)]
-                struct Config { body: Flow }
-            },
-            "expected `runtime = \"path\"` on the config struct",
-        );
-    }
-}
-
-#[test]
-fn rejects_malformed_runtime_paths_and_non_string_runtime_values() {
-    for (option, message) in [
-        (quote!(runtime = "not a path"), "unexpected token"),
-        (quote!(runtime = 42), "expected string literal"),
-        (quote!(runtime), "expected `=`"),
-    ] {
-        assert_error(
-            parse_quote! {
-                #[config(#option)]
-                struct Config { body: Flow }
-            },
-            message,
-        );
-    }
     assert_error(
-        parse_quote! {
-            #[config(runtime = "::first")]
-            #[config(runtime = "::second")]
-            struct Config { body: Flow }
-        },
-        "duplicate runtime path",
+        parse_quote! { struct Config { #[serde(rename(foo = "a"))] body: Flow } },
+        "malformed rename attribute",
     );
+}
+
+#[test]
+fn runtime_aliases_are_used_by_all_generated_dispatchers() {
+    let result = expansion(
+        parse_quote! { #[config(runtime = "::runtime_alias")] struct Config { body: Flow } },
+    );
+    assert!(result.contains("impl :: runtime_alias :: NodeConfig"));
+    assert!(result.contains("runtime_alias :: node_config :: Presence"));
+    assert!(!result.contains(":: mf_runtime"));
+    assert_error(
+        parse_quote! { #[config(runtim = "crate")] struct Config {} },
+        "expected one",
+    );
+    assert_error(
+        parse_quote! { #[config(runtime = "")] struct Config {} },
+        "expected",
+    );
+}
+
+#[test]
+fn malformed_serde_values_are_not_ignored() {
+    for input in [
+        parse_quote! { struct Config { #[serde(rename = 42)] body: Flow } },
+        parse_quote! { #[serde(rename_all = "not-a-rule")] struct Config { body: Flow } },
+    ] {
+        assert!(expand(input).is_err());
+    }
+}
+
+fn ordinary_config(attrs: proc_macro2::TokenStream) -> DeriveInput {
+    parse_quote! { struct Config { #attrs ordinary: String, body: Flow } }
 }
 
 #[test]
@@ -609,7 +374,7 @@ fn rejects_non_string_serde_wire_names_for_ordinary_and_flow_fields() {
             #[serde(rename_all = false)]
             struct Config { body: Flow }
         },
-        "NodeConfig requires a string value",
+        "expected serde rename_all attribute to be a string",
     );
 }
 
@@ -630,134 +395,4 @@ fn rejects_malformed_serde_option_lists() {
     ] {
         assert_error(input, "expected `,`");
     }
-}
-
-#[test]
-fn ignores_ordinary_associated_types_and_unparameterized_option_names() {
-    assert_expansion(
-        parse_quote! {
-            struct Config {
-                ordinary: <Settings as Trait>::Value,
-                named_option: Option,
-                qualified_option: other::Option,
-                body: Flow,
-            }
-        },
-        parse_quote!(::mf_runtime),
-        &["body"],
-    );
-    assert_error(
-        parse_quote! {
-            struct Config {
-                body: <Settings as Trait>::Flow,
-            }
-        },
-        "only direct Flow or Option<Flow>",
-    );
-}
-
-#[test]
-fn injects_flow_and_existing_host_policy_handles_without_deserializing_them() {
-    assert_expansion(
-        parse_quote! {
-            struct Config {
-                compiled: Flow,
-                optional: Option<Flow>,
-                callback: PreparedSubgraph,
-                optional_callback: Option<runtime_alias::PreparedSubgraph>,
-            }
-        },
-        parse_quote!(::mf_runtime),
-        &["compiled", "optional", "callback", "optional_callback"],
-    );
-    let expanded = expand(parse_quote! {
-        #[serde(deny_unknown_fields, rename_all = "camelCase")]
-        struct Config {
-            executable_body: Flow,
-            #[serde(alias = "legacy", default, deserialize_with = "decode_count")]
-            count: usize,
-        }
-    })
-    .unwrap()
-    .to_string();
-    for expected in [
-        "struct __MfConfigOrdinaryConfig { # [serde (alias = \"legacy\" , default , deserialize_with = \"decode_count\")] count : usize }",
-        "deny_unknown_fields , rename_all = \"camelCase\"",
-        "fields . remove (\"executableBody\")",
-        "prepared . into_flow () ?",
-        "present != prepared . is_some ()",
-        "missing prepared Flow field",
-    ] {
-        assert!(
-            expanded.contains(expected),
-            "missing {expected:?}: {expanded}"
-        );
-    }
-}
-
-#[test]
-fn executable_field_names_cannot_shadow_decoder_working_values() {
-    let expanded = expand(parse_quote! {
-        struct Config { config: Flow, flows: Flow, __mf_config: Option<Flow> }
-    })
-    .unwrap()
-    .to_string();
-    for expected in [
-        "mut __mf_config : :: serde_json :: Value",
-        "mut __mf_flows : :: std :: collections :: BTreeMap",
-        "let config =",
-        "let flows =",
-        "__mf_config . as_object_mut ()",
-        "__mf_flows . remove (\"flows\")",
-    ] {
-        assert!(
-            expanded.contains(expected),
-            "missing {expected:?}: {expanded}"
-        );
-    }
-}
-
-#[test]
-fn projects_container_defaults_onto_only_ordinary_fields() {
-    for default in [quote!(default), quote!(default = "default_config")] {
-        let expanded = expand(parse_quote! {
-            #[serde(#default)]
-            struct Config { body: Flow, count: usize }
-        })
-        .unwrap()
-        .to_string();
-        assert!(
-            expanded.contains("impl :: core :: default :: Default for __MfConfigOrdinaryConfig"),
-            "{expanded}"
-        );
-        assert!(
-            expanded.contains("Self { count : _config . count }"),
-            "{expanded}"
-        );
-        assert!(!expanded.contains("body : _config . body"), "{expanded}");
-    }
-    for ty in [
-        quote!(Vec<PreparedSubgraph>),
-        quote!(Option<Option<PreparedSubgraph>>),
-    ] {
-        assert_error(
-            parse_quote! { struct Config { body: #ty } },
-            "nested containers",
-        );
-    }
-}
-
-#[test]
-fn explicit_rename_gives_underscore_only_fields_a_valid_wire_name() {
-    assert_expansion(
-        parse_quote! {
-            #[serde(rename_all = "camelCase")]
-            struct Config {
-                #[serde(rename = "body")]
-                __: Flow,
-            }
-        },
-        parse_quote!(::mf_runtime),
-        &["body"],
-    );
 }

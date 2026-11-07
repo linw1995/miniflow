@@ -51,10 +51,12 @@ fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
             "right": null,
             "settings": {"body": {}},
             "unknown": {"nodes": []},
-        })),
+        }))
+        .unwrap(),
         BTreeMap::from([
-            ("requestBody".into(), json!({"request": true})),
-            ("left-hand".into(), json!({"left": true})),
+            ("/requestBody".into(), json!({"request": true})),
+            ("/left-hand".into(), json!({"left": true})),
+            ("/right".into(), JsonValue::Null),
         ])
     );
     let config = DirectConfig::from_config(
@@ -64,8 +66,8 @@ fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
             "preferences": {"ordinary": true},
         }),
         BTreeMap::from([
-            ("requestBody".into(), prepared()),
-            ("left-hand".into(), prepared()),
+            ("/requestBody".into(), prepared()),
+            ("/left-hand".into(), prepared()),
         ]),
     )
     .unwrap();
@@ -80,12 +82,15 @@ fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
 #[test]
 fn actual_derive_accepts_qualified_types_with_a_runtime_crate_alias() {
     assert_eq!(
-        AliasedRuntimeConfig::flow_parameters(&json!({"body": {}, "left": null})),
-        BTreeMap::from([("body".into(), json!({}))])
+        AliasedRuntimeConfig::flow_parameters(&json!({"body": {}, "left": null})).unwrap(),
+        BTreeMap::from([
+            ("/body".into(), json!({})),
+            ("/left".into(), JsonValue::Null)
+        ])
     );
     let config = AliasedRuntimeConfig::from_config(
         json!({"body": {}, "left": null}),
-        BTreeMap::from([("body".into(), prepared())]),
+        BTreeMap::from([("/body".into(), prepared())]),
     )
     .unwrap();
     assert!(config.body.execute().unwrap().is_empty());
@@ -101,7 +106,7 @@ fn callback_config_receives_its_typed_prepared_body_without_a_fake_flow() {
     let callback = || PreparedSubgraph::new(vec![], vec![], |_| Ok(Default::default()));
     let config = CallbackConfig::from_config(
         json!({"body": {}}),
-        BTreeMap::from([("body".into(), callback())]),
+        BTreeMap::from([("/body".into(), callback())]),
     )
     .unwrap();
     assert!(
@@ -113,7 +118,7 @@ fn callback_config_receives_its_typed_prepared_body_without_a_fake_flow() {
     );
     let result = AliasedRuntimeConfig::from_config(
         json!({"body": {}}),
-        BTreeMap::from([("body".into(), callback())]),
+        BTreeMap::from([("/body".into(), callback())]),
     );
     assert!(
         matches!(result, Err(mf_runtime::NodeBuildError::InvalidSubgraph { message })
@@ -146,7 +151,7 @@ fn ordinary_serde_paths_keep_the_original_self_receiver() {
     assert!(defaulted.body.is_none());
     let decoded = Config::from_config(
         json!({"count": 4, "body": {}}),
-        BTreeMap::from([("body".into(), prepared())]),
+        BTreeMap::from([("/body".into(), prepared())]),
     )
     .unwrap();
     assert_eq!(decoded.count, 5);
@@ -185,7 +190,7 @@ fn ordinary_helper_names_do_not_shadow_user_types_or_container_defaults() {
         }
         let config = OrdinaryConfig::from_config(
             json!({"body": {}}),
-            BTreeMap::from([("body".into(), prepared())]),
+            BTreeMap::from([("/body".into(), prepared())]),
         )
         .unwrap();
         assert_eq!(config.count, 17);
@@ -242,10 +247,10 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
             fields.insert("input-only".into(), directional);
             let expected = fields.iter()
                 .filter(|(_, value)| value.is_object())
-                .map(|(name, value)| (name.clone(), value.clone()))
+                .map(|(name, value)| (mf_runtime::node_config::join_config_path("", name), value.clone()))
                 .collect::<BTreeMap<_, _>>();
             assert_eq!(expected.len(), 4, "{}", $rule);
-            assert_eq!(Config::flow_parameters(&canonical), expected);
+            assert_eq!(Config::flow_parameters(&canonical).unwrap(), expected);
             let mut aliased = canonical.clone();
             let fields = aliased.as_object_mut().unwrap();
             let settings = fields.remove($settings_name).unwrap();
@@ -274,7 +279,7 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
                 ];
                 assert_eq!(ordinary, [17; 5]);
 
-                let extracted = Config::flow_parameters(&input);
+                let extracted = Config::flow_parameters(&input).unwrap();
                 assert_eq!(extracted, expected);
                 assert!(!extracted.contains_key($settings_name));
                 assert!(!extracted.contains_key("input-only"));
@@ -334,12 +339,12 @@ fn extraction_selects_all_executable_field_forms_without_decoding_provider_data(
     });
     let original = input.clone();
     assert_eq!(
-        Config::flow_parameters(&input),
+        Config::flow_parameters(&input).unwrap(),
         BTreeMap::from([
-            ("required".into(), json!(false)),
-            ("optional".into(), json!(0)),
-            ("callback".into(), json!(["not decoded here"])),
-            ("optional_callback".into(), json!("source.json")),
+            ("/required".into(), json!(false)),
+            ("/optional".into(), json!(0)),
+            ("/callback".into(), json!(["not decoded here"])),
+            ("/optional_callback".into(), json!("source.json")),
         ])
     );
     assert_eq!(input, original);
@@ -349,11 +354,237 @@ fn extraction_selects_all_executable_field_forms_without_decoding_provider_data(
         json!(42),
         json!("opaque"),
         json!([]),
+    ] {
+        assert!(Config::flow_parameters(&input).is_err());
+    }
+    for input in [
         json!({}),
         json!({"required": null, "optional": null, "callback": null, "optional_callback": null}),
     ] {
-        assert!(Config::flow_parameters(&input).is_empty());
+        assert_eq!(
+            Config::flow_parameters(&input).unwrap(),
+            BTreeMap::from([
+                ("/required".into(), JsonValue::Null),
+                ("/optional".into(), JsonValue::Null),
+                ("/callback".into(), JsonValue::Null),
+                ("/optional_callback".into(), JsonValue::Null),
+            ])
+        );
     }
+}
+
+#[test]
+fn ordinary_missing_fields_remain_distinct_from_explicit_null() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CODECS: AtomicUsize = AtomicUsize::new(0);
+    #[derive(NodeConfig)]
+    #[allow(dead_code)]
+    struct Required {
+        body: Option<Flow>,
+        payload: JsonValue,
+    }
+    #[derive(NodeConfig)]
+    #[allow(dead_code)]
+    struct Optional {
+        body: Option<Flow>,
+        payload: Option<JsonValue>,
+    }
+    struct Nullable(JsonValue);
+    impl<'de> serde::Deserialize<'de> for Nullable {
+        fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+            CODECS.fetch_add(1, Ordering::SeqCst);
+            <JsonValue as serde::Deserialize>::deserialize(decoder).map(Self)
+        }
+    }
+    #[derive(NodeConfig)]
+    #[allow(dead_code)]
+    struct Custom {
+        body: Option<Flow>,
+        payload: Nullable,
+    }
+    for input in [json!({}), json!({"payload": null})] {
+        let before = CODECS.load(Ordering::SeqCst);
+        let roles = BTreeMap::from([("/body".into(), JsonValue::Null)]);
+        assert_eq!(Required::flow_parameters(&input).unwrap(), roles);
+        assert_eq!(Optional::flow_parameters(&input).unwrap(), roles);
+        assert_eq!(Custom::flow_parameters(&input).unwrap(), roles);
+        assert_eq!(CODECS.load(Ordering::SeqCst), before);
+        assert!(
+            Optional::from_config(input.clone(), BTreeMap::new())
+                .unwrap()
+                .payload
+                .is_none()
+        );
+        if input.get("payload").is_some() {
+            assert_eq!(
+                Required::from_config(input.clone(), BTreeMap::new())
+                    .unwrap()
+                    .payload,
+                JsonValue::Null
+            );
+            assert_eq!(
+                Custom::from_config(input, BTreeMap::new())
+                    .unwrap()
+                    .payload
+                    .0,
+                JsonValue::Null
+            );
+        } else {
+            let error = Required::from_config(input.clone(), BTreeMap::new())
+                .err()
+                .unwrap();
+            assert!(
+                matches!(&error, mf_runtime::NodeBuildError::InvalidConfiguration { source }
+                if source.is_data() && source.to_string().contains("missing field"))
+            );
+            assert!(
+                std::error::Error::source(&error)
+                    .unwrap()
+                    .downcast_ref::<serde_json::Error>()
+                    .is_some()
+            );
+            assert!(matches!(Custom::from_config(input, BTreeMap::new()),
+                Err(mf_runtime::NodeBuildError::InvalidConfiguration { source })
+                if source.is_data() && source.to_string().contains("missing field")));
+        }
+    }
+    assert_eq!(
+        JsonValue::from_config(JsonValue::Null, BTreeMap::new()).unwrap(),
+        JsonValue::Null
+    );
+}
+
+#[test]
+fn skipped_ordinary_fields_use_serde_default_priority_only_during_decode() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static FIELD_DEFAULTS: AtomicUsize = AtomicUsize::new(0);
+    static CONTAINER_DEFAULTS: AtomicUsize = AtomicUsize::new(0);
+    #[derive(NodeConfig)]
+    #[allow(dead_code)]
+    struct FieldDefault {
+        body: Option<Flow>,
+        #[serde(skip_deserializing, default = "Self::default_count")]
+        count: usize,
+    }
+    impl FieldDefault {
+        fn default_count() -> usize {
+            FIELD_DEFAULTS.fetch_add(1, Ordering::SeqCst);
+            7
+        }
+    }
+    #[derive(NodeConfig)]
+    #[serde(default = "Self::defaults")]
+    #[allow(dead_code)]
+    struct ContainerDefault {
+        #[serde(skip_deserializing)]
+        count: usize,
+        #[serde(skip_deserializing, default)]
+        field_default_wins: usize,
+    }
+    impl ContainerDefault {
+        fn defaults() -> Self {
+            CONTAINER_DEFAULTS.fetch_add(1, Ordering::SeqCst);
+            Self {
+                count: 9,
+                field_default_wins: 11,
+            }
+        }
+    }
+    // The custom default belongs to an ordinary nested NodeConfig, not the
+    // Flow-bearing parent. It therefore cannot construct executable defaults.
+    #[derive(NodeConfig)]
+    #[allow(dead_code)]
+    struct WithFlowSibling {
+        body: Option<Flow>,
+        ordinary: ContainerDefault,
+    }
+    for input in [json!({}), json!({"count": 99, "field_default_wins": 99})] {
+        let fields_before = FIELD_DEFAULTS.load(Ordering::SeqCst);
+        let containers_before = CONTAINER_DEFAULTS.load(Ordering::SeqCst);
+        let roles = BTreeMap::from([("/body".into(), JsonValue::Null)]);
+        let nested = json!({"ordinary": input.clone()});
+        assert_eq!(FieldDefault::flow_parameters(&input).unwrap(), roles);
+        assert!(
+            ContainerDefault::flow_parameters(&input)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(WithFlowSibling::flow_parameters(&nested).unwrap(), roles);
+        assert_eq!(FIELD_DEFAULTS.load(Ordering::SeqCst), fields_before);
+        assert_eq!(CONTAINER_DEFAULTS.load(Ordering::SeqCst), containers_before);
+        assert_eq!(
+            FieldDefault::from_config(input.clone(), BTreeMap::new())
+                .unwrap()
+                .count,
+            7
+        );
+        let decoded = WithFlowSibling::from_config(nested, BTreeMap::new())
+            .unwrap()
+            .ordinary;
+        assert_eq!(decoded.count, 9);
+        assert_eq!(decoded.field_default_wins, 0);
+        assert_eq!(FIELD_DEFAULTS.load(Ordering::SeqCst), fields_before + 1);
+        assert_eq!(
+            CONTAINER_DEFAULTS.load(Ordering::SeqCst),
+            containers_before + 1
+        );
+    }
+}
+
+#[test]
+fn custom_container_defaults_on_flow_bearing_configs_are_rejected_without_execution() {
+    #[derive(NodeConfig)]
+    #[serde(default = "Self::defaults")]
+    #[allow(dead_code)]
+    struct Config {
+        body: Option<Flow>,
+    }
+    impl Config {
+        fn defaults() -> Self {
+            panic!("discovery and rejected decoding must never run executable defaults")
+        }
+    }
+    for input in [json!({}), json!({"body": null}), json!({"body": {}})] {
+        assert!(matches!(Config::flow_parameters(&input),
+            Err(mf_runtime::NodeBuildError::InvalidSubgraph { message })
+            if message.contains("executable defaults cannot supply Flow values")));
+        assert!(matches!(Config::from_config(input, BTreeMap::new()),
+            Err(mf_runtime::NodeBuildError::InvalidSubgraph { message })
+            if message.contains("executable defaults cannot supply Flow values")));
+    }
+}
+
+#[test]
+fn metadata_ignores_unknown_ordinary_fields_but_provider_decode_retains_serde_errors() {
+    #[derive(NodeConfig)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct Config {
+        body: Flow,
+    }
+    let input = json!({
+        "body": {"path": "already-prepared.json"},
+        "unexpected": {"version": "2026-10-28", "nodes": []},
+    });
+    let original = input.clone();
+    assert_eq!(
+        Config::flow_parameters(&input).unwrap(),
+        BTreeMap::from([("/body".into(), input["body"].clone()),])
+    );
+    assert_eq!(input, original);
+    let error = Config::from_config(input, BTreeMap::from([("/body".into(), prepared())]))
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, mf_runtime::NodeBuildError::InvalidConfiguration { source }
+        if source.is_data() && source.to_string().contains("unknown field `unexpected`"))
+    );
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<serde_json::Error>()
+            .is_some()
+    );
 }
 
 #[test]
@@ -363,8 +594,8 @@ fn flow_config_cannot_be_decoded_without_its_prepared_body() {
         AliasedRuntimeConfig::from_config(
             json!({"body": {}}),
             BTreeMap::from([
-                ("body".into(), prepared()),
-                ("undeclared".into(), prepared())
+                ("/body".into(), prepared()),
+                ("/undeclared".into(), prepared())
             ]),
         )
         .is_err()
