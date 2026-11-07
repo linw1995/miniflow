@@ -77,7 +77,7 @@ Use `NodeFactory::Plain` for a factory taking configuration and returning `Prepa
 Use `NodeFactory::Subgraph { flow_parameters, plain, prepared }` for executable child fields.
 Its prepared factory takes `(id: &str, config: Value, children: BTreeMap<String, PreparedSubgraph>)`;
 there is no separate execution-options argument. Set `flow_parameters` to `Config::flow_parameters`,
-which extracts the present executable child values from the supplied configuration.
+which discovers typed Flow leaves in the supplied configuration; only non-null roles become children.
 Call, Loop, Iteration, and custom providers all use this same map-based factory contract. Their child
 fields contain complete Flow definitions in ordinary node configuration; Loop and Iteration no longer
 have separate partial-body formats or a top-level `loop` field. The compiler resolves the selected
@@ -1090,13 +1090,24 @@ use mf_runtime::{Flow, NodeConfig, NodeFactory};
 #[derive(NodeConfig)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    body: Flow,
-    fallback: Option<Flow>,
+    policy: Policy,
+    branches: Vec<Branch>,
     label: String,
 }
 
-// Config::flow_parameters(&config) returns the raw body value and, when present,
-// the fallback value. It does not include label or absent optional children.
+#[derive(NodeConfig)]
+struct Policy {
+    fallback: Option<Flow>,
+}
+
+#[derive(NodeConfig)]
+struct Branch {
+    body: Flow,
+}
+
+// Config::flow_parameters(&config)? returns typed Flow roles keyed by JSON Pointer,
+// such as /policy/fallback and /branches/0/body. An unfilled leaf has a null value.
+// label remains opaque. An absent optional structured parent adds no child paths.
 //
 // In NodeRegistration, using the provider's plain and prepared factory functions:
 // factory: NodeFactory::Subgraph {
@@ -1106,20 +1117,27 @@ struct Config {
 // },
 ```
 
-`NodeConfig::flow_parameters(&Value) -> BTreeMap<String, Value>` extracts executable child values,
-keyed by each field's canonical Serde deserialize name (`rename` and `rename_all`). The derive uses
-Serde's parsed field metadata directly. It recognizes direct `Flow` and `Option<Flow>` fields;
-`PreparedSubgraph` and its optional form use the same extraction path when a provider needs the
-callable interface, including manual host callbacks. Optional children that are absent or null are
-not extracted. No whole-configuration type schema is generated or persisted.
+`NodeConfig::flow_parameters(&Value) -> Result<BTreeMap<String, Value>, NodeBuildError>` discovers
+Flow roles from the receiving Rust types and actual configuration. Derive `NodeConfig` on nested
+configuration too; no parallel source-description type or user-maintained path list is required.
+`Flow` and `PreparedSubgraph` leaves compose through nested structures, tagged variants, `Option`,
+`Box`, `Vec`, arrays, tuples, and string-keyed `BTreeMap`/`HashMap`. Finite recursive configurations
+are traversed through their actual values rather than expanded into an infinite static schema.
 
-All ordinary fields remain opaque provider-owned Serde data, including optional values, custom-Serde
-types, and named flattened fields in configurations without executable fields. Extraction does not
-require `NodeValue`, reflect nested JSON, or infer executable roles from keys such as `definition`,
-`body`, or `path`. Ordinary aliases participate in collision checks but do not create child entries.
-The derive rejects ambiguous canonical names, executable-field aliases or custom codecs, and combining
-flattened fields with executable fields. Required/default and ordinary-field validation occurs in
-`Config::from_config`, not in the extraction callback.
+Keys are RFC 6901 JSON Pointers. Map keys escape `~` as `~0` and `/` as `~1`; array indices identify
+existing elements. The empty pointer identifies a root Flow configuration. Missing or null authorized
+leaves appear as `Value::Null` so Call-site binding can fill them. Only non-null values produce actual
+children in `ResolvedWorkflow.children` and `CompiledGraph.children`. An absent optional structured
+parent or empty collection contributes no descendant paths. No receiving-type table is persisted.
+
+Ordinary `Deserialize` values, especially `serde_json::Value`, remain opaque even when their JSON
+contains `definition`, `body`, or `path`. Actual standard-container identity is checked before generated
+traversal; a foreign wrapper named `Vec` does not gain executable roles from its spelling. Metadata
+discovery never invokes user defaults, custom deserializers, factories, or executable bodies. Ordinary
+Serde codecs and defaults run during `Config::from_config`. Invalid structural layouts fail before
+source I/O. Ambiguous executable codecs/defaults, untagged representations, and blended Flow leaves
+are rejected rather than guessed; generic derives and foreign wrappers require an explicit
+`NodeConfig` implementation where automatic composition is unavailable.
 
 Author a declared field as `{"path": "./worker.json"}`, `{"builtin": "my-provider.worker"}`, or
 `{"definition": <WorkflowDefinition>}` using the workflow's existing version. Source loading consults
@@ -1130,10 +1148,15 @@ markers, add a Flow declaration table, or migrate workflow versions.
 The prepared factory receives the node ID, resolved configuration, and a
 `BTreeMap<String, PreparedSubgraph>`. Inspect the prepared interfaces before executing any work, then
 call `Config::from_config(config, children)` to deserialize ordinary fields and inject the executable
-Flow fields. Flow objects are not deserialized from source JSON. Required fields need prepared handles;
-omitted optional fields become `None`. All supplied children are prepared, even if execution later
+Flow leaves using the same concrete pointer keys. Flow objects are not deserialized from source JSON.
+Non-null source presence must match prepared-handle presence; omitted optional leaves become `None`.
+All supplied children are prepared, even if execution later
 selects only one. The plain factory retains ordinary direct-instantiation semantics and can reject a
 configuration requiring a prepared child.
+
+`workflow.call.config.arguments` can fill an authorized missing or null leaf using a JSON Pointer.
+It cannot override a non-null value, modify ordinary data, fabricate parents, or append array elements.
+Argument sources resolve relative to the caller, before the callee's other child sources are read.
 
 Use the map's standard `get`, `keys`, and `values` methods. Each `PreparedSubgraph` already provides
 startup `inputs`, terminal `outputs`, `stream_outputs`, and partitioned `input_metadata()`. Inspect
@@ -1147,6 +1170,10 @@ recreating node-specific diagnostics. Offline graph planning and description che
 lowering contracts, not the complete business configuration. Prepared injection does not reparse a raw
 child definition: the original stored configuration reaches the factory with actual prepared handles.
 This also applies to Loop, Iteration, and Call; their ordinary business validation is factory-owned.
+
+For a callable child, capture `body.scope_key(id, pointer)` before consuming the prepared handle and
+pass that key to `context.run_call`. It is the same compiled owner/binding identity used by offline
+descriptions and TUI observation; no additional invocation counter or binding event protocol is needed.
 
 Compiler-prepared children carry `PreparedSubgraph::relations` with the actual graph's scope contract.
 A callable child and a frame-backed child are distinct; a scoped receiver validates the supplied frame

@@ -151,9 +151,10 @@ its native stream coordinator, without rebuilding it or linking its custom nodes
 
 ## Passed subgraphs for custom nodes
 
-Providers expose executable child values through receiver callbacks. `NodeConfig` derives extraction
-for fields typed `Flow` (or `Option<Flow>`); users do not add a separate declaration or change workflow
-versions. A declared field accepts a local path, a built-in name, or an inline definition:
+Providers expose executable child values through receiver callbacks. `NodeConfig` recursively discovers
+`Flow` and `PreparedSubgraph` leaves in typed configuration, including nested structures, active tagged
+variants and standard containers. Users do not add a separate declaration or change workflow versions.
+A declared leaf accepts a local path, a built-in name, or an inline definition:
 
 ```json
 {
@@ -181,10 +182,13 @@ and `Config::flow_parameters` extracting a `body: Flow` field; it is not a new c
 `"body": {"path": "./worker.json"}` or `"body": {"builtin": "my-provider.worker"}`. Relative paths
 belong to the source file that declares them. Providers decide their own input ports, selection,
 child arguments, execution policy, result shape, and error handling. There is no global Flow environment
-or parameter-alias mapping: the configuration field name is the prepared-child map key and static scope identity.
+or parameter-alias mapping: concrete JSON Pointers such as `/body`, `/policy/fallback` and
+`/branches/0/body` identify prepared children and their static bindings. Map keys escape `/` as `~1`
+and `~` as `~0`; the empty pointer addresses a root Flow configuration. Ordinary JSON stays opaque.
 
 Source loading calls the selected receiver's `flow_parameters` callback, resolves only the returned
-child values, and merges child dependencies for standalone compilation. Planning freezes that selected
+non-null child values, and merges child dependencies for standalone compilation. Missing/null typed
+leaves are authoring-time binding targets, not executable scopes. Planning freezes the selected
 child tree as explicit `CompiledGraph.children`; saved plans do not rediscover children from JSON.
 Resolved child graphs are compiled into executable Flow objects and injected into those fields. JSON shape alone grants no executable
 authority; ordinary fields containing `definition` or `path` remain ordinary data.
@@ -208,6 +212,39 @@ ordinary configuration; no legacy Loop/Iteration body adapter is retained. Per-p
 and lifecycle semantics remain distinct. This does not wrap loops in Calls or expand child
 Event/Stream scheduler support. See
 [node development](node-development.md#receive-and-execute-passed-subgraphs) for the public APIs.
+
+### Bind a Flow at a call site
+
+`workflow.call.config.arguments` specializes the called Flow before preparing its children. The outer
+key is an exact direct node ID in the callee; the inner key is a JSON Pointer to an authorized Flow
+leaf in that node's configuration:
+
+```json
+{
+  "id": "callA",
+  "kind": "workflow.call",
+  "config": {
+    "flow": "flowA",
+    "arguments": {
+      "apply": {"/policy/body": {"path": "./answer-body.json"}}
+    }
+  }
+}
+```
+
+The [complete three-file example](../examples/embedded-workflows) calls Flow A, whose `apply` node
+has `config: {"policy": {}}` and receiving types `Config { policy: Policy }`, `Policy { body: Flow }`.
+Root supplies B at `/policy/body`; its ordinary data input is separately forwarded as `apply.value`.
+The host prints `{"answer":42}`; a standalone runner with `--params.value 43` returns `{"answer":43}`.
+See [embedding and TUI commands](embedding.md#repository-example).
+
+All argument targets and receiving roles are validated before reading argument sources. Missing/null
+Flow leaves can be filled, but non-null values cannot be overridden. Bindings cannot target ordinary
+data, another executable child's internals, missing intermediate objects, or appended array elements.
+Sources in arguments resolve relative to the caller, not the callee; inline and builtin source forms
+work too. Binding precedes other child source reads and is consumed after specialization. The result
+is the ordinary explicit `ResolvedWorkflow.children` and `CompiledGraph.children` tree, not a global
+Flow environment, proxy node, persisted type table, or runtime argument interpreter.
 
 ## Node clusters
 

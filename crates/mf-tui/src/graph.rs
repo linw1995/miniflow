@@ -1046,25 +1046,27 @@ impl GraphLayout {
             .filter(|(index, _)| folded.contains(index))
             .flat_map(|(_, cluster)| cluster.nodes.iter().map(String::as_str))
             .collect();
-        let mut children = BTreeMap::new();
+        let mut children: BTreeMap<String, Self> = BTreeMap::new();
         for node in &scope.nodes {
-            let mut child_path = path.to_vec();
-            child_path.push(node.id.clone());
-            if !hidden.contains(node.id.as_str())
-                && expanded.contains(&child_path)
-                && description.body(&child_path).is_some()
-            {
-                children.insert(
-                    node.id.clone(),
-                    Self::inline_scope(
+            if hidden.contains(node.id.as_str()) {
+                continue;
+            }
+            for child_path in description.body_paths_for_node(path, &node.id) {
+                if expanded.contains(child_path) {
+                    let child = Self::inline_scope(
                         description,
-                        &child_path,
+                        child_path,
                         view,
                         expanded,
                         collapsed,
                         remaining,
-                    )?,
-                );
+                    )?;
+                    if let Some(existing) = children.get_mut(&node.id) {
+                        existing.stack_below(child);
+                    } else {
+                        children.insert(node.id.clone(), child);
+                    }
+                }
             }
         }
         let mut layout = Self::with_children(
@@ -1080,9 +1082,9 @@ impl GraphLayout {
             .iter()
             .enumerate()
             .filter_map(|(index, node)| {
-                let mut child = path.to_vec();
-                child.push(node.id.clone());
-                (node.kind != CLUSTER_KIND && description.body(&child).is_some()).then_some(index)
+                (node.kind != CLUSTER_KIND
+                    && !description.body_paths_for_node(path, &node.id).is_empty())
+                .then_some(index)
             })
             .collect();
         for (scope, _) in &mut layout.cluster_keys {
@@ -1097,11 +1099,25 @@ impl GraphLayout {
         Ok(layout)
     }
 
-    fn append_body(&mut self, owner: usize, mut child: Self) {
+    fn append_body(&mut self, owner: usize, child: Self) {
         // Route scopes independently so parent connections treat the entire body as an obstacle.
         let parent = self.nodes[owner].rect;
         let x = parent.x + 1;
         let y = parent.y + parent.height - child.height - 1;
+        self.merge_body(child, x, y);
+        self.expanded_nodes.insert(owner);
+    }
+
+    /// Stacks `other` below this layout without an owning call node.
+    fn stack_below(&mut self, other: Self) {
+        let y = self.height + 2;
+        let (width, height) = (other.width, other.height);
+        self.merge_body(other, 0, y);
+        self.height = (y + height).max(self.height);
+        self.width = self.width.max(width);
+    }
+
+    fn merge_body(&mut self, mut child: Self, x: u32, y: u32) {
         let nodes = self.nodes.len();
         let sources = self.all_nodes.len();
         let clusters = self.clusters.len();
@@ -1152,7 +1168,6 @@ impl GraphLayout {
         }
         self.body_nodes
             .extend(child.body_nodes.into_iter().map(|index| index + nodes));
-        self.expanded_nodes.insert(owner);
         self.expanded_nodes
             .extend(child.expanded_nodes.into_iter().map(|index| index + nodes));
         self.nodes.extend(child.nodes);
@@ -1196,11 +1211,22 @@ impl GraphLayout {
     }
 
     pub fn display_index_for_scoped_node(&self, path: &[String], id: &str) -> Option<usize> {
+        let owner = mf_telemetry::event::ScopePathEntry::binding_owner(id);
         let source = self
             .all_nodes
             .iter()
             .enumerate()
-            .position(|(source, node)| node.id == id && self.source_path(source) == path)?;
+            .position(|(source, node)| node.id == id && self.source_path(source) == path)
+            .or_else(|| {
+                owner.and_then(|owner| {
+                    self.all_nodes
+                        .iter()
+                        .enumerate()
+                        .position(|(source, node)| {
+                            node.id == owner && self.source_path(source) == path
+                        })
+                })
+            })?;
         self.display_index_for_source(source)
     }
 

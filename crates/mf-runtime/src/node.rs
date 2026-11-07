@@ -1339,25 +1339,14 @@ impl PreparedNode {
     }
 }
 
-/// Selects executable configuration fields and injects their prepared Flow values.
-pub trait NodeConfig: Sized {
-    /// Returns only declared, present, non-null Flow fields under their canonical wire names.
-    /// All other provider configuration remains opaque.
-    fn flow_parameters(config: &Value) -> BTreeMap<String, Value>;
-
-    /// Decodes ordinary configuration and injects the explicitly prepared Flow fields.
-    /// The derive implements this without requiring executable Flow values to be deserializable.
-    fn from_config(
-        config: Value,
-        flows: BTreeMap<String, crate::PreparedSubgraph>,
-    ) -> Result<Self, NodeBuildError>;
-}
+#[cfg(test)]
+use crate::NodeConfig;
 
 #[derive(Clone, Copy, Debug)]
 pub enum NodeFactory {
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
     Subgraph {
-        flow_parameters: fn(&Value) -> BTreeMap<String, Value>,
+        flow_parameters: fn(&Value) -> Result<BTreeMap<String, Value>, NodeBuildError>,
         plain: fn(Value) -> Result<PreparedNode, NodeBuildError>,
         #[expect(
             clippy::type_complexity,
@@ -1383,12 +1372,15 @@ impl NodeRegistration {
         matches!(self.factory, NodeFactory::Subgraph { .. })
     }
 
-    pub fn flow_parameters(&self, config: &Value) -> BTreeMap<String, Value> {
+    pub fn flow_parameters(
+        &self,
+        config: &Value,
+    ) -> Result<BTreeMap<String, Value>, NodeBuildError> {
         match self.factory {
             NodeFactory::Subgraph {
                 flow_parameters, ..
             } => flow_parameters(config),
-            NodeFactory::Plain(_) => BTreeMap::new(),
+            NodeFactory::Plain(_) => Ok(BTreeMap::new()),
         }
     }
 
@@ -1400,15 +1392,15 @@ impl NodeRegistration {
         node: &crate::NodeDefinition,
         inherited_version: crate::WorkflowDefinitionVersion,
     ) -> Result<BTreeMap<String, crate::WorkflowDefinition>, NodeBuildError> {
-        self.flow_parameters(&node.config)
+        let parameters = self.flow_parameters(&node.config)?;
+        for parameter in parameters.keys() {
+            crate::NodeDefinition::validate_flow_parameter_path(parameter)
+                .context(FlowParametersSnafu)?;
+        }
+        parameters
             .into_iter()
+            .filter(|(_, value)| !value.is_null())
             .map(|(parameter, value)| {
-                ensure!(
-                    !parameter.trim().is_empty(),
-                    crate::definition::InvalidSnafu {
-                        message: "Flow parameter field names must be nonblank"
-                    }
-                );
                 let body =
                     crate::WorkflowDefinition::from_value_with_version(value, inherited_version)
                         .context(crate::definition::JsonSnafu {
@@ -1432,19 +1424,17 @@ impl NodeRegistration {
             NodeFactory::Subgraph { prepared, .. } => {
                 // Prepared children are authoritative. The receiver selects binding
                 // names here, but decoding child definitions belongs to authoring.
-                let parameters = self.flow_parameters(&config);
-                if parameters
-                    .keys()
-                    .any(|parameter| parameter.trim().is_empty())
-                {
-                    return crate::definition::InvalidSnafu {
-                        message: "Flow parameter field names must be nonblank",
-                    }
-                    .fail()
-                    .context(FlowParametersSnafu);
+                let parameters = self.flow_parameters(&config)?;
+                for parameter in parameters.keys() {
+                    crate::NodeDefinition::validate_flow_parameter_path(parameter)
+                        .context(FlowParametersSnafu)?;
                 }
                 ensure!(
-                    parameters.keys().eq(arguments.keys()),
+                    parameters
+                        .iter()
+                        .filter(|(_, value)| !value.is_null())
+                        .map(|(path, _)| path)
+                        .eq(arguments.keys()),
                     InvalidSubgraphSnafu {
                         message: format!(
                             "node `{}` prepared Flow arguments do not match its receiver-selected configuration fields",
@@ -1499,9 +1489,9 @@ mod tests {
         let decoded = Config::from_config(
             json!({"config": {}, "flows": {}, "__mf_config": {}, "__mf_flows": "ordinary"}),
             BTreeMap::from([
-                ("config".into(), body()),
-                ("flows".into(), body()),
-                ("__mf_config".into(), body()),
+                ("/config".into(), body()),
+                ("/flows".into(), body()),
+                ("/__mf_config".into(), body()),
             ]),
         )
         .unwrap();

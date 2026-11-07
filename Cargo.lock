@@ -813,6 +813,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
+name = "embedded-flow-provider"
+version = "0.0.0"
+dependencies = [
+ "inventory",
+ "mf-runtime",
+ "serde",
+ "serde_json",
+ "snafu",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1789,6 +1800,7 @@ dependencies = [
 name = "mf-compiler"
 version = "0.1.0"
 dependencies = [
+ "embedded-flow-provider",
  "inventory",
  "mf-runtime",
  "mf-telemetry",

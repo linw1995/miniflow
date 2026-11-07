@@ -31,7 +31,7 @@ impl ScopeContext {
         // Reject a new frame before decoding its configuration. Callable scopes
         // reset state ownership, but do not erase an immutable-item ancestor.
         if self.inside_items
-            && binding == "body"
+            && binding == "/body"
             && matches!(
                 owner.kind.as_str(),
                 mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND
@@ -96,7 +96,7 @@ pub fn child_relations_at(
     let mut owner_path = path.to_vec();
     owner_path.push(owner.id.clone());
     let mut relations = GraphRelations::default();
-    if binding != "body" {
+    if binding != "/body" {
         return Ok(relations);
     }
     match owner.kind.as_str() {
@@ -278,7 +278,7 @@ mod tests {
             config: json!({}),
         };
         let outer = ScopeContext::default()
-            .child(WorkflowDefinitionVersion::CURRENT, &owner, "selected")
+            .child(WorkflowDefinitionVersion::CURRENT, &owner, "/selected")
             .unwrap();
         let frame = NodeDefinition {
             id: "repeat".into(),
@@ -286,7 +286,7 @@ mod tests {
             config: json!({"variables":[{"name":"count", "type":"int"}]}),
         };
         let mut context = outer
-            .child(WorkflowDefinitionVersion::CURRENT, &frame, "body")
+            .child(WorkflowDefinitionVersion::CURRENT, &frame, "/body")
             .unwrap();
         assert_eq!(context.relations.key.as_deref(), Some("repeat"));
         let mut definition = WorkflowDefinition::from_json(
@@ -301,7 +301,7 @@ mod tests {
         .unwrap();
         let error = context.lower_scope(&mut definition).unwrap_err();
         let expected_path = crate::loops::path_label(&[
-            mf_runtime::ScopePathEntry::binding_key("receiver", "selected").into(),
+            mf_runtime::ScopePathEntry::binding_key("receiver", "/selected").into(),
             "repeat".into(),
             "write".into(),
         ]);

@@ -216,6 +216,8 @@ pub enum FlowSource {
 #[serde(deny_unknown_fields)]
 pub struct CallConfig {
     pub flow: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arguments: BTreeMap<String, BTreeMap<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<Box<WorkflowDefinition>>,
 }
@@ -245,48 +247,96 @@ pub enum FlowParameterError {
 }
 
 impl NodeDefinition {
-    /// Writes a normalized child into its declared configuration field.
-    pub fn set_node_flow(
-        &mut self,
-        name: &str,
-        body: WorkflowDefinition,
-    ) -> Result<(), FlowParameterError> {
+    /// Checks RFC 6901 syntax. The empty pointer identifies the configuration itself.
+    pub fn validate_flow_parameter_path(path: &str) -> Result<(), FlowParameterError> {
+        let mut bytes = path.bytes();
         ensure!(
-            !name.trim().is_empty(),
+            path.is_empty() || bytes.next() == Some(b'/'),
             InvalidSnafu {
-                message: "Flow parameter field names must be nonblank"
+                message: "Flow parameter paths must be JSON pointers"
             }
         );
-        let config = self.config.as_object_mut().ok_or_else(|| {
-            InvalidSnafu {
-                message: "Flow parameters require an object configuration",
+        while let Some(byte) = bytes.next() {
+            if byte == b'~' {
+                ensure!(
+                    matches!(bytes.next(), Some(b'0' | b'1')),
+                    InvalidSnafu {
+                        message: "Flow parameter paths contain an invalid JSON pointer escape"
+                    }
+                );
             }
-            .build()
-        })?;
-        let value = serde_json::to_value(body).context(JsonSnafu { parameter: name })?;
-        config.insert(name.into(), value);
+        }
         Ok(())
     }
 
-    /// Reads only the declared, present, non-null executable configuration fields.
-    /// Source resolution must normalize these fields to direct workflow definitions first.
-    /// Every other field remains opaque provider data.
+    /// Checks structural writability, not receiving-type authority, without copying configuration.
+    /// Missing final object members are writable; missing parents and array elements are not.
+    pub fn validate_flow_parameter_target(&self, path: &str) -> Result<(), FlowParameterError> {
+        Self::validate_flow_parameter_path(path)?;
+        let writable = self.config.pointer(path).is_some()
+            || path.rsplit_once('/').is_some_and(|(parent, _)| {
+                self.config.pointer(parent).is_some_and(Value::is_object)
+            });
+        ensure!(
+            writable,
+            InvalidSnafu {
+                message: "Flow parameter path has a missing parent or array element"
+            }
+        );
+        Ok(())
+    }
+
+    /// Writes an authorized leaf without creating parents or appending array elements.
+    /// A missing final object member is allowed for an optional Flow parameter.
+    pub fn set_node_flow(
+        &mut self,
+        path: &str,
+        body: WorkflowDefinition,
+    ) -> Result<(), FlowParameterError> {
+        self.validate_flow_parameter_target(path)?;
+        let value = serde_json::to_value(body).context(JsonSnafu { parameter: path })?;
+        if let Some(leaf) = self.config.pointer_mut(path) {
+            *leaf = value;
+            return Ok(());
+        }
+        let parent_and_key = path.rsplit_once('/');
+        if let Some((parent, key)) = parent_and_key
+            && let Some(object) = self
+                .config
+                .pointer_mut(parent)
+                .and_then(Value::as_object_mut)
+        {
+            object.insert(key.replace("~1", "/").replace("~0", "~"), value);
+            return Ok(());
+        }
+        InvalidSnafu {
+            message: "Flow parameter path has a missing parent or array element",
+        }
+        .fail()
+    }
+
+    /// Reads only declared, present, non-null executable leaves using JSON pointers.
+    /// Source resolution must normalize these values to direct workflow definitions first.
+    /// Every other value remains opaque provider data.
     pub fn flow_parameters(
         &self,
         parameters: &[&str],
     ) -> Result<BTreeMap<String, WorkflowDefinition>, FlowParameterError> {
         let mut flows = BTreeMap::new();
-        for &name in parameters {
+        let mut declared = std::collections::BTreeSet::new();
+        for &path in parameters {
+            Self::validate_flow_parameter_path(path)?;
             ensure!(
-                !name.trim().is_empty(),
+                declared.insert(path),
                 InvalidSnafu {
-                    message: "Flow parameter field names must be nonblank"
+                    message: "duplicate Flow parameter path"
                 }
             );
-            if let Some(value) = self.config.get(name).filter(|value| !value.is_null()) {
-                let body =
-                    serde_json::from_value(value.clone()).context(JsonSnafu { parameter: name })?;
-                flows.insert(name.to_owned(), body);
+            if let Some(value) = self.config.pointer(path).filter(|value| !value.is_null()) {
+                flows.insert(
+                    path.to_owned(),
+                    serde_json::from_value(value.clone()).context(JsonSnafu { parameter: path })?,
+                );
             }
         }
         Ok(flows)

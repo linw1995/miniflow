@@ -158,7 +158,7 @@ fn factory(
         .collect();
     let node = CallNode {
         id: id.into(),
-        scope_key: body.scope_key(id, "body"),
+        scope_key: body.scope_key(id, "/body"),
         flow,
         body,
     };
@@ -199,7 +199,7 @@ mod tests {
                 } else if mapped {
                     key.clone()
                 } else {
-                    mf_runtime::ScopePathEntry::binding_key("invoke", "body")
+                    mf_runtime::ScopePathEntry::binding_key("invoke", "/body")
                 };
                 let mut body = PreparedSubgraph::new(Vec::new(), Vec::new(), move |state| {
                     let path = state.invocation_path();
@@ -219,7 +219,7 @@ mod tests {
                     factory(
                         "invoke",
                         json!({"flow":"child", "body":{}}),
-                        BTreeMap::from([("body".into(), body)]),
+                        BTreeMap::from([("/body".into(), body)]),
                     )
                     .unwrap(),
                 )
@@ -250,24 +250,34 @@ mod tests {
             .get(mf_runtime::CALL_KIND)
             .unwrap();
         assert_eq!(
-            registration.flow_parameters(&config),
-            BTreeMap::from([("body".into(), config["body"].clone())])
+            registration.flow_parameters(&config).unwrap(),
+            BTreeMap::from([("/body".into(), config["body"].clone())])
         );
         for config in [json!({}), json!({"body": null, "flow": {"nodes": []}})] {
-            assert!(registration.flow_parameters(&config).is_empty());
+            assert_eq!(
+                registration.flow_parameters(&config).unwrap(),
+                BTreeMap::from([("/body".into(), Value::Null)])
+            );
         }
         assert!(registration.instantiate(config.clone()).is_err());
         for bodies in [
             BTreeMap::new(),
             BTreeMap::from([("other".into(), body())]),
-            BTreeMap::from([("body".into(), body()), ("extra".into(), body())]),
+            BTreeMap::from([("/body".into(), body()), ("extra".into(), body())]),
         ] {
             assert!(factory("invoke", config.clone(), bodies).is_err());
         }
         let mut invalid = config.clone();
         invalid["body"] = Value::Null;
-        assert!(factory("invoke", invalid, BTreeMap::from([("body".into(), body())])).is_err());
-        assert!(factory("invoke", config, BTreeMap::from([("body".into(), body())])).is_ok());
+        assert!(
+            factory(
+                "invoke",
+                invalid,
+                BTreeMap::from([("/body".into(), body())])
+            )
+            .is_err()
+        );
+        assert!(factory("invoke", config, BTreeMap::from([("/body".into(), body())])).is_ok());
     }
 
     #[test]
@@ -277,15 +287,19 @@ mod tests {
             factory(
                 "invoke",
                 config.clone(),
-                BTreeMap::from([("body".into(), body())]),
+                BTreeMap::from([("/body".into(), body())]),
             )
             .is_ok()
         );
         let mut invalid = config;
         invalid["flow"] = json!(false);
-        let error = factory("invoke", invalid, BTreeMap::from([("body".into(), body())]))
-            .err()
-            .unwrap();
+        let error = factory(
+            "invoke",
+            invalid,
+            BTreeMap::from([("/body".into(), body())]),
+        )
+        .err()
+        .unwrap();
         assert!(matches!(error, NodeBuildError::InvalidConfiguration { .. }));
     }
 
@@ -301,7 +315,7 @@ mod tests {
         let error = factory(
             "invoke",
             json!({"flow":" ", "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}}),
-            BTreeMap::from([("body".into(), body())]),
+            BTreeMap::from([("/body".into(), body())]),
         )
         .err()
         .unwrap();
@@ -313,7 +327,7 @@ mod tests {
         let error = factory(
             "invoke",
             json!({"flow":"child", "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}}),
-            BTreeMap::from([("body".into(), body().with_input_schema(inputs))]),
+            BTreeMap::from([("/body".into(), body().with_input_schema(inputs))]),
         )
         .err()
         .unwrap();
@@ -331,7 +345,7 @@ mod tests {
         let error = factory(
             "invoke",
             json!({"flow":"child", "body":{}}),
-            BTreeMap::from([("body".into(), scoped)]),
+            BTreeMap::from([("/body".into(), scoped)]),
         )
         .err()
         .unwrap();

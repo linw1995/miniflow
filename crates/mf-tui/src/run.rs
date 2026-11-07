@@ -2550,17 +2550,26 @@ impl ObservationView {
             return None;
         }
         let node = self.root.nodes().get(self.state.selected)?;
-        let mut path = self.root.node_path(self.state.selected).to_vec();
-        path.push(node.id.clone());
-        self.description.body(&path).map(|_| path)
+        self.description
+            .body_paths_for_node(self.root.node_path(self.state.selected), &node.id)
+            .first()
+            .map(|path| (*path).clone())
     }
 
     fn fold_body(&mut self, path: Vec<String>, expand: bool) -> Result<(), RunError> {
         let mut expanded = self.expanded.clone();
-        if expand {
-            expanded.insert(path.clone());
-        } else {
-            expanded.remove(&path);
+        let (key, parent) = path.split_last().expect("body path is nonempty");
+        // Decode the binding once; the resulting physical node ID remains opaque.
+        let owner = mf_telemetry::event::ScopePathEntry::binding_owner(key);
+        for sibling in self
+            .description
+            .body_paths_for_node(parent, owner.as_deref().unwrap_or(key))
+        {
+            if expand {
+                expanded.insert(sibling.clone());
+            } else {
+                expanded.remove(sibling);
+            }
         }
         let root = GraphLayout::with_expanded_bodies(
             &self.description,
@@ -5092,6 +5101,256 @@ mod tests {
         view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
         assert!(view.state.path.is_empty());
         assert_eq!(view.root.nodes().len(), 1);
+    }
+
+    #[test]
+    fn named_binding_observations_keep_siblings_separate() {
+        use mf_telemetry::event::{LoopPassOutcome, NodeIdentity, Outcome, ScopePathEntry};
+        let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":format!("sha256:{}", "c".repeat(64)),
+            "execution":{"mode":"single"}, "nodes":[{"id":"router", "kind":"fixture.custom_router"}],
+            "execution_order":["router"], "data_edges":[], "control_edges":[],
+            "loop_bodies": (["/first", "/second"].map(|binding| serde_json::json!({
+                "path":[ScopePathEntry::binding_key("router", binding)],
+                "nodes":[{"id":"leaf", "kind":"fixture.task"}],
+                "execution_order":["leaf"], "data_edges":[], "control_edges":[]
+            })))
+        }))
+        .unwrap();
+        let run = RunId::new();
+        let mut session = crate::state::SessionState::new(description.clone(), run).unwrap();
+        let owner = NodeIdentity {
+            id: "router".into(),
+            kind: "fixture.custom_router".into(),
+            path: vec![],
+        };
+        let mut events = vec![
+            LifecycleKind::WorkflowStarted {
+                elapsed_ns: Count::ZERO,
+            },
+            LifecycleKind::NodeStarted {
+                node: owner.clone(),
+                position: Count::ZERO,
+                elapsed_ns: Count::ZERO,
+                selected_inputs: vec![],
+            },
+        ];
+        let paths = ["/first", "/second"].map(|binding| {
+            vec![ScopePathEntry::Call {
+                call_id: ScopePathEntry::binding_key("router", binding),
+            }]
+        });
+        for (index, path) in paths.iter().enumerate() {
+            let leaf = NodeIdentity {
+                id: "leaf".into(),
+                kind: "fixture.task".into(),
+                path: path.clone(),
+            };
+            events.extend([
+                LifecycleKind::CallStarted {
+                    path: path.clone(),
+                    elapsed_ns: Count::ZERO,
+                },
+                LifecycleKind::NodeStarted {
+                    node: leaf.clone(),
+                    position: Count::ZERO,
+                    elapsed_ns: Count::ZERO,
+                    selected_inputs: vec![],
+                },
+                LifecycleKind::NodeFinished {
+                    node: leaf,
+                    position: Count::ZERO,
+                    elapsed_ns: Count::try_from(10).unwrap(),
+                    duration_ns: Some(Count::try_from(index as i64 + 1).unwrap()),
+                    outcome: Outcome::Succeeded,
+                    produced_ports: vec![],
+                    skipped_ports: vec![],
+                    failure: None,
+                    loop_summary: None,
+                },
+                LifecycleKind::CallFinished {
+                    path: path.clone(),
+                    elapsed_ns: Count::ZERO,
+                    outcome: LoopPassOutcome::Completed,
+                },
+            ]);
+        }
+        events.extend([
+            LifecycleKind::NodeFinished {
+                node: owner,
+                position: Count::ZERO,
+                elapsed_ns: Count::ZERO,
+                duration_ns: Some(Count::ZERO),
+                outcome: Outcome::Succeeded,
+                produced_ports: vec![],
+                skipped_ports: vec![],
+                failure: None,
+                loop_summary: None,
+            },
+            LifecycleKind::WorkflowFinished {
+                elapsed_ns: Count::ZERO,
+                outcome: Outcome::Succeeded,
+                failure_node_id: None,
+                failure: None,
+            },
+        ]);
+        for (sequence, event) in events.into_iter().enumerate() {
+            assert_eq!(
+                session
+                    .apply(LifecycleEvent {
+                        workflow_id: description.workflow_id.clone(),
+                        run_id: run,
+                        sequence: Count::try_from(sequence as i64 + 1).unwrap(),
+                        event,
+                    })
+                    .unwrap(),
+                crate::state::Admission::Applied
+            );
+        }
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.observation.protocol_conflicts, 0);
+        assert_eq!(snapshot.loop_passes.len(), 2);
+        let mut view = ObservationView::new(&description).unwrap();
+        for (index, path) in paths.iter().enumerate() {
+            view.state.selected = view
+                .root
+                .display_index_for_scoped_node(&[path[0].node_id().to_owned()], "leaf")
+                .unwrap();
+            view.state.sync_scope(&view.root);
+            let pass = view.state.pass(&snapshot).unwrap();
+            assert_eq!(&pass.path, path);
+            let nodes = inline_observations(
+                &view.root,
+                &description,
+                &snapshot,
+                &view.state.history_offsets(),
+            );
+            assert_eq!(
+                nodes[view.state.selected].duration_ns,
+                Some(Count::try_from(index as i64 + 1).unwrap())
+            );
+        }
+        // Folding the physical receiver folds every binding, not only the first.
+        view.state.selected = view
+            .root
+            .display_index_for_scoped_node(&[], "router")
+            .unwrap();
+        let selected = view.selected_body().unwrap();
+        for expand in [false, true] {
+            view.fold_body(selected.clone(), expand).unwrap();
+            assert_eq!(view.root.nodes().len(), if expand { 3 } else { 1 });
+            for path in &paths {
+                assert_eq!(
+                    view.expanded.contains(&vec![path[0].node_id().to_owned()]),
+                    expand
+                );
+            }
+            assert_eq!(view.root.nodes()[view.state.selected].id, "router");
+        }
+    }
+
+    #[test]
+    fn keyboard_folding_preserves_authored_binding_shaped_call_ids() {
+        use mf_telemetry::event::ScopePathEntry;
+        use serde_json::json;
+
+        fn compiled(nodes: serde_json::Value, order: &[&str]) -> mf_runtime::CompiledGraph {
+            mf_runtime::CompiledGraph {
+                definition: serde_json::from_value(json!({
+                    "version":"2026-10-28", "dependencies":{}, "nodes":nodes
+                }))
+                .unwrap(),
+                execution_order: order.iter().map(|id| (*id).into()).collect(),
+                relations: Default::default(),
+                children: Default::default(),
+            }
+        }
+
+        for nested in [false, true] {
+            let authored = ScopePathEntry::binding_key("invoke", "/authored");
+            let bound = ScopePathEntry::binding_key("invoke", "/provided");
+            let parent: Vec<String> = if nested { vec!["outer".into()] } else { vec![] };
+            let authored_key = ScopePathEntry::binding_key(&authored, "/body");
+            let authored_path = [parent.clone(), vec![authored_key]].concat();
+            let bound_path = [parent.clone(), vec![bound]].concat();
+            let mut scope = compiled(
+                json!([
+                    {"id":"invoke", "kind":"fixture.custom"},
+                    {"id":authored, "kind":"fixture.custom"}
+                ]),
+                &["invoke", &authored],
+            );
+            scope.children.insert(
+                authored.clone().into(),
+                [(
+                    "/body".into(),
+                    compiled(
+                        json!([{"id":"authored_leaf", "kind":"fixture.task"}]),
+                        &["authored_leaf"],
+                    ),
+                )]
+                .into(),
+            );
+            scope.children.insert(
+                "invoke".into(),
+                [(
+                    "/provided".into(),
+                    compiled(
+                        json!([{"id":"bound_leaf", "kind":"fixture.task"}]),
+                        &["bound_leaf"],
+                    ),
+                )]
+                .into(),
+            );
+            let root = if nested {
+                let mut root =
+                    compiled(json!([{"id":"outer", "kind":"workflow.call"}]), &["outer"]);
+                scope.relations.key = Some("outer".into());
+                root.children
+                    .insert("outer".into(), [("/body".into(), scope)].into());
+                root
+            } else {
+                scope
+            };
+            let description = mf_runtime::describe_graph(&root).unwrap();
+            let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+                .unwrap()
+                .snapshot();
+            let traces = TraceSnapshot::default();
+            let logs = LogSnapshot::default();
+            let mut view = ObservationView::new(&description).unwrap();
+            view.state.selected = view
+                .root
+                .display_index_for_scoped_node(&parent, &authored)
+                .unwrap();
+            for (key, expected) in [
+                (KeyCode::Char('c'), false),
+                (KeyCode::Char('c'), true),
+                (KeyCode::Char('h'), false),
+                (KeyCode::Char('l'), true),
+                (KeyCode::Esc, false),
+            ] {
+                view.handle_navigation(key, &snapshot, &traces, &logs);
+                assert_eq!(
+                    view.expanded.contains(&authored_path),
+                    expected,
+                    "nested={nested}, {key:?}"
+                );
+                assert!(view.expanded.contains(&bound_path));
+                assert_eq!(view.root.nodes()[view.state.selected].id, authored);
+                assert_eq!(
+                    view.root
+                        .display_index_for_scoped_node(&authored_path, "authored_leaf")
+                        .is_some(),
+                    expected
+                );
+                assert!(
+                    view.root
+                        .display_index_for_scoped_node(&bound_path, "bound_leaf")
+                        .is_some()
+                );
+            }
+        }
     }
 
     #[test]

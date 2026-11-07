@@ -137,7 +137,8 @@ ordinary provider data is not interpreted as a Flow source. Planning uses regist
 constructing nodes and supports existing description and observation APIs.
 
 The plan stores an explicit `CompiledGraph`: a definition, its canonical `execution_order`, and a
-`children` map keyed by receiving node ID and configuration field name, plus required `relations`.
+`children` map keyed by receiving node ID and concrete configuration JSON Pointer, plus required
+`relations`.
 These relationships name scope input sources, current-frame variable writes and exits, stream export
 endpoints, host bindings, and scope-edge identity. Discovery, provider checking, preparation, and codegen
 consume those relationships rather than reclassifying instructions by their node-kind labels. Only the
@@ -149,8 +150,9 @@ compiler error contracts do not expose telemetry error definitions. Genuine obse
 failures retain their typed telemetry source behind the runtime observation boundary.
 Description bodies carry their actual input source and state-output relationships, so lifecycle
 validation does not infer frame semantics from provider labels. `NodeConfig::flow_parameters`
-extracts executable child values from configuration during source resolution; ordinary JSON remains
-opaque, and absent optional children produce no graph entry. The resolved tree is handed directly to
+discovers typed Flow roles during source resolution; ordinary JSON remains opaque. Unfilled roles
+are represented as null for authoring-time Call binding, while absent optional children produce no
+graph entry. The resolved tree is handed directly to
 `plan_resolved_workflow`, so planning retains the selected receiver's child decisions.
 For an already resolved inline definition, `plan_resolved_definition(&definition, &registry)` is an
 authoring convenience that selects children using that registry. Do not use it to replan saved artifacts.
@@ -212,8 +214,16 @@ an embedded module's explicit host `plan(registry)` entry point. The separate
 
 ## Repository example
 
-The [embedded-workflows example](../examples/embedded-workflows) prints `{"answer":42}` and declares
-`mfn-core` only as a normal dependency. From the repository root:
+The [embedded-workflows example](../examples/embedded-workflows) prints `{"answer":42}` through
+Root → Call A → `apply.policy.body` B. Root binds B using the pointer `/policy/body`; the provider
+receives an actual executable `Flow` inside its derived nested configuration. Its factory captures
+`PreparedSubgraph::scope_key(id, "/policy/body")`, then execution uses ordinary `context.run_call`
+with that key, retaining the explicit graph's binding identity.
+
+`mfn-core` and `embedded-flow-provider` are normal dependencies, not build dependencies. The build
+script lists A and B with `EmbedRequest::with_source`; it only packages source resources and never
+loads receiving providers. Host preparation resolves and specializes them using the host registry.
+From the repository root:
 
 ```sh
 CARGO_TARGET_DIR="$PWD/target/embedded-example" nix develop --command \
@@ -221,6 +231,19 @@ CARGO_TARGET_DIR="$PWD/target/embedded-example" nix develop --command \
 ```
 
 After building, the executable prepares and runs without workflow JSON, generated sources, or build tools.
+To run the same graph in the live TUI, compile a standalone runner:
+
+```sh
+nix develop --command cargo run -p mf-cli --features development-support -- \
+  compile examples/embedded-workflows/answer.json \
+  --output target/passed-answer --build-dir target/passed-answer-build
+nix develop --command cargo run -p mf-cli --features development-support -- \
+  run --tui ./target/passed-answer --params.value 43
+```
+
+The runner returns `{"answer":43}`. Its frozen graph contains A under `callA` and B under `apply`'s
+`/policy/body` binding. Offline inspection traverses these actual children without loading providers
+or guessing executable fields from the retained configuration.
 
 ## Programmatic exclusive bindings
 

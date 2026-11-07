@@ -1,0 +1,15 @@
+[package]
+name = "embedded-flow-provider"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+mf-runtime = { path = "../../../crates/mf-runtime" }
+inventory = "0.3.24"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+snafu = "0.9.2"

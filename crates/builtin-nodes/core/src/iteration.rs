@@ -162,7 +162,7 @@ impl IterationNode {
         );
         let result_type = body.outputs[0].value_type.clone();
         let id = id.into();
-        let scope_key = body.scope_key(&id, "body");
+        let scope_key = body.scope_key(&id, "/body");
         Ok(Self {
             id,
             scope_key,
@@ -664,7 +664,7 @@ mod tests {
                     "body": {"poison": "not a workflow"},
                     "stream_outputs": {(name): {"node":"identity", "port":"value"}},
                 }),
-                BTreeMap::from([("body".into(), result_body())]),
+                BTreeMap::from([("/body".into(), result_body())]),
             )
             .err()
             .unwrap();
@@ -682,7 +682,7 @@ mod tests {
             factory(
                 "each",
                 config.clone(),
-                BTreeMap::from([("body".into(), result_body())]),
+                BTreeMap::from([("/body".into(), result_body())]),
             )
             .is_ok()
         );
@@ -691,7 +691,7 @@ mod tests {
         let error = factory(
             "each",
             invalid,
-            BTreeMap::from([("body".into(), result_body())]),
+            BTreeMap::from([("/body".into(), result_body())]),
         )
         .err()
         .unwrap();
@@ -699,7 +699,7 @@ mod tests {
 
         let mut body = result_body();
         body.outputs.clear();
-        let error = factory("each", config, BTreeMap::from([("body".into(), body)]))
+        let error = factory("each", config, BTreeMap::from([("/body".into(), body)]))
             .err()
             .unwrap();
         assert!(matches!(
@@ -895,11 +895,14 @@ mod tests {
             "stream_outputs": {"nodes": []},
         });
         assert_eq!(
-            registration.flow_parameters(&config),
-            BTreeMap::from([("body".into(), config["body"].clone())])
+            registration.flow_parameters(&config).unwrap(),
+            BTreeMap::from([("/body".into(), config["body"].clone())])
         );
         for config in [json!({}), json!({"body": null})] {
-            assert!(registration.flow_parameters(&config).is_empty());
+            assert_eq!(
+                registration.flow_parameters(&config).unwrap(),
+                BTreeMap::from([("/body".into(), Value::Null)])
+            );
         }
         assert!(registration.instantiate(json!({})).is_err());
         let node = registration
@@ -909,7 +912,7 @@ mod tests {
                     "body": {"version":"2026-10-28", "dependencies":{}, "nodes":[]}
                 }),
                 BTreeMap::from([(
-                    "body".into(),
+                    "/body".into(),
                     PreparedSubgraph::new(
                         Vec::new(),
                         vec![PortSpec::new("result", ValueType::Any, true)],

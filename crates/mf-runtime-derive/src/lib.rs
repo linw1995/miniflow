@@ -57,22 +57,20 @@ pub fn derive_node_enum(input: TokenStream) -> TokenStream {
     }
 }
 
-/// Discovers executable `Flow` and `Option<Flow>` configuration fields and injects
-/// their prepared values through `NodeConfig::from_config`. Existing host-policy
-/// configurations may also use `PreparedSubgraph` or `Option<PreparedSubgraph>`.
-/// Such configurations need not derive `Deserialize`: ordinary fields retain their
-/// Serde decoding contract, while executable fields come only from prepared handles.
+/// Derives recursive configuration traversal and prepared `Flow` injection.
 ///
-/// Serde `rename` and container `rename_all` determine the wire names. Names that
-/// collide with ordinary fields' deserialize names or aliases are rejected, as
-/// are flattened fields in configurations containing Flow parameters.
+/// Derive on nested structs and tagged enums as well as the provider root. Standard
+/// containers, transparent newtypes, tuples, aliases and addressable flattened
+/// structs compose typed Flow leaves; ordinary `Deserialize` fields remain opaque.
+/// `PreparedSubgraph` is also supported for callback-backed host policies.
 ///
-/// Discovery requires these literal type spellings (possibly qualified).
-/// Differently named type aliases are not discovered. Recognized types are checked
-/// against the runtime's actual types by constructing the decoded fields. Nested
-/// Flow parameters and Serde options that change their wire representation are
-/// rejected. Executable fields allow bare `default` only when optional; custom
-/// defaults cannot supply executable values. Use
+/// Discovery returns a fallible map of RFC 6901 pointers to source values. Missing
+/// or null Flow leaves remain null roles, while absent optional parents introduce
+/// no descendants. Metadata never executes user codecs, defaults or factories.
+/// Serde owns wire names and aliases; ambiguous/custom executable layouts require
+/// a manual implementation. Defaults may supply only empty optional/collection
+/// Flow configuration, not executable handles. Generic derives are unsupported;
+/// generic wrappers can implement `NodeConfig` manually. Use
 /// `#[config(runtime = "::runtime_alias")]` to override the runtime crate path.
 #[proc_macro_derive(NodeConfig, attributes(config, serde))]
 pub fn derive_node_config(input: TokenStream) -> TokenStream {

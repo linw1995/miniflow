@@ -1,0 +1,20 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {},
+  "nodes": [
+    {
+      "id": "apply",
+      "kind": "example.apply",
+      "config": {
+        "policy": {}
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "apply",
+      "port": "answer"
+    }
+  ]
+}

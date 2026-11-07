@@ -1,4 +1,5 @@
 use core_nodes as _;
+use embedded_flow_provider as _;
 
 mf_compiler::embed_workflow!(pub mod answer);
 

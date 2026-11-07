@@ -479,7 +479,7 @@ fn body_invocations_keep_success_conditions_local_and_containers_are_rejected() 
             .unwrap()
             .validate_flow_parameters(&graph.nodes[1], graph.version)
             .unwrap()
-            .remove("body")
+            .remove("/body")
             .unwrap();
         body.nodes.extend([
             serde_json::from_value(task("a", &path)).unwrap(),
@@ -489,7 +489,7 @@ fn body_invocations_keep_success_conditions_local_and_containers_are_rejected() 
             from_node: "a".into(),
             to_node: "b".into(),
         });
-        graph.nodes[1].set_node_flow("body", body).unwrap();
+        graph.nodes[1].set_node_flow("/body", body).unwrap();
         execute(&graph).unwrap();
         assert_eq!(trace(&path), ["a", "b", "a", "b", "a", "b"]);
         graph
@@ -728,7 +728,7 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
             .unwrap()
             .validate_flow_parameters(&graph.nodes[1], graph.version)
             .unwrap()
-            .remove("body")
+            .remove("/body")
             .unwrap();
         body.nodes.extend([
             serde_json::from_value(task("a", &path)).unwrap(),
@@ -738,7 +738,7 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
             from_node: "a".into(),
             to_node: "b".into(),
         });
-        graph.nodes[1].set_node_flow("body", body).unwrap();
+        graph.nodes[1].set_node_flow("/body", body).unwrap();
         cases.push(graph);
     }
     let mut stream = definition(

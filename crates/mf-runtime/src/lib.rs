@@ -13,6 +13,8 @@ mod future_execution;
 mod iteration;
 mod loop_node;
 mod node;
+#[doc(hidden)]
+pub mod node_config;
 mod node_target;
 mod number;
 mod registry;
@@ -83,7 +85,7 @@ pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
     ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
     FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs,
-    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeConfig, NodeExecution,
+    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeExecution,
     NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
     NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
@@ -95,6 +97,7 @@ pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,
     TypedTaskHandle,
 };
+pub use node_config::NodeConfig;
 pub use node_target::{
     NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget, target_ports,
 };

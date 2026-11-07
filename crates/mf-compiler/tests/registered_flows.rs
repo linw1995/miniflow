@@ -161,7 +161,7 @@ fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
             .children
             .get_mut(&"invoke".into())
             .unwrap()
-            .get_mut("body")
+            .get_mut("/body")
             .unwrap();
         match case {
             "root inherited version" => {
@@ -194,7 +194,7 @@ fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
                     .children
                     .get_mut(&"nested".into())
                     .unwrap()
-                    .get_mut("body")
+                    .get_mut("/body")
                     .unwrap();
                 nested.definition.nodes[0].config = json!({"changed":true});
             }
@@ -230,7 +230,10 @@ fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
         ) {
             // Unknown providers in both nested bodies remain host-local exemptions.
             assert_eq!(
-                result.unwrap().execute().unwrap()["value"],
+                result
+                    .unwrap_or_else(|error| panic!("{case}: {error:?}"))
+                    .execute()
+                    .unwrap()["value"],
                 json!("host result")
             );
             continue;
