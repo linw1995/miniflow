@@ -228,8 +228,8 @@ impl CompiledWorkflow {
             description.workflow_id = mf_telemetry::identity::WorkflowId::from_definition(
                 &serde_json::json!({"isolation_format": 1, "workflow_id": original.workflow_id, "target": id}),
                 &description.execution_order,
-            ).context(crate::compiler::ContractSnafu)?;
-            description.validate().context(crate::compiler::ContractSnafu)?;
+            ).context(mf_runtime::GraphObservationSnafu).context(crate::compiler::GraphSnafu)?;
+            description.validate().context(mf_runtime::GraphObservationSnafu).context(crate::compiler::GraphSnafu)?;
             let context = node.metadata.context_references.iter().map(|reference| {
                 let value_type = output_types.get(&reference.output).context(UnknownTargetReferenceSnafu {
                     definition_id: node.definition_id.clone(), output: &reference.output,
@@ -256,7 +256,8 @@ impl CompiledWorkflow {
         }
         observer
             .start_stream(description, run_id)
-            .context(crate::compiler::ContractSnafu)
+            .context(mf_runtime::GraphObservationSnafu)
+            .context(crate::compiler::GraphSnafu)
     }
 
     pub fn start_observation(
@@ -277,7 +278,8 @@ impl CompiledWorkflow {
             if description.version.supports_loops() {
                 return observer
                     .start_with_description(description, run_id)
-                    .context(crate::compiler::ContractSnafu);
+                    .context(mf_runtime::GraphObservationSnafu)
+                    .context(crate::compiler::GraphSnafu);
             }
         }
         ensure!(
@@ -302,7 +304,7 @@ impl CompiledWorkflow {
         let id = self
             .graph
             .workflow_id()
-            .context(crate::compiler::ContractSnafu)?;
+            .context(crate::compiler::GraphSnafu)?;
         let nodes = self
             .graph
             .execution_order
@@ -322,7 +324,8 @@ impl CompiledWorkflow {
             .collect::<Result<_, _>>()?;
         observer
             .start(id, run_id, nodes)
-            .context(crate::compiler::ContractSnafu)
+            .context(mf_runtime::GraphObservationSnafu)
+            .context(crate::compiler::GraphSnafu)
     }
 
     pub fn to_json(&self) -> Result<String, PlanError> {

@@ -15,6 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct ScopeContext {
     pub relations: GraphRelations,
     pub path: Vec<DefinitionId>,
+    /// The original authored root, unchanged by explicit child version overrides.
+    pub root_version: Option<WorkflowDefinitionVersion>,
     inside_items: bool,
 }
 
@@ -62,6 +64,7 @@ impl ScopeContext {
         Ok(Self {
             relations,
             path,
+            root_version: self.root_version,
             inside_items,
         })
     }
@@ -70,6 +73,7 @@ impl ScopeContext {
         &mut self,
         definition: &mut WorkflowDefinition,
     ) -> Result<(), WorkflowCompileError> {
+        self.root_version.get_or_insert(definition.version);
         lower_scope_at(definition, &mut self.relations, &self.path)
     }
 }

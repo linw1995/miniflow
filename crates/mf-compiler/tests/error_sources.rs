@@ -16,6 +16,34 @@ use mf_compiler::{
 use serde_json::{Value, json};
 use std::{error::Error, fs, fs::TryLockError, io};
 
+#[test]
+fn compiled_graph_error_boundaries_preserve_the_runtime_domain_source() {
+    let graph = mf_runtime::CompiledGraph {
+        definition: serde_json::from_value(json!({
+            "version": "2026-10-28", "dependencies": {},
+            "nodes": [{"id": "value", "kind": "builtin.constant", "config": {"value": 1}}]
+        }))
+        .unwrap(),
+        execution_order: Vec::new(),
+        relations: Default::default(),
+        children: Default::default(),
+    };
+    let build_error = mf_compiler::WorkflowBuildError::CompiledGraph {
+        source: mf_runtime::describe_graph(&graph).unwrap_err(),
+    };
+    let description_error = mf_compiler::DescriptionError::Graph {
+        source: mf_runtime::describe_graph(&graph).unwrap_err(),
+    };
+    for error in [&build_error as &dyn Error, &description_error as &dyn Error] {
+        assert!(matches!(
+            find_source::<mf_runtime::GraphDescriptionError>(error),
+            Some(mf_runtime::GraphDescriptionError::Invalid { message })
+                if message == "compiled execution order does not match the node count"
+        ));
+        assert!(error.source().unwrap().source().is_none());
+    }
+}
+
 fn find_source<'a, T: Error + 'static>(error: &'a (dyn Error + 'static)) -> Option<&'a T> {
     let mut current = Some(error);
     while let Some(error) = current {

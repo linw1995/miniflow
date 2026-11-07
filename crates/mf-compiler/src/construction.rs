@@ -809,7 +809,9 @@ pub enum WorkflowBuildError {
     #[snafu(transparent)]
     StreamBuild { source: StreamBuildError },
     #[snafu(display("invalid compiled graph: {source}"))]
-    CompiledGraph { source: mf_telemetry::ContractError },
+    CompiledGraph {
+        source: mf_runtime::GraphDescriptionError,
+    },
     #[snafu(display("invalid compiled graph structure: {source}"))]
     CompiledStructure {
         #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
@@ -891,12 +893,13 @@ pub fn validate_compiled_graph(
 ) -> Result<(), WorkflowBuildError> {
     crate::compiler::validate_graph_structure(graph).context(CompiledStructureSnafu)?;
     mf_runtime::describe_graph(graph).context(CompiledGraphSnafu)?;
-    validate_compiled_providers(registry, graph)
+    validate_compiled_providers(registry, graph, graph.definition.version)
 }
 
 fn validate_compiled_providers(
     registry: &NodeRegistry,
     graph: &mf_runtime::CompiledGraph,
+    root_version: crate::WorkflowDefinitionVersion,
 ) -> Result<(), WorkflowBuildError> {
     for node in &graph.definition.nodes {
         let children = graph.children.get(&node.id);
@@ -931,14 +934,13 @@ fn validate_compiled_providers(
                 .as_deref()
                 .and_then(|name| registry.flow(name))
             {
-                crate::compiler::validate_host_flow_binding(node, body, registered).context(
-                    HostFlowBindingSnafu {
-                        definition_id: node.id.clone(),
-                    },
-                )?;
+                crate::compiler::validate_host_flow_binding(node, body, registered, root_version)
+                    .context(HostFlowBindingSnafu {
+                    definition_id: node.id.clone(),
+                })?;
                 continue;
             }
-            validate_compiled_providers(registry, body).context(SubgraphSnafu {
+            validate_compiled_providers(registry, body, root_version).context(SubgraphSnafu {
                 definition_id: node.id.clone(),
             })?;
         }

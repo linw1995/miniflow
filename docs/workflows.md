@@ -11,6 +11,13 @@ The [conditional convergence example](../examples/exclusive-inputs.json) and the
 example](../examples/hello-workflow.json) use this format with annotated clusters. Existing supported versions keep their
 original field meanings and feature restrictions; new fields are not inferred from their shape.
 
+The root graph must specify `version`. An executable child may omit it to inherit the original root
+version, including children loaded from another file. An explicit child version overrides that default
+for that child only: a versionless grandchild still inherits the root version, not its immediate
+parent's override. Invalid or null versions are rejected. `dependencies` may be omitted when empty;
+provider dependencies are not inherited by this shorthand. Canonical serialization omits empty
+`dependencies` and records each resolved child's effective version.
+
 ### Input references
 
 Declare a source next to its consumer input:
@@ -33,7 +40,7 @@ transformation nodes to select fields or construct another value.
 Input names must match the provider's ports. Duplicate keys, unknown fields, null bindings, and mixed binding variants
 fail. A connected optional input still skips its consumer when its source skips. Unbound inputs keep their existing
 required, optional, and startup parameter rules. Loop and Iteration bodies are complete Flow definitions
-with their own version, dependency declarations, and local `flows` aliases, subject to their scope and
+with an optional version override, independent dependency declarations, and local `flows` aliases, subject to their scope and
 message-domain restrictions. Source-file aliases used by a nested Call belong to its containing Flow,
 not an outer body's table.
 
@@ -286,7 +293,7 @@ Existing `--locked` validation, authoritative-lock handling, and discovery retri
 
 ## Migrate older definitions
 
-Definitions with version `2026-09-24` are rejected with a migration diagnostic. Change the version to `2026-09-26` and add `dependencies` declaring the packages that provide every node kind, including built-ins. An empty object is valid for definitions that require no plugins. Node configuration, connections, and selected outputs retain their meanings.
+Definitions with version `2026-09-24` are rejected with a migration diagnostic. Change the version to `2026-09-26` and add `dependencies` declaring the packages that provide every node kind, including built-ins. Definitions that require no plugin declarations may omit `dependencies` or use an empty object. Node configuration, connections, and selected outputs retain their meanings.
 
 Built-in body sources use the `%` prefix: `%loop` for Loop variables and `%iteration` for Iteration
 items. In earlier definitions, replace `$loop` with `%loop` and `@iteration` with `%iteration` in
@@ -940,8 +947,8 @@ register. The outer graph and every Loop body remain acyclic. The engine repeats
 execution order instead of adding a graph back edge.
 
 A Loop node's `config` has required `max_iterations`, a nonempty `variables` list, an optional `until`
-condition, and a `body` containing a complete Flow definition with its own `version` and `dependencies`.
-The old top-level `loop` field and partial-body format are not supported.
+condition, and a `body` using the same Flow definition grammar. Its `version` may inherit the root,
+and empty `dependencies` may be omitted. The old top-level `loop` field is not supported.
 Each variable creates a required Loop input for its initial value and a required Loop output for its
 final value. The body's terminal `outputs` must be empty; Loop returns its variables rather than a
 second set of child results. The body reads current values and a zero-based `index` through the synthetic `%loop`

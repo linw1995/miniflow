@@ -149,6 +149,7 @@ fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
 
     for case in [
         "matching",
+        "root inherited version",
         "stale raw body",
         "compiled child drift",
         "missing registered body",
@@ -163,6 +164,21 @@ fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
             .get_mut("body")
             .unwrap();
         match case {
+            "root inherited version" => {
+                registered.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_25;
+                host.definition.version = registered.version;
+                for node in &mut registered.nodes {
+                    let body = node.config["body"].as_object_mut().unwrap();
+                    body.remove("version");
+                    body.remove("dependencies");
+                }
+                assert!(
+                    host.children
+                        .values()
+                        .flat_map(|bindings| bindings.values())
+                        .all(|child| child.definition.version == saved.graph.definition.version)
+                );
+            }
             "stale raw body" => {
                 // Only the stored child tree is executable, not this inline copy.
                 let nested = host
@@ -208,7 +224,10 @@ fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
             )
             .unwrap();
         let result = mf_compiler::instantiate_compiled(&plan, &registry);
-        if matches!(case, "matching" | "stale raw body") {
+        if matches!(
+            case,
+            "matching" | "root inherited version" | "stale raw body"
+        ) {
             // Unknown providers in both nested bodies remain host-local exemptions.
             assert_eq!(
                 result.unwrap().execute().unwrap()["value"],

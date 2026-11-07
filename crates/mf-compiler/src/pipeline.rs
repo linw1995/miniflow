@@ -949,7 +949,7 @@ inventory::submit! {
         assert_eq!(
             resolved.definition.nodes[0].config["body"],
             json!({
-                "version":"2026-10-25", "dependencies":{}, "nodes":[], "edges":[], "outputs":[]
+                "version":"2026-10-25", "nodes":[], "edges":[], "outputs":[]
             })
         );
         assert_eq!(resolved.sources, BTreeSet::from([inputs.definition]));

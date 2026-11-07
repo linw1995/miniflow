@@ -144,6 +144,9 @@ consume those relationships rather than reclassifying instructions by their node
 authoring lowering boundary interprets the language's structural syntax. Scope keys must name their
 actual receiving owner or that exact encoded owner/binding pair; runtime invocation paths and
 telemetry descriptions use the same key while routing and errors retain the physical owner ID.
+Compiled-graph integrity and description failures use runtime-owned `GraphDescriptionError`;
+compiler error contracts do not expose telemetry error definitions. Genuine observation projection
+failures retain their typed telemetry source behind the runtime observation boundary.
 Description bodies carry their actual input source and state-output relationships, so lifecycle
 validation does not infer frame semantics from provider labels. `NodeConfig::flow_parameters`
 extracts executable child values from configuration during source resolution; ordinary JSON remains

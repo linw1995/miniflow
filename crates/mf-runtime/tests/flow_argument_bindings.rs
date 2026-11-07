@@ -244,7 +244,10 @@ fn declarations_are_validated_but_unknown_json_is_opaque() {
     for extractor in invalid_extractors {
         for config in [json!({}), json!({"selected": null})] {
             assert!(matches!(
-                registration(extractor).validate_flow_parameters(&node(config.clone())),
+                registration(extractor).validate_flow_parameters(
+                    &node(config.clone()),
+                    mf_runtime::WorkflowDefinitionVersion::CURRENT
+                ),
                 Err(NodeBuildError::FlowParameters {
                     source: mf_runtime::FlowParameterError::Invalid { .. }
                 })
@@ -264,14 +267,17 @@ fn declarations_are_validated_but_unknown_json_is_opaque() {
     assert!(opaque.flow_parameters(&malformed.config).is_empty());
     assert!(
         opaque
-            .validate_flow_parameters(&malformed)
+            .validate_flow_parameters(&malformed, mf_runtime::WorkflowDefinitionVersion::CURRENT)
             .unwrap()
             .is_empty()
     );
     let registration = registration(selected);
     for config in [json!({"selected": frozen()}), json!({"unknown": frozen()})] {
         registration
-            .validate_flow_parameters(&node(config))
+            .validate_flow_parameters(
+                &node(config),
+                mf_runtime::WorkflowDefinitionVersion::CURRENT,
+            )
             .unwrap();
     }
     let plain = NodeRegistration {
@@ -284,7 +290,10 @@ fn declarations_are_validated_but_unknown_json_is_opaque() {
             .is_empty()
     );
     plain
-        .validate_flow_parameters(&node(json!({"selected": frozen()})))
+        .validate_flow_parameters(
+            &node(json!({"selected": frozen()})),
+            mf_runtime::WorkflowDefinitionVersion::CURRENT,
+        )
         .unwrap();
     let error = preparation_error(registration, json!({"unknown": frozen()}), &["unknown"]);
     assert!(matches!(error, NodeBuildError::InvalidSubgraph { .. }));
@@ -295,17 +304,26 @@ fn validation_parses_the_receiver_callback_values_not_same_named_raw_json() {
     let registration = registration(|config| {
         BTreeMap::from([("selected".into(), config["provider"]["normalized"].clone())])
     });
-    let node = node(json!({
-        "selected": {"version": "opaque provider data"},
-        "provider": {"normalized": frozen()},
-    }));
-    let original = node.clone();
-    assert_eq!(
-        registration.validate_flow_parameters(&node).unwrap(),
-        BTreeMap::from([("selected".into(), definition())])
-    );
-    assert!(node.flow_parameters(&["selected"]).is_err());
-    assert_eq!(node, original);
+    for inherit in [false, true] {
+        let mut normalized = frozen();
+        if inherit {
+            normalized.as_object_mut().unwrap().remove("version");
+            normalized.as_object_mut().unwrap().remove("dependencies");
+        }
+        let node = node(json!({
+            "selected": {"version": "opaque provider data"},
+            "provider": {"normalized": normalized},
+        }));
+        let original = node.clone();
+        assert_eq!(
+            registration
+                .validate_flow_parameters(&node, mf_runtime::WorkflowDefinitionVersion::CURRENT)
+                .unwrap(),
+            BTreeMap::from([("selected".into(), definition())])
+        );
+        assert!(node.flow_parameters(&["selected"]).is_err());
+        assert_eq!(node, original);
+    }
 }
 
 #[test]
@@ -331,7 +349,9 @@ fn authoring_preserves_typed_errors_but_preparation_executes_the_supplied_child(
     ] {
         let node = node(json!({"selected": value, "option": 42}));
         let original = node.clone();
-        let error = registration.validate_flow_parameters(&node).unwrap_err();
+        let error = registration
+            .validate_flow_parameters(&node, mf_runtime::WorkflowDefinitionVersion::CURRENT)
+            .unwrap_err();
         assert!(matches!(&error, NodeBuildError::FlowParameters {
             source: mf_runtime::FlowParameterError::Json { parameter, source }
         } if parameter == "selected" && source.is_data()));
@@ -439,7 +459,10 @@ fn matching_arguments_leave_nonobject_and_business_validation_to_the_provider() 
         ),
     ] {
         registration
-            .validate_flow_parameters(&node(config.clone()))
+            .validate_flow_parameters(
+                &node(config.clone()),
+                mf_runtime::WorkflowDefinitionVersion::CURRENT,
+            )
             .unwrap();
         assert!(matches!(preparation_error(registration, config, keys),
             NodeBuildError::InvalidSubgraph { message } if message == expected));

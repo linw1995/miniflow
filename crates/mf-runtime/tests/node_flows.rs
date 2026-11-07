@@ -70,7 +70,7 @@ fn receiver(node: &NodeDefinition) -> NodeRegistration {
 }
 
 #[test]
-fn all_child_kinds_use_declared_fields_without_inheriting_parent_schema_or_dependencies() {
+fn declared_children_keep_explicit_versions_and_independent_dependencies() {
     let mut parent = definition("2026-10-28");
     parent.dependencies = serde_json::from_value(json!({
         "provider": {"package": "provider", "path": "../provider"}
@@ -83,7 +83,9 @@ fn all_child_kinds_use_declared_fields_without_inheriting_parent_schema_or_depen
         assert!(node.flow_parameters(&[]).unwrap().is_empty());
         let flows = node.flow_parameters(&[name]).unwrap();
         assert_eq!(
-            receiver(&node).validate_flow_parameters(&node).unwrap(),
+            receiver(&node)
+                .validate_flow_parameters(&node, mf_runtime::WorkflowDefinitionVersion::CURRENT)
+                .unwrap(),
             flows
         );
         assert_eq!(flows.len(), 1);
@@ -91,7 +93,9 @@ fn all_child_kinds_use_declared_fields_without_inheriting_parent_schema_or_depen
         assert_eq!(body.version, WorkflowDefinitionVersion::V2026_10_25);
         assert!(body.dependencies.is_empty());
         assert!(body.nodes.is_empty());
-        assert_eq!(json!(body), node.config[name]);
+        let mut canonical = node.config[name].clone();
+        canonical.as_object_mut().unwrap().remove("dependencies");
+        assert_eq!(json!(body), canonical);
         let child = CompiledGraph {
             definition: body.clone(),
             execution_order: Vec::new(),
@@ -170,7 +174,7 @@ fn manifest_projects_explicit_compiled_sources_with_complete_child_orders() {
         .iter()
         .map(|node| {
             let bodies = receiver(node)
-                .validate_flow_parameters(node)
+                .validate_flow_parameters(node, parent.version)
                 .unwrap()
                 .into_iter()
                 .map(|(name, body)| {
@@ -221,7 +225,7 @@ fn missing_and_null_fields_are_optional_and_unresolved_calls_are_not_special_cas
         assert!(node.flow_parameters(&["body"]).unwrap().is_empty());
         assert!(
             receiver(&node)
-                .validate_flow_parameters(&node)
+                .validate_flow_parameters(&node, mf_runtime::WorkflowDefinitionVersion::CURRENT)
                 .unwrap()
                 .is_empty()
         );
@@ -376,7 +380,7 @@ fn old_top_level_loop_and_incomplete_definitions_are_rejected() {
         }))
         .is_err()
     );
-    for field in ["version", "dependencies"] {
+    for field in ["version", "nodes"] {
         let mut body = json!(definition("2026-10-25"));
         body.as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<WorkflowDefinition>(body).is_err());

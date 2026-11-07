@@ -4,10 +4,10 @@ use crate::{
 };
 use mf_telemetry::description::{
     ClusterDescription, ControlEdge, DataEdge, ExecutionDescription, ExecutionMode,
-    LoopBodyDescription, NodeDescription, OrderEdge, WorkflowDescriptionVersion,
+    LoopBodyDescription, NodeDescription, OrderEdge, WorkflowDescription,
+    WorkflowDescriptionVersion,
 };
 use mf_telemetry::identity::WorkflowId;
-use mf_telemetry::{ContractError, description::WorkflowDescription};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +34,24 @@ pub struct WorkflowManifest {
     pub input_schema: WorkflowInputSchema,
 }
 
+/// Failures describing authoritative compiled graph facts without preparing providers.
+///
+/// Graph integrity and authored-definition failures belong to the runtime. Only
+/// projecting those facts into the observation schema or its identity can produce
+/// an observation-contract source.
+#[derive(Debug, Snafu)]
+pub enum GraphDescriptionError {
+    #[snafu(display("invalid compiled graph: {message}"))]
+    Invalid { message: String },
+    #[snafu(display("invalid compiled workflow definition: {source}"))]
+    Definition { source: serde_json::Error },
+    #[snafu(
+        display("invalid graph observation projection: {source}"),
+        visibility(pub)
+    )]
+    Observation { source: mf_telemetry::ContractError },
+}
+
 #[derive(Debug, Snafu)]
 pub enum WorkflowManifestError {
     #[snafu(display("compiled workflow interface drift at `{path}`: {component} differs"))]
@@ -50,7 +68,7 @@ pub enum WorkflowManifestError {
     #[snafu(display("invalid workflow manifest JSON: {source}"))]
     Json { source: serde_json::Error },
     #[snafu(display("invalid workflow manifest graph: {source}"))]
-    Graph { source: ContractError },
+    Graph { source: GraphDescriptionError },
     #[snafu(display("invalid workflow manifest interface: {source}"))]
     Interface { source: WorkflowInputError },
 }
@@ -259,9 +277,10 @@ impl WorkflowManifest {
 
 /// Projects the observation view from actual compiled scopes, without planning,
 /// providers, or discovery from configuration JSON.
-pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, ContractError> {
+pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, GraphDescriptionError> {
     validate_relations(graph)?;
     let definition = &graph.definition;
+    serde_json::to_writer(std::io::sink(), definition).context(DefinitionSnafu)?;
     let execution_order = string_order(&graph.execution_order);
     let mut loop_bodies = Vec::new();
     let mut omitted_iterations = Vec::new();
@@ -306,7 +325,7 @@ pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, Cont
                 && (!body.order_edges.is_empty() || !body.clusters.is_empty())
         })
     });
-    description.validate()?;
+    description.validate().context(ObservationSnafu)?;
     if !omitted_iterations.is_empty() {
         description.loop_bodies.retain(|body| {
             !omitted_iterations
@@ -347,19 +366,19 @@ pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, Cont
     ) {
         description.execution = None;
     }
-    description.validate()?;
+    description.validate().context(ObservationSnafu)?;
     Ok(description)
 }
 
 /// Validate provider-free endpoints before any observation-only projection.
-fn validate_relations(graph: &CompiledGraph) -> Result<(), ContractError> {
+fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError> {
     ensure!(
         graph
             .relations
             .host
             .as_ref()
             .is_none_or(|name| graph.relations.is_callable() && !name.trim().is_empty()),
-        mf_telemetry::InvalidSnafu {
+        InvalidSnafu {
             message: "compiled host references require a callable scope and nonblank name"
         }
     );
@@ -374,7 +393,7 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), ContractError> {
             !name.trim().is_empty()
                 && !output.port.trim().is_empty()
                 && nodes.contains(&output.node),
-            mf_telemetry::InvalidSnafu {
+            InvalidSnafu {
                 message: "compiled stream relation has an invalid output endpoint"
             }
         );
@@ -389,13 +408,13 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), ContractError> {
     {
         ensure!(
             nodes.contains(id),
-            mf_telemetry::InvalidSnafu {
+            InvalidSnafu {
                 message: format!("compiled scope instruction names unknown node `{id}`")
             }
         );
         ensure!(
             instructions.insert(id),
-            mf_telemetry::InvalidSnafu {
+            InvalidSnafu {
                 message: "compiled scope instruction roles collide"
             }
         );
@@ -405,14 +424,14 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), ContractError> {
             .values
             .keys()
             .all(|name| !name.trim().is_empty() && name != "index"),
-        mf_telemetry::InvalidSnafu {
+        InvalidSnafu {
             message: "compiled scope variable names must be nonblank"
         }
     );
     for variable in scope.writes.values().chain(scope.state_outputs.keys()) {
         ensure!(
             scope.values.contains_key(variable),
-            mf_telemetry::InvalidSnafu {
+            InvalidSnafu {
                 message: format!("compiled scope relation names unknown variable `{variable}`")
             }
         );
@@ -421,7 +440,7 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), ContractError> {
     for (variable, output) in &scope.state_outputs {
         ensure!(
             output == variable && outputs.insert(output),
-            mf_telemetry::InvalidSnafu {
+            InvalidSnafu {
                 message: "compiled state outputs must preserve current-frame variable names"
             }
         );
@@ -431,13 +450,13 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), ContractError> {
             .writes
             .values()
             .all(|variable| scope.state_outputs.contains_key(variable)),
-        mf_telemetry::InvalidSnafu {
+        InvalidSnafu {
             message: "compiled scope writes require declared state outputs"
         }
     );
     ensure!(
         scope.is_stateful() || scope.exits.is_empty(),
-        mf_telemetry::InvalidSnafu {
+        InvalidSnafu {
             message: "compiled scope exits require a stateful frame"
         }
     );
@@ -445,7 +464,7 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), ContractError> {
         instructions
             .iter()
             .all(|id| !graph.children.contains_key(*id)),
-        mf_telemetry::InvalidSnafu {
+        InvalidSnafu {
             message: "compiled scope instructions cannot own child graphs"
         }
     );
@@ -455,31 +474,35 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), ContractError> {
 fn ordered_nodes<'a>(
     nodes: impl IntoIterator<Item = (&'a str, &'a str)>,
     order: &[String],
-) -> Result<Vec<NodeDescription>, ContractError> {
+) -> Result<Vec<NodeDescription>, GraphDescriptionError> {
     let mut definitions = BTreeMap::new();
     for (id, kind) in nodes {
         ensure!(
             definitions.insert(id, kind).is_none(),
-            mf_telemetry::InvalidSnafu {
+            InvalidSnafu {
                 message: "duplicate node definition"
             }
         );
     }
     ensure!(
         definitions.len() == order.len(),
-        mf_telemetry::InvalidSnafu {
+        InvalidSnafu {
             message: "compiled execution order does not match the node count"
         }
     );
+    let mut seen = BTreeSet::new();
     order
         .iter()
         .map(|id| {
-            let kind =
-                definitions
-                    .get(id.as_str())
-                    .with_context(|| mf_telemetry::InvalidSnafu {
-                        message: format!("compiled execution order names unknown node `{id}`"),
-                    })?;
+            ensure!(
+                seen.insert(id),
+                InvalidSnafu {
+                    message: format!("compiled execution order repeats node `{id}`")
+                }
+            );
+            let kind = definitions.get(id.as_str()).with_context(|| InvalidSnafu {
+                message: format!("compiled execution order names unknown node `{id}`"),
+            })?;
             Ok(NodeDescription {
                 id: id.clone(),
                 kind: (*kind).into(),
@@ -543,17 +566,17 @@ fn describe_children(
     bodies: &mut Vec<LoopBodyDescription>,
     include_iterations: bool,
     omitted_iterations: &mut Vec<Vec<String>>,
-) -> Result<(), ContractError> {
+) -> Result<(), GraphDescriptionError> {
     ensure!(
         path.len() <= mf_telemetry::MAX_SCOPE_DEPTH,
-        mf_telemetry::InvalidSnafu {
+        InvalidSnafu {
             message: "invalid compiled child scope depth"
         }
     );
     for owner in parent.children.keys() {
         ensure!(
             parent.definition.nodes.iter().any(|node| node.id == *owner),
-            mf_telemetry::InvalidSnafu {
+            InvalidSnafu {
                 message: format!("compiled child names unknown owner `{owner}` at {path:?}")
             }
         );
@@ -568,7 +591,7 @@ fn describe_children(
         for (name, child) in children {
             ensure!(
                 !name.trim().is_empty(),
-                mf_telemetry::InvalidSnafu {
+                InvalidSnafu {
                     message: "compiled child binding names must be nonblank",
                 }
             );
@@ -576,13 +599,13 @@ fn describe_children(
             ensure!(
                 key == node.id.as_str()
                     || key == crate::ScopePathEntry::binding_key(node.id.as_str(), name),
-                mf_telemetry::InvalidSnafu {
+                InvalidSnafu {
                     message: "compiled scope keys must reference their actual receiving owner and binding",
                 }
             );
             ensure!(
                 scope_keys.insert(key.clone()),
-                mf_telemetry::InvalidSnafu {
+                InvalidSnafu {
                     message: "compiled child scope keys collide"
                 }
             );
@@ -593,7 +616,7 @@ fn describe_children(
                         .nodes
                         .iter()
                         .any(|other| other.id.as_str() == key),
-                mf_telemetry::InvalidSnafu {
+                InvalidSnafu {
                     message: "compiled child scope key collides with another node ID"
                 }
             );
@@ -614,7 +637,7 @@ fn describe_children(
             // Each actual child has its own authored version and wire invariants.
             // Validate those without decoding any configuration field as a graph,
             // retaining serde's typed source for malformed in-memory definitions.
-            serde_json::to_writer(std::io::sink(), body)?;
+            serde_json::to_writer(std::io::sink(), body).context(DefinitionSnafu)?;
             let order = string_order(&child.execution_order);
             bodies.push(LoopBodyDescription {
                 path: path.clone(),

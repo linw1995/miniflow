@@ -1398,6 +1398,7 @@ impl NodeRegistration {
     pub fn validate_flow_parameters(
         &self,
         node: &crate::NodeDefinition,
+        inherited_version: crate::WorkflowDefinitionVersion,
     ) -> Result<BTreeMap<String, crate::WorkflowDefinition>, NodeBuildError> {
         self.flow_parameters(&node.config)
             .into_iter()
@@ -1408,9 +1409,11 @@ impl NodeRegistration {
                         message: "Flow parameter field names must be nonblank"
                     }
                 );
-                let body = serde_json::from_value(value).context(crate::definition::JsonSnafu {
-                    parameter: &parameter,
-                })?;
+                let body =
+                    crate::WorkflowDefinition::from_value_with_version(value, inherited_version)
+                        .context(crate::definition::JsonSnafu {
+                            parameter: &parameter,
+                        })?;
                 Ok((parameter, body))
             })
             .collect::<Result<_, crate::FlowParameterError>>()

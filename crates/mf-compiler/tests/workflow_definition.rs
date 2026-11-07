@@ -83,7 +83,6 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
                 "outputs":[{"name":"result", "node":"%iteration", "port":"item"}]
             }}},
             {"id":"callA", "kind":"workflow.call", "config":{"flow":"A", "body":{
-                "version":"2026-10-28", "dependencies":{},
                 "nodes":[{"id":"leaf", "kind":"builtin.constant", "config":{"value":42}}],
                 "outputs":[{"name":"answer", "node":"leaf", "port":"value"}]
             }}}
@@ -134,6 +133,7 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
         .find(|node| node.id.as_str() == "callA")
         .unwrap();
     let child = &normalized.graph.children[&call.id]["body"];
+    assert_eq!(child.definition.version, WorkflowDefinitionVersion::CURRENT);
     assert_eq!(child.relations.key.as_deref(), Some("callA"));
     assert_eq!(child.child_scope_key(call, "body"), "callA");
     let round_trip = WorkflowDefinition::from_json(
@@ -273,6 +273,15 @@ fn dependencies_validate_sources_and_preserve_features() {
         );
     }
     value.as_object_mut().unwrap().remove("dependencies");
+    let without_dependencies = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+    assert!(without_dependencies.dependencies.is_empty());
+    assert!(
+        serde_json::to_value(without_dependencies)
+            .unwrap()
+            .get("dependencies")
+            .is_none()
+    );
+    value["dependencies"] = json!(null);
     assert!(WorkflowDefinition::from_json(&value.to_string()).is_err());
 }
 

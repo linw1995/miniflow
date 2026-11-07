@@ -167,7 +167,8 @@ pub use workflow_inputs::{
 };
 
 pub use workflow_manifest::{
-    MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC, MAX_MANIFEST_PADDING_BYTES,
-    MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES, WorkflowManifest,
-    WorkflowManifestError, WorkflowManifestVersion, describe_graph,
+    GraphDescriptionError, MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC,
+    MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES,
+    ObservationSnafu as GraphObservationSnafu, WorkflowManifest, WorkflowManifestError,
+    WorkflowManifestVersion, describe_graph,
 };

@@ -74,8 +74,12 @@ fn caller() -> Value {
 fn frozen_arguments_resolve_relative_files_and_survive_without_source_files() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir(directory.path().join("provider")).unwrap();
-    fs::write(directory.path().join("leaf.json"), leaf().to_string()).unwrap();
+    let mut child = leaf();
+    child.as_object_mut().unwrap().remove("version");
+    child.as_object_mut().unwrap().remove("dependencies");
+    fs::write(directory.path().join("leaf.json"), child.to_string()).unwrap();
     let mut argument = caller();
+    argument.as_object_mut().unwrap().remove("version");
     argument["dependencies"] =
         json!({"provider": {"package": "test-provider", "path": "provider"}});
     let authored = json!({
@@ -89,6 +93,10 @@ fn frozen_arguments_resolve_relative_files_and_survive_without_source_files() {
         .flow_parameters(&["local"])
         .unwrap();
     let argument = &arguments["local"];
+    assert_eq!(
+        argument.version,
+        mf_compiler::WorkflowDefinitionVersion::CURRENT
+    );
     assert!(argument.flows.is_empty());
     assert_eq!(
         argument.dependencies["provider"].path.as_deref(),
@@ -290,6 +298,78 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
             assert_eq!(embedded.description().unwrap(), graph);
         }
     }
+}
+
+#[test]
+fn missing_grandchild_versions_inherit_the_root_across_explicit_older_call_frames() {
+    use mf_compiler::WorkflowDefinitionVersion;
+    let mut grandchild = leaf();
+    grandchild.as_object_mut().unwrap().remove("version");
+    grandchild.as_object_mut().unwrap().remove("dependencies");
+    grandchild["clusters"] = json!([{
+        "label":"Grandchild", "annotation":"Uses the root schema", "nodes":["value"]
+    }]);
+    let middle = json!({"version":"2026-09-26", "nodes":[owner(grandchild)]});
+    let root = definition(json!({"version":"2026-10-28", "nodes":[
+        {"id":"invoke", "kind":"workflow.call", "config":{"flow":"static", "body":middle}},
+        owner(middle)
+    ]}));
+    let resolved = resolve_flows(&root, None).unwrap();
+    let plan = plan_definition(&root).unwrap();
+    for (owner, field) in [("invoke", "body"), ("custom", "local")] {
+        let child = &resolved.children[&owner.into()][field];
+        assert_eq!(
+            child.definition.version,
+            WorkflowDefinitionVersion::V2026_09_26
+        );
+        let grandchild = &child.children[&"custom".into()]["local"];
+        assert_eq!(
+            grandchild.definition.version,
+            WorkflowDefinitionVersion::CURRENT
+        );
+        assert_eq!(grandchild.definition.clusters.len(), 1);
+        let compiled = &plan.graph.children[&owner.into()][field];
+        assert_eq!(
+            compiled.definition.version,
+            WorkflowDefinitionVersion::V2026_09_26
+        );
+        assert_eq!(
+            compiled.children[&"custom".into()]["local"]
+                .definition
+                .version,
+            WorkflowDefinitionVersion::CURRENT
+        );
+    }
+    assert!(resolved.sources.is_empty());
+    let canonical =
+        WorkflowDefinition::from_json(&serde_json::to_string(&resolved.definition).unwrap())
+            .unwrap();
+    assert_eq!(plan_definition(&canonical).unwrap(), plan);
+}
+
+#[test]
+fn inherited_old_child_versions_reject_new_features_but_explicit_versions_are_independent() {
+    let mut child = leaf();
+    child.as_object_mut().unwrap().remove("version");
+    child.as_object_mut().unwrap().remove("dependencies");
+    child["clusters"] = json!([{
+        "label":"Child", "annotation":"Requires a newer schema", "nodes":["value"]
+    }]);
+    let mut root = definition(json!({"version":"2026-10-03", "nodes":[owner(child)]}));
+    let error = resolve_flows(&root, None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("node clusters require version 2026-10-23")
+    );
+    root.nodes[0].config["local"]["definition"]["version"] = json!("2026-10-28");
+    let resolved = resolve_flows(&root, None).unwrap();
+    assert_eq!(
+        resolved.children[&"custom".into()]["local"]
+            .definition
+            .version,
+        mf_compiler::WorkflowDefinitionVersion::CURRENT
+    );
 }
 
 #[test]

@@ -62,8 +62,8 @@ pub enum FlowResolutionError {
 #[serde(untagged, deny_unknown_fields)]
 enum ParameterSource {
     Source(FlowSource),
-    Definition { definition: Box<WorkflowDefinition> },
-    Resolved(WorkflowDefinition),
+    Definition { definition: serde_json::Value },
+    Resolved(serde_json::Value),
 }
 
 /// A complete host-side resolution result. Partial provider-discovery handoffs
@@ -624,8 +624,11 @@ impl Resolver {
         } else {
             fs::read_to_string(&path).context(ReadSnafu { path: &path })?
         };
-        let mut definition =
-            WorkflowDefinition::from_json(&source).context(ParseSnafu { path: &path })?;
+        let mut definition = match context.root_version {
+            Some(version) => WorkflowDefinition::from_json_with_version(&source, version),
+            None => WorkflowDefinition::from_json(&source),
+        }
+        .context(ParseSnafu { path: &path })?;
         self.sources.insert(path.clone());
         self.stack.push(path.clone());
         let result = self.definition(
@@ -820,14 +823,19 @@ impl Resolver {
         self.with_scope(reference, |resolver| {
             let source: ParameterSource = serde_json::from_value(parameter)
                 .context(ConfigurationSnafu { node: reference })?;
-            let mut definition = match source {
+            let value = match source {
                 ParameterSource::Source(source) => {
                     return resolver
                         .source(&source, directory, available, depth, reference, context);
                 }
-                ParameterSource::Definition { definition } => *definition,
+                ParameterSource::Definition { definition } => definition,
                 ParameterSource::Resolved(definition) => definition,
             };
+            let mut definition = match context.root_version {
+                Some(version) => WorkflowDefinition::from_value_with_version(value, version),
+                None => serde_json::from_value(value),
+            }
+            .context(ConfigurationSnafu { node: reference })?;
             resolver
                 .definition(
                     &mut definition,
@@ -976,13 +984,15 @@ impl Resolver {
                         // Call's receiving provider is selected. Explicit bodies
                         // never take this business-only source-selection path.
                         if let Some(child) = self.with_scope(&config.flow, |resolver| {
+                            let mut bootstrap = ScopeContext::default();
+                            bootstrap.root_version = context.root_version;
                             resolver.source(
                                 source,
                                 directory,
                                 available,
                                 depth + 1,
                                 &config.flow,
-                                ScopeContext::default(),
+                                bootstrap,
                             )
                         })? {
                             ensure!(
@@ -1499,6 +1509,7 @@ mod tests {
                 "ordinary":{"path":"../../outside.json"}
             }
         }]));
+        child.version = mf_runtime::WorkflowDefinitionVersion::V2026_09_26;
         child.dependencies.insert(
             "provider".into(),
             NodeDependency {
@@ -1516,13 +1527,17 @@ mod tests {
                 "body":{"path":"never-read.json"}
             }
         }]));
-        let archive = embedded_archive(
+        let mut archive = embedded_archive(
             "./flows/root.json",
             &[
                 ("flows/root.json", parent.clone()),
                 ("flows/nested/child.json", child.clone()),
                 ("flows/unused/../leaf.json", leaf.clone()),
             ],
+        );
+        archive.sources.insert(
+            "flows/unused/../leaf.json".into(),
+            json!({"nodes":[]}).to_string(),
         );
         let archive =
             FlowSourceBundle::from_json(&serde_json::to_string(&archive).unwrap()).unwrap();
@@ -1827,13 +1842,29 @@ mod tests {
                 source_definition("test.source-api-owner", json!({"path":"invalid.json"})),
             )],
         );
+        for source in [
+            "{not valid JSON}",
+            r#"{"nodes":[],"nodes":[]}"#,
+            r#"{"version":null,"nodes":[]}"#,
+            r#"{"version":"unknown","nodes":[]}"#,
+            r#"{"dependencies":null,"nodes":[]}"#,
+        ] {
+            archive.sources.insert("invalid.json".into(), source.into());
+            let error = archive.resolve(&registry).err().unwrap();
+            assert!(
+                matches!(source_cause(&error), FlowResolutionError::Parse { path, source: crate::DefinitionParseError::JsonParse { .. } }
+                if path == Path::new("invalid.json"))
+            );
+        }
         archive
             .sources
-            .insert("invalid.json".into(), "{not valid JSON}".into());
-        let error = archive.resolve(&registry).err().unwrap();
-        assert!(
-            matches!(source_cause(&error), FlowResolutionError::Parse { path, source: crate::DefinitionParseError::JsonParse { .. } }
-            if path == Path::new("invalid.json"))
+            .insert("invalid.json".into(), r#"{"nodes":[]}"#.into());
+        let inherited = archive.resolve(&registry).unwrap();
+        assert_eq!(
+            inherited.children[&"owner".into()]["body"]
+                .definition
+                .version,
+            mf_runtime::WorkflowDefinitionVersion::CURRENT
         );
         archive.entry = "invalid.json".into();
         let error = archive.resolve(&registry).err().unwrap();
@@ -2077,7 +2108,7 @@ mod tests {
 
     #[test]
     fn ordinary_json_remains_opaque() {
-        let child = definition(json!([]));
+        let child = json!({"nodes":[]});
         let mut parent = definition(json!([{
             "id": "owner", "kind": "test.ordinary", "config": {
                 "body": child, "other":child,
@@ -2103,18 +2134,45 @@ mod tests {
             mf_runtime::WorkflowDefinitionVersion::V2026_09_26,
             mf_runtime::WorkflowDefinitionVersion::V2026_10_28,
         ] {
-            let child = definition(json!([]));
-            for value in [json!({"definition":child}), json!(child)] {
-                let mut parent = source_definition("test.flow-source-owner", value);
-                parent.version = version;
-                source_resolver().resolve(&mut parent, None).unwrap();
-                assert_eq!(parent.nodes[0].config["body"], json!(child));
-                let plan = source_resolver().plan(&parent).unwrap();
-                assert_eq!(plan.graph.children.len(), 1);
-                assert_eq!(
-                    crate::describe_compiled(&plan).unwrap().loop_bodies.len(),
-                    1
-                );
+            for explicit in [false, true] {
+                let mut child = json!({"nodes":[]});
+                if explicit {
+                    child["version"] = json!("2026-10-28");
+                }
+                let expected =
+                    WorkflowDefinition::from_value_with_version(child.clone(), version).unwrap();
+                for value in [json!({"definition":child}), child.clone()] {
+                    let mut parent = source_definition("test.flow-source-owner", value);
+                    parent.version = version;
+                    let opaque = json!({"nodes":[], "body":{"path":"must-not-read.json"},
+                        "other":{"version":null, "nodes":[]}});
+                    parent.nodes[0].config["ordinary"] = opaque.clone();
+                    let discovery = resolve_using(
+                        Resolver {
+                            discovery: true,
+                            ..source_resolver()
+                        },
+                        &parent,
+                        None,
+                    )
+                    .unwrap();
+                    let scope = source_resolver().resolve(&mut parent, None).unwrap();
+                    assert_eq!(parent.nodes[0].config["body"], json!(expected));
+                    assert_eq!(parent.nodes[0].config["ordinary"], opaque);
+                    assert_eq!(discovery.definition, scope.definition);
+                    assert_eq!(discovery.sources, scope.sources);
+                    assert!(discovery.pending.is_empty());
+                    assert_eq!(
+                        discovery.children[&"owner".into()]["body"].definition,
+                        scope.children[&"owner".into()]["body"].definition
+                    );
+                    let plan = source_resolver().plan(&parent).unwrap();
+                    assert_eq!(plan.graph.children.len(), 1);
+                    assert_eq!(
+                        crate::describe_compiled(&plan).unwrap().loop_bodies.len(),
+                        1
+                    );
+                }
             }
         }
     }
@@ -2132,7 +2190,9 @@ mod tests {
                 ..dependency("untrusted-provider")
             },
         );
-        let parent = source_definition("unlinked.owner", json!(child));
+        let mut child = json!(child);
+        child.as_object_mut().unwrap().remove("version");
+        let parent = source_definition("unlinked.owner", child);
         let original = parent.nodes[0].config.clone();
         let discovery = discover_unlinked_flows(&parent, Some(root.path())).unwrap();
         assert_eq!(

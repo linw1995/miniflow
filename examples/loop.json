@@ -35,8 +35,6 @@
           "value": 3
         },
         "body": {
-          "version": "2026-10-23",
-          "dependencies": {},
           "nodes": [
             {
               "id": "increment",

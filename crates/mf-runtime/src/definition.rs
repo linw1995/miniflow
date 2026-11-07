@@ -68,7 +68,11 @@ struct DefinitionFields {
         skip_serializing_if = "Option::is_none"
     )]
     pub execution: Option<crate::StreamExecution>,
-    #[serde(deserialize_with = "deserialize_dependencies")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_dependencies",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub dependencies: BTreeMap<String, NodeDependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flows: BTreeMap<String, FlowSource>,
@@ -97,12 +101,47 @@ impl WorkflowDefinition {
     }
 
     pub fn from_json(input: &str) -> Result<Self, DefinitionParseError> {
-        let value: Value = serde_json::from_str(input).context(JsonParseSnafu)?;
+        Self::parse_json(input, None)
+    }
+
+    /// Parse a receiver-authorized child, inheriting the original root version only
+    /// when this definition omits `version`. Node configuration remains opaque.
+    pub fn from_value_with_version(
+        mut value: Value,
+        inherited: WorkflowDefinitionVersion,
+    ) -> Result<Self, serde_json::Error> {
+        if let Some(scope) = value.as_object_mut()
+            && !scope.contains_key("version")
+        {
+            scope.insert("version".into(), serde_json::to_value(inherited)?);
+        }
+        serde_json::from_value(value)
+    }
+
+    /// Parse an authorized child source while retaining duplicate-key rejection
+    /// and the same typed JSON and legacy-version errors as the root parser.
+    pub fn from_json_with_version(
+        input: &str,
+        inherited: WorkflowDefinitionVersion,
+    ) -> Result<Self, DefinitionParseError> {
+        Self::parse_json(input, Some(inherited))
+    }
+
+    fn parse_json(
+        input: &str,
+        inherited: Option<WorkflowDefinitionVersion>,
+    ) -> Result<Self, DefinitionParseError> {
+        let value = serde_json::from_str::<crate::workflow_inputs::UniqueValue>(input)
+            .context(JsonParseSnafu)?
+            .0;
         if value.get("version").and_then(Value::as_str) == Some("2026-09-24") {
             return LegacyVersionSnafu.fail();
         }
-        let definition: Self = serde_json::from_str(input).context(JsonParseSnafu)?;
-        Ok(definition)
+        match inherited {
+            Some(version) => Self::from_value_with_version(value, version),
+            None => serde_json::from_value(value),
+        }
+        .context(JsonParseSnafu)
     }
 }
 

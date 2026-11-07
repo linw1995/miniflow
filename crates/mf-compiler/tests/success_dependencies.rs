@@ -474,8 +474,10 @@ fn body_invocations_keep_success_conditions_local_and_containers_are_rejected() 
         let path = root.path().join("trace");
         let mut graph: WorkflowDefinition = serde_json::from_str(source).unwrap();
         let container = graph.nodes[1].id.clone();
-        let mut body = graph.nodes[1]
-            .flow_parameters(&["body"])
+        let mut body = registry
+            .get(&graph.nodes[1].kind)
+            .unwrap()
+            .validate_flow_parameters(&graph.nodes[1], graph.version)
             .unwrap()
             .remove("body")
             .unwrap();
@@ -721,8 +723,10 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
         include_str!("../../../examples/iteration.json"),
     ] {
         let mut graph: WorkflowDefinition = serde_json::from_str(source).unwrap();
-        let mut body = graph.nodes[1]
-            .flow_parameters(&["body"])
+        let mut body = registry
+            .get(&graph.nodes[1].kind)
+            .unwrap()
+            .validate_flow_parameters(&graph.nodes[1], graph.version)
             .unwrap()
             .remove("body")
             .unwrap();

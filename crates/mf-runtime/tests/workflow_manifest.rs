@@ -397,10 +397,15 @@ fn every_actual_child_requires_a_complete_valid_order_and_known_owner() {
         }
         for error in errors(&invalid) {
             assert!(
-                matches!(&error, WorkflowManifestError::Graph { source: mf_telemetry::ContractError::Invalid { message } } if message.contains(diagnostic)),
+                matches!(&error, WorkflowManifestError::Graph { source: mf_runtime::GraphDescriptionError::Invalid { message } } if message.contains(diagnostic)),
                 "{case}: {error}"
             );
-            assert!(error.source().unwrap().is::<mf_telemetry::ContractError>());
+            assert!(
+                error
+                    .source()
+                    .unwrap()
+                    .is::<mf_runtime::GraphDescriptionError>()
+            );
             assert!(error.source().unwrap().source().is_none());
         }
     }
@@ -958,12 +963,17 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
                 matches!(
                     &error,
                     WorkflowManifestError::Graph {
-                        source: mf_telemetry::ContractError::Invalid { .. }
+                        source: mf_runtime::GraphDescriptionError::Invalid { .. }
                     }
                 ),
                 "{case}: {error}"
             );
-            assert!(error.source().unwrap().is::<mf_telemetry::ContractError>());
+            assert!(
+                error
+                    .source()
+                    .unwrap()
+                    .is::<mf_runtime::GraphDescriptionError>()
+            );
             if case == "nonidentity_state_output" {
                 assert!(
                     error
@@ -1054,7 +1064,7 @@ fn binding_scope_keys_cannot_be_claimed_by_another_authored_node() {
             .key = Some(key);
         for error in errors(&manifest) {
             assert!(matches!(error, WorkflowManifestError::Graph {
-                source: mf_telemetry::ContractError::Invalid { message }
+                source: mf_runtime::GraphDescriptionError::Invalid { message }
             } if message == "compiled scope keys must reference their actual receiving owner and binding"));
         }
     }
@@ -1195,11 +1205,28 @@ fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
             annotation: "Metadata requiring a newer definition.".into(),
             nodes: vec!["root.a/~".into()],
         });
+    // Identity serialization is a genuine telemetry boundary, unlike the
+    // runtime's own authored-definition validation during graph description.
+    let identity_error = invalid.graph.workflow_id().unwrap_err();
+    assert!(matches!(
+        &identity_error,
+        mf_runtime::GraphDescriptionError::Observation {
+            source: mf_telemetry::ContractError::Json { .. }
+        }
+    ));
+    assert!(
+        identity_error
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .is::<serde_json::Error>()
+    );
     let error = invalid.description().unwrap_err();
     assert!(matches!(
         &error,
         WorkflowManifestError::Graph {
-            source: mf_telemetry::ContractError::Json { .. }
+            source: mf_runtime::GraphDescriptionError::Definition { .. }
         }
     ));
     assert!(

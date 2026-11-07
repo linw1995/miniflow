@@ -205,7 +205,7 @@ fn execute_selected(
     });
     if let Some(snapshots) = snapshots {
         snapshots.finish();
-        if let Some(error) = snapshots.diagnostic() { eprintln!("data history incomplete: {error}"); }
+        snapshots.report_diagnostic();
     }
     #[cfg(feature = "telemetry")]
     if let Some(providers) = providers {
@@ -272,7 +272,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(u
     if let (Err(error), Some(observation)) = (&result, &observation) { observation.preparation_failed(error.to_string()); }
     if let Some(snapshots) = snapshots {
         snapshots.finish();
-        if let Some(error) = snapshots.diagnostic() { eprintln!("data history incomplete: {error}"); }
+        snapshots.report_diagnostic();
     }
     #[cfg(feature = "telemetry")]
     if let Some(providers) = providers {
@@ -374,8 +374,10 @@ impl SnapshotExport {
         mf_runtime::SnapshotRecorder::new(move |event| publisher.record(event))
     }
     fn finish(&self) { self.0.finish(); }
-    fn diagnostic(&self) -> Option<std::sync::Arc<mf_telemetry::capture::SnapshotPublishError>> {
-        self.0.diagnostic()
+    fn report_diagnostic(&self) {
+        if let Some(error) = self.0.diagnostic() {
+            eprintln!("data history incomplete: {error}");
+        }
     }
 }
 
@@ -412,7 +414,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
     });
     if let Some(snapshots) = snapshots {
         snapshots.finish();
-        if let Some(error) = snapshots.diagnostic() { eprintln!("data history incomplete: {error}"); }
+        snapshots.report_diagnostic();
     }
     result
 }

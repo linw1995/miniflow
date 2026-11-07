@@ -1,6 +1,10 @@
-use crate::{DefinitionId, NodeDefinition, ScopePathEntry, ValueType, WorkflowDefinition};
-use mf_telemetry::{ContractError, identity::WorkflowId};
+use crate::{
+    DefinitionId, GraphDescriptionError, GraphObservationSnafu, NodeDefinition, ScopePathEntry,
+    ValueType, WorkflowDefinition,
+};
+use mf_telemetry::identity::WorkflowId;
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Concrete execution relationships for one compiled graph.
@@ -90,15 +94,16 @@ impl CompiledGraph {
 
     /// Identifies all authoritative compiled relationships and child scopes.
     /// Plain child-free graphs retain their historical definition/order identity.
-    pub fn workflow_id(&self) -> Result<WorkflowId, ContractError> {
+    pub fn workflow_id(&self) -> Result<WorkflowId, GraphDescriptionError> {
         let order = self
             .execution_order
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
         if self.children.is_empty() && self.relations == GraphRelations::default() {
-            return WorkflowId::from_definition(&self.definition, &order);
+            return WorkflowId::from_definition(&self.definition, &order)
+                .context(GraphObservationSnafu);
         }
-        WorkflowId::from_definition(self, &order)
+        WorkflowId::from_definition(self, &order).context(GraphObservationSnafu)
     }
 }

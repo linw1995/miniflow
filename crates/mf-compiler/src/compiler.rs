@@ -5,7 +5,7 @@ use crate::{
 use crate::{DefinitionId, WorkflowDefinition};
 use mf_runtime::{GraphRelations, PreparedSubgraph, ScopeInstruction};
 use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
-use mf_telemetry::{ContractError, description::WorkflowDescription, event::NodeIdentity};
+use mf_telemetry::{description::WorkflowDescription, event::NodeIdentity};
 use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -532,6 +532,7 @@ pub fn prepare_compiled_graph_with_layouts(
         graph,
         &mut GraphPreparation {
             registry,
+            root_version: graph.definition.version,
             body_layouts,
             path: Vec::new(),
         },
@@ -548,6 +549,7 @@ pub type ScopeLayouts = BTreeMap<
 
 struct GraphPreparation<'a> {
     registry: &'a NodeRegistry,
+    root_version: mf_runtime::WorkflowDefinitionVersion,
     body_layouts: Option<&'a mut ScopeLayouts>,
     path: Vec<DefinitionId>,
 }
@@ -1336,7 +1338,9 @@ fn resolve_inline_scopes(
             // Preparation still requires this provider unless a host Call owns it.
             continue;
         };
-        let fields = match registration.validate_flow_parameters(node) {
+        let fields = match registration
+            .validate_flow_parameters(node, context.root_version.unwrap_or(definition.version))
+        {
             Err(NodeBuildError::FlowParameters { source }) => {
                 return Err(FlowParametersSnafu {
                     definition_id: node.id.clone(),
@@ -1763,6 +1767,7 @@ fn validate_relations(
 fn canonical_host_definition(
     definition: &WorkflowDefinition,
     shape: &mf_runtime::CompiledGraph,
+    root_version: mf_runtime::WorkflowDefinitionVersion,
     mut relations: GraphRelations,
     depth: usize,
 ) -> Result<WorkflowDefinition, WorkflowCompileError> {
@@ -1793,20 +1798,22 @@ fn canonical_host_definition(
     let mut nodes: Vec<_> = order.iter().map(|id| (*nodes_by_id[id]).clone()).collect();
     for node in &mut nodes {
         for (name, child) in shape.children.get(&node.id).into_iter().flatten() {
-            let raw = node
-                .flow_parameters(&[name.as_str()])
-                .context(FlowParametersSnafu {
-                    definition_id: node.id.clone(),
-                })?
-                .remove(name)
+            let value = node
+                .config
+                .get(name)
+                .filter(|value| !value.is_null())
                 .with_context(|| InvalidGraphSnafu {
                     definition_id: node.id.clone(),
                     message: "host Flow body does not match compiled bindings",
                 })?;
+            let raw = WorkflowDefinition::from_value_with_version(value.clone(), root_version)
+                .context(NodeConfigurationSnafu {
+                    definition_id: node.id.clone(),
+                })?;
             let child_relations = crate::lowering::child_relations(definition.version, node, name)?;
             node.set_node_flow(
                 name,
-                canonical_host_definition(&raw, child, child_relations, depth + 1)?,
+                canonical_host_definition(&raw, child, root_version, child_relations, depth + 1)?,
             )
             .context(FlowParametersSnafu {
                 definition_id: node.id.clone(),
@@ -1820,6 +1827,7 @@ pub fn validate_host_flow_binding(
     node: &crate::NodeDefinition,
     graph: &mf_runtime::CompiledGraph,
     registered: &mf_runtime::RegisteredFlow,
+    root_version: mf_runtime::WorkflowDefinitionVersion,
 ) -> Result<(), WorkflowCompileError> {
     // The root binding's host selector and observation key identify this actual
     // call site. Its executable relationships come independently from the
@@ -1832,7 +1840,13 @@ pub fn validate_host_flow_binding(
     };
     ensure!(
         project_graph_definition(graph)?
-            == canonical_host_definition(&registered.definition, graph, relations, 0)?,
+            == canonical_host_definition(
+                &registered.definition,
+                graph,
+                root_version,
+                relations,
+                0
+            )?,
         InvalidGraphSnafu {
             definition_id: node.id.clone(),
             message: "host Flow binding differs from the frozen call definition",
@@ -1887,6 +1901,7 @@ pub fn prepare_compiled_plan(
         &plan.graph,
         &mut GraphPreparation {
             registry,
+            root_version: plan.graph.definition.version,
             body_layouts: None,
             path: Vec::new(),
         },
@@ -2006,7 +2021,9 @@ pub enum DescriptionError {
     #[snafu(display("could not describe node `{definition_id}`"))]
     MissingNode { definition_id: DefinitionId },
     #[snafu(display("invalid workflow description: {source}"), visibility(pub))]
-    Contract { source: ContractError },
+    Graph {
+        source: mf_runtime::GraphDescriptionError,
+    },
 }
 
 pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription, DescriptionError> {
@@ -2033,7 +2050,7 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
     validate_graph_structure(&plan.graph).context(DescriptionOrderSnafu {
         path: Vec::<String>::new(),
     })?;
-    mf_runtime::describe_graph(&plan.graph).context(ContractSnafu)
+    mf_runtime::describe_graph(&plan.graph).context(GraphSnafu)
 }
 
 fn validate_description_orders(
@@ -2112,6 +2129,7 @@ pub fn resolve_nodes(
         &normalized.graph,
         &mut GraphPreparation {
             registry,
+            root_version: definition.version,
             body_layouts: None,
             path: Vec::new(),
         },
@@ -2321,7 +2339,7 @@ fn prepare_node_subgraphs(
             .as_deref()
             .and_then(|name| preparation.registry.flow(name));
         let prepared = if let Some(registered) = host {
-            validate_host_flow_binding(node, body, registered)?;
+            validate_host_flow_binding(node, body, registered, preparation.root_version)?;
             ensure!(
                 preparation.body_layouts.is_none(),
                 InvalidGraphSnafu {
