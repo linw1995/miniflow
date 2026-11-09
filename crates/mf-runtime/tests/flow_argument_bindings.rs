@@ -37,17 +37,17 @@ fn factory(_: Value) -> Result<PreparedNode, NodeBuildError> {
 fn extract(config: &Value, names: &[&str]) -> BTreeMap<String, Value> {
     names
         .iter()
-        .filter_map(|&name| {
+        .filter_map(|&path| {
             config
-                .get(name)
+                .pointer(path)
                 .filter(|value| !value.is_null())
-                .map(|value| (name.into(), value.clone()))
+                .map(|value| (path.into(), value.clone()))
         })
         .collect()
 }
 
 fn selected(config: &Value) -> BTreeMap<String, Value> {
-    extract(config, &["selected"])
+    extract(config, &["/selected"])
 }
 
 fn registration(flow_parameters: fn(&Value) -> BTreeMap<String, Value>) -> NodeRegistration {
@@ -138,7 +138,7 @@ fn preparation_error(
 fn legacy_provider_config_remains_opaque() {
     let node = node(json!({"selected": frozen(), "subgraphs": "provider-owned"}));
     assert!(node.flow_parameters(&[]).unwrap().is_empty());
-    assert_eq!(node.flow_parameters(&["selected"]).unwrap().len(), 1);
+    assert_eq!(node.flow_parameters(&["/selected"]).unwrap().len(), 1);
     let definition = serde_json::from_value(json!({
         "version": "2026-10-28", "dependencies": {}, "nodes": [node]
     }))
@@ -200,14 +200,14 @@ fn only_declared_immediate_fields_select_flow_parameters() {
     }));
     assert!(selected_node.flow_parameters(&[]).unwrap().is_empty());
     assert_eq!(
-        selected_node.flow_parameters(&["selected"]).unwrap(),
-        BTreeMap::from([("selected".into(), definition())])
+        selected_node.flow_parameters(&["/selected"]).unwrap(),
+        BTreeMap::from([("/selected".into(), definition())])
     );
     let encoded = serde_json::to_value(&selected_node).unwrap();
     let decoded: NodeDefinition = serde_json::from_value(encoded).unwrap();
     assert_eq!(
-        decoded.flow_parameters(&["selected"]).unwrap(),
-        selected_node.flow_parameters(&["selected"]).unwrap()
+        decoded.flow_parameters(&["/selected"]).unwrap(),
+        selected_node.flow_parameters(&["/selected"]).unwrap()
     );
     for config in [
         json!({}),
@@ -215,19 +215,19 @@ fn only_declared_immediate_fields_select_flow_parameters() {
         json!({"nested": {"child": frozen()}}),
     ] {
         let node = node(config);
-        assert!(node.flow_parameters(&["selected"]).unwrap().is_empty());
+        assert!(node.flow_parameters(&["/selected"]).unwrap().is_empty());
     }
 }
 
 #[test]
 fn malformed_declared_fields_are_rejected_but_absent_and_null_fields_are_optional() {
-    for (name, value) in [("", frozen()), (" ", frozen())] {
+    for (name, value) in [("selected", frozen()), ("/~2", frozen())] {
         assert!(node(json!({name: value})).flow_parameters(&[name]).is_err());
     }
     for config in [json!({}), json!({"selected": null})] {
         assert!(
             node(config)
-                .flow_parameters(&["selected"])
+                .flow_parameters(&["/selected"])
                 .unwrap()
                 .is_empty()
         );
@@ -238,8 +238,8 @@ fn malformed_declared_fields_are_rejected_but_absent_and_null_fields_are_optiona
 fn declarations_are_validated_but_unknown_json_is_opaque() {
     // Duplicate keys cannot be represented by a map; derive tests reject duplicate wire names.
     let invalid_extractors: [Extractor; 2] = [
-        |_| [("".into(), frozen())].into(),
-        |_| [(" ".into(), frozen())].into(),
+        |_| [("selected".into(), frozen())].into(),
+        |_| [("/~2".into(), frozen())].into(),
     ];
     for extractor in invalid_extractors {
         for config in [json!({}), json!({"selected": null})] {
@@ -295,14 +295,14 @@ fn declarations_are_validated_but_unknown_json_is_opaque() {
             mf_runtime::WorkflowDefinitionVersion::CURRENT,
         )
         .unwrap();
-    let error = preparation_error(registration, json!({"unknown": frozen()}), &["unknown"]);
+    let error = preparation_error(registration, json!({"unknown": frozen()}), &["/unknown"]);
     assert!(matches!(error, NodeBuildError::InvalidSubgraph { .. }));
 }
 
 #[test]
 fn validation_parses_the_receiver_callback_values_not_same_named_raw_json() {
     let registration = registration(|config| {
-        BTreeMap::from([("selected".into(), config["provider"]["normalized"].clone())])
+        BTreeMap::from([("/selected".into(), config["provider"]["normalized"].clone())])
     });
     for inherit in [false, true] {
         let mut normalized = frozen();
@@ -319,18 +319,18 @@ fn validation_parses_the_receiver_callback_values_not_same_named_raw_json() {
             registration
                 .validate_flow_parameters(&node, mf_runtime::WorkflowDefinitionVersion::CURRENT)
                 .unwrap(),
-            BTreeMap::from([("selected".into(), definition())])
+            BTreeMap::from([("/selected".into(), definition())])
         );
-        assert!(node.flow_parameters(&["selected"]).is_err());
+        assert!(node.flow_parameters(&["/selected"]).is_err());
         assert_eq!(node, original);
     }
 }
 
 #[test]
 fn prepared_argument_keys_must_exactly_match_frozen_config_fields() {
-    let registration = registration(|config| extract(config, &["selected", "other"]));
+    let registration = registration(|config| extract(config, &["/selected", "/other"]));
     for value in [frozen(), json!({"path": "unresolved-child.json"})] {
-        for keys in [&[][..], &["other"], &["selected", "other"]] {
+        for keys in [&[][..], &["/other"], &["/selected", "/other"]] {
             let error = preparation_error(registration, json!({"selected": value.clone()}), keys);
             assert!(matches!(error, NodeBuildError::InvalidSubgraph { message }
                 if message.contains("do not match")));
@@ -354,7 +354,7 @@ fn authoring_preserves_typed_errors_but_preparation_executes_the_supplied_child(
             .unwrap_err();
         assert!(matches!(&error, NodeBuildError::FlowParameters {
             source: mf_runtime::FlowParameterError::Json { parameter, source }
-        } if parameter == "selected" && source.is_data()));
+        } if parameter == "/selected" && source.is_data()));
         let parameters = error
             .source()
             .unwrap()
@@ -372,7 +372,7 @@ fn authoring_preserves_typed_errors_but_preparation_executes_the_supplied_child(
             .instantiate_subgraphs(
                 "custom",
                 node.config.clone(),
-                BTreeMap::from([("selected".into(), actual_body())]),
+                BTreeMap::from([("/selected".into(), actual_body())]),
             )
             .unwrap();
         let result = prepared
@@ -398,12 +398,12 @@ fn prepared_children_do_not_bypass_ordinary_decoding_or_provider_business_rules(
         json!({"selected": {"path": "child.json"}, "option": 42, "unexpected": true}),
     ] {
         assert!(matches!(
-            preparation_error(registration, config, &["selected"]),
+            preparation_error(registration, config, &["/selected"]),
             NodeBuildError::InvalidConfiguration { source } if source.is_data()
         ));
     }
     assert!(matches!(
-        preparation_error(registration, json!({"selected": {"path": "child.json"}, "option": 7}), &["selected"]),
+        preparation_error(registration, json!({"selected": {"path": "child.json"}, "option": 7}), &["/selected"]),
         NodeBuildError::InvalidSubgraph { message } if message == "provider requires option 42"
     ));
 }
@@ -415,7 +415,7 @@ fn plain_factories_reject_prepared_bindings_before_reading_configuration() {
         factory: NodeFactory::Plain(factory),
     };
     for config in [Value::Null, json!({"selected": "provider-owned"})] {
-        let error = preparation_error(registration, config, &["selected"]);
+        let error = preparation_error(registration, config, &["/selected"]);
         assert!(matches!(&error, NodeBuildError::InvalidSubgraph { message }
             if message == "node `user.plain` does not accept prepared Flow arguments"));
         assert!(error.source().is_none());
@@ -438,7 +438,7 @@ fn matching_arguments_leave_nonobject_and_business_validation_to_the_provider() 
                     assert_eq!(config["option"], 42);
                     assert_eq!(
                         arguments.keys().map(String::as_str).collect::<Vec<_>>(),
-                        ["selected"]
+                        ["/selected"]
                     );
                     "provider business rule"
                 };
@@ -454,7 +454,7 @@ fn matching_arguments_leave_nonobject_and_business_validation_to_the_provider() 
         ),
         (
             json!({"selected": frozen(), "option": 42}),
-            &["selected"],
+            &["/selected"],
             "provider business rule",
         ),
     ] {

@@ -53,8 +53,8 @@ fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
             "unknown": {"nodes": []},
         })),
         BTreeMap::from([
-            ("requestBody".into(), json!({"request": true})),
-            ("left-hand".into(), json!({"left": true})),
+            ("/requestBody".into(), json!({"request": true})),
+            ("/left-hand".into(), json!({"left": true})),
         ])
     );
     let config = DirectConfig::from_config(
@@ -64,8 +64,8 @@ fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
             "preferences": {"ordinary": true},
         }),
         BTreeMap::from([
-            ("requestBody".into(), prepared()),
-            ("left-hand".into(), prepared()),
+            ("/requestBody".into(), prepared()),
+            ("/left-hand".into(), prepared()),
         ]),
     )
     .unwrap();
@@ -81,11 +81,11 @@ fn actual_derive_injects_compiled_flows_and_preserves_ordinary_serde_fields() {
 fn actual_derive_accepts_qualified_types_with_a_runtime_crate_alias() {
     assert_eq!(
         AliasedRuntimeConfig::flow_parameters(&json!({"body": {}, "left": null})),
-        BTreeMap::from([("body".into(), json!({}))])
+        BTreeMap::from([("/body".into(), json!({}))])
     );
     let config = AliasedRuntimeConfig::from_config(
         json!({"body": {}, "left": null}),
-        BTreeMap::from([("body".into(), prepared())]),
+        BTreeMap::from([("/body".into(), prepared())]),
     )
     .unwrap();
     assert!(config.body.execute().unwrap().is_empty());
@@ -101,7 +101,7 @@ fn callback_config_receives_its_typed_prepared_body_without_a_fake_flow() {
     let callback = || PreparedSubgraph::new(vec![], vec![], |_| Ok(Default::default()));
     let config = CallbackConfig::from_config(
         json!({"body": {}}),
-        BTreeMap::from([("body".into(), callback())]),
+        BTreeMap::from([("/body".into(), callback())]),
     )
     .unwrap();
     assert!(
@@ -113,7 +113,7 @@ fn callback_config_receives_its_typed_prepared_body_without_a_fake_flow() {
     );
     let result = AliasedRuntimeConfig::from_config(
         json!({"body": {}}),
-        BTreeMap::from([("body".into(), callback())]),
+        BTreeMap::from([("/body".into(), callback())]),
     );
     assert!(
         matches!(result, Err(mf_runtime::NodeBuildError::InvalidSubgraph { message })
@@ -146,7 +146,7 @@ fn ordinary_serde_paths_keep_the_original_self_receiver() {
     assert!(defaulted.body.is_none());
     let decoded = Config::from_config(
         json!({"count": 4, "body": {}}),
-        BTreeMap::from([("body".into(), prepared())]),
+        BTreeMap::from([("/body".into(), prepared())]),
     )
     .unwrap();
     assert_eq!(decoded.count, 5);
@@ -185,7 +185,7 @@ fn ordinary_helper_names_do_not_shadow_user_types_or_container_defaults() {
         }
         let config = OrdinaryConfig::from_config(
             json!({"body": {}}),
-            BTreeMap::from([("body".into(), prepared())]),
+            BTreeMap::from([("/body".into(), prepared())]),
         )
         .unwrap();
         assert_eq!(config.count, 17);
@@ -215,7 +215,7 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
                         directional_field: usize,
                         #[serde(alias = "legacy-preferences")]
                         user_settings: usize,
-                        #[serde(rename = "explicit-body")]
+                        #[serde(rename = "explicit/body~")]
                         __: $flow,
                     }
                 };
@@ -242,7 +242,9 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
             fields.insert("input-only".into(), directional);
             let expected = fields.iter()
                 .filter(|(_, value)| value.is_object())
-                .map(|(name, value)| (name.clone(), value.clone()))
+                .map(|(name, value)| {
+                    (format!("/{}", name.replace('~', "~0").replace('/', "~1")), value.clone())
+                })
                 .collect::<BTreeMap<_, _>>();
             assert_eq!(expected.len(), 4, "{}", $rule);
             assert_eq!(Config::flow_parameters(&canonical), expected);
@@ -276,9 +278,9 @@ fn parameter_names_match_serde_deserialization_for_every_rename_rule() {
 
                 let extracted = Config::flow_parameters(&input);
                 assert_eq!(extracted, expected);
-                assert!(!extracted.contains_key($settings_name));
-                assert!(!extracted.contains_key("input-only"));
-                assert!(!extracted.contains_key("legacy-preferences"));
+                assert!(!extracted.contains_key(&format!("/{}", $settings_name)));
+                assert!(!extracted.contains_key("/input-only"));
+                assert!(!extracted.contains_key("/legacy-preferences"));
                 let flows = extracted.into_keys().map(|name| (name, prepared())).collect();
                 let config = Config::from_config(input, flows).unwrap();
                 for flow in [
@@ -336,10 +338,10 @@ fn extraction_selects_all_executable_field_forms_without_decoding_provider_data(
     assert_eq!(
         Config::flow_parameters(&input),
         BTreeMap::from([
-            ("required".into(), json!(false)),
-            ("optional".into(), json!(0)),
-            ("callback".into(), json!(["not decoded here"])),
-            ("optional_callback".into(), json!("source.json")),
+            ("/required".into(), json!(false)),
+            ("/optional".into(), json!(0)),
+            ("/callback".into(), json!(["not decoded here"])),
+            ("/optional_callback".into(), json!("source.json")),
         ])
     );
     assert_eq!(input, original);
@@ -363,8 +365,8 @@ fn flow_config_cannot_be_decoded_without_its_prepared_body() {
         AliasedRuntimeConfig::from_config(
             json!({"body": {}}),
             BTreeMap::from([
-                ("body".into(), prepared()),
-                ("undeclared".into(), prepared())
+                ("/body".into(), prepared()),
+                ("/undeclared".into(), prepared())
             ]),
         )
         .is_err()

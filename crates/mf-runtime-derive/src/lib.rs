@@ -63,7 +63,8 @@ pub fn derive_node_enum(input: TokenStream) -> TokenStream {
 /// Such configurations need not derive `Deserialize`: ordinary fields retain their
 /// Serde decoding contract, while executable fields come only from prepared handles.
 ///
-/// Serde `rename` and container `rename_all` determine the wire names. Names that
+/// Serde `rename` and container `rename_all` determine the wire names, escaped as
+/// RFC 6901 pointers for extracted and prepared maps. Names that
 /// collide with ordinary fields' deserialize names or aliases are rejected, as
 /// are flattened fields in configurations containing Flow parameters.
 ///

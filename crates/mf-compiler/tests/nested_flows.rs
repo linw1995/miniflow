@@ -412,7 +412,7 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
         .children
         .get_mut(&"invoke".into())
         .unwrap()
-        .get_mut("body")
+        .get_mut("/body")
         .unwrap()
         .execution_order
         .clear();
@@ -423,7 +423,7 @@ fn frozen_plans_and_manifests_reject_missing_corrupt_or_cyclic_call_bodies() {
         .children
         .get_mut(&"invoke".into())
         .unwrap()
-        .get_mut("body")
+        .get_mut("/body")
         .unwrap()
         .definition
         .edges

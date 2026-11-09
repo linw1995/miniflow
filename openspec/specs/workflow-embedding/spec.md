@@ -103,7 +103,7 @@ and reuse shared compiler normalization without constructing nodes. Ordinary con
 opaque. Inspection SHALL prepare metadata without executing business operations. Embedding SHALL NOT
 freeze a build-time startup schema or emit executable manifest sections. Compiled plans and manifest
 payload version `2026-11-06` SHALL retain an explicit `graph` containing its definition, canonical
-execution order, and recursively compiled children keyed by receiving node ID and field name.
+execution order, and recursively compiled children keyed by receiving node ID and configuration JSON Pointer.
 Receiver callbacks SHALL select child values during source resolution; ordinary JSON SHALL remain
 opaque and absent optional children SHALL have no graph entry. `ResolvedWorkflow` SHALL preserve the
 actual selected child tree for `plan_resolved_workflow`. Offline traversal SHALL use graph children,

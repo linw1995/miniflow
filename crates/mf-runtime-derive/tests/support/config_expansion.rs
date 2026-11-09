@@ -7,9 +7,10 @@ fn assert_expansion(input: DeriveInput, runtime: Path, parameters: &[&str]) {
     let name = &input.ident;
     let prefix = quote! { impl #runtime::NodeConfig for #name }.to_string();
     let extractions = parameters.iter().map(|name| {
+        let pointer = format!("/{}", name.replace('~', "~0").replace('/', "~1"));
         quote! {
             if let ::core::option::Option::Some(value) = __mf_config.get(#name).filter(|value| !value.is_null()) {
-                flows.insert(::std::string::String::from(#name), value.clone());
+                flows.insert(::std::string::String::from(#pointer), value.clone());
             }
         }
     });
@@ -708,7 +709,7 @@ fn executable_field_names_cannot_shadow_decoder_working_values() {
         "let config =",
         "let flows =",
         "__mf_config . as_object_mut ()",
-        "__mf_flows . remove (\"flows\")",
+        "__mf_flows . remove (\"/flows\")",
     ] {
         assert!(
             expanded.contains(expected),
@@ -753,11 +754,11 @@ fn explicit_rename_gives_underscore_only_fields_a_valid_wire_name() {
         parse_quote! {
             #[serde(rename_all = "camelCase")]
             struct Config {
-                #[serde(rename = "body")]
+                #[serde(rename = "body/~")]
                 __: Flow,
             }
         },
         parse_quote!(::mf_runtime),
-        &["body"],
+        &["body/~"],
     );
 }

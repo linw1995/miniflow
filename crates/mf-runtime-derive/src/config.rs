@@ -169,11 +169,15 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 "duplicate Flow parameter wire name",
             ));
         }
+        let pointer = LitStr::new(
+            &format!("/{}", wire.value().replace('~', "~0").replace('/', "~1")),
+            wire.span(),
+        );
         let prepared = quote! {
             {
                 let source = #config_value.as_object_mut().and_then(|fields| fields.remove(#wire));
                 let present = source.as_ref().is_some_and(|value| !value.is_null());
-                let prepared = #prepared_flows.remove(#wire);
+                let prepared = #prepared_flows.remove(#pointer);
                 if present != prepared.is_some() {
                     return #runtime::NodeInvalidSubgraphSnafu {
                         message: ::std::format!("prepared Flow field `{}` does not match its configuration", #wire),
@@ -208,7 +212,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         flow_idents.push(ident);
         flow_extractions.push(quote! {
             if let ::core::option::Option::Some(value) = #config_value.get(#wire).filter(|value| !value.is_null()) {
-                flows.insert(::std::string::String::from(#wire), value.clone());
+                flows.insert(::std::string::String::from(#pointer), value.clone());
             }
         });
     }

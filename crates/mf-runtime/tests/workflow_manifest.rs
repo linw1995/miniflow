@@ -200,7 +200,7 @@ fn binding_manifest() -> WorkflowManifest {
     bind(
         &mut selected,
         "value",
-        "nested",
+        "/nested",
         graph(
             json!({
                 "version": "2026-10-03", "dependencies": {},
@@ -209,11 +209,11 @@ fn binding_manifest() -> WorkflowManifest {
             &["value"],
         ),
     );
-    bind(&mut root, "dispatch", "selected", selected);
+    bind(&mut root, "dispatch", "/selected", selected);
     bind(
         &mut root,
         "dispatch",
-        "fallback",
+        "/fallback",
         graph(
             json!({
                 "version": "2026-09-26", "dependencies": {},
@@ -240,15 +240,15 @@ fn actual_child_trees_are_independent_of_opaque_provider_configuration() {
     assert_eq!(description.loop_bodies.len(), 3);
     let key = |owner, field| mf_telemetry::event::ScopePathEntry::binding_key(owner, field);
     for (field, kind) in [
-        ("selected", "fixture.dispatch"),
-        ("fallback", "fixture.fallback"),
+        ("/selected", "fixture.dispatch"),
+        ("/fallback", "fixture.fallback"),
     ] {
         let body = description.loop_body(&[key("dispatch", field)]).unwrap();
         assert_eq!(body.nodes[0].id, "value");
         assert_eq!(body.nodes[0].kind, kind);
     }
     let nested = description
-        .loop_body(&[key("dispatch", "selected"), key("value", "nested")])
+        .loop_body(&[key("dispatch", "/selected"), key("value", "/nested")])
         .unwrap();
     assert_eq!(nested.nodes[0].kind, "fixture.input");
     assert_eq!(description.body_paths_for_node(&[], "dispatch").len(), 2);
@@ -256,7 +256,7 @@ fn actual_child_trees_are_independent_of_opaque_provider_configuration() {
     assert!(
         decoded.graph.definition.nodes[0]
             .config
-            .get("fallback")
+            .pointer("/fallback")
             .is_none()
     );
 
@@ -281,8 +281,8 @@ fn actual_child_trees_are_independent_of_opaque_provider_configuration() {
     // A binding not present in JSON is still a real child, even for the same
     // provider kind used elsewhere without any children.
     let mut extra = manifest.clone();
-    let body = child(&mut extra.graph, "dispatch", "fallback").clone();
-    bind(&mut extra.graph, "dispatch", "opaque", body);
+    let body = child(&mut extra.graph, "dispatch", "/fallback").clone();
+    bind(&mut extra.graph, "dispatch", "/opaque", body);
     assert_eq!(
         round_trip(&extra).description().unwrap().loop_bodies.len(),
         4
@@ -292,7 +292,7 @@ fn actual_child_trees_are_independent_of_opaque_provider_configuration() {
 #[test]
 fn identity_covers_actual_children_and_their_orders_without_discovering_config_graphs() {
     let mut manifest = binding_manifest();
-    let fallback = child(&mut manifest.graph, "dispatch", "fallback");
+    let fallback = child(&mut manifest.graph, "dispatch", "/fallback");
     fallback
         .definition
         .nodes
@@ -304,7 +304,7 @@ fn identity_covers_actual_children_and_their_orders_without_discovering_config_g
 
     for mutate_order in [false, true] {
         let mut changed = manifest.clone();
-        let fallback = child(&mut changed.graph, "dispatch", "fallback");
+        let fallback = child(&mut changed.graph, "dispatch", "/fallback");
         if mutate_order {
             fallback.execution_order.reverse();
         } else {
@@ -343,35 +343,35 @@ fn every_actual_child_requires_a_complete_valid_order_and_known_owner() {
         ("unknown_owner", "unknown owner `unknown`"),
         ("unknown_empty_owner", "unknown owner `unknown`"),
         (
-            "blank_binding",
-            "compiled child binding names must be nonblank",
+            "nonpointer_binding",
+            "compiled child bindings must be RFC 6901 pointers",
         ),
         (
-            "whitespace_binding",
-            "compiled child binding names must be nonblank",
+            "malformed_escape_binding",
+            "compiled child bindings must be RFC 6901 pointers",
         ),
     ] {
         let mut invalid = manifest.clone();
         match case {
-            "missing_outer_order" => child(&mut invalid.graph, "dispatch", "selected")
+            "missing_outer_order" => child(&mut invalid.graph, "dispatch", "/selected")
                 .execution_order
                 .clear(),
             "missing_nested_order" => child(
-                child(&mut invalid.graph, "dispatch", "selected"),
+                child(&mut invalid.graph, "dispatch", "/selected"),
                 "value",
-                "nested",
+                "/nested",
             )
             .execution_order
             .clear(),
             "unknown_outer_node" => {
-                child(&mut invalid.graph, "dispatch", "selected").execution_order[0] =
+                child(&mut invalid.graph, "dispatch", "/selected").execution_order[0] =
                     "unknown".into()
             }
             "unknown_nested_node" => {
                 child(
-                    child(&mut invalid.graph, "dispatch", "selected"),
+                    child(&mut invalid.graph, "dispatch", "/selected"),
                     "value",
-                    "nested",
+                    "/nested",
                 )
                 .execution_order[0] = "unknown".into()
             }
@@ -391,8 +391,16 @@ fn every_actual_child_requires_a_complete_valid_order_and_known_owner() {
             }
             _ => {
                 let fields = invalid.graph.children.get_mut(&"dispatch".into()).unwrap();
-                let body = fields.remove("selected").unwrap();
-                fields.insert(if case == "blank_binding" { "" } else { " " }.into(), body);
+                let body = fields.remove("/selected").unwrap();
+                fields.insert(
+                    if case == "nonpointer_binding" {
+                        "body"
+                    } else {
+                        "/~2"
+                    }
+                    .into(),
+                    body,
+                );
             }
         }
         for error in errors(&invalid) {
@@ -450,8 +458,8 @@ fn loop_manifest() -> WorkflowManifest {
         writes: Default::default(),
         exits: Default::default(),
     });
-    bind(&mut body, "inner", "body", inner);
-    bind(&mut root, "repeat", "body", body);
+    bind(&mut body, "inner", "/body", inner);
+    bind(&mut root, "repeat", "/body", body);
     WorkflowManifest {
         version: WorkflowManifestVersion::V2026_11_06,
         graph: root,
@@ -477,7 +485,7 @@ fn nested_builtin_bodies_use_actual_orders_and_validate_synthetic_sources() {
         assert_eq!(body.source.as_deref(), Some("%loop"));
     }
     let mut reordered = manifest.clone();
-    child(&mut reordered.graph, "repeat", "body")
+    child(&mut reordered.graph, "repeat", "/body")
         .execution_order
         .reverse();
     assert_eq!(
@@ -499,8 +507,12 @@ fn nested_builtin_bodies_use_actual_orders_and_validate_synthetic_sources() {
         let mut invalid = manifest.clone();
         match case {
             "wrong_child" => {
-                child(child(&mut invalid.graph, "repeat", "body"), "inner", "body")
-                    .execution_order[0] = "unknown".into()
+                child(
+                    child(&mut invalid.graph, "repeat", "/body"),
+                    "inner",
+                    "/body",
+                )
+                .execution_order[0] = "unknown".into()
             }
             "wrong_root" => invalid.graph.execution_order[0] = "unknown".into(),
             "duplicate_node" => {
@@ -514,12 +526,12 @@ fn nested_builtin_bodies_use_actual_orders_and_validate_synthetic_sources() {
                 invalid.graph.execution_order.push("repeat".into());
             }
             "missing_source" => {
-                let body = child(&mut invalid.graph, "repeat", "body");
+                let body = child(&mut invalid.graph, "repeat", "/body");
                 body.definition.nodes.remove(0);
                 body.execution_order.remove(0);
             }
             "unknown_source_relation" => {
-                child(&mut invalid.graph, "repeat", "body")
+                child(&mut invalid.graph, "repeat", "/body")
                     .relations
                     .scope
                     .as_mut()
@@ -527,7 +539,7 @@ fn nested_builtin_bodies_use_actual_orders_and_validate_synthetic_sources() {
                     .input = "unknown".into();
             }
             "incomplete_body_order" => {
-                child(&mut invalid.graph, "repeat", "body")
+                child(&mut invalid.graph, "repeat", "/body")
                     .execution_order
                     .remove(0);
             }
@@ -569,7 +581,7 @@ fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
         bind(
             &mut root,
             "dispatch",
-            "selected",
+            "/selected",
             graph(definition, &["source", "sink"]),
         );
         let manifest = WorkflowManifest {
@@ -630,11 +642,11 @@ fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
         // not weakened by an independently versioned legacy root.
         let mut corrupt = manifest.clone();
         if feature == "order_edges" {
-            child(&mut corrupt.graph, "dispatch", "selected")
+            child(&mut corrupt.graph, "dispatch", "/selected")
                 .execution_order
                 .reverse();
         } else {
-            child(&mut corrupt.graph, "dispatch", "selected")
+            child(&mut corrupt.graph, "dispatch", "/selected")
                 .definition
                 .clusters[0]
                 .nodes
@@ -670,7 +682,7 @@ fn historical_iteration_manifest() -> WorkflowManifest {
     bind(
         &mut body,
         "dispatch",
-        "selected",
+        "/selected",
         graph(
             json!({
                 "version": "2026-10-19", "dependencies": {},
@@ -679,7 +691,7 @@ fn historical_iteration_manifest() -> WorkflowManifest {
             &["value", "sink"],
         ),
     );
-    bind(&mut root, "map", "body", body);
+    bind(&mut root, "map", "/body", body);
     WorkflowManifest {
         version: WorkflowManifestVersion::V2026_11_06,
         graph: root,
@@ -704,7 +716,7 @@ fn historical_iteration_projection_validates_all_actual_descendants_first() {
         "missing_source",
     ] {
         let mut corrupt = manifest.clone();
-        let body = child(&mut corrupt.graph, "map", "body");
+        let body = child(&mut corrupt.graph, "map", "/body");
         match case {
             "incomplete_parent" => body.execution_order.clear(),
             "missing_source" => {
@@ -715,7 +727,7 @@ fn historical_iteration_projection_validates_all_actual_descendants_first() {
                 body.children.insert("unknown".into(), Default::default());
             }
             _ => {
-                let descendant = child(body, "dispatch", "selected");
+                let descendant = child(body, "dispatch", "/selected");
                 match case {
                     "unknown_descendant" => descendant.execution_order[0] = "unknown".into(),
                     "incomplete_descendant" => descendant.execution_order.clear(),
@@ -758,9 +770,9 @@ fn historical_iteration_projection_validates_all_actual_descendants_first() {
     // Newer child metadata prevents historical omission, preserving its scope.
     let mut visible = manifest;
     child(
-        child(&mut visible.graph, "map", "body"),
+        child(&mut visible.graph, "map", "/body"),
         "dispatch",
-        "selected",
+        "/selected",
     )
     .definition
     .order_edges
@@ -783,13 +795,13 @@ fn historical_projection_follows_explicit_stateless_frames_not_provider_names() 
     let mut manifest = historical_iteration_manifest();
     manifest.graph.definition.nodes[0].kind = "renamed.dispatch".into();
     let bindings = manifest.graph.children.get_mut(&"map".into()).unwrap();
-    let mut body = bindings.remove("body").unwrap();
+    let mut body = bindings.remove("/body").unwrap();
     body.relations.key = None;
     body.definition.nodes[0].id = "item-source".into();
     body.definition.nodes[0].kind = "renamed.input".into();
     body.execution_order[0] = "item-source".into();
     body.relations.scope.as_mut().unwrap().input = "item-source".into();
-    bindings.insert("selected".into(), body);
+    bindings.insert("/selected".into(), body);
     assert!(
         round_trip(&manifest)
             .description()
@@ -799,7 +811,7 @@ fn historical_projection_follows_explicit_stateless_frames_not_provider_names() 
     );
 
     let mut callable = manifest.clone();
-    child(&mut callable.graph, "map", "selected")
+    child(&mut callable.graph, "map", "/selected")
         .relations
         .scope = None;
     assert_eq!(
@@ -811,7 +823,7 @@ fn historical_projection_follows_explicit_stateless_frames_not_provider_names() 
         2
     );
     let mut stateful = manifest;
-    child(&mut stateful.graph, "map", "selected")
+    child(&mut stateful.graph, "map", "/selected")
         .relations
         .scope
         .as_mut()
@@ -828,7 +840,7 @@ fn historical_projection_follows_explicit_stateless_frames_not_provider_names() 
     );
 
     let mut builtin_without_frame = historical_iteration_manifest();
-    child(&mut builtin_without_frame.graph, "map", "body")
+    child(&mut builtin_without_frame.graph, "map", "/body")
         .relations
         .scope = None;
     assert_eq!(
@@ -844,7 +856,7 @@ fn historical_projection_follows_explicit_stateless_frames_not_provider_names() 
 #[test]
 fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisions() {
     let mut manifest = historical_iteration_manifest();
-    let body = child(&mut manifest.graph, "map", "body");
+    let body = child(&mut manifest.graph, "map", "/body");
     body.definition.nodes.push(
         serde_json::from_value(json!({"id": "instruction", "kind": "foreign.instruction"}))
             .unwrap(),
@@ -881,7 +893,7 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
         "blank_stream_name",
     ] {
         let mut corrupt = manifest.clone();
-        let body = child(&mut corrupt.graph, "map", "body");
+        let body = child(&mut corrupt.graph, "map", "/body");
         let scope = body.relations.scope.as_mut().unwrap();
         match case {
             "unknown_input" => scope.input = "missing".into(),
@@ -988,7 +1000,7 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
 #[test]
 fn explicit_relations_round_trip_without_kind_or_configuration_inference() {
     let mut manifest = binding_manifest();
-    let body = child(&mut manifest.graph, "dispatch", "selected");
+    let body = child(&mut manifest.graph, "dispatch", "/selected");
     for id in ["source", "other-source", "store", "leave"] {
         body.definition.nodes.push(
             serde_json::from_value(json!({"id": id, "kind": "renamed.instruction"})).unwrap(),
@@ -1008,7 +1020,7 @@ fn explicit_relations_round_trip_without_kind_or_configuration_inference() {
     );
     let decoded = round_trip(&manifest);
     let description = decoded.description().unwrap();
-    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
+    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "/selected");
     assert_eq!(
         description.loop_body(&[key]).unwrap().source.as_deref(),
         Some("source")
@@ -1020,13 +1032,13 @@ fn explicit_relations_round_trip_without_kind_or_configuration_inference() {
         .unwrap();
     let original_id = decoded.workflow_id().unwrap();
     let mut changed = decoded;
-    child(&mut changed.graph, "dispatch", "selected")
+    child(&mut changed.graph, "dispatch", "/selected")
         .relations
         .scope
         .as_mut()
         .unwrap()
         .input = "other-source".into();
-    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
+    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "/selected");
     assert_eq!(
         changed
             .description()
@@ -1044,8 +1056,8 @@ fn explicit_relations_round_trip_without_kind_or_configuration_inference() {
 #[test]
 fn explicit_child_keys_cannot_collide_even_when_legacy_projection_omits_them() {
     let mut manifest = historical_iteration_manifest();
-    let body = child(&mut manifest.graph, "map", "body").clone();
-    bind(&mut manifest.graph, "map", "other", body);
+    let body = child(&mut manifest.graph, "map", "/body").clone();
+    bind(&mut manifest.graph, "map", "/other", body);
     for error in errors(&manifest) {
         assert!(error.to_string().contains("scope keys collide"));
     }
@@ -1054,12 +1066,12 @@ fn explicit_child_keys_cannot_collide_even_when_legacy_projection_omits_them() {
 #[test]
 fn binding_scope_keys_cannot_be_claimed_by_another_authored_node() {
     for key in [
-        mf_telemetry::event::ScopePathEntry::binding_key("other", "selected"),
-        mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "other"),
+        mf_telemetry::event::ScopePathEntry::binding_key("other", "/selected"),
+        mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "/other"),
         "unbound".into(),
     ] {
         let mut manifest = binding_manifest();
-        child(&mut manifest.graph, "dispatch", "selected")
+        child(&mut manifest.graph, "dispatch", "/selected")
             .relations
             .key = Some(key);
         for error in errors(&manifest) {
@@ -1069,7 +1081,7 @@ fn binding_scope_keys_cannot_be_claimed_by_another_authored_node() {
         }
     }
     let mut manifest = binding_manifest();
-    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "selected");
+    let key = mf_telemetry::event::ScopePathEntry::binding_key("dispatch", "/selected");
     manifest
         .graph
         .definition

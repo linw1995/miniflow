@@ -857,6 +857,11 @@ pub enum WorkflowBuildError {
         definition_id: DefinitionId,
         source: mf_runtime::TypeDescriptorError,
     },
+    #[snafu(display("invalid Flow parameters for node `{definition_id}`: {source}"))]
+    FlowParameters {
+        definition_id: DefinitionId,
+        source: mf_runtime::FlowParameterError,
+    },
     #[snafu(
         display("invalid definition for node `{definition_id}`: {message}"),
         visibility(pub)
@@ -882,6 +887,19 @@ pub enum WorkflowBuildError {
         #[snafu(source(from(WorkflowBuildError, Box::new)))]
         source: Box<WorkflowBuildError>,
     },
+}
+
+fn receiver_flow_parameters(
+    registration: &mf_runtime::NodeRegistration,
+    node: &crate::NodeDefinition,
+) -> Result<BTreeMap<String, Value>, WorkflowBuildError> {
+    let fields = registration.flow_parameters(&node.config);
+    for path in fields.keys() {
+        crate::NodeDefinition::validate_flow_parameter_path(path).context(FlowParametersSnafu {
+            definition_id: node.id.clone(),
+        })?;
+    }
+    Ok(fields)
 }
 
 /// Validate the stored tree and every construction-reachable receiving boundary
@@ -917,7 +935,7 @@ fn validate_compiled_providers(
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
-        let fields = registration.flow_parameters(&node.config);
+        let fields = receiver_flow_parameters(registration, node)?;
         ensure!(
             fields
                 .keys()
@@ -1028,7 +1046,7 @@ fn validated_node_config(
             definition_id: DefinitionId::from(definition_id),
         })?,
     };
-    let fields = registration.flow_parameters(&node.config);
+    let fields = receiver_flow_parameters(registration, &node)?;
     ensure!(
         fields
             .keys()

@@ -126,7 +126,7 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 Manifest payload version `2026-11-06` stores an explicit compiled `graph` and prepared `input_schema`.
 Each graph contains its `definition`, canonical `execution_order`, and child graphs keyed by receiving node ID and
-field name. Parameter-type schemas and separate `loop_orders` are not persisted. Graph descriptions, interface wrappers,
+configuration JSON Pointer. Parameter-type schemas and separate `loop_orders` are not persisted. Graph descriptions, interface wrappers,
 and workflow IDs are not duplicated in the payload. `description()`, `interface()`, and `workflow_id()` derive those views
 from the stored graph without scanning configuration for children, planning a DAG, or preparing providers.
 The original definition is accessible through `graph.definition` (or field dereferencing), and the input schema is a direct field;

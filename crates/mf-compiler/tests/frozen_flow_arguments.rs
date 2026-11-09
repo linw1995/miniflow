@@ -90,9 +90,9 @@ fn frozen_arguments_resolve_relative_files_and_survive_without_source_files() {
     let resolved = load_workflow(&source).unwrap();
     assert_eq!(resolved.sources.len(), 2);
     let arguments = resolved.definition.nodes[0]
-        .flow_parameters(&["local"])
+        .flow_parameters(&["/local"])
         .unwrap();
-    let argument = &arguments["local"];
+    let argument = &arguments["/local"];
     assert_eq!(
         argument.version,
         mf_compiler::WorkflowDefinitionVersion::CURRENT
@@ -149,7 +149,7 @@ fn mixed_version_child_iterations_retain_body_paths_for_static_and_mapped_calls(
     let expected_paths = vec![
         vec!["invoke".to_owned(), "iteration".to_owned()],
         vec![
-            mf_telemetry::event::ScopePathEntry::binding_key("custom", "local"),
+            mf_telemetry::event::ScopePathEntry::binding_key("custom", "/local"),
             "iteration".to_owned(),
         ],
     ];
@@ -190,7 +190,7 @@ fn mixed_version_child_iterations_retain_body_paths_for_static_and_mapped_calls(
             .children
             .get_mut(&"iteration".into())
             .unwrap()
-            .get_mut("body")
+            .get_mut("/body")
             .unwrap()
             .definition
             .nodes
@@ -258,7 +258,7 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
             }
         );
         let path = vec![mf_telemetry::event::ScopePathEntry::binding_key(
-            "custom", "local",
+            "custom", "/local",
         )];
         let body = graph.body(&path).unwrap();
         assert_eq!(body.order_edges.len(), 1);
@@ -316,13 +316,13 @@ fn missing_grandchild_versions_inherit_the_root_across_explicit_older_call_frame
     ]}));
     let resolved = resolve_flows(&root, None).unwrap();
     let plan = plan_definition(&root).unwrap();
-    for (owner, field) in [("invoke", "body"), ("custom", "local")] {
+    for (owner, field) in [("invoke", "/body"), ("custom", "/local")] {
         let child = &resolved.children[&owner.into()][field];
         assert_eq!(
             child.definition.version,
             WorkflowDefinitionVersion::V2026_09_26
         );
-        let grandchild = &child.children[&"custom".into()]["local"];
+        let grandchild = &child.children[&"custom".into()]["/local"];
         assert_eq!(
             grandchild.definition.version,
             WorkflowDefinitionVersion::CURRENT
@@ -334,7 +334,7 @@ fn missing_grandchild_versions_inherit_the_root_across_explicit_older_call_frame
             WorkflowDefinitionVersion::V2026_09_26
         );
         assert_eq!(
-            compiled.children[&"custom".into()]["local"]
+            compiled.children[&"custom".into()]["/local"]
                 .definition
                 .version,
             WorkflowDefinitionVersion::CURRENT
@@ -365,7 +365,7 @@ fn inherited_old_child_versions_reject_new_features_but_explicit_versions_are_in
     root.nodes[0].config["local"]["definition"]["version"] = json!("2026-10-28");
     let resolved = resolve_flows(&root, None).unwrap();
     assert_eq!(
-        resolved.children[&"custom".into()]["local"]
+        resolved.children[&"custom".into()]["/local"]
             .definition
             .version,
         mf_compiler::WorkflowDefinitionVersion::CURRENT
@@ -408,7 +408,7 @@ fn frozen_argument_normalization_canonicalizes_every_body() {
         "version": "2026-10-28", "dependencies": {}, "nodes": [owner(argument)]
     }));
     let plan = plan_definition(&authored).unwrap();
-    let child = &plan.graph.children[&mf_compiler::DefinitionId::from("custom")]["local"];
+    let child = &plan.graph.children[&mf_compiler::DefinitionId::from("custom")]["/local"];
     assert_eq!(
         child
             .execution_order

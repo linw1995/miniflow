@@ -187,7 +187,7 @@ fn factory(
     ensure!(body.outputs.is_empty(), BodyOutputsSnafu);
     let node = LoopNode {
         id: id.into(),
-        scope_key: body.scope_key(id, "body"),
+        scope_key: body.scope_key(id, "/body"),
         max_iterations,
         until,
         types,
@@ -248,7 +248,7 @@ mod tests {
     }
 
     fn build_error(config: Value, body: PreparedSubgraph) -> NodeBuildError {
-        factory("repeat", config, BTreeMap::from([("body".into(), body)]))
+        factory("repeat", config, BTreeMap::from([("/body".into(), body)]))
             .err()
             .unwrap()
     }
@@ -302,7 +302,7 @@ mod tests {
             }
             let node = LoopNode {
                 id: "repeat".into(),
-                scope_key: prepared.scope_key("repeat", "body"),
+                scope_key: prepared.scope_key("repeat", "/body"),
                 max_iterations: 1,
                 until: None,
                 types,
@@ -329,7 +329,7 @@ mod tests {
                 } else if mapped {
                     key.clone()
                 } else {
-                    mf_runtime::ScopePathEntry::binding_key("repeat", "body")
+                    mf_runtime::ScopePathEntry::binding_key("repeat", "/body")
                 };
                 let mut body = PreparedSubgraph::new(body().nodes, Vec::new(), move |state| {
                     let path = state.invocation_path();
@@ -346,7 +346,7 @@ mod tests {
                 }
                 let node = mf_runtime::FlowNode::new(
                     "repeat",
-                    factory("repeat", config(), BTreeMap::from([("body".into(), body)])).unwrap(),
+                    factory("repeat", config(), BTreeMap::from([("/body".into(), body)])).unwrap(),
                 )
                 .into_task()
                 .unwrap();
@@ -373,7 +373,7 @@ mod tests {
             factory(
                 "repeat",
                 config(),
-                BTreeMap::from([("body".into(), prepared)]),
+                BTreeMap::from([("/body".into(), prepared)]),
             )
             .is_ok()
         );
@@ -437,7 +437,7 @@ mod tests {
     fn loop_factory_uses_prepared_boundary_not_raw_body() {
         let mut config = config();
         config["body"] = json!({"not": "a workflow", "outputs": ["poison"]});
-        assert!(factory("repeat", config, BTreeMap::from([("body".into(), body())])).is_ok());
+        assert!(factory("repeat", config, BTreeMap::from([("/body".into(), body())])).is_ok());
 
         let mut empty = body();
         empty.nodes.clear();
@@ -606,7 +606,7 @@ mod tests {
             let mut config = config();
             config["variables"][0]["type"] = descriptor;
             config["until"] = json!({"variable":"x", "operator":"eq", "value":value});
-            assert!(factory("repeat", config, BTreeMap::from([("body".into(), body())])).is_ok());
+            assert!(factory("repeat", config, BTreeMap::from([("/body".into(), body())])).is_ok());
         }
     }
 
@@ -620,7 +620,7 @@ mod tests {
         });
         assert_eq!(
             registration.flow_parameters(&config),
-            BTreeMap::from([("body".into(), config["body"].clone())])
+            BTreeMap::from([("/body".into(), config["body"].clone())])
         );
         for config in [json!({}), json!({"body": null})] {
             assert!(registration.flow_parameters(&config).is_empty());
@@ -642,7 +642,7 @@ mod tests {
             let prepared = registration.instantiate_subgraphs(
                 "repeat",
                 config,
-                BTreeMap::from([("body".into(), body())]),
+                BTreeMap::from([("/body".into(), body())]),
             );
             assert_eq!(prepared.is_ok(), valid);
         }

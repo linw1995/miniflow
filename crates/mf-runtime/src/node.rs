@@ -1341,7 +1341,7 @@ impl PreparedNode {
 
 /// Selects executable configuration fields and injects their prepared Flow values.
 pub trait NodeConfig: Sized {
-    /// Returns only declared, present, non-null Flow fields under their canonical wire names.
+    /// Returns only declared, present, non-null Flow values keyed by RFC 6901 pointers.
     /// All other provider configuration remains opaque.
     fn flow_parameters(config: &Value) -> BTreeMap<String, Value>;
 
@@ -1403,12 +1403,7 @@ impl NodeRegistration {
         self.flow_parameters(&node.config)
             .into_iter()
             .map(|(parameter, value)| {
-                ensure!(
-                    !parameter.trim().is_empty(),
-                    crate::definition::InvalidSnafu {
-                        message: "Flow parameter field names must be nonblank"
-                    }
-                );
+                crate::NodeDefinition::validate_flow_parameter_path(&parameter)?;
                 let body =
                     crate::WorkflowDefinition::from_value_with_version(value, inherited_version)
                         .context(crate::definition::JsonSnafu {
@@ -1433,15 +1428,9 @@ impl NodeRegistration {
                 // Prepared children are authoritative. The receiver selects binding
                 // names here, but decoding child definitions belongs to authoring.
                 let parameters = self.flow_parameters(&config);
-                if parameters
-                    .keys()
-                    .any(|parameter| parameter.trim().is_empty())
-                {
-                    return crate::definition::InvalidSnafu {
-                        message: "Flow parameter field names must be nonblank",
-                    }
-                    .fail()
-                    .context(FlowParametersSnafu);
+                for parameter in parameters.keys() {
+                    crate::NodeDefinition::validate_flow_parameter_path(parameter)
+                        .context(FlowParametersSnafu)?;
                 }
                 ensure!(
                     parameters.keys().eq(arguments.keys()),
@@ -1499,9 +1488,9 @@ mod tests {
         let decoded = Config::from_config(
             json!({"config": {}, "flows": {}, "__mf_config": {}, "__mf_flows": "ordinary"}),
             BTreeMap::from([
-                ("config".into(), body()),
-                ("flows".into(), body()),
-                ("__mf_config".into(), body()),
+                ("/config".into(), body()),
+                ("/flows".into(), body()),
+                ("/__mf_config".into(), body()),
             ]),
         )
         .unwrap();

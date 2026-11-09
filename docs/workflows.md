@@ -181,7 +181,8 @@ and `Config::flow_parameters` extracting a `body: Flow` field; it is not a new c
 `"body": {"path": "./worker.json"}` or `"body": {"builtin": "my-provider.worker"}`. Relative paths
 belong to the source file that declares them. Providers decide their own input ports, selection,
 child arguments, execution policy, result shape, and error handling. There is no global Flow environment
-or parameter-alias mapping: the configuration field name is the prepared-child map key and static scope identity.
+or parameter-alias mapping: the configuration JSON Pointer (for example `/body`) is the prepared-child
+map key and participates in its static scope identity.
 
 Source loading calls the selected receiver's `flow_parameters` callback, resolves only the returned
 child values, and merges child dependencies for standalone compilation. Planning freezes that selected

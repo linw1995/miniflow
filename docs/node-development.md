@@ -1095,8 +1095,8 @@ struct Config {
     label: String,
 }
 
-// Config::flow_parameters(&config) returns the raw body value and, when present,
-// the fallback value. It does not include label or absent optional children.
+// Config::flow_parameters(&config) returns raw child values keyed by /body and,
+// when present, /fallback. It does not include label or absent optional children.
 //
 // In NodeRegistration, using the provider's plain and prepared factory functions:
 // factory: NodeFactory::Subgraph {
@@ -1107,8 +1107,9 @@ struct Config {
 ```
 
 `NodeConfig::flow_parameters(&Value) -> BTreeMap<String, Value>` extracts executable child values,
-keyed by each field's canonical Serde deserialize name (`rename` and `rename_all`). The derive uses
-Serde's parsed field metadata directly. It recognizes direct `Flow` and `Option<Flow>` fields;
+keyed by JSON Pointers built from each field's canonical Serde deserialize name (`rename` and
+`rename_all`). For example, `body` becomes `/body`; `/` and `~` in wire names become `~1` and `~0`.
+The derive uses Serde's parsed field metadata directly. It recognizes direct `Flow` and `Option<Flow>` fields;
 `PreparedSubgraph` and its optional form use the same extraction path when a provider needs the
 callable interface, including manual host callbacks. Optional children that are absent or null are
 not extracted. No whole-configuration type schema is generated or persisted.
@@ -1135,7 +1136,13 @@ omitted optional fields become `None`. All supplied children are prepared, even 
 selects only one. The plain factory retains ordinary direct-instantiation semantics and can reject a
 configuration requiring a prepared child.
 
-Use the map's standard `get`, `keys`, and `values` methods. Each `PreparedSubgraph` already provides
+Use the map's standard `get`, `keys`, and `values` methods, with keys such as `/body`. Configuration
+keys in the authored JSON remain unchanged; the pointer is only the internal child address. Pointer
+syntax does not authorize execution: only the receiving registration selects executable locations.
+Manual receivers can use nested pointers or the empty root pointer; the derive still supports only
+the direct executable fields described above.
+
+Each `PreparedSubgraph` already provides
 startup `inputs`, terminal `outputs`, `stream_outputs`, and partitioned `input_metadata()`. Inspect
 those contracts in your prepared factory; do not execute children during preparation. Return a normal
 `PreparedNode` with your own ports and policy. The runtime does not prescribe selector inputs, argument

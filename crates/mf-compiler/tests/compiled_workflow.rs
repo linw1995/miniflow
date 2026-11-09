@@ -353,9 +353,9 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
     ] {
         let mut authored = definition();
         let (owner, field) = match case {
-            "absent owner" => ("missing", "local"),
+            "absent owner" => ("missing", "/local"),
             "blank field" => ("source", " \t "),
-            _ => ("source", "local"),
+            _ => ("source", "/local"),
         };
         if case == "scope collision" {
             let mut collision = authored.nodes[2].clone();
@@ -390,7 +390,7 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
             "absent owner" | "empty bindings" => {
                 "child graphs require a known owner and nonempty binding set"
             }
-            "blank field" => "blank receiving Flow parameter declaration",
+            "blank field" => "receiving Flow parameters must be RFC 6901 pointers",
             "foreign owner key" | "foreign binding key" | "unbound alias" => {
                 "scope keys must reference their actual receiving owner and binding"
             }
@@ -468,7 +468,7 @@ fn saved_container_frames_require_known_instruction_endpoints_and_distinct_bindi
         } else {
             json!({})
         };
-        authored.nodes[0].set_node_flow("body", body).unwrap();
+        authored.nodes[0].set_node_flow("/body", body).unwrap();
         let registry = NodeRegistry::from_inventory().unwrap();
         let plan = mf_compiler::plan_resolved_definition(&authored, &registry).unwrap();
         let mut handoff = resolved_graph(&plan.graph);
@@ -485,7 +485,7 @@ fn saved_container_frames_require_known_instruction_endpoints_and_distinct_bindi
             .children
             .get_mut(&"container".into())
             .unwrap()
-            .get_mut("body")
+            .get_mut("/body")
             .unwrap()
             .relations
             .streams
@@ -506,7 +506,7 @@ fn saved_container_frames_require_known_instruction_endpoints_and_distinct_bindi
             let template = handoff.clone();
             for depth in 2..=5 {
                 // Reuse the actual lowered frame, not the container's authoring kind.
-                let scope = &template.children[&"container".into()]["body"];
+                let scope = &template.children[&"container".into()]["/body"];
                 handoff.relations = scope.relations.clone();
                 let input = &scope.relations.scope.as_ref().unwrap().input;
                 handoff.definition.nodes.push(
@@ -523,7 +523,7 @@ fn saved_container_frames_require_known_instruction_endpoints_and_distinct_bindi
                     .children
                     .get_mut(&"container".into())
                     .unwrap()
-                    .insert("body".to_owned(), handoff);
+                    .insert("/body".to_owned(), handoff);
                 handoff = parent;
                 if depth <= 4 {
                     let nested = plan_resolved_workflow(&handoff).unwrap();
@@ -556,12 +556,12 @@ fn saved_container_frames_require_known_instruction_endpoints_and_distinct_bindi
                 }
             }
 
-            let mut inline = template.children[&"container".into()]["body"]
+            let mut inline = template.children[&"container".into()]["/body"]
                 .definition
                 .clone();
             for _ in 0..=mf_telemetry::MAX_SCOPE_DEPTH {
                 let mut parent = template.definition.clone();
-                parent.nodes[0].set_node_flow("body", inline).unwrap();
+                parent.nodes[0].set_node_flow("/body", inline).unwrap();
                 inline = parent;
             }
             let registry = NodeRegistry::from_inventory().unwrap();
@@ -615,7 +615,7 @@ fn saved_container_frames_require_known_instruction_endpoints_and_distinct_bindi
 
         let mut extra = plan.clone();
         let bindings = extra.graph.children.get_mut(&"container".into()).unwrap();
-        bindings.insert("extra".to_owned(), bindings["body"].clone());
+        bindings.insert("/extra".to_owned(), bindings["/body"].clone());
         assert_invalid_graph(
             saved_structure_error(&extra),
             "container",
@@ -652,7 +652,7 @@ fn saved_container_frames_require_known_instruction_endpoints_and_distinct_bindi
             .children
             .get_mut(&"container".into())
             .unwrap()
-            .get_mut("body")
+            .get_mut("/body")
             .unwrap();
         let source = if kind == mf_runtime::LOOP_KIND {
             mf_runtime::LOOP_SOURCE_ID
@@ -685,13 +685,13 @@ fn actual_child_trees_enforce_call_depth_before_the_combined_scope_limit() {
         let mut parent = resolved(definition());
         parent.children.insert(
             "source".into(),
-            BTreeMap::from([("local".to_owned(), handoff)]),
+            BTreeMap::from([("/local".to_owned(), handoff)]),
         );
         handoff = parent;
         let mut parent = leaf.clone();
         parent.graph.children.insert(
             "source".into(),
-            BTreeMap::from([("local".to_owned(), plan.graph)]),
+            BTreeMap::from([("/local".to_owned(), plan.graph)]),
         );
         plan = parent;
         if depth == mf_runtime::MAX_CALL_DEPTH {
@@ -737,7 +737,7 @@ fn mixed_actual_frames_reach_the_combined_scope_limit_without_exhausting_other_b
     }))
     .unwrap();
     let lowered = mf_compiler::plan_resolved_definition(&authored, &registry).unwrap();
-    let state = &lowered.graph.children[&"container".into()]["body"];
+    let state = &lowered.graph.children[&"container".into()]["/body"];
     let chain = |depth: usize| {
         // Four complete state frames, then a callable boundary that resets the
         // state-depth budget. At depth 21 there are only four calls in total.
@@ -756,7 +756,7 @@ fn mixed_actual_frames_reach_the_combined_scope_limit_without_exhausting_other_b
             graph.relations.key = None;
             parent
                 .children
-                .insert("source".into(), BTreeMap::from([("local".into(), graph)]));
+                .insert("source".into(), BTreeMap::from([("/local".into(), graph)]));
             graph = parent;
         }
         CompiledWorkflow { graph }
@@ -796,8 +796,8 @@ fn mixed_actual_frames_reach_the_combined_scope_limit_without_exhausting_other_b
             .iter()
             .find(|node| node.id.as_str() == "source")
             .unwrap();
-        let child = &bindings["local"];
-        expected_path.push(child.child_scope_key(owner, "local"));
+        let child = &bindings["/local"];
+        expected_path.push(child.child_scope_key(owner, "/local"));
         graph = child;
     }
     let error = CompiledWorkflow::from_json(&over.to_json().unwrap()).unwrap_err();

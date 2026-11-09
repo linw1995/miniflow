@@ -192,8 +192,8 @@ fn plans_and_type_checks_nested_loop_body() {
     assert_eq!(definition.version, WorkflowDefinitionVersion::V2026_09_29);
     let plan = plan_definition(&definition).unwrap();
     let body = &plan.graph.definition.nodes[1]
-        .flow_parameters(&["body"])
-        .unwrap()["body"];
+        .flow_parameters(&["/body"])
+        .unwrap()["/body"];
     let authored_nodes: Vec<_> = body
         .nodes
         .iter()
@@ -328,7 +328,7 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
             "repeat",
             mf_runtime::LOOP_KIND,
             &config.to_string(),
-            [("body".into(), prepared_body)].into(),
+            [("/body".into(), prepared_body)].into(),
         )
         .err()
         .unwrap()
@@ -345,7 +345,7 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
         "repeat",
         mf_runtime::LOOP_KIND,
         &complete_definition.to_string(),
-        [("body".into(), prepared_body)].into(),
+        [("/body".into(), prepared_body)].into(),
     )
     .unwrap();
     assert_eq!(prepared.metadata.ports.inputs[0].name, "count");
@@ -361,7 +361,7 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
         mf_runtime::LOOP_KIND,
         &complete_definition.to_string(),
         [(
-            "body".into(),
+            "/body".into(),
             mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
         )]
         .into(),
@@ -659,7 +659,7 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
         .children
         .get_mut(&"repeat".into())
         .unwrap()
-        .get_mut("body")
+        .get_mut("/body")
         .unwrap();
     let relations = body.relations.clone();
     let frame = relations.scope.as_ref().unwrap();
@@ -1442,7 +1442,7 @@ fn observed_preparation_attributes_damaged_loop_graphs_to_the_root_owner() {
                     .children
                     .get_mut(&"repeat".into())
                     .unwrap()
-                    .get_mut("body")
+                    .get_mut("/body")
                     .unwrap()
                     .relations
                     .scope
@@ -1456,7 +1456,7 @@ fn observed_preparation_attributes_damaged_loop_graphs_to_the_root_owner() {
                     .children
                     .get_mut(&"repeat".into())
                     .unwrap()
-                    .get_mut("body")
+                    .get_mut("/body")
                     .unwrap()
                     .definition
                     .nodes
@@ -1472,7 +1472,7 @@ fn observed_preparation_attributes_damaged_loop_graphs_to_the_root_owner() {
                     .children
                     .get_mut(&"repeat".into())
                     .unwrap()
-                    .get_mut("body")
+                    .get_mut("/body")
                     .unwrap()
                     .relations
                     .scope
@@ -1556,7 +1556,7 @@ fn observation_preserves_description_and_structural_order_errors() {
         .children
         .get_mut(&"repeat".into())
         .unwrap()
-        .get_mut("body")
+        .get_mut("/body")
         .unwrap()
         .definition;
     body.edges
@@ -1602,11 +1602,11 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
     );
     assert!(matches!(
         error.source().unwrap().downcast_ref::<mf_runtime::FlowParameterError>().unwrap(),
-        mf_runtime::FlowParameterError::Json { parameter, .. } if parameter == "body"
+        mf_runtime::FlowParameterError::Json { parameter, .. } if parameter == "/body"
     ));
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
     let mut malformed = serde_json::to_value(&valid).unwrap();
-    malformed["graph"]["children"]["repeat"]["body"]["definition"] = json!("not a workflow");
+    malformed["graph"]["children"]["repeat"]["/body"]["definition"] = json!("not a workflow");
     let error = mf_compiler::CompiledWorkflow::from_json(&malformed.to_string()).unwrap_err();
     assert!(
         matches!(&error, mf_compiler::PlanError::Parse { .. }),
@@ -1648,7 +1648,7 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
             .children
             .get_mut(&"repeat".into())
             .unwrap()
-            .get_mut("body")
+            .get_mut("/body")
             .unwrap()
             .relations
             .scope

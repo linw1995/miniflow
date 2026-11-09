@@ -349,7 +349,7 @@ mod tests {
                     config
                         .get("body")
                         .filter(|value| !value.is_null())
-                        .map(|value| ("body".into(), value.clone()))
+                        .map(|value| ("/body".into(), value.clone()))
                         .into_iter()
                         .collect()
                 },
@@ -373,7 +373,7 @@ mod tests {
                             config
                                 .get(name)
                                 .filter(|value| !value.is_null())
-                                .map(|value| (name.into(), value.clone()))
+                                .map(|value| (format!("/{name}"), value.clone()))
                         })
                         .collect()
                 },
@@ -403,8 +403,8 @@ mod tests {
                 &serde_json::json!({"selected": 1, "fallback": 2, "option": 3})
             ),
             BTreeMap::from([
-                ("selected".into(), Value::from(1)),
-                ("fallback".into(), Value::from(2))
+                ("/selected".into(), Value::from(1)),
+                ("/fallback".into(), Value::from(2))
             ])
         );
     }

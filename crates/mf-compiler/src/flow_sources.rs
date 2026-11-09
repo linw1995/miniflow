@@ -39,6 +39,11 @@ pub enum FlowResolutionError {
         node: String,
         source: serde_json::Error,
     },
+    #[snafu(display("invalid Flow parameter on `{node}`: {source}"))]
+    Parameter {
+        node: String,
+        source: mf_runtime::FlowParameterError,
+    },
     #[snafu(display("could not resolve child scope for node `{definition_id}`: {source}"))]
     ChildScope {
         definition_id: DefinitionId,
@@ -865,16 +870,9 @@ impl Resolver {
         let parameters = extractor(&node.config);
         let mut children = BTreeMap::new();
         for field in parameters.keys() {
-            ensure!(
-                !field.trim().is_empty(),
-                InvalidSnafu {
-                    reference: node.id.as_str(),
-                    message: format!(
-                        "blank configuration parameter declaration on `{}`",
-                        node.kind
-                    )
-                }
-            );
+            NodeDefinition::validate_flow_parameter_path(field).context(ParameterSnafu {
+                node: node.id.as_str(),
+            })?;
         }
         for (field, value) in &parameters {
             let reference = format!("{}.config.{field}", node.id);
@@ -908,8 +906,8 @@ impl Resolver {
                         }
                     );
                 }
-                node.config[field] = serde_json::to_value(&child.definition)
-                    .context(ConfigurationSnafu { node: &reference })?;
+                node.set_node_flow(field, child.definition.clone())
+                    .context(ParameterSnafu { node: &reference })?;
                 children.insert(field.clone(), child);
             }
         }
@@ -1021,7 +1019,7 @@ impl Resolver {
                             node: node.id.as_str(),
                         })?;
                     ensure!(
-                        extractor.expect("selected receiver")(&candidate).contains_key("body"),
+                        extractor.expect("selected receiver")(&candidate).contains_key("/body"),
                         InvalidSnafu {
                             reference: node.id.as_str(),
                             message: "selected Call provider does not declare the `body` Flow parameter",
@@ -1030,7 +1028,7 @@ impl Resolver {
                     node.config = candidate;
                 } else if let Some(extractor) = extractor {
                     ensure!(
-                        extractor(&node.config).contains_key("body"),
+                        extractor(&node.config).contains_key("/body"),
                         InvalidSnafu {
                             reference: node.id.as_str(),
                             message: "selected Call provider does not declare the `body` Flow parameter",
@@ -1085,7 +1083,7 @@ mod tests {
         config
             .get("body")
             .filter(|value| !value.is_null())
-            .map(|body| BTreeMap::from([("body".into(), body.clone())]))
+            .map(|body| BTreeMap::from([("/body".into(), body.clone())]))
             .unwrap_or_default()
     }
 
@@ -1164,7 +1162,7 @@ mod tests {
         discovery.children.insert(
             "input".into(),
             BTreeMap::from([(
-                "body".into(),
+                "/body".into(),
                 FlowDiscovery {
                     relations: GraphRelations::default(),
                     definition: definition(json!([{"id":"leaf", "kind":"missing.kind"}])),
@@ -1423,12 +1421,12 @@ mod tests {
             vec!["child", "root"]
         );
         assert_eq!(file.sources, BTreeSet::from([entry.clone(), child_path]));
-        assert_eq!(file.children[&"owner".into()]["body"].definition, child);
+        assert_eq!(file.children[&"owner".into()]["/body"].definition, child);
         assert_eq!(
-            file.children[&"owner".into()]["body"].sources,
+            file.children[&"owner".into()]["/body"].sources,
             BTreeSet::from([fs::canonicalize(root.path().join("child.json")).unwrap()])
         );
-        assert!(file.children[&"owner".into()]["body"].children.is_empty());
+        assert!(file.children[&"owner".into()]["/body"].children.is_empty());
         assert_eq!(file.definition.nodes[0].config["body"], json!(child));
         let selected = FlowDiscovery::resolve_with_builtin_catalog(
             &entry,
@@ -1459,14 +1457,14 @@ mod tests {
             assert!(discovery.pending.is_empty());
             assert_eq!(discovery.definition, file.definition);
             assert_eq!(
-                discovery.children[&"owner".into()]["body"].definition,
-                file.children[&"owner".into()]["body"].definition
+                discovery.children[&"owner".into()]["/body"].definition,
+                file.children[&"owner".into()]["/body"].definition
             );
             let serialized = serde_json::to_value(&discovery).unwrap();
             assert!(serialized.get("contracts").is_none());
             assert!(serialized.get("parameter_types").is_none());
             assert_eq!(
-                serialized["children"]["owner"]["body"]["definition"],
+                serialized["children"]["owner"]["/body"]["definition"],
                 json!(child)
             );
             let mut sources = discovery.sources;
@@ -1488,8 +1486,8 @@ mod tests {
         let replay = bundle.resolve(&registry).unwrap();
         assert_eq!(replay.definition, embedded.definition);
         assert_eq!(
-            replay.children[&"owner".into()]["body"].definition,
-            file.children[&"owner".into()]["body"].definition
+            replay.children[&"owner".into()]["/body"].definition,
+            file.children[&"owner".into()]["/body"].definition
         );
         assert_eq!(
             replay.sources,
@@ -1570,12 +1568,12 @@ mod tests {
             parent.nodes[0].config["ordinary"]
         );
         assert_eq!(resolved.definition.nodes[1], parent.nodes[1]);
-        let child_scope = &resolved.children[&"owner".into()]["body"];
+        let child_scope = &resolved.children[&"owner".into()]["/body"];
         assert_eq!(
             child_scope.sources,
             BTreeSet::from(["flows/nested/child.json".into()])
         );
-        let leaf_scope = &child_scope.children[&"nested".into()]["body"];
+        let leaf_scope = &child_scope.children[&"nested".into()]["/body"];
         assert_eq!(leaf_scope.definition, leaf);
         assert_eq!(
             leaf_scope.sources,
@@ -1719,7 +1717,7 @@ mod tests {
             ),
             (
                 "source-archive-test.local-path",
-                "nested.config.body",
+                "nested.config./body",
                 "local Flow references require",
             ),
         ] {
@@ -1861,7 +1859,7 @@ mod tests {
             .insert("invalid.json".into(), r#"{"nodes":[]}"#.into());
         let inherited = archive.resolve(&registry).unwrap();
         assert_eq!(
-            inherited.children[&"owner".into()]["body"]
+            inherited.children[&"owner".into()]["/body"]
                 .definition
                 .version,
             mf_runtime::WorkflowDefinitionVersion::CURRENT
@@ -1968,14 +1966,12 @@ mod tests {
     }
 
     #[test]
-    fn blank_parameter_names_fail_before_resolving_declared_sources() {
+    fn malformed_parameter_paths_fail_before_resolving_declared_sources() {
         for extractor in [
-            (|config: &serde_json::Value| BTreeMap::from([("".into(), config["body"].clone())]))
-                as FlowExtractor,
-            (|config: &serde_json::Value| BTreeMap::from([("   ".into(), config["body"].clone())]))
+            (|config: &serde_json::Value| BTreeMap::from([("body".into(), config["body"].clone())]))
                 as FlowExtractor,
             (|config: &serde_json::Value| {
-                BTreeMap::from([("\u{2000}".into(), config["body"].clone())])
+                BTreeMap::from([("/bad~2escape".into(), config["body"].clone())])
             }) as FlowExtractor,
         ] {
             let mut parent =
@@ -1986,8 +1982,8 @@ mod tests {
                 .insert("test.flow-source-owner".into(), extractor);
             let error = resolver.resolve(&mut parent, None).unwrap_err();
             assert!(
-                matches!(error, FlowResolutionError::Invalid { reference, message }
-                if reference == "owner" && message.contains("blank configuration parameter declaration"))
+                matches!(error, FlowResolutionError::Parameter { node, source: mf_runtime::FlowParameterError::Invalid { .. } }
+                if node == "owner")
             );
             assert!(resolver.sources.is_empty());
         }
@@ -2014,7 +2010,7 @@ mod tests {
             ),
             (
                 source_definition("test.flow-source-owner", json!({"path":42})),
-                "owner.config.body",
+                "owner.config./body",
             ),
         ] {
             let error = source_resolver().resolve(&mut parent, None).unwrap_err();
@@ -2034,7 +2030,7 @@ mod tests {
         let error = source_resolver().resolve(&mut parent, None).unwrap_err();
         assert!(
             matches!(source_cause(&error), FlowResolutionError::Invalid { reference, message }
-            if reference == "owner.config.body" && message.contains("source directory"))
+            if reference == "owner.config./body" && message.contains("source directory"))
         );
     }
 
@@ -2163,8 +2159,8 @@ mod tests {
                     assert_eq!(discovery.sources, scope.sources);
                     assert!(discovery.pending.is_empty());
                     assert_eq!(
-                        discovery.children[&"owner".into()]["body"].definition,
-                        scope.children[&"owner".into()]["body"].definition
+                        discovery.children[&"owner".into()]["/body"].definition,
+                        scope.children[&"owner".into()]["/body"].definition
                     );
                     let plan = source_resolver().plan(&parent).unwrap();
                     assert_eq!(plan.graph.children.len(), 1);
@@ -2467,7 +2463,7 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(source_cause(&error), FlowResolutionError::Invalid { reference, message }
-            if reference == "repeat.config.body"
+            if reference == "repeat.config./body"
                 && message == "combined container nesting exceeds twenty scopes"),
             "{error}"
         );
@@ -2566,9 +2562,9 @@ mod tests {
                 let mut graph = &plan.graph;
                 for index in (0..calls).rev() {
                     assert_eq!(graph.children.len(), 1);
-                    graph = &graph.children[&format!("call-{index}").into()]["body"];
+                    graph = &graph.children[&format!("call-{index}").into()]["/body"];
                 }
-                let body = &graph.children[&"repeat".into()]["body"];
+                let body = &graph.children[&"repeat".into()]["/body"];
                 assert_eq!(
                     body.execution_order
                         .iter()
@@ -2653,7 +2649,7 @@ mod tests {
                 .unwrap_err();
             let expected_path = crate::loops::path_label(&[
                 "outer".into(),
-                mf_runtime::ScopePathEntry::binding_key("owner", "body").into(),
+                mf_runtime::ScopePathEntry::binding_key("owner", "/body").into(),
                 "invoke".into(),
                 "repeat".into(),
             ]);
@@ -2709,11 +2705,14 @@ mod tests {
         resolver
             .extractors
             .insert("test.flow-source-owner".into(), |config| {
-                BTreeMap::from([("body".into(), config["selected"].clone())])
+                BTreeMap::from([("/body".into(), config["selected"].clone())])
             });
         let scope = resolver.resolve(&mut parent, None).unwrap();
         let resolved = resolver.into_resolved(scope);
-        assert_eq!(resolved.children[&"owner".into()]["body"].definition, child);
+        assert_eq!(
+            resolved.children[&"owner".into()]["/body"].definition,
+            child
+        );
         assert_eq!(resolved.definition.nodes[0].config["body"], json!(child));
         assert_eq!(resolved.children.len(), 1);
         assert_eq!(resolved.children[&"owner".into()].len(), 1);
@@ -2765,11 +2764,11 @@ mod tests {
             BTreeSet::from(["builtin:unavailable.scope".into()])
         );
         assert!(
-            discovery.children[&"sibling".into()]["body"]
+            discovery.children[&"sibling".into()]["/body"]
                 .pending
                 .is_empty()
         );
-        let child = &discovery.children[&"owner".into()]["body"];
+        let child = &discovery.children[&"owner".into()]["/body"];
         assert_eq!(child.pending, discovery.pending);
         assert!(child.sources.is_empty());
         assert!(child.children.is_empty());

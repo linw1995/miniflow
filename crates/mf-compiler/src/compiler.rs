@@ -1401,10 +1401,10 @@ fn normalize_scope(
         let mut flows = BTreeMap::new();
         for (name, body) in resolved.children.get(&node.id).into_iter().flatten() {
             ensure!(
-                !name.trim().is_empty(),
+                crate::NodeDefinition::validate_flow_parameter_path(name).is_ok(),
                 InvalidGraphSnafu {
                     definition_id: node.id.clone(),
-                    message: "blank receiving Flow parameter declaration",
+                    message: "receiving Flow parameters must be RFC 6901 pointers",
                 }
             );
             let order = crate::calls::child_result(node, structural_order_graph(&body.definition))?;
@@ -1607,10 +1607,10 @@ fn validate_scope_graph(
         let flows = graph.children.get(&node.id);
         for (name, child) in flows.into_iter().flatten() {
             ensure!(
-                !name.trim().is_empty(),
+                crate::NodeDefinition::validate_flow_parameter_path(name).is_ok(),
                 InvalidGraphSnafu {
                     definition_id: node.id.clone(),
-                    message: "blank receiving Flow parameter declaration"
+                    message: "receiving Flow parameters must be RFC 6901 pointers"
                 }
             );
             ensure!(
@@ -1800,7 +1800,7 @@ fn canonical_host_definition(
         for (name, child) in shape.children.get(&node.id).into_iter().flatten() {
             let value = node
                 .config
-                .get(name)
+                .pointer(name)
                 .filter(|value| !value.is_null())
                 .with_context(|| InvalidGraphSnafu {
                     definition_id: node.id.clone(),
