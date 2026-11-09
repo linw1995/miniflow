@@ -3,7 +3,7 @@ use crate::{
     WorkflowRunError,
 };
 use snafu::{ResultExt, Snafu};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 
 #[derive(Debug, Snafu)]
 enum ForwardingError {
@@ -221,6 +221,8 @@ impl SubgraphInputMetadata {
 #[derive(Clone)]
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,
+    /// Definition metadata can be completed after execution-mode resolution.
+    origin: Option<SubgraphOrigin>,
     pub inputs: crate::WorkflowInputSchema,
     pub outputs: Vec<PortSpec>,
     pub stream_outputs: Vec<PortSpec>,
@@ -229,6 +231,15 @@ pub struct PreparedSubgraph {
     pub relations: Option<crate::GraphRelations>,
     input_metadata: SubgraphInputMetadata,
     body: PreparedSubgraphBody,
+}
+
+#[derive(Clone)]
+enum SubgraphOrigin {
+    Fixed(crate::FlowOrigin),
+    Deferred {
+        workflow_id: Arc<OnceLock<mf_telemetry::identity::WorkflowId>>,
+        path: Vec<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -337,6 +348,7 @@ impl PreparedSubgraph {
         let stream_outputs = flow.stream_output_ports();
         Self {
             nodes,
+            origin: None,
             inputs,
             outputs,
             stream_outputs,
@@ -385,6 +397,7 @@ impl PreparedSubgraph {
     ) -> Self {
         Self {
             nodes,
+            origin: None,
             inputs: Default::default(),
             outputs,
             stream_outputs,
@@ -407,6 +420,7 @@ impl PreparedSubgraph {
     ) -> Self {
         Self {
             nodes,
+            origin: None,
             inputs,
             outputs: Vec::new(),
             stream_outputs,
@@ -442,6 +456,37 @@ impl PreparedSubgraph {
                 crate::flow_invocation::workflow_result(instance)
                     .map(crate::FlowInvocation::from_stream)
             }
+        }
+    }
+
+    /// Records the body's canonical definition location for movable Flow handles.
+    pub fn with_origin(mut self, origin: crate::FlowOrigin) -> Self {
+        self.origin = Some(SubgraphOrigin::Fixed(origin));
+        self
+    }
+
+    /// Shares a write-once root identity finalized after execution-mode resolution.
+    ///
+    /// Factories may capture and clone this body before the root graph's final
+    /// identity is known. All clones resolve the same finalized identity without
+    /// rebuilding executors or retaining provisional workflow IDs.
+    pub fn with_origin_source(
+        mut self,
+        workflow_id: Arc<OnceLock<mf_telemetry::identity::WorkflowId>>,
+        path: Vec<String>,
+    ) -> Self {
+        self.origin = Some(SubgraphOrigin::Deferred { workflow_id, path });
+        self
+    }
+
+    /// Materializes the actual definition location, if its root identity is ready.
+    pub fn origin(&self) -> Option<crate::FlowOrigin> {
+        match self.origin.as_ref()? {
+            SubgraphOrigin::Fixed(origin) => Some(origin.clone()),
+            SubgraphOrigin::Deferred { workflow_id, path } => Some(crate::FlowOrigin {
+                workflow_id: workflow_id.get()?.clone(),
+                path: path.clone(),
+            }),
         }
     }
 
@@ -666,6 +711,53 @@ mod tests {
         assert!(callable.relations.is_some());
         assert!(callable.scope_input().is_none());
         assert_eq!(prepared.scope_input().unwrap().as_str(), "custom-input");
+    }
+
+    #[test]
+    fn definition_origins_survive_cloning_without_becoming_invocation_owners() {
+        let original = PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
+            panic!("origin changes must not execute the callback")
+        });
+        let origin = crate::FlowOrigin {
+            workflow_id: mf_telemetry::identity::WorkflowId::from_definition(&"workflow", &[])
+                .unwrap(),
+            path: vec![crate::ScopePathEntry::binding_key("producer", "body")],
+        };
+        let located = original.clone().with_origin(origin.clone());
+        assert!(original.origin().is_none());
+        assert_eq!(located.origin().as_ref(), Some(&origin));
+        assert_eq!(located.clone().origin(), located.origin());
+        assert_eq!(located.scope_key("invoker", "body"), "invoker");
+    }
+
+    #[test]
+    fn write_once_origin_identity_reaches_handles_captured_before_finalization() {
+        let source = Arc::new(OnceLock::new());
+        let path = vec![crate::ScopePathEntry::binding_key("producer", "body")];
+        let body = PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
+            panic!("origin finalization must not execute the body")
+        })
+        .with_origin_source(source.clone(), path.clone());
+        let flow = crate::FlowValue::new(body.clone()).unwrap();
+        let captured = flow.clone();
+        assert!(body.origin().is_none());
+        assert!(flow.body().origin().is_none());
+        let workflow_id =
+            mf_telemetry::identity::WorkflowId::from_definition(&"final resolved graph", &[])
+                .unwrap();
+        source.set(workflow_id.clone()).unwrap();
+        let origin = crate::FlowOrigin { workflow_id, path };
+        assert_eq!(body.origin(), Some(origin.clone()));
+        assert_eq!(flow.body().origin(), Some(origin.clone()));
+        assert_eq!(captured.body().origin(), Some(origin));
+        assert!(
+            source
+                .set(
+                    mf_telemetry::identity::WorkflowId::from_definition(&"replacement", &[])
+                        .unwrap()
+                )
+                .is_err()
+        );
     }
 
     #[test]

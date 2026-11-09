@@ -1,0 +1,63 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {},
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "policy": {
+            "type": "flow",
+            "secret": false
+          },
+          "value": {
+            "type": "int",
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "apply",
+      "kind": "workflow.call",
+      "config": {
+        "inputs": [
+          {
+            "name": "echo.input",
+            "value_type": "any",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "name": "answer",
+            "value_type": "any",
+            "required": true
+          }
+        ]
+      },
+      "inputs": {
+        "flow": {
+          "from": {
+            "node": "params",
+            "port": "policy"
+          }
+        },
+        "echo.input": {
+          "from": {
+            "node": "params",
+            "port": "value"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "apply",
+      "port": "answer"
+    }
+  ]
+}

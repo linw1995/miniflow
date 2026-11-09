@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 /// One authoritative declaration and encoder for a task's owned output fields.
 ///
-/// Implementations must emit exactly the names, requiredness, and JSON types
-/// reported by `ports()`. Shared JSON payloads must remain shared.
+/// Implementations must emit exactly the names, requiredness, and runtime types
+/// reported by `ports()`. Shared payloads must remain shared.
 ///
 /// ```
 /// use mf_runtime::{NodeOutputs, ValueRef, ValueType};
@@ -37,7 +37,7 @@ pub trait NodeOutputs: Sized {
     fn into_outputs(self) -> Result<Outputs, OutputEncodeError>;
 }
 
-/// Encodes a JSON value without coercion or an intermediate JSON tree.
+/// Encodes a runtime value without coercion or an intermediate JSON tree.
 ///
 /// Supported implementations mirror `InputValue`. `Option` is only an
 /// `OutputField`: omission is distinct from a supplied JSON null.
@@ -157,6 +157,7 @@ scalar_value!(i64, Int64);
 scalar_value!(u64, Uint64);
 scalar_value!(String, String);
 scalar_value!(ValueRef, Any);
+scalar_value!(crate::FlowValue, Flow);
 
 impl OutputValue for usize {
     fn value_type() -> ValueType {

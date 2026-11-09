@@ -104,8 +104,8 @@ opaque. Inspection SHALL prepare metadata without executing business operations.
 freeze a build-time startup schema or emit executable manifest sections. Compiled plans and manifest
 payload version `2026-11-06` SHALL retain an explicit `graph` containing its definition, canonical
 execution order, and recursively compiled children keyed by receiving node ID and field name.
-Receiver callbacks SHALL select child values during source resolution; ordinary JSON SHALL remain
-opaque and absent optional children SHALL have no graph entry. `ResolvedWorkflow` SHALL preserve the
+Receiver callbacks SHALL select top-level child values during source resolution; ordinary JSON SHALL
+remain opaque and absent optional children SHALL have no graph entry. `ResolvedWorkflow` SHALL preserve the
 actual selected child tree for `plan_resolved_workflow`. Offline traversal SHALL use graph children,
 not infer roles from configuration keys or order paths. Saved-plan and generated preparation SHALL
 validate provider availability and actual compiled-child binding keys at the receiving boundary;
@@ -139,6 +139,18 @@ prepare and execute without definitions, generated files, or build tools.
 
 - **WHEN** a host rebuilds after editing its definition without cleaning
 - **THEN** the module and execution reflect the edit
+
+#### Scenario: Pass callable Flow values through ordinary edges
+
+- **WHEN** a caller supplies B through ordinary input edges or native workflow arguments to A's `builtin.parameters` Flow input
+- **THEN** A receives a native callable capability through the same edge mechanism as other input values
+- **AND** A can forward that value or invoke it using ordinary argument ports and an explicit input/output contract
+- **AND** two calls to the same A may receive different compatible Flow values without changing A or installing named bindings
+- **AND** code may supply the same native Flow values through typed node ports or native workflow inputs without Serde executables
+- **AND** JSON objects, environment values, and defaults cannot manufacture executable capabilities
+- **AND** definitions remain frozen at their actual producer children in `CompiledGraph.children`, with no runtime JSON interpretation
+- **AND** observation preserves the invocation site separately from the called definition origin
+- **AND** embedded modules use their ordinary preparation helpers without adding receiving providers as build dependencies
 
 #### Scenario: Resolve declared children using host-only providers
 

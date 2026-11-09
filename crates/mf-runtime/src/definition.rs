@@ -220,6 +220,24 @@ pub struct CallConfig {
     pub body: Option<Box<WorkflowDefinition>>,
 }
 
+impl CallConfig {
+    /// Identify the strict edge-carried callable contract without interpreting
+    /// sources or validating the receiving node's business rules. Static selector
+    /// and body fields, including null fields, cannot be mixed into this mode.
+    pub fn is_dynamic(config: &Value) -> bool {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct InputContract {
+            #[serde(rename = "inputs")]
+            _inputs: Vec<crate::PortSpec>,
+            #[serde(rename = "outputs")]
+            _outputs: Vec<crate::PortSpec>,
+        }
+
+        serde_json::from_value::<InputContract>(config.clone()).is_ok()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeDefinition {

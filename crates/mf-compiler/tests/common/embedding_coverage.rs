@@ -33,11 +33,12 @@ pub fn preserve(
     root: &Path,
     output: &Output,
     executable: &Path,
-    fixture: &str,
+    artifact_name: &str,
+    source_directory: &str,
     main_source: &str,
 ) {
     assert_success(output);
-    let name = format!("mf-{fixture}");
+    let name = format!("mf-{artifact_name}");
     let build_script = root.join("build.rs").canonicalize().unwrap();
     // Cargo identifies the exact build-script executable, including fresh artifacts.
     // Scanning the shared target directory could retain a stale script instead.
@@ -64,22 +65,7 @@ pub fn preserve(
     fs::copy(script_binary, &retained_script).unwrap();
     fs::copy(executable, coverage.join(&name)).unwrap();
 
-    let repository = super::crates_dir().parent().unwrap().to_owned();
-    let fixture_directory = format!("crates/mf-compiler/tests/fixtures/{fixture}");
-    let mappings = [
-        ("src/main.rs", format!("{fixture_directory}/{main_source}")),
-        ("build.rs", format!("{fixture_directory}/build.rs")),
-    ]
-    .map(|(source, fixture)| {
-        let source = root.join(source).canonicalize().unwrap();
-        // Remaps are only valid when the compiled and tracked sources share lines.
-        assert_eq!(
-            fs::read(&source).unwrap(),
-            fs::read(repository.join(&fixture)).unwrap()
-        );
-        (source.to_str().unwrap().to_owned(), fixture)
-    });
-    let mut mappings = BTreeMap::from(mappings);
+    let mut mappings = source_aliases(root, source_directory, main_source);
     // A reused script can still name its original, now-deleted source root.
     // Ask its coverage map rather than guessing a cache-wide source alias.
     let output = Command::new("rustc")
@@ -115,13 +101,36 @@ pub fn preserve(
     assert_eq!(sources.len(), 1, "ambiguous build-script coverage source");
     mappings.insert(
         sources[0].to_owned(),
-        format!("{fixture_directory}/build.rs"),
+        format!("{source_directory}/build.rs"),
     );
     fs::write(
         coverage.join(format!("{name}.paths.json")),
         serde_json::to_vec(&mappings).unwrap(),
     )
     .unwrap();
+}
+
+/// Alias only byte-identical copied sources to their checkout-relative paths.
+pub fn source_aliases(
+    root: &Path,
+    source_directory: &str,
+    main_source: &str,
+) -> BTreeMap<String, String> {
+    let repository = super::crates_dir().parent().unwrap().to_owned();
+    let sources = [("src/main.rs", main_source), ("build.rs", "build.rs")];
+    sources
+        .into_iter()
+        .map(|(source, tracked)| {
+            let source = root.join(source).canonicalize().unwrap();
+            let tracked = format!("{source_directory}/{tracked}");
+            // Remaps are only valid when the compiled and tracked sources share lines.
+            assert_eq!(
+                fs::read(&source).unwrap(),
+                fs::read(repository.join(&tracked)).unwrap()
+            );
+            (source.to_str().unwrap().to_owned(), tracked)
+        })
+        .collect()
 }
 
 /// Select the coverage-bearing executable only for a verified Kache launcher.

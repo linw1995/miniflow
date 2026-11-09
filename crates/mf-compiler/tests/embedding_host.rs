@@ -119,6 +119,50 @@ fn build_script_coverage_requires_both_launcher_marker_and_record() {
 }
 
 #[test]
+fn coverage_source_aliases_use_explicit_checkout_directories_and_identical_bytes() {
+    use common::embedding_coverage::source_aliases;
+
+    let repository = common::crates_dir().parent().unwrap().to_owned();
+    for (directory, main_source) in [
+        (
+            "crates/mf-compiler/tests/fixtures/embedding-host",
+            "src/main.rs",
+        ),
+        (
+            "crates/mf-compiler/tests/fixtures/embedding-resources",
+            "main.rs",
+        ),
+        ("examples/embedded-workflows", "src/main.rs"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        let sources = [("src/main.rs", main_source), ("build.rs", "build.rs")];
+        for (copied, tracked) in &sources {
+            fs::copy(
+                repository.join(directory).join(tracked),
+                root.path().join(copied),
+            )
+            .unwrap();
+        }
+        let aliases = source_aliases(root.path(), directory, main_source);
+        assert_eq!(aliases.len(), sources.len());
+        for (copied, tracked) in sources {
+            let source = root.path().join(copied).canonicalize().unwrap();
+            assert_eq!(
+                aliases[source.to_str().unwrap()],
+                format!("{directory}/{tracked}")
+            );
+        }
+        fs::write(root.path().join("build.rs"), "fn main() {}\n").unwrap();
+        assert!(
+            std::panic::catch_unwind(|| source_aliases(root.path(), directory, main_source))
+                .is_err(),
+            "different source bytes must not be aliased: {directory}"
+        );
+    }
+}
+
+#[test]
 fn coverage_command_failures_report_captured_stdout_and_stderr() {
     let output = Command::new("rustc")
         .arg("--not-a-real-embedding-coverage-flag")
@@ -253,6 +297,7 @@ fn embedded_host_preserves_execution_and_build_contracts() {
             &output,
             &executable,
             "embedding-host",
+            "crates/mf-compiler/tests/fixtures/embedding-host",
             "src/main.rs",
         );
     }
@@ -304,7 +349,13 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         .parent()
         .unwrap()
         .join("examples/embedded-workflows");
-    for file in ["Cargo.toml", "build.rs", "answer.json"] {
+    for file in [
+        "Cargo.toml",
+        "build.rs",
+        "answer.json",
+        "answer-apply.json",
+        "answer-body.json",
+    ] {
         fs::copy(source.join(file), example.path().join(file)).unwrap();
     }
     copy_tree(&source.join("src"), &example.path().join("src"));
@@ -314,15 +365,26 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         &format!("{}/", common::crates_dir().display()),
     );
     fs::write(manifest, content).unwrap();
-    assert_build_success(example.path());
+    let build_output = assert_build_success(example.path());
     let example_binary =
         common::embedding_coverage::executable(example.path(), "embedded-workflows");
-    let output = Command::new(example_binary).output().unwrap();
+    let output = Command::new(&example_binary).output().unwrap();
     assert_success(&output);
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         json!({"answer":42})
     );
+    if let Some(coverage) = std::env::var_os("MF_COVERAGE_BINARIES_DIR") {
+        common::embedding_coverage::preserve(
+            Path::new(&coverage),
+            example.path(),
+            &build_output,
+            &example_binary,
+            "embedded-workflows",
+            "examples/embedded-workflows",
+            "src/main.rs",
+        );
+    }
 }
 
 fn assert_build_success(root: &Path) -> Output {

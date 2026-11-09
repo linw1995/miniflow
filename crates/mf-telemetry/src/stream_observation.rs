@@ -241,7 +241,11 @@ impl StreamObservation {
             payload,
             emission_count,
         };
-        if let Ok(wire) = record.to_wire(time.as_nanos().min(u64::MAX as u128) as u64, trace) {
+        if let Ok(wire) = record.to_wire_with_schema(
+            time.as_nanos().min(u64::MAX as u128) as u64,
+            trace,
+            self.0.description.event_schema_version(),
+        ) {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.0.backend.emit_lifecycle(&wire)
             }));

@@ -1,5 +1,7 @@
 mod assert;
 mod batch;
+mod call;
+mod call_input;
 mod condition;
 mod constant;
 mod identity;
@@ -12,6 +14,7 @@ mod readline;
 pub use assert::KIND as ASSERT_KIND;
 pub use batch::KIND as BATCH_KIND;
 pub use call::CallBuildError;
+pub use call_input::{CallInputBuildError, CallInputError};
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
 pub use identity::{
     IdentityInputs, IdentityOutputs, KIND as IDENTITY_KIND, kind as identity_kind, prepare_identity,
@@ -108,4 +111,3 @@ mod tests {
             .unwrap();
     }
 }
-mod call;

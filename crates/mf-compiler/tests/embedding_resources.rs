@@ -239,6 +239,7 @@ fn resources_are_packed_without_providers_and_resolved_only_by_the_runtime_host(
             &output,
             &executable,
             "embedding-resources",
+            "crates/mf-compiler/tests/fixtures/embedding-resources",
             "main.rs",
         );
     }

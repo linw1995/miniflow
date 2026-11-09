@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/mf-*", "crates/builtin-nodes/*", "tools/test-affected/nodes/*"]
+exclude = ["examples/embedded-workflows"]
 default-members = ["crates/mf-cli"]
 resolver = "3"
 

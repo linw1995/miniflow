@@ -21,6 +21,8 @@ pub enum WorkflowDescriptionVersion {
     V2026_10_19,
     #[serde(rename = "2026-10-23")]
     V2026_10_23,
+    #[serde(rename = "2026-11-09")]
+    V2026_11_09,
 }
 
 impl WorkflowDescriptionVersion {
@@ -32,15 +34,25 @@ impl WorkflowDescriptionVersion {
     }
 
     pub fn supports_iteration_bodies(self) -> bool {
-        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+        matches!(
+            self,
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_11_09
+        )
     }
 
     pub fn supports_clusters(self) -> bool {
-        self == Self::V2026_10_23
+        matches!(self, Self::V2026_10_23 | Self::V2026_11_09)
+    }
+
+    pub fn supports_flow_invocations(self) -> bool {
+        self == Self::V2026_11_09
     }
 
     pub fn uses_node_success_edges(self) -> bool {
-        matches!(self, Self::V2026_10_19 | Self::V2026_10_23)
+        matches!(
+            self,
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_11_09
+        )
     }
 }
 
@@ -140,10 +152,14 @@ impl WorkflowDescription {
     }
 
     pub fn event_schema_version(&self) -> i64 {
-        if self.is_streaming() {
-            crate::STREAM_EVENT_SCHEMA_VERSION
-        } else {
-            crate::EVENT_SCHEMA_VERSION
+        match (
+            self.is_streaming(),
+            self.version.supports_flow_invocations(),
+        ) {
+            (false, false) => crate::EVENT_SCHEMA_VERSION,
+            (true, false) => crate::STREAM_EVENT_SCHEMA_VERSION,
+            (false, true) => crate::FLOW_EVENT_SCHEMA_VERSION,
+            (true, true) => crate::FLOW_STREAM_EVENT_SCHEMA_VERSION,
         }
     }
 
@@ -212,28 +228,64 @@ impl WorkflowDescription {
         &self,
         path: &[crate::event::ScopePathEntry],
     ) -> Result<(), ContractError> {
+        self.scope_definition_path(path).map(|_| ())
+    }
+
+    /// Resolves runtime ancestry to its current definition location. Flow frames jump to
+    /// an absolute origin rather than inventing a static child beneath the invoker.
+    pub fn scope_definition_path(
+        &self,
+        path: &[crate::event::ScopePathEntry],
+    ) -> Result<Vec<String>, ContractError> {
+        self.scope_definition_path_from(&[], path)
+    }
+
+    /// Resolves scopes within a known definition, including an immutable iteration body.
+    /// Runtime item correlation is retained by the caller, not encoded in definition keys.
+    pub fn scope_definition_path_from(
+        &self,
+        definition: &[String],
+        path: &[crate::event::ScopePathEntry],
+    ) -> Result<Vec<String>, ContractError> {
+        use crate::event::ScopePathEntry;
+        crate::event::validate_path(path)?;
         require(
             path.is_empty() || self.version.supports_loops(),
             "scope paths require a description with subgraph support",
         )?;
-        let mut parent = &self.nodes;
-        let mut static_path = Vec::new();
+        let mut static_path = definition.to_vec();
+        let mut parent = if definition.is_empty() {
+            &self.nodes
+        } else {
+            &self
+                .body(definition)
+                .ok_or_else(|| crate::invalid("unknown initial scope definition"))?
+                .nodes
+        };
         for entry in path {
             let key = entry.node_id();
-            let owner = crate::event::ScopePathEntry::binding_owner(key);
+            // Dynamic call IDs are actual node IDs, not legacy encoded binding keys.
+            let owner = (!entry.is_flow())
+                .then(|| ScopePathEntry::binding_owner(key))
+                .flatten();
             require(
                 parent
                     .iter()
                     .any(|node| node.id == owner.as_deref().unwrap_or(key)),
                 "unknown scope container",
             )?;
-            static_path.push(key.to_owned());
+            if let ScopePathEntry::Flow { definition, .. } = entry {
+                self.validate_flow_definition(definition)?;
+                static_path.clone_from(&definition.path);
+            } else {
+                static_path.push(key.to_owned());
+            }
             let body = self
                 .body(&static_path)
                 .ok_or_else(|| crate::invalid("unknown scope body"))?;
             require(
                 if entry.is_call() {
-                    body.source.is_none()
+                    body.source.is_none() && body.state_outputs.is_empty()
                 } else {
                     body.source.is_some() && !body.state_outputs.is_empty()
                 },
@@ -241,7 +293,46 @@ impl WorkflowDescription {
             )?;
             parent = &body.nodes;
         }
-        Ok(())
+        Ok(static_path)
+    }
+
+    /// Checks metadata only. A valid origin never authorizes executable lookup.
+    /// Node-target observations may retain their original workflow's origins only
+    /// through the exact `WorkflowId::for_node_target` mapping and retained bodies.
+    pub fn validate_flow_definition(
+        &self,
+        origin: &crate::event::FlowOrigin,
+    ) -> Result<(), ContractError> {
+        require(
+            self.version.supports_flow_invocations(),
+            "Flow invocation requires description version 2026-11-09",
+        )?;
+        origin.validate()?;
+        let matching_workflow = if origin.workflow_id == self.workflow_id {
+            true
+        } else if let ([root], [target]) = (self.nodes.as_slice(), self.execution_order.as_slice())
+        {
+            // Node isolation changes the operation's ID, not prepared values'
+            // definition ownership. Verify the exact isolation hash and shape;
+            // this is not a general foreign-origin allowance.
+            root.id == *target && self.workflow_id == origin.workflow_id.for_node_target(target)?
+        } else {
+            false
+        };
+        if !matching_workflow {
+            return crate::UnsupportedFlowOriginSnafu {
+                owning_workflow: self.workflow_id.clone(),
+                origin_workflow: origin.workflow_id.clone(),
+            }
+            .fail();
+        }
+        let body = self
+            .body(&origin.path)
+            .ok_or_else(|| crate::invalid("unknown Flow origin definition"))?;
+        require(
+            body.source.is_none() && body.state_outputs.is_empty(),
+            "Flow origin does not describe a callable body",
+        )
     }
 
     /// Lifecycle paths contain Loop and Call scopes; Iteration items use separate detail spans.
@@ -291,6 +382,7 @@ impl WorkflowDescription {
             WorkflowDescriptionVersion::V2026_10_03
                 | WorkflowDescriptionVersion::V2026_10_19
                 | WorkflowDescriptionVersion::V2026_10_23
+                | WorkflowDescriptionVersion::V2026_11_09
         ) {
             require(
                 self.execution.is_some(),

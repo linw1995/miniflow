@@ -745,6 +745,94 @@ impl ExecutionContext {
         result
     }
 
+    /// Invokes an edge-carried Flow at its actual definition location.
+    ///
+    /// Anonymous native bodies can execute without observation. An observed call
+    /// must resolve its origin in the current description before any body effects;
+    /// the invoker is never treated as the body's static definition owner.
+    pub fn run_flow<T>(
+        &mut self,
+        id: &str,
+        arguments: crate::WorkflowArguments,
+        origin: Option<&crate::FlowOrigin>,
+        nodes: &[crate::NodeIdentity],
+        run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
+    ) -> Result<T, WorkflowRunError> {
+        let parent_path = self.invocation_path();
+        ensure!(
+            !id.trim().is_empty() && parent_path.len() < mf_telemetry::MAX_SCOPE_DEPTH,
+            ContextSnafu {
+                definition_id: id,
+                message: "invalid or excessively nested Flow invocation scope",
+            }
+        );
+        ensure!(
+            origin.is_some()
+                || (self.observation.is_none()
+                    && self.body_observation.is_none()
+                    && self.snapshots.is_none()),
+            ContextSnafu {
+                definition_id: id,
+                message: "observed Flow invocation requires a known definition origin",
+            }
+        );
+        if let (Some(observation), Some(origin)) = (&self.observation, origin) {
+            observation
+                .validate_flow_origin(id, &parent_path, origin)
+                .boxed()
+                .context(crate::NodePluginFailedSnafu)
+                .context(NodeExecutionSnafu { definition_id: id })?;
+        }
+        let body_observation = self
+            .body_observation
+            .as_ref()
+            .zip(origin)
+            .map(|(observation, origin)| observation.for_flow_node(id, origin, nodes))
+            .transpose()
+            .boxed()
+            .context(crate::NodePluginFailedSnafu)
+            .context(NodeExecutionSnafu { definition_id: id })?;
+        let mut child = self.fork_body(body_observation);
+        child.remaining_steps = self.remaining_steps.clone();
+        child.observation = self.observation.clone();
+        child.scope_prefix.push(match origin {
+            Some(origin) => LoopPathEntry::Flow {
+                call_id: id.into(),
+                definition: origin.clone(),
+            },
+            // This frame records runtime ancestry only. No observed definition
+            // lookup is allowed for an anonymous native body (checked above).
+            None => LoopPathEntry::Call { call_id: id.into() },
+        });
+        child.set_workflow_arguments(arguments);
+        let path = child.invocation_path();
+        if let Some(observation) = child
+            .observation
+            .as_mut()
+            .filter(|observation| observation.supports_loops())
+        {
+            observation.call_started(path.clone());
+        }
+        let result = (|| {
+            crate::flow_invocation::workflow_result(
+                child.cancellation().failure().map_or(Ok(()), Err),
+            )?;
+            let result = run(&mut child)?;
+            crate::flow_invocation::workflow_result(
+                child.cancellation().failure().map_or(Ok(()), Err),
+            )?;
+            Ok(result)
+        })();
+        if let Some(observation) = child
+            .observation
+            .as_mut()
+            .filter(|observation| observation.supports_loops())
+        {
+            observation.call_finished(path, result.is_err());
+        }
+        result
+    }
+
     /// Includes enclosing body scopes even when observation and snapshots are disabled.
     pub fn invocation_path(&self) -> Vec<LoopPathEntry> {
         let mut path = self.scope_prefix.clone();
@@ -1454,6 +1542,287 @@ mod tests {
             context.remaining_steps.0.load(Ordering::Acquire),
             crate::MAX_SCHEDULED_STEPS - 2
         );
+    }
+
+    #[test]
+    fn concurrent_flow_invocations_share_budget_workers_and_limits_without_values() {
+        let mut context = ExecutionContext {
+            remaining_steps: StepBudget::new(1),
+            ..ExecutionContext::default()
+        };
+        context.configure_worker_limit(NonZeroUsize::new(2).unwrap());
+        context.outputs.set_value("ambient.value".into(), 99.into());
+        context.set_workflow_arguments(crate::WorkflowArguments(Inputs::from([(
+            "ambient.argument".into(),
+            99.into(),
+        )])));
+        let workers = context.worker_scope();
+        let expected_workers = workers.clone();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let executions = effects.clone();
+        let concurrent = Arc::new(std::sync::Barrier::new(2));
+        let flow = crate::FlowValue::new(crate::PreparedSubgraph::new(
+            Vec::new(),
+            Vec::new(),
+            move |child| {
+                assert!(child.output("ambient.value").is_err());
+                assert!(child.workflow_arguments().0.is_empty());
+                assert!(child.scope_path().is_empty());
+                assert_eq!(child.worker_limit().get(), 2);
+                assert!(Arc::ptr_eq(&expected_workers, &child.worker_scope()));
+                concurrent.wait();
+                child.reserve_step("body")?;
+                executions.fetch_add(1, Ordering::SeqCst);
+                Ok(Default::default())
+            },
+        ))
+        .unwrap();
+        let results = context
+            .run_parallel(2, |parent| {
+                (0..2)
+                    .map(|index| {
+                        let mut caller = parent.fork_domain_with_observation(None);
+                        let flow = flow.clone();
+                        move || {
+                            flow.invoke(&format!("invoke-{index}"), Default::default(), &mut caller)
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        assert_eq!(context.remaining_steps.0.load(Ordering::Acquire), 0);
+        assert_eq!(
+            context.output("ambient.value").unwrap(),
+            ContextValue::Value(&99.into())
+        );
+        assert!(
+            context
+                .workflow_arguments()
+                .0
+                .contains_key("ambient.argument")
+        );
+        assert!(context.invocation_path().is_empty());
+    }
+
+    #[test]
+    fn flow_invocations_check_cancellation_before_body_effects_and_after_completion() {
+        for cancelled_before in [false, true] {
+            let mut context = ExecutionContext::default();
+            let effects = Arc::new(AtomicUsize::new(0));
+            let executions = effects.clone();
+            let flow = crate::FlowValue::new(crate::PreparedSubgraph::new(
+                Vec::new(),
+                Vec::new(),
+                move |child| {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    child.cancellation().cancel(
+                        crate::StreamExecutionSnafu {
+                            message: "cancelled inside Flow",
+                        }
+                        .build(),
+                    );
+                    Ok(Default::default())
+                },
+            ))
+            .unwrap();
+            if cancelled_before {
+                context.cancellation().cancel(
+                    crate::StreamExecutionSnafu {
+                        message: "cancelled before Flow",
+                    }
+                    .build(),
+                );
+            }
+            assert!(
+                flow.invoke("invoke", Default::default(), &mut context)
+                    .is_err()
+            );
+            assert_eq!(
+                effects.load(Ordering::SeqCst),
+                usize::from(!cancelled_before)
+            );
+            assert!(context.cancellation().failure().is_some());
+            assert!(context.invocation_path().is_empty());
+        }
+    }
+
+    #[test]
+    fn observed_flow_invocations_require_a_known_same_artifact_origin_before_effects() {
+        use mf_telemetry::{
+            description::{
+                LoopBodyDescription, NodeDescription, WorkflowDescription,
+                WorkflowDescriptionVersion,
+            },
+            identity::{RunId, WorkflowId},
+            observation::Observer,
+        };
+        let workflow_id = WorkflowId::from_definition(&json!({"workflow":"current"}), &[]).unwrap();
+        let path = vec![crate::ScopePathEntry::binding_key("producer", "body")];
+        let description = WorkflowDescription {
+            version: WorkflowDescriptionVersion::V2026_11_09,
+            workflow_id: workflow_id.clone(),
+            execution: Some(mf_telemetry::description::ExecutionDescription {
+                mode: mf_telemetry::description::ExecutionMode::Single,
+            }),
+            nodes: vec![
+                NodeDescription {
+                    id: "producer".into(),
+                    kind: "builtin.constant".into(),
+                },
+                NodeDescription {
+                    id: "invoke".into(),
+                    kind: "workflow.call".into(),
+                },
+            ],
+            data_edges: Vec::new(),
+            control_edges: Vec::new(),
+            order_edges: Vec::new(),
+            execution_order: vec!["producer".into(), "invoke".into()],
+            loop_bodies: vec![LoopBodyDescription {
+                path: path.clone(),
+                source: None,
+                state_outputs: BTreeMap::new(),
+                nodes: Vec::new(),
+                data_edges: Vec::new(),
+                control_edges: Vec::new(),
+                order_edges: Vec::new(),
+                execution_order: Vec::new(),
+                clusters: Vec::new(),
+            }],
+            clusters: Vec::new(),
+        };
+        let valid_origin = crate::FlowOrigin { workflow_id, path };
+        let foreign = crate::FlowOrigin {
+            workflow_id: WorkflowId::from_definition(&json!({"workflow":"foreign"}), &[]).unwrap(),
+            path: valid_origin.path.clone(),
+        };
+        let unknown = crate::FlowOrigin {
+            workflow_id: valid_origin.workflow_id.clone(),
+            path: vec![crate::ScopePathEntry::binding_key("missing", "body")],
+        };
+        for origin in [
+            None,
+            Some(foreign),
+            Some(unknown),
+            Some(valid_origin.clone()),
+        ] {
+            let valid = origin.as_ref() == Some(&valid_origin);
+            let effects = Arc::new(AtomicUsize::new(0));
+            let executions = effects.clone();
+            let expected = valid_origin.clone();
+            let mut body = crate::PreparedSubgraph::new(Vec::new(), Vec::new(), move |child| {
+                executions.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    child.invocation_path(),
+                    [LoopPathEntry::Flow {
+                        call_id: "invoke".into(),
+                        definition: expected.clone(),
+                    }]
+                );
+                Ok(Default::default())
+            });
+            if let Some(origin) = origin {
+                body = body.with_origin(origin);
+            }
+            let flow = crate::FlowValue::new(body).unwrap();
+            let observation = Observer::stderr(0)
+                .start_with_description(description.clone(), RunId::new())
+                .unwrap();
+            let result = ExecutionContext::run(Some(observation), |context| {
+                flow.invoke("invoke", Default::default(), context)
+            });
+            assert_eq!(result.is_ok(), valid);
+            assert_eq!(effects.load(Ordering::SeqCst), usize::from(valid));
+        }
+
+        // Snapshot-only observation also needs a real definition origin; anonymous
+        // Call ancestry would otherwise claim a child that does not exist.
+        let flow =
+            crate::FlowValue::new(crate::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
+                panic!("anonymous observed body must not execute")
+            }))
+            .unwrap();
+        let mut context = ExecutionContext::default();
+        context.set_snapshot_recorder(crate::SnapshotRecorder::new(|_| {
+            panic!("rejected invocation must not publish fabricated snapshots")
+        }));
+        let error = flow
+            .invoke("invoke", Default::default(), &mut context)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("known definition origin"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn flow_scope_validation_and_unwinding_preserve_the_parent_frame() {
+        let mut context = ExecutionContext::default();
+        assert!(
+            context
+                .run_flow(" ", Default::default(), None, &[], |_| Ok(()))
+                .is_err()
+        );
+        context.scope_prefix = vec![
+            LoopPathEntry::Call {
+                call_id: "enclosing".into(),
+            };
+            mf_telemetry::MAX_SCOPE_DEPTH
+        ];
+        assert!(
+            context
+                .run_flow("invoke", Default::default(), None, &[], |_| Ok(()))
+                .is_err()
+        );
+        context.scope_prefix.clear();
+        context.outputs.set_value("parent.value".into(), 1.into());
+        context.current_node = Some("invoke".into());
+        let scope = ExecutionScope::new(
+            "enclosing-loop",
+            "%frame",
+            0,
+            Outputs::from([("value".into(), 2.into())]),
+            BTreeMap::from([("value".into(), ValueType::Int64)]),
+        )
+        .unwrap();
+        context
+            .run_scope(scope, |parent| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    parent.run_flow(
+                        "invoke",
+                        Default::default(),
+                        None,
+                        &[],
+                        |child| -> Result<(), WorkflowRunError> {
+                            assert!(child.scope_path().is_empty());
+                            assert!(child.scope_values().is_err());
+                            assert!(child.output("parent.value").is_err());
+                            assert!(child.current_node().is_none());
+                            assert!(child.stdin.is_none());
+                            child.reserve_step("body")?;
+                            panic!("unwound Flow body");
+                        },
+                    )
+                }));
+                assert!(result.is_err());
+                assert_eq!(parent.current_node(), Some("invoke"));
+                assert_eq!(parent.scope_values().unwrap()["value"], json!(2));
+                assert!(!parent.scope_exit_requested());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            context.output("parent.value").unwrap(),
+            ContextValue::Value(&1.into())
+        );
+        assert_eq!(
+            context.remaining_steps.0.load(Ordering::Acquire),
+            crate::MAX_SCHEDULED_STEPS - 1
+        );
+        assert!(context.invocation_path().is_empty());
     }
 
     #[test]

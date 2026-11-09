@@ -44,6 +44,7 @@ pub enum ValueType {
     String,
     Array,
     Object,
+    Flow,
     List(Box<ValueType>),
     Map(Box<ValueType>),
     Nullable(Box<ValueType>),
@@ -65,6 +66,7 @@ impl serde::Serialize for ValueType {
             Self::String => "string",
             Self::Array => "array",
             Self::Object => "object",
+            Self::Flow => "flow",
             Self::List(inner) | Self::Map(inner) | Self::Nullable(inner) => {
                 let mut map = serializer.serialize_map(Some(1))?;
                 map.serialize_entry(
@@ -188,6 +190,7 @@ impl ValueType {
                     "string" => Ok(ValueType::String),
                     "array" => Ok(ValueType::Array),
                     "object" => Ok(ValueType::Object),
+                    "flow" => Ok(ValueType::Flow),
                     _ => UnsupportedNameSnafu { name }.fail(),
                 },
                 Value::Object(fields) if fields.len() == 1 => {
@@ -216,7 +219,21 @@ impl ValueType {
             | Self::Float64
             | Self::String => true,
             Self::List(inner) | Self::Map(inner) => inner.is_concrete(),
-            Self::Any | Self::Number | Self::Array | Self::Object | Self::Nullable(_) => false,
+            Self::Any
+            | Self::Number
+            | Self::Array
+            | Self::Object
+            | Self::Flow
+            | Self::Nullable(_) => false,
+        }
+    }
+
+    /// Whether this descriptor requires native values rather than JSON startup sources.
+    pub fn is_runtime_only(&self) -> bool {
+        match self {
+            Self::Flow => true,
+            Self::List(inner) | Self::Map(inner) | Self::Nullable(inner) => inner.is_runtime_only(),
+            _ => false,
         }
     }
 
@@ -237,6 +254,7 @@ impl ValueType {
                 _ => Self::Number,
             },
             "string" => Self::String,
+            "flow" => Self::Flow,
             "array" => {
                 let mut items = value.array_items();
                 if depth < Self::MAX_DEPTH
@@ -261,7 +279,7 @@ impl ValueType {
                 }
                 Self::Object
             }
-            _ => unreachable!("JSON values have a known shape"),
+            _ => unreachable!("runtime values have a known shape"),
         }
     }
 
@@ -354,6 +372,7 @@ impl ValueType {
                 "number",
             )
             | (Self::String, "string")
+            | (Self::Flow, "flow")
             | (Self::Array, "array")
             | (Self::Object, "object") => match self {
                 Self::Int64 => value
@@ -448,6 +467,7 @@ impl fmt::Display for ValueType {
             Self::String => "string",
             Self::Array => "array",
             Self::Object => "object",
+            Self::Flow => "flow",
             Self::List(inner) => return write!(formatter, "list<{inner}>"),
             Self::Map(inner) => return write!(formatter, "map<{inner}>"),
             Self::Nullable(inner) => return write!(formatter, "nullable<{inner}>"),

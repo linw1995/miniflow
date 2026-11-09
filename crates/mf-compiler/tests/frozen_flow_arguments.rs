@@ -249,14 +249,9 @@ fn old_root_preserves_new_child_features_in_every_observation_projection() {
             mf_compiler::WorkflowDefinitionVersion::V2026_09_26
         );
         let graph = mf_compiler::describe_compiled(&plan).unwrap();
-        assert_eq!(
-            graph.version,
-            if clustered {
-                WorkflowDescriptionVersion::V2026_10_23
-            } else {
-                WorkflowDescriptionVersion::V2026_10_19
-            }
-        );
+        // Any actual callable child can be exported as a native Flow value,
+        // independently of this provider's current execution policy.
+        assert_eq!(graph.version, WorkflowDescriptionVersion::V2026_11_09);
         let path = vec![mf_telemetry::event::ScopePathEntry::binding_key(
             "custom", "local",
         )];

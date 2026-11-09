@@ -151,8 +151,9 @@ its native stream coordinator, without rebuilding it or linking its custom nodes
 
 ## Passed subgraphs for custom nodes
 
-Providers expose executable child values through receiver callbacks. `NodeConfig` derives extraction
-for fields typed `Flow` (or `Option<Flow>`); users do not add a separate declaration or change workflow
+Providers expose executable child values through receiver callbacks. `NodeConfig` selects top-level
+`Flow` and `Option<Flow>` fields, including their `PreparedSubgraph` equivalents. It does not traverse
+nested configuration structs or containers. Users do not add a separate declaration or change workflow
 versions. A declared field accepts a local path, a built-in name, or an inline definition:
 
 ```json
@@ -180,11 +181,14 @@ This fragment assumes a provider registering `my-provider.dispatch` with `NodeFa
 and `Config::flow_parameters` extracting a `body: Flow` field; it is not a new core built-in. Alternatively, use
 `"body": {"path": "./worker.json"}` or `"body": {"builtin": "my-provider.worker"}`. Relative paths
 belong to the source file that declares them. Providers decide their own input ports, selection,
-child arguments, execution policy, result shape, and error handling. There is no global Flow environment
-or parameter-alias mapping: the configuration field name is the prepared-child map key and static scope identity.
+child arguments, execution policy, result shape, and error handling. There is no global Flow environment.
+Prepared children use the receiving field's canonical Serde name as their map key and static binding
+identity. Ordinary JSON stays opaque. To pass a callable as a runtime argument rather than a node's
+fixed configuration, use a Flow-valued edge as described below.
 
 Source loading calls the selected receiver's `flow_parameters` callback, resolves only the returned
-child values, and merges child dependencies for standalone compilation. Planning freezes that selected
+child values, and merges child dependencies for standalone compilation. Missing/null optional
+fields produce no executable scopes; required fields still fail provider decoding. Planning freezes the selected
 child tree as explicit `CompiledGraph.children`; saved plans do not rediscover children from JSON.
 Resolved child graphs are compiled into executable Flow objects and injected into those fields. JSON shape alone grants no executable
 authority; ordinary fields containing `definition` or `path` remain ordinary data.
@@ -201,13 +205,110 @@ Event/Stream children. The runtime separately supports factory-backed Event hand
 `PreparedSubgraph::from_stream_factory` and the shared `FlowInvocation` lifecycle. That runtime capability
 does not itself add authored Event-child preparation or generated fresh-state factories.
 
-This feature does not add dynamic call targets, prescribe routers, or introduce a standard
-argument/result envelope. Call, Loop, Iteration, and custom nodes share one declared-child preparation
-and map-based factory contract. Every body uses the same complete Flow definition format under
+Fixed child configuration does not itself add runtime-selected call targets or prescribe routers.
+Flow-valued edges below add explicit callable transport without a standard argument/result envelope.
+Call, Loop, Iteration, and custom nodes share one declared-child preparation and map-based factory contract. Every body uses the same complete Flow definition format under
 ordinary configuration; no legacy Loop/Iteration body adapter is retained. Per-pass/per-item scope
 and lifecycle semantics remain distinct. This does not wrap loops in Calls or expand child
 Event/Stream scheduler support. See
 [node development](node-development.md#receive-and-execute-passed-subgraphs) for the public APIs.
+
+### Pass callable Flow values over edges
+
+A Flow can be an input or output value. Use the existing `builtin.parameters` node to declare and
+receive a `"type": "flow"` parameter, just like other native workflow arguments. A caller supplies the
+value through ordinary input edges or native `WorkflowArguments`; no named binding environment or
+special parameter-default rule is involved.
+
+When a definition needs a fixed Flow value, the existing `builtin.constant` accepts an explicit Flow
+type. Its top-level `value` is prepared as a receiver-authorized source and its ordinary `value` output
+publishes the callable without executing B:
+
+```json
+{
+  "id": "policy",
+  "kind": "builtin.constant",
+  "config": {"type": "flow", "value": {"path": "./B.json"}}
+}
+```
+
+A declares a normal parameter using the existing node:
+
+```json
+{
+  "id": "params",
+  "kind": "builtin.parameters",
+  "config": {"parameters": {"policy": {"type": "flow", "secret": false}}}
+}
+```
+
+Its caller supplies the value with the same `inputs` syntax used for numbers and strings:
+
+```json
+{
+  "id": "callA",
+  "kind": "workflow.call",
+  "config": {"flow": "A"},
+  "inputs": {
+    "params.policy": {"from": {"node": "policy", "port": "value"}}
+  }
+}
+```
+
+A can forward that parameter or call it with the existing `workflow.call`. In input-call mode, its
+configuration declares the expected ordinary input/output ports and the callable arrives through the
+`flow` input. Existing static `flow`/`body` configuration remains supported as a separate mode:
+
+```json
+{
+  "id": "apply",
+  "kind": "workflow.call",
+  "config": {
+    "inputs": [],
+    "outputs": [{"name": "answer", "value_type": "string", "required": true}]
+  },
+  "inputs": {
+    "flow": {"from": {"node": "params", "port": "policy"}}
+  }
+}
+```
+
+The example expects a callable with no ordinary inputs and one required string output named `answer`.
+Other ordinary arguments use additional input edges; there is no special argument/result envelope.
+The invoker checks the received handle's exact input/output contract before starting the body. Port
+names are compared independently of declaration order. `flow` is reserved for the callable input.
+
+Two calls to the same A can receive B and C independently, without modifying A or installing a named
+binding environment. Existing identity and routing nodes can forward callable values without a JSON
+round trip. Definitions remain frozen in `CompiledGraph.children` at their producer; passing a value
+does not copy B into A's definition or reinterpret executable JSON at runtime.
+
+`FlowValue` is a native callable capability, not workflow JSON, a filename, or a registry lookup key.
+Code supplies the same value through typed node fields or native `WorkflowArguments`, using the same
+argument transport as mf-chat's supplied-workflow composition:
+
+```rust
+let inputs = mf_runtime::WorkflowArguments(mf_runtime::Inputs::from([
+    ("params.policy".into(), policy.into()), // policy: FlowValue
+]));
+let outputs = mf_runtime::FlowRuntime::default().execute_with_inputs(&a, inputs)?;
+```
+
+JSON input, environment variables, and JSON defaults cannot create a callable. Direct or nested business JSON
+serialization fails explicitly; diagnostic snapshots render a safe opaque placeholder instead.
+
+The initial dynamic callable contract is finite, without stdin or exported stream emissions. Declared
+ordinary input-call arguments are conservatively secret at the invocation boundary, so snapshots
+cannot expose a selected callee's private input before its handle is decoded. Secret callable selection
+also propagates to returned values. Existing static `workflow.call` streaming behavior is unchanged.
+Invocation creates isolated input/value state while sharing the caller's step budget, cancellation, and
+worker limits. Observation distinguishes the
+invocation node from the producer's actual definition origin; no fictitious child is created beneath
+the invoker. Observed calls currently require a target origin in the running workflow's frozen
+description; an unmapped native callback or a handle from a different artifact fails explicitly rather
+than reporting fictitious child events. Native callbacks remain usable without graph observation.
+See the [complete three-file example](../examples/embedded-workflows) and
+[embedding](embedding.md#repository-example).
 
 ## Node clusters
 

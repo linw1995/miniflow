@@ -965,7 +965,7 @@ fn call_loop_call_execution_preserves_complete_observation_paths() {
     let description = mf_compiler::describe_compiled(&plan).unwrap();
     assert_eq!(
         description.version,
-        mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23
+        mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09
     );
     let harness = capture::Harness::new(true);
     let observation = plan

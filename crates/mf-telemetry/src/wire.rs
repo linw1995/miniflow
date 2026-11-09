@@ -57,7 +57,34 @@ impl WireRecord {
         time_unix_nano: u64,
         trace_context: Option<TraceContext>,
     ) -> Result<Self, ContractError> {
+        Self::from_event_with_schema(
+            event,
+            time_unix_nano,
+            trace_context,
+            if event.event.has_flow_scope() {
+                crate::FLOW_EVENT_SCHEMA_VERSION
+            } else {
+                EVENT_SCHEMA_VERSION
+            },
+        )
+    }
+
+    /// Uses the owning description's schema for every event, including root boundaries.
+    pub fn from_event_with_schema(
+        event: &LifecycleEvent,
+        time_unix_nano: u64,
+        trace_context: Option<TraceContext>,
+        schema_version: i64,
+    ) -> Result<Self, ContractError> {
         event.validate()?;
+        require(
+            matches!(
+                schema_version,
+                EVENT_SCHEMA_VERSION | crate::FLOW_EVENT_SCHEMA_VERSION
+            ) && (!event.event.has_flow_scope()
+                || schema_version == crate::FLOW_EVENT_SCHEMA_VERSION),
+            "Flow frames require the extended event schema",
+        )?;
         if let Some(context) = &trace_context {
             context.ids()?;
         }
@@ -66,7 +93,7 @@ impl WireRecord {
             .as_object_mut()
             .expect("event bodies are objects");
         let mut attributes = Map::from_iter([
-            ("mf.schema.version".into(), json!(EVENT_SCHEMA_VERSION)),
+            ("mf.schema.version".into(), json!(schema_version)),
             ("mf.workflow.id".into(), json!(event.workflow_id)),
             ("mf.run.id".into(), json!(event.run_id)),
             ("mf.event.sequence".into(), json!(event.sequence)),
@@ -111,7 +138,7 @@ impl WireRecord {
             self.scope == INSTRUMENTATION_SCOPE,
             "unexpected instrumentation scope",
         )?;
-        self.schema_version()?;
+        let schema_version = self.schema_version()?;
         if let Some(context) = &self.trace_context {
             context.ids()?;
         }
@@ -187,6 +214,10 @@ impl WireRecord {
             event: serde_json::from_value(json!({"event_name":self.event_name,"body":body}))?,
         };
         result.validate()?;
+        require(
+            !result.event.has_flow_scope() || schema_version == crate::FLOW_EVENT_SCHEMA_VERSION,
+            "Flow frames require the extended event schema",
+        )?;
         Ok(result)
     }
 
@@ -196,7 +227,10 @@ impl WireRecord {
             .as_i64()
             .ok_or_else(|| crate::invalid("invalid event schema version"))?;
         require(
-            version == EVENT_SCHEMA_VERSION,
+            matches!(
+                version,
+                EVENT_SCHEMA_VERSION | crate::FLOW_EVENT_SCHEMA_VERSION
+            ),
             "unsupported event schema version",
         )?;
         Ok(version)
@@ -211,12 +245,12 @@ impl WireRecord {
     /// Fills a fresh record created by a logger with the `mf.workflow` scope.
     /// It does not install a provider or emit, enqueue, or export the record.
     pub fn write_to(&self, record: &mut impl LogRecord) -> Result<(), ContractError> {
-        let (normalized, name) = if self
-            .attributes
-            .get("mf.schema.version")
-            .and_then(Value::as_i64)
-            == Some(crate::STREAM_EVENT_SCHEMA_VERSION)
-        {
+        let (mut normalized, name) = if matches!(
+            self.attributes
+                .get("mf.schema.version")
+                .and_then(Value::as_i64),
+            Some(crate::STREAM_EVENT_SCHEMA_VERSION | crate::FLOW_STREAM_EVENT_SCHEMA_VERSION)
+        ) {
             let event = crate::stream::StreamRecord::decode(self)?;
             (
                 event.to_wire(self.time_unix_nano, self.trace_context.clone())?,
@@ -229,6 +263,11 @@ impl WireRecord {
                 event.event.name(),
             )
         };
+        // Preserve the description-selected version even for events with no Flow frame.
+        normalized.attributes.insert(
+            "mf.schema.version".into(),
+            self.attribute("mf.schema.version")?.clone(),
+        );
         let timestamp = UNIX_EPOCH
             .checked_add(Duration::from_nanos(self.time_unix_nano))
             .ok_or_else(|| crate::invalid("timestamp exceeds platform range"))?;

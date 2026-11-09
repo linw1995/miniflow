@@ -9,6 +9,7 @@ use mf_telemetry::{description::WorkflowDescription, event::NodeIdentity};
 use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CyclePath(Vec<DefinitionId>);
@@ -528,15 +529,41 @@ pub fn prepare_compiled_graph_with_layouts(
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     validate_graph_structure(graph)?;
     crate::validate_compiled_graph(registry, graph)?;
-    prepare_graph(
+    let origin_identity = Arc::new(OnceLock::new());
+    let (nodes, order) = prepare_graph(
         graph,
         &mut GraphPreparation {
             registry,
             root_version: graph.definition.version,
             body_layouts,
             path: Vec::new(),
+            origin_identity: origin_identity.clone(),
         },
-    )
+    )?;
+    finalize_origin_identity(graph, &nodes, &origin_identity)?;
+    Ok((nodes, order))
+}
+
+/// Factories may determine that an authored root is finite or streaming. Finalize
+/// the shared origin only after that decision, without constructing any node twice.
+fn finalize_origin_identity(
+    graph: &mf_runtime::CompiledGraph,
+    nodes: &[FlowNode],
+    identity: &OnceLock<mf_telemetry::identity::WorkflowId>,
+) -> Result<WorkflowDefinition, WorkflowCompileError> {
+    let mut resolved = graph.clone();
+    resolved.definition = resolve_execution(&graph.definition, nodes)?;
+    let workflow_id = resolved.workflow_id().context(GraphSnafu)?;
+    // This cell belongs exclusively to this root preparation and is set once,
+    // after every factory has returned. Prepared descendants only read it.
+    ensure!(
+        identity.set(workflow_id).is_ok(),
+        InvalidGraphSnafu {
+            definition_id: DefinitionId::from("<workflow>"),
+            message: "Flow origin identity was already finalized",
+        }
+    );
+    Ok(resolved.definition)
 }
 
 pub type ScopeLayouts = BTreeMap<
@@ -552,6 +579,7 @@ struct GraphPreparation<'a> {
     root_version: mf_runtime::WorkflowDefinitionVersion,
     body_layouts: Option<&'a mut ScopeLayouts>,
     path: Vec<DefinitionId>,
+    origin_identity: Arc<OnceLock<mf_telemetry::identity::WorkflowId>>,
 }
 
 fn prepare_graph(
@@ -1897,6 +1925,7 @@ pub fn prepare_compiled_plan(
     registry: &NodeRegistry,
 ) -> Result<(CompiledWorkflow, crate::FlowBuilder), WorkflowCompileError> {
     validate_compiled_scope_orders(plan, registry)?;
+    let origin_identity = Arc::new(OnceLock::new());
     let (nodes, _) = prepare_graph(
         &plan.graph,
         &mut GraphPreparation {
@@ -1904,10 +1933,11 @@ pub fn prepare_compiled_plan(
             root_version: plan.graph.definition.version,
             body_layouts: None,
             path: Vec::new(),
+            origin_identity: origin_identity.clone(),
         },
     )?;
     let mut resolved = plan.clone();
-    resolved.graph.definition = resolve_execution(&plan.graph.definition, &nodes)?;
+    resolved.graph.definition = finalize_origin_identity(&plan.graph, &nodes, &origin_identity)?;
     let builder = crate::FlowBuilder::prepare(
         nodes,
         plan.graph.definition.edges.clone(),
@@ -2125,15 +2155,19 @@ pub fn resolve_nodes(
         crate::resolve_flows_with_registry(definition, None, registry).map_err(resolution_error)?;
     let normalized = plan_resolved_workflow(&resolved)?;
     validate_compiled_scope_orders(&normalized, registry)?;
-    resolve_nodes_in_scope(
+    let origin_identity = Arc::new(OnceLock::new());
+    let nodes = resolve_nodes_in_scope(
         &normalized.graph,
         &mut GraphPreparation {
             registry,
             root_version: definition.version,
             body_layouts: None,
             path: Vec::new(),
+            origin_identity: origin_identity.clone(),
         },
-    )
+    )?;
+    finalize_origin_identity(&normalized.graph, &nodes, &origin_identity)?;
+    Ok(nodes)
 }
 
 fn registration_for(
@@ -2209,10 +2243,7 @@ fn prepare_subgraph_body(
         .path
         .push(graph.child_scope_key(node, name).into());
     let prepared = prepare_graph(graph, preparation);
-    let path = preparation
-        .body_layouts
-        .as_ref()
-        .map(|_| preparation.path.clone());
+    let path = preparation.path.clone();
     preparation.path.pop();
     let (nodes, order) = crate::calls::child_result(node, prepared)?;
     let mut stream_outputs = prepare_stream_outputs(&graph.relations.streams, &nodes, node)?;
@@ -2280,10 +2311,7 @@ fn prepare_subgraph_body(
                 output
             })
             .collect();
-        layouts.insert(
-            path.expect("layout collection has a body path"),
-            (flow.execution_domains().clone(), streams),
-        );
+        layouts.insert(path.clone(), (flow.execution_domains().clone(), streams));
     }
     let flow = flow
         .with_stream_outputs(stream_outputs)
@@ -2291,7 +2319,12 @@ fn prepare_subgraph_body(
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
-    Ok(PreparedSubgraph::from_flow(flow, identities).with_relations(graph.relations.clone()))
+    Ok(PreparedSubgraph::from_flow(flow, identities)
+        .with_relations(graph.relations.clone())
+        .with_origin_source(
+            preparation.origin_identity.clone(),
+            path.iter().map(ToString::to_string).collect(),
+        ))
 }
 
 /// Prepare every selected child before the single registry factory dispatch.
@@ -2347,10 +2380,17 @@ fn prepare_node_subgraphs(
                     message: "host Flow executors cannot be emitted into generated execution plans"
                 }
             );
+            let path = preparation
+                .path
+                .iter()
+                .map(ToString::to_string)
+                .chain(std::iter::once(key))
+                .collect();
             registered
                 .body
                 .clone()
                 .with_relations(body.relations.clone())
+                .with_origin_source(preparation.origin_identity.clone(), path)
         } else {
             prepare_subgraph_body(node, name, preparation, body)?
         };
@@ -2432,4 +2472,408 @@ fn resolve_nodes_in_scope(
             Ok(FlowNode::new(node.id.clone(), instance))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate mfn_core as _;
+
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ORIGIN_EVENT_CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
+
+    struct NeverRun;
+
+    impl mf_runtime::TaskNode for NeverRun {
+        fn execute(
+            &self,
+            _: mf_runtime::Inputs,
+            _: &mut mf_runtime::ExecutionContext,
+        ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
+            panic!("identity finalization must not execute a Task")
+        }
+    }
+
+    impl mf_runtime::EventNode for NeverRun {
+        fn on_event(
+            &mut self,
+            _: mf_runtime::NodeEvent,
+            _: &mf_runtime::EventContext<'_>,
+        ) -> Result<mf_runtime::EventEffects, mf_runtime::NodeExecutionError> {
+            panic!("identity finalization must not dispatch an Event")
+        }
+    }
+
+    inventory::submit! {
+        mf_runtime::NodeRegistration {
+            kind: "compiler-test.origin-event",
+            factory: mf_runtime::NodeFactory::Plain(|_| {
+                ORIGIN_EVENT_CONSTRUCTIONS.fetch_add(1, Ordering::SeqCst);
+                Ok(mf_runtime::PreparedNode::from_parts(
+                    mf_runtime::NodeExecution::Event(Box::new(NeverRun)),
+                    mf_runtime::NodePorts {
+                        inputs: vec![mf_runtime::PortSpec::new("flow", ValueType::Flow, true)],
+                        outputs: Vec::new(),
+                    },
+                ))
+            }),
+        }
+    }
+
+    #[derive(mf_runtime::NodeConfig)]
+    #[serde(deny_unknown_fields)]
+    struct NativeFlowConfig {
+        body: PreparedSubgraph,
+    }
+
+    #[derive(mf_runtime::NodeValue)]
+    struct NativeEmpty {}
+
+    #[derive(mf_runtime::NodeValue)]
+    struct NativeFlowPorts {
+        flow: mf_runtime::FlowValue,
+    }
+
+    struct NativeFlowProducer(mf_runtime::FlowValue);
+
+    impl mf_runtime::TypedTaskNode for NativeFlowProducer {
+        type Input = NativeEmpty;
+        type Output = NativeFlowPorts;
+
+        fn execute(
+            &self,
+            _: Self::Input,
+            _: &mut mf_runtime::ExecutionContext,
+        ) -> Result<mf_runtime::TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError>
+        {
+            Ok(NativeFlowPorts {
+                flow: self.0.clone(),
+            }
+            .into())
+        }
+    }
+
+    #[derive(mf_runtime::NodeValue)]
+    struct NativeAnswer {
+        answer: i64,
+    }
+
+    struct NativeFlowInvoker;
+
+    impl mf_runtime::TypedTaskNode for NativeFlowInvoker {
+        type Input = NativeFlowPorts;
+        type Output = NativeAnswer;
+
+        fn execute(
+            &self,
+            input: Self::Input,
+            context: &mut mf_runtime::ExecutionContext,
+        ) -> Result<mf_runtime::TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError>
+        {
+            let id = context
+                .current_node()
+                .expect("runtime supplies the native invoker ID")
+                .to_owned();
+            let outputs = input.flow.invoke(&id, Default::default(), context)?;
+            Ok(NativeAnswer {
+                answer: outputs["answer"].as_i64().unwrap(),
+            }
+            .into())
+        }
+    }
+
+    inventory::submit! {
+        mf_runtime::NodeRegistration {
+            kind: "compiler-test.native-flow-producer",
+            factory: mf_runtime::NodeFactory::Subgraph {
+                flow_parameters: <NativeFlowConfig as mf_runtime::NodeConfig>::flow_parameters,
+                plain: |_| mf_runtime::NodeInvalidSubgraphSnafu {
+                    message: "native producer requires a prepared callable child",
+                }.fail(),
+                prepared: |_, config, children| {
+                    let config = <NativeFlowConfig as mf_runtime::NodeConfig>::from_config(config, children)?;
+                    mf_runtime::PreparedNode::typed_task(
+                        NativeFlowProducer(mf_runtime::FlowValue::new(config.body)?),
+                        mf_runtime::NodeMetadata::default(),
+                    )
+                },
+            },
+        }
+    }
+
+    inventory::submit! {
+        mf_runtime::NodeRegistration {
+            kind: "compiler-test.native-flow-invoker",
+            factory: mf_runtime::NodeFactory::Plain(|_| {
+                mf_runtime::PreparedNode::typed_task(NativeFlowInvoker, mf_runtime::NodeMetadata::default())
+            }),
+        }
+    }
+
+    #[test]
+    fn native_flow_providers_observe_known_callable_children_without_builtin_node_names() {
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version":"2026-10-23", "dependencies":{},
+            "nodes":[
+                {"id":"make", "kind":"compiler-test.native-flow-producer", "config":{
+                    "body":{"version":"2026-10-23", "dependencies":{},
+                        "nodes":[{"id":"answer", "kind":"builtin.constant", "config":{"value":42}}],
+                        "outputs":[{"name":"answer", "node":"answer", "port":"value"}]
+                    }
+                }},
+                {"id":"apply", "kind":"compiler-test.native-flow-invoker", "inputs":{
+                    "flow":{"from":{"node":"make", "port":"flow"}}
+                }}
+            ],
+            "outputs":[{"name":"answer", "node":"apply", "port":"answer"}]
+        }))
+        .unwrap();
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let description = describe_compiled(&plan).unwrap();
+        assert_eq!(
+            description.version,
+            mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09,
+        );
+        let definition_path = vec![mf_runtime::ScopePathEntry::binding_key("make", "body")];
+        assert!(description.body(&definition_path).is_some());
+        description
+            .validate_scope_path(&[mf_runtime::ScopePathEntry::Flow {
+                call_id: "apply".into(),
+                definition: mf_runtime::FlowOrigin {
+                    workflow_id: description.workflow_id.clone(),
+                    path: definition_path,
+                },
+            }])
+            .unwrap();
+        let observation = plan
+            .start_observation(
+                &mf_telemetry::observation::Observer::stderr(0),
+                mf_telemetry::identity::RunId::new(),
+            )
+            .unwrap();
+        let outputs =
+            execute_compiled_with_inputs(&plan, &registry, Default::default(), Some(observation))
+                .unwrap();
+        assert_eq!(outputs["answer"].as_i64(), Some(42));
+    }
+
+    #[test]
+    fn input_calls_accept_native_flow_parameters_without_static_children() {
+        let registry = NodeRegistry::from_inventory().unwrap();
+        for version in ["2026-10-28", "2026-10-23"] {
+            let definition: WorkflowDefinition = serde_json::from_value(json!({
+                "version":version, "dependencies":{},
+                "nodes":[
+                    {"id":"formal", "kind":"builtin.parameters", "config":{
+                        "parameters":{"callback":{"type":"flow", "secret":false}}
+                    }},
+                    {"id":"apply", "kind":"workflow.call", "config":{
+                        "inputs":[],
+                        "outputs":[{"name":"answer", "value_type":"int", "required":true}]
+                    }, "inputs":{"flow":{"from":{"node":"formal", "port":"callback"}}}}
+                ],
+                "outputs":[{"name":"answer", "node":"apply", "port":"answer"}]
+            }))
+            .unwrap();
+            let plan = compile_definition(&definition, &registry).unwrap();
+            assert!(plan.graph.children.is_empty());
+            assert_eq!(plan.graph.relations, GraphRelations::default());
+            assert_eq!(
+                plan.graph.definition.nodes[1].config,
+                definition.nodes[1].config
+            );
+            let replay = CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+            assert_eq!(replay, plan);
+            for plan in [&plan, &replay] {
+                let callable = mf_runtime::FlowValue::new(PreparedSubgraph::new(
+                    Vec::new(),
+                    vec![mf_runtime::PortSpec::new("answer", ValueType::Int64, true)],
+                    |_| Ok(mf_runtime::Outputs::from([("answer".into(), 42.into())])),
+                ))
+                .unwrap();
+                let outputs = execute_compiled_with_inputs(
+                    plan,
+                    &registry,
+                    mf_runtime::WorkflowArguments(mf_runtime::Inputs::from([(
+                        "formal.callback".into(),
+                        callable.into(),
+                    )])),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(outputs["answer"].as_i64(), Some(42));
+            }
+        }
+    }
+
+    #[test]
+    fn callable_child_protocol_promotion_retains_origins_but_preserves_pure_scope_history() {
+        let describe = |value| {
+            let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
+            describe_compiled(&plan_definition(&definition).unwrap()).unwrap()
+        };
+        let root = describe(json!({
+            "version":"2026-10-23", "dependencies":{}, "nodes":[]
+        }));
+        assert_eq!(
+            root.version,
+            mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23
+        );
+        let unbound_invoker = describe(json!({
+            "version":"2026-10-23", "dependencies":{},
+            "nodes":[{"id":"apply", "kind":"workflow.call", "config":{"inputs":[], "outputs":[]}}]
+        }));
+        assert_eq!(unbound_invoker.version, root.version);
+        let pure_loop = describe(json!({
+            "version":"2026-09-29", "dependencies":{},
+            "nodes":[{"id":"repeat", "kind":"workflow.loop", "config":{
+                "max_iterations":1, "variables":[{"name":"value", "type":"int"}],
+                "body":{"version":"2026-09-29", "dependencies":{}, "nodes":[]}
+            }}]
+        }));
+        assert_eq!(
+            pure_loop.version,
+            mf_telemetry::description::WorkflowDescriptionVersion::V2026_09_29
+        );
+        let mut iteration = json!({
+            "version":"2026-10-03", "dependencies":{},
+            "nodes":[{"id":"each", "kind":"builtin.iteration", "config":{
+                "body":{"version":"2026-10-03", "dependencies":{}, "nodes":[]}
+            }}]
+        });
+        let pure_iteration = describe(iteration.clone());
+        assert_eq!(
+            pure_iteration.version,
+            mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_03
+        );
+        assert!(pure_iteration.loop_bodies.is_empty());
+        iteration["nodes"][0]["config"]["body"]["nodes"] = json!([{
+            "id":"make", "kind":"compiler-test.native-flow-producer", "config":{
+                "body":{"version":"2026-10-03", "dependencies":{}, "nodes":[]}
+            }
+        }]);
+        let nested_callable = describe(iteration);
+        assert_eq!(
+            nested_callable.version,
+            mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09
+        );
+        // The old root's historically omitted iteration cannot hide the actual
+        // definition origin of a capability exported inside that iteration.
+        assert!(nested_callable.body(&["each".into()]).is_some());
+        assert!(
+            nested_callable
+                .body(&[
+                    "each".into(),
+                    mf_runtime::ScopePathEntry::binding_key("make", "body"),
+                ])
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn prepared_flow_values_resolve_the_final_root_identity_without_rebuilding_factories() {
+        ORIGIN_EVENT_CONSTRUCTIONS.store(0, Ordering::SeqCst);
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        for streaming in [false, true] {
+            let mut authored = json!({
+                "version":"2026-10-28", "dependencies":{},
+                "nodes":[{"id":"make", "kind":"builtin.constant", "config":{
+                    "type":"flow", "value":{"version":"2026-10-28", "dependencies":{}, "nodes":[]}
+                }}],
+                "outputs":[{"name":"flow", "node":"make", "port":"value"}]
+            });
+            if streaming {
+                authored["nodes"].as_array_mut().unwrap().push(json!({
+                    "id":"event", "kind":"compiler-test.origin-event",
+                    "inputs":{"flow":{"from":{"node":"make", "port":"value"}}}
+                }));
+            } else {
+                authored["execution"] = json!({});
+            }
+            let definition: WorkflowDefinition = serde_json::from_value(authored).unwrap();
+            let plan = plan_definition(&definition).unwrap();
+            let original = plan.graph.workflow_id().unwrap();
+            let (nodes, _) =
+                prepare_compiled_graph_with_layouts(&plan.graph, &registry, None).unwrap();
+            let mut resolved = plan.graph.clone();
+            resolved.definition = resolve_execution(&resolved.definition, &nodes).unwrap();
+            let expected = resolved.workflow_id().unwrap();
+            assert_ne!(original, expected);
+            let make = nodes
+                .iter()
+                .find(|node| node.definition_id.as_str() == "make")
+                .unwrap();
+            assert_eq!(
+                make.metadata.output_derivations,
+                [OutputDerivation::known_type("value", ValueType::Flow)]
+            );
+            assert_eq!(make.metadata.ports.outputs[0].value_type, ValueType::Flow);
+            let producer = make.node.as_ref().unwrap().as_task_node().unwrap();
+            let result = producer
+                .execute(
+                    Default::default(),
+                    &mut mf_runtime::ExecutionContext::default(),
+                )
+                .unwrap();
+            let flow = result.outputs["value"].as_flow().unwrap();
+            let origin = flow
+                .body()
+                .origin()
+                .expect("completed root preparation has an origin");
+            assert_eq!(origin.workflow_id, expected);
+            assert_eq!(
+                origin.path,
+                [plan.graph.children[&"make".into()]["value"]
+                    .child_scope_key(&plan.graph.definition.nodes[0], "value",)],
+            );
+            assert_eq!(
+                ORIGIN_EVENT_CONSTRUCTIONS.load(Ordering::SeqCst),
+                usize::from(streaming),
+            );
+        }
+    }
+
+    #[test]
+    fn child_origin_identity_is_finalized_after_root_execution_resolution() {
+        for streaming in [false, true] {
+            let mut definition: WorkflowDefinition = serde_json::from_value(json!({
+                "version":"2026-10-28", "dependencies":{},
+                "nodes":[{"id":"root", "kind":"test.origin-identity"}]
+            }))
+            .unwrap();
+            // Exercise both automatic streaming and an authored streaming hint
+            // whose prepared Task-only graph is actually finite.
+            definition.execution = (!streaming).then(Default::default);
+            let graph = mf_runtime::CompiledGraph {
+                definition,
+                execution_order: vec!["root".into()],
+                relations: Default::default(),
+                children: BTreeMap::new(),
+            };
+            let execution = if streaming {
+                mf_runtime::NodeExecution::Event(Box::new(NeverRun))
+            } else {
+                mf_runtime::NodeExecution::Task(Box::new(NeverRun))
+            };
+            let nodes = vec![FlowNode::new(
+                "root",
+                mf_runtime::PreparedNode::from_parts(
+                    execution,
+                    mf_runtime::NodeMetadata::default(),
+                ),
+            )];
+            let identity = OnceLock::new();
+            let original = graph.workflow_id().unwrap();
+            let definition = finalize_origin_identity(&graph, &nodes, &identity).unwrap();
+            assert_eq!(definition.execution.is_some(), streaming);
+            let mut resolved = graph.clone();
+            resolved.definition = definition;
+            let expected = resolved.workflow_id().unwrap();
+            assert_ne!(original, expected);
+            assert_eq!(identity.get(), Some(&expected));
+        }
+    }
 }

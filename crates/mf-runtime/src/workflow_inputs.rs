@@ -193,6 +193,13 @@ impl InputBinding {
     }
 
     pub fn validate(&self, name: &str, value_type: &ValueType) -> Result<(), WorkflowInputError> {
+        ensure!(
+            !value_type.is_runtime_only() || (self.env.is_none() && self.default.is_none()),
+            InvalidSnafu {
+                path: pointer("", name),
+                message: "runtime-only Flow inputs cannot use environment bindings or JSON defaults",
+            }
+        );
         if let Some(env) = &self.env
             && (env.is_empty() || env.contains(['=', '\0']))
         {

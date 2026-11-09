@@ -316,6 +316,37 @@ responsible for their own nested value codecs.
 `expected`, and `actual` details remain readable through dereferencing. Direct construction and struct patterns must
 use its enum variants; construct scalar mismatches with `TypeMismatch::Value { details: TypeMismatchDetails { ... } }`.
 
+### Callable values on ordinary ports
+
+Use `FlowValue` for a callable input or output, not `serde_json::Value` or a string reference:
+
+```rust
+use mf_runtime::{FlowValue, NodeValue};
+
+#[derive(NodeValue)]
+struct ApplyInput {
+    policy: FlowValue,
+    value: i64,
+}
+```
+
+The generated codecs declare `ValueType::Flow` and transfer the native capability without Serde.
+Cloning or forwarding it preserves the prepared body; it does not execute the body or capture the
+producer's execution context. `FlowValue::new(prepared_body)` creates a finite callable from a
+`PreparedSubgraph`; an explicit Flow-typed `builtin.constant` performs equivalent preparation for
+fixed values in authored definitions. `builtin.parameters` declares Flow-valued parameters supplied by
+native code or enclosing input edges. Use `workflow.call` in input-call mode to invoke a received value,
+with explicit normal port contracts and input edges. Native workflow inputs can carry the same handle directly. Native receivers
+call `policy.invoke(id, arguments, context)`; this validates arguments/results and retains ordinary
+invocation budgets, cancellation, and context isolation. `FlowValue::from_flow(flow)` wraps an already
+prepared native `Flow` without serializing it.
+
+Callable capabilities are runtime-only. Business JSON serialization, including a Flow nested in a
+collection, fails rather than serializing executable code. Debug/snapshot projection is safe and
+opaque. JSON deserialization cannot produce a Flow, and JSON defaults/environment bindings cannot
+supply one. Flow-valued fields initially retain dynamic generated execution rather than claiming
+certified direct-transfer support.
+
 ### Typed generation opt-in
 
 A provider can opt a named value into certified field access and borrowed validation with `#[value(typed)]`.

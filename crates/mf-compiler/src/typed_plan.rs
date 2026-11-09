@@ -126,6 +126,20 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
         if !standard_runner {
             return Some(CustomRunner);
         }
+        // Native Flow handles use ordinary ValueRef transport. No typed codec
+        // evidence currently certifies bypassing that transport, even inside a
+        // list, map, or nullable port.
+        if [source, target].into_iter().any(|index| {
+            nodes[index]
+                .metadata
+                .ports
+                .inputs
+                .iter()
+                .chain(&nodes[index].metadata.ports.outputs)
+                .any(|port| port.value_type.is_runtime_only())
+        }) {
+            return Some(UnprovenRefinement);
+        }
         if [source, target]
             .into_iter()
             .any(|index| !nodes[index].metadata.stream_outputs.is_empty())
@@ -263,4 +277,77 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
         }
     }
     plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mf_runtime::{
+        EdgeDefinition, FlowNode, NodeExecution, NodeMetadata, NodePorts, PortSpec, PreparedNode,
+        ValueType,
+    };
+
+    struct NeverRun;
+
+    impl mf_runtime::TaskNode for NeverRun {
+        fn execute(
+            &self,
+            _: mf_runtime::Inputs,
+            _: &mut mf_runtime::ExecutionContext,
+        ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
+            panic!("typed planning must not execute a node")
+        }
+    }
+
+    #[test]
+    fn flow_ports_use_native_transport_until_typed_codecs_are_certified() {
+        for value_type in [
+            ValueType::Flow,
+            ValueType::List(Box::new(ValueType::Flow)),
+            ValueType::Map(Box::new(ValueType::Nullable(Box::new(ValueType::Flow)))),
+        ] {
+            let node = |id: &str, inputs, outputs| {
+                FlowNode::new(
+                    id,
+                    PreparedNode::from_parts(
+                        NodeExecution::Task(Box::new(NeverRun)),
+                        NodeMetadata::from(NodePorts { inputs, outputs }),
+                    ),
+                )
+            };
+            let flow = crate::FlowBuilder::prepare(
+                vec![
+                    node(
+                        "producer",
+                        Vec::new(),
+                        vec![PortSpec::owned("flow", value_type.clone(), true)],
+                    ),
+                    node(
+                        "consumer",
+                        vec![PortSpec::owned("flow", value_type, true)],
+                        Vec::new(),
+                    ),
+                ],
+                vec![EdgeDefinition {
+                    from_node: "producer".into(),
+                    from_output: "flow".into(),
+                    to_node: "consumer".into(),
+                    to_input: "flow".into(),
+                    exclusive: false,
+                }],
+                vec!["producer".into(), "consumer".into()],
+                Vec::new(),
+            )
+            .unwrap()
+            .into_tasks()
+            .unwrap();
+            let plan = plan_typed_segments(&flow, true, true);
+            assert!(plan.segments.is_empty());
+            assert_eq!(plan.connections.len(), 1);
+            assert_eq!(
+                plan.connections[0].fallback,
+                Some(TypedFallbackReason::UnprovenRefinement)
+            );
+        }
+    }
 }

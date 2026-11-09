@@ -352,7 +352,38 @@ impl StreamRecord {
         timestamp: u64,
         trace: Option<TraceContext>,
     ) -> Result<WireRecord, ContractError> {
+        let has_flow =
+            matches!(&self.payload, StreamPayload::Execution(event) if event.has_flow_scope());
+        self.to_wire_with_schema(
+            timestamp,
+            trace,
+            if has_flow {
+                crate::FLOW_STREAM_EVENT_SCHEMA_VERSION
+            } else {
+                STREAM_EVENT_SCHEMA_VERSION
+            },
+        )
+    }
+
+    pub fn to_wire_with_schema(
+        &self,
+        timestamp: u64,
+        trace: Option<TraceContext>,
+        schema_version: i64,
+    ) -> Result<WireRecord, ContractError> {
         self.validate()?;
+        crate::require(
+            matches!(
+                schema_version,
+                STREAM_EVENT_SCHEMA_VERSION | crate::FLOW_STREAM_EVENT_SCHEMA_VERSION
+            ),
+            "unsupported stream event schema",
+        )?;
+        crate::require(
+            !matches!(&self.payload, StreamPayload::Execution(event) if event.has_flow_scope())
+                || schema_version == crate::FLOW_STREAM_EVENT_SCHEMA_VERSION,
+            "Flow frames require the extended stream event schema",
+        )?;
         let mut wire = match &self.payload {
             StreamPayload::Execution(event) => WireRecord::from_event(
                 &LifecycleEvent {
@@ -391,10 +422,8 @@ impl StreamRecord {
                 }
             }
         };
-        wire.attributes.insert(
-            "mf.schema.version".into(),
-            json!(STREAM_EVENT_SCHEMA_VERSION),
-        );
+        wire.attributes
+            .insert("mf.schema.version".into(), json!(schema_version));
         if let Some(identity) = &self.identity {
             wire.body
                 .as_object_mut()
@@ -413,11 +442,12 @@ impl StreamRecord {
     pub fn decode(wire: &WireRecord) -> Result<Self, ContractError> {
         ensure!(
             wire.scope == INSTRUMENTATION_SCOPE
-                && wire
-                    .attributes
-                    .get("mf.schema.version")
-                    .and_then(Value::as_i64)
-                    == Some(STREAM_EVENT_SCHEMA_VERSION),
+                && matches!(
+                    wire.attributes
+                        .get("mf.schema.version")
+                        .and_then(Value::as_i64),
+                    Some(STREAM_EVENT_SCHEMA_VERSION | crate::FLOW_STREAM_EVENT_SCHEMA_VERSION)
+                ),
             InvalidSnafu {
                 message: "unsupported stream event schema"
             }
@@ -454,9 +484,19 @@ impl StreamRecord {
         {
             let mut execution = wire.clone();
             execution.body = Value::Object(body);
-            execution
-                .attributes
-                .insert("mf.schema.version".into(), json!(EVENT_SCHEMA_VERSION));
+            execution.attributes.insert(
+                "mf.schema.version".into(),
+                json!(if wire
+                    .attributes
+                    .get("mf.schema.version")
+                    .and_then(Value::as_i64)
+                    == Some(crate::FLOW_STREAM_EVENT_SCHEMA_VERSION)
+                {
+                    crate::FLOW_EVENT_SCHEMA_VERSION
+                } else {
+                    EVENT_SCHEMA_VERSION
+                }),
+            );
             StreamPayload::Execution(execution.decode()?.event)
         } else {
             if wire.event_name.starts_with("mf.batch.") {

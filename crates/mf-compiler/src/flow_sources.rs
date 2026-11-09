@@ -1,7 +1,7 @@
 use crate::{NodeDependency, WorkflowDefinition, lowering::ScopeContext};
 use mf_runtime::{
-    CALL_KIND, DefinitionId, FlowSource, GraphRelations, MAX_CALL_DEPTH, NodeDefinition,
-    NodeRegistry,
+    CALL_KIND, CallConfig, DefinitionId, FlowSource, GraphRelations, MAX_CALL_DEPTH,
+    NodeDefinition, NodeRegistry,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
@@ -931,7 +931,10 @@ impl Resolver {
             if context.relations.instruction(&node.id).is_some() {
                 continue;
             }
-            if node.kind == CALL_KIND {
+            // Input-contract calls receive their handle through an ordinary edge.
+            // Only static selectors take the alias/bootstrap path; dynamic calls
+            // keep normal selected-receiver discovery and factory validation.
+            if node.kind == CALL_KIND && !CallConfig::is_dynamic(&node.config) {
                 let explicit_body = node.config.get("body").is_some_and(|body| !body.is_null());
                 // Validate the named selector without interpreting
                 // the receiving field before its selected metadata authorizes it.
@@ -1052,7 +1055,6 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::CallConfig;
     use serde_json::json;
 
     fn definition(nodes: serde_json::Value) -> WorkflowDefinition {
@@ -1990,6 +1992,166 @@ mod tests {
                 if reference == "owner" && message.contains("blank configuration parameter declaration"))
             );
             assert!(resolver.sources.is_empty());
+        }
+    }
+
+    #[test]
+    fn flow_constants_authorize_only_top_level_values_and_inherit_the_original_root_version() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("child.json"), r#"{"nodes":[]}"#).unwrap();
+        let registry = NodeRegistry::from_inventory().unwrap();
+        for value in [
+            json!({"nodes":[]}),
+            json!({"definition":{"nodes":[]}}),
+            json!({"path":"child.json"}),
+        ] {
+            let parent: WorkflowDefinition = serde_json::from_value(json!({
+                "version":"2026-10-23", "dependencies":{}, "nodes":[
+                    {"id":"outer", "kind":"builtin.constant", "config":{
+                        "type":"flow", "value":{"version":"2026-10-28", "nodes":[
+                            {"id":"inner", "kind":"builtin.constant", "config":{
+                                "type":"flow", "value":value
+                            }}
+                        ]}
+                    }},
+                    {"id":"ordinary", "kind":"builtin.constant", "config":{
+                        "value":{"type":"flow", "value":{"path":"must-not-read.json"}}
+                    }}
+                ]
+            }))
+            .unwrap();
+            let discovery = discover_unlinked_flows(&parent, Some(root.path())).unwrap();
+            assert_eq!(
+                discovery.pending,
+                BTreeSet::from(["node:builtin.constant".into()])
+            );
+            assert_eq!(discovery.definition, parent);
+            assert!(discovery.children.is_empty());
+            assert!(discovery.sources.is_empty());
+            let resolved =
+                resolve_flows_with_registry(&parent, Some(root.path()), &registry).unwrap();
+            assert_eq!(resolved.children.len(), 1);
+            let outer = &resolved.children[&"outer".into()]["value"];
+            assert!(outer.relations.is_callable());
+            assert!(outer.relations.host.is_none());
+            assert_eq!(
+                outer.definition.version,
+                mf_runtime::WorkflowDefinitionVersion::CURRENT
+            );
+            let inner = &outer.children[&"inner".into()]["value"];
+            assert!(inner.relations.is_callable());
+            assert!(inner.relations.host.is_none());
+            assert_eq!(inner.definition.version, parent.version);
+            assert_eq!(resolved.definition.nodes[1].config, parent.nodes[1].config);
+            assert_eq!(
+                resolved.sources,
+                if value.get("path").is_some() {
+                    BTreeSet::from([fs::canonicalize(root.path().join("child.json")).unwrap()])
+                } else {
+                    BTreeSet::new()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn input_call_mode_is_strict_without_changing_static_call_serde() {
+        let contract = json!({"inputs":[], "outputs":[]});
+        assert!(CallConfig::is_dynamic(&contract));
+        // Mode selection validates the wire shape, not owning-node business rules.
+        assert!(CallConfig::is_dynamic(&json!({
+            "inputs":[{"name":"flow", "value_type":"flow", "required":true}],
+            "outputs":[{"name":"", "value_type":"int", "required":true}]
+        })));
+        for config in [
+            json!(null),
+            json!({}),
+            json!({"inputs":[]}),
+            json!({"outputs":[]}),
+            json!({"inputs":{}, "outputs":[]}),
+            json!({"inputs":[{"name":"x", "value_type":"int"}], "outputs":[]}),
+            json!({"inputs":[{"name":"x", "value_type":"int", "required":true, "extra":1}], "outputs":[]}),
+            json!({"inputs":[], "outputs":[], "flow":null}),
+            json!({"inputs":[], "outputs":[], "flow":"alias"}),
+            json!({"inputs":[], "outputs":[], "body":null}),
+            json!({"inputs":[], "outputs":[], "body":{"path":"must-not-read.json"}}),
+            json!({"inputs":[], "outputs":[], "arguments":{}}),
+        ] {
+            assert!(!CallConfig::is_dynamic(&config), "accepted {config}");
+        }
+        let config: CallConfig = serde_json::from_value(json!({"flow":"alias"})).unwrap();
+        assert_eq!(config.flow, "alias");
+        assert!(config.body.is_none());
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            json!({"flow":"alias"})
+        );
+        assert!(serde_json::from_value::<CallConfig>(contract).is_err());
+    }
+
+    #[test]
+    fn input_calls_discover_receivers_without_static_sources_or_child_relationships() {
+        for version in [
+            mf_runtime::WorkflowDefinitionVersion::CURRENT,
+            mf_runtime::WorkflowDefinitionVersion::V2026_10_23,
+            mf_runtime::WorkflowDefinitionVersion::V2026_09_26,
+        ] {
+            let mut parent = definition(json!([{
+                "id":"call", "kind":CALL_KIND, "config":{"inputs":[], "outputs":[]}
+            }]));
+            parent.version = version;
+            let original = parent.clone();
+            for extractor in [
+                None,
+                Some(no_parameters as FlowExtractor),
+                Some(body_parameter),
+            ] {
+                for discovery in [false, true] {
+                    let mut resolver = Resolver {
+                        discovery,
+                        extractors: extractor
+                            .map(|extractor| BTreeMap::from([(CALL_KIND.into(), extractor)]))
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    };
+                    let mut candidate = parent.clone();
+                    let scope = resolver.resolve(&mut candidate, None).unwrap();
+                    assert_eq!(candidate, original);
+                    assert_eq!(scope.relations, GraphRelations::default());
+                    assert!(scope.children.is_empty());
+                    assert!(resolver.sources.is_empty());
+                    assert!(resolver.dependencies.is_empty());
+                    assert_eq!(
+                        resolver.pending,
+                        if discovery && extractor.is_none() {
+                            BTreeSet::from([format!("node:{CALL_KIND}")])
+                        } else {
+                            BTreeSet::new()
+                        }
+                    );
+                }
+            }
+            let discovery = discover_unlinked_flows(&parent, None).unwrap();
+            assert_eq!(discovery.definition, original);
+            assert_eq!(
+                discovery.pending,
+                BTreeSet::from([format!("node:{CALL_KIND}")])
+            );
+            assert!(discovery.children.is_empty());
+            assert!(discovery.sources.is_empty());
+            let plan = source_resolver().plan(&parent).unwrap();
+            assert_eq!(plan.graph.relations, GraphRelations::default());
+            assert!(plan.graph.children.is_empty());
+            assert_eq!(
+                crate::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap(),
+                plan
+            );
+            if !version.supports_nested_flows() {
+                parent.nodes[0].config = json!({"flow":"static"});
+                let error = source_resolver().resolve(&mut parent, None).unwrap_err();
+                assert!(matches!(error, FlowResolutionError::Invalid { message, .. }
+                    if message == "Flow calls require version 2026-10-25"));
+            }
         }
     }
 

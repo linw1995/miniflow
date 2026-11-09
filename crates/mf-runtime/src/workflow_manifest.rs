@@ -284,18 +284,23 @@ pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, Grap
     let execution_order = string_order(&graph.execution_order);
     let mut loop_bodies = Vec::new();
     let mut omitted_iterations = Vec::new();
+    let callable_children = has_callable_children(graph);
     describe_children(
         graph,
         &mut Vec::new(),
         &mut loop_bodies,
-        definition.has_order_edges() || definition.version.supports_clusters(),
+        definition.has_order_edges() || definition.version.supports_clusters() || callable_children,
         &mut omitted_iterations,
     )?;
     // Validate every supplied scope, including scopes omitted by the historical
     // observation projection, using an existing schema that supports all features.
     let mut description = WorkflowDescription {
         order_edges: order_edges(&definition.order_edges),
-        version: WorkflowDescriptionVersion::V2026_10_23,
+        version: if callable_children {
+            WorkflowDescriptionVersion::V2026_11_09
+        } else {
+            WorkflowDescriptionVersion::V2026_10_23
+        },
         execution: Some(ExecutionDescription {
             mode: if definition.execution.is_some() {
                 ExecutionMode::Stream
@@ -336,7 +341,9 @@ pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, Grap
     // Receiving fields can carry newer child features even when the authored root
     // is old. Select a compatible existing observation schema from the projection;
     // this never changes the authored workflow version or scans opaque JSON.
-    description.version = if definition.version.supports_clusters()
+    description.version = if callable_children {
+        WorkflowDescriptionVersion::V2026_11_09
+    } else if definition.version.supports_clusters()
         || !description.clusters.is_empty()
         || description
             .loop_bodies
@@ -368,6 +375,18 @@ pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, Grap
     }
     description.validate().context(ObservationSnafu)?;
     Ok(description)
+}
+
+/// Any actual callable child can be exported as a native Flow capability by its
+/// receiving provider. Keep its origin observable without knowing provider kinds
+/// or interpreting opaque configuration. Pure state/iteration scopes alone do
+/// not require the newer protocol.
+fn has_callable_children(graph: &CompiledGraph) -> bool {
+    graph
+        .children
+        .values()
+        .flat_map(BTreeMap::values)
+        .any(|child| child.relations.is_callable() || has_callable_children(child))
 }
 
 /// Validate provider-free endpoints before any observation-only projection.

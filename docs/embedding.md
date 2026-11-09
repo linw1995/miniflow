@@ -149,8 +149,8 @@ compiler error contracts do not expose telemetry error definitions. Genuine obse
 failures retain their typed telemetry source behind the runtime observation boundary.
 Description bodies carry their actual input source and state-output relationships, so lifecycle
 validation does not infer frame semantics from provider labels. `NodeConfig::flow_parameters`
-extracts executable child values from configuration during source resolution; ordinary JSON remains
-opaque, and absent optional children produce no graph entry. The resolved tree is handed directly to
+extracts declared top-level child values during source resolution; ordinary JSON remains opaque.
+Absent or null optional children produce no graph entry. The resolved tree is handed directly to
 `plan_resolved_workflow`, so planning retains the selected receiver's child decisions.
 For an already resolved inline definition, `plan_resolved_definition(&definition, &registry)` is an
 authoring convenience that selects children using that registry. Do not use it to replan saved artifacts.
@@ -212,15 +212,50 @@ an embedded module's explicit host `plan(registry)` entry point. The separate
 
 ## Repository example
 
-The [embedded-workflows example](../examples/embedded-workflows) prints `{"answer":42}` and declares
-`mfn-core` only as a normal dependency. From the repository root:
+The [embedded-workflows example](../examples/embedded-workflows) prints `{"answer":42}` by passing
+B as a Flow value to A through an ordinary edge, using only built-in nodes:
+
+```text
+Root: policy (builtin.constant, type = flow, value = B)
+          └─value──→ callA.params.policy
+      params.value → callA.params.value
+
+A:    params.policy ──→ apply.flow (workflow.call)
+      params.value  ──→ apply.echo.input
+
+B:    echo.input ──identity──→ answer
+```
+
+`answer.json` selects a fixed B using the Flow-typed constant's top-level `value` and wires its ordinary
+`value` output to A's parameter. `answer-apply.json` declares `policy` through `builtin.parameters` and
+calls the received value using `workflow.call`, without naming B's source. A different caller can pass another compatible callable without editing A.
+There is no host binding environment, Flow-reference `$ref` namespace, or special configuration
+argument map. Existing ordinary configuration templates are a separate feature.
+
+`mfn-core` is a normal dependency, not a build dependency; no custom provider crate is needed. The
+build script lists A and B with `EmbedRequest::with_source`; it only packages source resources and
+never loads receiving providers. Host preparation resolves them using the host registry.
+From the repository root:
 
 ```sh
 CARGO_TARGET_DIR="$PWD/target/embedded-example" nix develop --command \
   cargo run --manifest-path examples/embedded-workflows/Cargo.toml --offline
 ```
 
-After building, the executable prepares and runs without workflow JSON, generated sources, or build tools.
+The host uses the ordinary generated preparation helper:
+
+```rust
+let flow = answer::prepare_workflow(&registry, None)?;
+```
+
+After building the host executable, it prepares and runs without workflow JSON, generated sources,
+or build tools. Source paths are resolved only against packed resources, with no filesystem fallback.
+`plan(registry)` and `manifest(registry)` describe the same frozen definitions used by execution.
+
+The graph retains A under `callA` and B under the `policy` constant's `value` binding. B is not a
+statically owned child of A's `apply` node. Runtime call observation records both the invocation node
+and B's actual definition origin. Saved plans and generated runners retain the prepared bodies; no
+runtime JSON interpreter or executable registry lookup is involved.
 
 ## Programmatic exclusive bindings
 

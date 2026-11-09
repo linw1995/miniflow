@@ -8,6 +8,7 @@ mod execution_inputs;
 mod execution_outputs;
 mod flow;
 mod flow_invocation;
+mod flow_value;
 #[cfg(feature = "async")]
 mod future_execution;
 mod iteration;
@@ -64,6 +65,7 @@ pub use flow::{
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
 };
 pub use flow_invocation::{FlowEmission, FlowInvocation};
+pub use flow_value::{FlowValue, FlowValueBuildError};
 #[cfg(feature = "async")]
 pub use future_execution::FutureExecutionError;
 #[doc(hidden)]
@@ -77,7 +79,7 @@ pub use loop_node::{
     prepared_loop_source_types, prepared_scope_source,
 };
 pub use mf_runtime_derive::{NodeConfig, NodeEnum, NodeInputs, NodeOutputs, NodeValue};
-pub use mf_telemetry::event::{NodeIdentity, ScopePathEntry, SkipCause};
+pub use mf_telemetry::event::{FlowOrigin, NodeIdentity, ScopePathEntry, SkipCause};
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
