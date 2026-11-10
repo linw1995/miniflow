@@ -91,8 +91,8 @@ impl FlowValue {
     /// Wraps a manifest-backed executor observed independently, such as a
     /// runner process. Its actual interface and definition identity come from the
     /// validated manifest. Output types supplement historical manifests, which
-    /// record only output names and optionality. The executor must check that the
-    /// artifact still matches this manifest before launching it. Record-mode
+    /// record only output names and optionality. The prepared executor owns
+    /// per-invocation input binding and its process lifecycle. Record-mode
     /// runners expose every selection as a stream port, with no terminal outputs.
     /// Records may originate in different execution domains, so those ports are
     /// optional per emission even when a selection is required in its own domain.
@@ -252,23 +252,21 @@ impl FlowValue {
             }
         );
         self.0.inputs.mark_secrets(&mut arguments);
-        let execute = |child: &mut ExecutionContext| {
-            child.bind_workflow_inputs(&self.0.inputs)?;
-            self.0
-                .inputs
-                .validate_stdin(child.workflow_arguments(), false)?;
-            let mut emitter =
-                crate::Emitter::new(id, self.stream_output_ports(), child.cancellation(), sink);
-            let mut stream = crate::SubgraphStream::new(id, child, &mut emitter);
-            let outputs = self.0.execute_with_sink(child, &mut stream)?;
-            self.validate_outputs(id, &outputs)?;
-            Ok(outputs)
-        };
         if matches!(self.1, InvocationBoundary::External) {
-            return context.run_external_flow(id, arguments, execute);
+            return context.run_external_flow(id, arguments, |child| {
+                let mut emitter =
+                    crate::Emitter::new(id, self.stream_output_ports(), child.cancellation(), sink);
+                let mut stream = crate::SubgraphStream::new(id, child, &mut emitter);
+                let outputs = self.0.execute_with_sink(child, &mut stream)?;
+                self.validate_outputs(id, &outputs)?;
+                Ok(outputs)
+            });
         }
         let origin = self.0.origin();
-        context.run_flow(id, arguments, origin.as_ref(), &self.0.nodes, execute)
+        context.run_flow(id, arguments, origin.as_ref(), &self.0.nodes, |child| {
+            let mut stream = crate::SubgraphStream::new(id, child, sink);
+            self.0.invoke_with_sink(child, &mut stream)
+        })
     }
 
     fn validate_outputs(&self, id: &str, outputs: &FlowOutputs) -> Result<(), WorkflowRunError> {
@@ -348,9 +346,8 @@ mod tests {
         assert!(flow.output_ports().is_empty());
     }
 
-    #[test]
-    fn external_capabilities_derive_and_validate_the_manifest_contract() {
-        let mut manifest = crate::WorkflowManifest {
+    fn external_manifest() -> crate::WorkflowManifest {
+        crate::WorkflowManifest {
             version: crate::WorkflowManifestVersion::V2026_11_06,
             graph: crate::CompiledGraph {
                 definition: serde_json::from_value(json!({
@@ -370,7 +367,12 @@ mod tests {
                 "stdin":{}
             }))
             .unwrap(),
-        };
+        }
+    }
+
+    #[test]
+    fn external_capabilities_derive_and_validate_the_manifest_contract() {
+        let mut manifest = external_manifest();
         let outputs = vec![PortSpec::new("answer", ValueType::String, true)];
         let flow = FlowValue::external(&manifest, outputs.clone(), |_, _| {
             panic!("preparation must not execute")
@@ -682,7 +684,15 @@ mod tests {
     }
 
     #[test]
-    fn native_invocation_validates_manual_callback_outputs_including_required_presence() {
+    fn external_invocation_validates_outputs_including_required_presence() {
+        let mut manifest = external_manifest();
+        manifest.graph.definition.outputs[0].name = "value".into();
+        manifest.graph.definition.outputs.push(
+            serde_json::from_value(json!({
+                "name":"optional", "node":"params", "port":"text", "optional":true
+            }))
+            .unwrap(),
+        );
         for (outputs, valid, type_error) in [
             (FlowOutputs::new(), false, false),
             (
@@ -697,14 +707,14 @@ mod tests {
             ),
             (FlowOutputs::from([("value".into(), 1.into())]), true, false),
         ] {
-            let flow = FlowValue::new(PreparedSubgraph::new(
-                Vec::new(),
+            let flow = FlowValue::external(
+                &manifest,
                 vec![
                     PortSpec::new("value", ValueType::Int64, true),
                     PortSpec::new("optional", ValueType::String, false),
                 ],
-                move |_| Ok(outputs.clone()),
-            ))
+                move |_, _| Ok(outputs.clone()),
+            )
             .unwrap();
             let result = flow.invoke(
                 "native",

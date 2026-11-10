@@ -5,9 +5,16 @@ use crate::{
     run::{LocalObservation, LocalOutcome, LocalRun, RunError},
 };
 use mf_runtime::{NodeValues, StreamCancellation, WorkflowArguments, WorkflowManifest};
-use mf_telemetry::{description::ExecutionMode, identity::RunId};
+use mf_telemetry::{
+    description::{ExecutionMode, WorkflowDescription},
+    identity::RunId,
+};
 use snafu::{ResultExt, Snafu, ensure};
-use std::{path::Path, process::Command, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 #[derive(Debug, Snafu)]
 pub enum RunnerError {
@@ -19,10 +26,6 @@ pub enum RunnerError {
     Contract {
         source: mf_runtime::WorkflowManifestError,
     },
-    #[snafu(display("runner manifest changed since preparation"))]
-    ManifestChanged,
-    #[snafu(display("runner output mode differs from its manifest"))]
-    OutputMode,
     #[snafu(transparent)]
     Run { source: RunError },
     #[snafu(transparent)]
@@ -48,16 +51,67 @@ pub enum RunnerOutput {
     Records,
 }
 
-/// The host supplies protocol policy; launch, transport, cancellation, draining,
-/// and process-group cleanup are identical for all runner consumers.
+/// An executable's immutable loading-time contract, reusable across invocations.
+///
+/// Loading reads and validates the embedded manifest once, then freezes observation
+/// metadata and transport mode. The host must keep this executable unchanged for
+/// the prepared runner's lifetime; replacement requires loading a new runner.
+pub struct PreparedRunner {
+    executable: PathBuf,
+    manifest: WorkflowManifest,
+    description: WorkflowDescription,
+    output: RunnerOutput,
+}
+
+impl PreparedRunner {
+    pub fn load(executable: &Path, terminal_limit: u64) -> Result<Self, RunnerError> {
+        let executable = executable.canonicalize().context(IoSnafu {
+            operation: "resolve runner executable",
+        })?;
+        let manifest = read_manifest(&executable)?;
+        let description = manifest.description()?;
+        let output = if description
+            .execution
+            .as_ref()
+            .is_some_and(|execution| execution.mode == ExecutionMode::Stream)
+        {
+            RunnerOutput::Records
+        } else {
+            RunnerOutput::Finite {
+                limit: terminal_limit,
+            }
+        };
+        Ok(Self {
+            executable,
+            manifest,
+            description,
+            output,
+        })
+    }
+
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    pub fn manifest(&self) -> &WorkflowManifest {
+        &self.manifest
+    }
+
+    pub fn description(&self) -> &WorkflowDescription {
+        &self.description
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        matches!(self.output, RunnerOutput::Records)
+    }
+}
+
+/// Only per-invocation inputs and process policy vary; executable metadata and
+/// transport mode come from a previously loaded runner.
 pub struct RunnerInvocation<'a> {
-    pub executable: &'a Path,
+    pub runner: &'a PreparedRunner,
     pub arguments: &'a WorkflowArguments,
-    /// Frozen preparation contract. The executable's manifest is reread and
-    /// compared before every launch; observation is derived from that manifest.
-    pub manifest: &'a WorkflowManifest,
     pub verbose: u8,
-    pub output: RunnerOutput,
     pub snapshots: bool,
 }
 
@@ -83,22 +137,11 @@ impl RunnerInvocation<'_> {
         if let Some(error) = cancellation.failure() {
             return Err(error.into());
         }
-        let manifest = read_manifest(self.executable)?;
-        ensure!(manifest == *self.manifest, ManifestChangedSnafu);
-        let description = manifest.description()?;
-        let streaming = description
-            .execution
-            .as_ref()
-            .is_some_and(|execution| execution.mode == ExecutionMode::Stream);
-        ensure!(
-            streaming == matches!(self.output, RunnerOutput::Records),
-            OutputModeSnafu
-        );
-        let arguments =
-            mf_runtime::resolve_workflow_inputs(&manifest.input_schema, self.arguments, |name| {
-                std::env::var_os(name)
-            })?;
-        manifest.input_schema.validate_stdin(&arguments, false)?;
+        let schema = &self.runner.manifest.input_schema;
+        let arguments = mf_runtime::resolve_workflow_inputs(schema, self.arguments, |name| {
+            std::env::var_os(name)
+        })?;
+        schema.validate_stdin(&arguments, false)?;
         let mut file = tempfile::NamedTempFile::new().context(IoSnafu {
             operation: "create private runner arguments",
         })?;
@@ -122,7 +165,7 @@ impl RunnerInvocation<'_> {
         if let Some(error) = cancellation.failure() {
             return Err(error.into());
         }
-        let mut command = Command::new(self.executable);
+        let mut command = Command::new(&self.runner.executable);
         command.arg("--inputs-file").arg(file.path());
         for _ in 0..self.verbose.min(3) {
             command.arg("--verbose");
@@ -132,7 +175,8 @@ impl RunnerInvocation<'_> {
             if self.snapshots { "1" } else { "0" },
         );
         let run_id = RunId::new();
-        let mut run = match self.output {
+        let description = self.runner.description.clone();
+        let mut run = match self.runner.output {
             RunnerOutput::Finite { limit } => LocalRun::start(command, description, run_id, limit)?,
             RunnerOutput::Records => {
                 LocalRun::start_stream(command, description, run_id, cancellation.clone())?
@@ -190,60 +234,68 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn manifest_and_input_preflight_fail_before_observation_or_process_effects() {
+    fn loading_freezes_metadata_and_invocations_only_bind_current_inputs() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runner");
         let marker = root.path().join("executed");
-        let expected = crate::test_support::sample_manifest();
-        let script = format!("#!/bin/sh\ntouch '{}'\nprintf '{{}}'\n", marker.display());
-        crate::test_support::write_runner(&path, &expected, &script);
-        let invoke = |arguments: &WorkflowArguments, output| {
+        let manifest = crate::test_support::sample_manifest();
+        let script = format!(
+            "#!/bin/sh\nprintf x >> '{}'\nprintf '{{}}'\n",
+            marker.display()
+        );
+        crate::test_support::write_runner(&path, &manifest, &script);
+        let runner = PreparedRunner::load(&path, 1024).unwrap();
+        assert_eq!(runner.manifest(), &manifest);
+        assert_eq!(runner.description(), &manifest.description().unwrap());
+        assert!(!runner.is_streaming());
+        let invoke = |arguments: &WorkflowArguments| {
             RunnerInvocation {
-                executable: &path,
-                manifest: &expected,
+                runner: &runner,
                 arguments,
                 verbose: 0,
-                output,
                 snapshots: false,
             }
             .run(
                 Default::default(),
-                |_| panic!("preflight must not launch"),
+                |_| {},
                 |_| Ok::<_, std::convert::Infallible>(()),
                 || false,
             )
         };
-        let finite = RunnerOutput::Finite { limit: 1024 };
         let arguments = WorkflowArguments::try_from(json!({"unknown": 1})).unwrap();
         assert!(matches!(
-            invoke(&arguments, finite),
+            invoke(&arguments),
             Err(RunnerError::Inputs { .. })
         ));
+        assert!(!marker.exists());
+        for _ in 0..2 {
+            assert!(
+                invoke(&Default::default())
+                    .unwrap()
+                    .outcome
+                    .status
+                    .success()
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "xx");
+        // A missing artifact fails at process startup, not by attempting to reread
+        // a previously prepared contract. Metadata remains available to the host.
+        std::fs::remove_file(&path).unwrap();
         assert!(matches!(
-            invoke(&Default::default(), RunnerOutput::Records),
-            Err(RunnerError::OutputMode)
+            invoke(&Default::default()),
+            Err(RunnerError::Run { .. })
         ));
-        let mut changed = expected.clone();
-        changed.graph.definition = serde_json::from_value(json!({
-            "version":"2026-10-03", "dependencies":{},
-            "nodes":[{"id":"other", "kind":"builtin.constant", "config":{"value":1}}]
-        }))
-        .unwrap();
-        changed.graph.execution_order = vec!["other".into()];
-        changed
-            .input_schema
-            .inputs
-            .insert("other".into(), Default::default());
-        crate::test_support::write_runner(&path, &changed, &script);
+        assert_eq!(runner.manifest(), &manifest);
+    }
+
+    #[test]
+    fn invalid_artifacts_fail_during_loading() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runner");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
         assert!(matches!(
-            invoke(&Default::default(), finite),
-            Err(RunnerError::ManifestChanged)
-        ));
-        std::fs::write(&path, &script).unwrap();
-        assert!(matches!(
-            invoke(&Default::default(), finite),
+            PreparedRunner::load(&path, 1024),
             Err(RunnerError::Manifest { .. })
         ));
-        assert!(!marker.exists());
     }
 }

@@ -553,6 +553,19 @@ impl PreparedSubgraph {
         self.execute_with_sink(state, &mut crate::DiscardSink)
     }
 
+    /// Native callbacks need startup binding here; compiled finite and Event
+    /// executors already own that work. Do not rebind inputs around those engines.
+    pub(super) fn invoke_with_sink(
+        &self,
+        state: &mut ExecutionContext,
+        sink: &mut dyn crate::EmissionSink,
+    ) -> Result<FlowOutputs, WorkflowRunError> {
+        if matches!(self.body, PreparedSubgraphBody::Finite(_)) {
+            state.bind_workflow_inputs(&self.inputs)?;
+        }
+        self.execute_with_sink(state, sink)
+    }
+
     pub fn execute_with_sink(
         &self,
         state: &mut ExecutionContext,

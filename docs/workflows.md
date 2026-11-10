@@ -315,7 +315,11 @@ let outputs = mf_runtime::FlowRuntime::default().execute_with_inputs(&a, inputs)
 JSON input, environment variables, and JSON defaults cannot create a callable. Direct or nested business JSON
 serialization fails explicitly; diagnostic snapshots render a safe opaque placeholder instead.
 
-Constructing or forwarding a Flow value validates its interface, without requiring execution resources.
+Constructing a Flow value validates its interface once; cloning and forwarding it do not revalidate
+that contract. Internal prepared Flows execute through their existing engines, without an additional
+Flow-value output validator or a second startup binding around the compiled executor. Dynamic Call
+still checks that the selected handle matches its receiving signature, since that handle may vary
+between invocations. Native callback implementations must honor their prepared port contracts.
 At invocation, a body that depends on an implicit Loop/Iteration scope frame fails before execution.
 Stdin requirements are checked after ordinary input binding; a conditional stdin declaration is usable
 when its alternative input is supplied. An invocation that still requires stdin fails because dynamic
@@ -350,9 +354,10 @@ let inputs = mf_runtime::WorkflowArguments(mf_runtime::Inputs::from([
 let outputs = mf_runtime::FlowRuntime::default().execute_with_inputs(&a, inputs)?;
 ```
 
-The loader reads the embedded manifest without launching or recompiling the runner.
-`FlowValue::external` requires that manifest, validates its output contract,
-and derives input bindings, node identities, and the definition origin from it.
+The loader prepares a reusable `mf_tui::runner::PreparedRunner` without launching or recompiling it.
+Loading reads and validates the embedded manifest, caches the observation description and terminal
+versus record output mode, and checks the host's output contract. `FlowValue::external` uses that
+manifest to derive input bindings, node identities, and the definition origin.
 Existing manifests describe input types but only output names and optionality, so the
 host supplies output types explicitly. Names and requiredness must match the manifest;
 returned values are type-checked on every call. The executable must remain available,
@@ -388,13 +393,13 @@ the retained terminal reply and usage events, including after protocol or proces
 failure. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
 values select terminal or record transport from the manifest and use the same executor.
 
-Before each launch, the shared executor rereads the executable's manifest and checks
-it against the complete preparation manifest. Missing, invalid, or changed manifests
-fail before process startup. It derives observation from the freshly read manifest,
-checks terminal-versus-record output mode, and resolves and validates arguments and
-stdin requirements through the standard workflow input resolver. Both `--chat` and
-Flow-valued runner calls use this preflight; neither can supply a description in
-place of the executable's manifest.
+Both `--chat` and runner-backed Flow values hold the same prepared-runner abstraction.
+Invocations use its cached description and output mode without rereading, comparing, or revalidating
+the manifest. They resolve this call's arguments and environment bindings, evaluate conditional stdin
+requirements, and supervise process launch, cancellation, draining, and cleanup. Actual external
+outputs are still validated on every call. The host must keep the executable unchanged while reusing
+a prepared runner; after replacing it, load a new prepared runner. Missing or invalid artifacts fail
+during loading, while a subsequently missing or unlaunchable executable fails at process startup.
 
 ## Node clusters
 

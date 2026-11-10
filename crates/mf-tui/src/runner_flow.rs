@@ -1,9 +1,6 @@
 //! Source-free runner capabilities for ordinary Flow-valued edges.
 
-use crate::{
-    manifest::read_manifest,
-    runner::{RunnerError, RunnerInvocation, RunnerOutput},
-};
+use crate::runner::{PreparedRunner, RunnerError, RunnerInvocation};
 use mf_runtime::{ExecutionContext, FlowOutputs, FlowValue, PortSpec};
 use snafu::{ResultExt, Snafu, ensure};
 use std::{path::Path, sync::Arc};
@@ -11,20 +8,11 @@ use std::{path::Path, sync::Arc};
 #[derive(Debug, Snafu)]
 pub enum RunnerFlowError {
     #[snafu(transparent)]
-    Manifest {
-        source: crate::manifest::ManifestReadError,
-    },
-    #[snafu(transparent)]
     Build { source: mf_runtime::NodeBuildError },
     #[snafu(transparent)]
     Run { source: crate::runner::RunnerError },
     #[snafu(transparent)]
     Delivery { source: mf_runtime::StreamError },
-    #[snafu(display("could not {operation}: {source}"))]
-    Io {
-        operation: &'static str,
-        source: std::io::Error,
-    },
     #[snafu(display("runner output is not valid JSON: {source}"))]
     Json { source: serde_json::Error },
     #[snafu(display("runner output capture failed: {source}"))]
@@ -40,8 +28,9 @@ pub enum RunnerFlowError {
 
 /// Loads a built runner without its source or providers. Historical manifests
 /// contain output names and optionality, but not provider output types: the host
-/// supplies those types as an explicit contract, checked on every invocation.
-/// Each invocation launches a fresh process and uses the existing LocalRun
+/// supplies those types as a loading-time contract. Transported output values
+/// are checked on each invocation. Manifest, observation metadata, and output mode
+/// are prepared once; each invocation launches a fresh process using LocalRun
 /// supervisor, including process-group cancellation and bounded output capture.
 pub fn load(path: &Path, outputs: Vec<PortSpec>) -> Result<FlowValue, RunnerFlowError> {
     load_with_observer(path, outputs, |_| {})
@@ -53,16 +42,13 @@ pub fn load_with_observer(
     outputs: Vec<PortSpec>,
     observe: impl Fn(crate::run::LocalObservation) + Send + Sync + 'static,
 ) -> Result<FlowValue, RunnerFlowError> {
-    let executable = path.canonicalize().context(IoSnafu {
-        operation: "resolve runner executable",
-    })?;
-    let manifest = Arc::new(read_manifest(&executable)?);
-    let expected = Arc::clone(&manifest);
+    let runner = Arc::new(PreparedRunner::load(path, 256 * 1024 * 1024)?);
+    let prepared = Arc::clone(&runner);
     Ok(FlowValue::external(
-        &manifest,
+        runner.manifest(),
         outputs,
         move |context, sink| {
-            execute(&executable, &expected, context, sink, &observe)
+            execute(&prepared, context, sink, &observe)
                 .boxed()
                 .context(mf_runtime::NodePluginFailedSnafu)
                 .context(mf_runtime::NodeExecutionSnafu {
@@ -73,25 +59,15 @@ pub fn load_with_observer(
 }
 
 fn execute(
-    executable: &Path,
-    manifest: &mf_runtime::WorkflowManifest,
+    runner: &PreparedRunner,
     context: &mut ExecutionContext,
     sink: &mut dyn mf_runtime::EmissionSink,
     observe: &dyn Fn(crate::run::LocalObservation),
 ) -> Result<FlowOutputs, RunnerFlowError> {
-    let streaming = manifest.graph.definition.execution.is_some();
     let completion = RunnerInvocation {
-        executable,
+        runner,
         arguments: context.workflow_arguments(),
-        manifest,
         verbose: 0,
-        output: if streaming {
-            RunnerOutput::Records
-        } else {
-            RunnerOutput::Finite {
-                limit: 256 * 1024 * 1024,
-            }
-        },
         // Existing runner JSON cannot carry the caller's native privacy labels.
         snapshots: false,
     }
@@ -123,7 +99,7 @@ fn execute(
             stderr: outcome.stderr
         }
     );
-    if streaming {
+    if runner.is_streaming() {
         return Ok(FlowOutputs::new());
     }
     Ok(secret_outputs(
@@ -145,24 +121,22 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn script(root: &Path, contents: &str) -> std::path::PathBuf {
+    fn script(root: &Path, contents: &str) -> PreparedRunner {
         let path = root.join("runner");
         crate::test_support::write_runner(
             &path,
             &crate::test_support::sample_manifest(),
             &format!("#!/bin/sh\n{contents}\n"),
         );
-        path
+        PreparedRunner::load(&path, 256 * 1024 * 1024).unwrap()
     }
 
     #[test]
     fn process_failures_and_duplicate_output_keys_preserve_typed_causes() {
         let root = tempfile::tempdir().unwrap();
-        let manifest = crate::test_support::sample_manifest();
         let path = script(root.path(), "echo failure >&2; exit 7");
         let error = execute(
             &path,
-            &manifest,
             &mut Default::default(),
             &mut mf_runtime::DiscardSink,
             &|_| {},
@@ -177,7 +151,6 @@ mod tests {
         );
         let error = execute(
             &path,
-            &manifest,
             &mut Default::default(),
             &mut mf_runtime::DiscardSink,
             &|_| {},
@@ -190,24 +163,17 @@ mod tests {
     fn cancellation_reaps_a_running_process_and_prevents_a_cancelled_launch() {
         let root = tempfile::tempdir().unwrap();
         let path = script(root.path(), "exec sleep 60");
-        let manifest = crate::test_support::sample_manifest();
         let mut context = ExecutionContext::default();
         let cancel = context.cancellation();
         let started = std::time::Instant::now();
-        let error = execute(
-            &path,
-            &manifest,
-            &mut context,
-            &mut mf_runtime::DiscardSink,
-            &|_| {
-                cancel.cancel(
-                    mf_runtime::StreamExecutionSnafu {
-                        message: "test cancellation",
-                    }
-                    .build(),
-                );
-            },
-        )
+        let error = execute(&path, &mut context, &mut mf_runtime::DiscardSink, &|_| {
+            cancel.cancel(
+                mf_runtime::StreamExecutionSnafu {
+                    message: "test cancellation",
+                }
+                .build(),
+            );
+        })
         .unwrap_err();
         assert!(matches!(
             error,
@@ -216,13 +182,9 @@ mod tests {
             }
         ));
         assert!(started.elapsed() < Duration::from_secs(10));
-        let error = execute(
-            &path,
-            &manifest,
-            &mut context,
-            &mut mf_runtime::DiscardSink,
-            &|_| panic!("cancelled launch"),
-        )
+        let error = execute(&path, &mut context, &mut mf_runtime::DiscardSink, &|_| {
+            panic!("cancelled launch")
+        })
         .unwrap_err();
         assert!(matches!(
             error,

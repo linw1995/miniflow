@@ -338,8 +338,11 @@ fixed values in authored definitions. `builtin.parameters` declares Flow-valued 
 native code or enclosing input edges. Use `workflow.call` in input-call mode to invoke a received value,
 with explicit normal port contracts and input edges, plus `stream_outputs` for incremental ports.
 Native workflow inputs can carry the same handle directly. Native receivers call
-`policy.invoke_with_sink(id, arguments, context, sink)` to forward validated emissions with backpressure
-and receive terminal results. `invoke` drains and discards emissions. Both retain ordinary invocation
+`policy.invoke_with_sink(id, arguments, context, sink)` to forward emissions with backpressure
+and receive terminal results. Prepared internal engines retain their normal node validation; the Flow
+wrapper does not add a second output-validation layer. Native callbacks are responsible for honoring
+their declared contracts. Externally transported values are checked at the process boundary.
+`invoke` drains and discards emissions. Both entry points retain ordinary invocation
 budgets, cancellation, and context isolation. Prepared Event bodies use the existing owned invocation
 lifecycle and return no terminal outputs. Resource requirements (implicit scope frames or unresolved
 stdin ownership) are checked when invoked, rather than preventing construction or transport.

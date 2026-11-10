@@ -25,8 +25,8 @@ pub fn launch(directory: &Path) -> ChatLaunch {
     let executable = directory.join("worker");
     crate::test_support::write_runner(&executable, &manifest, "#!/bin/sh\ntrap '' INT\nsleep 20\n");
     ChatLaunch {
-        executable,
-        manifest,
+        runner: PreparedRunner::load(&executable, mf_chat::contract::MAX_RECOVERY_BYTES as u64)
+            .unwrap(),
         contract,
         parameters: Default::default(),
         options: ChatOptions {
@@ -53,7 +53,7 @@ fn argument_transports_and_invalid_chat_options_fail_before_database_ownership()
     let binary = root.path().join("manifest");
     fs::write(
         &binary,
-        crate::test_support::elf(Some(&prepared.manifest.to_bytes().unwrap()), 1),
+        crate::test_support::elf(Some(&prepared.runner.manifest().to_bytes().unwrap()), 1),
     )
     .unwrap();
     let input = root.path().join("inputs.json");
@@ -179,7 +179,7 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
         let count = root.path().join("calls");
         prepared.options.database_path = state.join("chat.sqlite");
         let path = prepared.options.database_path.clone();
-        fs::write(prepared.executable.with_extension("script"), format!("#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"retained answer\",\"metadata\":{{\"source\":\"fixture\"}},\"usages\":[{{\"call_id\":\"actual-call\",\"model\":\"fixture\"}}]}}'\n", count.display())).unwrap();
+        fs::write(prepared.runner.executable().with_extension("script"), format!("#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"retained answer\",\"metadata\":{{\"source\":\"fixture\"}},\"usages\":[{{\"call_id\":\"actual-call\",\"model\":\"fixture\"}}]}}'\n", count.display())).unwrap();
         let controller = ChatController::open(prepared).unwrap();
         controller
             .send(ChatCommand::Submit {
@@ -344,7 +344,7 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
         let path = prepared.options.database_path.clone();
         let marker = root.path().join("started");
         fs::write(
-            prepared.executable.with_extension("script"),
+            prepared.runner.executable().with_extension("script"),
             format!("#!/bin/sh\ntouch '{}'\nsleep 20\n", marker.display()),
         )
         .unwrap();
@@ -421,11 +421,12 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
 
 fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf) {
     let mut launch = launch(directory);
-    launch.manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
-    launch.manifest.graph.definition.outputs.push(
+    let mut manifest = launch.runner.manifest().clone();
+    manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
+    manifest.graph.definition.outputs.push(
         serde_json::from_value(json!({"name":"answer","node":"start","port":"delta"})).unwrap(),
     );
-    launch.contract = ChatContract::from_manifest(&launch.manifest).unwrap();
+    launch.contract = ChatContract::from_manifest(&manifest).unwrap();
     let gate = directory.join("release");
     let records = json!([
         {"answer":{"text":"provisional","model_call_id":"model-call"}},
@@ -458,7 +459,12 @@ if mode == 'late':
         records = serde_json::to_string(&records).unwrap(),
         gate = gate.to_str().unwrap()
     );
-    crate::test_support::write_runner(&launch.executable, &launch.manifest, &script);
+    crate::test_support::write_runner(launch.runner.executable(), &manifest, &script);
+    launch.runner = PreparedRunner::load(
+        launch.runner.executable(),
+        mf_chat::contract::MAX_RECOVERY_BYTES as u64,
+    )
+    .unwrap();
     (launch, gate)
 }
 
@@ -583,9 +589,10 @@ fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes()
 #[test]
 fn answer_selection_requires_native_streaming_execution() {
     let root = tempfile::tempdir().unwrap();
-    let (mut launch, _) = live_launch(root.path(), "prefix");
-    launch.manifest.graph.definition.execution = None;
-    assert!(ChatContract::from_manifest(&launch.manifest).is_err());
+    let (launch, _) = live_launch(root.path(), "prefix");
+    let mut manifest = launch.runner.manifest().clone();
+    manifest.graph.definition.execution = None;
+    assert!(ChatContract::from_manifest(&manifest).is_err());
 }
 
 #[test]

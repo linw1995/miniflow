@@ -1,15 +1,13 @@
 //! A single conversation execution lane over a supplied workflow executable.
 
 use crate::{
-    manifest::{ManifestReadError, read_manifest},
     run::{LocalObservation, LocalOutcome, RunError, RunOptions},
-    runner::{RunnerError, RunnerInvocation, RunnerOutput},
+    runner::{PreparedRunner, RunnerError, RunnerInvocation},
 };
 use mf_chat::contract::{
     ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
 };
 use mf_chat::{ChatDatabase, Invocation, MessagePage, Session, SessionPage, UncommittedCompletion};
-use mf_runtime::WorkflowManifest;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     io,
@@ -39,8 +37,6 @@ pub enum ChatRunError {
     Json { source: serde_json::Error },
     #[snafu(transparent)]
     Domain { source: mf_chat::ChatError },
-    #[snafu(transparent)]
-    Manifest { source: ManifestReadError },
     #[snafu(transparent)]
     Inputs {
         source: mf_runtime::WorkflowInputError,
@@ -80,8 +76,7 @@ pub struct ChatOptions {
 }
 
 pub struct ChatLaunch {
-    pub executable: PathBuf,
-    pub manifest: WorkflowManifest,
+    pub runner: PreparedRunner,
     pub contract: ChatContract,
     pub options: ChatOptions,
     pub parameters: mf_runtime::WorkflowArguments,
@@ -94,16 +89,12 @@ impl ChatLaunch {
                 reason: "requires a nonblank profile"
             }
         );
-        let manifest = read_manifest(executable)?;
-        let contract = ChatContract::from_manifest(&manifest)?;
-        let supplied = options.run.workflow_arguments(&contract.parameters)?;
-        let parameters =
-            mf_runtime::resolve_workflow_inputs(&contract.parameters, &supplied, |name| {
-                std::env::var_os(name)
-            })?;
+        let runner =
+            PreparedRunner::load(executable, mf_chat::contract::MAX_RECOVERY_BYTES as u64)?;
+        let contract = ChatContract::from_manifest(runner.manifest())?;
+        let parameters = options.run.workflow_arguments(&contract.parameters)?;
         Ok(Self {
-            executable: executable.to_owned(),
-            manifest,
+            runner,
             contract,
             options,
             parameters,
@@ -435,6 +426,11 @@ impl Controller {
         retry_of: Option<String>,
     ) -> Result<(), ChatRunError> {
         ensure!(self.retained.is_none(), BusySnafu);
+        let parameters = mf_runtime::resolve_workflow_inputs(
+            &self.launch.contract.parameters,
+            &self.launch.parameters,
+            |name| std::env::var_os(name),
+        )?;
         let invocation = Invocation::new(&session.id);
         if self.launch.contract.answer_stream {
             self.preview.lock().unwrap().begin(invocation.clone());
@@ -444,6 +440,7 @@ impl Controller {
         let backend = ExternalBackend {
             cancellation: cancellation.clone(),
             launch: Arc::clone(&self.launch),
+            parameters,
             session: session.clone(),
             output: self.output.clone(),
             closed: Arc::clone(&self.closed),
@@ -593,6 +590,7 @@ impl Controller {
 struct ExternalBackend {
     cancellation: mf_runtime::StreamCancellation,
     launch: Arc<ChatLaunch>,
+    parameters: mf_runtime::WorkflowArguments,
     session: Session,
     output: SyncSender<ChatEvent>,
     closed: Arc<AtomicBool>,
@@ -607,13 +605,13 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         &mf_runtime::WorkflowManifest,
         &mf_runtime::WorkflowArguments,
     )> {
-        Some((&self.launch.manifest, &self.launch.parameters))
+        Some((self.launch.runner.manifest(), &self.parameters))
     }
 
     fn builtin_title_parameters(&self) -> Option<mf_runtime::WorkflowArguments> {
         self.launch
             .contract
-            .builtin_title_parameters(&self.launch.parameters)
+            .builtin_title_parameters(&self.parameters)
     }
 
     fn invoke(
@@ -705,23 +703,12 @@ impl ExternalBackend {
         context: &mut mf_runtime::ExecutionContext,
         mut preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), mf_chat::ChatError>>,
     ) -> Result<(LocalOutcome, Option<mf_chat::ChatError>), ChatRunError> {
-        let arguments = self
-            .launch
-            .contract
-            .arguments(request, &self.launch.parameters)?;
+        let arguments = self.launch.contract.arguments(request, &self.parameters)?;
         let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);
         let completion = RunnerInvocation {
-            executable: &self.launch.executable,
+            runner: &self.launch.runner,
             arguments: &arguments,
-            manifest: &self.launch.manifest,
             verbose: self.launch.options.run.verbose,
-            output: if self.launch.contract.streaming {
-                RunnerOutput::Records
-            } else {
-                RunnerOutput::Finite {
-                    limit: mf_chat::contract::MAX_RECOVERY_BYTES as u64,
-                }
-            },
             snapshots: true,
         }
         .run(
