@@ -1,13 +1,28 @@
 //! Shared executable invocation for native Flow values and conversation hosts.
 
-use crate::run::{LocalObservation, LocalOutcome, LocalRun, RunError};
-use mf_runtime::{NodeValues, StreamCancellation, WorkflowArguments};
-use mf_telemetry::{description::WorkflowDescription, identity::RunId};
+use crate::{
+    manifest::read_manifest,
+    run::{LocalObservation, LocalOutcome, LocalRun, RunError},
+};
+use mf_runtime::{NodeValues, StreamCancellation, WorkflowArguments, WorkflowManifest};
+use mf_telemetry::{description::ExecutionMode, identity::RunId};
 use snafu::{ResultExt, Snafu, ensure};
-use std::{io::Write, path::Path, process::Command, time::Duration};
+use std::{path::Path, process::Command, time::Duration};
 
 #[derive(Debug, Snafu)]
 pub enum RunnerError {
+    #[snafu(transparent)]
+    Manifest {
+        source: crate::manifest::ManifestReadError,
+    },
+    #[snafu(transparent)]
+    Contract {
+        source: mf_runtime::WorkflowManifestError,
+    },
+    #[snafu(display("runner manifest changed since preparation"))]
+    ManifestChanged,
+    #[snafu(display("runner output mode differs from its manifest"))]
+    OutputMode,
     #[snafu(transparent)]
     Run { source: RunError },
     #[snafu(transparent)]
@@ -38,7 +53,9 @@ pub enum RunnerOutput {
 pub struct RunnerInvocation<'a> {
     pub executable: &'a Path,
     pub arguments: &'a WorkflowArguments,
-    pub description: WorkflowDescription,
+    /// Frozen preparation contract. The executable's manifest is reread and
+    /// compared before every launch; observation is derived from that manifest.
+    pub manifest: &'a WorkflowManifest,
     pub verbose: u8,
     pub output: RunnerOutput,
     pub snapshots: bool,
@@ -60,13 +77,32 @@ impl RunnerInvocation<'_> {
         mut consume: impl FnMut(NodeValues) -> Result<(), E>,
         mut should_cancel: impl FnMut() -> bool,
     ) -> Result<RunnerCompletion<E>, RunnerError> {
+        if should_cancel() {
+            cancel(&cancellation);
+        }
+        if let Some(error) = cancellation.failure() {
+            return Err(error.into());
+        }
+        let manifest = read_manifest(self.executable)?;
+        ensure!(manifest == *self.manifest, ManifestChangedSnafu);
+        let description = manifest.description()?;
+        let streaming = description
+            .execution
+            .as_ref()
+            .is_some_and(|execution| execution.mode == ExecutionMode::Stream);
+        ensure!(
+            streaming == matches!(self.output, RunnerOutput::Records),
+            OutputModeSnafu
+        );
+        let arguments =
+            mf_runtime::resolve_workflow_inputs(&manifest.input_schema, self.arguments, |name| {
+                std::env::var_os(name)
+            })?;
+        manifest.input_schema.validate_stdin(&arguments, false)?;
         let mut file = tempfile::NamedTempFile::new().context(IoSnafu {
             operation: "create private runner arguments",
         })?;
-        serde_json::to_writer(&mut file, self.arguments).context(ArgumentsSnafu)?;
-        file.flush().context(IoSnafu {
-            operation: "flush private runner arguments",
-        })?;
+        serde_json::to_writer(&mut file, &arguments).context(ArgumentsSnafu)?;
         let size = file
             .as_file()
             .metadata()
@@ -97,11 +133,9 @@ impl RunnerInvocation<'_> {
         );
         let run_id = RunId::new();
         let mut run = match self.output {
-            RunnerOutput::Finite { limit } => {
-                LocalRun::start(command, self.description, run_id, limit)?
-            }
+            RunnerOutput::Finite { limit } => LocalRun::start(command, description, run_id, limit)?,
             RunnerOutput::Records => {
-                LocalRun::start_stream(command, self.description, run_id, cancellation.clone())?
+                LocalRun::start_stream(command, description, run_id, cancellation.clone())?
             }
         };
         observe(run.observation());
@@ -147,5 +181,69 @@ fn consume_records<E>(
             *failure = Some(error);
             run.cancel();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn manifest_and_input_preflight_fail_before_observation_or_process_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runner");
+        let marker = root.path().join("executed");
+        let expected = crate::test_support::sample_manifest();
+        let script = format!("#!/bin/sh\ntouch '{}'\nprintf '{{}}'\n", marker.display());
+        crate::test_support::write_runner(&path, &expected, &script);
+        let invoke = |arguments: &WorkflowArguments, output| {
+            RunnerInvocation {
+                executable: &path,
+                manifest: &expected,
+                arguments,
+                verbose: 0,
+                output,
+                snapshots: false,
+            }
+            .run(
+                Default::default(),
+                |_| panic!("preflight must not launch"),
+                |_| Ok::<_, std::convert::Infallible>(()),
+                || false,
+            )
+        };
+        let finite = RunnerOutput::Finite { limit: 1024 };
+        let arguments = WorkflowArguments::try_from(json!({"unknown": 1})).unwrap();
+        assert!(matches!(
+            invoke(&arguments, finite),
+            Err(RunnerError::Inputs { .. })
+        ));
+        assert!(matches!(
+            invoke(&Default::default(), RunnerOutput::Records),
+            Err(RunnerError::OutputMode)
+        ));
+        let mut changed = expected.clone();
+        changed.graph.definition = serde_json::from_value(json!({
+            "version":"2026-10-03", "dependencies":{},
+            "nodes":[{"id":"other", "kind":"builtin.constant", "config":{"value":1}}]
+        }))
+        .unwrap();
+        changed.graph.execution_order = vec!["other".into()];
+        changed
+            .input_schema
+            .inputs
+            .insert("other".into(), Default::default());
+        crate::test_support::write_runner(&path, &changed, &script);
+        assert!(matches!(
+            invoke(&Default::default(), finite),
+            Err(RunnerError::ManifestChanged)
+        ));
+        std::fs::write(&path, &script).unwrap();
+        assert!(matches!(
+            invoke(&Default::default(), finite),
+            Err(RunnerError::Manifest { .. })
+        ));
+        assert!(!marker.exists());
     }
 }

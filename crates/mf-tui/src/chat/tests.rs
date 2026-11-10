@@ -1,7 +1,7 @@
 use super::*;
 use mf_runtime::OutputValue;
 use serde_json::json;
-use std::{fs, os::unix::fs::PermissionsExt, time::Instant};
+use std::{fs, time::Instant};
 
 pub fn launch(directory: &Path) -> ChatLaunch {
     let mut manifest = crate::test_support::sample_manifest();
@@ -23,8 +23,7 @@ pub fn launch(directory: &Path) -> ChatLaunch {
     }},"stdin":{}})).unwrap();
     let contract = ChatContract::from_manifest(&manifest).unwrap();
     let executable = directory.join("worker");
-    fs::write(&executable, "#!/bin/sh\ntrap '' INT\nsleep 20\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_support::write_runner(&executable, &manifest, "#!/bin/sh\ntrap '' INT\nsleep 20\n");
     ChatLaunch {
         executable,
         manifest,
@@ -180,7 +179,7 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
         let count = root.path().join("calls");
         prepared.options.database_path = state.join("chat.sqlite");
         let path = prepared.options.database_path.clone();
-        fs::write(&prepared.executable, format!("#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"retained answer\",\"metadata\":{{\"source\":\"fixture\"}},\"usages\":[{{\"call_id\":\"actual-call\",\"model\":\"fixture\"}}]}}'\n", count.display())).unwrap();
+        fs::write(prepared.executable.with_extension("script"), format!("#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"retained answer\",\"metadata\":{{\"source\":\"fixture\"}},\"usages\":[{{\"call_id\":\"actual-call\",\"model\":\"fixture\"}}]}}'\n", count.display())).unwrap();
         let controller = ChatController::open(prepared).unwrap();
         controller
             .send(ChatCommand::Submit {
@@ -345,7 +344,7 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
         let path = prepared.options.database_path.clone();
         let marker = root.path().join("started");
         fs::write(
-            &prepared.executable,
+            prepared.executable.with_extension("script"),
             format!("#!/bin/sh\ntouch '{}'\nsleep 20\n", marker.display()),
         )
         .unwrap();
@@ -459,7 +458,7 @@ if mode == 'late':
         records = serde_json::to_string(&records).unwrap(),
         gate = gate.to_str().unwrap()
     );
-    fs::write(&launch.executable, script).unwrap();
+    crate::test_support::write_runner(&launch.executable, &launch.manifest, &script);
     (launch, gate)
 }
 

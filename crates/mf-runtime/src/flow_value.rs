@@ -40,6 +40,12 @@ pub enum FlowValueBuildError {
     },
     #[snafu(display("Flow value input binding: {source}"))]
     InputBinding { source: crate::WorkflowInputError },
+    #[snafu(display("external Flow manifest: {source}"))]
+    Manifest {
+        source: crate::WorkflowManifestError,
+    },
+    #[snafu(display("external Flow outputs must match the manifest's names and optionality"))]
+    ManifestOutputs,
 }
 
 impl From<FlowValueBuildError> for NodeBuildError {
@@ -99,20 +105,57 @@ impl FlowValue {
         Ok(Self(Arc::new(body), InvocationBoundary::Local))
     }
 
-    /// Wraps a finite executor whose internal execution is observed independently,
-    /// such as a runner process. The caller observes the invoking node's boundary;
-    /// its definition identities and snapshots never leak into the external body.
+    /// Wraps a manifest-backed finite executor observed independently, such as a
+    /// runner process. Its actual interface and definition identity come from the
+    /// validated manifest. Output types supplement historical manifests, which
+    /// record only output names and optionality. The executor must check that the
+    /// artifact still matches this manifest before launching it.
     pub fn external(
-        inputs: crate::WorkflowInputSchema,
+        manifest: &crate::WorkflowManifest,
         outputs: Vec<PortSpec>,
         execute: impl Fn(&mut ExecutionContext) -> Result<FlowOutputs, WorkflowRunError>
         + Send
         + Sync
         + 'static,
     ) -> Result<Self, NodeBuildError> {
-        let mut value = Self::new(
-            PreparedSubgraph::new(Vec::new(), outputs, execute).with_input_schema(inputs),
-        )?;
+        manifest.validate().context(ManifestSnafu)?;
+        ensure!(
+            manifest.graph.definition.execution.is_none(),
+            EventBodySnafu
+        );
+        ensure!(
+            manifest.graph.relations.streams.is_empty(),
+            StreamOutputsSnafu
+        );
+        ensure!(
+            outputs.len() == manifest.graph.definition.outputs.len()
+                && outputs.iter().all(|port| manifest
+                    .graph
+                    .definition
+                    .outputs
+                    .iter()
+                    .any(|output| output.name == port.name && output.optional != port.required)),
+            ManifestOutputsSnafu
+        );
+        let nodes = manifest
+            .graph
+            .definition
+            .nodes
+            .iter()
+            .map(|node| NodeIdentity {
+                id: node.id.to_string(),
+                kind: node.kind.clone(),
+                path: Vec::new(),
+            })
+            .collect();
+        let body = PreparedSubgraph::new(nodes, outputs, execute)
+            .with_input_schema(manifest.input_schema.clone())
+            .with_relations(manifest.graph.relations.clone())
+            .with_origin(crate::FlowOrigin {
+                workflow_id: manifest.workflow_id().context(ManifestSnafu)?,
+                path: Vec::new(),
+            });
+        let mut value = Self::new(body)?;
         value.1 = InvocationBoundary::External;
         Ok(value)
     }
@@ -185,21 +228,17 @@ impl FlowValue {
         context: &mut ExecutionContext,
     ) -> Result<FlowOutputs, WorkflowRunError> {
         self.0.inputs.mark_secrets(&mut arguments);
-        if matches!(self.1, InvocationBoundary::External) {
-            return context.run_external_flow(id, arguments, |child| {
-                child.bind_workflow_inputs(&self.0.inputs)?;
-                let outputs = self.0.execute_in_context(child)?;
-                self.validate_outputs(id, &outputs)?;
-                Ok(outputs)
-            });
-        }
-        let origin = self.0.origin();
-        context.run_flow(id, arguments, origin.as_ref(), &self.0.nodes, |child| {
+        let execute = |child: &mut ExecutionContext| {
             child.bind_workflow_inputs(&self.0.inputs)?;
             let outputs = self.0.execute_in_context(child)?;
             self.validate_outputs(id, &outputs)?;
             Ok(outputs)
-        })
+        };
+        if matches!(self.1, InvocationBoundary::External) {
+            return context.run_external_flow(id, arguments, execute);
+        }
+        let origin = self.0.origin();
+        context.run_flow(id, arguments, origin.as_ref(), &self.0.nodes, execute)
     }
 
     fn validate_outputs(&self, id: &str, outputs: &FlowOutputs) -> Result<(), WorkflowRunError> {
@@ -277,6 +316,58 @@ mod tests {
         assert_eq!(format!("{flow:?}"), "FlowValue { .. }");
         assert!(flow.input_ports().is_empty());
         assert!(flow.output_ports().is_empty());
+    }
+
+    #[test]
+    fn external_capabilities_derive_and_validate_the_manifest_contract() {
+        let mut manifest = crate::WorkflowManifest {
+            version: crate::WorkflowManifestVersion::V2026_11_06,
+            graph: crate::CompiledGraph {
+                definition: serde_json::from_value(json!({
+                    "version":"2026-10-28", "dependencies":{},
+                    "nodes":[{"id":"params", "kind":"builtin.parameters", "config":{
+                        "parameters":{"text":{"type":"string"}}
+                    }}],
+                    "outputs":[{"name":"answer", "node":"params", "port":"text"}]
+                }))
+                .unwrap(),
+                execution_order: vec!["params".into()],
+                relations: Default::default(),
+                children: Default::default(),
+            },
+            input_schema: serde_json::from_value(json!({
+                "inputs":{"params":{"text":{"type":"string", "required":true}}},
+                "stdin":{}
+            }))
+            .unwrap(),
+        };
+        let outputs = vec![PortSpec::new("answer", ValueType::String, true)];
+        let flow = FlowValue::external(&manifest, outputs.clone(), |_| {
+            panic!("preparation must not execute")
+        })
+        .unwrap();
+        assert_eq!(flow.body().inputs, manifest.input_schema);
+        assert_eq!(flow.body().nodes[0].kind, "builtin.parameters");
+        assert_eq!(
+            flow.body().origin().unwrap().workflow_id,
+            manifest.workflow_id().unwrap()
+        );
+        assert!(matches!(
+            business_error(
+                &FlowValue::external(&manifest, vec![], |_| unreachable!()).unwrap_err()
+            ),
+            FlowValueBuildError::ManifestOutputs
+        ));
+        manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
+        assert!(FlowValue::external(&manifest, outputs.clone(), |_| unreachable!()).is_err());
+        manifest.graph.definition.execution = None;
+        manifest.graph.execution_order.clear();
+        assert!(matches!(
+            business_error(
+                &FlowValue::external(&manifest, outputs, |_| unreachable!()).unwrap_err()
+            ),
+            FlowValueBuildError::Manifest { .. }
+        ));
     }
 
     #[test]

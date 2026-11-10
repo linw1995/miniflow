@@ -635,14 +635,10 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         );
         let execution = self.execute(request, context, preview);
         let failure = match execution.as_ref().err() {
-            Some(ChatRunError::Cancelled)
-            | Some(ChatRunError::Runner {
+            Some(ChatRunError::Runner {
                 source: RunnerError::Cancelled { .. },
             }) => TurnExit::Cancelled,
-            Some(ChatRunError::Observation {
-                source: RunError::Supervise { .. },
-            })
-            | Some(ChatRunError::Runner {
+            Some(ChatRunError::Runner {
                 source:
                     RunnerError::Run {
                         source: RunError::Supervise { .. },
@@ -713,20 +709,11 @@ impl ExternalBackend {
             .launch
             .contract
             .arguments(request, &self.launch.parameters)?;
-        ensure!(
-            !self.cancel.load(Ordering::Acquire) && !self.closed.load(Ordering::Acquire),
-            CancelledSnafu
-        );
-        let description = self
-            .launch
-            .manifest
-            .description()
-            .map_err(mf_chat::ChatError::from)?;
         let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);
         let completion = RunnerInvocation {
             executable: &self.launch.executable,
             arguments: &arguments,
-            description,
+            manifest: &self.launch.manifest,
             verbose: self.launch.options.run.verbose,
             output: if self.launch.contract.streaming {
                 RunnerOutput::Records

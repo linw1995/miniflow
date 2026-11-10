@@ -328,6 +328,8 @@ let outputs = mf_runtime::FlowRuntime::default().execute_with_inputs(&a, inputs)
 ```
 
 The loader reads the embedded manifest without launching or recompiling the runner.
+`FlowValue::external` requires that manifest, validates its finite callable contract,
+and derives input bindings, node identities, and the definition origin from it.
 Existing manifests describe input types but only output names and optionality, so the
 host supplies output types explicitly. Names and requiredness must match the manifest;
 returned values are type-checked on every call. The executable must remain available,
@@ -347,7 +349,7 @@ its own description, run identity, and telemetry; `load_with_observer` exposes a
 telemetry remains enabled; subprocess value snapshots are disabled because existing
 runner input transport cannot preserve the caller's privacy labels. Native hosts
 implementing other independently observed executors can use `FlowValue::external`
-with the same boundary semantics.
+with a validated manifest and the same boundary semantics.
 
 `--chat` and runner-backed Flow parameters share `mf_tui::runner::RunnerInvocation`
 for argument-file transport, launch, live observation, cancellation, output draining,
@@ -357,6 +359,14 @@ the retained terminal reply and usage events, including after protocol or proces
 failure. Its streaming composition continues to use `PreparedSubgraph` and
 `workflow.call`; the finite Flow-value adapter uses the same executor with a terminal
 output contract.
+
+Before each launch, the shared executor rereads the executable's manifest and checks
+it against the complete preparation manifest. Missing, invalid, or changed manifests
+fail before process startup. It derives observation from the freshly read manifest,
+checks terminal-versus-record output mode, and resolves and validates arguments and
+stdin requirements through the standard workflow input resolver. Both `--chat` and
+Flow-valued runner calls use this preflight; neither can supply a description in
+place of the executable's manifest.
 
 ## Node clusters
 

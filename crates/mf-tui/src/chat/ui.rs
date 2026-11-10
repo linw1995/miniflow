@@ -1762,7 +1762,7 @@ mod tests {
         let offline = root.path().join("offline");
         launch.options.database_path = state.join("chat.sqlite");
         let path = launch.options.database_path.clone();
-        std::fs::write(&launch.executable, "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"status\":\"succeeded\",\"text\":\"paid reply\",\"usages\":[]}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
+        std::fs::write(launch.executable.with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"status\":\"succeeded\",\"text\":\"paid reply\",\"usages\":[]}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
         let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.editor.insert("question");

@@ -2,7 +2,7 @@
 
 use crate::{
     manifest::read_manifest,
-    runner::{RunnerInvocation, RunnerOutput},
+    runner::{RunnerError, RunnerInvocation, RunnerOutput},
 };
 use mf_runtime::{ExecutionContext, FlowOutputs, FlowValue, PortSpec};
 use snafu::{ResultExt, Snafu, ensure};
@@ -15,19 +15,9 @@ pub enum RunnerFlowError {
         source: crate::manifest::ManifestReadError,
     },
     #[snafu(transparent)]
-    Contract {
-        source: mf_runtime::WorkflowManifestError,
-    },
-    #[snafu(transparent)]
     Build { source: mf_runtime::NodeBuildError },
     #[snafu(transparent)]
     Run { source: crate::runner::RunnerError },
-    #[snafu(transparent)]
-    Cancelled { source: mf_runtime::StreamError },
-    #[snafu(display("runner Flow requires a finite callable without exported streams"))]
-    NotFinite,
-    #[snafu(display("runner output contract must match the manifest's names and optionality"))]
-    Outputs,
     #[snafu(display("could not {operation}: {source}"))]
     Io {
         operation: &'static str,
@@ -64,53 +54,28 @@ pub fn load_with_observer(
     let executable = path.canonicalize().context(IoSnafu {
         operation: "resolve runner executable",
     })?;
-    let manifest = read_manifest(&executable)?;
-    let description = manifest.description()?;
-    ensure!(
-        manifest.graph.relations.is_callable()
-            && manifest.graph.relations.streams.is_empty()
-            && description.execution.as_ref().is_none_or(
-                |execution| execution.mode == mf_telemetry::description::ExecutionMode::Single
-            ),
-        NotFiniteSnafu
-    );
-    ensure!(
-        outputs.len() == manifest.graph.definition.outputs.len()
-            && outputs.iter().all(|port| manifest
-                .graph
-                .definition
-                .outputs
-                .iter()
-                .any(|output| output.name == port.name && output.optional != port.required)),
-        OutputsSnafu
-    );
-    Ok(FlowValue::external(
-        manifest.input_schema,
-        outputs,
-        move |context| {
-            execute(&executable, description.clone(), context, &observe)
-                .boxed()
-                .context(mf_runtime::NodePluginFailedSnafu)
-                .context(mf_runtime::NodeExecutionSnafu {
-                    definition_id: "runner",
-                })
-        },
-    )?)
+    let manifest = Arc::new(read_manifest(&executable)?);
+    let expected = Arc::clone(&manifest);
+    Ok(FlowValue::external(&manifest, outputs, move |context| {
+        execute(&executable, &expected, context, &observe)
+            .boxed()
+            .context(mf_runtime::NodePluginFailedSnafu)
+            .context(mf_runtime::NodeExecutionSnafu {
+                definition_id: "runner",
+            })
+    })?)
 }
 
 fn execute(
     executable: &Path,
-    description: mf_telemetry::description::WorkflowDescription,
+    manifest: &mf_runtime::WorkflowManifest,
     context: &mut ExecutionContext,
     observe: &dyn Fn(crate::run::LocalObservation),
 ) -> Result<FlowOutputs, RunnerFlowError> {
-    if let Some(error) = context.cancellation().failure() {
-        return Err(error.into());
-    }
     let completion = RunnerInvocation {
         executable,
         arguments: context.workflow_arguments(),
-        description,
+        manifest,
         verbose: 0,
         output: RunnerOutput::Finite {
             limit: 256 * 1024 * 1024,
@@ -125,7 +90,7 @@ fn execute(
         || false,
     )?;
     if let Some(error) = context.cancellation().failure() {
-        return Err(error.into());
+        return Err(RunnerError::from(error).into());
     }
     let outcome = completion.outcome;
     if let Some(source) = outcome.capture_failure {
@@ -151,24 +116,24 @@ fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+    use std::time::Duration;
 
     fn script(root: &Path, contents: &str) -> std::path::PathBuf {
         let path = root.join("runner");
-        fs::write(&path, format!("#!/bin/sh\n{contents}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_support::write_runner(
+            &path,
+            &crate::test_support::sample_manifest(),
+            &format!("#!/bin/sh\n{contents}\n"),
+        );
         path
     }
 
     #[test]
     fn process_failures_and_duplicate_output_keys_preserve_typed_causes() {
         let root = tempfile::tempdir().unwrap();
-        let description = crate::test_support::sample_manifest()
-            .description()
-            .unwrap();
+        let manifest = crate::test_support::sample_manifest();
         let path = script(root.path(), "echo failure >&2; exit 7");
-        let error =
-            execute(&path, description.clone(), &mut Default::default(), &|_| {}).unwrap_err();
+        let error = execute(&path, &manifest, &mut Default::default(), &|_| {}).unwrap_err();
         assert!(
             matches!(error, RunnerFlowError::Exit { status, stderr } if status.code() == Some(7) && stderr.contains("failure"))
         );
@@ -176,7 +141,7 @@ mod tests {
             root.path(),
             "[ \"$MF_CAPTURE_SNAPSHOTS\" = 0 ] || exit 9\nprintf '%s' '{\"x\":1,\"x\":2}'",
         );
-        let error = execute(&path, description, &mut Default::default(), &|_| {}).unwrap_err();
+        let error = execute(&path, &manifest, &mut Default::default(), &|_| {}).unwrap_err();
         assert!(matches!(error, RunnerFlowError::Json { .. }));
     }
 
@@ -184,13 +149,11 @@ mod tests {
     fn cancellation_reaps_a_running_process_and_prevents_a_cancelled_launch() {
         let root = tempfile::tempdir().unwrap();
         let path = script(root.path(), "exec sleep 60");
-        let description = crate::test_support::sample_manifest()
-            .description()
-            .unwrap();
+        let manifest = crate::test_support::sample_manifest();
         let mut context = ExecutionContext::default();
         let cancel = context.cancellation();
         let started = std::time::Instant::now();
-        let error = execute(&path, description.clone(), &mut context, &|_| {
+        let error = execute(&path, &manifest, &mut context, &|_| {
             cancel.cancel(
                 mf_runtime::StreamExecutionSnafu {
                     message: "test cancellation",
@@ -199,12 +162,22 @@ mod tests {
             );
         })
         .unwrap_err();
-        assert!(matches!(error, RunnerFlowError::Cancelled { .. }));
+        assert!(matches!(
+            error,
+            RunnerFlowError::Run {
+                source: RunnerError::Cancelled { .. }
+            }
+        ));
         assert!(started.elapsed() < Duration::from_secs(10));
-        let error = execute(&path, description, &mut context, &|_| {
+        let error = execute(&path, &manifest, &mut context, &|_| {
             panic!("cancelled launch")
         })
         .unwrap_err();
-        assert!(matches!(error, RunnerFlowError::Cancelled { .. }));
+        assert!(matches!(
+            error,
+            RunnerFlowError::Run {
+                source: RunnerError::Cancelled { .. }
+            }
+        ));
     }
 }
