@@ -663,8 +663,6 @@ impl mf_chat::ConversationBackend for ExternalBackend {
             Err(Box::new(failure) as Box<dyn std::error::Error + Send + Sync>)
         } else if let Some(failure) = &outcome.capture_failure {
             Err(Box::new(failure.clone()) as Box<dyn std::error::Error + Send + Sync>)
-        } else if let Some(message) = &outcome.capture_error {
-            mf_chat::CaptureSnafu { message }.fail().boxed()
         } else if !outcome.status.success() {
             mf_chat::CaptureSnafu {
                 message: "workflow process exited unsuccessfully",

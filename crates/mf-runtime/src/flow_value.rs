@@ -89,9 +89,10 @@ impl FlowValue {
     }
 
     /// Wraps a manifest-backed executor observed independently, such as a
-    /// runner process. Its actual interface and definition identity come from the
-    /// validated manifest. Output types supplement historical manifests, which
-    /// record only output names and optionality. The prepared executor owns
+    /// runner process. Its interface comes from the validated manifest; internal
+    /// nodes and definition identity remain with the independent executor, not
+    /// the caller-side prepared body. Output types supplement historical manifests,
+    /// which record only output names and optionality. The prepared executor owns
     /// per-invocation input binding and its process lifecycle. Record-mode
     /// runners expose every selection as a stream port, with no terminal outputs.
     /// Records may originate in different execution domains, so those ports are
@@ -118,17 +119,6 @@ impl FlowValue {
                     .any(|output| output.name == port.name && output.optional != port.required)),
             ManifestOutputsSnafu
         );
-        let nodes = manifest
-            .graph
-            .definition
-            .nodes
-            .iter()
-            .map(|node| NodeIdentity {
-                id: node.id.to_string(),
-                kind: node.kind.clone(),
-                path: Vec::new(),
-            })
-            .collect();
         let (outputs, stream_outputs) = if manifest.graph.definition.execution.is_some() {
             (
                 Vec::new(),
@@ -143,13 +133,9 @@ impl FlowValue {
         } else {
             (outputs, Vec::new())
         };
-        let body = PreparedSubgraph::streaming(nodes, outputs, stream_outputs, execute)
+        let body = PreparedSubgraph::streaming(Vec::new(), outputs, stream_outputs, execute)
             .with_input_schema(manifest.input_schema.clone())
-            .with_relations(manifest.graph.relations.clone())
-            .with_origin(crate::FlowOrigin {
-                workflow_id: manifest.workflow_id().context(ManifestSnafu)?,
-                path: Vec::new(),
-            });
+            .with_relations(manifest.graph.relations.clone());
         let mut value = Self::new(body)?;
         value.1 = InvocationBoundary::External;
         Ok(value)
@@ -379,11 +365,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(flow.body().inputs, manifest.input_schema);
-        assert_eq!(flow.body().nodes[0].kind, "builtin.parameters");
-        assert_eq!(
-            flow.body().origin().unwrap().workflow_id,
-            manifest.workflow_id().unwrap()
-        );
+        assert!(flow.body().nodes.is_empty());
+        assert!(flow.body().origin().is_none());
         assert!(matches!(
             business_error(
                 &FlowValue::external(&manifest, vec![], |_, _| unreachable!()).unwrap_err()
@@ -399,6 +382,26 @@ mod tests {
             [PortSpec::new("answer", ValueType::String, false)]
         );
         manifest.graph.definition.execution = None;
+        manifest.graph.relations.scope = Some(crate::ScopeRelations {
+            input: "params".into(),
+            values: Default::default(),
+            state_outputs: Default::default(),
+            writes: Default::default(),
+            exits: Default::default(),
+        });
+        let scoped = FlowValue::external(&manifest, outputs.clone(), |_, _| {
+            panic!("an external implicit-scope body must not execute")
+        })
+        .unwrap();
+        assert_eq!(
+            scoped.body().relations.as_ref(),
+            Some(&manifest.graph.relations)
+        );
+        assert!(matches!(
+            scoped.invoke("call", Default::default(), &mut Default::default()),
+            Err(WorkflowRunError::Context { .. })
+        ));
+        manifest.graph.relations.scope = None;
         manifest.graph.execution_order.clear();
         assert!(matches!(
             business_error(

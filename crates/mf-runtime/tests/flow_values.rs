@@ -31,31 +31,62 @@ fn flow_value() -> FlowValue {
 #[test]
 fn prepared_origin_metadata_and_invocation_are_available_from_the_runtime_entry() {
     use mf_runtime::{DiscardSink, FlowOrigin, SubgraphOrigin};
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     let origin = FlowOrigin {
         workflow_id: mf_telemetry::identity::WorkflowId::from_definition(&"public origin", &[])
             .unwrap(),
-        path: vec!["producer".into()],
+        path: vec![mf_runtime::ScopePathEntry::binding_key("producer", "body")],
     };
-    let mut body = PreparedSubgraph::new(vec![], vec![], |_| Ok(FlowOutputs::new()));
-    body.origin = Some(SubgraphOrigin::Fixed(origin.clone()));
-    assert_eq!(body.origin(), Some(origin.clone()));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let effects = executions.clone();
+    let original = PreparedSubgraph::new(vec![], vec![], move |_| {
+        effects.fetch_add(1, Ordering::SeqCst);
+        Ok(FlowOutputs::new())
+    });
+    let fixed = original.clone().with_origin(origin.clone());
+    assert!(original.origin.is_none());
+    assert!(matches!(&fixed.origin, Some(SubgraphOrigin::Fixed(actual)) if actual == &origin));
+    assert_eq!(fixed.origin(), Some(origin.clone()));
+    assert_eq!(fixed.clone().origin(), fixed.origin());
+    assert_eq!(fixed.scope_key("invoker", "body"), "invoker");
 
     let identity = Arc::new(OnceLock::new());
-    body.origin = Some(SubgraphOrigin::Deferred {
-        workflow_id: identity.clone(),
-        path: origin.path.clone(),
-    });
+    let body = fixed.with_origin_source(identity.clone(), origin.path.clone());
+    assert!(matches!(
+        &body.origin,
+        Some(SubgraphOrigin::Deferred { .. })
+    ));
     let cloned = body.clone();
+    let flow = FlowValue::new(body.clone()).unwrap();
+    let captured = flow.clone();
+    assert!(body.origin().is_none());
     assert!(cloned.origin().is_none());
+    assert!(flow.body().origin().is_none());
+    assert!(captured.body().origin().is_none());
+    let origin = FlowOrigin {
+        workflow_id: mf_telemetry::identity::WorkflowId::from_definition(
+            &"final resolved graph",
+            &[],
+        )
+        .unwrap(),
+        path: origin.path,
+    };
     identity.set(origin.workflow_id.clone()).unwrap();
-    assert_eq!(cloned.origin(), Some(origin));
+    assert_eq!(body.origin(), Some(origin.clone()));
+    assert_eq!(cloned.origin(), Some(origin.clone()));
+    assert_eq!(flow.body().origin(), Some(origin.clone()));
+    assert_eq!(captured.body().origin(), Some(origin));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
     assert!(
         body.invoke_with_sink(&mut ExecutionContext::default(), &mut DiscardSink)
             .unwrap()
             .is_empty()
     );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
 }
 
 #[derive(Debug, NodeValue)]

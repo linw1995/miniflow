@@ -102,10 +102,29 @@ fn source_free_runner_passes_through_parameter_edges_under_observation() {
     }
     assert_eq!(observed.load(Ordering::SeqCst), 2);
     let invalid = WorkflowArguments::try_from(json!({"params.text":42})).unwrap();
-    assert!(matches!(
-        callable.invoke("apply", invalid, &mut Default::default()),
-        Err(mf_runtime::WorkflowRunError::WorkflowInputs { .. })
-    ));
+    let error = callable
+        .invoke("apply", invalid, &mut Default::default())
+        .unwrap_err();
+    // The prepared external executor owns input binding; its typed cause survives
+    // the normal node/runner boundaries without requiring a second binding pass.
+    let mf_runtime::WorkflowRunError::NodeExecution {
+        source: mf_runtime::NodeExecutionError::PluginFailed { source },
+        ..
+    } = &error
+    else {
+        panic!("expected the prepared runner's typed input error, got {error:?}");
+    };
+    assert!(
+        matches!(
+            source.downcast_ref::<mf_tui::runner_flow::RunnerFlowError>(),
+            Some(mf_tui::runner_flow::RunnerFlowError::Run {
+                source: mf_tui::runner::RunnerError::Inputs {
+                    source: mf_runtime::WorkflowInputError::TypeMismatch { .. }
+                }
+            })
+        ),
+        "expected the prepared runner's typed input error, got {error:?}"
+    );
     assert_eq!(
         observed.load(Ordering::SeqCst),
         2,

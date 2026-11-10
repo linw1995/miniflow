@@ -25,11 +25,6 @@ pub enum CallInputBuildError {
     },
     #[snafu(display("Flow invocation input `flow` is reserved for the callable handle"))]
     ReservedFlow,
-    #[snafu(display("Flow invocation port `{name}`: {source}"))]
-    TypeDepth {
-        name: String,
-        source: mf_runtime::TypeDepthError,
-    },
 }
 
 impl From<CallInputBuildError> for NodeBuildError {
@@ -210,9 +205,6 @@ fn validate_ports<'a>(
             direction != "input" || port.name != "flow",
             ReservedFlowSnafu
         );
-        port.value_type.check_depth().context(TypeDepthSnafu {
-            name: port.name.as_ref(),
-        })?;
     }
     Ok(())
 }
@@ -321,10 +313,9 @@ mod tests {
         }
         let ports = [PortSpec::new("deep", value_type, true)];
         assert!(matches!(
-            validate_ports(&ports, "input"),
-            Err(CallInputBuildError::TypeDepth { .. })
+            factory(json!({"inputs":ports,"outputs":[]})),
+            Err(NodeBuildError::InvalidConfiguration { .. })
         ));
-        assert!(factory(json!({"inputs":ports,"outputs":[]})).is_err());
         let prepared = prepare(Vec::new(), vec![input("flow", true)]);
         assert_eq!(
             prepared.metadata.ports.inputs,

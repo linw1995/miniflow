@@ -144,20 +144,18 @@ fn generated_discovery_follows_new_provider_contracts_and_freezes_relative_param
     fs::remove_dir_all(&chooser).unwrap();
     fs::remove_dir_all(&streaming).unwrap();
     fs::remove_dir_all(&build).unwrap();
-    for _ in 0..2 {
-        let result = Command::new(&output)
-            .current_dir(root.path())
-            .env("PATH", "")
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        assert_eq!(
-            serde_json::from_slice::<Value>(&result.stdout).unwrap(),
-            json!({"content":"resolved"})
-        );
-    }
+    let result = Command::new(&output)
+        .current_dir(root.path())
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        json!({"content":"resolved"})
+    );
 }

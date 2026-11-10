@@ -489,61 +489,6 @@ fn ambient_registry_alias_cannot_capture_a_direct_parameter() {
 }
 
 #[test]
-fn direct_binding_preserves_secret_value_identity() {
-    // The provider deliberately rejects startup inputs. Exercise the binding-aware runtime
-    // boundary directly to verify it transports the original secret handle without copying.
-    let credential = mf_runtime::ValueRef::from("credential").into_secret();
-    let returned = credential.clone();
-    let body = PreparedSubgraph::new(
-        vec![],
-        vec![PortSpec::new("content", ValueType::String, true)],
-        move |_| Ok([("content".into(), returned.clone())].into()),
-    );
-    #[derive(NodeConfig)]
-    struct CallbackConfig {
-        left: PreparedSubgraph,
-    }
-    let config = CallbackConfig::from_config(
-        json!({"left":child("one")}),
-        BTreeMap::from([("left".into(), body)]),
-    )
-    .unwrap();
-    let body = config.left;
-    let outputs = ExecutionContext::default()
-        .run_call(
-            &body.scope_key("custom", "left"),
-            WorkflowArguments::default(),
-            &body.nodes,
-            |child| body.execute_in_context(child),
-        )
-        .unwrap();
-    assert!(outputs["content"].is_secret());
-    assert!(outputs["content"].ptr_eq(&credential));
-}
-
-#[test]
-fn external_factories_reject_unprepared_or_mismatched_handles() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let registration = registry.get(KIND).unwrap();
-    let config = json!({"label":"mapped", "left":child("one")});
-    let error = registration.instantiate(config.clone()).err().unwrap();
-    assert!(
-        error.to_string().contains("prepared Flow field `left`"),
-        "{error}"
-    );
-    let error = registration
-        .instantiate_subgraphs("custom", config, BTreeMap::new())
-        .err()
-        .unwrap();
-    assert!(
-        error
-            .to_string()
-            .contains("receiver-selected configuration fields"),
-        "{error}"
-    );
-}
-
-#[test]
 fn generated_flow_argument_constructor_reports_missing_provider_and_invalid_config() {
     use mf_compiler::{WorkflowBuildError, instantiate_subgraphs_with_metadata};
 

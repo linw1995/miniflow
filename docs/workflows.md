@@ -356,8 +356,9 @@ let outputs = mf_runtime::FlowRuntime::default().execute_with_inputs(&a, inputs)
 
 The loader prepares a reusable `mf_tui::runner::PreparedRunner` without launching or recompiling it.
 Loading reads and validates the embedded manifest, caches the observation description and terminal
-versus record output mode, and checks the host's output contract. `FlowValue::external` uses that
-manifest to derive input bindings, node identities, and the definition origin.
+versus record output mode, and checks the host's output contract. `FlowValue::external` derives its
+input schema and output contract from that manifest; internal nodes and definition identity stay with
+the independently observed runner, not the caller-side prepared body.
 Existing manifests describe input types but only output names and optionality, so the
 host supplies output types explicitly. Names and requiredness must match the manifest;
 returned values are type-checked on every call. The executable must remain available,

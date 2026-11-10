@@ -729,53 +729,6 @@ mod tests {
     }
 
     #[test]
-    fn definition_origins_survive_cloning_without_becoming_invocation_owners() {
-        let original = PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
-            panic!("origin changes must not execute the callback")
-        });
-        let origin = crate::FlowOrigin {
-            workflow_id: mf_telemetry::identity::WorkflowId::from_definition(&"workflow", &[])
-                .unwrap(),
-            path: vec![crate::ScopePathEntry::binding_key("producer", "body")],
-        };
-        let located = original.clone().with_origin(origin.clone());
-        assert!(original.origin().is_none());
-        assert_eq!(located.origin().as_ref(), Some(&origin));
-        assert_eq!(located.clone().origin(), located.origin());
-        assert_eq!(located.scope_key("invoker", "body"), "invoker");
-    }
-
-    #[test]
-    fn write_once_origin_identity_reaches_handles_captured_before_finalization() {
-        let source = Arc::new(OnceLock::new());
-        let path = vec![crate::ScopePathEntry::binding_key("producer", "body")];
-        let body = PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
-            panic!("origin finalization must not execute the body")
-        })
-        .with_origin_source(source.clone(), path.clone());
-        let flow = crate::FlowValue::new(body.clone()).unwrap();
-        let captured = flow.clone();
-        assert!(body.origin().is_none());
-        assert!(flow.body().origin().is_none());
-        let workflow_id =
-            mf_telemetry::identity::WorkflowId::from_definition(&"final resolved graph", &[])
-                .unwrap();
-        source.set(workflow_id.clone()).unwrap();
-        let origin = crate::FlowOrigin { workflow_id, path };
-        assert_eq!(body.origin(), Some(origin.clone()));
-        assert_eq!(flow.body().origin(), Some(origin.clone()));
-        assert_eq!(captured.body().origin(), Some(origin));
-        assert!(
-            source
-                .set(
-                    mf_telemetry::identity::WorkflowId::from_definition(&"replacement", &[])
-                        .unwrap()
-                )
-                .is_err()
-        );
-    }
-
-    #[test]
     fn scope_keys_distinguish_manual_compiled_and_explicit_bindings() {
         let manual = PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
             panic!("reading scope keys must not execute the body")

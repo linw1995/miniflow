@@ -169,15 +169,21 @@ fn selected_incremental_and_terminal_outputs_keep_their_message_domains() {
 #[test]
 fn flow_constants_retain_stream_contracts_and_producer_ownership() {
     let mut body = root_export();
-    body["nodes"][0]["inputs"] = json!({"count":{"value":2}});
+    body["nodes"][0]["inputs"] = json!({"count":{"from":{"node":"seed", "port":"value"}}});
+    body["nodes"].as_array_mut().unwrap().insert(
+        0,
+        json!({
+            "id":"seed", "kind":"builtin.constant", "config":{"value":2}
+        }),
+    );
     let definition = serde_json::from_value(json!({
         "version":"2026-10-28", "dependencies":{},
         "nodes":[
             {"id":"policy", "kind":"builtin.constant", "config":{"type":"flow", "value":body}},
             {"id":"apply", "kind":"workflow.call", "config":{
                 "inputs":[],
-                "outputs":[{"name":"total", "value_type":"int", "required":true}],
-                "stream_outputs":[{"name":"increment", "value_type":"int", "required":true}]
+                "outputs":[{"name":"total", "value_type":"usize", "required":true}],
+                "stream_outputs":[{"name":"increment", "value_type":"usize", "required":true}]
             }, "inputs":{"flow":{"from":{"node":"policy", "port":"value"}}}}
         ],
         "outputs":[{"name":"total", "node":"apply", "port":"total"},

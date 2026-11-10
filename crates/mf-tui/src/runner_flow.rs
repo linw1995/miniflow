@@ -145,10 +145,11 @@ mod tests {
         assert!(
             matches!(error, RunnerFlowError::Exit { status, stderr } if status.code() == Some(7) && stderr.contains("failure"))
         );
-        let path = script(
-            root.path(),
-            "[ \"$MF_CAPTURE_SNAPSHOTS\" = 0 ] || exit 9\nprintf '%s' '{\"x\":1,\"x\":2}'",
-        );
+        std::fs::write(
+            path.executable().with_extension("script"),
+            "#!/bin/sh\n[ \"$MF_CAPTURE_SNAPSHOTS\" = 0 ] || exit 9\nprintf '%s' '{\"x\":1,\"x\":2}'\n",
+        )
+        .unwrap();
         let error = execute(
             &path,
             &mut Default::default(),

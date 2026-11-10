@@ -213,6 +213,13 @@ fn code_supplies_real_callable_values_as_native_workflow_inputs() {
     let definition = WorkflowDefinition::from_json(&apply_definition().to_string()).unwrap();
     let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
     let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
+    let typed = mf_compiler::plan_typed_segments(&flow, true, true);
+    assert!(typed.segments.is_empty());
+    assert_eq!(typed.connections.len(), 1);
+    assert_eq!(
+        typed.connections[0].fallback,
+        Some(mf_compiler::TypedFallbackReason::ProviderMissing)
+    );
     for answer in ["native B", "native C"] {
         let body = PreparedSubgraph::new(
             Vec::new(),

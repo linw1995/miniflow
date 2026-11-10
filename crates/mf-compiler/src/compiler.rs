@@ -2486,16 +2486,6 @@ mod tests {
 
     struct NeverRun;
 
-    impl mf_runtime::TaskNode for NeverRun {
-        fn execute(
-            &self,
-            _: mf_runtime::Inputs,
-            _: &mut mf_runtime::ExecutionContext,
-        ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
-            panic!("identity finalization must not execute a Task")
-        }
-    }
-
     impl mf_runtime::EventNode for NeverRun {
         fn on_event(
             &mut self,
@@ -2833,47 +2823,6 @@ mod tests {
                 ORIGIN_EVENT_CONSTRUCTIONS.load(Ordering::SeqCst),
                 usize::from(streaming),
             );
-        }
-    }
-
-    #[test]
-    fn child_origin_identity_is_finalized_after_root_execution_resolution() {
-        for streaming in [false, true] {
-            let mut definition: WorkflowDefinition = serde_json::from_value(json!({
-                "version":"2026-10-28", "dependencies":{},
-                "nodes":[{"id":"root", "kind":"test.origin-identity"}]
-            }))
-            .unwrap();
-            // Exercise both automatic streaming and an authored streaming hint
-            // whose prepared Task-only graph is actually finite.
-            definition.execution = (!streaming).then(Default::default);
-            let graph = mf_runtime::CompiledGraph {
-                definition,
-                execution_order: vec!["root".into()],
-                relations: Default::default(),
-                children: BTreeMap::new(),
-            };
-            let execution = if streaming {
-                mf_runtime::NodeExecution::Event(Box::new(NeverRun))
-            } else {
-                mf_runtime::NodeExecution::Task(Box::new(NeverRun))
-            };
-            let nodes = vec![FlowNode::new(
-                "root",
-                mf_runtime::PreparedNode::from_parts(
-                    execution,
-                    mf_runtime::NodeMetadata::default(),
-                ),
-            )];
-            let identity = OnceLock::new();
-            let original = graph.workflow_id().unwrap();
-            let definition = finalize_origin_identity(&graph, &nodes, &identity).unwrap();
-            assert_eq!(definition.execution.is_some(), streaming);
-            let mut resolved = graph.clone();
-            resolved.definition = definition;
-            let expected = resolved.workflow_id().unwrap();
-            assert_ne!(original, expected);
-            assert_eq!(identity.get(), Some(&expected));
         }
     }
 }

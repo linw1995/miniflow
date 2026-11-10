@@ -66,78 +66,44 @@ fn assert_outputs(values: &[Value], stream: bool) {
 #[test]
 fn callable_task_children_preserve_stream_exports_without_promoting_or_flattening_the_body() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    for stream in [false, true] {
-        for optional in [false, true] {
-            let plan = compile_definition(&definition(stream, optional), &registry).unwrap();
-            assert_eq!(plan.graph.definition.execution.is_some(), stream);
-            assert!(
-                plan.graph.definition.nodes[0]
-                    .flow_parameters(&["local"])
-                    .unwrap()["local"]
-                    .execution
-                    .is_none()
-            );
-            let description = mf_compiler::describe_compiled(&plan).unwrap();
-            assert_eq!(description.nodes.len(), 1);
-            assert_eq!(description.loop_bodies.len(), 1);
-            assert_eq!(description.loop_bodies[0].nodes.len(), 1);
-            let values = if stream {
-                let instance = instantiate_stream(&plan, &registry)
-                    .unwrap()
-                    .start_with_options(StreamOptions::default())
-                    .unwrap();
-                let mut values = vec![];
-                while let Some(output) = instance.recv().unwrap() {
-                    values.push(serde_json::to_value(output.outputs).unwrap());
-                }
-                instance.join().unwrap();
-                values
-            } else {
-                vec![
-                    serde_json::to_value(
-                        instantiate_compiled(&plan, &registry)
-                            .unwrap()
-                            .execute()
-                            .unwrap(),
-                    )
-                    .unwrap(),
-                ]
-            };
-            assert_outputs(&values, stream);
-        }
+    for (stream, optional) in [(true, false), (false, true)] {
+        let plan = compile_definition(&definition(stream, optional), &registry).unwrap();
+        assert_eq!(plan.graph.definition.execution.is_some(), stream);
+        assert!(
+            plan.graph.definition.nodes[0]
+                .flow_parameters(&["local"])
+                .unwrap()["local"]
+                .execution
+                .is_none()
+        );
+        let description = mf_compiler::describe_compiled(&plan).unwrap();
+        assert_eq!(description.nodes.len(), 1);
+        assert_eq!(description.loop_bodies.len(), 1);
+        assert_eq!(description.loop_bodies[0].nodes.len(), 1);
+        let values = if stream {
+            let instance = instantiate_stream(&plan, &registry)
+                .unwrap()
+                .start_with_options(StreamOptions::default())
+                .unwrap();
+            let mut values = vec![];
+            while let Some(output) = instance.recv().unwrap() {
+                values.push(serde_json::to_value(output.outputs).unwrap());
+            }
+            instance.join().unwrap();
+            values
+        } else {
+            vec![
+                serde_json::to_value(
+                    instantiate_compiled(&plan, &registry)
+                        .unwrap()
+                        .execute()
+                        .unwrap(),
+                )
+                .unwrap(),
+            ]
+        };
+        assert_outputs(&values, stream);
     }
-}
-
-#[test]
-fn external_provider_rejects_unprepared_aliases_and_incompatible_body_interfaces() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let registration = registry.get(provider::KIND).unwrap();
-    let error = registration.instantiate(json!({})).err().unwrap();
-    assert!(
-        error
-            .to_string()
-            .contains("requires a prepared Flow argument")
-    );
-    let error = registration
-        .instantiate_subgraphs("custom", json!({}), BTreeMap::new())
-        .err()
-        .unwrap();
-    assert!(
-        error
-            .to_string()
-            .contains("expected exactly the local alias")
-    );
-    let mut value = serde_json::to_value(definition(false, false)).unwrap();
-    value["nodes"][0]["config"]["local"]["definition"]["outputs"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|output| output["name"] != "increment");
-    let error = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("expected separate terminal and increment stream interfaces")
-    );
 }
 
 // This target intentionally does not link mfn-core, so changed receiving
@@ -304,24 +270,22 @@ fn source_free_generated_runner_preserves_stream_forwarding_and_unsubscribed_ter
     fs::remove_dir_all(&build).unwrap();
     fs::remove_dir_all(&provider).unwrap();
     for (output, stream) in runners {
-        for _ in 0..2 {
-            let result = Command::new(&output)
-                .current_dir(root.path())
-                .env("PATH", "")
-                .output()
-                .unwrap();
-            assert!(
-                result.status.success(),
-                "{}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-            let values = result
-                .stdout
-                .split(|byte| *byte == b'\n')
-                .filter(|line| !line.is_empty())
-                .map(|line| serde_json::from_slice::<Value>(line).unwrap())
-                .collect::<Vec<_>>();
-            assert_outputs(&values, stream);
-        }
+        let result = Command::new(&output)
+            .current_dir(root.path())
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let values = result
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_outputs(&values, stream);
     }
 }

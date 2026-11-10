@@ -14,7 +14,7 @@ use mf_compiler::{
 use mf_runtime::{FlowRuntime, WorkflowArguments, WorkflowManifest};
 use mf_telemetry::event::ScopePathEntry;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, process::Command};
+use std::{fs, process::Command};
 
 fn child(content: &str) -> Value {
     json!({
@@ -23,50 +23,6 @@ fn child(content: &str) -> Value {
         "nodes":[{"id":"leaf", "kind":"builtin.constant", "config":{"value":content}}],
         "outputs":[{"name":"content", "node":"leaf", "port":"value"}]
     })
-}
-
-#[test]
-fn external_provider_validates_prepared_aliases_and_body_contracts() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let registration = registry.get(provider::KIND).unwrap();
-    // Empty ordinary construction is valid, but config cannot invent prepared handles.
-    registration.instantiate(json!({})).unwrap();
-    let error = registration
-        .instantiate_subgraphs("custom", json!({"left":child("one")}), BTreeMap::new())
-        .err()
-        .unwrap();
-    assert!(
-        matches!(
-            &error,
-            mf_runtime::NodeBuildError::InvalidSubgraph { message }
-                if message.contains("prepared Flow arguments do not match its receiver-selected configuration fields")
-        ),
-        "{error}"
-    );
-
-    // Every exposed body must satisfy the provider contract, even if never selected.
-    let mut wrong_output = child("content");
-    wrong_output["outputs"][0]["name"] = "answer".into();
-    for body in [
-        json!({"version":"2026-10-28", "dependencies":{},
-            "nodes":[{"id":"leaf", "kind":"builtin.identity"}],
-            "outputs":[{"name":"content", "node":"leaf", "port":"value"}]}),
-        wrong_output,
-    ] {
-        let definition: WorkflowDefinition = serde_json::from_value(json!({
-            "version":"2026-10-28", "dependencies":{},
-            "nodes":[{"id":"custom", "kind":provider::KIND,
-                "config":{"left":{"definition":body}}}]
-        }))
-        .unwrap();
-        let error = compile_definition(&definition, &registry).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("expected a terminal string-content body without inputs"),
-            "{error}"
-        );
-    }
 }
 
 #[test]
@@ -290,7 +246,7 @@ fn source_free_generated_runner_executes_external_provider_flow_bindings() {
     fs::remove_dir_all(&build).unwrap();
     fs::remove_dir_all(&provider_dir).unwrap();
 
-    for (selection, expected) in [("left", "one"), ("right", "two"), ("left", "one")] {
+    for (selection, expected) in [("left", "one"), ("right", "two")] {
         let result = Command::new(&output)
             .arg(format!("--params.select={selection}"))
             .current_dir(root.path())

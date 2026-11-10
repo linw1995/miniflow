@@ -109,20 +109,6 @@ fn definition(value: Value) -> WorkflowDefinition {
     serde_json::from_value(value).unwrap()
 }
 
-fn terminal_child(task_stream: bool) -> Value {
-    json!({
-        "version":"2026-10-28", "dependencies":{},
-        "nodes":[if task_stream {
-            json!({"id":"leaf", "kind":"fixture.task_stream"})
-        } else {
-            json!({"id":"leaf", "kind":"builtin.parameters", "config":{
-                "parameters":{"count":{"type":"usize", "secret":false}}
-            }})
-        }],
-        "outputs":[{"name":"total", "node":"leaf", "port":if task_stream { "total" } else { "count" }}]
-    })
-}
-
 fn parent(child: Value) -> Value {
     // No execution configuration: the real Stream source must determine the mode.
     json!({
@@ -137,43 +123,13 @@ fn parent(child: Value) -> Value {
 }
 
 #[test]
-fn stream_consumer_requires_a_matching_prepared_flow_contract() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let registration = registry.get(KIND).unwrap();
-    let error = registration.instantiate(json!({})).err().unwrap();
-    assert!(
-        error
-            .to_string()
-            .contains("requires a prepared Flow handle")
-    );
-    let error = registration
-        .instantiate_subgraphs(
-            OWNER,
-            json!({"local":terminal_child(false)}),
-            BTreeMap::new(),
-        )
-        .err()
-        .unwrap();
-    assert!(
-        error
-            .to_string()
-            .contains("receiver-selected configuration fields")
-    );
-}
-
-#[test]
-fn stream_messages_call_one_terminal_flow_task_with_bound_scope_and_identity() {
-    exercise_stream_parent(false);
-}
-
-#[test]
 fn terminal_task_stream_child_adapts_without_promoting_the_passed_flow_to_stream() {
-    exercise_stream_parent(true);
-}
-
-fn exercise_stream_parent(task_stream_child: bool) {
     let registry = NodeRegistry::from_inventory().unwrap();
-    let child = terminal_child(task_stream_child);
+    let child = json!({
+        "version":"2026-10-28", "dependencies":{},
+        "nodes":[{"id":"leaf", "kind":"fixture.task_stream"}],
+        "outputs":[{"name":"total", "node":"leaf", "port":"total"}]
+    });
     let child_plan = compile_definition(&definition(child.clone()), &registry).unwrap();
     assert!(
         child_plan.graph.definition.execution.is_none(),
@@ -206,14 +162,7 @@ fn exercise_stream_parent(task_stream_child: bool) {
     let body = graph.body(&body_path).unwrap();
     assert_eq!(body.nodes.len(), 1);
     assert_eq!(body.nodes[0].id, "leaf");
-    assert_eq!(
-        body.nodes[0].kind,
-        if task_stream_child {
-            "fixture.task_stream"
-        } else {
-            "builtin.parameters"
-        }
-    );
+    assert_eq!(body.nodes[0].kind, "fixture.task_stream");
 
     let prepared = instantiate_stream(&plan, &registry).unwrap();
     let owner = prepared

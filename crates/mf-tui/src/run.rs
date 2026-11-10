@@ -437,8 +437,7 @@ impl LocalRun {
         {
             return Err(error.into());
         }
-        let receiver =
-            LoopbackReceiver::bind(description.clone(), run_id).context(ReceiverSnafu)?;
+        let receiver = LoopbackReceiver::bind(description, run_id).context(ReceiverSnafu)?;
         let capture = Arc::new(Mutex::new(Capture::new().context(SpoolSnafu)?));
         capture.lock().expect("capture lock was not poisoned").limit =
             stdout_limit.min(MAX_STDOUT_BYTES);
