@@ -1094,7 +1094,9 @@ impl ChatView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run::LocalRun;
     use ratatui::backend::TestBackend;
+    use std::process::Command;
 
     fn pump(view: &mut ChatView, controller: &ChatController, ready: impl Fn(&ChatView) -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);

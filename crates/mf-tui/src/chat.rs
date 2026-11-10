@@ -2,7 +2,8 @@
 
 use crate::{
     manifest::{ManifestReadError, read_manifest},
-    run::{LocalObservation, LocalOutcome, LocalRun, RunError, RunOptions},
+    run::{LocalObservation, LocalOutcome, RunError, RunOptions},
+    runner::{RunnerError, RunnerInvocation, RunnerOutput},
 };
 use mf_chat::contract::{
     ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
@@ -13,7 +14,7 @@ use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     io,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus},
+    process::ExitStatus,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -46,6 +47,8 @@ pub enum ChatRunError {
     },
     #[snafu(transparent)]
     Observation { source: RunError },
+    #[snafu(transparent)]
+    Runner { source: RunnerError },
     #[snafu(display("could not {operation}: {source}"))]
     Io {
         operation: &'static str,
@@ -632,9 +635,18 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         );
         let execution = self.execute(request, context, preview);
         let failure = match execution.as_ref().err() {
-            Some(ChatRunError::Cancelled) => TurnExit::Cancelled,
+            Some(ChatRunError::Cancelled)
+            | Some(ChatRunError::Runner {
+                source: RunnerError::Cancelled { .. },
+            }) => TurnExit::Cancelled,
             Some(ChatRunError::Observation {
                 source: RunError::Supervise { .. },
+            })
+            | Some(ChatRunError::Runner {
+                source:
+                    RunnerError::Run {
+                        source: RunError::Supervise { .. },
+                    },
             }) => TurnExit::Interrupted,
             _ => TurnExit::Failed,
         };
@@ -701,111 +713,75 @@ impl ExternalBackend {
             .launch
             .contract
             .arguments(request, &self.launch.parameters)?;
-        let mut file = tempfile::NamedTempFile::new().context(IoSnafu {
-            operation: "create private workflow arguments",
-        })?;
-        serde_json::to_writer(&mut file, &arguments)?;
-        let size = file
-            .as_file()
-            .metadata()
-            .context(IoSnafu {
-                operation: "inspect private workflow arguments",
-            })?
-            .len();
-        ensure!(
-            size <= mf_runtime::MAX_WORKFLOW_INPUT_BYTES as u64,
-            mf_runtime::WorkflowInputTooLargeSnafu {
-                limit: mf_runtime::MAX_WORKFLOW_INPUT_BYTES
-            }
-        );
         ensure!(
             !self.cancel.load(Ordering::Acquire) && !self.closed.load(Ordering::Acquire),
             CancelledSnafu
         );
-        let mut command = Command::new(&self.launch.executable);
-        command.arg("--inputs-file").arg(file.path());
-        for _ in 0..self.launch.options.run.verbose.min(3) {
-            command.arg("--verbose");
-        }
         let description = self
             .launch
             .manifest
             .description()
             .map_err(mf_chat::ChatError::from)?;
-        let run_id = mf_telemetry::identity::RunId::new();
         let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);
-        let mut run = if self.launch.contract.streaming {
-            LocalRun::start_stream(command, description, run_id, context.cancellation())?
-        } else {
-            LocalRun::start(
-                command,
-                description,
-                run_id,
-                mf_chat::contract::MAX_RECOVERY_BYTES as u64,
-            )?
-        };
-        emit(
-            &self.output,
-            &self.closed,
-            ChatEvent::Observing(run.observation()),
-        );
-        let mut protocol_failure = None;
-        loop {
-            if self.cancel.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
-                self.cancellation.cancel(
-                    mf_runtime::StreamExecutionSnafu {
-                        message: "chat request cancelled",
-                    }
-                    .build(),
-                );
-                run.cancel();
-            }
-            if context.cancellation().failure().is_some() {
-                run.cancel();
-            }
-            if protocol_failure.is_none() {
-                if let Err(error) = Self::consume_records(&run, &mut decoder, &mut preview) {
-                    protocol_failure = Some(error);
-                    run.cancel();
-                }
+        let completion = RunnerInvocation {
+            executable: &self.launch.executable,
+            arguments: &arguments,
+            description,
+            verbose: self.launch.options.run.verbose,
+            output: if self.launch.contract.streaming {
+                RunnerOutput::Records
             } else {
-                while run.try_record().is_ok() {}
-            }
-            if let Some(mut outcome) = run.poll()? {
-                if protocol_failure.is_none()
-                    && let Err(error) = Self::consume_records(&run, &mut decoder, &mut preview)
+                RunnerOutput::Finite {
+                    limit: mf_chat::contract::MAX_RECOVERY_BYTES as u64,
+                }
+            },
+            snapshots: true,
+        }
+        .run(
+            context.cancellation(),
+            |observation| {
+                emit(
+                    &self.output,
+                    &self.closed,
+                    ChatEvent::Observing(observation),
+                )
+            },
+            |record| {
+                if let Some(delta) = decoder.accept(record)?
+                    && let Some(consume) = preview.as_mut()
                 {
-                    protocol_failure = Some(error);
+                    consume(delta)?;
                 }
-                if self.launch.contract.streaming {
-                    if let Some(result) = decoder.result() {
-                        outcome.stdout = serde_json::to_vec(result)?;
-                    }
-                    if protocol_failure.is_none()
-                        && outcome.capture_error.is_none()
-                        && let Err(error) = decoder.finish()
-                    {
-                        protocol_failure = Some(error);
-                    }
+                Ok(())
+            },
+            || {
+                let cancelled =
+                    self.cancel.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire);
+                if cancelled {
+                    self.cancellation.cancel(
+                        mf_runtime::StreamExecutionSnafu {
+                            message: "chat request cancelled",
+                        }
+                        .build(),
+                    );
                 }
-                return Ok((outcome, protocol_failure));
+                cancelled
+            },
+        )?;
+        let mut outcome = completion.outcome;
+        let mut protocol_failure = completion.protocol_failure;
+        if self.launch.contract.streaming {
+            if let Some(result) = decoder.result() {
+                outcome.stdout = serde_json::to_vec(result)?;
             }
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-    fn consume_records(
-        run: &LocalRun,
-        decoder: &mut mf_chat::contract::ConversationOutputDecoder,
-        preview: &mut Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), mf_chat::ChatError>>,
-    ) -> Result<(), mf_chat::ChatError> {
-        while let Ok(record) = run.try_record() {
-            if let Some(delta) = decoder.accept(record)?
-                && let Some(consume) = preview.as_mut()
+            if protocol_failure.is_none()
+                && outcome.capture_error.is_none()
+                && let Err(error) = decoder.finish()
             {
-                consume(delta)?;
+                protocol_failure = Some(error);
             }
         }
-        Ok(())
+        Ok((outcome, protocol_failure))
     }
 }
 

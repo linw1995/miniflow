@@ -310,6 +310,54 @@ than reporting fictitious child events. Native callbacks remain usable without g
 See the [complete three-file example](../examples/embedded-workflows) and
 [embedding](embedding.md#repository-example).
 
+### Supply an already-built runner
+
+Unix hosts can load an existing Linux ELF64 or macOS Mach-O64 runner as the same
+native capability using `mf_tui::runner_flow::load`. A's parameter declaration and
+`workflow.call` edges stay the same:
+
+```rust
+let policy = mf_tui::runner_flow::load(
+    std::path::Path::new("./policy-runner"),
+    vec![mf_runtime::PortSpec::new("answer", mf_runtime::ValueType::String, true)],
+)?;
+let inputs = mf_runtime::WorkflowArguments(mf_runtime::Inputs::from([
+    ("params.policy".into(), policy.into()),
+]));
+let outputs = mf_runtime::FlowRuntime::default().execute_with_inputs(&a, inputs)?;
+```
+
+The loader reads the embedded manifest without launching or recompiling the runner.
+Existing manifests describe input types but only output names and optionality, so the
+host supplies output types explicitly. Names and requiredness must match the manifest;
+returned values are type-checked on every call. The executable must remain available,
+but its source, providers, and build tools are unnecessary at invocation time.
+
+Each call uses fresh private arguments and a fresh supervised process. Cancellation
+terminates the process group; exit, capture, and JSON decoding failures retain their
+typed causes. This adapter supports finite runners without stdin or exported streams.
+Arguments and results cross a JSON boundary, so nested callable arguments cannot cross
+into the subprocess. Output values are conservatively secret because runner JSON does
+not preserve native privacy labels. The subprocess uses its own internal execution
+budgets and workers rather than sharing in-process scheduling state.
+
+The caller observes the invoking node's input, output, and completion. The runner has
+its own description, run identity, and telemetry; `load_with_observer` exposes a live
+`LocalObservation` for each invocation. No child definition is added to A. Graph
+telemetry remains enabled; subprocess value snapshots are disabled because existing
+runner input transport cannot preserve the caller's privacy labels. Native hosts
+implementing other independently observed executors can use `FlowValue::external`
+with the same boundary semantics.
+
+`--chat` and runner-backed Flow parameters share `mf_tui::runner::RunnerInvocation`
+for argument-file transport, launch, live observation, cancellation, output draining,
+and process-group cleanup. It supports both terminal JSON and backpressured JSON
+records. Chat supplies its conversation decoder and preview consumer, then reconciles
+the retained terminal reply and usage events, including after protocol or process
+failure. Its streaming composition continues to use `PreparedSubgraph` and
+`workflow.call`; the finite Flow-value adapter uses the same executor with a terminal
+output contract.
+
 ## Node clusters
 
 Version `2026-10-23` accepts an optional `clusters` array in the root graph and in Loop and Iteration bodies. Clusters

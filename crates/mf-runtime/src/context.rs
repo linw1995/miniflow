@@ -833,6 +833,20 @@ impl ExecutionContext {
         result
     }
 
+    /// Invokes an independently observed executor. Only the calling node belongs
+    /// to this artifact; no child definition or snapshot scope is fabricated.
+    pub fn run_external_flow<T>(
+        &mut self,
+        id: &str,
+        arguments: crate::WorkflowArguments,
+        run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
+    ) -> Result<T, WorkflowRunError> {
+        let mut child = self.fork_body(None);
+        child.snapshots = None;
+        child.remaining_steps = self.remaining_steps.clone();
+        child.run_flow(id, arguments, None, &[], run)
+    }
+
     /// Includes enclosing body scopes even when observation and snapshots are disabled.
     pub fn invocation_path(&self) -> Vec<LoopPathEntry> {
         let mut path = self.scope_prefix.clone();

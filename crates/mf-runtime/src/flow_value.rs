@@ -10,7 +10,13 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 /// Clones share preparation, never invocation state or the producer's context. Handles
 /// have identity equality and deliberately have no serialization implementation.
 #[derive(Clone)]
-pub struct FlowValue(Arc<PreparedSubgraph>);
+pub struct FlowValue(Arc<PreparedSubgraph>, InvocationBoundary);
+
+#[derive(Clone, Copy)]
+enum InvocationBoundary {
+    Local,
+    External,
+}
 
 #[derive(Debug, Snafu)]
 pub enum FlowValueBuildError {
@@ -90,7 +96,25 @@ impl FlowValue {
                 name: port.name.as_ref(),
             })?;
         }
-        Ok(Self(Arc::new(body)))
+        Ok(Self(Arc::new(body), InvocationBoundary::Local))
+    }
+
+    /// Wraps a finite executor whose internal execution is observed independently,
+    /// such as a runner process. The caller observes the invoking node's boundary;
+    /// its definition identities and snapshots never leak into the external body.
+    pub fn external(
+        inputs: crate::WorkflowInputSchema,
+        outputs: Vec<PortSpec>,
+        execute: impl Fn(&mut ExecutionContext) -> Result<FlowOutputs, WorkflowRunError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<Self, NodeBuildError> {
+        let mut value = Self::new(
+            PreparedSubgraph::new(Vec::new(), outputs, execute).with_input_schema(inputs),
+        )?;
+        value.1 = InvocationBoundary::External;
+        Ok(value)
     }
 
     /// Wraps an already prepared native Flow without capturing any caller state.
@@ -161,6 +185,14 @@ impl FlowValue {
         context: &mut ExecutionContext,
     ) -> Result<FlowOutputs, WorkflowRunError> {
         self.0.inputs.mark_secrets(&mut arguments);
+        if matches!(self.1, InvocationBoundary::External) {
+            return context.run_external_flow(id, arguments, |child| {
+                child.bind_workflow_inputs(&self.0.inputs)?;
+                let outputs = self.0.execute_in_context(child)?;
+                self.validate_outputs(id, &outputs)?;
+                Ok(outputs)
+            });
+        }
         let origin = self.0.origin();
         context.run_flow(id, arguments, origin.as_ref(), &self.0.nodes, |child| {
             child.bind_workflow_inputs(&self.0.inputs)?;

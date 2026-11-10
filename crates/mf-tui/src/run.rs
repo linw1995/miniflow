@@ -457,8 +457,13 @@ impl LocalRun {
         }
         command
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
-            .env("MF_RUN_ID", run_id.to_string())
-            .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1");
+            .env("MF_RUN_ID", run_id.to_string());
+        if !command
+            .get_envs()
+            .any(|(name, _)| name == mf_telemetry::SNAPSHOT_CAPTURE_ENV)
+        {
+            command.env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1");
+        }
         let path = PathBuf::from(command.get_program());
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader());
