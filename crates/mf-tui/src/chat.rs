@@ -284,7 +284,10 @@ impl ChatController {
     fn join_worker(&mut self) -> Result<(), ChatRunError> {
         self.closed.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
-            worker.join().map_err(|_| WorkerPanicSnafu.build())??;
+            match worker.join() {
+                Ok(result) => result?,
+                Err(_) => return WorkerPanicSnafu.fail(),
+            }
         }
         Ok(())
     }

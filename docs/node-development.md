@@ -348,6 +348,12 @@ lifecycle and return no terminal outputs. Resource requirements (implicit scope 
 stdin ownership) are checked when invoked, rather than preventing construction or transport.
 `FlowValue::from_flow(flow)` wraps an already prepared native `Flow` without serializing it.
 
+Definition identity is shared prepared metadata: `PreparedSubgraph::origin` and `SubgraphOrigin`
+are public through the existing `mf_runtime` entry point, alongside the other subgraph metadata.
+`Fixed` holds an established `FlowOrigin`; `Deferred` shares the preparer's write-once workflow
+identity until execution-mode resolution completes. `origin()` materializes either form when ready;
+cloning a deferred origin retains the same identity source, not a new invocation owner.
+
 Callable capabilities are runtime-only. Business JSON serialization, including a Flow nested in a
 collection, fails rather than serializing executable code. Debug/snapshot projection is safe and
 opaque. JSON deserialization cannot produce a Flow, and JSON defaults/environment bindings cannot

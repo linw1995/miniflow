@@ -124,7 +124,7 @@ pub use stream_plan::{
 };
 pub use subgraph::{
     PreparedSubgraph, SubgraphFlowInputMetadata, SubgraphInputMetadata, SubgraphNode,
-    SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
+    SubgraphOrigin, SubgraphStream, SubgraphStreamOutput, SubgraphStreamSender,
 };
 pub use task_stream::{
     DiscardSink, EmissionSink, Emitter, TaskStreamExecutor, TaskStreamNode, TypedEmitter,

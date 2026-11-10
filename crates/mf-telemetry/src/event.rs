@@ -468,7 +468,9 @@ impl Event {
     }
 }
 
-pub(crate) fn validate_path(path: &[LoopPathEntry]) -> Result<(), ContractError> {
+/// Validates runtime scope bounds and entries without resolving their definition
+/// locations against a workflow description.
+pub fn validate_path(path: &[LoopPathEntry]) -> Result<(), ContractError> {
     require(
         path.len() <= crate::MAX_SCOPE_DEPTH,
         "Loop path exceeds nesting limit",

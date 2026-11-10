@@ -222,7 +222,7 @@ impl SubgraphInputMetadata {
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,
     /// Definition metadata can be completed after execution-mode resolution.
-    origin: Option<SubgraphOrigin>,
+    pub origin: Option<SubgraphOrigin>,
     pub inputs: crate::WorkflowInputSchema,
     pub outputs: Vec<PortSpec>,
     pub stream_outputs: Vec<PortSpec>,
@@ -233,8 +233,10 @@ pub struct PreparedSubgraph {
     body: PreparedSubgraphBody,
 }
 
+/// A prepared body's definition identity, fixed or shared with its preparer
+/// until execution-mode resolution finalizes the root workflow identity.
 #[derive(Clone)]
-enum SubgraphOrigin {
+pub enum SubgraphOrigin {
     Fixed(crate::FlowOrigin),
     Deferred {
         workflow_id: Arc<OnceLock<mf_telemetry::identity::WorkflowId>>,
@@ -555,7 +557,7 @@ impl PreparedSubgraph {
 
     /// Native callbacks need startup binding here; compiled finite and Event
     /// executors already own that work. Do not rebind inputs around those engines.
-    pub(super) fn invoke_with_sink(
+    pub fn invoke_with_sink(
         &self,
         state: &mut ExecutionContext,
         sink: &mut dyn crate::EmissionSink,

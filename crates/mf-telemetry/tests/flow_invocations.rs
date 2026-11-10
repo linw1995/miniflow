@@ -78,6 +78,13 @@ fn lifecycle(
 fn flow_frames_jump_definitions_without_reparenting_runtime_ancestry() {
     let graph = graph();
     let path = invocation(&graph);
+    mf_telemetry::event::validate_path(&path).unwrap();
+    assert!(
+        mf_telemetry::event::validate_path(&[ScopePathEntry::Call {
+            call_id: " ".into()
+        }])
+        .is_err()
+    );
     assert_eq!(path[1].node_id(), "invoke");
     assert!(path[1].is_call());
     assert_eq!(path[1].index(), Count::ZERO);

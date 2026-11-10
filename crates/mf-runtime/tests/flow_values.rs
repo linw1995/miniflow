@@ -28,6 +28,36 @@ fn flow_value() -> FlowValue {
     .unwrap()
 }
 
+#[test]
+fn prepared_origin_metadata_and_invocation_are_available_from_the_runtime_entry() {
+    use mf_runtime::{DiscardSink, FlowOrigin, SubgraphOrigin};
+    use std::sync::{Arc, OnceLock};
+
+    let origin = FlowOrigin {
+        workflow_id: mf_telemetry::identity::WorkflowId::from_definition(&"public origin", &[])
+            .unwrap(),
+        path: vec!["producer".into()],
+    };
+    let mut body = PreparedSubgraph::new(vec![], vec![], |_| Ok(FlowOutputs::new()));
+    body.origin = Some(SubgraphOrigin::Fixed(origin.clone()));
+    assert_eq!(body.origin(), Some(origin.clone()));
+
+    let identity = Arc::new(OnceLock::new());
+    body.origin = Some(SubgraphOrigin::Deferred {
+        workflow_id: identity.clone(),
+        path: origin.path.clone(),
+    });
+    let cloned = body.clone();
+    assert!(cloned.origin().is_none());
+    identity.set(origin.workflow_id.clone()).unwrap();
+    assert_eq!(cloned.origin(), Some(origin));
+    assert!(
+        body.invoke_with_sink(&mut ExecutionContext::default(), &mut DiscardSink)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[derive(Debug, NodeValue)]
 struct FlowPort {
     value: FlowValue,
