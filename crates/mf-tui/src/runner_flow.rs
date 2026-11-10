@@ -1,4 +1,4 @@
-//! Source-free, finite runner capabilities for ordinary Flow-valued edges.
+//! Source-free runner capabilities for ordinary Flow-valued edges.
 
 use crate::{
     manifest::read_manifest,
@@ -18,6 +18,8 @@ pub enum RunnerFlowError {
     Build { source: mf_runtime::NodeBuildError },
     #[snafu(transparent)]
     Run { source: crate::runner::RunnerError },
+    #[snafu(transparent)]
+    Delivery { source: mf_runtime::StreamError },
     #[snafu(display("could not {operation}: {source}"))]
     Io {
         operation: &'static str,
@@ -56,29 +58,39 @@ pub fn load_with_observer(
     })?;
     let manifest = Arc::new(read_manifest(&executable)?);
     let expected = Arc::clone(&manifest);
-    Ok(FlowValue::external(&manifest, outputs, move |context| {
-        execute(&executable, &expected, context, &observe)
-            .boxed()
-            .context(mf_runtime::NodePluginFailedSnafu)
-            .context(mf_runtime::NodeExecutionSnafu {
-                definition_id: "runner",
-            })
-    })?)
+    Ok(FlowValue::external(
+        &manifest,
+        outputs,
+        move |context, sink| {
+            execute(&executable, &expected, context, sink, &observe)
+                .boxed()
+                .context(mf_runtime::NodePluginFailedSnafu)
+                .context(mf_runtime::NodeExecutionSnafu {
+                    definition_id: "runner",
+                })
+        },
+    )?)
 }
 
 fn execute(
     executable: &Path,
     manifest: &mf_runtime::WorkflowManifest,
     context: &mut ExecutionContext,
+    sink: &mut dyn mf_runtime::EmissionSink,
     observe: &dyn Fn(crate::run::LocalObservation),
 ) -> Result<FlowOutputs, RunnerFlowError> {
+    let streaming = manifest.graph.definition.execution.is_some();
     let completion = RunnerInvocation {
         executable,
         arguments: context.workflow_arguments(),
         manifest,
         verbose: 0,
-        output: RunnerOutput::Finite {
-            limit: 256 * 1024 * 1024,
+        output: if streaming {
+            RunnerOutput::Records
+        } else {
+            RunnerOutput::Finite {
+                limit: 256 * 1024 * 1024,
+            }
         },
         // Existing runner JSON cannot carry the caller's native privacy labels.
         snapshots: false,
@@ -86,9 +98,17 @@ fn execute(
     .run(
         context.cancellation(),
         observe,
-        |_| Ok::<_, std::convert::Infallible>(()),
+        |outputs| {
+            sink.send(mf_runtime::NodeResult {
+                outputs: secret_outputs(outputs),
+                ..Default::default()
+            })
+        },
         || false,
     )?;
+    if let Some(error) = completion.protocol_failure {
+        return Err(error.into());
+    }
     if let Some(error) = context.cancellation().failure() {
         return Err(RunnerError::from(error).into());
     }
@@ -103,14 +123,21 @@ fn execute(
             stderr: outcome.stderr
         }
     );
-    let outputs: FlowOutputs =
-        mf_runtime::decode_unique_json(&outcome.stdout).context(JsonSnafu)?;
+    if streaming {
+        return Ok(FlowOutputs::new());
+    }
+    Ok(secret_outputs(
+        mf_runtime::decode_unique_json(&outcome.stdout).context(JsonSnafu)?,
+    ))
+}
+
+fn secret_outputs(outputs: FlowOutputs) -> FlowOutputs {
     // JSON transport does not preserve native secret labels, including
     // secrets acquired inside the runner rather than from its arguments.
-    Ok(outputs
+    outputs
         .into_iter()
         .map(|(name, value)| (name, value.into_secret()))
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -133,7 +160,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let manifest = crate::test_support::sample_manifest();
         let path = script(root.path(), "echo failure >&2; exit 7");
-        let error = execute(&path, &manifest, &mut Default::default(), &|_| {}).unwrap_err();
+        let error = execute(
+            &path,
+            &manifest,
+            &mut Default::default(),
+            &mut mf_runtime::DiscardSink,
+            &|_| {},
+        )
+        .unwrap_err();
         assert!(
             matches!(error, RunnerFlowError::Exit { status, stderr } if status.code() == Some(7) && stderr.contains("failure"))
         );
@@ -141,7 +175,14 @@ mod tests {
             root.path(),
             "[ \"$MF_CAPTURE_SNAPSHOTS\" = 0 ] || exit 9\nprintf '%s' '{\"x\":1,\"x\":2}'",
         );
-        let error = execute(&path, &manifest, &mut Default::default(), &|_| {}).unwrap_err();
+        let error = execute(
+            &path,
+            &manifest,
+            &mut Default::default(),
+            &mut mf_runtime::DiscardSink,
+            &|_| {},
+        )
+        .unwrap_err();
         assert!(matches!(error, RunnerFlowError::Json { .. }));
     }
 
@@ -153,14 +194,20 @@ mod tests {
         let mut context = ExecutionContext::default();
         let cancel = context.cancellation();
         let started = std::time::Instant::now();
-        let error = execute(&path, &manifest, &mut context, &|_| {
-            cancel.cancel(
-                mf_runtime::StreamExecutionSnafu {
-                    message: "test cancellation",
-                }
-                .build(),
-            );
-        })
+        let error = execute(
+            &path,
+            &manifest,
+            &mut context,
+            &mut mf_runtime::DiscardSink,
+            &|_| {
+                cancel.cancel(
+                    mf_runtime::StreamExecutionSnafu {
+                        message: "test cancellation",
+                    }
+                    .build(),
+                );
+            },
+        )
         .unwrap_err();
         assert!(matches!(
             error,
@@ -169,9 +216,13 @@ mod tests {
             }
         ));
         assert!(started.elapsed() < Duration::from_secs(10));
-        let error = execute(&path, &manifest, &mut context, &|_| {
-            panic!("cancelled launch")
-        })
+        let error = execute(
+            &path,
+            &manifest,
+            &mut context,
+            &mut mf_runtime::DiscardSink,
+            &|_| panic!("cancelled launch"),
+        )
         .unwrap_err();
         assert!(matches!(
             error,
@@ -179,5 +230,86 @@ mod tests {
                 source: RunnerError::Cancelled { .. }
             }
         ));
+    }
+
+    #[test]
+    fn record_runner_delivers_live_secret_values_and_reaps_on_sink_failure() {
+        use mf_runtime::{EmissionSink, NodeResult, ValueType};
+        struct Sink {
+            gate: std::path::PathBuf,
+            values: Vec<i64>,
+            reject: bool,
+        }
+        impl EmissionSink for Sink {
+            fn send(&mut self, result: NodeResult) -> Result<(), mf_runtime::StreamError> {
+                if self.reject {
+                    return mf_runtime::StreamExecutionSnafu {
+                        message: "receiver rejected record",
+                    }
+                    .fail();
+                }
+                let value = &result.outputs["value"];
+                assert!(value.is_secret());
+                self.values.push(value.as_i64().unwrap());
+                std::fs::write(&self.gate, "release").unwrap();
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runner");
+        let gate = root.path().join("release");
+        let mut manifest = crate::test_support::sample_manifest();
+        manifest.graph.definition = serde_json::from_value(serde_json::json!({
+            "version":"2026-10-28", "dependencies":{}, "execution":{},
+            "nodes":[{"id":"source", "kind":"builtin.constant", "config":{"value":1}}],
+            "outputs":[{"name":"value", "node":"source", "port":"value"}]
+        }))
+        .unwrap();
+        manifest.graph.execution_order = vec!["source".into()];
+        manifest
+            .input_schema
+            .inputs
+            .insert("source".into(), Default::default());
+        crate::test_support::write_runner(
+            &path,
+            &manifest,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"value\":1}}'\ni=0\nwhile [ ! -f '{}' ] && [ \"$i\" -lt 500 ]; do sleep 0.01; i=$((i+1)); done\n[ -f '{}' ] || exit 9\nprintf '%s\\n' '{{\"value\":2}}'\n",
+                gate.display(),
+                gate.display()
+            ),
+        );
+        let flow = load(&path, vec![PortSpec::new("value", ValueType::Int64, true)]).unwrap();
+        assert!(flow.output_ports().is_empty());
+        assert_eq!(
+            flow.stream_output_ports(),
+            [PortSpec::new("value", ValueType::Int64, false)]
+        );
+        let mut sink = Sink {
+            gate,
+            values: vec![],
+            reject: false,
+        };
+        assert!(
+            flow.invoke_with_sink(
+                "runner",
+                Default::default(),
+                &mut Default::default(),
+                &mut sink
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(sink.values, [1, 2]);
+        std::fs::remove_file(&sink.gate).unwrap();
+        sink.reject = true;
+        let mut context = ExecutionContext::default();
+        let started = std::time::Instant::now();
+        let error = flow
+            .invoke_with_sink("runner", Default::default(), &mut context, &mut sink)
+            .unwrap_err();
+        assert!(error.to_string().contains("receiver rejected record"));
+        assert!(context.cancellation().failure().is_some());
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

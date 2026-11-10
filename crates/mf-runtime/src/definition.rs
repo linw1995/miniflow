@@ -232,6 +232,8 @@ impl CallConfig {
             _inputs: Vec<crate::PortSpec>,
             #[serde(rename = "outputs")]
             _outputs: Vec<crate::PortSpec>,
+            #[serde(default, rename = "stream_outputs")]
+            _stream_outputs: Vec<crate::PortSpec>,
         }
 
         serde_json::from_value::<InputContract>(config.clone()).is_ok()

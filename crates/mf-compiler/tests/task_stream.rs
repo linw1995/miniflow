@@ -167,6 +167,43 @@ fn selected_incremental_and_terminal_outputs_keep_their_message_domains() {
 }
 
 #[test]
+fn flow_constants_retain_stream_contracts_and_producer_ownership() {
+    let mut body = root_export();
+    body["nodes"][0]["inputs"] = json!({"count":{"value":2}});
+    let definition = serde_json::from_value(json!({
+        "version":"2026-10-28", "dependencies":{},
+        "nodes":[
+            {"id":"policy", "kind":"builtin.constant", "config":{"type":"flow", "value":body}},
+            {"id":"apply", "kind":"workflow.call", "config":{
+                "inputs":[],
+                "outputs":[{"name":"total", "value_type":"int", "required":true}],
+                "stream_outputs":[{"name":"increment", "value_type":"int", "required":true}]
+            }, "inputs":{"flow":{"from":{"node":"policy", "port":"value"}}}}
+        ],
+        "outputs":[{"name":"total", "node":"apply", "port":"total"},
+            {"name":"increment", "node":"apply", "port":"increment"}]
+    }))
+    .unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    assert!(plan.graph.children.contains_key(&"policy".into()));
+    assert!(!plan.graph.children.contains_key(&"apply".into()));
+    let instance = instantiate_stream(&plan, &registry)
+        .unwrap()
+        .start()
+        .unwrap();
+    let mut seen = Vec::new();
+    while let Some(output) = instance.recv().unwrap() {
+        seen.push(serde_json::to_value(output.outputs).unwrap());
+    }
+    instance.join().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert!(seen.contains(&json!({"total":2})));
+    assert!(seen.contains(&json!({"increment":0})));
+    assert!(seen.contains(&json!({"increment":1})));
+}
+
+#[test]
 fn independent_selected_domains_do_not_overwrite_pending_deliveries() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let definition = serde_json::from_value(json!({

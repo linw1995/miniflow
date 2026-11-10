@@ -332,14 +332,18 @@ struct ApplyInput {
 
 The generated codecs declare `ValueType::Flow` and transfer the native capability without Serde.
 Cloning or forwarding it preserves the prepared body; it does not execute the body or capture the
-producer's execution context. `FlowValue::new(prepared_body)` creates a finite callable from a
+producer's execution context. `FlowValue::new(prepared_body)` creates a capability from a
 `PreparedSubgraph`; an explicit Flow-typed `builtin.constant` performs equivalent preparation for
 fixed values in authored definitions. `builtin.parameters` declares Flow-valued parameters supplied by
 native code or enclosing input edges. Use `workflow.call` in input-call mode to invoke a received value,
-with explicit normal port contracts and input edges. Native workflow inputs can carry the same handle directly. Native receivers
-call `policy.invoke(id, arguments, context)`; this validates arguments/results and retains ordinary
-invocation budgets, cancellation, and context isolation. `FlowValue::from_flow(flow)` wraps an already
-prepared native `Flow` without serializing it.
+with explicit normal port contracts and input edges, plus `stream_outputs` for incremental ports.
+Native workflow inputs can carry the same handle directly. Native receivers call
+`policy.invoke_with_sink(id, arguments, context, sink)` to forward validated emissions with backpressure
+and receive terminal results. `invoke` drains and discards emissions. Both retain ordinary invocation
+budgets, cancellation, and context isolation. Prepared Event bodies use the existing owned invocation
+lifecycle and return no terminal outputs. Resource requirements (implicit scope frames or unresolved
+stdin ownership) are checked when invoked, rather than preventing construction or transport.
+`FlowValue::from_flow(flow)` wraps an already prepared native `Flow` without serializing it.
 
 Callable capabilities are runtime-only. Business JSON serialization, including a Flow nested in a
 collection, fails rather than serializing executable code. Debug/snapshot projection is safe and

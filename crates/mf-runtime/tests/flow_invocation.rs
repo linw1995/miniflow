@@ -302,6 +302,36 @@ fn synchronous_event_adapter_drains_emissions_and_finite_bodies_stay_on_caller()
             .is_empty()
     );
     assert_eq!(sink.0.len(), 3);
+    sink.0.clear();
+    let value = mf_runtime::FlowValue::new(event).unwrap();
+    assert!(
+        value
+            .invoke_with_sink(
+                "event",
+                Default::default(),
+                &mut Default::default(),
+                &mut sink
+            )
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(sink.0.len(), 3);
+    struct Reject;
+    impl EmissionSink for Reject {
+        fn send(&mut self, _: NodeResult) -> Result<(), StreamError> {
+            mf_runtime::StreamExecutionSnafu {
+                message: "stop Event delivery",
+            }
+            .fail()
+        }
+    }
+    let mut context = ExecutionContext::default();
+    assert!(
+        value
+            .invoke_with_sink("event", Default::default(), &mut context, &mut Reject)
+            .is_err()
+    );
+    assert!(context.cancellation().failure().is_some());
 }
 
 #[test]

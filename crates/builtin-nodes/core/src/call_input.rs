@@ -12,6 +12,8 @@ use std::collections::BTreeSet;
 struct Config {
     inputs: Vec<PortSpec>,
     outputs: Vec<PortSpec>,
+    #[serde(default)]
+    stream_outputs: Vec<PortSpec>,
 }
 
 #[derive(Debug, Snafu)]
@@ -49,6 +51,11 @@ pub enum CallInputError {
         declared: NodePorts,
         actual: NodePorts,
     },
+    #[snafu(display("Flow stream signature differs: declared {declared:?}, actual {actual:?}"))]
+    StreamSignature {
+        declared: Vec<PortSpec>,
+        actual: Vec<PortSpec>,
+    },
     #[snafu(display("Flow invocation `{node}`: {source}"))]
     Execution {
         node: String,
@@ -68,9 +75,14 @@ impl From<CallInputError> for NodeExecutionError {
 /// is available. Public callable selection and unrelated results stay public.
 struct CallInputNode {
     signature: NodePorts,
+    stream_outputs: Vec<PortSpec>,
 }
 
 impl NodePortContract for CallInputNode {
+    fn stream_outputs(&self) -> Vec<PortSpec> {
+        self.stream_outputs.clone()
+    }
+
     fn ports(&self) -> NodePorts {
         let mut inputs = vec![PortSpec::new("flow", ValueType::Flow, true)];
         inputs.extend(self.signature.inputs.clone());
@@ -84,8 +96,30 @@ impl NodePortContract for CallInputNode {
 impl TaskNode for CallInputNode {
     fn execute(
         &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_call(inputs, context, &mut mf_runtime::DiscardSink)
+    }
+}
+
+impl mf_runtime::TaskStreamNode for CallInputNode {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        emitter: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_call(inputs, context, emitter)
+    }
+}
+
+impl CallInputNode {
+    fn execute_call(
+        &self,
         mut inputs: Inputs,
         context: &mut ExecutionContext,
+        sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
         let value = inputs.remove("flow").context(MissingFlowSnafu)?;
         let flow = value.as_flow().context(InvalidFlowSnafu)?;
@@ -97,12 +131,29 @@ impl TaskNode for CallInputNode {
                 actual,
             }
         );
+        let mut actual = flow.stream_output_ports().to_vec();
+        actual.sort_by(|left, right| left.name.cmp(&right.name));
+        ensure!(
+            actual == self.stream_outputs,
+            StreamSignatureSnafu {
+                declared: self.stream_outputs.clone(),
+                actual,
+            }
+        );
         let id = context
             .current_node()
             .unwrap_or(mf_runtime::CALL_KIND)
             .to_owned();
         let outputs: mf_runtime::Outputs = flow
-            .invoke(&id, WorkflowArguments(inputs), context)
+            .invoke_with_sink(
+                &id,
+                WorkflowArguments(inputs),
+                context,
+                &mut SelectionSink {
+                    sink,
+                    selection: &value,
+                },
+            )
             .context(ExecutionSnafu { node: &id })?
             .into_iter()
             // The chosen callable's identity can itself be sensitive, even when
@@ -124,7 +175,28 @@ impl TaskNode for CallInputNode {
     }
 }
 
-fn validate_ports(ports: &[PortSpec], direction: &'static str) -> Result<(), CallInputBuildError> {
+struct SelectionSink<'a> {
+    sink: &'a mut dyn mf_runtime::EmissionSink,
+    selection: &'a mf_runtime::ValueRef,
+}
+
+impl mf_runtime::EmissionSink for SelectionSink<'_> {
+    fn is_connected(&self) -> bool {
+        self.sink.is_connected()
+    }
+
+    fn send(&mut self, mut result: NodeResult) -> Result<(), mf_runtime::StreamError> {
+        for output in result.outputs.values_mut() {
+            *output = output.clone().inherit_secrets([self.selection]);
+        }
+        self.sink.send(result)
+    }
+}
+
+fn validate_ports<'a>(
+    ports: impl IntoIterator<Item = &'a PortSpec>,
+    direction: &'static str,
+) -> Result<(), CallInputBuildError> {
     let mut names = BTreeSet::new();
     for port in ports {
         ensure!(
@@ -149,11 +221,13 @@ pub fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let Config {
         mut inputs,
         mut outputs,
+        mut stream_outputs,
     } = mf_runtime::deserialize_config(config)?;
     validate_ports(&inputs, "input")?;
-    validate_ports(&outputs, "output")?;
+    validate_ports(outputs.iter().chain(&stream_outputs), "output")?;
     inputs.sort_by(|left, right| left.name.cmp(&right.name));
     outputs.sort_by(|left, right| left.name.cmp(&right.name));
+    stream_outputs.sort_by(|left, right| left.name.cmp(&right.name));
     let input_bindings = inputs
         .iter()
         .map(|port| {
@@ -166,15 +240,20 @@ pub fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
             )
         })
         .collect();
-    PreparedNode::new(
-        CallInputNode {
-            signature: NodePorts { inputs, outputs },
-        },
-        NodeMetadata {
-            input_bindings,
-            ..Default::default()
-        },
-    )
+    let streaming = !stream_outputs.is_empty();
+    let node = CallInputNode {
+        signature: NodePorts { inputs, outputs },
+        stream_outputs,
+    };
+    let metadata = NodeMetadata {
+        input_bindings,
+        ..Default::default()
+    };
+    if streaming {
+        PreparedNode::task_stream(node, metadata)
+    } else {
+        PreparedNode::new(node, metadata)
+    }
 }
 
 #[cfg(test)]
@@ -230,6 +309,9 @@ mod tests {
             json!({"inputs": [input("x", true), input("x", false)], "outputs": []}),
             json!({"inputs": [], "outputs": [input("", true)]}),
             json!({"inputs": [], "outputs": [input("x", true), input("x", true)]}),
+            json!({"inputs": [], "outputs": [], "stream_outputs": [input("", true)]}),
+            json!({"inputs": [], "outputs": [], "stream_outputs": [input("x", true), input("x", true)]}),
+            json!({"inputs": [], "outputs": [input("x", true)], "stream_outputs": [input("x", true)]}),
         ] {
             assert!(factory(config.clone()).is_err(), "accepted {config}");
         }
@@ -322,6 +404,89 @@ mod tests {
             .unwrap();
         assert_eq!(result.outputs["value"], json!(1));
         assert_eq!(effects.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn streaming_calls_forward_before_completion_and_preserve_selection_privacy() {
+        struct Sink {
+            received: Arc<AtomicUsize>,
+            reject: bool,
+        }
+        impl mf_runtime::EmissionSink for Sink {
+            fn send(&mut self, result: NodeResult) -> Result<(), mf_runtime::StreamError> {
+                assert!(result.outputs["delta"].is_secret());
+                self.received.fetch_add(1, Ordering::SeqCst);
+                if self.reject {
+                    return mf_runtime::StreamExecutionSnafu {
+                        message: "receiver closed",
+                    }
+                    .fail();
+                }
+                Ok(())
+            }
+        }
+        let received = Arc::new(AtomicUsize::new(0));
+        let seen = received.clone();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let finished = completed.clone();
+        let flow = FlowValue::new(PreparedSubgraph::streaming(
+            vec![],
+            vec![input("answer", true)],
+            vec![input("delta", true)],
+            move |_, sink| {
+                sink.send(Outputs::from([("delta".into(), 1.into())]).into())
+                    .map_err(NodeExecutionError::from)
+                    .context(mf_runtime::NodeExecutionSnafu {
+                        definition_id: "body",
+                    })?;
+                assert_eq!(
+                    seen.load(Ordering::SeqCst),
+                    1,
+                    "delivery must precede completion"
+                );
+                finished.fetch_add(1, Ordering::SeqCst);
+                Ok(Outputs::from([("answer".into(), 42.into())]))
+            },
+        ))
+        .unwrap();
+        // A terminal-only declaration must not silently drain a streaming callable.
+        let mismatch = prepare(vec![], vec![input("answer", true)])
+            .execution
+            .as_task_node()
+            .unwrap()
+            .execute(
+                Inputs::from([("flow".into(), flow.clone().into())]),
+                &mut Default::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            invocation_error(&mismatch),
+            CallInputError::StreamSignature { .. }
+        ));
+        assert_eq!(received.load(Ordering::SeqCst), 0);
+        let prepared = factory(json!({"inputs":[], "outputs":[input("answer", true)], "stream_outputs":[input("delta", true)]})).unwrap();
+        let mf_runtime::NodeExecution::TaskStream(executor) = prepared.execution else {
+            panic!("stream executor required");
+        };
+        let mut sink = Sink {
+            received,
+            reject: false,
+        };
+        let arguments = Inputs::from([("flow".into(), ValueRef::from(flow).into_secret())]);
+        let result = executor
+            .execute_with_sink(arguments.clone(), &mut Default::default(), &mut sink)
+            .unwrap();
+        assert_eq!(result.outputs["answer"], json!(42));
+        assert!(result.outputs["answer"].is_secret());
+        sink.reject = true;
+        let mut context = ExecutionContext::default();
+        assert!(
+            executor
+                .execute_with_sink(arguments, &mut context, &mut sink)
+                .is_err()
+        );
+        assert!(context.cancellation().failure().is_some());
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
     }
 
     #[test]

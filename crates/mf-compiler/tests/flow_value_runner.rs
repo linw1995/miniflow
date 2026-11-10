@@ -231,6 +231,60 @@ fn code_supplies_real_callable_values_as_native_workflow_inputs() {
     }
 }
 
+#[test]
+fn native_streaming_capabilities_travel_through_parameters_and_ordinary_edges() {
+    use mf_runtime::{
+        FlowValue, Outputs, PortSpec, PreparedSubgraph, ValueType, WorkflowArguments,
+    };
+    use snafu::ResultExt;
+    let mut definition = apply_definition();
+    definition["nodes"][1]["config"]["stream_outputs"] = json!([
+        {"name":"delta", "value_type":"string", "required":true}
+    ]);
+    definition["nodes"].as_array_mut().unwrap().push(json!({
+        "id":"consume", "kind":"builtin.identity", "inputs":{
+            "input":{"from":{"node":"apply", "port":"delta"}}
+        }
+    }));
+    definition["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"delta", "node":"consume", "port":"value"}));
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan =
+        mf_compiler::compile_definition(&serde_json::from_value(definition).unwrap(), &registry)
+            .unwrap();
+    let policy = FlowValue::new(PreparedSubgraph::streaming(
+        vec![],
+        vec![PortSpec::new("answer", ValueType::String, true)],
+        vec![PortSpec::new("delta", ValueType::String, true)],
+        |_, sink| {
+            sink.send(Outputs::from([("delta".into(), "increment".into())]).into())
+                .map_err(mf_runtime::NodeExecutionError::from)
+                .context(mf_runtime::NodeExecutionSnafu {
+                    definition_id: "native",
+                })?;
+            Ok(Outputs::from([("answer".into(), "complete".into())]))
+        },
+    ))
+    .unwrap();
+    let instance = mf_compiler::instantiate_stream(&plan, &registry)
+        .unwrap()
+        .start_with_options(mf_runtime::StreamOptions {
+            arguments: WorkflowArguments(Outputs::from([("params.policy".into(), policy.into())])),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut seen = Vec::new();
+    while let Some(output) = instance.recv().unwrap() {
+        seen.push(serde_json::to_value(output.outputs).unwrap());
+    }
+    instance.join().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen.contains(&json!({"delta":"increment"})));
+    assert!(seen.contains(&json!({"answer":"complete"})));
+}
+
 #[cfg(feature = "codegen")]
 #[test]
 fn generated_edge_passed_flows_execute_without_sources_or_build_tools() {

@@ -25,6 +25,7 @@ fn flow_parameters(config: &Value) -> BTreeMap<String, Value> {
     if let Some(fields) = config.as_object()
         && !fields.contains_key("inputs")
         && !fields.contains_key("outputs")
+        && !fields.contains_key("stream_outputs")
         && fields.get("flow").is_some_and(Value::is_string)
         && fields.get("body").is_some_and(|body| !body.is_null())
     {

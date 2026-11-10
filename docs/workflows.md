@@ -275,8 +275,26 @@ configuration declares the expected ordinary input/output ports and the callable
 
 The example expects a callable with no ordinary inputs and one required string output named `answer`.
 Other ordinary arguments use additional input edges; there is no special argument/result envelope.
-The invoker checks the received handle's exact input/output contract before starting the body. Port
+The invoker checks the received handle's exact input/output and stream-output contract before starting the body. Port
 names are compared independently of declaration order. `flow` is reserved for the callable input.
+
+For incremental outputs, add `config.stream_outputs`, using the same `PortSpec` array format as
+`outputs`. It defaults to `[]`. For example, a callable with a terminal `answer` and incremental
+`delta` declares both separately:
+
+```json
+{
+  "inputs": [],
+  "outputs": [{"name": "answer", "value_type": "string", "required": true}],
+  "stream_outputs": [{"name": "delta", "value_type": "string", "required": true}]
+}
+```
+
+Stream ports use ordinary edges. Dynamic Call forwards emissions with backpressure, validates their
+types, and returns terminal outputs only after successful completion. Native prepared Event bodies
+export emissions and have no terminal outputs; their existing invocation lifecycle handles draining,
+cancellation, and joining. Native hosts can use `FlowValue::invoke_with_sink`; `invoke` drains and
+discards emissions, matching `PreparedSubgraph::execute_in_context`.
 
 Two calls to the same A can receive B and C independently, without modifying A or installing a named
 binding environment. Existing identity and routing nodes can forward callable values without a JSON
@@ -297,10 +315,15 @@ let outputs = mf_runtime::FlowRuntime::default().execute_with_inputs(&a, inputs)
 JSON input, environment variables, and JSON defaults cannot create a callable. Direct or nested business JSON
 serialization fails explicitly; diagnostic snapshots render a safe opaque placeholder instead.
 
-The initial dynamic callable contract is finite, without stdin or exported stream emissions. Declared
+Constructing or forwarding a Flow value validates its interface, without requiring execution resources.
+At invocation, a body that depends on an implicit Loop/Iteration scope frame fails before execution.
+Stdin requirements are checked after ordinary input binding; a conditional stdin declaration is usable
+when its alternative input is supplied. An invocation that still requires stdin fails because dynamic
+calls do not own a stdin resource. This does not prevent carrying the value through `parameters`.
+Declared
 ordinary input-call arguments are conservatively secret at the invocation boundary, so snapshots
 cannot expose a selected callee's private input before its handle is decoded. Secret callable selection
-also propagates to returned values. Existing static `workflow.call` streaming behavior is unchanged.
+also propagates to terminal and incremental values.
 Invocation creates isolated input/value state while sharing the caller's step budget, cancellation, and
 worker limits. Observation distinguishes the
 invocation node from the producer's actual definition origin; no fictitious child is created beneath
@@ -328,7 +351,7 @@ let outputs = mf_runtime::FlowRuntime::default().execute_with_inputs(&a, inputs)
 ```
 
 The loader reads the embedded manifest without launching or recompiling the runner.
-`FlowValue::external` requires that manifest, validates its finite callable contract,
+`FlowValue::external` requires that manifest, validates its output contract,
 and derives input bindings, node identities, and the definition origin from it.
 Existing manifests describe input types but only output names and optionality, so the
 host supplies output types explicitly. Names and requiredness must match the manifest;
@@ -337,7 +360,13 @@ but its source, providers, and build tools are unnecessary at invocation time.
 
 Each call uses fresh private arguments and a fresh supervised process. Cancellation
 terminates the process group; exit, capture, and JSON decoding failures retain their
-typed causes. This adapter supports finite runners without stdin or exported streams.
+typed causes. Terminal-JSON runners expose terminal outputs. JSON-record runners expose every selected
+output as a stream port, including selections produced at startup or completion. They return no
+terminal map. This wire mode includes finite streaming workflows as well as autonomous Event workflows.
+Since records can come from different execution domains, the derived stream ports are optional per
+record (`required: false`); the loader's supplied ports still match the manifest's selection optionality.
+Use `policy.stream_output_ports()` to inspect that derived contract. Records are forwarded live through
+the same supervised transport as chat, without accumulating the stream into a terminal result.
 Arguments and results cross a JSON boundary, so nested callable arguments cannot cross
 into the subprocess. Output values are conservatively secret because runner JSON does
 not preserve native privacy labels. The subprocess uses its own internal execution
@@ -349,16 +378,15 @@ its own description, run identity, and telemetry; `load_with_observer` exposes a
 telemetry remains enabled; subprocess value snapshots are disabled because existing
 runner input transport cannot preserve the caller's privacy labels. Native hosts
 implementing other independently observed executors can use `FlowValue::external`
-with a validated manifest and the same boundary semantics.
+with a validated manifest and a sink-aware executor using the same boundary semantics.
 
 `--chat` and runner-backed Flow parameters share `mf_tui::runner::RunnerInvocation`
 for argument-file transport, launch, live observation, cancellation, output draining,
 and process-group cleanup. It supports both terminal JSON and backpressured JSON
 records. Chat supplies its conversation decoder and preview consumer, then reconciles
 the retained terminal reply and usage events, including after protocol or process
-failure. Its streaming composition continues to use `PreparedSubgraph` and
-`workflow.call`; the finite Flow-value adapter uses the same executor with a terminal
-output contract.
+failure. Its streaming composition uses `PreparedSubgraph` and `workflow.call`; runner-backed Flow
+values select terminal or record transport from the manifest and use the same executor.
 
 Before each launch, the shared executor rereads the executable's manifest and checks
 it against the complete preparation manifest. Missing, invalid, or changed manifests

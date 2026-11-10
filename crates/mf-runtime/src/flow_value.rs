@@ -5,7 +5,7 @@ use crate::{
 use snafu::{ResultExt, Snafu, ensure};
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
-/// An immutable, process-local handle to a finite callable Flow.
+/// An immutable, process-local handle to a Flow.
 ///
 /// Clones share preparation, never invocation state or the producer's context. Handles
 /// have identity equality and deliberately have no serialization implementation.
@@ -20,14 +20,6 @@ enum InvocationBoundary {
 
 #[derive(Debug, Snafu)]
 pub enum FlowValueBuildError {
-    #[snafu(display("Flow values require a finite body, not an Event Flow"))]
-    EventBody,
-    #[snafu(display("Flow values require a callable body without an implicit scope frame"))]
-    ScopedBody,
-    #[snafu(display("Flow values cannot read stdin"))]
-    Stdin,
-    #[snafu(display("Flow values cannot export stream outputs"))]
-    StreamOutputs,
     #[snafu(display("Flow value {direction} port `{name}` must be nonblank and unique"))]
     InvalidPort {
         direction: &'static str,
@@ -55,17 +47,8 @@ impl From<FlowValueBuildError> for NodeBuildError {
 }
 
 impl FlowValue {
-    /// Checks the callable contract without running the body or resolving its inputs.
+    /// Checks the interface without running the body or resolving execution resources.
     pub fn new(body: PreparedSubgraph) -> Result<Self, NodeBuildError> {
-        ensure!(!body.is_event_stream(), EventBodySnafu);
-        ensure!(
-            body.relations
-                .as_ref()
-                .is_none_or(|relations| relations.is_callable()),
-            ScopedBodySnafu
-        );
-        ensure!(body.inputs.stdin.is_empty(), StdinSnafu);
-        ensure!(body.stream_outputs.is_empty(), StreamOutputsSnafu);
         let mut names = BTreeSet::new();
         for (node, ports) in &body.inputs.inputs {
             for (port, input) in ports {
@@ -90,7 +73,7 @@ impl FlowValue {
             }
         }
         names.clear();
-        for port in &body.outputs {
+        for port in body.outputs.iter().chain(&body.stream_outputs) {
             ensure!(
                 !port.name.trim().is_empty() && names.insert(port.name.to_string()),
                 InvalidPortSnafu {
@@ -105,28 +88,26 @@ impl FlowValue {
         Ok(Self(Arc::new(body), InvocationBoundary::Local))
     }
 
-    /// Wraps a manifest-backed finite executor observed independently, such as a
+    /// Wraps a manifest-backed executor observed independently, such as a
     /// runner process. Its actual interface and definition identity come from the
     /// validated manifest. Output types supplement historical manifests, which
     /// record only output names and optionality. The executor must check that the
-    /// artifact still matches this manifest before launching it.
+    /// artifact still matches this manifest before launching it. Record-mode
+    /// runners expose every selection as a stream port, with no terminal outputs.
+    /// Records may originate in different execution domains, so those ports are
+    /// optional per emission even when a selection is required in its own domain.
     pub fn external(
         manifest: &crate::WorkflowManifest,
         outputs: Vec<PortSpec>,
-        execute: impl Fn(&mut ExecutionContext) -> Result<FlowOutputs, WorkflowRunError>
+        execute: impl Fn(
+            &mut ExecutionContext,
+            &mut dyn crate::EmissionSink,
+        ) -> Result<FlowOutputs, WorkflowRunError>
         + Send
         + Sync
         + 'static,
     ) -> Result<Self, NodeBuildError> {
         manifest.validate().context(ManifestSnafu)?;
-        ensure!(
-            manifest.graph.definition.execution.is_none(),
-            EventBodySnafu
-        );
-        ensure!(
-            manifest.graph.relations.streams.is_empty(),
-            StreamOutputsSnafu
-        );
         ensure!(
             outputs.len() == manifest.graph.definition.outputs.len()
                 && outputs.iter().all(|port| manifest
@@ -148,7 +129,21 @@ impl FlowValue {
                 path: Vec::new(),
             })
             .collect();
-        let body = PreparedSubgraph::new(nodes, outputs, execute)
+        let (outputs, stream_outputs) = if manifest.graph.definition.execution.is_some() {
+            (
+                Vec::new(),
+                outputs
+                    .into_iter()
+                    .map(|mut port| {
+                        port.required = false;
+                        port
+                    })
+                    .collect(),
+            )
+        } else {
+            (outputs, Vec::new())
+        };
+        let body = PreparedSubgraph::streaming(nodes, outputs, stream_outputs, execute)
             .with_input_schema(manifest.input_schema.clone())
             .with_relations(manifest.graph.relations.clone())
             .with_origin(crate::FlowOrigin {
@@ -209,7 +204,12 @@ impl FlowValue {
         &self.0.outputs
     }
 
-    /// Returns a canonical signature. Declaration order is not part of the contract.
+    pub fn stream_output_ports(&self) -> &[PortSpec] {
+        &self.0.stream_outputs
+    }
+
+    /// Returns canonical ordinary ports. Incremental ports are exposed separately
+    /// by [`Self::stream_output_ports`]. Declaration order is not part of the contract.
     pub fn signature(&self) -> NodePorts {
         let mut outputs = self.output_ports().to_vec();
         outputs.sort_by(|left, right| left.name.cmp(&right.name));
@@ -221,16 +221,46 @@ impl FlowValue {
 
     /// Executes with fresh arguments, values, and loop control, sharing only the
     /// invoking context's execution services, limits, cancellation, and step budget.
+    /// Emissions are drained and discarded; use [`Self::invoke_with_sink`] to consume them.
     pub fn invoke(
+        &self,
+        id: &str,
+        arguments: WorkflowArguments,
+        context: &mut ExecutionContext,
+    ) -> Result<FlowOutputs, WorkflowRunError> {
+        self.invoke_with_sink(id, arguments, context, &mut crate::DiscardSink)
+    }
+
+    /// Forwards emissions with backpressure and returns only terminal outputs.
+    /// Event bodies finish through the existing owned invocation lifecycle. As
+    /// with static Call, a delivery failure cancels the enclosing execution.
+    pub fn invoke_with_sink(
         &self,
         id: &str,
         mut arguments: WorkflowArguments,
         context: &mut ExecutionContext,
+        sink: &mut dyn crate::EmissionSink,
     ) -> Result<FlowOutputs, WorkflowRunError> {
+        ensure!(
+            self.0
+                .relations
+                .as_ref()
+                .is_none_or(|relations| relations.is_callable()),
+            crate::runner::ContextSnafu {
+                definition_id: id,
+                message: "Flow invocation requires an independent body; an implicit scope frame is unavailable",
+            }
+        );
         self.0.inputs.mark_secrets(&mut arguments);
         let execute = |child: &mut ExecutionContext| {
             child.bind_workflow_inputs(&self.0.inputs)?;
-            let outputs = self.0.execute_in_context(child)?;
+            self.0
+                .inputs
+                .validate_stdin(child.workflow_arguments(), false)?;
+            let mut emitter =
+                crate::Emitter::new(id, self.stream_output_ports(), child.cancellation(), sink);
+            let mut stream = crate::SubgraphStream::new(id, child, &mut emitter);
+            let outputs = self.0.execute_with_sink(child, &mut stream)?;
             self.validate_outputs(id, &outputs)?;
             Ok(outputs)
         };
@@ -342,7 +372,7 @@ mod tests {
             .unwrap(),
         };
         let outputs = vec![PortSpec::new("answer", ValueType::String, true)];
-        let flow = FlowValue::external(&manifest, outputs.clone(), |_| {
+        let flow = FlowValue::external(&manifest, outputs.clone(), |_, _| {
             panic!("preparation must not execute")
         })
         .unwrap();
@@ -354,34 +384,37 @@ mod tests {
         );
         assert!(matches!(
             business_error(
-                &FlowValue::external(&manifest, vec![], |_| unreachable!()).unwrap_err()
+                &FlowValue::external(&manifest, vec![], |_, _| unreachable!()).unwrap_err()
             ),
             FlowValueBuildError::ManifestOutputs
         ));
         manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
-        assert!(FlowValue::external(&manifest, outputs.clone(), |_| unreachable!()).is_err());
+        let streaming =
+            FlowValue::external(&manifest, outputs.clone(), |_, _| unreachable!()).unwrap();
+        assert!(streaming.output_ports().is_empty());
+        assert_eq!(
+            streaming.stream_output_ports(),
+            [PortSpec::new("answer", ValueType::String, false)]
+        );
         manifest.graph.definition.execution = None;
         manifest.graph.execution_order.clear();
         assert!(matches!(
             business_error(
-                &FlowValue::external(&manifest, outputs, |_| unreachable!()).unwrap_err()
+                &FlowValue::external(&manifest, outputs, |_, _| unreachable!()).unwrap_err()
             ),
             FlowValueBuildError::Manifest { .. }
         ));
     }
 
     #[test]
-    fn finite_callable_contract_is_checked_without_running_or_instantiating() {
+    fn execution_resources_do_not_restrict_capability_construction() {
         let event = PreparedSubgraph::from_stream_factory(
             Vec::new(),
             WorkflowInputSchema::default(),
             Vec::new(),
-            || panic!("rejecting Event bodies must not instantiate a stream"),
+            || panic!("constructing Event values must not instantiate a stream"),
         );
-        assert!(matches!(
-            business_error(&FlowValue::new(event).unwrap_err()),
-            FlowValueBuildError::EventBody
-        ));
+        assert!(FlowValue::new(event).unwrap().body().is_event_stream());
         let scoped = body().with_relations(crate::GraphRelations {
             scope: Some(crate::ScopeRelations {
                 input: "%frame".into(),
@@ -392,9 +425,10 @@ mod tests {
             }),
             ..Default::default()
         });
+        let scoped = FlowValue::new(scoped).unwrap();
         assert!(matches!(
-            business_error(&FlowValue::new(scoped).unwrap_err()),
-            FlowValueBuildError::ScopedBody
+            scoped.invoke("call", Default::default(), &mut Default::default()),
+            Err(WorkflowRunError::Context { .. })
         ));
         for requirement in [
             crate::StdinRequirement::Always,
@@ -404,21 +438,25 @@ mod tests {
                 stdin: BTreeMap::from([("reader".into(), requirement)]),
                 ..Default::default()
             });
+            let stdin = FlowValue::new(stdin).unwrap();
             assert!(matches!(
-                business_error(&FlowValue::new(stdin).unwrap_err()),
-                FlowValueBuildError::Stdin
+                stdin.invoke("call", Default::default(), &mut Default::default()),
+                Err(WorkflowRunError::WorkflowInputs { .. })
             ));
         }
         let streaming = PreparedSubgraph::streaming(
             Vec::new(),
             Vec::new(),
             vec![PortSpec::new("stream", ValueType::Any, true)],
-            |_, _| panic!("rejecting exported streams must not execute them"),
+            |_, _| panic!("constructing streaming values must not execute them"),
         );
-        assert!(matches!(
-            business_error(&FlowValue::new(streaming).unwrap_err()),
-            FlowValueBuildError::StreamOutputs
-        ));
+        assert_eq!(
+            FlowValue::new(streaming)
+                .unwrap()
+                .stream_output_ports()
+                .len(),
+            1
+        );
         FlowValue::new(body().with_relations(crate::GraphRelations::default())).unwrap();
     }
 
@@ -600,6 +638,47 @@ mod tests {
         assert_eq!(outputs["value"], json!(1));
         assert!(outputs["value"].is_secret());
         assert_eq!(effects.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn conditional_stdin_is_resolved_after_binding_at_invocation() {
+        let flow = FlowValue::new(
+            PreparedSubgraph::new(vec![], vec![], |context| {
+                assert_eq!(
+                    context.workflow_arguments().0["reader.value"],
+                    json!("provided")
+                );
+                Ok(FlowOutputs::new())
+            })
+            .with_input_schema(WorkflowInputSchema {
+                inputs: BTreeMap::from([(
+                    "reader".into(),
+                    BTreeMap::from([(
+                        "value".into(),
+                        WorkflowInput {
+                            value_type: ValueType::String,
+                            required: false,
+                            binding: Default::default(),
+                        },
+                    )]),
+                )]),
+                stdin: BTreeMap::from([(
+                    "reader".into(),
+                    crate::StdinRequirement::UnlessInput("value".into()),
+                )]),
+            }),
+        )
+        .unwrap();
+        assert!(
+            flow.invoke("reader", Default::default(), &mut Default::default())
+                .is_err()
+        );
+        flow.invoke(
+            "reader",
+            WorkflowArguments::try_from(json!({"reader.value":"provided"})).unwrap(),
+            &mut Default::default(),
+        )
+        .unwrap();
     }
 
     #[test]
