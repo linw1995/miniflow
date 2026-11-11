@@ -106,7 +106,13 @@ before both CLI and runner compilation. Dependency artifacts are
 seeded only on the first run; installed executables, Cargo homes, and user
 projects remain temporary and isolated.
 The default and CI profiles share the generated-build fixtures for the CLI,
-compiler, and chat host. The chat fixture copies only its own build inputs and
+compiler, and chat host. Provider-discovery unit tests, callable-Flow runner targets,
+and all LLM/DeepSeek workflow cases use the same cache, including tests that fail
+validation after building a provider probe. These integration targets match by
+binary rather than individual test name so new or renamed cases retain cache reuse.
+The cache setup and serialized group filters must stay identical. CI script tests
+check their agreement and flag exact test names whose source functions disappeared.
+The chat fixture copies only its own build inputs and
 keeps dependency paths in the checkout; it deletes the copied workspace before
 running the relocated host. Ordinary generated builds use one serialized test group.
 The LTO/strip probe has its own optimized target, vendor tree, setup session, and
