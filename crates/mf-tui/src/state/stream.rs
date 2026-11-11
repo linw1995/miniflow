@@ -7,7 +7,7 @@ use snafu::ResultExt;
 const MAX_INVOCATIONS: usize = 4096;
 const MAX_RECENT_INVOCATIONS: usize = 64;
 
-type NodeKey = (Vec<String>, String);
+type NodeKey = (Vec<LoopPathEntry>, String);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamInvocationObservation {
@@ -46,23 +46,23 @@ struct Invocation {
     loop_summary: Option<LoopSummary>,
     closed_prefix: i64,
     closed_passes: BTreeSet<Count>,
+    // Callable bodies have independent keys rather than Loop pass indices.
+    closed_calls: BTreeSet<LoopPathEntry>,
 }
 
 impl Invocation {
     fn is_finished(&self) -> bool {
         self.node.terminal_sequence.is_some()
     }
-    fn has_closed_pass(&self, index: Count) -> bool {
+    fn has_closed_pass(&self, entry: &LoopPathEntry) -> bool {
+        if entry.is_call() {
+            return self.closed_calls.contains(entry);
+        }
+        let index = entry.index();
         index.get() < self.closed_prefix || self.closed_passes.contains(&index)
     }
     fn key(&self) -> NodeKey {
-        (
-            self.path
-                .iter()
-                .map(|entry| entry.node_id().to_owned())
-                .collect(),
-            self.node.id.clone(),
-        )
+        (self.path.clone(), self.node.id.clone())
     }
     fn view(&self, closed: bool, final_seen: bool, newer: bool) -> StreamInvocationObservation {
         let mut node = self.node.clone();
@@ -79,7 +79,9 @@ impl Invocation {
             path: self.path.clone(),
             node,
             loop_summary: self.loop_summary.clone(),
-            completed_passes: self.closed_prefix as u64 + self.closed_passes.len() as u64,
+            completed_passes: self.closed_prefix as u64
+                + self.closed_passes.len() as u64
+                + self.closed_calls.len() as u64,
             active_pass: None,
         }
     }
@@ -315,13 +317,7 @@ impl StreamState {
             }
             return Ok(Admission::Applied);
         }
-        let key = (
-            node.path
-                .iter()
-                .map(|entry| entry.node_id().to_owned())
-                .collect(),
-            node.id.clone(),
-        );
+        let key = (node.path.clone(), node.id.clone());
         if self
             .retired
             .get(&key)
@@ -344,6 +340,7 @@ impl StreamState {
                 loop_summary: None,
                 closed_prefix: 0,
                 closed_passes: BTreeSet::new(),
+                closed_calls: BTreeSet::new(),
             },
         );
         if node.path.is_empty() {
@@ -570,14 +567,9 @@ fn validate_graph(
         }
         StreamPayload::Execution(event) => {
             if let Some((node, position)) = event.node() {
-                description
-                    .validate_scope_path(&node.path)
+                let path = description
+                    .scope_definition_path(&node.path)
                     .context(EventSnafu)?;
-                let path: Vec<_> = node
-                    .path
-                    .iter()
-                    .map(|entry| entry.node_id().to_owned())
-                    .collect();
                 let (nodes, order, data, control, orders) = if path.is_empty() {
                     (
                         &description.nodes,
@@ -688,12 +680,13 @@ impl StreamState {
         };
         let identity = record.identity.as_ref().unwrap();
         let (last, parent) = path.split_last().expect("validated path");
-        let physical_owner = LoopPathEntry::binding_owner(last.node_id());
+        let physical_owner = (!last.is_flow())
+            .then(|| LoopPathEntry::binding_owner(last.node_id()))
+            .flatten();
         let owner_id = physical_owner.as_deref().unwrap_or(last.node_id());
-        let parent_path: Vec<_> = parent
-            .iter()
-            .map(|entry| entry.node_id().to_owned())
-            .collect();
+        let parent_path = description
+            .scope_definition_path(parent)
+            .context(EventSnafu)?;
         let owners = if parent_path.is_empty() {
             &description.nodes
         } else {
@@ -715,14 +708,13 @@ impl StreamState {
         if admission != Admission::Applied {
             return Ok(admission);
         }
-        let body_path: Vec<_> = path
-            .iter()
-            .map(|entry| entry.node_id().to_owned())
-            .collect();
-        let body = description.loop_body(&body_path).expect("validated body");
+        let body_path = description
+            .scope_definition_path(path)
+            .context(EventSnafu)?;
+        let body = description.body(&body_path).expect("validated body");
         let key = (identity.invocation, path.clone());
         if !self.passes.contains_key(&key)
-            && self.invocations[&identity.invocation].has_closed_pass(last.index())
+            && self.invocations[&identity.invocation].has_closed_pass(last)
         {
             return Ok(self.conflict("completed Loop pass received new lifecycle records"));
         }
@@ -808,15 +800,11 @@ impl StreamState {
         };
         let key = (owner, node.path.clone());
         let (last, parent) = node.path.split_last().unwrap();
-        let physical_owner = LoopPathEntry::binding_owner(last.node_id());
+        let physical_owner = (!last.is_flow())
+            .then(|| LoopPathEntry::binding_owner(last.node_id()))
+            .flatten();
         let owner_id = physical_owner.as_deref().unwrap_or(last.node_id());
-        let owner_key = (
-            parent
-                .iter()
-                .map(|entry| entry.node_id().to_owned())
-                .collect(),
-            owner_id.to_owned(),
-        );
+        let owner_key = (parent.to_vec(), owner_id.to_owned());
         if let Some(invocation) = self.invocations.get(&owner) {
             if invocation.node.id != owner_id
                 || invocation.path != parent
@@ -826,7 +814,7 @@ impl StreamState {
                 self.conflict("body invocation names a different Loop owner");
                 return;
             }
-            if !self.passes.contains_key(&key) && invocation.has_closed_pass(last.index()) {
+            if !self.passes.contains_key(&key) && invocation.has_closed_pass(last) {
                 self.conflict("body invocation followed a completed Loop pass");
                 return;
             }
@@ -842,12 +830,10 @@ impl StreamState {
             if self.passes.len() >= MAX_RECENT_LOOP_PASSES && self.evict_pass().is_err() {
                 return;
             }
-            let static_path: Vec<_> = node
-                .path
-                .iter()
-                .map(|entry| entry.node_id().to_owned())
-                .collect();
-            let body = description.loop_body(&static_path).expect("validated body");
+            let static_path = description
+                .scope_definition_path(&node.path)
+                .expect("validated scope");
+            let body = description.body(&static_path).expect("validated body");
             self.total_passes = self.total_passes.saturating_add(1);
             self.passes.insert(
                 key.clone(),
@@ -904,7 +890,16 @@ impl StreamState {
             if pass.is_finished()
                 && let Some(invocation) = self.invocations.get_mut(owner)
             {
-                let index = path.last().unwrap().index();
+                let entry = path.last().unwrap();
+                if entry.is_call() {
+                    if invocation.closed_calls.len() < MAX_RECENT_LOOP_PASSES {
+                        invocation.closed_calls.insert(entry.clone());
+                    } else if !invocation.closed_calls.contains(entry) {
+                        self.retention_overflows = self.retention_overflows.saturating_add(1);
+                    }
+                    continue;
+                }
+                let index = entry.index();
                 if index.get() >= invocation.closed_prefix
                     && invocation.closed_passes.len() < MAX_RECENT_LOOP_PASSES
                 {
@@ -1064,6 +1059,9 @@ impl StreamState {
             BTreeMap::new();
         for ((owner, path), pass) in &self.passes {
             let (last, parent) = path.split_last().unwrap();
+            if last.is_flow() {
+                continue;
+            }
             let key = (parent.to_vec(), last.node_id().to_owned());
             if overviews
                 .get(&key)
@@ -2033,6 +2031,397 @@ mod tests {
             state.snapshot().lifecycle.completeness,
             Completeness::Incomplete
         );
+    }
+
+    fn binding_description() -> WorkflowDescription {
+        serde_json::from_value(serde_json::json!({
+            "version":"2026-10-23", "workflow_id":description().workflow_id,
+            "execution":{"mode":"stream"},
+            "nodes":[{"id":"invoke", "kind":"fixture.dispatch"}],
+            "execution_order":["invoke"], "data_edges":[], "control_edges":[],
+            "loop_bodies":(["first", "second"].map(|binding| serde_json::json!({
+                "path":[LoopPathEntry::binding_key("invoke", binding)],
+                "nodes":[{"id":"leaf", "kind":"fixture.task"}],
+                "execution_order":["leaf"], "data_edges":[], "control_edges":[]
+            })))
+        }))
+        .unwrap()
+    }
+
+    fn binding_boundary(
+        run: RunId,
+        sequence: i64,
+        identity: StreamIdentity,
+        path: Vec<LoopPathEntry>,
+        finished: bool,
+    ) -> StreamRecord {
+        let elapsed_ns = count(sequence);
+        record(
+            run,
+            sequence,
+            Some(identity),
+            StreamPayload::Execution(if finished {
+                Event::CallFinished {
+                    path,
+                    elapsed_ns,
+                    outcome: LoopPassOutcome::Completed,
+                }
+            } else {
+                Event::CallStarted { path, elapsed_ns }
+            }),
+        )
+    }
+
+    #[test]
+    fn called_flow_with_a_passed_body_uses_frozen_structure() {
+        // No providers or configuration-shape discovery: the runner's compiled
+        // graph authorizes Root -> Call A -> Call apply -> Body B explicitly.
+        fn compiled(nodes: serde_json::Value, order: &[&str]) -> mf_runtime::CompiledGraph {
+            mf_runtime::CompiledGraph {
+                definition: serde_json::from_value(serde_json::json!({
+                    "version":"2026-10-28", "dependencies":{}, "nodes":nodes
+                }))
+                .unwrap(),
+                execution_order: order.iter().map(|id| (*id).into()).collect(),
+                relations: Default::default(),
+                children: Default::default(),
+            }
+        }
+        let mut body_b = compiled(
+            serde_json::json!([{"id":"echo", "kind":"builtin.identity"}]),
+            &["echo"],
+        );
+        body_b.relations.key = Some("apply".into());
+        let mut body_a = compiled(
+            serde_json::json!([{"id":"apply", "kind":"workflow.call", "config":{
+                "flow":"policy", "body":body_b.definition
+            }}]),
+            &["apply"],
+        );
+        body_a
+            .children
+            .insert("apply".into(), [("body".into(), body_b)].into());
+        // Builtin Call uses the direct call-node observation key in each scope.
+        body_a.relations.key = Some("callA".into());
+        let mut root = compiled(
+            serde_json::json!([{"id":"callA", "kind":"workflow.call", "config":{
+                "flow":"flowA", "body":body_a.definition
+            }}]),
+            &["callA"],
+        );
+        root.definition.execution = Some(serde_json::from_value(serde_json::json!({})).unwrap());
+        root.children
+            .insert("callA".into(), [("body".into(), body_a)].into());
+        let graph = mf_runtime::describe_graph(&root).unwrap();
+        let outer = LoopPathEntry::Call {
+            call_id: "callA".into(),
+        };
+        let binding = LoopPathEntry::Call {
+            call_id: "apply".into(),
+        };
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.loop_bodies.len(), 2);
+        assert_eq!(graph.loop_bodies[0].nodes[0].id, "apply");
+        assert_eq!(graph.loop_bodies[1].nodes[0].id, "echo");
+        assert_eq!(graph.loop_bodies[0].path, ["callA"]);
+        assert_eq!(
+            graph.loop_bodies[1].path,
+            ["callA".to_owned(), binding.node_id().to_owned()]
+        );
+        let run = RunId::new();
+        let owner = StreamIdentity {
+            invocation: 0,
+            parent: None,
+            trigger: StreamTrigger::Startup,
+            message: None,
+        };
+        let identity = StreamIdentity {
+            invocation: 1,
+            parent: Some(0),
+            ..owner.clone()
+        };
+        let path = vec![outer.clone(), binding];
+        let mut records = vec![
+            start(run),
+            binding_boundary(run, 2, owner.clone(), vec![outer.clone()], false),
+            binding_boundary(run, 3, identity.clone(), path.clone(), false),
+            binding_boundary(run, 4, identity, path, true),
+            binding_boundary(run, 5, owner, vec![outer.clone()], true),
+        ];
+        for record in &mut records {
+            record.workflow_id = graph.workflow_id.clone();
+        }
+        for reverse in [false, true] {
+            let mut state = SessionState::new(graph.clone(), run).unwrap();
+            let mut ordered = records.clone();
+            if reverse {
+                ordered.reverse();
+            }
+            for record in ordered {
+                let wire = record.to_wire(1, None).unwrap();
+                let decoded = StreamRecord::decode(&wire).unwrap();
+                assert_eq!(decoded, record);
+                assert_eq!(
+                    state.apply_stream(decoded.clone()).unwrap(),
+                    Admission::Applied
+                );
+                assert_eq!(state.apply_stream(decoded).unwrap(), Admission::Duplicate);
+            }
+            let snapshot = state.snapshot();
+            assert_eq!(snapshot.observation.protocol_conflicts, 0);
+            assert_eq!(snapshot.loop_passes.len(), 2);
+            assert!(
+                snapshot
+                    .loop_passes
+                    .iter()
+                    .all(|pass| pass.outcome == Some(LoopPassOutcome::Completed))
+            );
+            let invocations = &snapshot.stream.unwrap().invocations;
+            assert_eq!(invocations.len(), 2);
+            assert_eq!(invocations[0].node.id, "callA");
+            assert_eq!(invocations[0].node.kind, "workflow.call");
+            assert!(invocations[0].path.is_empty());
+            assert_eq!(invocations[1].node.id, "apply");
+            assert_eq!(invocations[1].node.kind, "workflow.call");
+            assert_eq!(invocations[1].path, vec![outer.clone()]);
+        }
+    }
+
+    #[test]
+    fn nested_binding_lifecycle_resolves_the_owner_in_its_parent_body() {
+        let run = RunId::new();
+        let mut graph = binding_description();
+        let outer = LoopPathEntry::Call {
+            call_id: LoopPathEntry::binding_key("invoke", "first"),
+        };
+        let inner = LoopPathEntry::Call {
+            call_id: LoopPathEntry::binding_key("leaf", "nested"),
+        };
+        graph.loop_bodies[0].nodes[0].kind = "fixture.custom".into();
+        let mut nested = graph.loop_bodies[1].clone();
+        nested.path = vec![outer.node_id().to_owned(), inner.node_id().to_owned()];
+        graph.loop_bodies.push(nested);
+        graph.validate().unwrap();
+        let owner = StreamIdentity {
+            invocation: 0,
+            parent: None,
+            trigger: StreamTrigger::Startup,
+            message: None,
+        };
+        let child = StreamIdentity {
+            invocation: 1,
+            parent: Some(0),
+            ..owner.clone()
+        };
+        let outer_path = vec![outer];
+        let inner_path = vec![outer_path[0].clone(), inner];
+        let records = vec![
+            start(run),
+            binding_boundary(run, 2, owner.clone(), outer_path.clone(), false),
+            binding_boundary(run, 3, child.clone(), inner_path.clone(), false),
+            binding_boundary(run, 4, child, inner_path.clone(), true),
+            binding_boundary(run, 5, owner, outer_path.clone(), true),
+        ];
+        for reverse in [false, true] {
+            let mut state = SessionState::new(graph.clone(), run).unwrap();
+            let mut ordered = records.clone();
+            if reverse {
+                ordered.reverse();
+            }
+            for record in ordered {
+                assert_eq!(
+                    state.apply_stream(record.clone()).unwrap(),
+                    Admission::Applied
+                );
+                assert_eq!(state.apply_stream(record).unwrap(), Admission::Duplicate);
+            }
+            let snapshot = state.snapshot();
+            assert_eq!(snapshot.observation.protocol_conflicts, 0);
+            assert_eq!(snapshot.observation.retention_overflows, 0);
+            assert_eq!(snapshot.loop_passes.len(), 2);
+            for path in [&outer_path, &inner_path] {
+                let pass = snapshot
+                    .loop_passes
+                    .iter()
+                    .find(|pass| &pass.path == path)
+                    .unwrap();
+                assert_eq!(pass.outcome, Some(LoopPassOutcome::Completed));
+            }
+            let invocations = &snapshot.stream.unwrap().invocations;
+            assert_eq!(invocations.len(), 2);
+            assert_eq!(invocations[0].node.id, "invoke");
+            assert_eq!(invocations[0].node.kind, "fixture.dispatch");
+            assert!(invocations[0].path.is_empty());
+            assert_eq!(invocations[1].node.id, "leaf");
+            assert_eq!(invocations[1].node.kind, "fixture.custom");
+            assert_eq!(invocations[1].path, outer_path);
+            assert!(
+                invocations
+                    .iter()
+                    .all(|invocation| invocation.completed_passes == 1)
+            );
+        }
+    }
+
+    #[test]
+    fn edge_flow_targets_have_independent_stream_history_and_closed_scope_keys() {
+        use mf_telemetry::event::FlowOrigin;
+        let run = RunId::new();
+        let mut graph = binding_description();
+        graph.version = WorkflowDescriptionVersion::V2026_11_09;
+        graph.nodes[0].kind = "workflow.call".into();
+        for (body, target) in graph.loop_bodies.iter_mut().zip(["B", "C"]) {
+            body.path = vec![target.into()];
+            graph.nodes.push(NodeDescription {
+                id: target.into(),
+                kind: "builtin.constant".into(),
+            });
+            graph.execution_order.push(target.into());
+        }
+        graph.validate().unwrap();
+        let identity = StreamIdentity {
+            invocation: 0,
+            parent: None,
+            trigger: StreamTrigger::Startup,
+            message: None,
+        };
+        let entry = |target: &str| LoopPathEntry::Flow {
+            call_id: "invoke".into(),
+            definition: FlowOrigin {
+                workflow_id: graph.workflow_id.clone(),
+                path: vec![target.into()],
+            },
+        };
+        let mut records = vec![start(run)];
+        let mut sequence = 2;
+        for (index, target) in ["B", "C"].into_iter().enumerate() {
+            let path = vec![entry(target)];
+            records.push(binding_boundary(
+                run,
+                sequence,
+                identity.clone(),
+                path.clone(),
+                false,
+            ));
+            sequence += 1;
+            for finished in [false, true] {
+                let node = NodeIdentity {
+                    id: "leaf".into(),
+                    kind: "fixture.task".into(),
+                    path: path.clone(),
+                };
+                let event = if finished {
+                    Event::NodeFinished {
+                        node,
+                        position: Count::ZERO,
+                        elapsed_ns: count(sequence),
+                        duration_ns: Some(count(1)),
+                        outcome: Outcome::Succeeded,
+                        produced_ports: vec![],
+                        skipped_ports: vec![],
+                        failure: None,
+                        loop_summary: None,
+                    }
+                } else {
+                    Event::NodeStarted {
+                        node,
+                        position: Count::ZERO,
+                        elapsed_ns: count(sequence),
+                        selected_inputs: vec![],
+                    }
+                };
+                records.push(record(
+                    run,
+                    sequence,
+                    Some(StreamIdentity {
+                        invocation: index as u64 + 1,
+                        parent: Some(0),
+                        ..identity.clone()
+                    }),
+                    StreamPayload::Execution(event),
+                ));
+                sequence += 1;
+            }
+            records.push(binding_boundary(
+                run,
+                sequence,
+                identity.clone(),
+                path,
+                true,
+            ));
+            sequence += 1;
+        }
+        for reverse in [false, true] {
+            let mut state = SessionState::new(graph.clone(), run).unwrap();
+            let mut ordered = records.clone();
+            if reverse {
+                ordered.reverse();
+            }
+            for record in ordered {
+                assert_eq!(state.apply_stream(record).unwrap(), Admission::Applied);
+            }
+            let snapshot = state.snapshot();
+            assert_eq!(snapshot.observation.protocol_conflicts, 0);
+            assert_eq!(snapshot.loop_passes.len(), 2);
+            assert_ne!(snapshot.loop_passes[0].path, snapshot.loop_passes[1].path);
+            assert!(
+                snapshot
+                    .loop_passes
+                    .iter()
+                    .all(|pass| pass.nodes[0].status == NodeStatus::Succeeded)
+            );
+            let owner = &state.stream.as_ref().unwrap().invocations[&0];
+            assert!(owner.has_closed_pass(&entry("B")));
+            assert!(owner.has_closed_pass(&entry("C")));
+            assert_eq!(owner.closed_calls.len(), 2);
+        }
+    }
+
+    #[test]
+    fn binding_completions_do_not_close_sibling_bindings_or_loop_indices() {
+        let run = RunId::new();
+        let mut state = SessionState::new(binding_description(), run).unwrap();
+        state.apply_stream(start(run)).unwrap();
+        let identity = StreamIdentity {
+            invocation: 0,
+            parent: None,
+            trigger: StreamTrigger::Startup,
+            message: None,
+        };
+        let entry = |binding: &str| LoopPathEntry::Call {
+            call_id: LoopPathEntry::binding_key("invoke", binding),
+        };
+        let mut sequence = 2;
+        for binding in ["first", "second"] {
+            let owner = state.stream.as_ref().unwrap().invocations.get(&0);
+            assert!(owner.is_none_or(|owner| !owner.has_closed_pass(&entry(binding))));
+            for finished in [false, true] {
+                let record = binding_boundary(
+                    run,
+                    sequence,
+                    identity.clone(),
+                    vec![entry(binding)],
+                    finished,
+                );
+                assert_eq!(
+                    state.apply_stream(record.clone()).unwrap(),
+                    Admission::Applied
+                );
+                assert_eq!(state.apply_stream(record).unwrap(), Admission::Duplicate);
+                sequence += 1;
+            }
+            let owner = &state.stream.as_ref().unwrap().invocations[&0];
+            assert!(owner.has_closed_pass(&entry(binding)));
+            assert!(!owner.has_closed_pass(&LoopPathEntry::Loop {
+                loop_id: "invoke".into(),
+                index: Count::ZERO,
+            }));
+        }
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.observation.protocol_conflicts, 0);
+        assert_eq!(snapshot.observation.retention_overflows, 0);
+        assert_eq!(snapshot.loop_passes.len(), 2);
+        assert_eq!(snapshot.stream.unwrap().invocations[0].completed_passes, 2);
     }
 
     #[test]

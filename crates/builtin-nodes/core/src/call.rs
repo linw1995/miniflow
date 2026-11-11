@@ -14,11 +14,25 @@ struct Config {
     body: PreparedSubgraph,
 }
 
-fn plain(_config: Value) -> Result<PreparedNode, NodeBuildError> {
-    mf_runtime::NodeInvalidSubgraphSnafu {
-        message: "workflow.call requires a prepared `body` binding",
+fn plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    crate::call_input::factory(config)
+}
+
+fn flow_parameters(config: &Value) -> BTreeMap<String, Value> {
+    // Only static mode owns executable configuration. Mixed input-call fields
+    // cannot authorize a child. Other ordinary fields remain decoder-owned, so
+    // invalid static configuration keeps its typed factory error.
+    if let Some(fields) = config.as_object()
+        && !fields.contains_key("inputs")
+        && !fields.contains_key("outputs")
+        && !fields.contains_key("stream_outputs")
+        && fields.get("flow").is_some_and(Value::is_string)
+        && fields.get("body").is_some_and(|body| !body.is_null())
+    {
+        Config::flow_parameters(config)
+    } else {
+        BTreeMap::new()
     }
-    .fail()
 }
 
 struct CallNode {
@@ -173,7 +187,7 @@ inventory::submit! {
     NodeRegistration {
         kind: mf_runtime::CALL_KIND,
         factory: NodeFactory::Subgraph {
-            flow_parameters: Config::flow_parameters,
+            flow_parameters,
             plain,
             prepared: factory,
         },
@@ -240,6 +254,37 @@ mod tests {
     }
 
     #[test]
+    fn call_input_mode_is_plain_and_has_no_executable_configuration() {
+        let registration = mf_runtime::NodeRegistry::from_inventory()
+            .unwrap()
+            .get(mf_runtime::CALL_KIND)
+            .unwrap();
+        let config = json!({
+            "inputs": [PortSpec::new("params.value", mf_runtime::ValueType::Int64, true)],
+            "outputs": [PortSpec::new("value", mf_runtime::ValueType::Int64, true)]
+        });
+        assert!(mf_runtime::CallConfig::is_dynamic(&config));
+        assert!(registration.flow_parameters(&config).is_empty());
+        let prepared = registration.instantiate(config).unwrap();
+        assert!(matches!(
+            prepared.execution,
+            mf_runtime::NodeExecution::Task(_)
+        ));
+        assert_eq!(
+            prepared.metadata.ports.inputs,
+            [
+                PortSpec::new("flow", mf_runtime::ValueType::Flow, true),
+                PortSpec::new("params.value", mf_runtime::ValueType::Int64, true),
+            ]
+        );
+        let mixed = json!({"inputs":[], "outputs":[], "flow":"child", "body":{}});
+        assert!(!mf_runtime::CallConfig::is_dynamic(&mixed));
+        assert!(registration.flow_parameters(&mixed).is_empty());
+        assert!(registration.instantiate(mixed.clone()).is_err());
+        assert!(factory("call", mixed, BTreeMap::from([("body".into(), body())])).is_err());
+    }
+
+    #[test]
     fn call_factory_requires_a_valid_config_and_exact_prepared_body() {
         let config = json!({
             "flow": "child",
@@ -253,10 +298,24 @@ mod tests {
             registration.flow_parameters(&config),
             BTreeMap::from([("body".into(), config["body"].clone())])
         );
-        for config in [json!({}), json!({"body": null, "flow": {"nodes": []}})] {
+        for config in [
+            json!({}),
+            json!({"body": null, "flow": "child"}),
+            json!({"body": {}, "flow": {"nodes": []}}),
+        ] {
             assert!(registration.flow_parameters(&config).is_empty());
         }
         assert!(registration.instantiate(config.clone()).is_err());
+        let mut unknown = config.clone();
+        unknown["unexpected"] = json!(true);
+        assert_eq!(
+            registration.flow_parameters(&unknown),
+            registration.flow_parameters(&config)
+        );
+        assert!(matches!(
+            factory("invoke", unknown, BTreeMap::from([("body".into(), body())])),
+            Err(NodeBuildError::InvalidConfiguration { .. })
+        ));
         for bodies in [
             BTreeMap::new(),
             BTreeMap::from([("other".into(), body())]),

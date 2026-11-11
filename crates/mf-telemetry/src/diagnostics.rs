@@ -12,7 +12,7 @@ struct NodeKey {
     workflow: String,
     run: String,
     node: String,
-    path: Vec<(String, u64)>,
+    path: Vec<crate::event::ScopePathEntry>,
     invocation: Option<u64>,
 }
 
@@ -22,17 +22,11 @@ impl NodeKey {
             workflow: attribute(wire, "mf.workflow.id").to_owned(),
             run: attribute(wire, "mf.run.id").to_owned(),
             node: attribute(wire, "mf.node.id").to_owned(),
-            path: wire.body["loop_path"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|entry| {
-                    (
-                        entry["loop_id"].as_str().unwrap_or("unknown").to_owned(),
-                        number(&entry["index"]),
-                    )
-                })
-                .collect(),
+            path: wire
+                .body
+                .get("loop_path")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
             invocation: wire
                 .body
                 .get("stream")
@@ -384,17 +378,36 @@ fn write_context(writer: &mut impl Write, body: &serde_json::Value) -> std::io::
         .and_then(serde_json::Value::as_array)
         .filter(|path| !path.is_empty())
     {
-        write!(writer, " | loop: ")?;
+        write!(
+            writer,
+            " | {}: ",
+            if path.iter().any(|entry| entry.get("call_id").is_some()) {
+                "scope"
+            } else {
+                "loop"
+            }
+        )?;
         for (index, entry) in path.iter().enumerate() {
             if index != 0 {
                 write!(writer, "/")?;
             }
-            write!(
-                writer,
-                "{:?}#{}",
-                entry["loop_id"].as_str().unwrap_or("unknown"),
-                number(&entry["index"]) + 1
-            )?;
+            if let Some(id) = entry.get("call_id").and_then(serde_json::Value::as_str) {
+                write!(writer, "{id:?}")?;
+                if let Some(definition) = entry.get("definition") {
+                    write!(
+                        writer,
+                        " => {} ({})",
+                        definition["path"], definition["workflow_id"]
+                    )?;
+                }
+            } else {
+                write!(
+                    writer,
+                    "{:?}#{}",
+                    entry["loop_id"].as_str().unwrap_or("unknown"),
+                    number(&entry["index"]) + 1
+                )?;
+            }
         }
     }
     if let Some(summary) = body.get("loop_summary") {
@@ -440,6 +453,23 @@ mod tests {
 
     fn fixture(source: &str) -> WireRecord {
         serde_json::from_str(source).unwrap()
+    }
+
+    #[test]
+    fn flow_diagnostics_distinguish_targets_and_show_actual_runtime_invokers() {
+        let mut first = fixture(include_str!("../tests/fixtures/node-started.json"));
+        first.body["loop_path"] = json!([
+            {"call_id":"A"},
+            {"call_id":"invoke", "definition":{"workflow_id":format!("sha256:{}", "a".repeat(64)), "path":["producer"]}}
+        ]);
+        let mut second = first.clone();
+        second.body["loop_path"][1]["definition"]["path"] = json!(["other"]);
+        assert!(NodeKey::from_wire(&first) != NodeKey::from_wire(&second));
+        let mut bytes = Vec::new();
+        write_diagnostic(&mut bytes, &first, 1).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("scope: \"A\"/\"invoke\" => [\"producer\"]"));
+        assert!(!text.contains("unknown"));
     }
 
     #[test]

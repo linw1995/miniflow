@@ -3,7 +3,7 @@ use crate::{
     WorkflowRunError,
 };
 use snafu::{ResultExt, Snafu};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 
 #[derive(Debug, Snafu)]
 enum ForwardingError {
@@ -221,6 +221,8 @@ impl SubgraphInputMetadata {
 #[derive(Clone)]
 pub struct PreparedSubgraph {
     pub nodes: Vec<NodeIdentity>,
+    /// Definition metadata can be completed after execution-mode resolution.
+    pub origin: Option<SubgraphOrigin>,
     pub inputs: crate::WorkflowInputSchema,
     pub outputs: Vec<PortSpec>,
     pub stream_outputs: Vec<PortSpec>,
@@ -229,6 +231,17 @@ pub struct PreparedSubgraph {
     pub relations: Option<crate::GraphRelations>,
     input_metadata: SubgraphInputMetadata,
     body: PreparedSubgraphBody,
+}
+
+/// A prepared body's definition identity, fixed or shared with its preparer
+/// until execution-mode resolution finalizes the root workflow identity.
+#[derive(Clone)]
+pub enum SubgraphOrigin {
+    Fixed(crate::FlowOrigin),
+    Deferred {
+        workflow_id: Arc<OnceLock<mf_telemetry::identity::WorkflowId>>,
+        path: Vec<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -337,6 +350,7 @@ impl PreparedSubgraph {
         let stream_outputs = flow.stream_output_ports();
         Self {
             nodes,
+            origin: None,
             inputs,
             outputs,
             stream_outputs,
@@ -385,6 +399,7 @@ impl PreparedSubgraph {
     ) -> Self {
         Self {
             nodes,
+            origin: None,
             inputs: Default::default(),
             outputs,
             stream_outputs,
@@ -407,6 +422,7 @@ impl PreparedSubgraph {
     ) -> Self {
         Self {
             nodes,
+            origin: None,
             inputs,
             outputs: Vec::new(),
             stream_outputs,
@@ -442,6 +458,37 @@ impl PreparedSubgraph {
                 crate::flow_invocation::workflow_result(instance)
                     .map(crate::FlowInvocation::from_stream)
             }
+        }
+    }
+
+    /// Records the body's canonical definition location for movable Flow handles.
+    pub fn with_origin(mut self, origin: crate::FlowOrigin) -> Self {
+        self.origin = Some(SubgraphOrigin::Fixed(origin));
+        self
+    }
+
+    /// Shares a write-once root identity finalized after execution-mode resolution.
+    ///
+    /// Factories may capture and clone this body before the root graph's final
+    /// identity is known. All clones resolve the same finalized identity without
+    /// rebuilding executors or retaining provisional workflow IDs.
+    pub fn with_origin_source(
+        mut self,
+        workflow_id: Arc<OnceLock<mf_telemetry::identity::WorkflowId>>,
+        path: Vec<String>,
+    ) -> Self {
+        self.origin = Some(SubgraphOrigin::Deferred { workflow_id, path });
+        self
+    }
+
+    /// Materializes the actual definition location, if its root identity is ready.
+    pub fn origin(&self) -> Option<crate::FlowOrigin> {
+        match self.origin.as_ref()? {
+            SubgraphOrigin::Fixed(origin) => Some(origin.clone()),
+            SubgraphOrigin::Deferred { workflow_id, path } => Some(crate::FlowOrigin {
+                workflow_id: workflow_id.get()?.clone(),
+                path: path.clone(),
+            }),
         }
     }
 
@@ -506,6 +553,19 @@ impl PreparedSubgraph {
         state: &mut ExecutionContext,
     ) -> Result<FlowOutputs, WorkflowRunError> {
         self.execute_with_sink(state, &mut crate::DiscardSink)
+    }
+
+    /// Native callbacks need startup binding here; compiled finite and Event
+    /// executors already own that work. Do not rebind inputs around those engines.
+    pub fn invoke_with_sink(
+        &self,
+        state: &mut ExecutionContext,
+        sink: &mut dyn crate::EmissionSink,
+    ) -> Result<FlowOutputs, WorkflowRunError> {
+        if matches!(self.body, PreparedSubgraphBody::Finite(_)) {
+            state.bind_workflow_inputs(&self.inputs)?;
+        }
+        self.execute_with_sink(state, sink)
     }
 
     pub fn execute_with_sink(

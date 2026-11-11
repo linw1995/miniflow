@@ -60,6 +60,7 @@ pub struct IterationRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IterationNodeObservation {
     pub path: Vec<String>,
+    pub runtime_path: Vec<LoopPathEntry>,
     pub node: NodeObservation,
 }
 
@@ -87,7 +88,9 @@ impl IterationItemObservation {
         let observed: BTreeMap<_, _> = self
             .nodes
             .iter()
-            .filter(|node| node.path == path)
+            .filter(|node| {
+                node.path == path && !node.runtime_path.iter().any(LoopPathEntry::is_flow)
+            })
             .map(|node| (node.node.id.as_str(), &node.node))
             .collect();
         order
@@ -164,7 +167,7 @@ struct ItemState {
     view: IterationItemObservation,
     started: Option<Count>,
     finished: Option<Count>,
-    nodes: BTreeMap<(Vec<String>, String), NodeObservation>,
+    nodes: BTreeMap<(Vec<String>, Vec<LoopPathEntry>, String), NodeObservation>,
 }
 
 impl IterationState {
@@ -174,7 +177,13 @@ impl IterationState {
         record: IterationRecord,
     ) -> Result<(Admission, bool), StateError> {
         let context = &record.context;
-        context.validate().context(IterationSnafu)?;
+        let body_scope = record
+            .event
+            .node()
+            .map_or(&[][..], |node| node.path.as_slice());
+        context
+            .validate_for_body_scope(body_scope)
+            .context(IterationSnafu)?;
         ensure!(
             record
                 .correlation
@@ -184,13 +193,19 @@ impl IterationState {
                 message: "invalid iteration trace correlation"
             }
         );
-        description
-            .validate_scope_path(&context.parent_path)
+        let parent_definition = description
+            .scope_definition_path(&context.parent_path)
             .context(IterationSnafu)?;
         let (owner, parent) = context
             .iteration_path
             .split_last()
             .expect("validated iteration path");
+        ensure!(
+            parent_definition == parent,
+            InvalidIterationSnafu {
+                message: "iteration parent disagrees with its definition"
+            }
+        );
         let owners = if parent.is_empty() {
             &description.nodes
         } else {
@@ -228,16 +243,70 @@ impl IterationState {
                 message: "iteration body scope is absent",
             })?;
         if let Some(node) = record.event.node() {
+            let relative_scope = if node.path.is_empty() {
+                context
+                    .body_path
+                    .strip_prefix(context.iteration_path.as_slice())
+                    .context(InvalidIterationSnafu {
+                        message: "iteration body is outside its owner",
+                    })?
+                    .iter()
+                    .map(|key| LoopPathEntry::Call {
+                        call_id: key.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                node.path.clone()
+            };
+            let definition = description
+                .scope_definition_path_from(&context.iteration_path, &relative_scope)
+                .context(IterationSnafu)?;
             ensure!(
-                node.path.is_empty()
-                    && body
-                        .nodes
-                        .iter()
-                        .any(|expected| expected.id == node.id && expected.kind == node.kind),
+                definition == context.body_path,
+                InvalidIterationSnafu {
+                    message: "iteration runtime scope disagrees with its definition"
+                }
+            );
+            ensure!(
+                body.nodes
+                    .iter()
+                    .any(|expected| expected.id == node.id && expected.kind == node.kind),
                 InvalidIterationSnafu {
                     message: "iteration node disagrees with its described scope"
                 }
             );
+            if let IterationEvent::NodeStarted {
+                selected_inputs, ..
+            } = &record.event
+            {
+                for selection in selected_inputs {
+                    ensure!(
+                        body.data_edges.iter().any(|edge| edge.exclusive
+                            && edge.to_node == node.id
+                            && edge.to_input == selection.input
+                            && edge.from_node == selection.source_node
+                            && edge.from_output == selection.source_output),
+                        InvalidIterationSnafu {
+                            message: "selected input is not an iteration dependency"
+                        }
+                    );
+                }
+            }
+            if let IterationEvent::NodeSkipped { causes, .. } = &record.event {
+                for cause in causes {
+                    ensure!(
+                        cause.matches_dependency(
+                            &node.id,
+                            &body.data_edges,
+                            &body.control_edges,
+                            &body.order_edges
+                        ),
+                        InvalidIterationSnafu {
+                            message: "skip cause is not an iteration dependency"
+                        }
+                    );
+                }
+            }
         } else {
             ensure!(
                 context.body_path == context.iteration_path,
@@ -318,9 +387,11 @@ impl IterationState {
         let key = context.item();
         let new_node = record.event.node().is_some_and(|node| {
             self.items.get(&key).is_none_or(|item| {
-                !item
-                    .nodes
-                    .contains_key(&(context.body_path.clone(), node.id.clone()))
+                !item.nodes.contains_key(&(
+                    context.body_path.clone(),
+                    node.path.clone(),
+                    node.id.clone(),
+                ))
             })
         });
         while (!self.items.contains_key(&key) && self.items.len() >= MAX_ITEMS)
@@ -434,7 +505,11 @@ impl IterationState {
                 let identity = event.node().expect("node event has an identity");
                 let node = item
                     .nodes
-                    .entry((context.body_path.clone(), identity.id.clone()))
+                    .entry((
+                        context.body_path.clone(),
+                        identity.path.clone(),
+                        identity.id.clone(),
+                    ))
                     .or_insert_with(|| NodeObservation::pending(&identity.id, &identity.kind));
                 match event {
                     IterationEvent::NodeStarted {
@@ -551,11 +626,12 @@ impl IterationState {
                 view.nodes = item
                     .nodes
                     .iter()
-                    .map(|((path, _), node)| {
+                    .map(|((path, runtime_path, _), node)| {
                         let mut node = node.clone();
                         node.possibly_missing_events |= missing && !node.status.is_terminal();
                         IterationNodeObservation {
                             path: path.clone(),
+                            runtime_path: runtime_path.clone(),
                             node,
                         }
                     })

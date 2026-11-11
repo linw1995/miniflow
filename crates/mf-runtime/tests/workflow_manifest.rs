@@ -582,11 +582,7 @@ fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
         assert_eq!(description.loop_bodies.len(), 1);
         assert_eq!(
             description.version,
-            if feature == "order_edges" {
-                mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_19
-            } else {
-                mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23
-            }
+            mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09,
         );
         assert!(description.execution.is_some());
         let body = &description.loop_bodies[0];
@@ -691,8 +687,23 @@ fn historical_iteration_manifest() -> WorkflowManifest {
 fn historical_iteration_projection_validates_all_actual_descendants_first() {
     let manifest = historical_iteration_manifest();
     let decoded = round_trip(&manifest);
-    assert!(decoded.description().unwrap().loop_bodies.is_empty());
-    assert!(decoded.interface().unwrap().schema.inputs.is_empty());
+    let description = decoded.description().unwrap();
+    assert_eq!(
+        description.version,
+        mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09
+    );
+    assert_eq!(description.loop_bodies.len(), 2);
+    assert_eq!(
+        description
+            .body_paths_for_node(&["map".into()], "dispatch")
+            .len(),
+        1
+    );
+    assert_eq!(
+        decoded.interface().unwrap().schema.inputs,
+        [("map".to_owned(), Default::default())].into(),
+    );
+    assert!(decoded.input_schema.inputs.is_empty());
     for case in [
         "incomplete_parent",
         "unknown_descendant",
@@ -790,8 +801,19 @@ fn historical_projection_follows_explicit_stateless_frames_not_provider_names() 
     body.execution_order[0] = "item-source".into();
     body.relations.scope.as_mut().unwrap().input = "item-source".into();
     bindings.insert("selected".into(), body);
+    let upgraded = round_trip(&manifest).description().unwrap();
+    assert_eq!(
+        upgraded.version,
+        mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09
+    );
+    assert_eq!(upgraded.loop_bodies.len(), 2);
+
+    // Without a callable descendant, renaming the provider does not change the
+    // historical projection of the actual stateless frame.
+    let mut pure = manifest.clone();
+    child(&mut pure.graph, "map", "selected").children.clear();
     assert!(
-        round_trip(&manifest)
+        round_trip(&pure)
             .description()
             .unwrap()
             .loop_bodies
@@ -844,6 +866,21 @@ fn historical_projection_follows_explicit_stateless_frames_not_provider_names() 
 #[test]
 fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisions() {
     let mut manifest = historical_iteration_manifest();
+    // Keep a real child for instruction/child collision checks, but make it a
+    // stateless frame too: no callable target should promote this legacy fixture.
+    child(
+        child(&mut manifest.graph, "map", "body"),
+        "dispatch",
+        "selected",
+    )
+    .relations
+    .scope = Some(ScopeRelations {
+        input: "value".into(),
+        values: [("item".into(), ValueType::String)].into(),
+        state_outputs: Default::default(),
+        writes: Default::default(),
+        exits: Default::default(),
+    });
     let body = child(&mut manifest.graph, "map", "body");
     body.definition.nodes.push(
         serde_json::from_value(json!({"id": "instruction", "kind": "foreign.instruction"}))

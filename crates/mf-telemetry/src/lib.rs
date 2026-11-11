@@ -22,6 +22,11 @@ use snafu::{Snafu, ensure};
 pub const INSTRUMENTATION_SCOPE: &str = "mf.workflow";
 pub const EVENT_SCHEMA_VERSION: i64 = 7;
 pub const STREAM_EVENT_SCHEMA_VERSION: i64 = 8;
+/// Extended finite and stream contracts distinguish runtime Flow frames from definitions.
+pub const FLOW_EVENT_SCHEMA_VERSION: i64 = 9;
+pub const FLOW_STREAM_EVENT_SCHEMA_VERSION: i64 = 10;
+
+pub use event::FlowOrigin;
 /// Combined static nesting bound for ordinary calls and Loop scopes.
 pub const MAX_SCOPE_DEPTH: usize = 20;
 pub const MAX_LOOP_DEPTH: usize = 4;
@@ -31,6 +36,17 @@ pub const MAX_LOOP_ITERATIONS: u16 = 1000;
 pub enum ContractError {
     #[snafu(display("invalid observation contract: {message}"), visibility(pub))]
     Invalid { message: String },
+    #[snafu(display(
+        "observed Flow origin belongs to workflow {origin_workflow}, not {owning_workflow}; cross-artifact observation is unsupported"
+    ))]
+    UnsupportedFlowOrigin {
+        owning_workflow: identity::WorkflowId,
+        origin_workflow: identity::WorkflowId,
+    },
+    #[snafu(display(
+        "observed Flow invocation inside an iteration item does not support target {definition:?} declaring nested state/item scopes"
+    ))]
+    UnsupportedFlowIterationScope { definition: FlowOrigin },
     #[snafu(display("invalid run ID: {source}"))]
     RunId { source: uuid::Error },
     #[snafu(display("invalid trace ID: {source}"))]

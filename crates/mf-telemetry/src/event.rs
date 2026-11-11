@@ -37,30 +37,64 @@ pub struct NodeIdentity {
     pub path: Vec<LoopPathEntry>,
 }
 
+/// Definition metadata for a prepared Flow value, never an executable lookup key.
+/// `path` contains absolute canonical child-scope keys in the owning workflow.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowOrigin {
+    pub workflow_id: WorkflowId,
+    pub path: Vec<String>,
+}
+
+impl FlowOrigin {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        require(
+            !self.path.is_empty()
+                && self.path.len() <= crate::MAX_SCOPE_DEPTH
+                && self.path.iter().all(|key| !key.trim().is_empty()),
+            "invalid Flow definition path",
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ScopePathEntry {
-    Loop { loop_id: String, index: Count },
-    Call { call_id: String },
+    Loop {
+        loop_id: String,
+        index: Count,
+    },
+    Call {
+        call_id: String,
+    },
+    /// Runtime ownership is the invoker; definition ownership remains at the origin.
+    Flow {
+        call_id: String,
+        definition: FlowOrigin,
+    },
 }
 
 impl ScopePathEntry {
     pub fn node_id(&self) -> &str {
         match self {
             Self::Loop { loop_id, .. } => loop_id,
-            Self::Call { call_id } => call_id,
+            Self::Call { call_id } | Self::Flow { call_id, .. } => call_id,
         }
     }
 
     pub fn index(&self) -> Count {
         match self {
             Self::Loop { index, .. } => *index,
-            Self::Call { .. } => Count::ZERO,
+            Self::Call { .. } | Self::Flow { .. } => Count::ZERO,
         }
     }
 
     pub fn is_call(&self) -> bool {
-        matches!(self, Self::Call { .. })
+        matches!(self, Self::Call { .. } | Self::Flow { .. })
+    }
+
+    pub fn is_flow(&self) -> bool {
+        matches!(self, Self::Flow { .. })
     }
 
     pub fn binding_key(call_id: &str, binding: &str) -> String {
@@ -258,6 +292,19 @@ impl Event {
         }
     }
 
+    pub fn has_flow_scope(&self) -> bool {
+        let path = match self {
+            Self::LoopPassStarted { path, .. }
+            | Self::LoopPassFinished { path, .. }
+            | Self::CallStarted { path, .. }
+            | Self::CallFinished { path, .. } => path.as_slice(),
+            _ => self
+                .node()
+                .map_or(&[][..], |(node, _)| node.path.as_slice()),
+        };
+        path.iter().any(ScopePathEntry::is_flow)
+    }
+
     pub fn selected_inputs(&self) -> &[InputSelection] {
         match self {
             Self::NodeStarted {
@@ -421,12 +468,17 @@ impl Event {
     }
 }
 
-fn validate_path(path: &[LoopPathEntry]) -> Result<(), ContractError> {
+/// Validates runtime scope bounds and entries without resolving their definition
+/// locations against a workflow description.
+pub fn validate_path(path: &[LoopPathEntry]) -> Result<(), ContractError> {
     require(
         path.len() <= crate::MAX_SCOPE_DEPTH,
         "Loop path exceeds nesting limit",
     )?;
     for entry in path {
+        if let ScopePathEntry::Flow { definition, .. } = entry {
+            definition.validate()?;
+        }
         require(
             !entry.node_id().trim().is_empty()
                 && entry.index().get() < i64::from(crate::MAX_LOOP_ITERATIONS),
@@ -503,16 +555,11 @@ impl LifecycleEvent {
         )?;
         let loop_schema = graph.version.supports_loops() && !graph.is_streaming();
         if let Some((identity, position)) = self.event.node() {
-            graph.validate_scope_path(&identity.path)?;
+            let static_path = graph.scope_definition_path(&identity.path)?;
             require(
                 loop_schema || identity.path.is_empty(),
                 "old event has a Loop path",
             )?;
-            let static_path: Vec<_> = identity
-                .path
-                .iter()
-                .map(|entry| entry.node_id().to_owned())
-                .collect();
             let (nodes, data_edges, control_edges, order_edges, order) = if static_path.is_empty() {
                 (
                     &graph.nodes,

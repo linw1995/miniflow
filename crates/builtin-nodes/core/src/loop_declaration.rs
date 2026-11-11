@@ -123,7 +123,11 @@ fn validate_options<'a>(
             ensure!(
                 !matches!(
                     value_type,
-                    ValueType::Array | ValueType::Object | ValueType::List(_) | ValueType::Map(_)
+                    ValueType::Array
+                        | ValueType::Object
+                        | ValueType::Flow
+                        | ValueType::List(_)
+                        | ValueType::Map(_)
                 ),
                 NonScalarConditionVariableSnafu
             );
@@ -139,9 +143,11 @@ fn validate_options<'a>(
                 ValueType::Boolean => condition.value.is_boolean(),
                 ValueType::String => condition.value.is_string(),
                 ValueType::Nullable(_) => value_type.validate_value(&condition.value).is_ok(),
-                ValueType::Array | ValueType::Object | ValueType::List(_) | ValueType::Map(_) => {
-                    false
-                }
+                ValueType::Array
+                | ValueType::Object
+                | ValueType::Flow
+                | ValueType::List(_)
+                | ValueType::Map(_) => false,
             };
             ensure!(compatible, IncompatibleConditionLiteralSnafu);
         }

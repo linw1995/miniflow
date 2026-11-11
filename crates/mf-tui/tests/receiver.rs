@@ -532,7 +532,17 @@ fn iteration_failure_and_skip_logs_keep_structured_node_evidence() {
         return;
     }
     for skipped in [false, true] {
-        let receiver = LoopbackReceiver::bind(observed_iteration_graph(), run_id()).unwrap();
+        let mut description = observed_iteration_graph();
+        description.loop_bodies[0].data_edges = ["item", "alternate"]
+            .map(|output| mf_telemetry::description::DataEdge {
+                exclusive: true,
+                from_node: "%iteration".into(),
+                from_output: output.into(),
+                to_node: "work".into(),
+                to_input: "input".into(),
+            })
+            .into();
+        let receiver = LoopbackReceiver::bind(description, run_id()).unwrap();
         let mut records = vec![iteration_log(1, "mf.iteration.item.started", Vec::new())];
         if skipped {
             records.push(iteration_log(
@@ -612,6 +622,128 @@ fn iteration_failure_and_skip_logs_keep_structured_node_evidence() {
         assert_eq!(snapshot.observation.errors, 0);
         assert_eq!(snapshot.lifecycle.known_missing_count, 0);
     }
+}
+
+#[test]
+fn flow_iteration_detail_transport_keeps_runtime_scope_and_definition_separate() {
+    use mf_telemetry::{
+        Count,
+        description::{LoopBodyDescription, NodeDescription},
+        event::{FlowOrigin, ScopePathEntry},
+        iteration::{
+            CONTEXT_ATTRIBUTE, DETAIL_CONTEXT_ATTRIBUTE, IterationContext, IterationDetailContext,
+        },
+    };
+    if !loopback_available() {
+        return;
+    }
+    let mut description = observed_iteration_graph();
+    description.version = WorkflowDescriptionVersion::V2026_11_09;
+    description.nodes.insert(
+        0,
+        NodeDescription {
+            id: "producer".into(),
+            kind: "builtin.constant".into(),
+        },
+    );
+    description.execution_order.insert(0, "producer".into());
+    description.loop_bodies[0].nodes[1].kind = "workflow.call".into();
+    description.loop_bodies.push(LoopBodyDescription {
+        path: vec!["producer".into()],
+        source: None,
+        state_outputs: Default::default(),
+        nodes: vec![NodeDescription {
+            id: "work".into(),
+            kind: "fixture.target".into(),
+        }],
+        execution_order: vec!["work".into()],
+        data_edges: vec![],
+        control_edges: vec![],
+        order_edges: vec![],
+        clusters: vec![],
+    });
+    let receiver = LoopbackReceiver::bind(description.clone(), run_id()).unwrap();
+    let mut detail = IterationDetailContext {
+        context: IterationContext {
+            invocation: Count::try_from(1).unwrap(),
+            index: Count::ZERO,
+            sequence: Count::try_from(2).unwrap(),
+            elapsed_ns: Count::try_from(2).unwrap(),
+            iteration_path: vec!["each".into()],
+            body_path: vec!["producer".into()],
+            parent_path: vec![],
+            parent_stream_invocation: None,
+        },
+        body_scope: vec![ScopePathEntry::Flow {
+            call_id: "work".into(),
+            definition: FlowOrigin {
+                workflow_id: description.workflow_id,
+                path: vec!["producer".into()],
+            },
+        }],
+    };
+    let dynamic = |detail: &IterationDetailContext| {
+        let mut log = iteration_log(
+            detail.context.sequence.get(),
+            "mf.iteration.node.started",
+            vec![],
+        );
+        log.attributes.retain(|attribute| {
+            attribute.key != CONTEXT_ATTRIBUTE && attribute.key != "mf.node.kind"
+        });
+        log.attributes.extend([
+            attribute("mf.schema.version", integer(2)),
+            attribute("mf.node.kind", string("fixture.target")),
+            attribute(
+                DETAIL_CONTEXT_ATTRIBUTE,
+                string(serde_json::to_string(detail).unwrap()),
+            ),
+        ]);
+        log
+    };
+    let payload = iteration_request(vec![
+        iteration_log(1, "mf.iteration.item.started", vec![]),
+        dynamic(&detail),
+    ]);
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &payload
+        ),
+        200
+    );
+    let snapshot = receiver.snapshot();
+    let item = &snapshot.iterations.items[0];
+    assert_eq!(item.iteration_path, ["each"]);
+    assert_eq!(item.nodes[0].path, ["producer"]);
+    assert_eq!(item.nodes[0].runtime_path, detail.body_scope);
+    assert_eq!(
+        snapshot
+            .iterations
+            .latest_node_event
+            .as_ref()
+            .unwrap()
+            .node
+            .path,
+        detail.body_scope
+    );
+    detail.context.sequence = Count::try_from(3).unwrap();
+    if let ScopePathEntry::Flow { call_id, .. } = &mut detail.body_scope[0] {
+        *call_id = "missing".into();
+    }
+    let payload = iteration_request(vec![dynamic(&detail)]);
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &payload
+        ),
+        400
+    );
+    assert_eq!(receiver.snapshot().iterations.items[0].nodes.len(), 1);
 }
 
 #[test]

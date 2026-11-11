@@ -80,7 +80,12 @@ fn decode_scope(
                 && scope
                     .get("nodes")
                     .and_then(Value::as_array)
-                    .is_none_or(|nodes| nodes.iter().all(|node| node["kind"] != crate::CALL_KIND))),
+                    .is_none_or(|nodes| {
+                        nodes.iter().all(|node| {
+                            node["kind"] != crate::CALL_KIND
+                                || CallConfig::is_dynamic(&node["config"])
+                        })
+                    })),
         InvalidSnafu {
             path,
             message: "nested flows require version 2026-10-25"
@@ -247,7 +252,12 @@ fn encode_scope(
                 && scope
                     .get("nodes")
                     .and_then(Value::as_array)
-                    .is_none_or(|nodes| nodes.iter().all(|node| node["kind"] != crate::CALL_KIND))),
+                    .is_none_or(|nodes| {
+                        nodes.iter().all(|node| {
+                            node["kind"] != crate::CALL_KIND
+                                || CallConfig::is_dynamic(&node["config"])
+                        })
+                    })),
         InvalidSnafu {
             path,
             message: "nested flows require version 2026-10-25"

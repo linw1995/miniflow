@@ -747,6 +747,9 @@ impl SessionState {
             let Some((last, parent)) = path.split_last() else {
                 continue;
             };
+            if last.is_flow() {
+                continue;
+            }
             let key = (parent.to_vec(), last.node_id().to_owned());
             let overview = overviews.entry(key).or_insert_with(|| LoopOverview {
                 parent_path: parent.to_vec(),

@@ -53,4 +53,5 @@ snafu.workspace = true
 rustix = { workspace = true, features = ["termios"] }
 
 [dev-dependencies]
-mf-compiler.workspace = true
+mf-compiler = { workspace = true, features = ["codegen"] }
+mfn-core.workspace = true

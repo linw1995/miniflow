@@ -197,52 +197,114 @@ impl CompiledWorkflow {
                 })
             })
             .collect();
-        nodes.iter().enumerate().map(|(index, node)| {
-            let id = node.definition_id.to_string();
-            ensure!(self.graph.execution_order.get(index) == Some(&node.definition_id), InvalidExecutionOrderSnafu);
-            let kind = match node.node.as_ref() {
-                Some(mf_runtime::NodeExecution::Task(_) | mf_runtime::NodeExecution::TaskStream(_)) => mf_runtime::NodeTargetKind::Task,
-                Some(mf_runtime::NodeExecution::Event(_)) => mf_runtime::NodeTargetKind::Event,
-                Some(mf_runtime::NodeExecution::Stream(_)) => mf_runtime::NodeTargetKind::Stream,
-                None => return UnknownNodeSnafu { definition_id: node.definition_id.clone() }.fail(),
-            };
-            let inputs = crate::workflow_input_schema(std::iter::once((node, true)), |_, _| false)?;
-            let mut description = mf_telemetry::description::WorkflowDescription {
-                order_edges: Vec::new(),
-                version: mf_telemetry::description::WorkflowDescriptionVersion::CURRENT,
-                workflow_id: original.workflow_id.clone(), execution: None,
-                nodes: vec![original.nodes[index].clone()],
-                data_edges: Vec::new(), control_edges: Vec::new(),
-                execution_order: vec![id.clone()],
-                loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
-                clusters: Vec::new(),
-            };
-            if original.version.supports_clusters() {
-                description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23;
-                description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
-            } else if self.graph.children.get(&node.definition_id).into_iter()
-                .flat_map(BTreeMap::values).any(requires_scope_order_description) {
-                description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_19;
-                description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
-            }
-            description.workflow_id = mf_telemetry::identity::WorkflowId::from_definition(
-                &serde_json::json!({"isolation_format": 1, "workflow_id": original.workflow_id, "target": id}),
-                &description.execution_order,
-            ).context(mf_runtime::GraphObservationSnafu).context(crate::compiler::GraphSnafu)?;
-            description.validate().context(mf_runtime::GraphObservationSnafu).context(crate::compiler::GraphSnafu)?;
-            let context = node.metadata.context_references.iter().map(|reference| {
-                let value_type = output_types.get(&reference.output).context(UnknownTargetReferenceSnafu {
-                    definition_id: node.definition_id.clone(), output: &reference.output,
-                })?;
-                Ok((reference.output.clone(), value_type.clone()))
-            }).collect::<Result<_, PlanError>>()?;
-            Ok(mf_runtime::NodeTarget {
-                id, index, kind, inputs, outputs: mf_runtime::target_ports(&node.metadata.ports.outputs),
-                worker_limit: self.graph.definition.execution.as_ref().and_then(|execution| std::num::NonZeroUsize::new(execution.limits.workers)),
-                context,
-                original_workflow_id: original.workflow_id.clone(), description,
+        nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let id = node.definition_id.to_string();
+                ensure!(
+                    self.graph.execution_order.get(index) == Some(&node.definition_id),
+                    InvalidExecutionOrderSnafu
+                );
+                let kind = match node.node.as_ref() {
+                    Some(
+                        mf_runtime::NodeExecution::Task(_)
+                        | mf_runtime::NodeExecution::TaskStream(_),
+                    ) => mf_runtime::NodeTargetKind::Task,
+                    Some(mf_runtime::NodeExecution::Event(_)) => mf_runtime::NodeTargetKind::Event,
+                    Some(mf_runtime::NodeExecution::Stream(_)) => {
+                        mf_runtime::NodeTargetKind::Stream
+                    }
+                    None => {
+                        return UnknownNodeSnafu {
+                            definition_id: node.definition_id.clone(),
+                        }
+                        .fail();
+                    }
+                };
+                let inputs =
+                    crate::workflow_input_schema(std::iter::once((node, true)), |_, _| false)?;
+                let mut description = mf_telemetry::description::WorkflowDescription {
+                    order_edges: Vec::new(),
+                    version: mf_telemetry::description::WorkflowDescriptionVersion::CURRENT,
+                    workflow_id: original.workflow_id.clone(),
+                    execution: None,
+                    nodes: vec![original.nodes[index].clone()],
+                    data_edges: Vec::new(),
+                    control_edges: Vec::new(),
+                    execution_order: vec![id.clone()],
+                    loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
+                    clusters: Vec::new(),
+                };
+                if original.version.supports_flow_invocations() {
+                    description.version =
+                        mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09;
+                    description.execution = Some(mf_telemetry::description::ExecutionDescription {
+                        mode: mf_telemetry::description::ExecutionMode::Single,
+                    });
+                } else if original.version.supports_clusters() {
+                    description.version =
+                        mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23;
+                    description.execution = Some(mf_telemetry::description::ExecutionDescription {
+                        mode: mf_telemetry::description::ExecutionMode::Single,
+                    });
+                } else if self
+                    .graph
+                    .children
+                    .get(&node.definition_id)
+                    .into_iter()
+                    .flat_map(BTreeMap::values)
+                    .any(requires_scope_order_description)
+                {
+                    description.version =
+                        mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_19;
+                    description.execution = Some(mf_telemetry::description::ExecutionDescription {
+                        mode: mf_telemetry::description::ExecutionMode::Single,
+                    });
+                }
+                description.workflow_id = original
+                    .workflow_id
+                    .for_node_target(&id)
+                    .context(mf_runtime::GraphObservationSnafu)
+                    .context(crate::compiler::GraphSnafu)?;
+                description
+                    .validate()
+                    .context(mf_runtime::GraphObservationSnafu)
+                    .context(crate::compiler::GraphSnafu)?;
+                let context = node
+                    .metadata
+                    .context_references
+                    .iter()
+                    .map(|reference| {
+                        let value_type = output_types.get(&reference.output).context(
+                            UnknownTargetReferenceSnafu {
+                                definition_id: node.definition_id.clone(),
+                                output: &reference.output,
+                            },
+                        )?;
+                        Ok((reference.output.clone(), value_type.clone()))
+                    })
+                    .collect::<Result<_, PlanError>>()?;
+                Ok(mf_runtime::NodeTarget {
+                    id,
+                    index,
+                    kind,
+                    inputs,
+                    outputs: mf_runtime::target_ports(&node.metadata.ports.outputs),
+                    worker_limit: self
+                        .graph
+                        .definition
+                        .execution
+                        .as_ref()
+                        .and_then(|execution| {
+                            std::num::NonZeroUsize::new(execution.limits.workers)
+                        }),
+                    context,
+                    original_workflow_id: original.workflow_id.clone(),
+                    description,
+                })
             })
-        }).collect()
+            .collect()
     }
 
     pub fn start_stream_observation(
@@ -985,6 +1047,9 @@ fn subgraphs_preparation(
                 }
             }
         };
+        let origin_path = path
+            .iter()
+            .map(|entry| LitStr::new(entry, Span::call_site()));
         let relations_ident = format_ident!("relations_{body_scope}");
         scope_entries.push(quote!(#relations_ident));
         prepared.push(quote! {
@@ -1008,7 +1073,8 @@ fn subgraphs_preparation(
                     definition_id: mf_runtime::DefinitionId::from(#id),
                 })?;
             let #body_ident = mf_runtime::PreparedSubgraph::from_flow(#flow, vec![#(#identities),*])
-                .with_relations(#relations_ident.clone());
+                .with_relations(#relations_ident.clone())
+                .with_origin(mf_compiled_flow_origin(vec![#(#origin_path.into()),*])?);
             #stream_version_check
         });
         let name = LitStr::new(name, Span::call_site());
@@ -1143,6 +1209,30 @@ impl CompiledWorkflow {
         };
         let schema = flow.input_schema().clone();
         let mut layouts = Vec::new();
+        if !self.graph.children.is_empty() {
+            let workflow_id = self
+                .graph
+                .workflow_id()
+                .context(crate::compiler::GraphSnafu)?;
+            let identity = LitStr::new(
+                &serde_json::to_string(&workflow_id).context(SerializeSnafu)?,
+                Span::call_site(),
+            );
+            // This graph already has its published execution mode. Do not prepare
+            // providers (or consult the authored, unresolved graph) to recover its ID.
+            layouts.push(quote! {
+                fn mf_compiled_flow_origin(
+                    path: Vec<String>,
+                ) -> Result<mf_runtime::FlowOrigin, mf_compiler::WorkflowBuildError> {
+                    use snafu::ResultExt as _;
+                    let workflow_id = serde_json::from_str(#identity)
+                        .context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
+                            definition_id: mf_runtime::DefinitionId::from("<workflow>"),
+                        })?;
+                    Ok(mf_runtime::FlowOrigin { workflow_id, path })
+                }
+            });
+        }
         let mut typed_plan = crate::TypedPlan::default();
         if let Some(execution) = &self.graph.definition.execution {
             typed_plan.connections = self
@@ -1928,7 +2018,133 @@ fn stream_guard_tokens(
 
 #[cfg(all(test, feature = "codegen"))]
 mod tests {
+    extern crate mfn_core as _;
+
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn generated_origins_use_absolute_paths_and_the_published_root_identity() {
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version":"2026-10-28", "execution":{}, "dependencies":{},
+            "nodes":[{"id":"outer", "kind":"workflow.call", "config":{
+                "flow":"inline", "body":{
+                    "version":"2026-10-28", "dependencies":{},
+                    "nodes":[{"id":"make", "kind":"builtin.constant", "config":{
+                        "type":"flow", "value":{"version":"2026-10-28", "dependencies":{}, "nodes":[]}
+                    }}],
+                    "outputs":[{"name":"flow", "node":"make", "port":"value"}]
+                }
+            }}],
+            "outputs":[{"name":"flow", "node":"outer", "port":"flow"}]
+        }))
+        .unwrap();
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        let plan = crate::plan_definition(&definition).unwrap();
+        let initial_identity = plan.graph.workflow_id().unwrap();
+        let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
+        let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+        let identity = manifest.workflow_id().unwrap();
+        assert!(manifest.graph.definition.execution.is_none());
+        assert_ne!(initial_identity, identity);
+        assert!(artifacts.rust_source.contains(identity.as_str()));
+        assert!(
+            artifacts
+                .rust_source
+                .contains("fn mf_compiled_flow_origin(")
+        );
+        assert_eq!(artifacts.rust_source.matches(".with_origin(").count(), 2);
+        let body_key = mf_runtime::ScopePathEntry::binding_key("make", "value");
+        let body_key = LitStr::new(&body_key, Span::call_site());
+        let expected = quote!("outer".into(), #body_key.into());
+        let compact = |source: &str| source.split_whitespace().collect::<String>();
+        assert!(compact(&artifacts.rust_source).contains(&compact(&expected.to_string())));
+        assert_eq!(
+            manifest.description().unwrap().version,
+            mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09,
+        );
+    }
+
+    #[test]
+    fn generated_input_calls_use_ordinary_receivers_and_keep_factory_validation() {
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version":"2026-10-28", "dependencies":{},
+            "nodes":[
+                {"id":"formal", "kind":"builtin.parameters", "config":{
+                    "parameters":{"callback":{"type":"flow", "secret":false}}
+                }},
+                {"id":"apply", "kind":"workflow.call", "config":{"inputs":[], "outputs":[]},
+                    "inputs":{"flow":{"from":{"node":"formal", "port":"callback"}}}}
+            ]
+        }))
+        .unwrap();
+        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+        let plan = crate::plan_definition(&definition).unwrap();
+        let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
+        let manifest = mf_runtime::WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
+        assert!(manifest.graph.children.is_empty());
+        assert_eq!(
+            manifest.graph.relations,
+            mf_runtime::GraphRelations::default()
+        );
+        assert_eq!(
+            manifest.input_schema.inputs["formal"]["callback"].value_type,
+            mf_runtime::ValueType::Flow
+        );
+        assert!(!artifacts.rust_source.contains("mf_compiled_flow_origin"));
+        assert!(
+            artifacts
+                .rust_source
+                .contains("instantiate_node_with_metadata")
+        );
+        assert!(
+            !artifacts
+                .rust_source
+                .contains("instantiate_subgraphs_with_metadata")
+        );
+
+        let config = serde_json::to_string(&definition.nodes[1].config).unwrap();
+        crate::validate_node_flow_parameters(&registry, "apply", crate::CALL_KIND, &config, &[])
+            .unwrap();
+        assert!(
+            crate::validate_node_flow_parameters(
+                &registry,
+                "apply",
+                crate::CALL_KIND,
+                &config,
+                &["body"]
+            )
+            .is_err()
+        );
+        let node =
+            crate::instantiate_node_with_metadata(&registry, "apply", crate::CALL_KIND, &config)
+                .unwrap();
+        assert_eq!(
+            node.metadata.ports.inputs,
+            [crate::PortSpec::new(
+                "flow",
+                mf_runtime::ValueType::Flow,
+                true
+            )]
+        );
+
+        let mut invalid = definition;
+        invalid.nodes[1].config["inputs"] = json!([
+            {"name":"flow", "value_type":"flow", "required":true}
+        ]);
+        // Source resolution does not run the factory's reserved-port check.
+        let plan = crate::plan_definition(&invalid).unwrap();
+        let replay = CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+        for plan in [&plan, &replay] {
+            assert!(matches!(
+                plan.generate_runner_execution_plans(&registry).unwrap_err(),
+                PlanError::Compilation { source }
+                    if matches!(source.as_ref(), crate::WorkflowCompileError::NodeConstruction {
+                        definition_id, source: crate::NodeBuildError::FactoryFailed { .. }, ..
+                    } if definition_id.as_str() == "apply")
+            ));
+        }
+    }
 
     #[test]
     fn generated_scope_constructors_follow_relations_not_kinds_or_config() {

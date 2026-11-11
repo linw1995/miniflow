@@ -4,7 +4,7 @@ use crate::{
     ContractError, Count, INSTRUMENTATION_SCOPE,
     description::WorkflowDescription,
     event::{
-        Event, Failure, FailurePhase, InputSelection, LifecycleEvent, LoopPassOutcome,
+        Event, Failure, FailurePhase, FlowOrigin, InputSelection, LifecycleEvent, LoopPassOutcome,
         LoopPathEntry, LoopSummary, NodeIdentity, Outcome, SkipCause,
     },
     identity::{RunId, WorkflowId},
@@ -326,6 +326,29 @@ impl RunObservation {
         self.description.is_some()
     }
 
+    pub fn description(&self) -> Option<&WorkflowDescription> {
+        self.description.as_deref()
+    }
+
+    /// Validate before executing an observed edge-carried Flow. Foreign or anonymous
+    /// prepared values remain executable without observation, but cannot invent a graph.
+    pub fn validate_flow_origin(
+        &self,
+        id: &str,
+        current_path: &[LoopPathEntry],
+        origin: &FlowOrigin,
+    ) -> Result<(), ContractError> {
+        let description = self.description.as_ref().ok_or_else(|| {
+            crate::invalid("observed Flow invocation requires a workflow description")
+        })?;
+        let mut path = current_path.to_vec();
+        path.push(LoopPathEntry::Flow {
+            call_id: id.to_owned(),
+            definition: origin.clone(),
+        });
+        description.scope_definition_path(&path).map(|_| ())
+    }
+
     pub fn enter(&self) -> ContextGuard {
         self.context.clone().attach()
     }
@@ -340,29 +363,25 @@ impl RunObservation {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        if path.is_empty() {
+        let mut body_path = if path.is_empty() {
             self.nodes.get(id)?;
+            Vec::new()
         } else {
-            let static_path: Vec<_> = path
-                .iter()
-                .map(|entry| entry.node_id().to_owned())
-                .collect();
-            self.description
-                .as_ref()?
-                .loop_body(&static_path)?
+            let description = self.description.as_ref()?;
+            let static_path = description.scope_definition_path(path).ok()?;
+            description
+                .body(&static_path)?
                 .nodes
                 .iter()
                 .find(|node| node.id == id)?;
-        }
-        let mut body_path: Vec<_> = path
-            .iter()
-            .map(|entry| entry.node_id().to_owned())
-            .collect();
+            static_path
+        };
         body_path.push(scope_key.to_owned());
         IterationObservation::new(
             Arc::clone(&self.backend),
             self.workflow_id.clone(),
             self.run_id,
+            self.description.clone(),
             body_path,
             path.to_vec(),
             Context::current()
@@ -421,11 +440,8 @@ impl RunObservation {
             return None;
         }
         let description = self.description.as_ref()?;
-        let static_path: Vec<_> = path
-            .iter()
-            .map(|entry| entry.node_id().to_owned())
-            .collect();
-        let body = description.loop_body(&static_path)?;
+        let static_path = description.scope_definition_path(&path).ok()?;
+        let body = description.body(&static_path)?;
         let position = body.execution_order.iter().position(|node| node == id)?;
         let kind = body.nodes.iter().find(|node| node.id == id)?.kind.clone();
         let position = Count::try_from(position as i64).ok()?;
@@ -773,7 +789,15 @@ impl RunObservation {
             sequence,
             event,
         };
-        if let Ok(record) = WireRecord::from_event(&event, timestamp, trace_context) {
+        let schema = self
+            .description
+            .as_ref()
+            .map_or(crate::EVENT_SCHEMA_VERSION, |description| {
+                description.event_schema_version()
+            });
+        if let Ok(record) =
+            WireRecord::from_event_with_schema(&event, timestamp, trace_context, schema)
+        {
             let _ = self.backend.emit_lifecycle(&record);
         }
     }
@@ -877,6 +901,7 @@ impl Drop for NodeObservation {
 }
 
 struct IterationScope {
+    description: Option<Arc<WorkflowDescription>>,
     invocation: Count,
     path: Vec<String>,
     parent_path: Vec<LoopPathEntry>,
@@ -889,6 +914,7 @@ impl IterationScope {
     fn attach(
         &self,
         path: &[String],
+        body_scope: &[LoopPathEntry],
         index: i64,
         terminal: bool,
         attributes: &mut Vec<(String, AnyValue)>,
@@ -917,7 +943,28 @@ impl IterationScope {
             sequence,
             elapsed_ns,
         };
-        if let Ok(json) = serde_json::to_string(&context) {
+        if body_scope
+            .iter()
+            .chain(&self.parent_path)
+            .any(LoopPathEntry::is_flow)
+        {
+            let detail = crate::iteration::IterationDetailContext {
+                context,
+                body_scope: body_scope.to_vec(),
+            };
+            if let Ok(json) = serde_json::to_string(&detail) {
+                for (key, value) in attributes.iter_mut() {
+                    if key == "mf.schema.version" {
+                        *value = AnyValue::Int(2);
+                    }
+                }
+                // Do not send a legacy context that older readers could misattribute.
+                attributes.push((
+                    crate::iteration::DETAIL_CONTEXT_ATTRIBUTE.into(),
+                    AnyValue::String(json.into()),
+                ));
+            }
+        } else if let Ok(json) = serde_json::to_string(&context) {
             attributes.push((
                 crate::iteration::CONTEXT_ATTRIBUTE.into(),
                 AnyValue::String(json.into()),
@@ -942,6 +989,7 @@ impl IterationObservation {
         backend: Arc<Backend>,
         workflow_id: WorkflowId,
         run_id: RunId,
+        description: Option<Arc<WorkflowDescription>>,
         path: Vec<String>,
         parent_path: Vec<LoopPathEntry>,
         parent_stream_invocation: Option<u64>,
@@ -957,6 +1005,7 @@ impl IterationObservation {
         let iteration_id = path.last()?.clone();
         let observation = Self {
             scope: Arc::new(IterationScope {
+                description,
                 invocation,
                 path,
                 parent_path,
@@ -983,7 +1032,7 @@ impl IterationObservation {
         let mut attributes =
             nested_attributes(&self.workflow_id, self.run_id, &self.iteration_id, 0);
         self.scope
-            .attach(&self.scope.path, 0, true, &mut attributes);
+            .attach(&self.scope.path, &[], 0, true, &mut attributes);
         (self.backend.emit_nested)(NestedLog {
             name: "mf.iteration.finished",
             attributes,
@@ -1052,6 +1101,7 @@ impl ItemObservation {
         BodyObservation {
             scope: Arc::clone(&self.scope),
             path: self.scope.path.clone(),
+            body_scope: Vec::new(),
             scoped: true,
             backend: Arc::clone(&self.backend),
             workflow_id: self.workflow_id.clone(),
@@ -1104,7 +1154,7 @@ impl ItemObservation {
             self.index,
         );
         self.scope
-            .attach(&self.scope.path, self.index, false, &mut common);
+            .attach(&self.scope.path, &[], self.index, false, &mut common);
         common.extend(attributes);
         (self.backend.emit_nested)(NestedLog {
             name,
@@ -1129,6 +1179,7 @@ impl Drop for ItemObservation {
 pub struct BodyObservation {
     scope: Arc<IterationScope>,
     path: Vec<String>,
+    body_scope: Vec<LoopPathEntry>,
     scoped: bool,
     backend: Arc<Backend>,
     workflow_id: WorkflowId,
@@ -1162,9 +1213,14 @@ impl BodyObservation {
     pub fn for_call_node(&self, id: &str, nodes: &[NodeIdentity]) -> Self {
         let mut path = self.path.clone();
         path.push(id.to_owned());
+        let mut body_scope = self.body_scope.clone();
+        body_scope.push(LoopPathEntry::Call {
+            call_id: id.to_owned(),
+        });
         Self {
             scoped: self.scoped && !id.trim().is_empty(),
             path,
+            body_scope,
             context: Context::current(),
             body_nodes: Arc::new(
                 nodes
@@ -1175,6 +1231,58 @@ impl BodyObservation {
             ),
             ..self.clone()
         }
+    }
+
+    /// Keeps item/runtime ancestry while jumping to the actual Flow definition.
+    /// The caller must obtain this observation before executing the target body.
+    pub fn for_flow_node(
+        &self,
+        id: &str,
+        origin: &FlowOrigin,
+        nodes: &[NodeIdentity],
+    ) -> Result<Self, ContractError> {
+        crate::require(
+            self.scoped,
+            "observed Flow invocation requires a scoped iteration body",
+        )?;
+        let description = self.scope.description.as_ref().ok_or_else(|| {
+            crate::invalid("observed Flow invocation requires a workflow description")
+        })?;
+        let entry = LoopPathEntry::Flow {
+            call_id: id.to_owned(),
+            definition: origin.clone(),
+        };
+        let path =
+            description.scope_definition_path_from(&self.path, std::slice::from_ref(&entry))?;
+        // Item observers correlate ordinary callable bodies, but do not yet carry
+        // nested pass/item frames. Reject that bounded grammar before body effects
+        // rather than emit outer-item nodes against an unrelated definition.
+        if description
+            .loop_bodies
+            .iter()
+            .any(|body| body.path.starts_with(&path) && body.source.is_some())
+        {
+            return crate::UnsupportedFlowIterationScopeSnafu {
+                definition: origin.clone(),
+            }
+            .fail();
+        }
+        let mut body_scope = self.body_scope.clone();
+        body_scope.push(entry);
+        crate::event::validate_path(&body_scope)?;
+        Ok(Self {
+            path,
+            body_scope,
+            context: Context::current(),
+            body_nodes: Arc::new(
+                nodes
+                    .iter()
+                    .cloned()
+                    .map(|node| (node.id.clone(), node))
+                    .collect(),
+            ),
+            ..self.clone()
+        })
     }
 
     pub fn begin_node(&self, id: &str) -> Option<BodyNodeObservation> {
@@ -1199,6 +1307,7 @@ impl BodyObservation {
         Some(BodyNodeObservation {
             scope: Arc::clone(&self.scope),
             path: self.path.clone(),
+            body_scope: self.body_scope.clone(),
             scoped: self.scoped,
             selected_inputs: Vec::new(),
             backend: Arc::clone(&self.backend),
@@ -1217,6 +1326,7 @@ impl BodyObservation {
 pub struct BodyNodeObservation {
     scope: Arc<IterationScope>,
     path: Vec<String>,
+    body_scope: Vec<LoopPathEntry>,
     scoped: bool,
     selected_inputs: Vec<InputSelection>,
     backend: Arc<Backend>,
@@ -1378,7 +1488,7 @@ impl BodyNodeObservation {
         }
         if self.scoped {
             self.scope
-                .attach(&self.path, self.index, false, &mut common);
+                .attach(&self.path, &self.body_scope, self.index, false, &mut common);
         }
         common.extend(attributes);
         (self.backend.emit_nested)(NestedLog {
@@ -1458,5 +1568,54 @@ fn phase_name(phase: FailurePhase) -> &'static str {
         FailurePhase::Execution => "execution",
         FailurePhase::Publication => "publication",
         FailurePhase::OutputSelection => "output_selection",
+    }
+}
+
+#[cfg(test)]
+mod flow_iteration_tests {
+    use super::*;
+
+    #[test]
+    fn extended_item_context_emits_runtime_frames_without_a_misleading_legacy_context() {
+        let origin = FlowOrigin {
+            workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            path: vec!["producer".into()],
+        };
+        let scope = IterationScope {
+            description: None,
+            invocation: Count::try_from(1).unwrap(),
+            path: vec!["each".into()],
+            parent_path: vec![],
+            parent_stream_invocation: Some(9),
+            started: Instant::now(),
+            sequence: Mutex::new(EventSequence::new()),
+        };
+        let body_scope = vec![LoopPathEntry::Flow {
+            call_id: "invoke".into(),
+            definition: origin.clone(),
+        }];
+        let mut attributes = vec![("mf.schema.version".into(), AnyValue::Int(1))];
+        scope.attach(&origin.path, &body_scope, 3, false, &mut attributes);
+        assert!(
+            !attributes
+                .iter()
+                .any(|(key, _)| key == crate::iteration::CONTEXT_ATTRIBUTE)
+        );
+        assert!(attributes.iter().any(|(key, value)| key == "mf.schema.version" && matches!(value, AnyValue::Int(2))));
+        let encoded = attributes
+            .iter()
+            .find_map(|(key, value)| match value {
+                AnyValue::String(value) if key == crate::iteration::DETAIL_CONTEXT_ATTRIBUTE => {
+                    Some(value.to_string())
+                }
+                _ => None,
+            })
+            .unwrap();
+        let detail = crate::iteration::IterationDetailContext::from_json(&encoded).unwrap();
+        assert_eq!(detail.body_scope, body_scope);
+        assert_eq!(detail.context.body_path, origin.path);
+        assert_eq!(detail.context.iteration_path, ["each"]);
+        assert_eq!(detail.context.index.get(), 3);
+        assert_eq!(detail.context.parent_stream_invocation, Some(9));
     }
 }

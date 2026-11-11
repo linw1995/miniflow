@@ -2,6 +2,48 @@
 
 use mf_runtime::{WorkflowInputSchema, WorkflowManifest, WorkflowManifestVersion};
 
+/// An executable fixture with the same embedded-manifest boundary as a built
+/// runner. Its script is replaceable independently of the manifest-bearing host.
+#[cfg(unix)]
+pub fn write_runner(path: &std::path::Path, manifest: &WorkflowManifest, script: &str) {
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+    let script_path = path.with_extension("script");
+    fs::write(&script_path, script).unwrap();
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o700)).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let bytes = manifest.to_bytes().unwrap();
+    let code = format!(
+        r#"
+        use std::os::unix::process::CommandExt;
+        #[used]
+        #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mf_manifest"))]
+        #[cfg_attr(target_os = "linux", unsafe(link_section = ".mf_manifest"))]
+        static MANIFEST: [u8; {length}] = {bytes:?};
+        fn main() {{
+            std::hint::black_box(&MANIFEST);
+            let error = std::process::Command::new({script_path:?})
+                .args(std::env::args_os().skip(1)).exec();
+            panic!("fixture script failed: {{error}}");
+        }}
+    "#,
+        length = bytes.len()
+    );
+    let rust = source.path().join("runner.rs");
+    fs::write(&rust, code).unwrap();
+    let output = Command::new("rustc")
+        .arg("--edition=2024")
+        .arg(&rust)
+        .arg("-o")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 pub fn sample_manifest() -> WorkflowManifest {
     WorkflowManifest {
         version: WorkflowManifestVersion::V2026_11_06,

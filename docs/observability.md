@@ -103,7 +103,8 @@ Description version `2026-10-19` adds `order_edges` to root and body graphs. Eac
 interface validation, and skip-cause validation. Output gates remain in the inspection model's `control_edges`; these
 inspection fields are distinct from the authoring format.
 
-All supported descriptions use finite event schema `7` or streaming schema `8`.
+Earlier supported descriptions use finite event schema `7` or streaming schema `8`. Description
+`2026-11-09` adds definition-origin-aware Flow scopes and uses finite schema `9` or streaming schema `10`.
 Old readers reject unsupported event versions before execution. Node-success skip causes use `{"node_success":"source"}` without a fabricated
 port; output skip causes keep their existing source-node/source-output fields.
 
@@ -159,7 +160,7 @@ Use the instrumentation scope `mf.workflow`. Event names, timestamps, and option
 
 | Attribute | Type | Meaning |
 | --- | --- | --- |
-| `mf.schema.version` | Signed integer | Event schema: 7 for finite lifecycles and 8 for source-driven streams |
+| `mf.schema.version` | Signed integer | Event schema: 7/8 for earlier finite/stream lifecycles; 9/10 for Flow-origin-aware finite/stream lifecycles |
 | `mf.workflow.id` | String | Identity shared with the description |
 | `mf.run.id` | String | Identity of this invocation |
 | `mf.event.sequence` | Signed integer | Positive per-run sequence starting at 1 |
@@ -305,7 +306,11 @@ a JSON `mf.iteration.context` attribute with an invocation ID, static Iteration 
 path and streaming invocation when present, item index, independent detail sequence, and elapsed time from run start.
 The invocation ID separates repeated executions of the same Iteration; body paths distinguish nested Calls with
 same-named nodes. The invocation boundary uses index zero without asserting that an item exists. Detail delivery gaps,
-conflicts, and retention limits are reported separately from outer lifecycle integrity.
+conflicts, and retention limits are reported separately from outer lifecycle integrity. Flow-origin-aware
+item details use schema `2` in `mf.iteration.context.v2`, separating the runtime scope frames from the
+actual definition path. This preserves item correlation when a received Flow is defined elsewhere.
+The initial dynamic-item support rejects targets containing nested Loop/Iteration scopes before target
+effects; ordinary bodies and nested static Calls remain supported.
 
 When an Iteration runs inside a Loop body, item detail spans inherit that pass's Iteration invocation span. The item
 span is a child of the Iteration node span, and each body-node span is a child of its item span. The
@@ -771,9 +776,9 @@ See [compiling workflows](compiling.md) for executable commands, endpoint settin
 
 ## Streaming observations
 
-Streaming descriptions use event schema `8`, decoded with `mf_telemetry::stream::StreamRecord`.
-The finite-run decoder supports schema `7`. Session admission selects a reducer from the description
-execution mode and rejects incompatible lifecycle records. Existing runners using retired schemas
+Streaming descriptions use event schema `8`, or `10` for Flow-origin-aware descriptions, decoded with
+`mf_telemetry::stream::StreamRecord`. Finite lifecycles use `7` or Flow-origin-aware `9`. Session admission
+selects the protocol and reducer from the description and rejects incompatible lifecycle records. Existing runners using retired schemas
 require recompilation for TUI use.
 
 A streaming instance has one workflow/run identity and a checked, monotonically increasing lifecycle
@@ -900,3 +905,30 @@ Call identities and redact secret values. Nested calls use ordinary `mf.node` sp
 calling node's native span context. Scope paths identify lifecycle and snapshot locations even
 when spans are not sampled; they do not define a separate tracing hierarchy.
 The protocol can describe calls independently of an execution engine that produces them.
+
+### Calls through Flow-valued edges
+
+First-class callable values separate the invocation site from the definition's owner. Description
+version `2026-11-09` supports a Flow scope frame with an actual `call_id` and a `definition` origin:
+
+```json
+{
+  "call_id": "apply",
+  "definition": {
+    "workflow_id": "<owning workflow identity>",
+    "path": ["<producer's compiled child scope key>"]
+  }
+}
+```
+
+The origin path is an absolute sequence of existing compiled child-scope keys, not a JSON Pointer or
+an executable lookup string. A receiver inside A can invoke B defined at the root without inventing a
+B child beneath A. The runtime path still contains the enclosing call/loop/item correlation; the
+definition cursor switches to B for subsequent node and nested scope validation. Validation checks
+the callsite, owning workflow identity, and target body before accepting the scope.
+
+The TUI retains B's static definition at its producer and distinguishes its actual invoked target
+from the consumer's placement. Snapshots replace callable payloads with `"<Flow>"`, or `"[REDACTED]"`
+when secret. Business JSON serialization does not use this placeholder: it rejects executable values.
+The metadata reference cannot manufacture or select an executable; execution uses the native handle
+that arrived through the edge.

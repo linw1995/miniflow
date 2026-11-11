@@ -102,6 +102,10 @@ fn json_to_cel_at(
 ) -> Result<CelValue, ConversionError> {
     check_depth(depth, path)?;
     match (value_type, value.kind()) {
+        (_, ValueKind::Flow(_)) => Err(invalid(
+            path,
+            "callable Flow values cannot be converted to CEL",
+        )),
         (ValueType::Any | ValueType::Null, ValueKind::Null) => Ok(CelValue::Null),
         (ValueType::Any | ValueType::Boolean, ValueKind::Bool(value)) => Ok(CelValue::Bool(*value)),
         (ValueType::Any, ValueKind::Number(value)) => {
@@ -285,6 +289,23 @@ mod tests {
                 json_to_cel(&input.into(), &descriptor, &mut Budget::default(), "", 1).is_err()
             );
         }
+    }
+
+    #[test]
+    fn rejects_callable_values_at_the_cel_boundary_without_serializing_them() {
+        let flow = mf_runtime::FlowValue::new(mf_runtime::PreparedSubgraph::new(
+            Vec::new(),
+            Vec::new(),
+            |_| Ok(Default::default()),
+        ))
+        .unwrap();
+        let value = ValueRef::object([("callback".into(), flow.into())]);
+        let error =
+            json_to_cel(&value, &ValueType::Any, &mut Budget::default(), "input", 1).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "path `input/callback`: callable Flow values cannot be converted to CEL"
+        );
     }
 
     #[test]

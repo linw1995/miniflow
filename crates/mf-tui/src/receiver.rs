@@ -616,14 +616,44 @@ fn receive_iteration(record: LogRecord, context: &Context) -> Result<(), IngestE
     {
         return Ok(());
     }
-    // Older detail records remain available as logs without guessing their invocation identity.
-    let Some(encoded) = string_attribute(
+    // Extended contexts keep runtime scopes separate from definition location.
+    let (iteration, body_scope) = if let Some(encoded) = string_attribute(
+        &record.attributes,
+        mf_telemetry::iteration::DETAIL_CONTEXT_ATTRIBUTE,
+    ) {
+        ensure!(
+            string_attribute(
+                &record.attributes,
+                mf_telemetry::iteration::CONTEXT_ATTRIBUTE
+            )
+            .is_none()
+                && record
+                    .attributes
+                    .iter()
+                    .any(|attribute| attribute.key == "mf.schema.version"
+                        && attribute.value.as_ref().is_some_and(|value| matches!(
+                            value.value,
+                            Some(any_value::Value::IntValue(2))
+                        ))),
+            InvalidSnafu {
+                message: "extended iteration context requires schema 2 without a legacy context"
+                    .to_owned()
+            }
+        );
+        let detail = mf_telemetry::iteration::IterationDetailContext::from_json(encoded)?;
+        (detail.context, detail.body_scope)
+    } else if let Some(encoded) = string_attribute(
         &record.attributes,
         mf_telemetry::iteration::CONTEXT_ATTRIBUTE,
-    ) else {
+    ) {
+        (
+            mf_telemetry::iteration::IterationContext::from_json(encoded)?,
+            Vec::new(),
+        )
+    } else {
+        // Older detail records remain logs without guessed invocation identity.
         return Ok(());
     };
-    let iteration = mf_telemetry::iteration::IterationContext::from_json(encoded)?;
     let mut attributes = Map::new();
     for attribute in &record.attributes {
         let item = attribute.value.as_ref().ok_or_else(|| {
@@ -674,7 +704,7 @@ fn receive_iteration(record: LogRecord, context: &Context) -> Result<(), IngestE
         Ok(NodeIdentity {
             id: serde_json::from_value(required("mf.node.id")?)?,
             kind: serde_json::from_value(required("mf.node.kind")?)?,
-            path: Vec::new(),
+            path: body_scope.clone(),
         })
     };
     let outcome =
@@ -834,7 +864,10 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
     let admission = (|| -> Result<Admission, IngestError> {
         if matches!(
             schema_version,
-            Some(mf_telemetry::STREAM_EVENT_SCHEMA_VERSION)
+            Some(
+                mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+                    | mf_telemetry::FLOW_STREAM_EVENT_SCHEMA_VERSION
+            )
         ) {
             let event = mf_telemetry::stream::StreamRecord::decode(&wire)?;
             Ok(context

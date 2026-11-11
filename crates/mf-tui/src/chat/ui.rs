@@ -71,12 +71,7 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
     let area = terminal_area().context(IoSnafu {
         operation: "read terminal size",
     })?;
-    let mut view = ChatView::new(
-        &launch
-            .manifest
-            .description()
-            .map_err(mf_chat::ChatError::from)?,
-    )?;
+    let mut view = ChatView::new(launch.runner.description())?;
     let controller = ChatController::open(launch)?;
     let signal = SignalGuard::register().context(IoSnafu {
         operation: "register interrupt handler",
@@ -1094,7 +1089,9 @@ impl ChatView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run::LocalRun;
     use ratatui::backend::TestBackend;
+    use std::process::Command;
 
     fn pump(view: &mut ChatView, controller: &ChatController, ready: impl Fn(&ChatView) -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1132,7 +1129,7 @@ mod tests {
     fn metrics_follow_saved_unsaved_and_reloaded_replies() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         view.show_execution = false;
         let controller = ChatController::open(launch).unwrap();
         let session = controller
@@ -1219,7 +1216,7 @@ mod tests {
     fn connection_shortcut_does_not_intercept_chat_prompt_editing() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.key(
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
@@ -1233,7 +1230,7 @@ mod tests {
     fn execution_panel_adapts_to_resizing_and_preserves_the_editor() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         view.editor.insert("Draft for the next turn");
         assert!(!render(&view, 180, 40).contains("Flow execution"));
         view.pending = Some(None);
@@ -1242,7 +1239,7 @@ mod tests {
         command.args(["-c", "sleep 0.1"]);
         let mut run = LocalRun::start(
             command,
-            launch.manifest.description().unwrap(),
+            launch.runner.description().clone(),
             mf_telemetry::identity::RunId::new(),
             1024,
         )
@@ -1290,7 +1287,7 @@ mod tests {
     fn execution_panel_toggle_preserves_observation_drafts_and_preferences() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         assert!(view.show_execution);
         view.editor.insert("first prompt");
@@ -1356,7 +1353,7 @@ mod tests {
     fn multiline_submission_preserves_new_edits_and_blocks_switching_until_cancelled() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.submit(&controller);
         assert!(!controller.busy());
@@ -1425,10 +1422,10 @@ mod tests {
     fn conversation_and_commands_remain_readable_without_management_panels() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         let run = LocalRun::start(
-            Command::new(&launch.executable),
-            launch.manifest.description().unwrap(),
+            Command::new(launch.runner.executable()),
+            launch.runner.description().clone(),
             mf_telemetry::identity::RunId::new(),
             1024,
         )
@@ -1513,7 +1510,7 @@ mod tests {
         assert!(!safe(&editor.text).contains('\x1b'));
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.editor.insert("submitted");
         let submitted = view.editor.revision;
@@ -1546,7 +1543,7 @@ mod tests {
     fn session_and_history_navigation_preserve_drafts_and_exclude_stale_retries() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.act(Action::Switch, &controller);
         view.key(
@@ -1698,9 +1695,9 @@ mod tests {
     fn failed_launch_restores_the_prompt_and_query_errors_do_not_clear_pending_admission() {
         let root = tempfile::tempdir().unwrap();
         let mut launch = super::super::tests::launch(root.path());
-        std::fs::remove_file(&launch.executable).unwrap();
+        std::fs::remove_file(launch.runner.executable()).unwrap();
         launch.options.run.verbose = 1;
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         controller
             .send(ChatCommand::Load {
@@ -1760,8 +1757,8 @@ mod tests {
         let offline = root.path().join("offline");
         launch.options.database_path = state.join("chat.sqlite");
         let path = launch.options.database_path.clone();
-        std::fs::write(&launch.executable, "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"status\":\"succeeded\",\"text\":\"paid reply\",\"usages\":[]}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"status\":\"succeeded\",\"text\":\"paid reply\",\"usages\":[]}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.editor.insert("question");
         view.submit(&controller);
@@ -1791,7 +1788,7 @@ mod tests {
     fn canonical_results_replace_previews_and_stale_turn_events_are_ignored() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         view.show_execution = false;
         let controller = ChatController::open(launch).unwrap();
         let session = controller
@@ -1896,7 +1893,7 @@ mod tests {
     fn previews_keep_their_rows_and_spinner_placement_across_completion() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         view.show_execution = false;
         let controller = ChatController::open(launch).unwrap();
         let session = controller
@@ -2001,7 +1998,7 @@ mod tests {
     fn failed_prefixes_are_marked_incomplete_and_full_recovery_replies_replace_them() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
         view.show_execution = false;
         let controller = ChatController::open(launch).unwrap();
         let session = controller

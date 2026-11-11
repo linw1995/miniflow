@@ -18,9 +18,12 @@ pub enum ValueKind {
     String(Arc<str>),
     Array(Vec<ValueRef>),
     Object(BTreeMap<Arc<str>, ValueRef>),
+    Flow(crate::FlowValue),
 }
 
-/// An immutable JSON value whose descendants are shared between versions.
+/// An immutable runtime value whose descendants are shared between versions.
+///
+/// JSON values are serializable; executable Flow capabilities remain native and opaque.
 #[derive(Clone)]
 pub struct ValueRef {
     kind: Arc<ValueKind>,
@@ -37,8 +40,8 @@ impl ValueRef {
 
     /// Marks this entire value and its descendants as secret without changing aliases.
     ///
-    /// Business accessors and `Serialize` retain the original payload. Diagnostics
-    /// and snapshots redact it. Extracted descendants retain their secret marker.
+    /// Business accessors retain the original payload, as does `Serialize` for JSON
+    /// values. Diagnostics and snapshots redact it. Extracted descendants retain their secret marker.
     pub fn into_secret(self) -> Self {
         if self.secret {
             return self;
@@ -82,22 +85,35 @@ impl ValueRef {
         }
     }
 
-    /// Returns a safe observation value, replacing each secret subtree completely.
+    fn needs_redaction(&self) -> bool {
+        self.secret
+            || match self.kind() {
+                ValueKind::Flow(_) => true,
+                ValueKind::Array(items) => items.iter().any(Self::needs_redaction),
+                ValueKind::Object(entries) => entries.values().any(Self::needs_redaction),
+                _ => false,
+            }
+    }
+
+    /// Returns a safe observation value, replacing secret subtrees and opaque Flows.
+    ///
+    /// Secret markers take precedence over the public `"<Flow>"` placeholder.
     pub fn redacted(&self) -> Self {
         if self.secret {
             return Self::from("[REDACTED]");
         }
-        if !self.contains_secret() {
+        if !self.needs_redaction() {
             return self.clone();
         }
         match self.kind() {
+            ValueKind::Flow(_) => Self::from("<Flow>"),
             ValueKind::Array(items) => Self::array(items.iter().map(Self::redacted)),
             ValueKind::Object(entries) => Self::object(
                 entries
                     .iter()
                     .map(|(key, value)| (key.clone(), value.redacted())),
             ),
-            _ => unreachable!("only containers can have secret descendants"),
+            _ => unreachable!("only Flows and containers need public value redaction"),
         }
     }
     pub fn null() -> Self {
@@ -180,6 +196,13 @@ impl ValueRef {
             None
         }
     }
+    pub fn as_flow(&self) -> Option<&crate::FlowValue> {
+        if let ValueKind::Flow(value) = self.kind() {
+            Some(value)
+        } else {
+            None
+        }
+    }
     pub fn get(&self, key: &str) -> Option<&Self> {
         self.as_object()?.get(key)
     }
@@ -245,6 +268,7 @@ impl PartialEq for ValueRef {
             (ValueKind::String(left), ValueKind::String(right)) => left == right,
             (ValueKind::Array(left), ValueKind::Array(right)) => left == right,
             (ValueKind::Object(left), ValueKind::Object(right)) => left == right,
+            (ValueKind::Flow(left), ValueKind::Flow(right)) => left == right,
             _ => false,
         }
     }
@@ -291,6 +315,11 @@ impl From<Value> for ValueRef {
                     .collect(),
             ),
         })
+    }
+}
+impl From<crate::FlowValue> for ValueRef {
+    fn from(value: crate::FlowValue) -> Self {
+        Self::new(ValueKind::Flow(value))
     }
 }
 impl From<bool> for ValueRef {
@@ -357,6 +386,9 @@ impl Serialize for ValueRef {
             ValueKind::Bool(value) => serializer.serialize_bool(*value),
             ValueKind::Number(value) => value.serialize(serializer),
             ValueKind::String(value) => serializer.serialize_str(value),
+            ValueKind::Flow(_) => Err(serde::ser::Error::custom(
+                "executable Flow values cannot be serialized",
+            )),
             ValueKind::Array(items) => {
                 let mut output = serializer.serialize_seq(Some(items.len()))?;
                 for item in items {
@@ -419,6 +451,7 @@ impl JsonView for ValueRef {
             ValueKind::String(_) => "string",
             ValueKind::Array(_) => "array",
             ValueKind::Object(_) => "object",
+            ValueKind::Flow(_) => "flow",
         }
     }
     fn number(&self) -> Option<&Number> {

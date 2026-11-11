@@ -1,26 +1,56 @@
 {
-  "version": "2026-10-23",
+  "version": "2026-10-28",
   "dependencies": {
     "core": {
       "package": "mfn-core",
-      "version": "0.1.0"
+      "path": "../../crates/builtin-nodes/core"
+    }
+  },
+  "flows": {
+    "flowA": {
+      "path": "./answer-apply.json"
     }
   },
   "nodes": [
     {
-      "id": "source",
-      "kind": "builtin.constant",
+      "id": "params",
+      "kind": "builtin.parameters",
       "config": {
-        "value": 42
+        "parameters": {
+          "value": {
+            "type": "int",
+            "default": 42,
+            "secret": false
+          }
+        }
       }
     },
     {
-      "id": "echo",
-      "kind": "builtin.identity",
+      "id": "policy",
+      "kind": "builtin.constant",
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "./answer-body.json"
+        }
+      }
+    },
+    {
+      "id": "callA",
+      "kind": "workflow.call",
+      "config": {
+        "flow": "flowA"
+      },
       "inputs": {
-        "input": {
+        "params.policy": {
           "from": {
-            "node": "source",
+            "node": "policy",
+            "port": "value"
+          }
+        },
+        "params.value": {
+          "from": {
+            "node": "params",
             "port": "value"
           }
         }
@@ -30,17 +60,18 @@
   "outputs": [
     {
       "name": "answer",
-      "node": "echo",
-      "port": "value"
+      "node": "callA",
+      "port": "answer"
     }
   ],
   "clusters": [
     {
-      "label": "Embedded answer",
-      "annotation": "Pass the constant answer through the embedded workflow and export it to the host.",
+      "label": "Pass a Flow to A",
+      "annotation": "Pass the prepared policy Flow and the value through ordinary input edges; A invokes the received Flow.",
       "nodes": [
-        "source",
-        "echo"
+        "params",
+        "policy",
+        "callA"
       ]
     }
   ]

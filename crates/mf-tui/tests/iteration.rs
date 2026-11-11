@@ -432,7 +432,17 @@ fn delayed_detail_events_do_not_take_focus_from_newer_outer_nodes() {
 #[test]
 fn skipped_nodes_and_conflicting_transitions_preserve_the_observed_outcome() {
     use mf_telemetry::event::SkipCause;
-    let mut state = SessionState::new(graph(), RunId::new()).unwrap();
+    let mut description = graph();
+    description.loop_bodies[0]
+        .data_edges
+        .push(mf_telemetry::description::DataEdge {
+            exclusive: false,
+            from_node: "%iteration".into(),
+            from_output: "item".into(),
+            to_node: "work".into(),
+            to_input: "item".into(),
+        });
+    let mut state = SessionState::new(description, RunId::new()).unwrap();
     let mut skipped = record(1, 0, 2, started());
     skipped.event = IterationEvent::NodeSkipped {
         node: NodeIdentity {

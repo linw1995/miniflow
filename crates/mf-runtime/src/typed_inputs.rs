@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 /// One authoritative declaration and decoder for a task's owned input fields.
 ///
-/// Implementations must accept exactly the names, requiredness, and JSON types
-/// reported by `ports()`, reject unknown names, and preserve shared JSON payloads.
+/// Implementations must accept exactly the names, requiredness, and runtime types
+/// reported by `ports()`, reject unknown names, and preserve shared payloads.
 ///
 /// ```
 /// use mf_runtime::{Inputs, NodeInputs, ValueRef};
@@ -35,11 +35,11 @@ pub trait NodeInputs: Sized {
     fn from_inputs(inputs: Inputs) -> Result<Self, InputDecodeError>;
 }
 
-/// Decodes one supplied JSON value with lossless numeric conversion and no intermediate JSON tree.
+/// Decodes one supplied runtime value with lossless numeric conversion and no JSON round trip.
 ///
 /// The decoder must agree with `value_type()` and report paths relative to the
 /// supplied value. Supported implementations are bool, i64, u64, usize, f32, f64, String, ValueRef,
-/// Vec of supported values, string-keyed BTreeMap of supported values, and
+/// FlowValue, Vec of supported values, string-keyed BTreeMap of supported values, and
 /// objects deriving [`crate::NodeValue`].
 /// `Option` is intentionally only an [`InputField`], not an element value codec.
 pub trait InputValue: Sized {
@@ -272,7 +272,7 @@ impl<T: InputValue> InputValue for Nullable<T> {
 }
 required_field!(Nullable<T>, T);
 
-/// A typed view of a shared JSON payload that defers owned decoding.
+/// A typed view of a shared runtime payload that defers owned decoding.
 ///
 /// Construction validates the wire descriptor without constructing `T`. Broad
 /// object/enum descriptors do not replace their strict codecs: `decode()` can
@@ -349,6 +349,18 @@ impl InputValue for ValueRef {
     }
 }
 required_field!(ValueRef);
+
+impl InputValue for crate::FlowValue {
+    fn value_type() -> ValueType {
+        ValueType::Flow
+    }
+
+    fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
+        ValueType::Flow.validate_shared(&value)?;
+        Ok(value.as_flow().expect("validated Flow").clone())
+    }
+}
+required_field!(crate::FlowValue);
 
 impl<T: InputValue> InputValue for Vec<T> {
     fn value_type() -> ValueType {

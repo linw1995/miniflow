@@ -1,9 +1,9 @@
 use super::*;
 use mf_runtime::OutputValue;
 use serde_json::json;
-use std::{fs, os::unix::fs::PermissionsExt, time::Instant};
+use std::{fs, time::Instant};
 
-pub fn launch(directory: &Path) -> ChatLaunch {
+fn chat_manifest() -> mf_runtime::WorkflowManifest {
     let mut manifest = crate::test_support::sample_manifest();
     manifest.graph.definition = serde_json::from_value(json!({
         "version":"2026-10-03", "dependencies":{},
@@ -21,22 +21,51 @@ pub fn launch(directory: &Path) -> ChatLaunch {
         "system":{"type":"string","required":false},
         "history":{"type":mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),"required":false}
     }},"stdin":{}})).unwrap();
-    let contract = ChatContract::from_manifest(&manifest).unwrap();
-    let executable = directory.join("worker");
-    fs::write(&executable, "#!/bin/sh\ntrap '' INT\nsleep 20\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-    ChatLaunch {
-        executable,
-        manifest,
-        contract,
-        parameters: Default::default(),
-        options: ChatOptions {
-            database_path: directory.join("chat.sqlite"),
-            profile: "default".into(),
-            run: Default::default(),
-        },
+    manifest
+}
+
+fn live_manifest() -> mf_runtime::WorkflowManifest {
+    let mut manifest = chat_manifest();
+    manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
+    manifest.graph.definition.outputs.push(
+        serde_json::from_value(json!({"name":"answer","node":"start","port":"delta"})).unwrap(),
+    );
+    manifest
+}
+
+fn chat_options(directory: &Path) -> ChatOptions {
+    ChatOptions {
+        database_path: directory.join("chat.sqlite"),
+        profile: "default".into(),
+        run: Default::default(),
     }
 }
+
+fn launch_runner(
+    directory: &Path,
+    manifest: &mf_runtime::WorkflowManifest,
+    script: &str,
+) -> ChatLaunch {
+    let contract = ChatContract::from_manifest(manifest).unwrap();
+    let executable = directory.join("worker");
+    crate::test_support::write_runner(&executable, manifest, script);
+    ChatLaunch {
+        runner: PreparedRunner::load(&executable, mf_chat::contract::MAX_RECOVERY_BYTES as u64)
+            .unwrap(),
+        contract,
+        parameters: Default::default(),
+        options: chat_options(directory),
+    }
+}
+
+pub fn launch(directory: &Path) -> ChatLaunch {
+    launch_runner(
+        directory,
+        &chat_manifest(),
+        "#!/bin/sh\ntrap '' INT\nsleep 20\n",
+    )
+}
+
 pub fn next(controller: &ChatController) -> ChatEvent {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -50,16 +79,16 @@ pub fn next(controller: &ChatController) -> ChatEvent {
 #[test]
 fn argument_transports_and_invalid_chat_options_fail_before_database_ownership() {
     let root = tempfile::tempdir().unwrap();
-    let prepared = launch(root.path());
+    let defaults = chat_options(root.path());
     let binary = root.path().join("manifest");
     fs::write(
         &binary,
-        crate::test_support::elf(Some(&prepared.manifest.to_bytes().unwrap()), 1),
+        crate::test_support::elf(Some(&chat_manifest().to_bytes().unwrap()), 1),
     )
     .unwrap();
     let input = root.path().join("inputs.json");
-    assert!(ChatLaunch::prepare(&binary, prepared.options.clone()).is_ok());
-    let mut options = prepared.options.clone();
+    assert!(ChatLaunch::prepare(&binary, defaults.clone()).is_ok());
+    let mut options = defaults.clone();
     options.profile = " ".into();
     assert!(ChatLaunch::prepare(&binary, options).is_err());
     fs::write(&input, "{}").unwrap();
@@ -73,7 +102,7 @@ fn argument_transports_and_invalid_chat_options_fail_before_database_ownership()
             ..Default::default()
         },
     ] {
-        let mut options = prepared.options.clone();
+        let mut options = defaults.clone();
         options.run = run;
         assert!(ChatLaunch::prepare(&binary, options).is_ok());
     }
@@ -105,11 +134,11 @@ fn argument_transports_and_invalid_chat_options_fail_before_database_ownership()
             ..Default::default()
         },
     ] {
-        let mut options = prepared.options.clone();
+        let mut options = defaults.clone();
         options.run = run;
         assert!(ChatLaunch::prepare(&binary, options).is_err());
     }
-    assert!(!prepared.options.database_path.exists());
+    assert!(!defaults.database_path.exists());
 }
 
 #[test]
@@ -180,7 +209,7 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
         let count = root.path().join("calls");
         prepared.options.database_path = state.join("chat.sqlite");
         let path = prepared.options.database_path.clone();
-        fs::write(&prepared.executable, format!("#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"retained answer\",\"metadata\":{{\"source\":\"fixture\"}},\"usages\":[{{\"call_id\":\"actual-call\",\"model\":\"fixture\"}}]}}'\n", count.display())).unwrap();
+        fs::write(prepared.runner.executable().with_extension("script"), format!("#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"retained answer\",\"metadata\":{{\"source\":\"fixture\"}},\"usages\":[{{\"call_id\":\"actual-call\",\"model\":\"fixture\"}}]}}'\n", count.display())).unwrap();
         let controller = ChatController::open(prepared).unwrap();
         controller
             .send(ChatCommand::Submit {
@@ -345,7 +374,7 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
         let path = prepared.options.database_path.clone();
         let marker = root.path().join("started");
         fs::write(
-            &prepared.executable,
+            prepared.runner.executable().with_extension("script"),
             format!("#!/bin/sh\ntouch '{}'\nsleep 20\n", marker.display()),
         )
         .unwrap();
@@ -421,12 +450,7 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
 }
 
 fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf) {
-    let mut launch = launch(directory);
-    launch.manifest.graph.definition.execution = Some(serde_json::from_value(json!({})).unwrap());
-    launch.manifest.graph.definition.outputs.push(
-        serde_json::from_value(json!({"name":"answer","node":"start","port":"delta"})).unwrap(),
-    );
-    launch.contract = ChatContract::from_manifest(&launch.manifest).unwrap();
+    let manifest = live_manifest();
     let gate = directory.join("release");
     let records = json!([
         {"answer":{"text":"provisional","model_call_id":"model-call"}},
@@ -459,8 +483,7 @@ if mode == 'late':
         records = serde_json::to_string(&records).unwrap(),
         gate = gate.to_str().unwrap()
     );
-    fs::write(&launch.executable, script).unwrap();
-    (launch, gate)
+    (launch_runner(directory, &manifest, &script), gate)
 }
 
 #[test]
@@ -583,10 +606,9 @@ fn native_failures_keep_complete_replies_for_save_only_and_never_save_prefixes()
 
 #[test]
 fn answer_selection_requires_native_streaming_execution() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut launch, _) = live_launch(root.path(), "prefix");
-    launch.manifest.graph.definition.execution = None;
-    assert!(ChatContract::from_manifest(&launch.manifest).is_err());
+    let mut manifest = live_manifest();
+    manifest.graph.definition.execution = None;
+    assert!(ChatContract::from_manifest(&manifest).is_err());
 }
 
 #[test]

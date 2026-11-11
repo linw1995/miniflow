@@ -41,6 +41,17 @@ impl WorkflowId {
         Ok(Self(format!("sha256:{hex}")))
     }
 
+    /// Identity of the isolated operation that executes one root node from this
+    /// workflow. This exact mapping binds retained Flow origins to node targets
+    /// without treating arbitrary foreign workflow IDs as trusted provenance.
+    pub fn for_node_target(&self, target: &str) -> Result<Self, ContractError> {
+        require(!target.trim().is_empty(), "blank isolated node target")?;
+        Self::from_definition(
+            &json!({"isolation_format": 1, "workflow_id": self, "target": target}),
+            &[target.to_owned()],
+        )
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
