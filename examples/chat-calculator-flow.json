@@ -1,0 +1,1057 @@
+{
+  "dependencies": {
+    "code": {
+      "default-features": true,
+      "features": [],
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    },
+    "core": {
+      "default-features": true,
+      "features": [],
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "llm": {
+      "default-features": true,
+      "features": [],
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "edges": [],
+  "nodes": [
+    {
+      "config": {
+        "parameters": {
+          "api_key": {
+            "env": "OPENAI_API_KEY",
+            "type": "string"
+          },
+          "base_url": {
+            "default": "https://api.openai.com/v1",
+            "secret": false,
+            "type": "string"
+          },
+          "history": {
+            "default": [],
+            "type": {
+              "list": "object"
+            }
+          },
+          "model": {
+            "default": "your-model",
+            "secret": false,
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "default": "",
+            "type": "string"
+          }
+        }
+      },
+      "id": "params",
+      "kind": "builtin.parameters"
+    },
+    {
+      "config": {
+        "code": {
+          "bindings": "dyn({\"calculator\":binding_0})",
+          "tools": "[definition_0]"
+        },
+        "inputs": {
+          "binding_0": "object",
+          "definition_0": "object"
+        },
+        "language": "cel"
+      },
+      "id": "catalog",
+      "inputs": {
+        "binding_0": {
+          "from": {
+            "node": "definition_0",
+            "port": "binding"
+          }
+        },
+        "definition_0": {
+          "from": {
+            "node": "definition_0",
+            "port": "definition"
+          }
+        }
+      },
+      "kind": "builtin.code"
+    },
+    {
+      "config": {
+        "code": {
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+        },
+        "inputs": {
+          "history": {
+            "list": "object"
+          },
+          "prompt": "string",
+          "system": "string"
+        },
+        "language": "cel"
+      },
+      "id": "initial_messages",
+      "inputs": {
+        "history": {
+          "from": {
+            "node": "params",
+            "port": "history"
+          }
+        },
+        "prompt": {
+          "from": {
+            "node": "params",
+            "port": "prompt"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "params",
+            "port": "system"
+          }
+        }
+      },
+      "kind": "builtin.code"
+    },
+    {
+      "config": {
+        "value": []
+      },
+      "id": "initial_usages",
+      "kind": "builtin.constant"
+    },
+    {
+      "config": {
+        "value": "running"
+      },
+      "id": "initial_status",
+      "kind": "builtin.constant"
+    },
+    {
+      "config": {
+        "value": ""
+      },
+      "id": "initial_text",
+      "kind": "builtin.constant"
+    },
+    {
+      "config": {
+        "value": ""
+      },
+      "id": "initial_outcome",
+      "kind": "builtin.constant"
+    },
+    {
+      "config": {
+        "value": ""
+      },
+      "id": "initial_error",
+      "kind": "builtin.constant"
+    },
+    {
+      "config": {
+        "value": false
+      },
+      "id": "initial_done",
+      "kind": "builtin.constant"
+    },
+    {
+      "config": {
+        "body": {
+          "dependencies": {},
+          "edges": [
+            {
+              "from_node": "decision",
+              "from_output": "proceed",
+              "to_node": "route"
+            },
+            {
+              "from_node": "route",
+              "from_output": "tool_calls",
+              "to_node": "append_assistant"
+            },
+            {
+              "from_node": "append_assistant",
+              "to_node": "dispatch"
+            },
+            {
+              "from_node": "route",
+              "from_output": "else",
+              "to_node": "preserve_messages"
+            }
+          ],
+          "flows": {
+            "agent-turn": {
+              "builtin": "mfn-llm.agent-turn"
+            }
+          },
+          "nodes": [
+            {
+              "config": {
+                "flow": "agent-turn"
+              },
+              "id": "turn",
+              "inputs": {
+                "params.api_key": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "api_key"
+                  }
+                },
+                "params.base_url": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "base_url"
+                  }
+                },
+                "params.messages": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                },
+                "params.model": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "model"
+                  }
+                },
+                "params.tools": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "tools"
+                  }
+                }
+              },
+              "kind": "workflow.call"
+            },
+            {
+              "config": {
+                "code": {
+                  "value": "left + right"
+                },
+                "inputs": {
+                  "left": {
+                    "list": "object"
+                  },
+                  "right": {
+                    "list": "object"
+                  }
+                },
+                "language": "cel"
+              },
+              "id": "collect_usages",
+              "inputs": {
+                "left": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "usages"
+                  }
+                },
+                "right": {
+                  "from": {
+                    "node": "turn",
+                    "port": "usages"
+                  }
+                }
+              },
+              "kind": "builtin.code"
+            },
+            {
+              "config": {
+                "code": {
+                  "done": "status == 'failed' || outcome != 'tool_calls'",
+                  "proceed": "status != 'failed' && outcome == 'tool_calls'",
+                  "status": "status == 'failed' || outcome == 'failed' ? 'failed' : outcome == 'completed' ? 'succeeded' : outcome == 'tool_calls' ? 'running' : 'failed'"
+                },
+                "inputs": {
+                  "outcome": "string",
+                  "status": "string"
+                },
+                "language": "cel"
+              },
+              "id": "decision",
+              "inputs": {
+                "outcome": {
+                  "from": {
+                    "node": "turn",
+                    "port": "outcome"
+                  }
+                },
+                "status": {
+                  "from": {
+                    "node": "turn",
+                    "port": "status"
+                  }
+                }
+              },
+              "kind": "builtin.code"
+            },
+            {
+              "config": {
+                "branches": [
+                  {
+                    "condition": {
+                      "operator": "eq",
+                      "source": {
+                        "output": "decision.proceed",
+                        "path": ""
+                      },
+                      "value": true
+                    },
+                    "id": "tool_calls"
+                  }
+                ]
+              },
+              "id": "route",
+              "kind": "builtin.if_else"
+            },
+            {
+              "config": {
+                "code": {
+                  "messages": "messages + [dyn(message)]"
+                },
+                "inputs": {
+                  "message": "object",
+                  "messages": {
+                    "list": "object"
+                  }
+                },
+                "language": "cel"
+              },
+              "id": "append_assistant",
+              "inputs": {
+                "message": {
+                  "from": {
+                    "node": "turn",
+                    "port": "message"
+                  }
+                },
+                "messages": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                }
+              },
+              "kind": "builtin.code"
+            },
+            {
+              "config": {
+                "body": {
+                  "dependencies": {},
+                  "edges": [
+                    {
+                      "from_node": "calls_valid",
+                      "to_node": "require_calls"
+                    },
+                    {
+                      "from_node": "require_calls",
+                      "to_node": "validated_calls"
+                    }
+                  ],
+                  "nodes": [
+                    {
+                      "config": {
+                        "parameters": {
+                          "bindings": {
+                            "secret": false,
+                            "type": "object"
+                          },
+                          "calls": {
+                            "secret": false,
+                            "type": {
+                              "list": "object"
+                            }
+                          },
+                          "flow_0": {
+                            "secret": false,
+                            "type": "flow"
+                          }
+                        }
+                      },
+                      "id": "params",
+                      "kind": "builtin.parameters"
+                    },
+                    {
+                      "config": {
+                        "code": {
+                          "valid": "calls.all(c, size(c) == 3 && 'id' in c && type(c.id) == string && c.id.matches(r'\\S') && 'name' in c && type(c.name) == string && 'arguments' in c)"
+                        },
+                        "inputs": {
+                          "calls": {
+                            "list": "object"
+                          }
+                        },
+                        "language": "cel"
+                      },
+                      "id": "calls_valid",
+                      "inputs": {
+                        "calls": {
+                          "from": {
+                            "node": "params",
+                            "port": "calls"
+                          }
+                        }
+                      },
+                      "kind": "builtin.code"
+                    },
+                    {
+                      "config": {
+                        "condition": {
+                          "operator": "eq",
+                          "source": {
+                            "output": "calls_valid.valid",
+                            "path": ""
+                          },
+                          "value": true
+                        },
+                        "message": "Tool calls must contain exactly a nonblank string id, a string name, and arguments"
+                      },
+                      "id": "require_calls",
+                      "kind": "builtin.assert"
+                    },
+                    {
+                      "id": "validated_calls",
+                      "inputs": {
+                        "input": {
+                          "from": {
+                            "node": "params",
+                            "port": "calls"
+                          }
+                        }
+                      },
+                      "kind": "builtin.identity"
+                    },
+                    {
+                      "config": {
+                        "body": {
+                          "nodes": [
+                            {
+                              "id": "arguments",
+                              "inputs": {
+                                "bindings": {
+                                  "from": {
+                                    "node": "%iteration",
+                                    "port": "bindings"
+                                  }
+                                },
+                                "call": {
+                                  "from": {
+                                    "node": "%iteration",
+                                    "port": "item"
+                                  }
+                                }
+                              },
+                              "kind": "llm.tool_arguments"
+                            },
+                            {
+                              "config": {
+                                "flow_inputs": {
+                                  "calculator": "flow_0"
+                                },
+                                "mode": "execute"
+                              },
+                              "id": "execute",
+                              "inputs": {
+                                "arguments": {
+                                  "from": {
+                                    "node": "arguments",
+                                    "port": "arguments"
+                                  }
+                                },
+                                "flow_0": {
+                                  "from": {
+                                    "node": "%iteration",
+                                    "port": "flow_0"
+                                  }
+                                },
+                                "route": {
+                                  "from": {
+                                    "node": "arguments",
+                                    "port": "name"
+                                  }
+                                }
+                              },
+                              "kind": "builtin.router"
+                            },
+                            {
+                              "id": "encode",
+                              "inputs": {
+                                "call": {
+                                  "from": {
+                                    "node": "%iteration",
+                                    "port": "item"
+                                  }
+                                },
+                                "plain_content": {
+                                  "from": {
+                                    "node": "arguments",
+                                    "port": "plain_content"
+                                  }
+                                },
+                                "result": {
+                                  "exclusive": [
+                                    {
+                                      "node": "arguments",
+                                      "port": "error"
+                                    },
+                                    {
+                                      "node": "execute",
+                                      "port": "result"
+                                    }
+                                  ]
+                                }
+                              },
+                              "kind": "llm.tool_result"
+                            }
+                          ],
+                          "outputs": [
+                            {
+                              "name": "result",
+                              "node": "encode",
+                              "port": "result"
+                            }
+                          ],
+                          "version": "2026-10-28"
+                        },
+                        "inputs": {
+                          "bindings": "object",
+                          "flow_0": "flow"
+                        },
+                        "mode": "parallel",
+                        "on_error": "terminate"
+                      },
+                      "id": "dispatch",
+                      "inputs": {
+                        "bindings": {
+                          "from": {
+                            "node": "params",
+                            "port": "bindings"
+                          }
+                        },
+                        "flow_0": {
+                          "from": {
+                            "node": "params",
+                            "port": "flow_0"
+                          }
+                        },
+                        "items": {
+                          "from": {
+                            "node": "validated_calls",
+                            "port": "value"
+                          }
+                        }
+                      },
+                      "kind": "builtin.iteration"
+                    }
+                  ],
+                  "outputs": [
+                    {
+                      "name": "results",
+                      "node": "dispatch",
+                      "port": "results"
+                    }
+                  ],
+                  "version": "2026-10-28"
+                },
+                "flow": "tool-uses"
+              },
+              "id": "dispatch",
+              "inputs": {
+                "params.bindings": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "bindings"
+                  }
+                },
+                "params.calls": {
+                  "from": {
+                    "node": "turn",
+                    "port": "tool_calls"
+                  }
+                },
+                "params.flow_0": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "flow_0"
+                  }
+                }
+              },
+              "kind": "workflow.call"
+            },
+            {
+              "config": {
+                "code": {
+                  "messages": "results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
+                },
+                "inputs": {
+                  "results": {
+                    "list": "object"
+                  }
+                },
+                "language": "cel"
+              },
+              "id": "tool_messages",
+              "inputs": {
+                "results": {
+                  "from": {
+                    "node": "dispatch",
+                    "port": "results"
+                  }
+                }
+              },
+              "kind": "builtin.code"
+            },
+            {
+              "config": {
+                "code": {
+                  "messages": "assistant + tools"
+                },
+                "inputs": {
+                  "assistant": {
+                    "list": "object"
+                  },
+                  "tools": {
+                    "list": "object"
+                  }
+                },
+                "language": "cel"
+              },
+              "id": "continued_messages",
+              "inputs": {
+                "assistant": {
+                  "from": {
+                    "node": "append_assistant",
+                    "port": "messages"
+                  }
+                },
+                "tools": {
+                  "from": {
+                    "node": "tool_messages",
+                    "port": "messages"
+                  }
+                }
+              },
+              "kind": "builtin.code"
+            },
+            {
+              "id": "preserve_messages",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                }
+              },
+              "kind": "builtin.identity"
+            },
+            {
+              "config": {
+                "variable": "messages"
+              },
+              "id": "save_messages",
+              "inputs": {
+                "value": {
+                  "exclusive": [
+                    {
+                      "node": "continued_messages",
+                      "port": "messages"
+                    },
+                    {
+                      "node": "preserve_messages",
+                      "port": "value"
+                    }
+                  ]
+                }
+              },
+              "kind": "workflow.loop_assign"
+            },
+            {
+              "config": {
+                "variable": "usages"
+              },
+              "id": "save_usages",
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "collect_usages",
+                    "port": "value"
+                  }
+                }
+              },
+              "kind": "workflow.loop_assign"
+            },
+            {
+              "config": {
+                "variable": "status"
+              },
+              "id": "save_status",
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "decision",
+                    "port": "status"
+                  }
+                }
+              },
+              "kind": "workflow.loop_assign"
+            },
+            {
+              "config": {
+                "variable": "text"
+              },
+              "id": "save_text",
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "turn",
+                    "port": "text"
+                  }
+                }
+              },
+              "kind": "workflow.loop_assign"
+            },
+            {
+              "config": {
+                "variable": "outcome"
+              },
+              "id": "save_outcome",
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "turn",
+                    "port": "outcome"
+                  }
+                }
+              },
+              "kind": "workflow.loop_assign"
+            },
+            {
+              "config": {
+                "variable": "error"
+              },
+              "id": "save_error",
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "turn",
+                    "port": "error"
+                  }
+                }
+              },
+              "kind": "workflow.loop_assign"
+            },
+            {
+              "config": {
+                "variable": "done"
+              },
+              "id": "save_done",
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "decision",
+                    "port": "done"
+                  }
+                }
+              },
+              "kind": "workflow.loop_assign"
+            }
+          ],
+          "outputs": [],
+          "version": "2026-10-28"
+        },
+        "max_iterations": 8,
+        "stream_outputs": {
+          "answer": {
+            "node": "turn",
+            "port": "answer"
+          }
+        },
+        "until": {
+          "operator": "eq",
+          "value": true,
+          "variable": "done"
+        },
+        "variables": [
+          {
+            "name": "messages",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "tools",
+            "type": "array"
+          },
+          {
+            "name": "bindings",
+            "type": "object"
+          },
+          {
+            "name": "model",
+            "type": "string"
+          },
+          {
+            "name": "base_url",
+            "type": "string"
+          },
+          {
+            "name": "api_key",
+            "type": "string"
+          },
+          {
+            "name": "usages",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "status",
+            "type": "string"
+          },
+          {
+            "name": "text",
+            "type": "string"
+          },
+          {
+            "name": "outcome",
+            "type": "string"
+          },
+          {
+            "name": "error",
+            "type": "string"
+          },
+          {
+            "name": "done",
+            "type": "bool"
+          },
+          {
+            "name": "flow_0",
+            "type": "flow"
+          }
+        ]
+      },
+      "id": "repeat",
+      "inputs": {
+        "api_key": {
+          "from": {
+            "node": "params",
+            "port": "api_key"
+          }
+        },
+        "base_url": {
+          "from": {
+            "node": "params",
+            "port": "base_url"
+          }
+        },
+        "bindings": {
+          "from": {
+            "node": "catalog",
+            "port": "bindings"
+          }
+        },
+        "done": {
+          "from": {
+            "node": "initial_done",
+            "port": "value"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "initial_error",
+            "port": "value"
+          }
+        },
+        "flow_0": {
+          "from": {
+            "node": "tool_0",
+            "port": "value"
+          }
+        },
+        "messages": {
+          "from": {
+            "node": "initial_messages",
+            "port": "messages"
+          }
+        },
+        "model": {
+          "from": {
+            "node": "params",
+            "port": "model"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "initial_outcome",
+            "port": "value"
+          }
+        },
+        "status": {
+          "from": {
+            "node": "initial_status",
+            "port": "value"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "initial_text",
+            "port": "value"
+          }
+        },
+        "tools": {
+          "from": {
+            "node": "catalog",
+            "port": "tools"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "initial_usages",
+            "port": "value"
+          }
+        }
+      },
+      "kind": "workflow.loop"
+    },
+    {
+      "config": {
+        "code": {
+          "error": "!done && outcome == 'tool_calls' ? 'Agent reached the 8-iteration limit with tool calls still pending.' : error != '' ? error : done && status == 'succeeded' && outcome == 'completed' ? '' : 'Agent stopped with outcome `' + outcome + '`.'",
+          "status": "done && status == 'succeeded' && outcome == 'completed' ? 'succeeded' : 'failed'",
+          "text": "text",
+          "usages": "usages"
+        },
+        "inputs": {
+          "done": "bool",
+          "error": "string",
+          "outcome": "string",
+          "status": "string",
+          "text": "string",
+          "usages": {
+            "list": "object"
+          }
+        },
+        "language": "cel"
+      },
+      "id": "result",
+      "inputs": {
+        "done": {
+          "from": {
+            "node": "repeat",
+            "port": "done"
+          }
+        },
+        "error": {
+          "from": {
+            "node": "repeat",
+            "port": "error"
+          }
+        },
+        "outcome": {
+          "from": {
+            "node": "repeat",
+            "port": "outcome"
+          }
+        },
+        "status": {
+          "from": {
+            "node": "repeat",
+            "port": "status"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "repeat",
+            "port": "text"
+          }
+        },
+        "usages": {
+          "from": {
+            "node": "repeat",
+            "port": "usages"
+          }
+        }
+      },
+      "kind": "builtin.code"
+    },
+    {
+      "config": {
+        "type": "flow",
+        "value": {
+          "path": "agent-calculator/calculator.json"
+        }
+      },
+      "id": "tool_0",
+      "kind": "builtin.constant"
+    },
+    {
+      "config": {
+        "description": "Perform add, subtract, multiply, or divide on two numeric operands. Division by zero returns an error message.",
+        "name": "calculator",
+        "parameters": {
+          "calculate.left": {
+            "description": "Left operand."
+          },
+          "calculate.operation": {
+            "description": "Operation to perform: add, subtract, multiply, or divide."
+          },
+          "calculate.right": {
+            "description": "Right operand; must be nonzero for division."
+          }
+        }
+      },
+      "id": "definition_0",
+      "inputs": {
+        "flow": {
+          "from": {
+            "node": "tool_0",
+            "port": "value"
+          }
+        }
+      },
+      "kind": "llm.tool_definition"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "repeat",
+      "optional": true,
+      "port": "answer"
+    },
+    {
+      "name": "status",
+      "node": "result",
+      "port": "status"
+    },
+    {
+      "name": "text",
+      "node": "result",
+      "port": "text"
+    },
+    {
+      "name": "usages",
+      "node": "result",
+      "port": "usages"
+    },
+    {
+      "name": "error",
+      "node": "result",
+      "optional": true,
+      "port": "error"
+    }
+  ],
+  "version": "2026-10-28"
+}

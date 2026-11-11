@@ -90,13 +90,13 @@ mod tests {
                 .iter()
                 .filter(|node| node.kind == mf_runtime::ITERATION_KIND)
                 .count(),
-            2
+            1
         );
         assert!(
             definition
                 .nodes
                 .iter()
-                .any(|node| node.kind == "llm.tool_set")
+                .any(|node| node.kind == "llm.tool_definition")
         );
         assert_eq!(
             definition

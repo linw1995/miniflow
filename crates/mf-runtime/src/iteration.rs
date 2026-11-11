@@ -26,6 +26,9 @@ pub enum IterationErrorPolicy {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IterationConfig {
+    /// Immutable ordinary inputs exposed to every item through its local scope.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, ValueType>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stream_outputs: BTreeMap<String, crate::OutputReferenceDefinition>,
     #[serde(default)]

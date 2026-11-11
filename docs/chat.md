@@ -179,6 +179,21 @@ characters. Invalid or stale candidates do not prevent saving the primary result
 is retained for idempotent replay. A database failure rolls back the whole completion; `retry_completion`
 or `save_recovered` saves the retained result without invoking either model again.
 
+## Calculator Agent
+
+The [calculator example](../examples/chat-calculator-flow.json) uses the provider-owned bounded Agent
+composition with a native Loop and parallel tool dispatch. Its calculator supports addition, subtraction,
+multiplication and division. Tool-call assistant messages and ordered tool results stay in the internal
+transcript; only the final assistant result is persisted. Each model turn reports its usage, and `answer`
+streams assistant text, including preambles accompanying tool calls. Catalog projection runs once before
+the first model request, not once per tool round.
+
+The example is an ordinary generated Flow with existing Flow constants, the three LLM protocol adapters,
+and normal Call/Loop/Iteration edges. It does not use LLM-specific producer/collector/pack/unpack nodes
+or configurable built-in source syntax. See [configured Flow tools](workflows.md#configured-flow-tools)
+for regeneration and compilation commands. The resulting executable supports the same `--chat`, model,
+endpoint and credential parameters as the other chat examples.
+
 ## Shared conversation contract
 
 `mf_chat::contract` owns the common contract, argument binding, and result reconciliation for both

@@ -25,76 +25,60 @@
               "list": "object"
             },
             "secret": false
+          },
+          "bindings": {
+            "type": "object",
+            "secret": false
           }
         }
       }
     },
     {
-      "id": "bindings",
-      "kind": "llm.tool_set",
+      "id": "calls_valid",
+      "kind": "builtin.code",
       "config": {
-        "names": []
-      }
-    },
-    {
-      "id": "catalog",
-      "kind": "builtin.iteration",
-      "config": {
-        "mode": "parallel",
-        "on_error": "terminate",
-        "body": {
-          "nodes": [
-            {
-              "id": "definition",
-              "kind": "llm.tool_definition",
-              "inputs": {
-                "binding": {
-                  "from": {
-                    "node": "%iteration",
-                    "port": "item"
-                  }
-                }
-              }
-            }
-          ],
-          "outputs": [
-            {
-              "name": "result",
-              "node": "definition",
-              "port": "definition"
-            }
-          ]
+        "language": "cel",
+        "inputs": {
+          "calls": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "valid": "calls.all(c, size(c) == 3 && 'id' in c && type(c.id) == string && c.id.matches(r'\\S') && 'name' in c && type(c.name) == string && 'arguments' in c)"
         }
       },
-      "inputs": {
-        "items": {
-          "from": {
-            "node": "bindings",
-            "port": "bindings"
-          }
-        }
-      }
-    },
-    {
-      "id": "items",
-      "kind": "llm.tool_calls",
       "inputs": {
         "calls": {
           "from": {
             "node": "params",
             "port": "calls"
           }
-        },
-        "bindings": {
+        }
+      }
+    },
+    {
+      "id": "require_calls",
+      "kind": "builtin.assert",
+      "config": {
+        "message": "Tool calls must contain exactly a nonblank string id, a string name, and arguments",
+        "condition": {
+          "source": {
+            "output": "calls_valid.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        }
+      }
+    },
+    {
+      "id": "validated_calls",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
           "from": {
-            "node": "bindings",
-            "port": "bindings"
-          }
-        },
-        "flows": {
-          "from": {
-            "node": "bindings",
-            "port": "flows"
+            "node": "params",
+            "port": "calls"
           }
         }
       }
@@ -105,51 +89,26 @@
       "config": {
         "mode": "parallel",
         "on_error": "terminate",
+        "inputs": {
+          "bindings": "object"
+        },
         "body": {
+          "version": "2026-10-28",
           "nodes": [
-            {
-              "id": "select",
-              "kind": "llm.tool_call",
-              "inputs": {
-                "item": {
-                  "from": {
-                    "node": "%iteration",
-                    "port": "item"
-                  }
-                }
-              }
-            },
-            {
-              "id": "route",
-              "kind": "builtin.router",
-              "config": {
-                "routes": [
-                  "known"
-                ]
-              },
-              "inputs": {
-                "route": {
-                  "from": {
-                    "node": "select",
-                    "port": "route"
-                  }
-                }
-              }
-            },
             {
               "id": "arguments",
               "kind": "llm.tool_arguments",
               "inputs": {
                 "call": {
                   "from": {
-                    "node": "select",
-                    "port": "call"
+                    "node": "%iteration",
+                    "port": "item"
                   }
                 },
-                "binding": {
+                "bindings": {
                   "from": {
-                    "node": "select",
-                    "port": "binding"
+                    "node": "%iteration",
+                    "port": "bindings"
                   }
                 }
               }
@@ -158,19 +117,14 @@
               "id": "execute",
               "kind": "builtin.router",
               "config": {
-                "mode": "execute"
+                "mode": "execute",
+                "flow_inputs": {}
               },
               "inputs": {
                 "route": {
                   "from": {
-                    "node": "select",
+                    "node": "arguments",
                     "port": "name"
-                  }
-                },
-                "flows": {
-                  "from": {
-                    "node": "select",
-                    "port": "flows"
                   }
                 },
                 "arguments": {
@@ -187,8 +141,8 @@
               "inputs": {
                 "call": {
                   "from": {
-                    "node": "select",
-                    "port": "call"
+                    "node": "%iteration",
+                    "port": "item"
                   }
                 },
                 "plain_content": {
@@ -210,70 +164,13 @@
                   ]
                 }
               }
-            },
-            {
-              "id": "unknown",
-              "kind": "builtin.constant",
-              "config": {
-                "value": {
-                  "error": "unknown tool"
-                }
-              }
-            },
-            {
-              "id": "unknown_result",
-              "kind": "llm.tool_result",
-              "inputs": {
-                "call": {
-                  "from": {
-                    "node": "select",
-                    "port": "call"
-                  }
-                },
-                "result": {
-                  "from": {
-                    "node": "unknown",
-                    "port": "value"
-                  }
-                }
-              }
-            },
-            {
-              "id": "result",
-              "kind": "builtin.identity",
-              "inputs": {
-                "input": {
-                  "exclusive": [
-                    {
-                      "node": "encode",
-                      "port": "result"
-                    },
-                    {
-                      "node": "unknown_result",
-                      "port": "result"
-                    }
-                  ]
-                }
-              }
-            }
-          ],
-          "edges": [
-            {
-              "from_node": "route",
-              "from_output": "known",
-              "to_node": "arguments"
-            },
-            {
-              "from_node": "route",
-              "from_output": "else",
-              "to_node": "unknown"
             }
           ],
           "outputs": [
             {
               "name": "result",
-              "node": "result",
-              "port": "value"
+              "node": "encode",
+              "port": "result"
             }
           ]
         }
@@ -281,8 +178,14 @@
       "inputs": {
         "items": {
           "from": {
-            "node": "items",
-            "port": "items"
+            "node": "validated_calls",
+            "port": "value"
+          }
+        },
+        "bindings": {
+          "from": {
+            "node": "params",
+            "port": "bindings"
           }
         }
       }
@@ -290,17 +193,15 @@
   ],
   "edges": [
     {
-      "from_node": "catalog",
-      "from_output": "results",
-      "to_node": "dispatch"
+      "from_node": "calls_valid",
+      "to_node": "require_calls"
+    },
+    {
+      "from_node": "require_calls",
+      "to_node": "validated_calls"
     }
   ],
   "outputs": [
-    {
-      "name": "catalog",
-      "node": "catalog",
-      "port": "results"
-    },
     {
       "name": "results",
       "node": "dispatch",

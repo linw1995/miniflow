@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 #[derive(Deserialize)]
 pub struct LoweringConfig {
     #[serde(default)]
+    pub inputs: BTreeMap<String, mf_runtime::ValueType>,
+    #[serde(default)]
     pub stream_outputs: BTreeMap<String, mf_runtime::OutputReferenceDefinition>,
 }
 

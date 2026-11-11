@@ -29,6 +29,8 @@ struct Config {
     on_error: IterationErrorPolicy,
     #[serde(default)]
     stream_outputs: BTreeMap<String, mf_runtime::OutputReferenceDefinition>,
+    #[serde(default)]
+    inputs: BTreeMap<String, ValueType>,
 }
 
 fn plain(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
@@ -48,9 +50,10 @@ fn factory(
         mode,
         on_error,
         stream_outputs,
+        inputs,
     } = Config::from_config(config, bodies)?;
     validate_stream_names(stream_outputs.keys().map(String::as_str))?;
-    let node = IterationNode::new(id, mode, on_error, body)?;
+    let node = IterationNode::with_inputs(id, mode, on_error, body, inputs)?;
     let metadata = mf_runtime::NodeMetadata {
         output_derivations: vec![node.result_derivation()],
         ..Default::default()
@@ -76,9 +79,18 @@ pub enum IterationValidationError {
     #[snafu(display("Iteration body must declare exactly one required output named `result`"))]
     InvalidResult,
     #[snafu(display(
-        "Iteration body scope bindings must be immutable item/key values of type Any"
+        "Iteration body scope bindings must match immutable item/key and configured shared inputs"
     ))]
     InvalidScopeBindings,
+    #[snafu(display(
+        "Iteration shared input `{name}` must be nonblank and not item, key, items or index"
+    ))]
+    InvalidInputName { name: String },
+    #[snafu(display("Iteration shared input `{name}` has an invalid descriptor: {source}"))]
+    InvalidInputType {
+        name: String,
+        source: mf_runtime::TypeDepthError,
+    },
 }
 
 impl From<IterationValidationError> for NodeBuildError {
@@ -106,6 +118,34 @@ pub struct IterationNode {
     on_error: IterationErrorPolicy,
     result_type: ValueType,
     body: Arc<PreparedSubgraph>,
+    inputs: BTreeMap<String, ValueType>,
+}
+
+struct ItemScope {
+    key: String,
+    body: Arc<PreparedSubgraph>,
+    types: BTreeMap<String, ValueType>,
+    shared: Outputs,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("Iteration shared input `{port}`: {source}"))]
+struct IterationSharedInputError {
+    port: String,
+    source: mf_runtime::TypeMismatch,
+}
+
+impl From<IterationSharedInputError> for NodeExecutionError {
+    fn from(source: IterationSharedInputError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
+fn scope_types(inputs: &BTreeMap<String, ValueType>) -> BTreeMap<String, ValueType> {
+    let mut types = inputs.clone();
+    types.insert("item".into(), ValueType::Any);
+    types.insert("key".into(), ValueType::Any);
+    types
 }
 
 /// Fixed inputs shared by typed and dynamic Iteration task calls.
@@ -140,15 +180,47 @@ impl IterationNode {
         on_error: IterationErrorPolicy,
         body: PreparedSubgraph,
     ) -> Result<Self, NodeBuildError> {
+        let inputs = body
+            .relations
+            .as_ref()
+            .and_then(|relations| relations.scope.as_ref())
+            .map(|scope| {
+                scope
+                    .values
+                    .iter()
+                    .filter(|(name, _)| !matches!(name.as_str(), "item" | "key"))
+                    .map(|(name, value_type)| (name.clone(), value_type.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::with_inputs(id, mode, on_error, body, inputs)
+    }
+
+    /// Builds an Iteration with required immutable inputs shared by every item.
+    pub fn with_inputs(
+        id: impl Into<String>,
+        mode: IterationMode,
+        on_error: IterationErrorPolicy,
+        body: PreparedSubgraph,
+        inputs: BTreeMap<String, ValueType>,
+    ) -> Result<Self, NodeBuildError> {
+        for (name, value_type) in &inputs {
+            // The generic scope source also publishes the engine-owned index.
+            ensure!(
+                !name.trim().is_empty()
+                    && !matches!(name.as_str(), "item" | "key" | "items" | "index"),
+                InvalidInputNameSnafu { name }
+            );
+            value_type
+                .check_depth()
+                .context(InvalidInputTypeSnafu { name })?;
+        }
         validate_stream_names(body.stream_outputs.iter().map(|port| port.name.as_ref()))?;
+        let types = scope_types(&inputs);
         if let Some(relations) = &body.relations {
             ensure!(
                 relations.scope.as_ref().is_some_and(|scope| {
-                    scope.values
-                        == BTreeMap::from([
-                            ("item".into(), ValueType::Any),
-                            ("key".into(), ValueType::Any),
-                        ])
+                    scope.values == types
                         && scope.state_outputs.is_empty()
                         && scope.writes.is_empty()
                         && scope.exits.is_empty()
@@ -170,11 +242,35 @@ impl IterationNode {
             on_error,
             result_type,
             body: Arc::new(body),
+            inputs,
         })
     }
 
     pub fn ports(&self) -> NodePorts {
-        NodePorts::from_types::<<Self as TypedTaskNode>::Input, <Self as TypedTaskNode>::Output>()
+        let mut ports = NodePorts::from_types::<
+            <Self as TypedTaskNode>::Input,
+            <Self as TypedTaskNode>::Output,
+        >();
+        ports
+            .inputs
+            .extend(self.inputs.iter().map(|(name, value_type)| {
+                mf_runtime::PortSpec::owned(name.clone(), value_type.clone(), true)
+            }));
+        ports
+    }
+
+    fn decode_inputs(&self, mut inputs: Inputs) -> Result<(ValueRef, Outputs), NodeExecutionError> {
+        let items = mf_runtime::decode_input::<ValueRef>(&mut inputs, "items").boxed()?;
+        let mut shared = Outputs::new();
+        for (port, value_type) in &self.inputs {
+            let value = mf_runtime::decode_input::<ValueRef>(&mut inputs, port).boxed()?;
+            value_type
+                .validate_shared(&value)
+                .context(IterationSharedInputSnafu { port })?;
+            shared.insert(port.clone(), value);
+        }
+        mf_runtime::reject_unknown_inputs(inputs).boxed()?;
+        Ok((items, shared))
     }
 
     fn result_derivation(&self) -> OutputDerivation {
@@ -187,8 +283,7 @@ impl IterationNode {
     }
 
     fn run_item(
-        scope_key: &str,
-        body: &PreparedSubgraph,
+        scope: &ItemScope,
         (key, item): (ValueRef, ValueRef),
         index: usize,
         observation: Option<&IterationObservation>,
@@ -199,22 +294,22 @@ impl IterationNode {
         let _context = step.as_ref().map(ItemObservation::enter);
         let body_observation = step.as_ref().map(ItemObservation::body_observation);
         let mut state = parent.fork_body(body_observation);
+        let mut values = scope.shared.clone();
+        values.insert("item".into(), item);
+        values.insert("key".into(), key);
         let result = ExecutionScope::new(
-            scope_key,
-            body.scope_input().map_or(
+            scope.key.as_str(),
+            scope.body.scope_input().map_or(
                 mf_runtime::ITERATION_INPUT_ID,
                 mf_runtime::DefinitionId::as_str,
             ),
             index,
-            Outputs::from([("item".into(), item), ("key".into(), key)]),
-            BTreeMap::from([
-                ("item".into(), ValueType::Any),
-                ("key".into(), ValueType::Any),
-            ]),
+            values,
+            scope.types.clone(),
         )
-        .and_then(|scope| {
+        .and_then(|frame| {
             let (mut outputs, _, _) =
-                state.run_scope(scope, |state| body.execute_with_sink(state, sink))?;
+                state.run_scope(frame, |state| scope.body.execute_with_sink(state, sink))?;
             outputs
                 .remove("result")
                 .with_context(|| mf_runtime::NodeExecutionFailedSnafu {
@@ -232,25 +327,34 @@ impl IterationNode {
     fn execute_items(
         &self,
         items: ValueRef,
+        shared: Outputs,
         observation: Option<IterationObservation>,
         parent: &mut ExecutionContext,
         sink: &mut SubgraphStream<'_>,
     ) -> Result<IterationOutputs, NodeExecutionError> {
-        let items: Box<dyn ExactSizeIterator<Item = (ValueRef, ValueRef)>> =
-            match items.kind() {
-                ValueKind::Array(items) => {
-                    Box::new(items.iter().map(|item| (ValueRef::null(), item.clone())))
+        let scope = Arc::new(ItemScope {
+            key: self.scope_key.clone(),
+            body: Arc::clone(&self.body),
+            types: scope_types(&self.inputs),
+            shared,
+        });
+        let secret_items = items.is_secret();
+        let items: Box<dyn ExactSizeIterator<Item = (ValueRef, ValueRef)>> = match items.kind() {
+            ValueKind::Array(items) => {
+                Box::new(items.iter().map(|item| (ValueRef::null(), item.clone())))
+            }
+            ValueKind::Object(items) => Box::new(items.iter().map(|(key, item)| {
+                let key = ValueRef::new(ValueKind::String(key.clone()));
+                let key = if secret_items { key.into_secret() } else { key };
+                (key, item.clone())
+            })),
+            _ => {
+                return mf_runtime::NodeExecutionFailedSnafu {
+                    message: "iteration requires an array or object input `items`",
                 }
-                ValueKind::Object(items) => Box::new(items.iter().map(|(key, item)| {
-                    (ValueRef::new(ValueKind::String(key.clone())), item.clone())
-                })),
-                _ => {
-                    return mf_runtime::NodeExecutionFailedSnafu {
-                        message: "iteration requires an array or object input `items`",
-                    }
-                    .fail();
-                }
-            };
+                .fail();
+            }
+        };
         let mut results = Vec::with_capacity(items.len());
         // A single active item can borrow the caller's sink directly.
         let mode = if sink.is_connected() && parent.worker_limit().get() == 1 {
@@ -265,8 +369,7 @@ impl IterationNode {
                         return Err(error.into());
                     }
                     results.push(Self::run_item(
-                        &self.scope_key,
-                        &self.body,
+                        &scope,
                         (key, item),
                         index,
                         observation.as_ref(),
@@ -295,9 +398,8 @@ impl IterationNode {
                                     let completed = Arc::clone(&completed);
                                     let stopped = Arc::clone(&stopped);
                                     let observation = observation.clone();
-                                    let scope_key = self.scope_key.clone();
+                                    let scope = Arc::clone(&scope);
                                     let on_error = self.on_error;
-                                    let body = Arc::clone(&self.body);
                                     let parent = parent.fork_body(None);
                                     let sender = sender.clone();
                                     move || loop {
@@ -318,8 +420,7 @@ impl IterationNode {
                                             None => &mut mf_runtime::DiscardSink,
                                         };
                                         let result = Self::run_item(
-                                            &scope_key,
-                                            &body,
+                                            &scope,
                                             (key, item),
                                             index,
                                             observation.as_deref(),
@@ -384,6 +485,11 @@ impl TypedTaskNode for IterationNode {
         inputs: IterationInputs,
         ctx: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        let (items, shared) = if self.inputs.is_empty() {
+            (inputs.items, Outputs::new())
+        } else {
+            self.decode_inputs(Inputs::from([("items".into(), inputs.items)]))?
+        };
         let observation = ctx.observation().and_then(|run| {
             run.iteration_observation(
                 &self.id,
@@ -394,7 +500,7 @@ impl TypedTaskNode for IterationNode {
         });
         let mut discard = mf_runtime::DiscardSink;
         let mut stream = SubgraphStream::new(self.id.as_str(), ctx, &mut discard);
-        self.execute_items(inputs.items, observation, ctx, &mut stream)
+        self.execute_items(items, shared, observation, ctx, &mut stream)
             .map(Into::into)
     }
 }
@@ -408,7 +514,11 @@ impl TaskNode for IterationNode {
         inputs: Inputs,
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        execute_typed_task(self, inputs, ctx)
+        if self.inputs.is_empty() {
+            execute_typed_task(self, inputs, ctx)
+        } else {
+            SubgraphNode::execute(self, inputs, ctx, &mut mf_runtime::DiscardSink)
+        }
     }
 }
 
@@ -433,7 +543,7 @@ impl SubgraphNode for IterationNode {
         context: &mut ExecutionContext,
         sink: &mut dyn EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
-        let inputs = <IterationInputs as mf_runtime::NodeInputs>::from_inputs(inputs).boxed()?;
+        let (items, shared) = self.decode_inputs(inputs)?;
         let observation = context.observation().and_then(|run| {
             run.iteration_observation(
                 &self.id,
@@ -443,7 +553,7 @@ impl SubgraphNode for IterationNode {
             )
         });
         let mut stream = SubgraphStream::new(self.id.as_str(), context, sink);
-        let outputs = self.execute_items(inputs.items, observation, context, &mut stream)?;
+        let outputs = self.execute_items(items, shared, observation, context, &mut stream)?;
         mf_runtime::encode_typed_result(outputs.into())
     }
 }
@@ -570,7 +680,7 @@ mod tests {
                     scope.values.remove("key");
                 }
                 3 => {
-                    scope.values.insert("extra".into(), ValueType::Any);
+                    scope.values.insert("key".into(), ValueType::String);
                 }
                 4 => {
                     scope.state_outputs.insert("item".into(), "item".into());
@@ -604,6 +714,190 @@ mod tests {
                 business_error(&error),
                 IterationValidationError::InvalidScopeBindings
             ));
+        }
+    }
+
+    #[test]
+    fn iteration_shared_inputs_match_prepared_scope_and_validate_configuration() {
+        let mut relations = body_relations("custom-input");
+        relations
+            .scope
+            .as_mut()
+            .unwrap()
+            .values
+            .insert("label".into(), ValueType::String);
+        let body = result_body().with_relations(relations);
+        let node = IterationNode::new(
+            "each",
+            IterationMode::Sequential,
+            IterationErrorPolicy::Terminate,
+            body.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            node.ports().inputs[1],
+            PortSpec::new("label", ValueType::String, true)
+        );
+        let config = json!({"body": {}, "inputs": {"label": "string"}});
+        assert!(
+            factory(
+                "each",
+                config.clone(),
+                BTreeMap::from([("body".into(), body.clone())])
+            )
+            .is_ok()
+        );
+        for inputs in [json!({}), json!({"label":"int"}), json!({"other":"string"})] {
+            let mut config = config.clone();
+            config["inputs"] = inputs;
+            let error = factory(
+                "each",
+                config,
+                BTreeMap::from([("body".into(), body.clone())]),
+            )
+            .err()
+            .unwrap();
+            assert!(matches!(
+                business_error(&error),
+                IterationValidationError::InvalidScopeBindings
+            ));
+        }
+        for name in ["", " ", "item", "key", "items", "index"] {
+            let error = factory(
+                "each",
+                json!({"body": {}, "inputs": {(name): "any"}}),
+                BTreeMap::from([("body".into(), result_body())]),
+            )
+            .err()
+            .unwrap();
+            assert!(matches!(
+                business_error(&error),
+                IterationValidationError::InvalidInputName { .. }
+            ));
+        }
+        for inputs in [
+            json!(null),
+            json!([]),
+            json!({"label":false}),
+            json!({"label":"unknown"}),
+        ] {
+            let error = factory(
+                "each",
+                json!({"body": {}, "inputs": inputs}),
+                BTreeMap::from([("body".into(), result_body())]),
+            )
+            .err()
+            .unwrap();
+            assert!(matches!(error, NodeBuildError::InvalidConfiguration { .. }));
+        }
+    }
+
+    #[test]
+    fn iteration_shared_inputs_keep_native_identity_and_secrets_in_both_call_paths() {
+        let capability = ValueRef::new(ValueKind::Flow(
+            mf_runtime::FlowValue::new(PreparedSubgraph::new(Vec::new(), Vec::new(), |_| {
+                Ok(Outputs::new())
+            }))
+            .unwrap(),
+        ))
+        .into_secret();
+        let label = ValueRef::from("shared label");
+        let settings = ValueRef::from(json!({"token":"private"})).into_secret();
+        let types = BTreeMap::from([
+            ("flow_0".into(), ValueType::Flow),
+            ("label".into(), ValueType::String),
+            ("settings".into(), ValueType::Object),
+        ]);
+        for mode in [IterationMode::Sequential, IterationMode::Parallel] {
+            let source = mf_runtime::prepared_scope_source("custom-input", &scope_types(&types))
+                .into_task()
+                .unwrap();
+            let expected = Outputs::from([
+                ("flow_0".into(), capability.clone()),
+                ("label".into(), label.clone()),
+                ("settings".into(), settings.clone()),
+            ]);
+            let body = PreparedSubgraph::new(
+                Vec::new(),
+                vec![PortSpec::new("result", ValueType::Any, true)],
+                move |state| {
+                    execute_node_in_context(&source, &[], state)?;
+                    let mut result = Outputs::new();
+                    for (name, expected) in &expected {
+                        let value = state
+                            .select_output("result", "custom-input", name, false)?
+                            .unwrap();
+                        assert!(value.ptr_eq(expected), "{name}");
+                        result.insert(name.clone(), value);
+                    }
+                    for name in ["item", "key"] {
+                        let value = state
+                            .select_output("result", "custom-input", name, false)?
+                            .unwrap();
+                        assert!(
+                            value.is_secret(),
+                            "secret items container must protect {name}"
+                        );
+                        result.insert(name.into(), value);
+                    }
+                    Ok(Outputs::from([(
+                        "result".into(),
+                        ValueRef::object(
+                            result.into_iter().map(|(name, value)| (name.into(), value)),
+                        ),
+                    )]))
+                },
+            );
+            let mut relations = body_relations("custom-input");
+            relations.scope.as_mut().unwrap().values = scope_types(&types);
+            // The existing constructor derives the shared contract from prepared relations.
+            let node = IterationNode::new(
+                "each",
+                mode,
+                IterationErrorPolicy::Terminate,
+                body.with_relations(relations),
+            )
+            .unwrap();
+            for subgraph in [false, true] {
+                let inputs = Inputs::from([
+                    (
+                        "items".into(),
+                        ValueRef::from(json!({"a":{"nested":1},"b":{"nested":2}})).into_secret(),
+                    ),
+                    ("flow_0".into(), capability.clone()),
+                    ("label".into(), label.clone()),
+                    ("settings".into(), settings.clone()),
+                ]);
+                let mut context = ExecutionContext::default();
+                let result = if subgraph {
+                    SubgraphNode::execute(&node, inputs, &mut context, &mut mf_runtime::DiscardSink)
+                } else {
+                    TaskNode::execute(&node, inputs, &mut context)
+                }
+                .unwrap();
+                for value in result.outputs["results"].as_array().unwrap() {
+                    assert!(value["flow_0"].ptr_eq(&capability));
+                    assert!(value["settings"].ptr_eq(&settings));
+                    assert!(value["item"]["nested"].is_secret());
+                }
+            }
+            let error = TaskNode::execute(
+                &node,
+                Inputs::from([
+                    ("items".into(), json!([]).into()),
+                    ("flow_0".into(), "not a native Flow".into()),
+                    ("label".into(), label.clone()),
+                    ("settings".into(), settings.clone()),
+                ]),
+                &mut ExecutionContext::default(),
+            )
+            .unwrap_err();
+            let NodeExecutionError::PluginFailed { source } = error else {
+                panic!("expected typed node-owned error")
+            };
+            let error = source.downcast_ref::<IterationSharedInputError>().unwrap();
+            assert_eq!(error.port, "flow_0");
+            assert_eq!(error.source.expected, ValueType::Flow);
         }
     }
 

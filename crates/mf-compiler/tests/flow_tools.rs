@@ -10,6 +10,8 @@ mod common;
 mod snapshots;
 // Exercise the documented host/export example in the instrumented integration
 // binary too, retaining its real source mapping for incremental coverage.
+#[path = "../examples/calculator_agent.rs"]
+mod calculator_example;
 #[path = "../examples/flow_tools.rs"]
 mod example;
 
@@ -143,8 +145,8 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
     // Each body exists only at its producer, not again under the collector or
     // dispatch callsite. Execution retains that producer definition origin.
     assert_eq!(plan.graph.children[&"tool_0".into()].len(), 1);
-    assert!(plan.graph.children[&"tool_0".into()].contains_key("body"));
-    assert!(plan.graph.children[&"tool_1".into()].contains_key("body"));
+    assert!(plan.graph.children[&"tool_0".into()].contains_key("value"));
+    assert!(plan.graph.children[&"tool_1".into()].contains_key("value"));
     assert!(!plan.graph.children.contains_key(&"bindings".into()));
     let dispatch = &plan.graph.children[&"dispatch".into()]["body"];
     assert!(dispatch.children.is_empty());
@@ -164,7 +166,7 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
             .iter()
             .filter(|node| node.kind == "llm.tool_result")
             .count(),
-        2
+        1
     );
     assert_results(&execute(&definition, calls()));
     let bytes = plan.manifest(&registry).unwrap().to_bytes().unwrap();
@@ -213,13 +215,17 @@ fn every_tool_interface_is_validated_even_without_calls() {
     );
     let definition = configured(BTreeMap::from([("add".into(), tool)]));
     let registry = NodeRegistry::from_inventory().unwrap();
-    let error = compile_definition(&definition, &registry).unwrap_err();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let error = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_with_inputs(WorkflowArguments::try_from(json!({"params.calls":[]})).unwrap())
+        .unwrap_err();
     assert!(error.to_string().contains("unknown input"), "{error}");
     assert!(std::error::Error::source(&error).is_some());
 }
 
 #[test]
-fn runtime_only_tool_inputs_are_rejected_during_preparation() {
+fn runtime_only_tool_inputs_are_rejected_before_dispatch() {
     for value_type in [json!("flow"), json!({"list":"flow"}), json!({"map":"flow"})] {
         let tool = FlowTool {
             description: "A model cannot provide callable capabilities.".into(),
@@ -232,7 +238,11 @@ fn runtime_only_tool_inputs_are_rejected_during_preparation() {
         };
         let definition = configured(BTreeMap::from([("native".into(), tool)]));
         let registry = NodeRegistry::from_inventory().unwrap();
-        let error = compile_definition(&definition, &registry).unwrap_err();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let error = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_with_inputs(WorkflowArguments::try_from(json!({"params.calls":[]})).unwrap())
+            .unwrap_err();
         assert!(std::error::Error::source(&error).is_some());
         assert!(error.to_string().contains("runtime-only"), "{error}");
     }
@@ -311,6 +321,103 @@ fn unknown_and_invalid_calls_do_not_execute_tool_business_work() {
                 .contains("error")
         );
     }
+}
+
+static BATCH_EFFECTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+struct BatchEffect;
+impl mf_runtime::TypedTaskNode for BatchEffect {
+    type Input = EffectInput;
+    type Output = EffectOutput;
+    fn execute(
+        &self,
+        input: EffectInput,
+        _: &mut ExecutionContext,
+    ) -> Result<mf_runtime::TypedNodeResult<EffectOutput>, mf_runtime::NodeExecutionError> {
+        BATCH_EFFECTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(EffectOutput {
+            content: input.value.to_string(),
+        }
+        .into())
+    }
+}
+inventory::submit! {
+    mf_runtime::NodeRegistration {
+        kind:"test.flow_tool_batch_effect",
+        factory:mf_runtime::NodeFactory::Plain(|_| mf_runtime::PreparedNode::typed_task(BatchEffect,mf_runtime::NodeMetadata::default())),
+    }
+}
+
+#[test]
+fn malformed_call_batches_fail_before_any_tool_effects() {
+    let tool = FlowTool {
+        description: "Validate every call first.".into(),
+        parameters: BTreeMap::new(),
+        body: body(
+            json!({"version":"2026-10-28","nodes":[{"id":"effect","kind":"test.flow_tool_batch_effect"}],"outputs":[{"name":"content","node":"effect","port":"content"}]}),
+        ),
+    };
+    let definition = configured(BTreeMap::from([("effect".into(), tool)]));
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    for malformed in [
+        json!({"id":42,"name":"missing","arguments":{}}),
+        json!({"id":" \t\n","name":"missing","arguments":{}}),
+        json!({"id":"\u{2003}\u{00a0}","name":"missing","arguments":{}}),
+        json!({"id":"missing-arguments","name":"missing"}),
+        json!({"id":"extra","name":"missing","arguments":{},"unexpected":true}),
+    ] {
+        let args=WorkflowArguments::try_from(json!({"params.calls":[{"id":"valid","name":"effect","arguments":{"value":42}},malformed]})).unwrap();
+        assert!(
+            instantiate_compiled(&plan, &registry)
+                .unwrap()
+                .execute_with_inputs(args)
+                .is_err()
+        );
+        assert_eq!(BATCH_EFFECTS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn private_arguments_do_not_hide_other_calls_or_public_selections() {
+    use mf_runtime::ValueRef;
+    let definition = configured(BTreeMap::from([("echo".into(), text())]));
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let private = ValueRef::object([
+        ("id".into(), "private".into()),
+        ("name".into(), "echo".into()),
+        (
+            "arguments".into(),
+            ValueRef::object([(
+                "content".into(),
+                ValueRef::from("private text").into_secret(),
+            )]),
+        ),
+    ]);
+    let public = ValueRef::from(json!({"id":"public","name":"echo","arguments":{}}));
+    let recording = snapshots::Snapshots::memory();
+    let mut context = ExecutionContext::default();
+    context.set_snapshot_recorder(recording.recorder());
+    context.set_workflow_arguments(WorkflowArguments(BTreeMap::from([(
+        "params.calls".into(),
+        ValueRef::array(vec![private, public]),
+    )])));
+    let output = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_in_context(&mut context)
+        .unwrap();
+    assert!(output["results"][0].contains_secret());
+    assert!(!output["results"][1].contains_secret());
+    assert_eq!(output["results"][1]["content"].as_str(), Some("ready"));
+    let history = recording.history();
+    let names: Vec<_> = history
+        .iter()
+        .filter(|entry| entry.node.as_ref() == "arguments")
+        .filter_map(|entry| entry.snapshot.node(&entry.scope, &entry.node))
+        .filter_map(|snapshot| snapshot.outputs.get("name"))
+        .collect();
+    assert!(!names.is_empty());
+    assert!(names.iter().all(|name| name.as_str() == Some("echo")));
 }
 
 #[test]
@@ -406,15 +513,13 @@ fn secret_tool_selection_stays_private_through_native_dispatch() {
         let history = recording.history();
         let selected: Vec<_> = history
             .iter()
-            .filter(|entry| entry.node.as_ref() == "select")
+            .filter(|entry| entry.node.as_ref() == "arguments")
             .filter_map(|entry| entry.snapshot.node(&entry.scope, &entry.node))
-            .filter(|snapshot| snapshot.outputs.get("binding").is_some())
+            .filter(|snapshot| snapshot.outputs.get("name").is_some())
             .collect();
         assert!(!selected.is_empty());
         for snapshot in selected {
-            for port in ["binding", "name", "route"] {
-                assert_eq!(snapshot.outputs[port].as_str(), Some("[REDACTED]"));
-            }
+            assert_eq!(snapshot.outputs["name"].as_str(), Some("[REDACTED]"));
         }
     }
 }
@@ -450,7 +555,7 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_without_exposing_bin
                 .iter()
                 .filter(|span| span.attributes.iter().any(|attribute| {
                     attribute.key.as_str() == "mf.node.id"
-                        && attribute.value.as_str() == "definition"
+                        && attribute.value.as_str() == "definition_0"
                 }))
                 .count(),
             1
@@ -479,7 +584,7 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_without_exposing_bin
             assert!(detail.body_scope.iter().any(|entry| matches!(entry,
                 mf_telemetry::event::ScopePathEntry::Flow { call_id, definition }
                 if call_id == "execute" && definition.workflow_id == graph.workflow_id
-                    && definition.path == vec![mf_telemetry::event::ScopePathEntry::binding_key("tool_0", "body")]
+                    && definition.path == vec![mf_telemetry::event::ScopePathEntry::binding_key("tool_0", "value")]
             )));
         }
         let records: Vec<_> = wire
