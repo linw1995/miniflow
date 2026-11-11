@@ -188,11 +188,12 @@ transcript; only the final assistant result is persisted. Each model turn report
 streams assistant text, including preambles accompanying tool calls. Catalog projection runs once before
 the first model request, not once per tool round.
 
-The example is an ordinary generated Flow with existing Flow constants, the three LLM protocol adapters,
-and normal Call/Loop/Iteration edges. It does not use LLM-specific producer/collector/pack/unpack nodes
-or configurable built-in source syntax. See [configured Flow tools](workflows.md#configured-flow-tools)
-for regeneration and compilation commands. The resulting executable supports the same `--chat`, model,
-endpoint and credential parameters as the other chat examples.
+The example is a small ordinary caller, not a generated Agent graph. A Flow constant produces the
+calculator, the generic `builtin.object` puts it in a native map, and a normal Call supplies that map to
+the fixed `mfn-llm.agent` Flow. Zero, one or many tools use the same Agent and ports. See
+[configured Flow tools](workflows.md#configured-flow-tools) for the input contract and compilation
+commands. The executable supports the same `--chat`, model, endpoint and credential parameters as the
+other chat examples.
 
 ## Shared conversation contract
 

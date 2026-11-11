@@ -1,0 +1,101 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "version": "=0.1.0"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "version": "=0.1.0"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "tools": {
+            "type": {
+              "map": "flow"
+            },
+            "secret": false
+          },
+          "descriptions": {
+            "type": "object",
+            "default": {},
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "project",
+      "kind": "builtin.iteration",
+      "config": {
+        "mode": "parallel",
+        "inputs": {
+          "descriptions": "object"
+        },
+        "body": {
+          "version": "2026-10-28",
+          "nodes": [
+            {
+              "id": "definition",
+              "kind": "llm.tool_definition",
+              "inputs": {
+                "flow": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                },
+                "name": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "key"
+                  }
+                },
+                "descriptions": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "descriptions"
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "result",
+              "node": "definition",
+              "port": "definition"
+            }
+          ]
+        }
+      },
+      "inputs": {
+        "items": {
+          "from": {
+            "node": "params",
+            "port": "tools"
+          }
+        },
+        "descriptions": {
+          "from": {
+            "node": "params",
+            "port": "descriptions"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "tools",
+      "node": "project",
+      "port": "results"
+    }
+  ]
+}

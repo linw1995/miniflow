@@ -35,13 +35,61 @@ fn calculator_profile_loads_real_tool_bodies_without_specialized_nodes() {
     let (plan, _) = backend
         .embedded_workflow()
         .expect("finite native Agent is composable");
-    let producer = &plan.graph.children[&"tool_0".into()]["value"];
+    let producer = &plan.graph.children[&"calculator".into()]["value"];
     assert!(
         producer
             .definition
             .nodes
             .iter()
             .any(|node| node.id.as_str() == "calculate")
+    );
+    assert_eq!(
+        plan.graph
+            .definition
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["params", "calculator", "tools", "agent"])
+    );
+    assert!(plan.graph.definition.edges.iter().any(|edge| {
+        edge.from_node.as_str() == "tools"
+            && edge.from_output == "value"
+            && edge.to_node.as_str() == "agent"
+            && edge.to_input == "params.tools"
+    }));
+    let agent = &plan.graph.children[&"agent".into()]["body"];
+    let builtins = BuiltinFlowRegistry::from_inventory().unwrap();
+    let registration = builtins.get("mfn-llm.agent").unwrap();
+    let definition = (registration.definition)().unwrap();
+    assert_eq!(
+        agent
+            .definition
+            .nodes
+            .iter()
+            .map(|node| &node.id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        definition
+            .nodes
+            .iter()
+            .map(|node| &node.id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        "the Agent child must keep the fixed builtin graph, not generate tool IDs"
+    );
+    let params = agent
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "params")
+        .unwrap();
+    assert_eq!(
+        params.config["parameters"]["tools"]["type"],
+        json!({"map":"flow"})
+    );
+    assert!(
+        params.config["parameters"]["tools"]
+            .get("default")
+            .is_none()
     );
     let serialized = serde_json::to_string(&plan.graph).unwrap();
     for removed in [

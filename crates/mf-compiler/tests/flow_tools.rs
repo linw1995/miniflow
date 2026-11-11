@@ -6,23 +6,19 @@ extern crate mfn_llm as _;
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 mod common;
-#[path = "common/snapshots.rs"]
-mod snapshots;
-// Exercise the documented host/export example in the instrumented integration
-// binary too, retaining its real source mapping for incremental coverage.
-#[path = "../examples/calculator_agent.rs"]
-mod calculator_example;
 #[path = "../examples/flow_tools.rs"]
 mod example;
+#[path = "common/snapshots.rs"]
+mod snapshots;
+#[path = "common/tool_values.rs"]
+mod tool_values;
 
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
 use mf_runtime::{ExecutionContext, WorkflowArguments};
-use mfn_llm::{
-    flows::{FlowTool, tool_uses_definition},
-    tools::ParameterDescription,
-};
+use mfn_llm::tools::ParameterDescription;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, process::Command};
+use tool_values::{FlowTool, configured_agent, configured_tools};
 
 fn body(value: Value) -> WorkflowDefinition {
     WorkflowDefinition::from_json(&value.to_string()).unwrap()
@@ -68,17 +64,6 @@ fn text() -> FlowTool {
             }], "outputs":[{"name":"content", "node":"params", "port":"content"}]
         })),
     }
-}
-
-fn configured(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition {
-    let mut definition = tool_uses_definition(tools).unwrap();
-    definition.dependencies = serde_json::from_value(json!({
-        "core":{"package":"mfn-core", "path": common::crates_dir().join("builtin-nodes/core")},
-        "code":{"package":"mfn-code", "path": common::crates_dir().join("builtin-nodes/code")},
-        "llm":{"package":"mfn-llm", "path": common::crates_dir().join("builtin-nodes/llm")}
-    }))
-    .unwrap();
-    definition
 }
 
 fn calls() -> Value {
@@ -136,19 +121,62 @@ fn assert_results(value: &Value) {
 
 #[test]
 fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
-    let definition = configured(BTreeMap::from([
+    let definition = configured_tools(BTreeMap::from([
         ("add".into(), addition()),
         ("echo".into(), text()),
     ]));
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    // Each body exists only at its producer, not again under the collector or
-    // dispatch callsite. Execution retains that producer definition origin.
-    assert_eq!(plan.graph.children[&"tool_0".into()].len(), 1);
-    assert!(plan.graph.children[&"tool_0".into()].contains_key("value"));
-    assert!(plan.graph.children[&"tool_1".into()].contains_key("value"));
-    assert!(!plan.graph.children.contains_key(&"bindings".into()));
-    let dispatch = &plan.graph.children[&"dispatch".into()]["body"];
+    // The caller constants alone own business bodies. Native map construction
+    // does not duplicate them under the catalog or dispatch callsites.
+    let producers: Vec<_> = plan
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "builtin.constant" && node.config["type"] == "flow")
+        .collect();
+    assert_eq!(producers.len(), 2);
+    for producer in producers {
+        let children = &plan.graph.children[&producer.id];
+        assert_eq!(children.len(), 1);
+        assert!(children.contains_key("value"));
+    }
+    assert!(!plan.graph.children.contains_key(&"tools".into()));
+    let empty = compile_definition(&configured_tools(BTreeMap::new()), &registry).unwrap();
+    for owner in ["catalog", "dispatch"] {
+        assert_eq!(
+            plan.graph.children[&owner.into()],
+            empty.graph.children[&owner.into()]
+        );
+    }
+    let catalog_call = &plan.graph.children[&"catalog".into()]["body"];
+    assert_eq!(
+        catalog_call
+            .definition
+            .outputs
+            .iter()
+            .map(|output| output.name.as_ref())
+            .collect::<Vec<_>>(),
+        ["tools"]
+    );
+    let dispatch_call = &plan.graph.children[&"dispatch".into()]["body"];
+    let params = dispatch_call
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "params")
+        .unwrap();
+    assert_eq!(
+        params.config["parameters"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["calls", "flows"]
+    );
+    let dispatch = &dispatch_call.children[&"dispatch".into()]["body"];
     assert!(dispatch.children.is_empty());
     assert_eq!(
         dispatch
@@ -182,8 +210,103 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
 }
 
 #[test]
+fn configured_example_executes_and_exports_an_ordinary_workflow() {
+    let definition = configured_tools(BTreeMap::from([
+        ("add".into(), addition()),
+        ("echo".into(), text()),
+    ]));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("tools.json");
+    fs::write(&path, serde_json::to_vec_pretty(&definition).unwrap()).unwrap();
+    let exported = WorkflowDefinition::from_json(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(exported, definition);
+    assert_results(&execute(&exported, calls()));
+    assert_eq!(
+        exported
+            .nodes
+            .iter()
+            .filter(|node| node.kind == "workflow.call")
+            .count(),
+        2
+    );
+    assert!(
+        !exported
+            .nodes
+            .iter()
+            .any(|node| node.kind == mf_runtime::ITERATION_KIND)
+    );
+    let tools = exported
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "tools")
+        .unwrap();
+    assert_eq!(tools.kind, "builtin.object");
+    assert_eq!(tools.config, json!({"fields":{"add":"flow","echo":"flow"}}));
+    let descriptions = exported
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "descriptions")
+        .unwrap();
+    assert_eq!(
+        descriptions.config["value"]["add"]["description"],
+        "Add two integers."
+    );
+    assert!(descriptions.config["value"]["add"].get("body").is_none());
+}
+
+#[test]
+fn fixed_agent_builtin_owns_no_caller_tool_bodies_or_per_tool_structure() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition = configured_agent(BTreeMap::from([
+        ("add".into(), addition()),
+        ("echo".into(), text()),
+    ]));
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let empty = compile_definition(&configured_agent(BTreeMap::new()), &registry).unwrap();
+    assert_eq!(
+        plan.graph.children[&"agent".into()],
+        empty.graph.children[&"agent".into()]
+    );
+    assert!(!plan.graph.children.contains_key(&"tools".into()));
+    let producers: Vec<_> = plan
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "builtin.constant" && node.config["type"] == "flow")
+        .collect();
+    assert_eq!(producers.len(), 2);
+    for producer in producers {
+        assert_eq!(plan.graph.children[&producer.id].len(), 1);
+        assert!(plan.graph.children[&producer.id].contains_key("value"));
+    }
+    let agent = definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "agent")
+        .unwrap();
+    assert_eq!(agent.kind, "workflow.call");
+    assert_eq!(agent.config, json!({"flow":"agent"}));
+    assert_eq!(definition.outputs.len(), 5);
+}
+
+#[test]
 fn empty_catalog_and_dispatch_keep_capabilities_internal() {
-    let definition = configured(BTreeMap::new());
+    use mf_runtime::{TypeCompatibility, ValueType};
+    // builtin.object with no fields has Map<Any>, accepted through the normal
+    // checked connection to the provider's Map<Flow> parameter, not a JSON shim.
+    assert_eq!(
+        ValueType::Map(Box::new(ValueType::Any))
+            .compatibility_with(&ValueType::Map(Box::new(ValueType::Flow))),
+        TypeCompatibility::Checked
+    );
+    let definition = configured_tools(BTreeMap::new());
+    let tools = definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "tools")
+        .unwrap();
+    assert_eq!(tools.config, json!({"fields":{}}));
     assert_eq!(
         execute(&definition, json!([])),
         json!({"catalog":[], "results":[]})
@@ -213,15 +336,36 @@ fn every_tool_interface_is_validated_even_without_calls() {
             description: "Not an input.".into(),
         },
     );
-    let definition = configured(BTreeMap::from([("add".into(), tool)]));
+    let definition = configured_tools(BTreeMap::from([("add".into(), tool)]));
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    let error = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute_with_inputs(WorkflowArguments::try_from(json!({"params.calls":[]})).unwrap())
-        .unwrap_err();
-    assert!(error.to_string().contains("unknown input"), "{error}");
-    assert!(std::error::Error::source(&error).is_some());
+    for calls in [
+        json!([]),
+        json!([{"id":"valid","name":"add","arguments":{"left":2,"right":3}}]),
+    ] {
+        let recording = snapshots::Snapshots::memory();
+        let mut context = ExecutionContext::default();
+        context.set_snapshot_recorder(recording.recorder());
+        context.set_workflow_arguments(
+            WorkflowArguments::try_from(json!({"params.calls":calls})).unwrap(),
+        );
+        let error = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_in_context(&mut context)
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown input"), "{error}");
+        assert!(std::error::Error::source(&error).is_some());
+        // Even a valid business call cannot start before catalog validation.
+        assert!(!recording.history().iter().any(|entry| {
+            matches!(entry.node.as_ref(), "dispatch" | "calculate")
+                && entry
+                    .snapshot
+                    .node(&entry.scope, &entry.node)
+                    .unwrap()
+                    .outcome
+                    == mf_runtime::SnapshotOutcome::Started
+        }));
+    }
 }
 
 #[test]
@@ -236,7 +380,7 @@ fn runtime_only_tool_inputs_are_rejected_before_dispatch() {
                 }}}
             ], "outputs":[{"name":"policy", "node":"params", "port":"policy"}]})),
         };
-        let definition = configured(BTreeMap::from([("native".into(), tool)]));
+        let definition = configured_tools(BTreeMap::from([("native".into(), tool)]));
         let registry = NodeRegistry::from_inventory().unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
         let error = instantiate_compiled(&plan, &registry)
@@ -296,7 +440,7 @@ fn unknown_and_invalid_calls_do_not_execute_tool_business_work() {
             {"id":"effect", "kind":"test.flow_tool_effect"}
         ], "outputs":[{"name":"content", "node":"effect", "port":"content"}]})),
     };
-    let definition = configured(BTreeMap::from([("effect".into(), tool)]));
+    let definition = configured_tools(BTreeMap::from([("effect".into(), tool)]));
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     assert_eq!(TOOL_EXECUTIONS.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -356,7 +500,7 @@ fn malformed_call_batches_fail_before_any_tool_effects() {
             json!({"version":"2026-10-28","nodes":[{"id":"effect","kind":"test.flow_tool_batch_effect"}],"outputs":[{"name":"content","node":"effect","port":"content"}]}),
         ),
     };
-    let definition = configured(BTreeMap::from([("effect".into(), tool)]));
+    let definition = configured_tools(BTreeMap::from([("effect".into(), tool)]));
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     for malformed in [
@@ -380,7 +524,7 @@ fn malformed_call_batches_fail_before_any_tool_effects() {
 #[test]
 fn private_arguments_do_not_hide_other_calls_or_public_selections() {
     use mf_runtime::ValueRef;
-    let definition = configured(BTreeMap::from([("echo".into(), text())]));
+    let definition = configured_tools(BTreeMap::from([("echo".into(), text())]));
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let private = ValueRef::object([
@@ -435,7 +579,7 @@ fn secret_tool_results_keep_business_values_while_all_downstream_snapshots_are_r
                 }], "outputs":[{"name":output_name, "node":"params", "port":"content"}]
             })),
         };
-        let definition = configured(BTreeMap::from([("private".into(), tool)]));
+        let definition = configured_tools(BTreeMap::from([("private".into(), tool)]));
         let registry = NodeRegistry::from_inventory().unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
         let recording = snapshots::Snapshots::memory();
@@ -488,7 +632,7 @@ fn secret_tool_results_keep_business_values_while_all_downstream_snapshots_are_r
 #[test]
 fn secret_tool_selection_stays_private_through_native_dispatch() {
     use mf_runtime::ValueRef;
-    let definition = configured(BTreeMap::from([("echo".into(), text())]));
+    let definition = configured_tools(BTreeMap::from([("echo".into(), text())]));
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     for name in ["echo", "missing"] {
@@ -525,12 +669,39 @@ fn secret_tool_selection_stays_private_through_native_dispatch() {
 }
 
 #[test]
-fn catalog_projects_once_before_dispatch_on_each_invocation_without_exposing_bindings() {
-    let definition = configured(BTreeMap::from([("add".into(), addition())]));
+fn catalog_projects_once_before_dispatch_on_each_invocation_with_native_flows() {
+    let definition = configured_tools(BTreeMap::from([("add".into(), addition())]));
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     let graph = mf_compiler::describe_compiled(&plan).unwrap();
+    let producer = plan
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.kind == "builtin.constant" && node.config["type"] == "flow")
+        .unwrap();
+    let producer_key =
+        plan.graph.children[&producer.id]["value"].child_scope_key(producer, "value");
+    let call = plan
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "dispatch")
+        .unwrap();
+    let dispatch_call = &plan.graph.children[&call.id]["body"];
+    let iteration = dispatch_call
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.kind == mf_runtime::ITERATION_KIND)
+        .unwrap();
+    let iteration_path = vec![
+        dispatch_call.child_scope_key(call, "body"),
+        iteration.id.to_string(),
+    ];
     for _ in 0..2 {
         use mf_telemetry::{event::Event, identity::RunId};
         let harness = capture::Harness::new(true);
@@ -547,15 +718,14 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_without_exposing_bin
         .unwrap();
         assert_eq!(output.len(), 2);
         assert_eq!(output["catalog"].as_array().unwrap().len(), 1);
-        assert!(!output.contains_key("bindings"));
         harness.traces.force_flush().unwrap();
         let spans = harness.spans.get_finished_spans().unwrap();
         assert_eq!(
             spans
                 .iter()
                 .filter(|span| span.attributes.iter().any(|attribute| {
-                    attribute.key.as_str() == "mf.node.id"
-                        && attribute.value.as_str() == "definition_0"
+                    attribute.key.as_str() == "mf.node.kind"
+                        && attribute.value.as_str() == "llm.tool_definition"
                 }))
                 .count(),
             1
@@ -579,12 +749,21 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_without_exposing_bin
             })
             .collect();
         assert!(!details.is_empty());
-        for detail in &details {
-            assert_eq!(detail.context.iteration_path, ["dispatch"]);
+        let executions: Vec<_> = details
+            .iter()
+            .filter(|detail| {
+                detail.body_scope.iter().any(|entry| matches!(entry,
+                mf_telemetry::event::ScopePathEntry::Flow { call_id, .. } if call_id == "execute"
+            ))
+            })
+            .collect();
+        assert!(!executions.is_empty());
+        for detail in executions {
+            assert_eq!(detail.context.iteration_path, iteration_path);
             assert!(detail.body_scope.iter().any(|entry| matches!(entry,
                 mf_telemetry::event::ScopePathEntry::Flow { call_id, definition }
                 if call_id == "execute" && definition.workflow_id == graph.workflow_id
-                    && definition.path == vec![mf_telemetry::event::ScopePathEntry::binding_key("tool_0", "value")]
+                    && definition.path == vec![producer_key.clone()]
             )));
         }
         let records: Vec<_> = wire
@@ -604,7 +783,9 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_without_exposing_bin
         assert!(catalog_done < dispatch_start);
     }
     assert!(plan.graph.definition.control_edges.iter().any(|edge| {
-        edge.from_node.as_str() == "catalog" && edge.to_node.as_str() == "dispatch"
+        edge.from_node.as_str() == "catalog"
+            && edge.from_output == "tools"
+            && edge.to_node.as_str() == "dispatch"
     }));
 }
 
@@ -612,7 +793,7 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_without_exposing_bin
 #[test]
 fn source_free_tool_catalog_and_dispatch_runner_matches_memory() {
     use mf_compiler::{CompileRequest, SupportPackages, compile_project};
-    let definition = configured(BTreeMap::from([
+    let definition = configured_tools(BTreeMap::from([
         ("add".into(), addition()),
         ("echo".into(), text()),
     ]));

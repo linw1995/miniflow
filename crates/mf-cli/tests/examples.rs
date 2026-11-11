@@ -36,6 +36,7 @@ const CALCULATOR_ANSWER: &str = "The results are 5 and 12.";
 
 fn agent_usage(iteration: usize) -> Value {
     let mut usage = chat_usage(json!([
+        {"node":"agent","index":0},
         {"node":"repeat","index":iteration},
         {"node":"turn","index":0}
     ]));

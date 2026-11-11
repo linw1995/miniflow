@@ -26,8 +26,10 @@
             },
             "secret": false
           },
-          "bindings": {
-            "type": "object",
+          "flows": {
+            "type": {
+              "map": "flow"
+            },
             "secret": false
           }
         }
@@ -90,7 +92,9 @@
         "mode": "parallel",
         "on_error": "terminate",
         "inputs": {
-          "bindings": "object"
+          "flows": {
+            "map": "flow"
+          }
         },
         "body": {
           "version": "2026-10-28",
@@ -105,10 +109,10 @@
                     "port": "item"
                   }
                 },
-                "bindings": {
+                "flows": {
                   "from": {
                     "node": "%iteration",
-                    "port": "bindings"
+                    "port": "flows"
                   }
                 }
               }
@@ -117,10 +121,15 @@
               "id": "execute",
               "kind": "builtin.router",
               "config": {
-                "mode": "execute",
-                "flow_inputs": {}
+                "mode": "execute"
               },
               "inputs": {
+                "flows": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "flows"
+                  }
+                },
                 "route": {
                   "from": {
                     "node": "arguments",
@@ -182,10 +191,10 @@
             "port": "value"
           }
         },
-        "bindings": {
+        "flows": {
           "from": {
             "node": "params",
-            "port": "bindings"
+            "port": "flows"
           }
         }
       }

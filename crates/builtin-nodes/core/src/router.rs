@@ -15,7 +15,6 @@ pub const KIND: &str = "builtin.router";
 struct Config {
     routes: Option<Vec<String>>,
     mode: Option<Mode>,
-    flow_inputs: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -32,8 +31,6 @@ pub enum RouterBuildError {
     Empty,
     #[snafu(display("Blank, reserved, or duplicate router route `{route}`"))]
     Route { route: String },
-    #[snafu(display("Blank, reserved, or duplicate router Flow input port `{port}`"))]
-    FlowInput { port: String },
 }
 
 impl From<RouterBuildError> for NodeBuildError {
@@ -92,31 +89,16 @@ impl TaskNode for Router {
     }
 }
 
-struct ExecuteRouter {
-    // None retains the native-host MapFlow interface; an empty map has no tools.
-    flow_inputs: Option<BTreeMap<String, String>>,
-}
+struct ExecuteRouter;
 
 impl NodePortContract for ExecuteRouter {
     fn ports(&self) -> NodePorts {
-        let mut inputs = vec![PortSpec::new("route", ValueType::String, true)];
-        if self.flow_inputs.is_none() {
-            inputs.push(PortSpec::new(
-                "flows",
-                ValueType::Map(Box::new(ValueType::Flow)),
-                true,
-            ));
-        }
-        inputs.push(PortSpec::new("arguments", ValueType::Object, true));
-        if let Some(flow_inputs) = &self.flow_inputs {
-            inputs.extend(
-                flow_inputs
-                    .values()
-                    .map(|port| PortSpec::owned(port, ValueType::Flow, true)),
-            );
-        }
         NodePorts {
-            inputs,
+            inputs: vec![
+                PortSpec::new("route", ValueType::String, true),
+                PortSpec::new("flows", ValueType::Map(Box::new(ValueType::Flow)), true),
+                PortSpec::new("arguments", ValueType::Object, true),
+            ],
             outputs: vec![PortSpec::new("result", ValueType::Object, true)],
         }
     }
@@ -191,11 +173,7 @@ impl TaskNode for ExecuteRouter {
         };
         // Keep the selected ValueRef, not just its Flow payload: selection itself
         // can be secret, independently of the callable's arguments and outputs.
-        let selected = match &self.flow_inputs {
-            Some(flow_inputs) => flow_inputs.get(route).and_then(|port| inputs.get(port)),
-            None => inputs["flows"].get(route),
-        }
-        .context(UnknownRouteSnafu {
+        let selected = inputs["flows"].get(route).context(UnknownRouteSnafu {
             node: &id,
             route: display_route,
         })?;
@@ -246,9 +224,7 @@ impl TaskNode for ExecuteRouter {
     }
 }
 
-fn validate_routes<'a>(
-    routes: impl IntoIterator<Item = &'a String>,
-) -> Result<(), RouterBuildError> {
+fn validate_routes(routes: &[String]) -> Result<(), RouterBuildError> {
     let mut names = BTreeSet::new();
     for route in routes {
         ensure!(
@@ -260,13 +236,9 @@ fn validate_routes<'a>(
 }
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
-    let Config {
-        routes,
-        mode,
-        flow_inputs,
-    } = mf_runtime::deserialize_config(config)?;
-    match (routes, mode, flow_inputs) {
-        (Some(routes), None, None) => {
+    let Config { routes, mode } = mf_runtime::deserialize_config(config)?;
+    match (routes, mode) {
+        (Some(routes), None) => {
             ensure!(!routes.is_empty(), EmptySnafu);
             validate_routes(&routes)?;
             let node = Router { routes };
@@ -281,35 +253,21 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
             };
             PreparedNode::new(node, metadata)
         }
-        (None, Some(Mode::Execute), flow_inputs) => {
-            if let Some(flow_inputs) = &flow_inputs {
-                validate_routes(flow_inputs.keys())?;
-                let mut ports = BTreeSet::new();
-                for port in flow_inputs.values() {
-                    ensure!(
-                        !port.trim().is_empty()
-                            && !matches!(port.as_str(), "route" | "arguments" | "flows")
-                            && ports.insert(port),
-                        FlowInputSnafu { port }
-                    );
-                }
-            }
-            PreparedNode::new(
-                ExecuteRouter { flow_inputs },
-                NodeMetadata {
-                    // Dynamic callees' privacy contracts are not known when snapshots
-                    // are taken; match workflow.call's conservative argument policy.
-                    input_bindings: BTreeMap::from([(
-                        "arguments".into(),
-                        mf_runtime::InputBinding {
-                            secret: true,
-                            ..Default::default()
-                        },
-                    )]),
-                    ..Default::default()
-                },
-            )
-        }
+        (None, Some(Mode::Execute)) => PreparedNode::new(
+            ExecuteRouter,
+            NodeMetadata {
+                // Dynamic callees' privacy contracts are not known when snapshots
+                // are taken; match workflow.call's conservative argument policy.
+                input_bindings: BTreeMap::from([(
+                    "arguments".into(),
+                    mf_runtime::InputBinding {
+                        secret: true,
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            },
+        ),
         _ => ModeSnafu.fail().map_err(NodeBuildError::from),
     }
 }
@@ -349,28 +307,6 @@ mod tests {
             .unwrap()
             .instantiate(json!({"mode": "execute"}))
             .unwrap()
-    }
-
-    fn named_executable() -> PreparedNode {
-        factory(json!({
-            "mode": "execute",
-            "flow_inputs": {"add": "flow_0", "echo": "flow_1"}
-        }))
-        .unwrap()
-    }
-
-    fn named_inputs(
-        route: ValueRef,
-        first: ValueRef,
-        second: ValueRef,
-        arguments: ValueRef,
-    ) -> Inputs {
-        Inputs::from([
-            ("route".into(), route),
-            ("flow_0".into(), first),
-            ("flow_1".into(), second),
-            ("arguments".into(), arguments),
-        ])
     }
 
     fn execute_with(
@@ -534,334 +470,6 @@ mod tests {
         assert_eq!(node.metadata.input_bindings.len(), 1);
         assert!(node.metadata.input_bindings["arguments"].secret);
         assert!(matches!(node.execution, mf_runtime::NodeExecution::Task(_)));
-    }
-
-    #[test]
-    fn named_flow_ports_are_required_native_values_without_blanket_secrecy() {
-        let node = named_executable();
-        assert_eq!(
-            node.metadata.ports.inputs,
-            [
-                PortSpec::new("route", ValueType::String, true),
-                PortSpec::new("arguments", ValueType::Object, true),
-                PortSpec::new("flow_0", ValueType::Flow, true),
-                PortSpec::new("flow_1", ValueType::Flow, true),
-            ]
-        );
-        assert_eq!(
-            node.metadata.ports.outputs,
-            [PortSpec::new("result", ValueType::Object, true)]
-        );
-        assert_eq!(node.metadata.input_bindings.len(), 1);
-        assert!(node.metadata.input_bindings["arguments"].secret);
-        for port in ["route", "flow_0", "flow_1"] {
-            assert!(
-                !node
-                    .metadata
-                    .input_bindings
-                    .get(port)
-                    .cloned()
-                    .unwrap_or_default()
-                    .secret
-            );
-        }
-        assert!(node.metadata.stream_outputs.is_empty());
-        assert!(node.metadata.exclusive_outputs.is_empty());
-        let registration = mf_runtime::NodeRegistry::from_inventory()
-            .unwrap()
-            .get(KIND)
-            .unwrap();
-        assert!(matches!(registration.factory, NodeFactory::Plain(_)));
-        assert!(
-            registration
-                .flow_parameters(&json!({
-                    "mode": "execute",
-                    "flow_inputs": {"add": "flow_0", "echo": "flow_1"}
-                }))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn named_flow_inputs_validate_routes_ports_and_mode_strictly() {
-        for port in ["", " ", "\t\n", "route", "arguments", "flows"] {
-            let error = factory(json!({
-                "mode": "execute", "flow_inputs": {"tool": port}
-            }))
-            .err()
-            .unwrap();
-            assert!(matches!(
-                business_error(&error),
-                RouterBuildError::FlowInput { port: invalid } if invalid == port
-            ));
-        }
-        let duplicate = factory(json!({
-            "mode": "execute", "flow_inputs": {"add": "flow_0", "echo": "flow_0"}
-        }))
-        .err()
-        .unwrap();
-        assert!(matches!(
-            business_error(&duplicate),
-            RouterBuildError::FlowInput { port } if port == "flow_0"
-        ));
-        for route in ["", " ", "else"] {
-            let error = factory(json!({
-                "mode": "execute", "flow_inputs": {route: "flow_0"}
-            }))
-            .err()
-            .unwrap();
-            assert!(matches!(
-                business_error(&error),
-                RouterBuildError::Route { .. }
-            ));
-        }
-        // Router names are not subject to an LLM provider's tool-name grammar.
-        for route in ["a/b~", "工具 名", "route", "arguments", "flows"] {
-            assert!(factory(json!({"mode": "execute", "flow_inputs": {route: "flow_0"}})).is_ok());
-        }
-        for config in [
-            json!({"flow_inputs": {}}),
-            json!({"routes": ["tool"], "flow_inputs": {}}),
-            json!({"routes": [], "mode": "execute", "flow_inputs": {}}),
-        ] {
-            assert!(matches!(
-                business_error(&factory(config).err().unwrap()),
-                RouterBuildError::Mode
-            ));
-        }
-        for flow_inputs in [json!([]), json!({"tool": 1}), json!({"tool": null})] {
-            assert!(matches!(
-                factory(json!({"mode": "execute", "flow_inputs": flow_inputs})),
-                Err(NodeBuildError::InvalidConfiguration { .. })
-            ));
-        }
-    }
-
-    #[test]
-    fn named_routes_invoke_only_the_selected_native_flow_without_serializing_arguments() {
-        let calls = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
-        let candidates = calls.each_ref().map(|calls| {
-            let calls = calls.clone();
-            handle(
-                PreparedSubgraph::new(
-                    vec![],
-                    vec![PortSpec::new("value", ValueType::Any, true)],
-                    move |context| {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        assert_eq!(context.invocation_path().len(), 1);
-                        assert!(context.invocation_path()[0].is_call());
-                        assert_eq!(context.invocation_path()[0].node_id(), "owner");
-                        Ok(Outputs::from([(
-                            "value".into(),
-                            context.workflow_arguments().0["params.value"].clone(),
-                        )]))
-                    },
-                )
-                .with_input_schema(schema()),
-            )
-        });
-        let node = named_executable();
-        let returned = handle(body());
-        let mut context = ExecutionContext::default();
-        for (index, route) in ["add", "echo"].into_iter().enumerate() {
-            let result = context
-                .with_node("owner".into(), |context| {
-                    node.execution.as_task_node().unwrap().execute(
-                        named_inputs(
-                            route.into(),
-                            candidates[0].clone(),
-                            candidates[1].clone(),
-                            ValueRef::object([("params.value".into(), returned.clone())]),
-                        ),
-                        context,
-                    )
-                })
-                .unwrap();
-            assert!(result.outputs["result"]["outputs"]["value"].ptr_eq(&returned));
-            assert_eq!(calls[index].load(Ordering::SeqCst), 1);
-            if index == 0 {
-                assert_eq!(calls[1].load(Ordering::SeqCst), 0);
-            }
-        }
-        let error = node
-            .execution
-            .as_task_node()
-            .unwrap()
-            .execute(
-                named_inputs(
-                    "missing".into(),
-                    candidates[0].clone(),
-                    candidates[1].clone(),
-                    json!({}).into(),
-                ),
-                &mut context,
-            )
-            .unwrap_err();
-        assert!(matches!(
-            execution_error(&error),
-            RouterExecutionError::UnknownRoute { route, .. } if route == "missing"
-        ));
-        for calls in calls {
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-        }
-    }
-
-    #[test]
-    fn empty_named_flow_inputs_allow_zero_tools_but_never_fall_back_to_mapflow() {
-        let node = factory(json!({"mode": "execute", "flow_inputs": {}})).unwrap();
-        assert_eq!(
-            node.metadata.ports.inputs,
-            [
-                PortSpec::new("route", ValueType::String, true),
-                PortSpec::new("arguments", ValueType::Object, true),
-            ]
-        );
-        let error = execute_with(
-            &node,
-            "tool".into(),
-            flows(body()),
-            json!({}).into(),
-            &mut Default::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            execution_error(&error),
-            RouterExecutionError::UnknownRoute { route, .. } if route == "tool"
-        ));
-        let error = node
-            .execution
-            .as_task_node()
-            .unwrap()
-            .execute(
-                Inputs::from([
-                    ("route".into(), "missing".into()),
-                    ("arguments".into(), json!({}).into()),
-                ]),
-                &mut Default::default(),
-            )
-            .unwrap_err();
-        assert!(matches!(
-            execution_error(&error),
-            RouterExecutionError::UnknownRoute { .. }
-        ));
-        assert!(matches!(
-            business_error(&factory(json!({"routes": []})).err().unwrap()),
-            RouterBuildError::Empty
-        ));
-    }
-
-    #[test]
-    fn named_selection_privacy_uses_only_selected_flow_and_route_not_private_arguments() {
-        let public = handle(PreparedSubgraph::new(
-            vec![],
-            vec![PortSpec::new("answer", ValueType::String, true)],
-            |_| Ok(Outputs::from([("answer".into(), "constant".into())])),
-        ));
-        let node = named_executable();
-        for secret_selected in [false, true] {
-            for secret_route in [false, true] {
-                for secret_arguments in [false, true] {
-                    let selected = public.clone();
-                    let route = ValueRef::from("add");
-                    let arguments = ValueRef::from(json!({}));
-                    let result = node
-                        .execution
-                        .as_task_node()
-                        .unwrap()
-                        .execute(
-                            named_inputs(
-                                if secret_route {
-                                    route.into_secret()
-                                } else {
-                                    route
-                                },
-                                if secret_selected {
-                                    selected.into_secret()
-                                } else {
-                                    selected
-                                },
-                                handle(body()).into_secret(),
-                                if secret_arguments {
-                                    arguments.into_secret()
-                                } else {
-                                    arguments
-                                },
-                            ),
-                            &mut Default::default(),
-                        )
-                        .unwrap();
-                    let result = &result.outputs["result"];
-                    assert_eq!(result.is_secret(), secret_selected || secret_route);
-                    assert_eq!(
-                        result["outputs"]["answer"].is_secret(),
-                        secret_selected || secret_route
-                    );
-                    assert_eq!(result["outputs"]["answer"], json!("constant"));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn named_secret_route_diagnostics_keep_errors_typed_without_selection_leaks() {
-        let private_route = "private-selected-tool";
-        let node = factory(json!({
-            "mode": "execute", "flow_inputs": {private_route: "flow_0"}
-        }))
-        .unwrap();
-        for kind in ["unknown", "invalid", "child"] {
-            let selected = if kind == "invalid" {
-                json!({}).into()
-            } else {
-                handle(PreparedSubgraph::new(vec![], vec![], |_| {
-                    Err(WorkflowRunError::Context {
-                        definition_id: "child".into(),
-                        message: "infrastructure failure".into(),
-                    })
-                }))
-            };
-            let route = if kind == "unknown" {
-                "private-missing-tool-selection"
-            } else {
-                private_route
-            };
-            let error = node
-                .execution
-                .as_task_node()
-                .unwrap()
-                .execute(
-                    Inputs::from([
-                        ("route".into(), ValueRef::from(route).into_secret()),
-                        ("flow_0".into(), selected),
-                        ("arguments".into(), json!({}).into()),
-                    ]),
-                    &mut Default::default(),
-                )
-                .unwrap_err();
-            assert!(error.to_string().contains("[REDACTED]"));
-            assert!(!error.to_string().contains(route));
-            assert!(!format!("{error:?}").contains(route));
-            match kind {
-                "unknown" => assert!(matches!(
-                    execution_error(&error),
-                    RouterExecutionError::UnknownRoute { .. }
-                )),
-                "invalid" => assert!(matches!(
-                    execution_error(&error),
-                    RouterExecutionError::InvalidFlow { .. }
-                )),
-                _ => {
-                    assert!(matches!(
-                        execution_error(&error),
-                        RouterExecutionError::Child {
-                            source: WorkflowRunError::Context { .. },
-                            ..
-                        }
-                    ));
-                    assert!(has_source::<WorkflowRunError>(&error));
-                }
-            }
-        }
     }
 
     #[test]

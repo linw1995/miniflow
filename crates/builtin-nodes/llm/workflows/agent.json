@@ -14,7 +14,11 @@
       "version": "=0.1.0"
     }
   },
-  "flows": {},
+  "flows": {
+    "tool-catalog": {
+      "builtin": "mfn-llm.tool-catalog"
+    }
+  },
   "nodes": [
     {
       "id": "params",
@@ -23,6 +27,17 @@
         "parameters": {
           "prompt": {
             "type": "string"
+          },
+          "tools": {
+            "type": {
+              "map": "flow"
+            },
+            "secret": false
+          },
+          "descriptions": {
+            "type": "object",
+            "secret": false,
+            "default": {}
           },
           "system": {
             "type": "string",
@@ -53,16 +68,24 @@
     },
     {
       "id": "catalog",
-      "kind": "builtin.code",
+      "kind": "workflow.call",
       "config": {
-        "language": "cel",
-        "inputs": {},
-        "code": {
-          "tools": "[]",
-          "bindings": "{}"
-        }
+        "flow": "tool-catalog"
       },
-      "inputs": {}
+      "inputs": {
+        "params.tools": {
+          "from": {
+            "node": "params",
+            "port": "tools"
+          }
+        },
+        "params.descriptions": {
+          "from": {
+            "node": "params",
+            "port": "descriptions"
+          }
+        }
+      }
     },
     {
       "id": "initial_messages",
@@ -160,8 +183,10 @@
             "type": "array"
           },
           {
-            "name": "bindings",
-            "type": "object"
+            "name": "flows",
+            "type": {
+              "map": "flow"
+            }
           },
           {
             "name": "model",
@@ -213,6 +238,9 @@
           "flows": {
             "agent-turn": {
               "builtin": "mfn-llm.agent-turn"
+            },
+            "tool-uses": {
+              "builtin": "mfn-llm.tool-uses"
             }
           },
           "nodes": [
@@ -370,15 +398,7 @@
               "id": "dispatch",
               "kind": "workflow.call",
               "config": {
-                "flow": "tool-uses",
-                "body": {
-                  "version": "2026-10-28",
-                  "dependencies": {},
-                  "flows": {},
-                  "nodes": [],
-                  "edges": [],
-                  "outputs": []
-                }
+                "flow": "tool-uses"
               },
               "inputs": {
                 "params.calls": {
@@ -387,10 +407,10 @@
                     "port": "tool_calls"
                   }
                 },
-                "params.bindings": {
+                "params.flows": {
                   "from": {
                     "node": "%loop",
-                    "port": "bindings"
+                    "port": "flows"
                   }
                 }
               }
@@ -617,10 +637,10 @@
             "port": "tools"
           }
         },
-        "bindings": {
+        "flows": {
           "from": {
-            "node": "catalog",
-            "port": "bindings"
+            "node": "params",
+            "port": "tools"
           }
         },
         "model": {

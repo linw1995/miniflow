@@ -3,23 +3,27 @@
 mod common;
 #[path = "common/snapshots.rs"]
 mod snapshots;
+#[path = "common/tool_values.rs"]
+mod tool_values;
 
 extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
     NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled, instantiate_stream,
+    resolve_flows,
 };
 use mf_runtime::{
-    ExecutionContext, FlowRuntime, SnapshotOutcome, StreamOptions, WorkflowArguments,
+    CompiledGraph, ExecutionContext, FlowRuntime, SnapshotOutcome, StreamOptions, WorkflowArguments,
 };
 use mfn_llm::{
-    flows::{FlowTool, agent_definition, agent_turn_definition},
+    flows::{agent_definition, agent_turn_definition},
     test_support::{Reply, Server, messages},
 };
 use serde_json::{Value, json};
 use snapshots::Snapshots;
 use std::collections::BTreeMap;
+use tool_values::{FlowTool, configured_agent};
 
 fn local_dependencies(definition: &mut WorkflowDefinition) {
     fn select_sources(value: &mut Value, dependencies: &Value) {
@@ -72,12 +76,6 @@ fn calculator_tools() -> BTreeMap<String, FlowTool> {
             body,
         },
     )])
-}
-
-fn agent(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition {
-    let mut definition = agent_definition(tools).unwrap();
-    local_dependencies(&mut definition);
-    definition
 }
 
 fn inputs(server: &Server) -> Value {
@@ -201,6 +199,239 @@ fn assert_calculator_schema(tools: &Value) {
     );
 }
 
+fn assert_catalog_once_outside_loop(recording: &Snapshots, tool_count: usize) {
+    let history = recording.history();
+    let started = history
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry
+                .snapshot
+                .node(&entry.scope, &entry.node)
+                .unwrap()
+                .outcome
+                == SnapshotOutcome::Started
+        })
+        .collect::<Vec<_>>();
+    let catalogs = started
+        .iter()
+        .filter(|(_, entry)| {
+            entry.node.as_ref() == "catalog"
+                && entry
+                    .scope
+                    .iter()
+                    .map(|scope| scope.node_id())
+                    .eq(["agent"])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(catalogs.len(), 1);
+    let (repeat_index, repeat) = started
+        .iter()
+        .find(|(_, entry)| entry.node.as_ref() == "repeat")
+        .unwrap();
+    assert!(catalogs[0].0 < *repeat_index);
+    let projections = started
+        .iter()
+        .filter(|(_, entry)| entry.node.as_ref() == "definition")
+        .collect::<Vec<_>>();
+    assert_eq!(projections.len(), tool_count);
+    for (index, projection) in projections {
+        assert!(*index < *repeat_index);
+        assert!(
+            projection
+                .scope
+                .iter()
+                .any(|scope| scope.node_id() == "catalog")
+        );
+        assert!(
+            projection
+                .scope
+                .iter()
+                .all(|scope| scope.node_id() != "repeat")
+        );
+    }
+    // Runtime capabilities stay native through the caller map and Loop state;
+    // snapshots expose neither executable bodies nor the chat credential.
+    let snapshot = repeat.snapshot.node(&repeat.scope, &repeat.node).unwrap();
+    let flows = snapshot.inputs.get("flows").unwrap().as_object().unwrap();
+    assert_eq!(flows.len(), tool_count);
+    assert!(flows.values().all(|flow| flow.as_str() == Some("<Flow>")));
+    for entry in history {
+        let snapshot = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+        let serialized = serde_json::to_string(snapshot).unwrap();
+        assert!(
+            !serialized.contains("synthetic-agent-key"),
+            "{}: {serialized}",
+            entry.node
+        );
+        assert!(
+            !serialized.contains("flow_0"),
+            "{}: {serialized}",
+            entry.node
+        );
+    }
+}
+
+// Compare authored/lowered definitions recursively, not observation descriptions:
+// runtime origins legitimately include the caller's differing root workflow ID.
+fn author_graph(graph: &CompiledGraph) -> Value {
+    let children = graph
+        .children
+        .iter()
+        .map(|(owner, bindings)| {
+            let bindings = bindings
+                .iter()
+                .map(|(binding, child)| (binding.clone(), author_graph(child)))
+                .collect::<BTreeMap<_, _>>();
+            (owner.as_str(), bindings)
+        })
+        .collect::<BTreeMap<_, _>>();
+    json!({"definition":graph.definition,"children":children})
+}
+
+#[test]
+fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
+    let source = agent_definition().unwrap();
+    let value = serde_json::to_value(&source).unwrap();
+    let node = |id: &str| {
+        value["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap()
+    };
+    let parameters = node("params")["config"]["parameters"].as_object().unwrap();
+    assert_eq!(parameters.len(), 8);
+    assert_eq!(parameters["tools"]["type"], json!({"map":"flow"}));
+    assert!(parameters["tools"].get("default").is_none());
+    assert_eq!(parameters["descriptions"]["type"], "object");
+    assert_eq!(parameters["descriptions"]["default"], json!({}));
+    assert!(!value.to_string().contains("flow_0"));
+    assert_eq!(node("catalog")["kind"], "workflow.call");
+    let catalog_flow = node("catalog")["config"]["flow"].as_str().unwrap();
+    assert_eq!(
+        value["flows"][catalog_flow]["builtin"],
+        "mfn-llm.tool-catalog"
+    );
+    let repeat = node("repeat");
+    let variables = repeat["config"]["variables"].as_array().unwrap();
+    let native_variables = variables
+        .iter()
+        .filter(|variable| variable["type"] == json!({"map":"flow"}))
+        .collect::<Vec<_>>();
+    assert_eq!(native_variables.len(), 1);
+    assert_eq!(native_variables[0]["name"], "flows");
+    assert!(variables.iter().all(|variable| variable["type"] != "flow"));
+    let body = &repeat["config"]["body"];
+    let dispatch = body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "dispatch")
+        .unwrap();
+    let dispatch_flow = dispatch["config"]["flow"].as_str().unwrap();
+    assert_eq!(body["flows"][dispatch_flow]["builtin"], "mfn-llm.tool-uses");
+    assert!(dispatch["config"].get("body").is_none());
+
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let calculator = calculator_tools().remove("calculator").unwrap();
+    let mut resolved_baseline = None;
+    let mut compiled_baseline = None;
+    let mut caller_baseline = None;
+    for names in [
+        vec![],
+        vec!["calculator"],
+        vec!["add", "multiply", "subtract"],
+    ] {
+        let tools = names
+            .iter()
+            .map(|name| ((*name).to_owned(), calculator.clone()))
+            .collect();
+        let definition = configured_agent(tools);
+        let caller = definition
+            .nodes
+            .iter()
+            .find(|node| node.id.as_str() == "agent")
+            .unwrap();
+        if let Some(baseline) = &caller_baseline {
+            assert_eq!(caller, baseline);
+        } else {
+            caller_baseline = Some(caller.clone());
+        }
+        let resolved = resolve_flows(&definition, None).unwrap();
+        let resolved_child = &resolved.children[&"agent".into()]["body"];
+        if let Some(baseline) = &resolved_baseline {
+            assert_eq!(&resolved_child.definition, baseline);
+        } else {
+            resolved_baseline = Some(resolved_child.definition.clone());
+        }
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let child = &plan.graph.children[&"agent".into()]["body"];
+        let shape = author_graph(child);
+        if let Some(baseline) = &compiled_baseline {
+            assert_eq!(&shape, baseline);
+        } else {
+            compiled_baseline = Some(shape);
+        }
+        assert_eq!(
+            child.children[&"catalog".into()]["body"]
+                .definition
+                .nodes
+                .iter()
+                .filter(|node| node.kind == mf_runtime::ITERATION_KIND)
+                .count(),
+            1
+        );
+
+        // Exercise the actual native map, catalog and dispatch, not just example JSON.
+        let replies = if let Some(name) = names.last() {
+            vec![
+                tool_reply(
+                    json!([call(
+                        "selected",
+                        name,
+                        json!({"operation":"add", "left":2.0, "right":3.0})
+                    )]),
+                    false,
+                ),
+                Reply::text("Runtime tools work"),
+            ]
+        } else {
+            vec![Reply::text("Runtime tools work")]
+        };
+        let server = Server::start(replies);
+        let (output, recording) = memory(definition, inputs(&server));
+        assert_success(
+            &output,
+            "Runtime tools work",
+            if names.is_empty() { 1 } else { 2 },
+        );
+        assert_catalog_once_outside_loop(&recording, names.len());
+        let requests = server.requests();
+        let advertised = requests[0]
+            .body
+            .get("tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(advertised, names);
+        if !names.is_empty() {
+            assert_eq!(
+                requests[1].body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap(),
+                &json!({"role":"tool", "tool_call_id":"selected", "content":"5.0"})
+            );
+        }
+        assert_eq!(agent_definition().unwrap(), source);
+    }
+}
+
 #[test]
 fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_modes() {
     for stream in [false, true] {
@@ -222,7 +453,7 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
             Reply::text("Five and twelve")
         };
         let server = Server::start(vec![tool_reply(calls.clone(), stream), completion]);
-        let definition = agent(calculator_tools());
+        let definition = configured_agent(calculator_tools());
         let mut args = inputs(&server);
         args["params.system"] = json!("Use the calculator.");
         args["params.history"] = json!([
@@ -242,22 +473,7 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
         } else {
             let (output, recording) = memory(definition, args.clone());
             assert_success(&output, "Five and twelve", 2);
-            // Projection is per invocation, not per turn or parallel tool item.
-            let projections = recording
-                .history()
-                .into_iter()
-                .filter(|entry| {
-                    entry.scope.is_empty()
-                        && entry.node.as_ref() == "definition_0"
-                        && entry
-                            .snapshot
-                            .node(&entry.scope, &entry.node)
-                            .unwrap()
-                            .outcome
-                            == SnapshotOutcome::Started
-                })
-                .count();
-            assert_eq!(projections, 1);
+            assert_catalog_once_outside_loop(&recording, 1);
         }
         let requests = server.requests();
         assert_eq!(requests.len(), 2);
@@ -290,8 +506,9 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
 #[test]
 fn empty_agent_completes_a_direct_answer_without_advertising_tools() {
     let server = Server::start(vec![Reply::text("Direct answer")]);
-    let (output, _) = memory(agent(BTreeMap::new()), inputs(&server));
+    let (output, recording) = memory(configured_agent(BTreeMap::new()), inputs(&server));
     assert_success(&output, "Direct answer", 1);
+    assert_catalog_once_outside_loop(&recording, 0);
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert!(
@@ -336,7 +553,7 @@ fn provider_failure_is_a_failed_agent_result_without_another_turn() {
     let mut reply = Reply::json(json!({"error":{"message":"PRIVATE_PROVIDER_SENTINEL"}}));
     reply.status = 401;
     let server = Server::start(vec![reply]);
-    let (output, _) = memory(agent(calculator_tools()), inputs(&server));
+    let (output, _) = memory(configured_agent(calculator_tools()), inputs(&server));
     assert_eq!(output["status"], "failed");
     assert_eq!(output["text"], "");
     let error = output["error"].as_str().unwrap();
@@ -363,7 +580,7 @@ fn native_agent_loop_stops_after_eight_tool_turns() {
         })
         .collect();
     let server = Server::start(replies);
-    let (output, recording) = memory(agent(calculator_tools()), inputs(&server));
+    let (output, recording) = memory(configured_agent(calculator_tools()), inputs(&server));
     assert_eq!(output["status"], "failed");
     assert!(
         output["error"]
@@ -390,23 +607,7 @@ fn native_agent_loop_stops_after_eight_tool_turns() {
             );
         }
     }
-    assert_eq!(
-        recording
-            .history()
-            .into_iter()
-            .filter(|entry| {
-                entry.scope.is_empty()
-                    && entry.node.as_ref() == "definition_0"
-                    && entry
-                        .snapshot
-                        .node(&entry.scope, &entry.node)
-                        .unwrap()
-                        .outcome
-                        == SnapshotOutcome::Started
-            })
-            .count(),
-        1
-    );
+    assert_catalog_once_outside_loop(&recording, 1);
 }
 
 #[test]
@@ -439,7 +640,7 @@ fn unknown_and_invalid_tool_arguments_are_ordered_results_and_the_agent_can_reco
         tool_reply(calls.clone(), false),
         Reply::text("Recovered"),
     ]);
-    let (output, _) = memory(agent(calculator_tools()), inputs(&server));
+    let (output, _) = memory(configured_agent(calculator_tools()), inputs(&server));
     assert_success(&output, "Recovered", 2);
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
@@ -476,6 +677,63 @@ fn unknown_and_invalid_tool_arguments_are_ordered_results_and_the_agent_can_reco
 }
 
 #[test]
+fn secret_tool_results_reach_the_model_but_not_agent_snapshots_or_catalog() {
+    const SECRET: &str = "synthetic-private-agent-tool-result";
+    let tool = FlowTool {
+        description: "Return a privately bound value.".into(),
+        parameters: BTreeMap::new(),
+        body: WorkflowDefinition::from_json(
+            &json!({
+                "version":"2026-10-28", "nodes":[{
+                    "id":"params", "kind":"builtin.parameters", "config":{"parameters":{
+                        "content":{"type":"string", "default":SECRET, "secret":true}
+                    }}
+                }], "outputs":[{"name":"content", "node":"params", "port":"content"}]
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    };
+    let server = Server::start(vec![
+        tool_reply(json!([call("private-result", "private", json!({}))]), false),
+        Reply::text("Private result received"),
+    ]);
+    let (output, recording) = memory(
+        configured_agent(BTreeMap::from([("private".into(), tool)])),
+        inputs(&server),
+    );
+    assert_success(&output, "Private result received", 2);
+    assert_catalog_once_outside_loop(&recording, 1);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].body["tools"].to_string().contains(SECRET));
+    assert_eq!(
+        requests[0].body["tools"][0]["function"]["parameters"]["properties"],
+        json!({})
+    );
+    assert_eq!(
+        requests[1].body["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        &json!({"role":"tool", "tool_call_id":"private-result", "content":SECRET})
+    );
+    assert!(!output.to_string().contains(SECRET));
+    let history = recording.history();
+    assert!(
+        history
+            .iter()
+            .any(|entry| entry.node.as_ref() == "dispatch")
+    );
+    for entry in history {
+        let snapshot = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+        let serialized = serde_json::to_string(snapshot).unwrap();
+        assert!(!serialized.contains(SECRET), "{}: {serialized}", entry.node);
+    }
+}
+
+#[test]
 fn malformed_provider_calls_fail_without_tool_dispatch_or_retry() {
     for calls in [
         json!([call(
@@ -487,7 +745,7 @@ fn malformed_provider_calls_fail_without_tool_dispatch_or_retry() {
         json!([{"id":"invalid-json", "type":"function", "function":{"name":"calculator", "arguments":"{"}}]),
     ] {
         let server = Server::start(vec![tool_reply(calls, false)]);
-        let (output, recording) = memory(agent(calculator_tools()), inputs(&server));
+        let (output, recording) = memory(configured_agent(calculator_tools()), inputs(&server));
         assert_eq!(output["status"], "failed", "{output}");
         assert!(!output["error"].as_str().unwrap().is_empty());
         assert_eq!(output["usages"].as_array().unwrap().len(), 1);

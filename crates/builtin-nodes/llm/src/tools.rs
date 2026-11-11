@@ -19,8 +19,7 @@ pub struct ParameterDescription {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Config {
-    name: String,
+struct ToolDescription {
     description: String,
     #[serde(default)]
     parameters: BTreeMap<String, ParameterDescription>,
@@ -130,6 +129,10 @@ impl From<ToolBuildError> for NodeExecutionError {
 pub enum ToolExecutionError {
     #[snafu(display("tool call ID must not be blank"))]
     BlankCallId,
+    #[snafu(display("tool documentation is missing for the selected name"))]
+    MissingDescription,
+    #[snafu(display("invalid tool documentation: {source}"))]
+    Description { source: serde_json::Error },
     #[snafu(display("tool adapter input: {source}"))]
     PlumbingInput {
         source: mf_runtime::InputDecodeError,
@@ -168,11 +171,10 @@ fn validate_name(name: &str) -> Result<(), ToolBuildError> {
         (1..=64).contains(&name.len())
             && name
                 .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
-            && name != "else",
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')),
         InvalidToolSnafu {
             name,
-            message: "name must be 1-64 ASCII letters, digits, underscores or hyphens and not `else`"
+            message: "name must be 1-64 ASCII letters, digits, underscores or hyphens"
         }
     );
     Ok(())
@@ -345,16 +347,43 @@ fn project_definition(config: Value) -> Result<ToolDefinition, NodeBuildError> {
     ))
 }
 
+/// Inspect the native capability, never an advertised or serialized interface.
+fn flow_metadata(name: &str, flow: &FlowValue) -> Result<ToolMetadata, ToolBuildError> {
+    let body = flow.body();
+    ensure!(
+        !body.is_event_stream(),
+        InvalidToolSnafu {
+            name,
+            message: "requires a terminal-only body"
+        }
+    );
+    ensure!(
+        body.relations
+            .as_ref()
+            .is_none_or(|relations| relations.is_callable()),
+        InvalidToolSnafu {
+            name,
+            message: "requires a callable prepared child without an implicit scope frame"
+        }
+    );
+    Ok(ToolMetadata {
+        inputs: body.inputs.clone(),
+        outputs: body.outputs.clone(),
+        stream_outputs: body.stream_outputs.clone(),
+    })
+}
+
 /// Projects the selected Flow's real interface without invoking or retaining its body.
-struct DefinitionNode(Config);
+struct DefinitionNode;
 impl NodePortContract for DefinitionNode {
     fn ports(&self) -> NodePorts {
         NodePorts {
-            inputs: vec![PortSpec::new("flow", ValueType::Flow, true)],
-            outputs: vec![
-                PortSpec::new("definition", ValueType::Object, true),
-                PortSpec::new("binding", ValueType::Object, true),
+            inputs: vec![
+                PortSpec::new("flow", ValueType::Flow, true),
+                PortSpec::new("name", ValueType::String, true),
+                PortSpec::new("descriptions", ValueType::Object, true),
             ],
+            outputs: vec![PortSpec::new("definition", ValueType::Object, true)],
         }
     }
 }
@@ -366,38 +395,34 @@ impl TaskNode for DefinitionNode {
     ) -> Result<NodeResult, NodeExecutionError> {
         let selected: Shared<FlowValue> =
             mf_runtime::decode_input(&mut inputs, "flow").context(PlumbingInputSnafu)?;
+        let name: Shared<String> =
+            mf_runtime::decode_input(&mut inputs, "name").context(PlumbingInputSnafu)?;
+        let descriptions: ValueRef =
+            mf_runtime::decode_input(&mut inputs, "descriptions").context(PlumbingInputSnafu)?;
+        ValueType::Object
+            .validate_shared(&descriptions)
+            .context(PlumbingValueSnafu {
+                field: "descriptions",
+            })?;
         mf_runtime::reject_unknown_inputs(inputs).context(PlumbingInputSnafu)?;
+        // The caller supplies Iteration.key, not an alias from documentation or config.
+        let key = name.value().as_str().expect("decoded name");
+        let documentation = descriptions
+            .get(key)
+            .ok_or_else(|| MissingDescriptionSnafu.build())?;
+        let description: ToolDescription =
+            serde_json::from_value(serde_json::to_value(documentation).context(DescriptionSnafu)?)
+                .context(DescriptionSnafu)?;
         let flow = selected
             .decode()
             .context(PlumbingValueSnafu { field: "flow" })?;
-        let body = flow.body();
-        ensure!(
-            !body.is_event_stream(),
-            InvalidToolSnafu {
-                name: &self.0.name,
-                message: "requires a terminal-only body"
-            }
-        );
-        ensure!(
-            body.relations
-                .as_ref()
-                .is_none_or(|relations| relations.is_callable()),
-            InvalidToolSnafu {
-                name: &self.0.name,
-                message: "requires a callable prepared child without an implicit scope frame"
-            }
-        );
-        // Validate original typed declarations before redaction. Only this sanitized
-        // metadata enters Serde; the capability and its source bindings never do.
+        // Validate original typed declarations before redaction. The projected
+        // metadata stays local; only the model-facing definition is published.
         let public = project_tool(
-            self.0.name.clone(),
-            self.0.description.clone(),
-            self.0.parameters.clone(),
-            ToolMetadata {
-                inputs: body.inputs.clone(),
-                outputs: body.outputs.clone(),
-                stream_outputs: body.stream_outputs.clone(),
-            },
+            key.to_owned(),
+            description.description,
+            description.parameters,
+            flow_metadata(key, &flow)?,
         )?;
         let interface = prepare_tool_interface(&public.name, public.metadata.clone())?;
         let definition = tool_definition(
@@ -406,25 +431,19 @@ impl TaskNode for DefinitionNode {
             &public.parameters,
             &interface,
         );
-        // Static configuration has no private field markers, but selecting a Flow
-        // may be sensitive. Both model-facing projections inherit that selection.
+        // Only the selected document participates: private sibling documentation
+        // must not taint an otherwise public tool. Never serialize the Flow.
         let definition = Shared::<ToolDefinition>::new(
             mf_runtime::encode_node_value(definition)
                 .context(PlumbingValueSnafu {
                     field: "definition",
                 })?
-                .inherit_secrets([selected.value()]),
+                .inherit_secrets([selected.value(), name.value(), documentation]),
         )
         .context(PlumbingValueSnafu {
             field: "definition",
         })?;
-        let binding = ValueRef::from(serde_json::to_value(public).boxed()?)
-            .inherit_secrets([selected.value()]);
-        Ok(Outputs::from([
-            ("definition".into(), definition.into_value()),
-            ("binding".into(), binding),
-        ])
-        .into())
+        Ok(Outputs::from([("definition".into(), definition.into_value())]).into())
     }
 }
 
@@ -524,7 +543,7 @@ impl NodePortContract for RuntimeArgumentsNode {
         NodePorts {
             inputs: vec![
                 PortSpec::new("call", ValueType::Object, true),
-                PortSpec::new("bindings", ValueType::Object, true),
+                PortSpec::new("flows", ValueType::Map(Box::new(ValueType::Flow)), true),
             ],
             outputs: vec![
                 PortSpec::new("arguments", ValueType::Object, false),
@@ -548,16 +567,16 @@ impl TaskNode for RuntimeArgumentsNode {
             .context(PlumbingValueSnafu { field: "call" })?;
         ensure!(!decoded.id.trim().is_empty(), BlankCallIdSnafu);
         let name = call.value().get("name").expect("decoded call name").clone();
-        let bindings: ValueRef =
-            mf_runtime::decode_input(&mut inputs, "bindings").context(PlumbingInputSnafu)?;
-        ValueType::Object
-            .validate_shared(&bindings)
-            .context(PlumbingValueSnafu { field: "bindings" })?;
+        let flows: ValueRef =
+            mf_runtime::decode_input(&mut inputs, "flows").context(PlumbingInputSnafu)?;
+        ValueType::Map(Box::new(ValueType::Flow))
+            .validate_shared(&flows)
+            .context(PlumbingValueSnafu { field: "flows" })?;
         mf_runtime::reject_unknown_inputs(inputs).context(PlumbingInputSnafu)?;
-        let Some(binding) = bindings.get(&decoded.name) else {
-            // Missing selection depends on the requested name and the map's root,
+        let Some(selected) = flows.get(name.as_str().expect("decoded call name")) else {
+            // Missing selection depends on the requested name and collection root,
             // never on private arguments or another tool's private metadata.
-            let selection = if bindings.is_secret() {
+            let selection = if flows.is_secret() {
                 name.clone().into_secret()
             } else {
                 name.clone()
@@ -579,26 +598,19 @@ impl TaskNode for RuntimeArgumentsNode {
                 ..Default::default()
             });
         };
-        let binding = binding.clone().inherit_secrets([&name]);
-        let config: RuntimeBinding =
-            serde_json::from_value(serde_json::to_value(&binding).boxed()?).boxed()?;
-        let interface = prepare_tool_interface(&config.name, config.metadata.clone())?;
-        validate_binding(&config, &interface)?;
+        let flow = selected.as_flow().expect("validated Flow map");
+        // Validate against the actual executable capability, not the advertised schema.
+        // Its private inputs remain present so model arguments cannot override them.
+        let interface = prepare_tool_interface(&decoded.name, flow_metadata(&decoded.name, flow)?)?;
         let mut result = ArgumentsNode(interface)
             .execute(Inputs::from([("call".into(), call.into_value())]), context)?;
-        for (name, value) in &mut result.outputs {
-            // Routing keeps the original call-name reference. Input declarations
-            // affect arguments/errors, output declarations affect plain-content;
-            // neither private arguments nor unrelated tools taint the selection.
-            if name == "name" {
+        for (output, value) in &mut result.outputs {
+            // Keep the original call-name reference. Only the selected capability
+            // and route name affect these derived values, never sibling Flows.
+            if output == "name" {
                 continue;
             }
-            let source = if name == "plain_content" {
-                &binding["metadata"]["outputs"]
-            } else {
-                &binding["metadata"]["inputs"]
-            };
-            *value = value.clone().inherit_secrets([source]);
+            *value = value.clone().inherit_secrets([selected, &name]);
         }
         Ok(result)
     }
@@ -654,22 +666,23 @@ impl TypedTaskNode for EncodeNode {
 }
 
 fn arguments_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Config {}
+    let _: Config = deserialize_config(config)?;
     let metadata = NodeMetadata {
         exclusive_outputs: vec!["arguments".into(), "error".into()],
         ..Default::default()
     };
-    if config.is_null() || config.as_object().is_some_and(serde_json::Map::is_empty) {
-        return PreparedNode::new(RuntimeArgumentsNode, metadata);
-    }
-    let config: RuntimeBinding = deserialize_config(config)?;
-    let interface = prepare_tool_interface(&config.name, config.metadata.clone())?;
-    validate_binding(&config, &interface)?;
-    PreparedNode::new(ArgumentsNode(interface), metadata)
+    PreparedNode::new(RuntimeArgumentsNode, metadata)
 }
 
 fn definition_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
-    let config: Config = deserialize_config(config)?;
-    PreparedNode::new(DefinitionNode(config), NodeMetadata::default())
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Config {}
+    let _: Config = deserialize_config(config)?;
+    PreparedNode::new(DefinitionNode, NodeMetadata::default())
 }
 
 fn encode_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
@@ -735,23 +748,45 @@ mod tests {
         json!({"name": "lookup", "description": "Look up values.", "metadata": body})
     }
 
-    fn catalog_config() -> Value {
-        json!({"name":"lookup", "description": "Look up values."})
+    fn documentation() -> Value {
+        json!({"description": "Look up values."})
     }
 
-    fn binding_map(binding: ValueRef) -> ValueRef {
-        let name = binding["name"].as_str().unwrap().into();
-        ValueRef::object([(name, binding)])
+    fn native_flow(body: ToolMetadata) -> ValueRef {
+        FlowValue::new(prepared(body)).unwrap().into()
     }
 
-    fn project(config: Value, body: PreparedSubgraph) -> Result<NodeResult, NodeExecutionError> {
-        let node = definition_factory(config).boxed()?;
+    fn flows(selected: ValueRef) -> ValueRef {
+        ValueRef::object([("lookup".into(), selected)])
+    }
+
+    fn definition_inputs(flow: ValueRef, name: ValueRef, descriptions: ValueRef) -> Inputs {
+        Inputs::from([
+            ("flow".into(), flow),
+            ("name".into(), name),
+            ("descriptions".into(), descriptions),
+        ])
+    }
+
+    fn project(
+        name: &str,
+        documentation: Value,
+        body: PreparedSubgraph,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        let node = definition_factory(json!({})).boxed()?;
         let flow = FlowValue::new(body).boxed()?;
-        execute_with(&node, Inputs::from([("flow".into(), flow.into())]))
+        execute_with(
+            &node,
+            definition_inputs(
+                flow.into(),
+                name.into(),
+                json!({name: documentation}).into(),
+            ),
+        )
     }
 
     fn catalog(body: ToolMetadata) -> Result<NodeResult, NodeExecutionError> {
-        project(catalog_config(), prepared(body))
+        project("lookup", documentation(), prepared(body))
     }
 
     fn execute_with(node: &PreparedNode, inputs: Inputs) -> Result<NodeResult, NodeExecutionError> {
@@ -772,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn flow_definition_and_binding_are_sanitized_without_child_execution() {
+    fn flow_definition_is_sanitized_without_child_execution() {
         let mut body = metadata();
         body.inputs
             .inputs
@@ -794,26 +829,32 @@ mod tests {
             },
         );
         for name in ["z-last", "9first"] {
-            let config = json!({"name":name, "description":"Description", "parameters": {
+            let descriptions: ValueRef = json!({name: {"description":"Description", "parameters": {
                 "params.secret": {"description":"PRIVATE_SECRET_DESCRIPTION"}
-            }});
-            let node = definition_factory(config).unwrap();
+            }}})
+            .into();
+            let node = definition_factory(json!({})).unwrap();
             assert_eq!(
                 node.metadata.ports.inputs,
-                [PortSpec::new("flow", ValueType::Flow, true)]
+                [
+                    PortSpec::new("flow", ValueType::Flow, true),
+                    PortSpec::new("name", ValueType::String, true),
+                    PortSpec::new("descriptions", ValueType::Object, true),
+                ]
             );
             assert_eq!(
                 node.metadata.ports.outputs,
-                [
-                    PortSpec::new("definition", ValueType::Object, true),
-                    PortSpec::new("binding", ValueType::Object, true),
-                ]
+                [PortSpec::new("definition", ValueType::Object, true)]
             );
             let flow: ValueRef = FlowValue::new(prepared(body.clone())).unwrap().into();
             for _ in 0..2 {
-                let result =
-                    execute_with(&node, Inputs::from([("flow".into(), flow.clone())])).unwrap();
-                let public = serde_json::to_value(&result.outputs["binding"]).unwrap();
+                let result = execute_with(
+                    &node,
+                    definition_inputs(flow.clone(), name.into(), descriptions.clone()),
+                )
+                .unwrap();
+                let public = serde_json::to_value(&result.outputs["definition"]).unwrap();
+                assert_eq!(result.outputs.len(), 1);
                 let definition =
                     Shared::<ToolDefinition>::new(result.outputs["definition"].clone())
                         .unwrap()
@@ -837,14 +878,14 @@ mod tests {
                             .contains(forbidden)
                     );
                 }
-                assert!(public.get("input_schema").is_none());
+                assert!(public.get("metadata").is_none());
                 assert!(public.get("flow").is_none());
                 let arguments = RuntimeArgumentsNode
                     .execute(
                         Inputs::from([
                             (
-                                "bindings".into(),
-                                binding_map(result.outputs["binding"].clone()),
+                                "flows".into(),
+                                ValueRef::object([(name.into(), flow.clone())]),
                             ),
                             (
                                 "call".into(),
@@ -862,19 +903,115 @@ mod tests {
     }
 
     #[test]
+    fn one_static_definition_node_projects_any_catalog_size_using_collection_keys() {
+        // One prepared node and fixed ports, reused by the catalog Iteration body.
+        // Neither tool names nor their number are configuration or graph structure.
+        let node = definition_factory(json!({})).unwrap();
+        let ports = node.metadata.ports.clone();
+        for count in [0, 1, 3, 32] {
+            let tools = ValueRef::object((0..count).map(|index| {
+                (
+                    format!("tool-{index}").into(),
+                    FlowValue::new(prepared(metadata())).unwrap().into(),
+                )
+            }));
+            let descriptions = ValueRef::object((0..count).map(|index| {
+                (
+                    format!("tool-{index}").into(),
+                    json!({"description":format!("Tool {index}")}).into(),
+                )
+            }));
+            let mut definitions = Vec::new();
+            for (key, selected) in tools.as_object().unwrap() {
+                let result = execute_with(
+                    &node,
+                    definition_inputs(selected.clone(), key.as_ref().into(), descriptions.clone()),
+                )
+                .unwrap();
+                assert_eq!(
+                    result.outputs["definition"]["name"].as_str(),
+                    Some(key.as_ref())
+                );
+                assert_eq!(result.outputs.len(), 1);
+                definitions.push(result.outputs["definition"].clone());
+            }
+            assert_eq!(definitions.len(), count);
+            assert_eq!(node.metadata.ports, ports);
+        }
+    }
+
+    #[test]
+    fn dynamic_documentation_is_required_and_strictly_decoded_only_after_selection() {
+        let node = definition_factory(json!({})).unwrap();
+        let flow: ValueRef = FlowValue::new(prepared(metadata())).unwrap().into();
+        for document in [
+            json!(null),
+            json!({}),
+            json!({"description":42}),
+            json!({"description":"Description", "name":"alias"}),
+            json!({"description":"Description", "parameters":[]}),
+            json!({"description":"Description", "parameters":{"params.visible":{}}}),
+            json!({"description":"Description", "parameters":{"params.visible":{"description":"x", "extra":true}}}),
+        ] {
+            let error = execute_with(
+                &node,
+                definition_inputs(
+                    flow.clone(),
+                    "lookup".into(),
+                    json!({"lookup":document}).into(),
+                ),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                std::error::Error::source(&error)
+                    .unwrap()
+                    .downcast_ref::<ToolExecutionError>(),
+                Some(ToolExecutionError::Description { .. })
+            ));
+        }
+        let error = execute_with(
+            &node,
+            definition_inputs(
+                flow.clone(),
+                "lookup".into(),
+                json!({"other":{"description":"Not a fallback"}}).into(),
+            ),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .downcast_ref::<ToolExecutionError>(),
+            Some(ToolExecutionError::MissingDescription)
+        ));
+        let error = execute_with(
+            &node,
+            definition_inputs(
+                flow.clone(),
+                "lookup".into(),
+                ValueRef::object([("lookup".into(), flow)]),
+            ),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .downcast_ref::<ToolExecutionError>(),
+            Some(ToolExecutionError::Description { .. })
+        ));
+    }
+
+    #[test]
     fn flow_projection_requires_valid_names_descriptions_and_qualified_parameters() {
         for name in [
             "".to_owned(),
-            "else".into(),
             "has.dot".into(),
             "has/slash".into(),
             "two words".into(),
             "工具".into(),
             "x".repeat(65),
         ] {
-            let config = json!({"name":name, "description": "Description"});
-            assert!(definition_factory(config.clone()).is_ok());
-            let error = project(config, prepared(metadata())).unwrap_err();
+            let error = project(&name, documentation(), prepared(metadata())).unwrap_err();
             assert!(
                 std::error::Error::source(&error)
                     .unwrap()
@@ -883,7 +1020,13 @@ mod tests {
                 "{name}"
             );
         }
-        for name in ["search-web", "9lookup", "under_score", &"x".repeat(64)] {
+        for name in [
+            "search-web",
+            "9lookup",
+            "under_score",
+            "else",
+            &"x".repeat(64),
+        ] {
             assert!(
                 project_tool(
                     name.into(),
@@ -895,10 +1038,9 @@ mod tests {
             );
         }
         for description in ["", " \n\t"] {
-            let mut config = catalog_config();
+            let mut config = documentation();
             config["description"] = json!(description);
-            assert!(definition_factory(config.clone()).is_ok());
-            assert!(project(config, prepared(metadata())).is_err());
+            assert!(project("lookup", config, prepared(metadata())).is_err());
         }
         for parameter in [
             "visible",
@@ -906,10 +1048,9 @@ mod tests {
             "params.missing",
             "params.visible.extra",
         ] {
-            let mut config = catalog_config();
+            let mut config = documentation();
             config["parameters"] = json!({parameter: {"description": "Unknown"}});
-            assert!(definition_factory(config.clone()).is_ok());
-            let error = project(config, prepared(metadata())).unwrap_err();
+            let error = project("lookup", config, prepared(metadata())).unwrap_err();
             assert!(error.to_string().contains("describes unknown input"));
             assert!(error.to_string().contains(parameter));
         }
@@ -935,7 +1076,13 @@ mod tests {
         variants.push(body);
         for body in variants {
             assert!(catalog(body.clone()).is_err());
-            assert!(arguments_factory(binding(body.clone())).is_err());
+            let mut inputs = call(json!({"visible":"x"}));
+            inputs.insert("flows".into(), flows(native_flow(body.clone())));
+            assert!(
+                RuntimeArgumentsNode
+                    .execute(inputs, &mut ExecutionContext::default())
+                    .is_err()
+            );
             assert!(project_definition(binding(body)).is_err());
         }
         let scoped = prepared(metadata()).with_relations(mf_runtime::GraphRelations {
@@ -948,12 +1095,12 @@ mod tests {
             }),
             ..Default::default()
         });
-        assert!(project(catalog_config(), scoped).is_err());
+        assert!(project("lookup", documentation(), scoped).is_err());
         let event =
             PreparedSubgraph::from_stream_factory(vec![], metadata().inputs, vec![], || {
                 panic!("event factory must not run during catalog preparation")
             });
-        assert!(project(catalog_config(), event).is_err());
+        assert!(project("lookup", documentation(), event).is_err());
     }
 
     #[test]
@@ -1009,10 +1156,15 @@ mod tests {
             .get_mut("params")
             .unwrap()
             .retain(|name, _| name == "secret");
+        let projection = project_tool(
+            "lookup".into(),
+            "Description".into(),
+            BTreeMap::new(),
+            body.clone(),
+        )
+        .unwrap();
+        assert!(projection.metadata.inputs.inputs["params"].is_empty());
         let result = catalog(body).unwrap();
-        let binding = serde_json::to_value(&result.outputs["binding"]).unwrap();
-        assert_eq!(binding["metadata"]["inputs"]["inputs"]["params"], json!({}));
-        assert!(project_definition(binding).is_ok());
         assert_eq!(
             result.outputs["definition"]["input_schema"]["properties"],
             json!({})
@@ -1073,11 +1225,56 @@ mod tests {
             ));
             assert!(std::error::Error::source(source).is_some());
             assert!(project_definition(binding(body.clone())).is_err());
-            assert!(arguments_factory(binding(body)).is_err());
+            let mut inputs = call(json!({"visible":"x"}));
+            inputs.insert("flows".into(), flows(native_flow(body)));
+            assert!(
+                RuntimeArgumentsNode
+                    .execute(inputs, &mut ExecutionContext::default())
+                    .is_err()
+            );
             let mut body = metadata();
             body.outputs.push(PortSpec::new("capability", ty, true));
             assert!(catalog(body.clone()).is_err());
             assert!(project_definition(binding(body)).is_err());
+        }
+    }
+
+    #[test]
+    fn secret_runtime_only_inputs_cannot_bypass_source_validation_before_redaction() {
+        for ty in [
+            ValueType::Flow,
+            ValueType::List(Box::new(ValueType::Flow)),
+            ValueType::Map(Box::new(ValueType::Nullable(Box::new(ValueType::Flow)))),
+        ] {
+            let mut body = metadata();
+            let hidden = body
+                .inputs
+                .inputs
+                .get_mut("params")
+                .unwrap()
+                .get_mut("secret")
+                .unwrap();
+            hidden.value_type = ty;
+            hidden.binding.default = None;
+            hidden.binding.env = Some("PRIVATE_FLOW_SOURCE".into());
+            let error = project_tool(
+                "lookup".into(),
+                "Description".into(),
+                BTreeMap::new(),
+                body.clone(),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                ToolBuildError::Metadata {
+                    source: ToolMetadataError::MetadataInput { .. },
+                    ..
+                }
+            ));
+            assert!(catalog(body.clone()).is_err());
+            input_binding(&mut body, "secret").env = None;
+            // A hidden capability also cannot be left unbound and then erased.
+            assert!(catalog(body).is_err());
         }
     }
 
@@ -1183,11 +1380,11 @@ mod tests {
             })
             .collect();
         let result = project(
-            json!({"name":"lookup", "description":"Description", "parameters":parameters}),
-            prepared(body),
+            "lookup",
+            json!({"description":"Description", "parameters":parameters}),
+            prepared(body.clone()),
         )
         .unwrap();
-        let public = serde_json::to_value(&result.outputs["binding"]).unwrap();
         let definition = Shared::<ToolDefinition>::new(result.outputs["definition"].clone())
             .unwrap()
             .decode()
@@ -1206,8 +1403,7 @@ mod tests {
                 "required": ["visible"], "additionalProperties": false,
             })
         );
-        let config: RuntimeBinding = deserialize_config(public.clone()).unwrap();
-        let node = ArgumentsNode(prepare_tool_interface(&config.name, config.metadata).unwrap());
+        let node = ArgumentsNode(prepare_tool_interface("lookup", body.clone()).unwrap());
         let result = node
             .execute(
                 call(json!({"visible":"x"})),
@@ -1229,7 +1425,7 @@ mod tests {
             json!(null),
         ] {
             let mut inputs = call(invalid);
-            inputs.insert("bindings".into(), binding_map(public.clone().into()));
+            inputs.insert("flows".into(), flows(native_flow(body.clone())));
             let result = RuntimeArgumentsNode
                 .execute(inputs, &mut ExecutionContext::default())
                 .unwrap();
@@ -1239,24 +1435,82 @@ mod tests {
     }
 
     #[test]
-    fn definition_and_binding_inherit_selected_flow_sensitivity() {
-        let node = definition_factory(json!({
-            "name":"lookup", "description":"Look up values.",
-            "parameters":{"params.visible":{"description":"Visible parameter documentation."}}
-        }))
-        .unwrap();
+    fn definition_inherits_only_selected_flow_name_and_document_sensitivity() {
+        let node = definition_factory(json!({})).unwrap();
         let public: ValueRef = FlowValue::new(prepared(metadata())).unwrap().into();
-        let baseline =
-            execute_with(&node, Inputs::from([("flow".into(), public.clone())])).unwrap();
-        for secret in [false, true] {
-            let selected = if secret {
-                public.clone().into_secret()
-            } else {
-                public.clone()
-            };
+        let document: ValueRef = json!({
+            "description":"Look up values.",
+            "parameters":{"params.visible":{"description":"Visible parameter documentation."}}
+        })
+        .into();
+        let descriptions = ValueRef::object([
+            ("lookup".into(), document.clone()),
+            (
+                "private-sibling".into(),
+                ValueRef::from("invalid and private").into_secret(),
+            ),
+        ]);
+        let baseline = execute_with(
+            &node,
+            definition_inputs(public.clone(), "lookup".into(), descriptions.clone()),
+        )
+        .unwrap();
+        for (selected, name, docs, secret) in [
+            (
+                public.clone(),
+                ValueRef::from("lookup"),
+                descriptions.clone(),
+                false,
+            ),
+            (
+                public.clone().into_secret(),
+                "lookup".into(),
+                descriptions.clone(),
+                true,
+            ),
+            (
+                public.clone(),
+                ValueRef::from("lookup").into_secret(),
+                descriptions.clone(),
+                true,
+            ),
+            (
+                public.clone(),
+                "lookup".into(),
+                descriptions.clone().into_secret(),
+                true,
+            ),
+            (
+                public.clone(),
+                "lookup".into(),
+                with_secret_field(&descriptions, "lookup"),
+                true,
+            ),
+            (
+                public.clone(),
+                "lookup".into(),
+                with_field(
+                    &descriptions,
+                    "lookup",
+                    with_secret_field(&document, "description"),
+                ),
+                true,
+            ),
+            (
+                public.clone(),
+                "lookup".into(),
+                with_field(
+                    &descriptions,
+                    "lookup",
+                    with_secret_field(&document, "parameters"),
+                ),
+                true,
+            ),
+        ] {
             let result =
-                execute_with(&node, Inputs::from([("flow".into(), selected.clone())])).unwrap();
-            for output in ["definition", "binding"] {
+                execute_with(&node, definition_inputs(selected.clone(), name, docs)).unwrap();
+            {
+                let output = "definition";
                 let value = &result.outputs[output];
                 assert_eq!(value.is_secret(), secret);
                 assert_eq!(
@@ -1284,24 +1538,27 @@ mod tests {
                 definition.input_schema["properties"]["visible"]["description"],
                 json!("Visible parameter documentation.")
             );
-            // Selection privacy must survive the JSON-binding arguments adapter too.
+            // Documentation sensitivity only affects advertisement, not execution.
             let mut inputs = call(json!({"visible":"x"}));
-            inputs.insert(
-                "bindings".into(),
-                binding_map(result.outputs["binding"].clone()),
-            );
+            inputs.insert("flows".into(), flows(selected.clone()));
             let arguments = RuntimeArgumentsNode
                 .execute(inputs, &mut ExecutionContext::default())
                 .unwrap();
-            assert_eq!(arguments.outputs["arguments"].is_secret(), secret);
-            assert_eq!(arguments.outputs["plain_content"].is_secret(), secret);
+            assert_eq!(
+                arguments.outputs["arguments"].is_secret(),
+                selected.is_secret()
+            );
+            assert_eq!(
+                arguments.outputs["plain_content"].is_secret(),
+                selected.is_secret()
+            );
             assert!(selected.as_flow().is_some());
             assert!(serde_json::to_value(&selected).is_err());
         }
     }
 
     #[test]
-    fn runtime_arguments_projection_marks_all_outputs_from_relevant_metadata() {
+    fn runtime_arguments_inherit_selected_flow_privacy_and_preserve_nested_argument_markers() {
         let mut body = metadata();
         body.inputs.inputs.get_mut("params").unwrap().insert(
             "other".into(),
@@ -1311,35 +1568,10 @@ mod tests {
                 binding: InputBinding::default(),
             },
         );
-        let public: ValueRef = serde_json::to_value(
-            project_tool(
-                "lookup".into(),
-                "Look up values.".into(),
-                BTreeMap::new(),
-                body,
-            )
-            .unwrap(),
-        )
-        .unwrap()
-        .into();
-        let private_inputs = with_field(
-            &public,
-            "metadata",
-            with_secret_field(&public["metadata"], "inputs"),
-        );
-        let private_outputs = with_field(
-            &public,
-            "metadata",
-            with_secret_field(&public["metadata"], "outputs"),
-        );
-        for (binding, secret_arguments, secret_plain_content) in [
+        let public = native_flow(body);
+        for (selected, secret_arguments, secret_plain_content) in [
             (public.clone(), false, false),
             (public.clone().into_secret(), true, true),
-            (with_secret_field(&public, "metadata"), true, true),
-            (private_inputs, true, false),
-            (private_outputs, false, true),
-            // Documentation is not used to validate or qualify arguments.
-            (with_secret_field(&public, "description"), false, false),
         ] {
             for (arguments, valid) in [
                 (json!({"visible":"x"}), true),
@@ -1347,7 +1579,7 @@ mod tests {
                 (json!({"visible":"x", "secret":"override"}), false),
             ] {
                 let mut inputs = call(arguments.clone());
-                inputs.insert("bindings".into(), binding_map(binding.clone()));
+                inputs.insert("flows".into(), flows(selected.clone()));
                 let result = RuntimeArgumentsNode
                     .execute(inputs, &mut ExecutionContext::default())
                     .unwrap();
@@ -1394,7 +1626,7 @@ mod tests {
         let result = RuntimeArgumentsNode
             .execute(
                 Inputs::from([
-                    ("bindings".into(), binding_map(public)),
+                    ("flows".into(), flows(public)),
                     (
                         "call".into(),
                         ValueRef::object([
@@ -1421,11 +1653,9 @@ mod tests {
 
     #[test]
     fn independent_calls_keep_argument_secrets_out_of_selection_and_other_calls() {
-        let public = catalog(metadata()).unwrap().outputs["binding"].clone();
-        let private_binding = with_field(&public, "name", "private-tool".into()).into_secret();
-        let bindings = ValueRef::object([
-            ("lookup".into(), public),
-            ("private-tool".into(), private_binding),
+        let tools = ValueRef::object([
+            ("lookup".into(), native_flow(metadata())),
+            ("private-tool".into(), native_flow(metadata()).into_secret()),
         ]);
         let private_argument = ValueRef::from("private argument").into_secret();
         let first = ValueRef::object([
@@ -1445,7 +1675,7 @@ mod tests {
                 .execute(
                     Inputs::from([
                         ("call".into(), call.clone()),
-                        ("bindings".into(), bindings.clone()),
+                        ("flows".into(), tools.clone()),
                     ]),
                     &mut ExecutionContext::default(),
                 )
@@ -1469,12 +1699,12 @@ mod tests {
         }
         assert!(results[0].outputs["arguments"].contains_secret());
         assert!(!results[1].outputs["arguments"].contains_secret());
-        assert!(!bindings["lookup"].contains_secret());
+        assert!(!tools["lookup"].contains_secret());
     }
 
     #[test]
     fn private_call_names_mark_selection_outputs_but_preserve_the_original_name() {
-        let bindings = binding_map(catalog(metadata()).unwrap().outputs["binding"].clone());
+        let tools = flows(native_flow(metadata()));
         for requested in ["lookup", "missing"] {
             for arguments in [json!({"visible":"x"}), json!({})] {
                 let public: ValueRef =
@@ -1484,7 +1714,7 @@ mod tests {
                         .execute(
                             Inputs::from([
                                 ("call".into(), call.clone()),
-                                ("bindings".into(), bindings.clone()),
+                                ("flows".into(), tools.clone()),
                             ]),
                             &mut ExecutionContext::default(),
                         )
@@ -1517,28 +1747,27 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tools_do_not_touch_other_bindings_or_inherit_their_privacy() {
-        // These bodies panic if invoked. Only the selected metadata may be used;
-        // private or malformed unselected entries must not affect unknown calls.
-        let private_binding = catalog(metadata()).unwrap().outputs["binding"]
-            .clone()
-            .into_secret();
-        let bindings = ValueRef::object([
-            ("lookup".into(), private_binding),
-            ("malformed-unused".into(), json!({"metadata":null}).into()),
+    fn unknown_tools_do_not_inspect_other_flow_interfaces_or_inherit_their_privacy() {
+        // These bodies panic if invoked. An invalid tool interface on another
+        // native Flow must not affect unknown calls or leak its privacy.
+        let mut invalid_interface = metadata();
+        invalid_interface.inputs.inputs.clear();
+        let tools = ValueRef::object([
+            ("lookup".into(), native_flow(metadata()).into_secret()),
+            ("invalid-unused".into(), native_flow(invalid_interface)),
         ]);
         let public: ValueRef =
             json!({"id":"id", "name":"missing", "arguments":{"private":"payload"}}).into();
         for call in [public.clone(), with_secret_field(&public, "arguments")] {
             for private_map in [false, true] {
                 let map = if private_map {
-                    bindings.clone().into_secret()
+                    tools.clone().into_secret()
                 } else {
-                    bindings.clone()
+                    tools.clone()
                 };
                 let result = RuntimeArgumentsNode
                     .execute(
-                        Inputs::from([("call".into(), call.clone()), ("bindings".into(), map)]),
+                        Inputs::from([("call".into(), call.clone()), ("flows".into(), map)]),
                         &mut ExecutionContext::default(),
                     )
                     .unwrap();
@@ -1555,18 +1784,86 @@ mod tests {
     }
 
     #[test]
+    fn selected_flow_and_whole_map_secrets_do_not_taint_original_public_names_or_other_calls() {
+        let public = native_flow(metadata());
+        let tools = ValueRef::object([
+            ("lookup".into(), public),
+            ("private-tool".into(), native_flow(metadata()).into_secret()),
+        ]);
+        for private_root in [false, true] {
+            let map = if private_root {
+                tools.clone().into_secret()
+            } else {
+                tools.clone()
+            };
+            for requested in ["lookup", "private-tool"] {
+                for valid in [false, true] {
+                    let arguments = if valid {
+                        json!({"visible":"x"})
+                    } else {
+                        json!({})
+                    };
+                    let call: ValueRef =
+                        json!({"id":"id", "name":requested, "arguments":arguments}).into();
+                    let result = RuntimeArgumentsNode
+                        .execute(
+                            Inputs::from([
+                                ("call".into(), call.clone()),
+                                ("flows".into(), map.clone()),
+                            ]),
+                            &mut ExecutionContext::default(),
+                        )
+                        .unwrap();
+                    let secret = private_root || requested == "private-tool";
+                    let output = if valid { "arguments" } else { "error" };
+                    assert_eq!(result.outputs[output].is_secret(), secret);
+                    assert_eq!(result.outputs["plain_content"].is_secret(), secret);
+                    assert!(result.outputs["name"].ptr_eq(&call["name"]));
+                    assert!(!result.outputs["name"].is_secret());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_rejects_spoofed_json_flows_and_legacy_binding_protocols() {
+        let runtime = arguments_factory(json!({})).unwrap();
+        for invalid in [
+            json!([]),
+            json!({"lookup":"<Flow>"}),
+            json!({"lookup":{"kind":"Flow", "body":{}}}),
+            json!({"lookup":binding(metadata())}),
+            json!([{ "definition":{}, "binding":binding(metadata()) }]),
+        ] {
+            let mut inputs = call(json!({"visible":"x"}));
+            inputs.insert("flows".into(), invalid.into());
+            let error = execute_with(&runtime, inputs).unwrap_err();
+            assert!(matches!(
+                std::error::Error::source(&error)
+                    .unwrap()
+                    .downcast_ref::<ToolExecutionError>(),
+                Some(ToolExecutionError::PlumbingValue { .. })
+            ));
+        }
+        let mut inputs = call(json!({"visible":"x"}));
+        inputs.insert("bindings".into(), json!([]).into());
+        assert!(execute_with(&runtime, inputs).is_err());
+        let mut inputs = call(json!({"visible":"x"}));
+        inputs.insert("flows".into(), flows(native_flow(metadata())));
+        inputs.insert("bindings".into(), json!([]).into());
+        assert!(execute_with(&runtime, inputs).is_err());
+    }
+
+    #[test]
     fn runtime_arguments_strictly_decode_calls_before_unknown_selection() {
         let runtime = arguments_factory(json!({})).unwrap();
-        let static_node = arguments_factory(binding(metadata())).unwrap();
-        assert_eq!(
-            runtime.metadata.ports.outputs,
-            static_node.metadata.ports.outputs
-        );
+        let interface = ArgumentsNode(prepare_tool_interface("lookup", metadata()).unwrap());
+        assert_eq!(runtime.metadata.ports.outputs, interface.ports().outputs);
         assert_eq!(
             runtime.metadata.ports.inputs,
             [
                 PortSpec::new("call", ValueType::Object, true),
-                PortSpec::new("bindings", ValueType::Object, true),
+                PortSpec::new("flows", ValueType::Map(Box::new(ValueType::Flow)), true),
             ]
         );
         assert!(runtime.metadata.ports.outputs.contains(&PortSpec::new(
@@ -1585,7 +1882,7 @@ mod tests {
                 &runtime,
                 Inputs::from([
                     ("call".into(), call.into()),
-                    ("bindings".into(), json!({}).into()),
+                    ("flows".into(), json!({}).into()),
                 ]),
             )
             .unwrap_err();
@@ -1625,7 +1922,7 @@ mod tests {
         };
         let config = json!({"name":"add", "description":"Add two integers.", "metadata":body,
             "parameters": {"calculate.left":{"description":"Left operand."}, "calculate.right":{"description":"Right operand."}}});
-        assert!(arguments_factory(config.clone()).is_ok());
+        assert!(arguments_factory(config.clone()).is_err());
         let definition = project_definition(config.clone()).unwrap();
         assert_eq!(
             serde_json::to_value(&definition.input_schema).unwrap(),
@@ -1698,16 +1995,13 @@ mod tests {
             .get_mut("visible")
             .unwrap()
             .value_type = ValueType::Map(Box::new(ValueType::Boolean));
-        let config = serde_json::to_value(
-            project_tool("lookup".into(), "Description".into(), BTreeMap::new(), body).unwrap(),
-        )
-        .unwrap();
+        let tools = flows(native_flow(body));
         for (visible, valid) in [
             (json!({"flag":true}), true),
             (json!({"flag":"not boolean"}), false),
         ] {
             let mut inputs = call(json!({"visible":visible}));
-            inputs.insert("bindings".into(), binding_map(config.clone().into()));
+            inputs.insert("flows".into(), tools.clone());
             let result = RuntimeArgumentsNode
                 .execute(inputs, &mut ExecutionContext::default())
                 .unwrap();
@@ -1747,13 +2041,13 @@ mod tests {
 
     #[test]
     fn adapter_factories_and_runtime_projection_reject_invalid_config() {
-        assert!(definition_factory(catalog_config()).is_ok());
-        assert!(definition_factory(json!({})).is_err());
+        assert!(definition_factory(documentation()).is_err());
+        assert!(definition_factory(json!({})).is_ok());
         assert!(definition_factory(json!({"binding":{}})).is_err());
         assert!(encode_factory(json!({})).is_ok());
         assert!(encode_factory(json!({"extra":true})).is_err());
         assert!(arguments_factory(json!({})).is_ok());
-        assert!(arguments_factory(Value::Null).is_ok());
+        assert!(arguments_factory(Value::Null).is_err());
         for config in [
             json!({}),
             json!({"name":"lookup","description":"x"}),
@@ -1766,7 +2060,6 @@ mod tests {
             assert!(std::error::Error::source(&error).is_some());
         }
         for config in [
-            json!({}),
             json!({"name":[],"description":"x"}),
             json!({"name":"lookup"}),
             json!({"name":"lookup","description":"x","parameters":[]}),
@@ -1781,7 +2074,7 @@ mod tests {
 
     #[test]
     fn definition_requires_a_native_flow_and_preserves_typed_input_errors() {
-        let node = definition_factory(catalog_config()).unwrap();
+        let node = definition_factory(json!({})).unwrap();
         for inputs in [
             Inputs::new(),
             Inputs::from([("flow".into(), json!({}).into())]),
@@ -1802,6 +2095,25 @@ mod tests {
                 Some(ToolExecutionError::PlumbingInput { .. })
             ));
             assert!(std::error::Error::source(source).is_some());
+        }
+        let flow: ValueRef = FlowValue::new(prepared(metadata())).unwrap().into();
+        let valid = definition_inputs(
+            flow,
+            "lookup".into(),
+            json!({"lookup":documentation()}).into(),
+        );
+        for field in ["flow", "name", "descriptions"] {
+            let mut missing = valid.clone();
+            missing.remove(field);
+            assert!(execute_with(&node, missing).is_err());
+        }
+        let mut extra = valid.clone();
+        extra.insert("extra".into(), true.into());
+        assert!(execute_with(&node, extra).is_err());
+        for (field, value) in [("name", json!(42)), ("descriptions", json!([]))] {
+            let mut invalid = valid.clone();
+            invalid.insert(field.into(), value.into());
+            assert!(execute_with(&node, invalid).is_err());
         }
         let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
         for kind in [

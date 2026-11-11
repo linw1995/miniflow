@@ -347,6 +347,8 @@ budgets, cancellation, and context isolation. Prepared Event bodies use the exis
 lifecycle and return no terminal outputs. Resource requirements (implicit scope frames or unresolved
 stdin ownership) are checked when invoked, rather than preventing construction or transport.
 `FlowValue::from_flow(flow)` wraps an already prepared native `Flow` without serializing it.
+When authored inputs must form a callable collection, the generic `builtin.object` node assembles
+`Map(Flow)` fields without Serde or CEL; the map is ordinary input data, not a registry of graph IDs.
 
 Definition identity is shared prepared metadata: `PreparedSubgraph::origin` and `SubgraphOrigin`
 are public through the existing `mf_runtime` entry point, alongside the other subgraph metadata.
