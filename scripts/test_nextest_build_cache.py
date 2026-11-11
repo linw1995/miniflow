@@ -2,7 +2,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +14,73 @@ spec = importlib.util.spec_from_file_location(
 )
 cache = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cache)
+
+
+class NextestConfigTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parent.parent
+        cls.config = tomllib.loads((cls.root / ".config/nextest.toml").read_text())
+        profile = cls.config["profile"]["default"]
+        cls.setup, = [rule for rule in profile["scripts"]
+                      if rule.get("setup") == "build-cache"]
+        cls.group, = [rule for rule in profile["overrides"]
+                      if rule.get("test-group") == "shared-cargo"]
+
+    def test_cache_setup_and_serialization_select_the_same_tests(self):
+        self.assertEqual(self.setup["filter"], self.group["filter"])
+        self.assertEqual(self.setup["platform"], self.group["platform"])
+        self.assertEqual(self.config["test-groups"]["shared-cargo"]["max-threads"], 1)
+        self.assertEqual(self.config["profile"]["ci"]["inherits"], "default")
+
+    def test_build_oriented_targets_cache_new_and_renamed_cases(self):
+        for binary in [
+            "mf-compiler::custom_flow_runner",
+            "mf-compiler::flow_argument_stream_codegen",
+            "mf-compiler::flow_parameter_discovery",
+            "mf-compiler::flow_value_runner",
+            "mf-compiler::deepseek_workflows",
+            "mf-compiler::llm_workflows",
+        ]:
+            with self.subTest(binary=binary):
+                self.assertRegex(
+                    self.setup["filter"], rf"(?m)^binary_id\(={re.escape(binary)}\)\s*\|"
+                )
+
+    def test_provider_probes_and_cli_validation_failures_use_the_cache(self):
+        self.assertIn("(binary_id(=mf-compiler) & test(pipeline::tests::))",
+                      self.setup["filter"])
+        cli = self.setup["filter"].split("(binary_id(=mf-cli::compile) & (", 1)[1]
+        cli = cli.split("))", 1)[0]
+        for name in [
+            "cyclic_workflow_reports_the_cycle_path",
+            "rejects_redirected_cache_directories_without_mutating_inputs",
+        ]:
+            with self.subTest(test=name):
+                self.assertIn(f"test(={name})", cli)
+
+    def test_exact_cache_selectors_have_matching_source_functions(self):
+        workspace = tomllib.loads((self.root / "Cargo.toml").read_text())["workspace"]
+        packages = {}
+        for pattern in workspace["members"]:
+            for directory in self.root.glob(pattern):
+                manifest = tomllib.loads((directory / "Cargo.toml").read_text())
+                packages[manifest["package"]["name"]] = directory
+        # Cheap source-level rename guard, not test discovery or a filter parser.
+        # A stale clause silently disables cache reuse when a test is renamed.
+        clauses = re.findall(r"binary_id\(=([^)]+)\)(.*?)(?=binary_id\(|\Z)",
+                             self.setup["filter"], re.DOTALL)
+        for binary, clause in clauses:
+            package, _, target = binary.partition("::")
+            directory = packages[package]
+            if target:
+                source = (directory / "tests" / f"{target}.rs").read_text()
+            else:
+                source = "\n".join(path.read_text() for path in (directory / "src").rglob("*.rs"))
+            for name in re.findall(r"test\(=([^)]+)\)", clause):
+                with self.subTest(binary=binary, test=name):
+                    function = re.escape(name.rsplit("::", 1)[-1])
+                    self.assertRegex(source, rf"\bfn\s+{function}\s*\(")
 
 
 class BuildCacheTests(unittest.TestCase):
