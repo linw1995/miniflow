@@ -402,6 +402,57 @@ outputs are still validated on every call. The host must keep the executable unc
 a prepared runner; after replacing it, load a new prepared runner. Missing or invalid artifacts fail
 during loading, while a subsequently missing or unlaunchable executable fails at process startup.
 
+## Configured Flow tools
+
+The LLM provider exposes `mfn_llm::flows::tool_uses_definition` for composing self-contained
+`FlowTool` definitions with caller-owned descriptions and qualified input documentation. This is a
+Rust composition API, not a new workflow version or a configurable-builtin source syntax. The returned
+ordinary Flow accepts `params.calls` and exports `catalog` and ordered `results`; it does not call a model.
+
+Each `llm.tool` producer owns one direct `body` child binding, validates its actual prepared interface,
+and emits sanitized metadata alongside a native `FlowValue`. The `llm.tool_set` collector separates
+JSON bindings from a native callable map. The first of two native Iterations maps the bindings through
+`llm.tool_definition` once per invocation. An explicit catalog-output prerequisite then permits the
+parallel dispatch Iteration, whose single shared arguments/router/result chain handles every tool.
+`llm.tool_calls` and `llm.tool_call` pack and unpack dispatch items natively: callable capabilities
+never enter Serde or CEL. Unknown tools, invalid arguments and recoverable child failures become
+tool-result content. Blank call IDs, cancellation and infrastructure failures still fail execution.
+
+Tool descriptions do not modify child parameter definitions. Types and requiredness come from the
+prepared interface: a tool has exactly one startup node and a finite terminal interface without stdin
+or incremental exports. Secret inputs require an environment or default source, cannot be supplied by
+model arguments, and are omitted from schemas and adapter data. Literal defaults and environment
+names stay in executable children; only fallback presence survives in public bindings. A sole required
+string output named `content` becomes plain text; other output shapes are JSON-encoded.
+
+A tool body is prepared and stored only at its producer. Dispatch preserves the callable's identity,
+definition origin and privacy through ordinary data edges; the Router does not own duplicate children
+or create a second invocation runtime. Resolve external tool sources in their original directory before
+composing if that directory differs from the composed workflow's directory. There is no runtime JSON
+catalog override or lexical `flow_ref` transport. The tool adapter remains terminal-only; the broader
+native Flow API's streaming capabilities and existing observed-item nested-scope limits are unchanged.
+
+Run the concrete addition/unknown-tool example, or emit its definition for standalone compilation:
+
+```sh
+nix develop --command cargo run -p mf-compiler --example flow_tools
+nix develop --command cargo run -p mf-compiler --example flow_tools -- target/flow-tools.json
+nix develop --command cargo run -p mf-cli --features development-support -- compile target/flow-tools.json --output target/flow-tools-runner --build-dir target/flow-tools-build
+nix develop --command ./target/flow-tools-runner --params.calls='[{"id":"one","name":"add","arguments":{"left":2,"right":3}}]'
+```
+
+`builtin.router` is also independently usable. Gate configuration `{"routes":["first","second"]}`
+accepts `route` and emits the selected exclusive Boolean gate, or `else`. Executable configuration
+`{"mode":"execute"}` accepts `route`, a native `flows: Map(Flow)` and a qualified `arguments` object.
+It selects a handle and invokes it through `FlowValue::invoke`, returning a `result` envelope containing
+`outputs` or a recoverable business `error`. An empty callable map is valid; unknown executable routes
+fail without invoking another body. Arguments are conservatively private, selected route/handle privacy
+propagates to results, and business-error envelopes are private. Cancellation, observation/contract,
+resource and output failures propagate rather than becoming business results. Recovery is deliberately
+fail-closed: explicit ordinary node execution failures, including known Call wrappers, are recoverable;
+unknown plugin errors are not assumed to be business failures. Router invocation drains incremental
+emissions terminally; it does not expose them as Router stream ports.
+
 ## Node clusters
 
 Version `2026-10-23` accepts an optional `clusters` array in the root graph and in Loop and Iteration bodies. Clusters
