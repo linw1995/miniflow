@@ -95,7 +95,7 @@ fn frozen_arguments_resolve_relative_files_and_survive_without_source_files() {
     let argument = &arguments["local"];
     assert_eq!(
         argument.version,
-        mf_compiler::WorkflowDefinitionVersion::CURRENT
+        mf_compiler::WorkflowDefinitionVersion::V2026_10_28
     );
     assert!(argument.flows.is_empty());
     assert_eq!(
@@ -320,7 +320,7 @@ fn missing_grandchild_versions_inherit_the_root_across_explicit_older_call_frame
         let grandchild = &child.children[&"custom".into()]["local"];
         assert_eq!(
             grandchild.definition.version,
-            WorkflowDefinitionVersion::CURRENT
+            WorkflowDefinitionVersion::V2026_10_28
         );
         assert_eq!(grandchild.definition.clusters.len(), 1);
         let compiled = &plan.graph.children[&owner.into()][field];
@@ -332,7 +332,7 @@ fn missing_grandchild_versions_inherit_the_root_across_explicit_older_call_frame
             compiled.children[&"custom".into()]["local"]
                 .definition
                 .version,
-            WorkflowDefinitionVersion::CURRENT
+            WorkflowDefinitionVersion::V2026_10_28
         );
     }
     assert!(resolved.sources.is_empty());
@@ -363,7 +363,7 @@ fn inherited_old_child_versions_reject_new_features_but_explicit_versions_are_in
         resolved.children[&"custom".into()]["local"]
             .definition
             .version,
-        mf_compiler::WorkflowDefinitionVersion::CURRENT
+        mf_compiler::WorkflowDefinitionVersion::V2026_10_28
     );
 }
 

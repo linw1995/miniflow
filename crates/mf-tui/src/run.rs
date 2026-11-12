@@ -2712,25 +2712,60 @@ impl ObservationView {
             .iter()
             .map(|body| body.path.clone())
             .collect();
-        let execution =
-            GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
+        let collapsed: BTreeMap<Vec<String>, BTreeSet<usize>> =
+            std::iter::once((Vec::new(), &description.clusters))
+                .chain(
+                    description
+                        .loop_bodies
+                        .iter()
+                        .map(|body| (body.path.clone(), &body.clusters)),
+                )
+                .map(|(path, clusters)| {
+                    let folded = clusters
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, cluster)| cluster.collapsed.then_some(index))
+                        .collect();
+                    (path, folded)
+                })
+                .collect();
+        let execution = GraphLayout::with_view_and_collapsed(
+            description,
+            ConnectionView::Execution,
+            &collapsed[&Vec::new()],
+        )
+        .context(GraphSnafu)?;
         let root = Arc::new(
             GraphLayout::with_expanded_bodies(
                 description,
                 ConnectionView::Execution,
                 &expanded,
-                &BTreeMap::new(),
+                &collapsed,
             )
             .context(GraphSnafu)?,
         );
+        // PiPs expose individual running members even when the main graph starts folded.
+        let pip_layout = if collapsed.values().all(BTreeSet::is_empty) {
+            Arc::clone(&root)
+        } else {
+            Arc::new(
+                GraphLayout::with_expanded_bodies(
+                    description,
+                    ConnectionView::Execution,
+                    &expanded,
+                    &BTreeMap::new(),
+                )
+                .context(GraphSnafu)?,
+            )
+        };
         Ok(Self {
             description: description.clone(),
             execution,
-            pip_layout: Arc::clone(&root),
+            pip_layout,
             root,
             expanded,
             viewports: BTreeMap::new(),
-            collapsed: BTreeMap::new(),
+            collapsed,
             cluster_focus: BTreeMap::new(),
             state: ViewState::default(),
         })
@@ -3895,6 +3930,7 @@ mod tests {
     fn parallel_pips_deduplicate_collapsed_clusters_and_use_supplied_body_observations() {
         let mut description = parallel_fixture(3);
         description.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: "parallel group".into(),
             annotation: "Parallel branches".into(),
             nodes: vec!["parallel-0".into(), "parallel-1".into()],
@@ -3930,6 +3966,7 @@ mod tests {
     fn assert_observation_pips_include_every_running_member_of_a_folded_cluster() {
         let mut description = parallel_fixture(2);
         description.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: "parallel group".into(),
             annotation: "Parallel branches".into(),
             nodes: vec!["parallel-0".into(), "parallel-1".into()],
@@ -4054,6 +4091,7 @@ mod tests {
             execution_order: vec!["read".into(), "parse".into(), "publish".into()],
             loop_bodies: Vec::new(),
             clusters: vec![ClusterDescription {
+                collapsed: false,
                 label: "Load".into(),
                 annotation: "Read and parse the input.".into(),
                 nodes: vec!["read".into(), "parse".into()],
@@ -4070,6 +4108,46 @@ mod tests {
         assert!(!view.root.clusters()[0].collapsed);
         assert_eq!(view.root.nodes()[view.state.selected].id, "parse");
         assert_eq!(view.root.nodes().len(), description.nodes.len());
+    }
+
+    #[test]
+    fn authored_cluster_defaults_fold_root_and_body_without_changing_the_description() {
+        let mut description = scope_fixture();
+        description.version = WorkflowDescriptionVersion::V2026_11_11;
+        description.execution = Some(ExecutionDescription {
+            mode: ExecutionMode::Single,
+        });
+        description.clusters = vec![ClusterDescription {
+            label: "Loops".into(),
+            annotation: "Loop containers.".into(),
+            nodes: vec!["first".into(), "second".into()],
+            collapsed: true,
+        }];
+        description.loop_bodies[0].clusters = vec![ClusterDescription {
+            label: "Initial values".into(),
+            annotation: "Supporting body values.".into(),
+            nodes: vec!["source".into(), "target".into()],
+            collapsed: true,
+        }];
+        let original = description.clone();
+        let mut view = ObservationView::new(&description).unwrap();
+        assert_eq!(view.collapsed[&Vec::new()], BTreeSet::from([0]));
+        assert_eq!(view.collapsed[&vec!["first".into()]], BTreeSet::from([0]));
+        assert!(view.root.clusters().iter().all(|cluster| cluster.collapsed));
+        assert!(view.execution.clusters()[0].collapsed);
+        assert!(
+            view.pip_layout
+                .clusters()
+                .iter()
+                .all(|cluster| !cluster.collapsed)
+        );
+
+        view.toggle_cluster().unwrap();
+        assert!(!view.root.clusters()[0].collapsed);
+        assert!(!view.collapsed[&Vec::new()].contains(&0));
+        assert_eq!(view.description, original);
+        assert!(description.clusters[0].collapsed);
+        assert!(description.loop_bodies[0].clusters[0].collapsed);
     }
 
     #[test]

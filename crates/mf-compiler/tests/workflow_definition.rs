@@ -133,7 +133,10 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
         .find(|node| node.id.as_str() == "callA")
         .unwrap();
     let child = &normalized.graph.children[&call.id]["body"];
-    assert_eq!(child.definition.version, WorkflowDefinitionVersion::CURRENT);
+    assert_eq!(
+        child.definition.version,
+        WorkflowDefinitionVersion::V2026_10_28
+    );
     assert_eq!(child.relations.key.as_deref(), Some("callA"));
     assert_eq!(child.child_scope_key(call, "body"), "callA");
     let round_trip = WorkflowDefinition::from_json(
@@ -453,6 +456,47 @@ fn clusters_require_the_supported_definition_version_and_round_trip() {
         );
     }
     value["version"] = serde_json::json!("2026-10-23");
+}
+
+#[test]
+fn cluster_default_collapsed_is_versioned_and_preserved_in_observation() {
+    let mut value = serde_json::json!({
+        "version": "2026-11-11",
+        "dependencies": {},
+        "nodes": [{"id": "initial", "kind": "fixture.constant"}],
+        "clusters": [{
+            "label": "Initial values",
+            "annotation": "Supporting defaults.",
+            "collapsed": true,
+            "nodes": ["initial"]
+        }]
+    });
+    let definition = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+    assert!(definition.clusters[0].collapsed);
+    let description =
+        mf_compiler::describe_compiled(&plan_definition(&definition).unwrap()).unwrap();
+    assert_eq!(
+        description.version,
+        mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_11
+    );
+    assert!(description.clusters[0].collapsed);
+
+    value["version"] = serde_json::json!("2026-10-28");
+    let error = WorkflowDefinition::from_json(&value.to_string()).unwrap_err();
+    assert!(error.to_string().contains("2026-11-11"), "{error}");
+    let mut programmatic = definition;
+    programmatic.version = WorkflowDefinitionVersion::V2026_10_28;
+    assert!(plan_definition(&programmatic).is_err());
+    assert!(serde_json::to_string(&programmatic).is_err());
+
+    value["clusters"][0]["collapsed"] = serde_json::json!(false);
+    let expanded = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+    assert!(!expanded.clusters[0].collapsed);
+    assert!(
+        !serde_json::to_string(&expanded)
+            .unwrap()
+            .contains("collapsed")
+    );
 }
 
 #[test]

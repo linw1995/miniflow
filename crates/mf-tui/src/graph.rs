@@ -189,7 +189,8 @@ impl GraphLayout {
         path: &[String],
         view: ConnectionView,
     ) -> Result<Self, GraphError> {
-        Self::from_body_with_view_and_collapsed(description, path, view, &BTreeSet::new())
+        let scope = Self::body_description(description, path)?;
+        Self::with_view(&scope, view)
     }
 
     pub fn from_body_with_view_and_collapsed(
@@ -245,7 +246,7 @@ impl GraphLayout {
         description: &WorkflowDescription,
         view: ConnectionView,
     ) -> Result<Self, GraphError> {
-        Self::with_view_and_collapsed(description, view, &BTreeSet::new())
+        Self::with_view_and_collapsed(description, view, &Self::default_collapsed(description))
     }
 
     pub fn with_view_and_collapsed(
@@ -266,7 +267,21 @@ impl GraphLayout {
         view: ConnectionView,
         limits: routing::RoutingLimits,
     ) -> Result<Self, GraphError> {
-        Self::with_view_and_limits_collapsed(description, view, limits, &BTreeSet::new())
+        Self::with_view_and_limits_collapsed(
+            description,
+            view,
+            limits,
+            &Self::default_collapsed(description),
+        )
+    }
+
+    fn default_collapsed(description: &WorkflowDescription) -> BTreeSet<usize> {
+        description
+            .clusters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cluster)| cluster.collapsed.then_some(index))
+            .collect()
     }
 
     pub fn with_view_and_limits_collapsed(

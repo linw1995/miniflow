@@ -163,17 +163,22 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_25,
     #[serde(rename = "2026-10-28")]
     V2026_10_28,
+    #[serde(rename = "2026-11-11")]
+    V2026_11_11,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_28;
+    pub const CURRENT: Self = Self::V2026_11_11;
 
     pub fn supports_child_streams(self) -> bool {
-        matches!(self, Self::V2026_10_28)
+        matches!(self, Self::V2026_10_28 | Self::V2026_11_11)
     }
 
     pub fn supports_nested_flows(self) -> bool {
-        matches!(self, Self::V2026_10_25 | Self::V2026_10_28)
+        matches!(
+            self,
+            Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_11
+        )
     }
 
     pub fn supports_startup_inputs(self) -> bool {
@@ -184,21 +189,30 @@ impl WorkflowDefinitionVersion {
                 | Self::V2026_10_23
                 | Self::V2026_10_25
                 | Self::V2026_10_28
+                | Self::V2026_11_11
         )
     }
 
     pub fn supports_node_success_edges(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+            Self::V2026_10_19
+                | Self::V2026_10_23
+                | Self::V2026_10_25
+                | Self::V2026_10_28
+                | Self::V2026_11_11
         )
     }
 
     pub fn supports_clusters(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28
+            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_11
         )
+    }
+
+    pub fn supports_cluster_collapsed(self) -> bool {
+        matches!(self, Self::V2026_11_11)
     }
 }
 
@@ -347,6 +361,8 @@ pub struct ClusterDefinition {
     pub label: String,
     pub annotation: String,
     pub nodes: Vec<DefinitionId>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

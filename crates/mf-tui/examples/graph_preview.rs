@@ -263,6 +263,7 @@ fn preview_description(mut fixture: WorkflowDescription, clusters: bool) -> Work
         let middle = fixture.nodes.len().div_ceil(2);
         fixture.clusters = vec![
             ClusterDescription {
+                collapsed: false,
                 label: "Input preparation".into(),
                 annotation: "Fetch the input and transform the source before publishing.".into(),
                 nodes: fixture.nodes[..middle]
@@ -271,6 +272,7 @@ fn preview_description(mut fixture: WorkflowDescription, clusters: bool) -> Work
                     .collect(),
             },
             ClusterDescription {
+                collapsed: false,
                 label: "Output delivery".into(),
                 annotation: "Publish the result or archive the original response.".into(),
                 nodes: fixture.nodes[middle..]

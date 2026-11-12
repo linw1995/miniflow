@@ -30,3 +30,7 @@ serde_json.workspace = true
 snafu.workspace = true
 url.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+
+[build-dependencies]
+# Bind built-in Flow providers to the publishing crate's workspace version.
+serde_json.workspace = true

@@ -1,17 +1,29 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-11-11",
+  "clusters": [
+    {
+      "label": "Initial values",
+      "annotation": "Default state for the bounded Agent loop.",
+      "collapsed": true,
+      "nodes": [
+        "initial_usages",
+        "initial_status",
+        "initial_text",
+        "initial_outcome",
+        "initial_error",
+        "initial_done"
+      ]
+    }
+  ],
   "dependencies": {
     "core": {
-      "package": "mfn-core",
-      "version": "=0.1.0"
+      "package": "mfn-core"
     },
     "code": {
-      "package": "mfn-code",
-      "version": "=0.1.0"
+      "package": "mfn-code"
     },
     "llm": {
-      "package": "mfn-llm",
-      "version": "=0.1.0"
+      "package": "mfn-llm"
     }
   },
   "flows": {
@@ -30,14 +42,9 @@
           },
           "tools": {
             "type": {
-              "map": "flow"
+              "map": "object"
             },
             "secret": false
-          },
-          "descriptions": {
-            "type": "object",
-            "secret": false,
-            "default": {}
           },
           "system": {
             "type": "string",
@@ -77,12 +84,6 @@
           "from": {
             "node": "params",
             "port": "tools"
-          }
-        },
-        "params.descriptions": {
-          "from": {
-            "node": "params",
-            "port": "descriptions"
           }
         }
       }
@@ -179,13 +180,13 @@
             }
           },
           {
-            "name": "tools",
+            "name": "tool_definitions",
             "type": "array"
           },
           {
-            "name": "flows",
+            "name": "tools",
             "type": {
-              "map": "flow"
+              "map": "object"
             }
           },
           {
@@ -260,7 +261,7 @@
                 "params.tools": {
                   "from": {
                     "node": "%loop",
-                    "port": "tools"
+                    "port": "tool_definitions"
                   }
                 },
                 "params.model": {
@@ -407,10 +408,10 @@
                     "port": "tool_calls"
                   }
                 },
-                "params.flows": {
+                "params.tools": {
                   "from": {
                     "node": "%loop",
-                    "port": "flows"
+                    "port": "tools"
                   }
                 }
               }
@@ -631,13 +632,13 @@
             "port": "messages"
           }
         },
-        "tools": {
+        "tool_definitions": {
           "from": {
             "node": "catalog",
             "port": "tools"
           }
         },
-        "flows": {
+        "tools": {
           "from": {
             "node": "params",
             "port": "tools"

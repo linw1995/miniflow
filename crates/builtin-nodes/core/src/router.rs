@@ -15,6 +15,7 @@ pub const KIND: &str = "builtin.router";
 struct Config {
     routes: Option<Vec<String>>,
     mode: Option<Mode>,
+    flow_field: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -31,6 +32,8 @@ pub enum RouterBuildError {
     Empty,
     #[snafu(display("Blank, reserved, or duplicate router route `{route}`"))]
     Route { route: String },
+    #[snafu(display("Router flow_field must be nonblank"))]
+    FlowField,
 }
 
 impl From<RouterBuildError> for NodeBuildError {
@@ -89,14 +92,21 @@ impl TaskNode for Router {
     }
 }
 
-struct ExecuteRouter;
+struct ExecuteRouter {
+    flow_field: Option<String>,
+}
 
 impl NodePortContract for ExecuteRouter {
     fn ports(&self) -> NodePorts {
+        let flows = if self.flow_field.is_some() {
+            ValueType::Map(Box::new(ValueType::Object))
+        } else {
+            ValueType::Map(Box::new(ValueType::Flow))
+        };
         NodePorts {
             inputs: vec![
                 PortSpec::new("route", ValueType::String, true),
-                PortSpec::new("flows", ValueType::Map(Box::new(ValueType::Flow)), true),
+                PortSpec::new("flows", flows, true),
                 PortSpec::new("arguments", ValueType::Object, true),
             ],
             outputs: vec![PortSpec::new("result", ValueType::Object, true)],
@@ -177,6 +187,14 @@ impl TaskNode for ExecuteRouter {
             node: &id,
             route: display_route,
         })?;
+        let selected = if let Some(field) = &self.flow_field {
+            selected.get(field).context(InvalidFlowSnafu {
+                node: &id,
+                route: display_route,
+            })?
+        } else {
+            selected
+        };
         let flow = selected.as_flow().context(InvalidFlowSnafu {
             node: &id,
             route: display_route,
@@ -236,9 +254,13 @@ fn validate_routes(routes: &[String]) -> Result<(), RouterBuildError> {
 }
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
-    let Config { routes, mode } = mf_runtime::deserialize_config(config)?;
-    match (routes, mode) {
-        (Some(routes), None) => {
+    let Config {
+        routes,
+        mode,
+        flow_field,
+    } = mf_runtime::deserialize_config(config)?;
+    match (routes, mode, flow_field) {
+        (Some(routes), None, None) => {
             ensure!(!routes.is_empty(), EmptySnafu);
             validate_routes(&routes)?;
             let node = Router { routes };
@@ -253,21 +275,26 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
             };
             PreparedNode::new(node, metadata)
         }
-        (None, Some(Mode::Execute)) => PreparedNode::new(
-            ExecuteRouter,
-            NodeMetadata {
-                // Dynamic callees' privacy contracts are not known when snapshots
-                // are taken; match workflow.call's conservative argument policy.
-                input_bindings: BTreeMap::from([(
-                    "arguments".into(),
-                    mf_runtime::InputBinding {
-                        secret: true,
-                        ..Default::default()
-                    },
-                )]),
-                ..Default::default()
-            },
-        ),
+        (None, Some(Mode::Execute), flow_field) => {
+            if let Some(field) = &flow_field {
+                ensure!(!field.trim().is_empty(), FlowFieldSnafu);
+            }
+            PreparedNode::new(
+                ExecuteRouter { flow_field },
+                NodeMetadata {
+                    // Dynamic callees' privacy contracts are not known when snapshots
+                    // are taken; match workflow.call's conservative argument policy.
+                    input_bindings: BTreeMap::from([(
+                        "arguments".into(),
+                        mf_runtime::InputBinding {
+                            secret: true,
+                            ..Default::default()
+                        },
+                    )]),
+                    ..Default::default()
+                },
+            )
+        }
         _ => ModeSnafu.fail().map_err(NodeBuildError::from),
     }
 }
@@ -300,13 +327,21 @@ mod tests {
         ValueRef::object([("tool".into(), handle(body))])
     }
 
-    fn executable() -> PreparedNode {
+    fn executable_with(config: Value) -> PreparedNode {
         mf_runtime::NodeRegistry::from_inventory()
             .unwrap()
             .get(KIND)
             .unwrap()
-            .instantiate(json!({"mode": "execute"}))
+            .instantiate(config)
             .unwrap()
+    }
+
+    fn executable() -> PreparedNode {
+        executable_with(json!({"mode": "execute"}))
+    }
+
+    fn field_executable(field: &str) -> PreparedNode {
+        executable_with(json!({"mode": "execute", "flow_field": field}))
     }
 
     fn execute_with(
@@ -451,6 +486,36 @@ mod tests {
     }
 
     #[test]
+    fn flow_field_config_is_strict_and_execute_only() {
+        for config in [
+            json!({"routes": ["a"], "flow_field": "run"}),
+            json!({"routes": ["a"], "mode": "execute", "flow_field": "run"}),
+            json!({"flow_field": "run"}),
+        ] {
+            assert!(matches!(
+                business_error(&factory(config).err().unwrap()),
+                RouterBuildError::Mode
+            ));
+        }
+        for field in ["", " ", "\t\n"] {
+            assert!(matches!(
+                business_error(
+                    &factory(json!({"mode": "execute", "flow_field": field}))
+                        .err()
+                        .unwrap()
+                ),
+                RouterBuildError::FlowField
+            ));
+        }
+        for field in [json!(1), json!(true), json!([])] {
+            assert!(matches!(
+                factory(json!({"mode": "execute", "flow_field": field})),
+                Err(NodeBuildError::InvalidConfiguration { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn execute_ports_and_argument_privacy_are_declared_without_static_candidates() {
         let node = executable();
         assert_eq!(
@@ -470,6 +535,25 @@ mod tests {
         assert_eq!(node.metadata.input_bindings.len(), 1);
         assert!(node.metadata.input_bindings["arguments"].secret);
         assert!(matches!(node.execution, mf_runtime::NodeExecution::Task(_)));
+    }
+
+    #[test]
+    fn flow_field_declares_object_records_without_changing_other_ports() {
+        let node = field_executable("run");
+        assert_eq!(
+            node.metadata.ports.inputs,
+            [
+                PortSpec::new("route", ValueType::String, true),
+                PortSpec::new("flows", ValueType::Map(Box::new(ValueType::Object)), true),
+                PortSpec::new("arguments", ValueType::Object, true),
+            ]
+        );
+        assert_eq!(
+            node.metadata.ports.outputs,
+            [PortSpec::new("result", ValueType::Object, true)]
+        );
+        assert_eq!(node.metadata.input_bindings.len(), 1);
+        assert!(node.metadata.input_bindings["arguments"].secret);
     }
 
     #[test]
@@ -531,6 +615,92 @@ mod tests {
             execution_error(&execute(json!({"tool": {}}).into()).unwrap_err()),
             RouterExecutionError::InvalidFlow { .. }
         ));
+    }
+
+    #[test]
+    fn flow_field_preserves_native_identity_and_executes_only_the_selected_field() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let returned = handle(body());
+        let mut entries = BTreeMap::new();
+        for name in ["first", "second"] {
+            let calls = calls.clone();
+            let returned = returned.clone();
+            let selected = handle(PreparedSubgraph::new(
+                vec![],
+                vec![PortSpec::new("handle", ValueType::Flow, true)],
+                move |context| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(context.invocation_path().len(), 1);
+                    assert_eq!(context.invocation_path()[0].node_id(), "owner");
+                    Ok(Outputs::from([("handle".into(), returned.clone())]))
+                },
+            ));
+            entries.insert(
+                name.into(),
+                ValueRef::object([
+                    ("run".into(), selected),
+                    ("description".into(), "metadata".into()),
+                ]),
+            );
+        }
+        let records = ValueRef::object(entries);
+        let original = records["first"]["run"].clone();
+        assert_eq!(records["first"]["run"].as_flow(), original.as_flow());
+        assert!(records["first"]["run"].ptr_eq(&original));
+        let node = field_executable("run");
+        let mut context = ExecutionContext::default();
+        for (index, name) in ["first", "second"].into_iter().enumerate() {
+            let result = context
+                .with_node("owner".into(), |context| {
+                    execute_with(
+                        &node,
+                        name.into(),
+                        records.clone(),
+                        json!({}).into(),
+                        context,
+                    )
+                })
+                .unwrap();
+            assert!(result.outputs["result"]["outputs"]["handle"].ptr_eq(&returned));
+            assert_eq!(calls.load(Ordering::SeqCst), index + 1);
+        }
+        let error = execute_with(
+            &node,
+            "missing".into(),
+            records,
+            json!({}).into(),
+            &mut context,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            execution_error(&error),
+            RouterExecutionError::UnknownRoute { route, .. } if route == "missing"
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn flow_field_missing_and_non_flow_values_are_invalid_flows() {
+        let node = field_executable("run");
+        for record in [
+            json!({}).into(),
+            json!({"run": {}}).into(),
+            json!({"run": "not native"}).into(),
+        ] {
+            let records = ValueRef::object([("selected".into(), record)]);
+            let error = execute_with(
+                &node,
+                "selected".into(),
+                records,
+                json!({}).into(),
+                &mut Default::default(),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                execution_error(&error),
+                RouterExecutionError::InvalidFlow { route, .. } if route == "selected"
+            ));
+        }
     }
 
     #[test]
@@ -716,6 +886,76 @@ mod tests {
             serde_json::to_value(result.redacted()).unwrap(),
             json!({"outputs": {"private": "[REDACTED]", "public": "visible"}})
         );
+    }
+
+    #[test]
+    fn flow_field_result_privacy_uses_only_the_selected_flow_and_route() {
+        let public_body = PreparedSubgraph::new(
+            vec![],
+            vec![PortSpec::new("answer", ValueType::String, true)],
+            |_| Ok(Outputs::from([("answer".into(), "constant".into())])),
+        );
+        let record = |selected| {
+            ValueRef::object([
+                ("run".into(), selected),
+                (
+                    "description".into(),
+                    ValueRef::from("private metadata").into_secret(),
+                ),
+            ])
+        };
+        let records = ValueRef::object([
+            ("selected".into(), record(handle(public_body.clone()))),
+            (
+                "unused".into(),
+                record(handle(body()).into_secret()).into_secret(),
+            ),
+        ]);
+        let node = field_executable("run");
+        let result = execute_with(
+            &node,
+            "selected".into(),
+            records,
+            json!({}).into(),
+            &mut Default::default(),
+        )
+        .unwrap();
+        let result = &result.outputs["result"];
+        assert!(!result.is_secret());
+        assert!(!result["outputs"]["answer"].is_secret());
+        assert_eq!(result["outputs"]["answer"], json!("constant"));
+
+        for (records, route) in [
+            (
+                ValueRef::object([(
+                    "selected".into(),
+                    record(handle(public_body.clone()).into_secret()),
+                )]),
+                ValueRef::from("selected"),
+            ),
+            (
+                ValueRef::object([(
+                    "selected".into(),
+                    record(handle(public_body.clone())).into_secret(),
+                )]),
+                ValueRef::from("selected"),
+            ),
+            (
+                ValueRef::object([("selected".into(), record(handle(public_body)))]),
+                ValueRef::from("selected").into_secret(),
+            ),
+        ] {
+            let result = execute_with(
+                &node,
+                route,
+                records,
+                json!({}).into(),
+                &mut Default::default(),
+            )
+            .unwrap();
+            assert!(result.outputs["result"].is_secret());
+            assert!(result.outputs["result"]["outputs"]["answer"].is_secret());
+        }
     }
 
     #[test]

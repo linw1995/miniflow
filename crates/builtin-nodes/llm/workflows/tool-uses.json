@@ -2,16 +2,13 @@
   "version": "2026-10-28",
   "dependencies": {
     "core": {
-      "package": "mfn-core",
-      "version": "=0.1.0"
+      "package": "mfn-core"
     },
     "code": {
-      "package": "mfn-code",
-      "version": "=0.1.0"
+      "package": "mfn-code"
     },
     "llm": {
-      "package": "mfn-llm",
-      "version": "=0.1.0"
+      "package": "mfn-llm"
     }
   },
   "nodes": [
@@ -26,9 +23,9 @@
             },
             "secret": false
           },
-          "flows": {
+          "tools": {
             "type": {
-              "map": "flow"
+              "map": "object"
             },
             "secret": false
           }
@@ -92,8 +89,8 @@
         "mode": "parallel",
         "on_error": "terminate",
         "inputs": {
-          "flows": {
-            "map": "flow"
+          "tools": {
+            "map": "object"
           }
         },
         "body": {
@@ -109,10 +106,10 @@
                     "port": "item"
                   }
                 },
-                "flows": {
+                "tools": {
                   "from": {
                     "node": "%iteration",
-                    "port": "flows"
+                    "port": "tools"
                   }
                 }
               }
@@ -121,13 +118,14 @@
               "id": "execute",
               "kind": "builtin.router",
               "config": {
-                "mode": "execute"
+                "mode": "execute",
+                "flow_field": "flow"
               },
               "inputs": {
                 "flows": {
                   "from": {
                     "node": "%iteration",
-                    "port": "flows"
+                    "port": "tools"
                   }
                 },
                 "route": {
@@ -191,10 +189,10 @@
             "port": "value"
           }
         },
-        "flows": {
+        "tools": {
           "from": {
             "node": "params",
-            "port": "flows"
+            "port": "tools"
           }
         }
       }

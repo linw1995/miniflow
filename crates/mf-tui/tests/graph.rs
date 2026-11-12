@@ -189,6 +189,7 @@ fn inline_cluster_folds_hide_descendants_and_preserve_scope_local_members() {
     description.loop_bodies[0]
         .clusters
         .push(ClusterDescription {
+            collapsed: false,
             label: "Preparation".into(),
             annotation: "Prepare the nested input.".into(),
             nodes: vec!["source".into(), "inner".into()],
@@ -250,6 +251,7 @@ fn clusters_render_expanded_bounds_and_collapse_to_one_node() {
         mode: ExecutionMode::Single,
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "left and join".into(),
         annotation: "The left branch and its convergence point.".into(),
         nodes: vec!["left".into(), "join".into()],
@@ -315,6 +317,7 @@ fn cluster_titles_preserve_the_remaining_top_border() {
     });
     for label in ["Computation", "Compute a\u{301} with 🦀"] {
         graph.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: label.into(),
             annotation: "Read the source and forward its value.".into(),
             nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -355,6 +358,7 @@ fn cluster_titles_follow_both_scroll_axes() {
     });
     for label in ["Computation", "Compute a\u{301} with 🦀"] {
         graph.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: label.into(),
             annotation: "Read the source and forward its value.".into(),
             nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -386,6 +390,7 @@ fn cluster_annotations_hide_only_while_the_label_is_repositioned() {
     });
     let annotation = "abcdefghijklmnopqrstuv";
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Group".into(),
         annotation: annotation.into(),
         nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -440,6 +445,7 @@ fn pinned_cluster_titles_clip_to_narrow_nonzero_viewports() {
         mode: ExecutionMode::Single,
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Compute a\u{301} 🦀 result".into(),
         annotation: "Forward the source value.".into(),
         nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -500,6 +506,7 @@ fn cluster_titles_disappear_when_the_cluster_leaves_the_viewport() {
         mode: ExecutionMode::Single,
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Computation".into(),
         annotation: "Forward the source value.".into(),
         nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -627,6 +634,7 @@ fn folding_noncontiguous_members_preserves_projected_cycle_connections() {
         to_input: "extra".into(),
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Endpoints".into(),
         annotation: "The source and final consumer.".into(),
         nodes: vec!["source".into(), "sink-0001".into()],
@@ -676,6 +684,7 @@ fn long_cluster_labels_fit_expanded_and_collapsed_geometry() {
         "Validate a\u{301} configuration with 🦀 and a complete title",
     ] {
         graph.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: label.into(),
             annotation: "Keep the entire title visible in both cluster states.".into(),
             nodes: vec!["source".into()],
@@ -731,11 +740,13 @@ fn cluster_colors_match_borders_and_labels_across_views_and_folds() {
     });
     graph.clusters = vec![
         ClusterDescription {
+            collapsed: false,
             label: "Input".into(),
             annotation: "Read the source and forward its value.".into(),
             nodes: vec!["source".into(), "router".into()],
         },
         ClusterDescription {
+            collapsed: false,
             label: "Output".into(),
             annotation: "Merge the branch results.".into(),
             nodes: vec!["left".into(), "join".into()],
@@ -824,6 +835,7 @@ fn cluster_annotations_wrap_in_the_graph_and_stay_clear_of_connections() {
         mode: ExecutionMode::Single,
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Input".into(),
         annotation: "01234567890123456789012345678901234567890123456789\n\tKeep a\u{301} and 🦀."
             .into(),
@@ -1315,6 +1327,7 @@ fn body_clusters_collapse_within_their_scope() {
         order_edges: Vec::new(),
         execution_order: vec!["%loop".into(), "step".into(), "next".into()],
         clusters: vec![ClusterDescription {
+            collapsed: false,
             label: "Body work".into(),
             annotation: "The body transformation and its successor.".into(),
             nodes: vec!["step".into(), "next".into()],

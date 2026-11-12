@@ -174,7 +174,7 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["calls", "flows"]
+        ["calls", "tools"]
     );
     let dispatch = &dispatch_call.children[&"dispatch".into()]["body"];
     assert!(dispatch.children.is_empty());
@@ -241,17 +241,38 @@ fn configured_example_executes_and_exports_an_ordinary_workflow() {
         .find(|node| node.id.as_str() == "tools")
         .unwrap();
     assert_eq!(tools.kind, "builtin.object");
-    assert_eq!(tools.config, json!({"fields":{"add":"flow","echo":"flow"}}));
-    let descriptions = exported
+    assert_eq!(
+        tools.config,
+        json!({"fields":{"add":"object","echo":"object"}})
+    );
+    let record = exported
         .nodes
         .iter()
-        .find(|node| node.id.as_str() == "descriptions")
+        .find(|node| node.id.as_str() == "tool_add_record")
         .unwrap();
+    assert_eq!(record.kind, "builtin.object");
     assert_eq!(
-        descriptions.config["value"]["add"]["description"],
-        "Add two integers."
+        record.config,
+        json!({"fields":{"flow":"flow","description":"string","parameters":"object"}})
     );
-    assert!(descriptions.config["value"]["add"].get("body").is_none());
+    let description = exported
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "tool_add_description")
+        .unwrap();
+    assert_eq!(description.config["value"], "Add two integers.");
+    assert!(exported.edges.iter().any(|edge| {
+        edge.from_node.as_str() == "tool_add_description"
+            && edge.from_output == "value"
+            && edge.to_node.as_str() == "tool_add_record"
+            && edge.to_input == "description"
+    }));
+    assert!(
+        !exported
+            .nodes
+            .iter()
+            .any(|node| node.id.as_str() == "descriptions")
+    );
 }
 
 #[test]
@@ -294,10 +315,10 @@ fn fixed_agent_builtin_owns_no_caller_tool_bodies_or_per_tool_structure() {
 fn empty_catalog_and_dispatch_keep_capabilities_internal() {
     use mf_runtime::{TypeCompatibility, ValueType};
     // builtin.object with no fields has Map<Any>, accepted through the normal
-    // checked connection to the provider's Map<Flow> parameter, not a JSON shim.
+    // checked connection to the provider's Map<Object> parameter, not a JSON shim.
     assert_eq!(
         ValueType::Map(Box::new(ValueType::Any))
-            .compatibility_with(&ValueType::Map(Box::new(ValueType::Flow))),
+            .compatibility_with(&ValueType::Map(Box::new(ValueType::Object))),
         TypeCompatibility::Checked
     );
     let definition = configured_tools(BTreeMap::new());

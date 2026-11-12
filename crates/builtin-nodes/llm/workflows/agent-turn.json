@@ -2,12 +2,10 @@
   "version": "2026-10-28",
   "dependencies": {
     "core": {
-      "package": "mfn-core",
-      "version": "=0.1.0"
+      "package": "mfn-core"
     },
     "llm": {
-      "package": "mfn-llm",
-      "version": "=0.1.0"
+      "package": "mfn-llm"
     }
   },
   "nodes": [

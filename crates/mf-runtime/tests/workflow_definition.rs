@@ -106,6 +106,73 @@ fn child_json_parser_retains_duplicate_key_rejection() {
 }
 
 #[test]
+fn default_collapsed_clusters_require_the_current_schema() {
+    let value = json!({
+        "version": "2026-11-11",
+        "nodes": [{"id": "source", "kind": "fixture.source"}],
+        "clusters": [{
+            "label": "Work",
+            "annotation": "Collapsed by default.",
+            "nodes": ["source"],
+            "collapsed": true
+        }]
+    });
+    let parsed = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+    assert_eq!(parsed.version, WorkflowDefinitionVersion::CURRENT);
+    assert!(parsed.version.supports_cluster_collapsed());
+    assert!(parsed.clusters[0].collapsed);
+    let serialized = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(serialized["version"], "2026-11-11");
+    assert_eq!(serialized["clusters"][0]["collapsed"], true);
+    assert_eq!(
+        serde_json::from_value::<WorkflowDefinition>(serialized).unwrap(),
+        parsed
+    );
+
+    let mut old = value;
+    old["version"] = "2026-10-28".into();
+    let error = WorkflowDefinition::from_json(&old.to_string()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("default-collapsed clusters require version 2026-11-11"),
+        "{error}"
+    );
+    let mut programmatic = parsed;
+    programmatic.version = WorkflowDefinitionVersion::V2026_10_28;
+    let error = serde_json::to_value(programmatic).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("default-collapsed clusters require version 2026-11-11"),
+        "{error}"
+    );
+}
+
+#[test]
+fn expanded_clusters_default_to_false_and_remain_old_schema_compatible() {
+    let parsed = WorkflowDefinition::from_json(
+        r#"{
+            "version":"2026-10-28",
+            "nodes":[{"id":"source","kind":"fixture.source"}],
+            "clusters":[{
+                "label":"Work",
+                "annotation":"Expanded by default.",
+                "nodes":["source"]
+            }]
+        }"#,
+    )
+    .unwrap();
+    assert!(!parsed.clusters[0].collapsed);
+    let serialized = serde_json::to_value(&parsed).unwrap();
+    assert!(serialized["clusters"][0].get("collapsed").is_none());
+    assert_eq!(
+        serde_json::from_value::<WorkflowDefinition>(serialized).unwrap(),
+        parsed
+    );
+}
+
+#[test]
 fn inherited_versions_enforce_their_own_wire_features() {
     let value = json!({"nodes":[{"id":"n", "kind":"ordinary", "inputs":{
         "value":{"from":{"node":"source", "port":"value"}}

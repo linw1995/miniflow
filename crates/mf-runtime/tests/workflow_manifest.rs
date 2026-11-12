@@ -640,6 +640,50 @@ fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
     }
 }
 
+#[test]
+fn default_collapsed_child_clusters_raise_the_manifest_description_version() {
+    let mut root = graph(
+        json!({
+            "version": "2026-09-29", "dependencies": {},
+            "nodes": [{"id": "dispatch", "kind": "user.dispatch"}]
+        }),
+        &["dispatch"],
+    );
+    bind(
+        &mut root,
+        "dispatch",
+        "selected",
+        graph(
+            json!({
+                "version": "2026-11-11", "dependencies": {},
+                "nodes": [{"id": "initial", "kind": "fixture.constant"}],
+                "clusters": [{
+                    "label": "Initial values", "annotation": "Supporting defaults.",
+                    "collapsed": true, "nodes": ["initial"]
+                }]
+            }),
+            &["initial"],
+        ),
+    );
+    let manifest = WorkflowManifest {
+        version: WorkflowManifestVersion::V2026_11_06,
+        graph: root,
+        input_schema: Default::default(),
+    };
+    let decoded = round_trip(&manifest);
+    let description = decoded.description().unwrap();
+    assert_eq!(
+        description.version,
+        mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_11
+    );
+    assert_eq!(description.loop_bodies.len(), 1);
+    assert!(description.loop_bodies[0].clusters[0].collapsed);
+    assert_eq!(
+        decoded.graph.definition.version,
+        mf_runtime::WorkflowDefinitionVersion::V2026_09_29
+    );
+}
+
 fn historical_iteration_manifest() -> WorkflowManifest {
     let mut root = graph(
         json!({
@@ -1241,6 +1285,7 @@ fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
             label: "Work".into(),
             annotation: "Metadata requiring a newer definition.".into(),
             nodes: vec!["root.a/~".into()],
+            collapsed: false,
         });
     // Identity serialization is a genuine telemetry boundary, unlike the
     // runtime's own authored-definition validation during graph description.

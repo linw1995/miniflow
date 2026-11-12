@@ -214,6 +214,123 @@ fn descriptions_validate_cluster_metadata_and_version() {
     value["clusters"][0]["label"] = json!("");
     assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
 }
+
+#[test]
+fn collapsed_cluster_version_preserves_existing_capabilities_and_finite_default() {
+    use mf_telemetry::description::WorkflowDescriptionVersion;
+
+    let version = WorkflowDescriptionVersion::V2026_11_11;
+    assert_eq!(serde_json::to_value(version).unwrap(), json!("2026-11-11"));
+    assert!(version.supports_loops());
+    assert!(version.supports_iteration_bodies());
+    assert!(version.supports_clusters());
+    assert!(version.supports_flow_invocations());
+    assert!(version.uses_node_success_edges());
+    assert!(version.supports_cluster_collapsed());
+    for old in [
+        WorkflowDescriptionVersion::V2026_09_27,
+        WorkflowDescriptionVersion::V2026_09_29,
+        WorkflowDescriptionVersion::V2026_10_02,
+        WorkflowDescriptionVersion::V2026_10_03,
+        WorkflowDescriptionVersion::V2026_10_19,
+        WorkflowDescriptionVersion::V2026_10_23,
+        WorkflowDescriptionVersion::V2026_11_09,
+    ] {
+        assert!(!old.supports_cluster_collapsed());
+    }
+    assert_eq!(
+        WorkflowDescriptionVersion::CURRENT,
+        WorkflowDescriptionVersion::V2026_09_29
+    );
+}
+
+#[test]
+fn default_collapsed_clusters_require_the_new_version_and_false_is_omitted() {
+    let mut value = json!({
+        "version": "2026-11-11",
+        "workflow_id": graph().workflow_id,
+        "execution": {"mode": "single"},
+        "nodes": [{"id": "owner", "kind": "workflow.call"}],
+        "data_edges": [],
+        "control_edges": [],
+        "execution_order": ["owner"],
+        "clusters": [{
+            "label": "Root",
+            "annotation": "Root cluster.",
+            "nodes": ["owner"],
+            "collapsed": true
+        }],
+        "loop_bodies": [{
+            "path": ["owner"],
+            "nodes": [{"id": "child", "kind": "fixture.echo"}],
+            "data_edges": [],
+            "control_edges": [],
+            "execution_order": ["child"],
+            "clusters": [{
+                "label": "Body",
+                "annotation": "Body cluster.",
+                "nodes": ["child"],
+                "collapsed": true
+            }]
+        }]
+    });
+    let description = WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(description.clusters[0].collapsed);
+    assert!(description.loop_bodies[0].clusters[0].collapsed);
+    let encoded = description.to_json().unwrap();
+    let encoded_value: Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(encoded_value["clusters"][0]["collapsed"], json!(true));
+    assert_eq!(
+        encoded_value["loop_bodies"][0]["clusters"][0]["collapsed"],
+        json!(true)
+    );
+    assert_eq!(
+        WorkflowDescription::from_json(&encoded).unwrap(),
+        description
+    );
+
+    for version in ["2026-10-23", "2026-11-09"] {
+        for scope in ["root", "body"] {
+            let mut old = value.clone();
+            old["version"] = json!(version);
+            if scope == "root" {
+                old["loop_bodies"][0]["clusters"][0]["collapsed"] = json!(false);
+            } else {
+                old["clusters"][0]["collapsed"] = json!(false);
+            }
+            let error =
+                WorkflowDescription::from_json(&serde_json::to_vec(&old).unwrap()).unwrap_err();
+            assert!(
+                matches!(&error, mf_telemetry::ContractError::Invalid { message }
+                    if message == "default-collapsed clusters require description version 2026-11-11"),
+                "{version}/{scope}: {error}"
+            );
+        }
+    }
+
+    value["clusters"][0]["collapsed"] = json!(false);
+    value["loop_bodies"][0]["clusters"][0]["collapsed"] = json!(false);
+    for version in ["2026-10-23", "2026-11-09", "2026-11-11"] {
+        value["version"] = json!(version);
+        let compatible =
+            WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(!compatible.clusters[0].collapsed);
+        assert!(!compatible.loop_bodies[0].clusters[0].collapsed);
+        let encoded: Value = serde_json::from_slice(&compatible.to_json().unwrap()).unwrap();
+        assert_eq!(encoded["version"], json!(version));
+        assert!(encoded["clusters"][0].get("collapsed").is_none());
+        assert!(
+            encoded["loop_bodies"][0]["clusters"][0]
+                .get("collapsed")
+                .is_none()
+        );
+        assert_eq!(
+            WorkflowDescription::from_json(&serde_json::to_vec(&encoded).unwrap()).unwrap(),
+            compatible
+        );
+    }
+}
+
 #[test]
 fn nested_descriptions_validate_scope_ownership_and_version() {
     for source in ["%loop", "$loop"] {

@@ -285,6 +285,7 @@ pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, Grap
     let mut loop_bodies = Vec::new();
     let mut omitted_iterations = Vec::new();
     let callable_children = has_callable_children(graph);
+    let default_collapsed = has_default_collapsed(graph);
     describe_children(
         graph,
         &mut Vec::new(),
@@ -296,7 +297,9 @@ pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, Grap
     // observation projection, using an existing schema that supports all features.
     let mut description = WorkflowDescription {
         order_edges: order_edges(&definition.order_edges),
-        version: if callable_children {
+        version: if default_collapsed {
+            WorkflowDescriptionVersion::V2026_11_11
+        } else if callable_children {
             WorkflowDescriptionVersion::V2026_11_09
         } else {
             WorkflowDescriptionVersion::V2026_10_23
@@ -341,7 +344,9 @@ pub fn describe_graph(graph: &CompiledGraph) -> Result<WorkflowDescription, Grap
     // Receiving fields can carry newer child features even when the authored root
     // is old. Select a compatible existing observation schema from the projection;
     // this never changes the authored workflow version or scans opaque JSON.
-    description.version = if callable_children {
+    description.version = if default_collapsed {
+        WorkflowDescriptionVersion::V2026_11_11
+    } else if callable_children {
         WorkflowDescriptionVersion::V2026_11_09
     } else if definition.version.supports_clusters()
         || !description.clusters.is_empty()
@@ -387,6 +392,19 @@ fn has_callable_children(graph: &CompiledGraph) -> bool {
         .values()
         .flat_map(BTreeMap::values)
         .any(|child| child.relations.is_callable() || has_callable_children(child))
+}
+
+fn has_default_collapsed(graph: &CompiledGraph) -> bool {
+    graph
+        .definition
+        .clusters
+        .iter()
+        .any(|cluster| cluster.collapsed)
+        || graph
+            .children
+            .values()
+            .flat_map(BTreeMap::values)
+            .any(has_default_collapsed)
 }
 
 /// Validate provider-free endpoints before any observation-only projection.
@@ -561,6 +579,7 @@ fn clusters(clusters: &[crate::ClusterDefinition]) -> Vec<ClusterDescription> {
             label: cluster.label.clone(),
             annotation: cluster.annotation.clone(),
             nodes: cluster.nodes.iter().map(ToString::to_string).collect(),
+            collapsed: cluster.collapsed,
         })
         .collect()
 }

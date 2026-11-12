@@ -105,6 +105,8 @@ inspection fields are distinct from the authoring format.
 
 Earlier supported descriptions use finite event schema `7` or streaming schema `8`. Description
 `2026-11-09` adds definition-origin-aware Flow scopes and uses finite schema `9` or streaming schema `10`.
+Description `2026-11-11` adds each cluster's optional `collapsed` default while retaining those event schemas.
+It changes only the initial TUI layout; later folding remains session-local, and PiPs still expose running members.
 Old readers reject unsupported event versions before execution. Node-success skip causes use `{"node_success":"source"}` without a fabricated
 port; output skip causes keep their existing source-node/source-output fields.
 
@@ -551,6 +553,13 @@ selection, or the viewport change.
 The browser builds layouts on demand and retains only the current root and current body layouts. Viewports are saved per
 scope/view; switching connections preserves the selected node. Re-entering an evicted scope reproduces its geometry.
 `GraphLayout::new` retains full-port behavior for widget callers; use `with_view` for an explicit projection.
+
+Each root or body cluster can set `collapsed: true` to start folded; omitted or `false` keeps the cluster expanded.
+This is only a default view, not an execution setting: press `c` on a cluster to expand or collapse it.
+The TUI keeps those choices as local session state, preserving them across connection-view changes and body folding
+without modifying the description. Layout constructors without an explicit collapsed-state argument apply the current
+scope's defaults; constructors with that argument use exactly the caller's state, including an empty set or map.
+Picture-in-picture layouts remain expanded, so running members of a collapsed cluster are still individually visible.
 
 Node boxes start at four rows: two borders, a title, and a detail line. Compact attachments are spaced
 four rows apart. One-to-one connections align input and output rows; fan/join connections stagger

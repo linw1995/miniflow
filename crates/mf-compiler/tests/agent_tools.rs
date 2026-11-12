@@ -253,9 +253,19 @@ fn assert_catalog_once_outside_loop(recording: &Snapshots, tool_count: usize) {
     // Runtime capabilities stay native through the caller map and Loop state;
     // snapshots expose neither executable bodies nor the chat credential.
     let snapshot = repeat.snapshot.node(&repeat.scope, &repeat.node).unwrap();
-    let flows = snapshot.inputs.get("flows").unwrap().as_object().unwrap();
-    assert_eq!(flows.len(), tool_count);
-    assert!(flows.values().all(|flow| flow.as_str() == Some("<Flow>")));
+    let tools = snapshot.inputs.get("tools").unwrap().as_object().unwrap();
+    assert_eq!(tools.len(), tool_count);
+    for tool in tools.values() {
+        let record = tool.as_object().unwrap();
+        assert_eq!(record.len(), 3);
+        assert_eq!(record["flow"].as_str(), Some("<Flow>"));
+        assert!(
+            record["description"]
+                .as_str()
+                .is_some_and(|description| !description.is_empty() && description != "[REDACTED]")
+        );
+        assert!(record["parameters"].is_object());
+    }
     for entry in history {
         let snapshot = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
         let serialized = serde_json::to_string(snapshot).unwrap();
@@ -302,11 +312,10 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
             .unwrap()
     };
     let parameters = node("params")["config"]["parameters"].as_object().unwrap();
-    assert_eq!(parameters.len(), 8);
-    assert_eq!(parameters["tools"]["type"], json!({"map":"flow"}));
+    assert_eq!(parameters.len(), 7);
+    assert_eq!(parameters["tools"]["type"], json!({"map":"object"}));
     assert!(parameters["tools"].get("default").is_none());
-    assert_eq!(parameters["descriptions"]["type"], "object");
-    assert_eq!(parameters["descriptions"]["default"], json!({}));
+    assert!(parameters.get("descriptions").is_none());
     assert!(!value.to_string().contains("flow_0"));
     assert_eq!(node("catalog")["kind"], "workflow.call");
     let catalog_flow = node("catalog")["config"]["flow"].as_str().unwrap();
@@ -318,10 +327,15 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
     let variables = repeat["config"]["variables"].as_array().unwrap();
     let native_variables = variables
         .iter()
-        .filter(|variable| variable["type"] == json!({"map":"flow"}))
+        .filter(|variable| variable["type"] == json!({"map":"object"}))
         .collect::<Vec<_>>();
     assert_eq!(native_variables.len(), 1);
-    assert_eq!(native_variables[0]["name"], "flows");
+    assert_eq!(native_variables[0]["name"], "tools");
+    let schema = variables
+        .iter()
+        .find(|variable| variable["name"] == "tool_definitions")
+        .unwrap();
+    assert_eq!(schema["type"], "array");
     assert!(variables.iter().all(|variable| variable["type"] != "flow"));
     let body = &repeat["config"]["body"];
     let dispatch = body["nodes"]
@@ -332,6 +346,15 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
         .unwrap();
     let dispatch_flow = dispatch["config"]["flow"].as_str().unwrap();
     assert_eq!(body["flows"][dispatch_flow]["builtin"], "mfn-llm.tool-uses");
+    assert_eq!(
+        dispatch["inputs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["params.calls", "params.tools"]
+    );
     assert!(dispatch["config"].get("body").is_none());
 
     let registry = NodeRegistry::from_inventory().unwrap();
