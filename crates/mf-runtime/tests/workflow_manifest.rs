@@ -641,6 +641,93 @@ fn newer_static_children_do_not_enable_startup_inputs_on_legacy_roots() {
 }
 
 #[test]
+fn root_cluster_defaults_project_without_sources_and_only_true_raises_the_version() {
+    for collapsed in [false, true] {
+        let mut manifest = sample();
+        manifest.graph.definition.version = mf_runtime::WorkflowDefinitionVersion::V2026_11_11;
+        manifest.graph.definition.clusters = vec![
+            serde_json::from_value(json!({
+                "label": "Root work", "annotation": "Provider-free cluster metadata.",
+                "nodes": ["root.a/~"], "collapsed": collapsed
+            }))
+            .unwrap(),
+        ];
+        let decoded = round_trip(&manifest);
+        let description = decoded.description().unwrap();
+        assert_eq!(
+            description.version,
+            if collapsed {
+                mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_11
+            } else {
+                mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23
+            }
+        );
+        assert_eq!(description.clusters[0].collapsed, collapsed);
+        let payload = serde_json::to_value(&decoded).unwrap();
+        let projection = serde_json::to_value(&description).unwrap();
+        if collapsed {
+            assert_eq!(
+                payload["graph"]["definition"]["clusters"][0]["collapsed"],
+                true
+            );
+            assert_eq!(projection["clusters"][0]["collapsed"], true);
+        } else {
+            assert!(
+                payload["graph"]["definition"]["clusters"][0]
+                    .get("collapsed")
+                    .is_none()
+            );
+            assert!(projection["clusters"][0].get("collapsed").is_none());
+        }
+    }
+}
+
+#[test]
+fn nested_loop_cluster_defaults_promote_only_for_true_without_changing_the_old_root() {
+    for collapsed in [false, true] {
+        let mut manifest = loop_manifest();
+        let nested = child(
+            child(&mut manifest.graph, "repeat", "body"),
+            "inner",
+            "body",
+        );
+        nested.definition.version = mf_runtime::WorkflowDefinitionVersion::V2026_11_11;
+        nested
+            .definition
+            .nodes
+            .push(serde_json::from_value(json!({"id": "work", "kind": "fixture.work"})).unwrap());
+        nested.execution_order.push("work".into());
+        nested.definition.clusters = vec![
+            serde_json::from_value(json!({
+                "label": "Inner work", "annotation": "Nested cluster metadata.",
+                "nodes": ["work"], "collapsed": collapsed
+            }))
+            .unwrap(),
+        ];
+        let decoded = round_trip(&manifest);
+        let description = decoded.description().unwrap();
+        assert_eq!(
+            description.version,
+            if collapsed {
+                mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_11
+            } else {
+                mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_23
+            }
+        );
+        assert_eq!(description.loop_bodies.len(), 2);
+        let nested = description
+            .loop_body(&["repeat".into(), "inner".into()])
+            .unwrap();
+        assert_eq!(nested.clusters[0].collapsed, collapsed);
+        assert_eq!(nested.clusters[0].nodes, ["work"]);
+        assert_eq!(
+            decoded.graph.definition.version,
+            mf_runtime::WorkflowDefinitionVersion::V2026_09_29
+        );
+    }
+}
+
+#[test]
 fn default_collapsed_child_clusters_raise_the_manifest_description_version() {
     let mut root = graph(
         json!({
@@ -677,11 +764,23 @@ fn default_collapsed_child_clusters_raise_the_manifest_description_version() {
         mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_11
     );
     assert_eq!(description.loop_bodies.len(), 1);
+    assert!(description.loop_bodies[0].source.is_none());
     assert!(description.loop_bodies[0].clusters[0].collapsed);
     assert_eq!(
         decoded.graph.definition.version,
         mf_runtime::WorkflowDefinitionVersion::V2026_09_29
     );
+    let mut expanded = decoded;
+    child(&mut expanded.graph, "dispatch", "selected")
+        .definition
+        .clusters[0]
+        .collapsed = false;
+    let description = round_trip(&expanded).description().unwrap();
+    assert_eq!(
+        description.version,
+        mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09
+    );
+    assert!(!description.loop_bodies[0].clusters[0].collapsed);
 }
 
 fn historical_iteration_manifest() -> WorkflowManifest {
