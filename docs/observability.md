@@ -686,6 +686,13 @@ before navigating back. The footer shows only common controls. Press `?` in the 
 for the remaining shortcuts, and `?` or Esc to dismiss help. Help consumes navigation keys while open.
 The header keeps the observed workflow outcome separate from the child process result. Arrow keys
 pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. `e` cycles connection views.
+Left-click a visible graph node to select it and update its scope and any open Details, including nodes
+inside expanded bodies. Clicks do not open Details or change history automatically. Wheel up/down pans
+the canvas vertically; horizontal wheel events pan horizontally. Mouse input over headers, Details,
+running-node PiPs, the visible minimap, help, or the tracing/log view does not pan or select the
+underlying canvas. These controls also work in the chat inspector, but not the compact read-only Flow
+overview. Dragging and mouse folding are not supported; use the existing keyboard shortcuts to expand
+or collapse bodies.
 When at least two display nodes run concurrently in the current scope, picture-in-picture local graphs
 center on and highlight each running node without changing the main graph's selection, pan state, or
 layout. The PiP grid recomputes its rows, columns, and visible count from the running-node count and

@@ -13,7 +13,10 @@ use crate::{
 };
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -27,7 +30,7 @@ use process_wrap::std::{ChildWrapper, CommandWrap, ProcessGroup};
 use ratatui::{
     Frame, Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Position, Rect},
     style::{Color, Style},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -663,7 +666,7 @@ impl TerminalGuard {
     pub fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let guard = Self;
-        execute!(io::stderr(), EnterAlternateScreen, Hide)?;
+        enter_screen(&mut io::stderr())?;
         Ok(guard)
     }
 }
@@ -671,8 +674,20 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stderr(), Show, LeaveAlternateScreen);
+        restore_screen(&mut io::stderr());
     }
+}
+
+fn enter_screen(writer: &mut impl Write) -> io::Result<()> {
+    execute!(writer, EnterAlternateScreen, Hide, EnableMouseCapture)
+}
+
+fn restore_screen(writer: &mut impl Write) {
+    // Attempt every restoration even when an earlier write fails. The guard is
+    // alive during setup as well, so partial initialization uses this path too.
+    let _ = execute!(writer, DisableMouseCapture);
+    let _ = execute!(writer, Show);
+    let _ = execute!(writer, LeaveAlternateScreen);
 }
 
 struct ChildGuard {
@@ -1017,6 +1032,8 @@ struct ViewState {
     iteration_items: BTreeMap<Vec<String>, ItemIdentity>,
     reveal_selected: bool,
     graph_size: Option<(u16, u16)>,
+    mouse_graph: Rect,
+    mouse_overlays: Vec<Rect>,
     details_visible: bool,
     help_visible: bool,
     traces: TraceView,
@@ -1258,6 +1275,51 @@ impl ViewState {
         }
     }
 
+    fn handle_mouse(&mut self, event: MouseEvent, layout: &GraphLayout) {
+        let position = Position::new(event.column, event.row);
+        if self.help_visible
+            || self.traces.visible
+            || !self.mouse_graph.contains(position)
+            || self
+                .mouse_overlays
+                .iter()
+                .any(|area| area.contains(position))
+        {
+            return;
+        }
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let x = self
+                    .offset
+                    .0
+                    .saturating_add(u32::from(event.column - self.mouse_graph.x));
+                let y = self
+                    .offset
+                    .1
+                    .saturating_add(u32::from(event.row - self.mouse_graph.y));
+                // Match paint order: inline children are drawn over their enclosing owner.
+                if let Some(selected) = layout.nodes().iter().rposition(|node| {
+                    let rect = node.rect;
+                    x >= rect.x
+                        && x < rect.x.saturating_add(rect.width)
+                        && y >= rect.y
+                        && y < rect.y.saturating_add(rect.height)
+                }) {
+                    self.selected = selected;
+                    self.sync_scope(layout);
+                    self.details_offset = 0;
+                    // A clipped node can be selected without moving the canvas.
+                    self.reveal_selected = false;
+                }
+            }
+            MouseEventKind::ScrollUp => self.offset.1 = self.offset.1.saturating_sub(2),
+            MouseEventKind::ScrollDown => self.offset.1 = self.offset.1.saturating_add(2),
+            MouseEventKind::ScrollLeft => self.offset.0 = self.offset.0.saturating_sub(4),
+            MouseEventKind::ScrollRight => self.offset.0 = self.offset.0.saturating_add(4),
+            _ => {}
+        }
+    }
+
     fn clear_iteration_history(&mut self, snapshot: &StateSnapshot) {
         for item in &snapshot.iterations.items {
             let owner = &item.iteration_path;
@@ -1312,6 +1374,7 @@ fn supervise(
                         view.handle_key(key.code, &observation);
                     }
                 }
+                Event::Mouse(mouse) => view.handle_mouse(mouse),
                 Event::Resize(width, height) => {
                     terminal
                         .resize(Rect::new(0, 0, width, height))
@@ -1696,6 +1759,7 @@ fn draw(
             graph
         } else { graph };
         view_state.reveal(layout, graph);
+        view_state.mouse_graph = graph;
         let mut graph_view = GraphView::new(layout)
             .reader(receiver)
             .selected(view_state.selected)
@@ -1703,6 +1767,7 @@ fn draw(
             .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64)
             .minimap(!view_state.minimap_hidden);
         graph_view = graph_view.nodes(&display_nodes);
+        let minimap_area = graph_view.minimap_area(graph);
         frame.render_widget(graph_view, graph);
         let observations = display_nodes.as_slice();
         let pip_nodes = inline_observations_with_items(
@@ -1712,6 +1777,10 @@ fn draw(
             &view_state.history_offsets(),
             &view_state.iteration_items,
         );
+        view_state.mouse_overlays = parallel_pip_areas(
+            execution_pips(pip_layout, &pip_nodes, Some(&snapshot.iterations)).len(), graph,
+        ).0;
+        view_state.mouse_overlays.extend(minimap_area);
         draw_parallel_pips(
             frame,
             graph,
@@ -1766,7 +1835,7 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | m minimap | d details | ? help | {controls}",
+            "Delivery: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows/wheel pan | Tab/click select | m minimap | d details | ? help | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             snapshot.observation.errors + snapshot.observation.protocol_conflicts + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
@@ -1786,7 +1855,7 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
          PgUp/PgDn      Scroll / page records\nv, Esc         Return to graph\n\
          Ctrl-C         Interrupt / close"
     } else {
-        "Arrows         Pan graph\nTab / Shift-Tab, j/k   Select node\n\
+        "Arrows / wheel Pan graph (wheel over canvas only)\nLeft click     Select node\nTab / Shift-Tab, j/k   Select node\n\
          d              Show / hide details\nPgUp/PgDn      Scroll visible details\n\
          e              Cycle connection view\nc              Fold selected body / cluster\nv              Open OTEL tracing\n\
          l              Expand selected body inline\nh              Collapse body / enclosing body\n\
@@ -3011,6 +3080,10 @@ impl ObservationView {
                 &reader.log_snapshot(),
             );
         }
+    }
+    /// Route mouse input using the last rendered inspector canvas bounds.
+    pub fn handle_mouse(&mut self, event: MouseEvent) {
+        self.state.handle_mouse(event, &self.root);
     }
     pub fn dismiss_overlay(&mut self) -> bool {
         if self.state.help_visible {
@@ -4383,6 +4456,320 @@ mod tests {
         view.state.handle_help(KeyCode::Esc);
         view.handle_navigation(KeyCode::Char('m'), &snapshot, &traces, &logs);
         assert!(!view.state.minimap_hidden);
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_canvas_bounds_follow_rendered_layout_and_resize() {
+        let description = scope_fixture();
+        let receiver = LoopbackReceiver::bind(description.clone(), RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let snapshot = reader.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(Box::new(io::sink()) as Box<dyn Write>),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(7, 3, 100, 24)),
+            },
+        )
+        .unwrap();
+        let capture = CaptureView {
+            stdout_open: false,
+            stderr_open: false,
+            stderr_tail: String::new(),
+            stderr_dropped: 0,
+            error: None,
+        };
+        for (details, warning, expected) in [
+            (false, false, Rect::new(7, 4, 100, 21)),
+            (true, false, Rect::new(7, 4, 70, 21)),
+            (true, true, Rect::new(7, 5, 70, 20)),
+        ] {
+            view.state.details_visible = details;
+            view.state.graph_notice = warning.then(|| "test warning".into());
+            draw(
+                &mut terminal,
+                &view.root,
+                &view.pip_layout,
+                &description,
+                &snapshot,
+                &capture,
+                Duration::ZERO,
+                &mut view.state,
+                &reader,
+                None,
+            )
+            .unwrap();
+            assert_eq!(view.state.mouse_graph, expected);
+            let offset = view.state.offset;
+            // Header, footer and the details pane do not pan the canvas.
+            for (x, y) in [(7, 3), (7, 25), (expected.right(), expected.y)] {
+                view.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
+                assert_eq!(view.state.offset, offset);
+            }
+        }
+        // A resize event replaces the fixed viewport before the next draw, so the
+        // canvas bounds must follow the new frame area rather than the old one.
+        view.state.details_visible = false;
+        view.state.graph_notice = None;
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(Box::new(io::sink()) as Box<dyn Write>),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 80, 20)),
+            },
+        )
+        .unwrap();
+        draw(
+            &mut terminal,
+            &view.root,
+            &view.pip_layout,
+            &description,
+            &snapshot,
+            &capture,
+            Duration::ZERO,
+            &mut view.state,
+            &reader,
+            None,
+        )
+        .unwrap();
+        let resized = Rect::new(0, 1, 80, 17);
+        assert_eq!(view.state.mouse_graph, resized);
+        let offset = view.state.offset;
+        view.handle_mouse(mouse(MouseEventKind::ScrollRight, 80, 1));
+        assert_eq!(view.state.offset, offset);
+        view.handle_mouse(mouse(MouseEventKind::ScrollDown, 0, 1));
+        assert_eq!(view.state.offset, (offset.0, offset.1 + 2));
+    }
+
+    #[test]
+    fn mouse_minimap_blocks_canvas_input_only_while_visible() {
+        let description = scope_fixture();
+        let receiver = LoopbackReceiver::bind(description.clone(), RunId::new()).unwrap();
+        let reader = receiver.reader();
+        let snapshot = reader.snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(Box::new(io::sink()) as Box<dyn Write>),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(7, 3, 24, 11)),
+            },
+        )
+        .unwrap();
+        let capture = CaptureView {
+            stdout_open: false,
+            stderr_open: false,
+            stderr_tail: String::new(),
+            stderr_dropped: 0,
+            error: None,
+        };
+        let render = |view: &mut ObservationView, terminal: &mut Terminal<_>| {
+            draw(
+                terminal,
+                &view.root,
+                &view.pip_layout,
+                &description,
+                &snapshot,
+                &capture,
+                Duration::ZERO,
+                &mut view.state,
+                &reader,
+                None,
+            )
+            .unwrap();
+        };
+        render(&mut view, &mut terminal);
+        let map = GraphView::new(&view.root)
+            .minimap(true)
+            .minimap_area(view.state.mouse_graph)
+            .expect("the graph overflows this small canvas");
+        let selected = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "target")
+            .unwrap();
+        let rect = view.root.nodes()[selected].rect;
+        // Place the target's bottom-right cell under the minimap's top-left cell.
+        view.state.offset = (
+            rect.x + rect.width - 1 - u32::from(map.x - view.state.mouse_graph.x),
+            rect.y + rect.height - 1 - u32::from(map.y - view.state.mouse_graph.y),
+        );
+        view.state.selected = (selected + 1) % view.root.nodes().len();
+        view.state.reveal_selected = false;
+        render(&mut view, &mut terminal);
+        assert!(view.state.mouse_overlays.contains(&map));
+        let previous = view.state.selected;
+        let offset = view.state.offset;
+        let click = mouse(MouseEventKind::Down(MouseButton::Left), map.x, map.y);
+        let wheel = mouse(MouseEventKind::ScrollDown, map.x, map.y);
+        view.handle_mouse(click);
+        view.handle_mouse(wheel);
+        assert_eq!(view.state.selected, previous);
+        assert_eq!(view.state.offset, offset);
+
+        view.state.minimap_hidden = true;
+        render(&mut view, &mut terminal);
+        assert!(!view.state.mouse_overlays.contains(&map));
+        view.handle_mouse(click);
+        assert_eq!(view.state.selected, selected);
+        view.handle_mouse(wheel);
+        assert_eq!(view.state.offset, (offset.0, offset.1 + 2));
+    }
+
+    #[test]
+    fn mouse_selects_clipped_inline_node_and_syncs_history_scope() {
+        let mut view = ObservationView::new(&scope_fixture()).unwrap();
+        let selected = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "target")
+            .unwrap();
+        let rect = view.root.nodes()[selected].rect;
+        // Nonzero viewport origin plus header/warning rows; node is clipped at left/top.
+        view.state.mouse_graph = Rect::new(7, 5, 30, 10);
+        view.state.offset = (rect.x + 1, rect.y + 1);
+        view.state.details_offset = 20;
+        view.state.pass_offsets.insert(vec!["second".into()], 3);
+        view.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 7, 5));
+        assert_eq!(view.state.selected, selected);
+        assert_eq!(view.state.path, ["second"]);
+        assert_eq!(view.state.pass_offset, 3);
+        assert_eq!(view.state.details_offset, 0);
+        assert_eq!(view.state.offset, (rect.x + 1, rect.y + 1));
+        assert!(!view.state.reveal_selected);
+    }
+
+    #[test]
+    fn mouse_selects_collapsed_cluster_without_changing_folding() {
+        let mut description = parallel_fixture(3);
+        description.version = WorkflowDescriptionVersion::V2026_11_11;
+        description.clusters = vec![ClusterDescription {
+            label: "Parallel work".into(),
+            annotation: "Independent tasks.".into(),
+            nodes: vec!["parallel-0".into(), "parallel-1".into()],
+            collapsed: true,
+        }];
+        let mut view = ObservationView::new(&description).unwrap();
+        let cluster = view.root.display_index_for_cluster(0).unwrap();
+        let rect = view.root.nodes()[cluster].rect;
+        view.state.selected = view.root.display_index_for_node_id("parallel-2").unwrap();
+        view.state.mouse_graph = Rect::new(5, 3, 80, 30);
+        view.state.offset = (rect.x, rect.y);
+        view.state.path = vec!["stale".into()];
+        view.state.details_offset = 7;
+        view.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 5, 3));
+        assert_eq!(view.state.selected, cluster);
+        assert!(view.state.path.is_empty());
+        assert_eq!(view.state.details_offset, 0);
+        assert_eq!(view.state.offset, (rect.x, rect.y));
+        assert!(view.root.is_collapsed_cluster(view.state.selected));
+        assert!(view.root.clusters()[0].collapsed);
+        assert_eq!(view.collapsed[&Vec::new()], BTreeSet::from([0]));
+    }
+
+    #[test]
+    fn mouse_respects_node_edges_canvas_bounds_and_overlays() {
+        let mut view = ObservationView::new(&scope_fixture()).unwrap();
+        let selected = view
+            .root
+            .display_index_for_scoped_node(&["second".into()], "target")
+            .unwrap();
+        let rect = view.root.nodes()[selected].rect;
+        view.state.mouse_graph = Rect::new(7, 5, 100, 40);
+        view.state.offset = (rect.x, rect.y);
+        let click = |x, y| mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+        for (x, y) in [
+            (6, 5),
+            (7, 4),
+            (107, 5),
+            (7, 45),
+            (7 + rect.width as u16, 5),
+            (7, 5 + rect.height as u16),
+        ] {
+            view.handle_mouse(click(x, y));
+            assert_ne!(view.state.selected, selected);
+        }
+        view.state.mouse_overlays = vec![Rect::new(7, 5, 10, 5)];
+        view.handle_mouse(click(7, 5));
+        assert_ne!(view.state.selected, selected);
+        view.state.mouse_overlays.clear();
+        view.state.help_visible = true;
+        view.handle_mouse(click(7, 5));
+        assert_ne!(view.state.selected, selected);
+        view.state.help_visible = false;
+        view.state.traces.visible = true;
+        view.handle_mouse(click(7, 5));
+        assert_ne!(view.state.selected, selected);
+        view.state.traces.visible = false;
+        view.handle_mouse(click(7 + rect.width as u16 - 1, 5 + rect.height as u16 - 1));
+        assert_eq!(view.state.selected, selected);
+    }
+
+    #[test]
+    fn mouse_wheel_pans_only_canvas_and_saturates() {
+        let mut view = ObservationView::new(&scope_fixture()).unwrap();
+        view.state.mouse_graph = Rect::new(3, 2, 30, 10);
+        for kind in [MouseEventKind::ScrollUp, MouseEventKind::ScrollLeft] {
+            view.handle_mouse(mouse(kind, 3, 2));
+        }
+        assert_eq!(view.state.offset, (0, 0));
+        view.handle_mouse(mouse(MouseEventKind::ScrollDown, 3, 2));
+        view.handle_mouse(mouse(MouseEventKind::ScrollRight, 3, 2));
+        assert_eq!(view.state.offset, (4, 2));
+        for (x, y) in [(3, 1), (33, 2), (3, 12)] {
+            view.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
+        }
+        assert_eq!(view.state.offset, (4, 2));
+        view.state.offset = (u32::MAX, u32::MAX);
+        view.handle_mouse(mouse(MouseEventKind::ScrollDown, 3, 2));
+        view.handle_mouse(mouse(MouseEventKind::ScrollRight, 3, 2));
+        assert_eq!(view.state.offset, (u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn terminal_screen_setup_and_cleanup_include_mouse_capture() {
+        let mut setup = Vec::new();
+        enter_screen(&mut setup).unwrap();
+        let mut expected = Vec::new();
+        execute!(expected, EnterAlternateScreen, Hide, EnableMouseCapture).unwrap();
+        assert_eq!(setup, expected);
+        let mut cleanup = Vec::new();
+        restore_screen(&mut cleanup);
+        expected.clear();
+        execute!(expected, DisableMouseCapture, Show, LeaveAlternateScreen).unwrap();
+        assert_eq!(cleanup, expected);
+
+        struct FailOnce {
+            writes: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for FailOnce {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                if self.writes == 1 {
+                    return Err(io::Error::other("test write failure"));
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        // A partial restore still attempts every remaining terminal reset.
+        let mut failing = FailOnce {
+            writes: 0,
+            bytes: Vec::new(),
+        };
+        restore_screen(&mut failing);
+        expected.clear();
+        execute!(expected, Show, LeaveAlternateScreen).unwrap();
+        assert_eq!(failing.bytes, expected);
     }
 
     #[test]

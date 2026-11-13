@@ -272,7 +272,7 @@ fn interact(binary: &Path, database: &Path, restart: bool) -> String {
                             Some(b"\x10")
                         }
                         8 if text.contains("Inspect current run") => Some(b"\x1b[B\x1b[B\r"),
-                        9 if text.contains("Workflow:") => Some(b"\x1b"),
+                        9 if text.contains("Workflow:") => Some(b"\x1b[<35;40;10M\x1b"),
                         10 if text.contains("Alt+Enter send") => Some(b"\x13"),
                         11 if text.contains("Switch chat") && text.contains("hello") => Some(b"\r"),
                         12 if text.contains("first reply") && !text.contains("second reply") => {
