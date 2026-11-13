@@ -214,6 +214,10 @@ impl WorkflowDefinitionVersion {
     pub fn supports_cluster_collapsed(self) -> bool {
         matches!(self, Self::V2026_11_11)
     }
+
+    pub fn supports_loop_inputs(self) -> bool {
+        matches!(self, Self::V2026_11_11)
+    }
 }
 
 pub const CALL_KIND: &str = "workflow.call";
@@ -340,6 +344,8 @@ pub const MAX_SCHEDULED_STEPS: usize = 10_000;
 pub struct LoopDefinition {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stream_outputs: BTreeMap<String, OutputReferenceDefinition>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, crate::ValueType>,
     pub max_iterations: u16,
     pub variables: Vec<LoopVariableDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -353,6 +359,8 @@ pub struct LoopVariableDefinition {
     pub name: String,
     #[serde(rename = "type")]
     pub value_type: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

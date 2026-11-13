@@ -40,6 +40,7 @@ fn loop_variable_failures_preserve_the_descriptor_source() {
     let error = loop_variable_types(&[LoopVariableDefinition {
         name: "count".into(),
         value_type: json!({"list": "unknown"}),
+        initial: None,
     }])
     .unwrap_err();
     assert!(

@@ -2,7 +2,7 @@ use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, LoopComparisonOperator, LoopConditionDefinition,
     LoopVariableDefinition, NodeBuildError, NodeConfig, NodeExecutionError, NodePortContract,
     NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedSubgraph, SubgraphNode,
-    SubgraphStream, ValueType, compare_json_numbers, loop_variable_types,
+    SubgraphStream, ValueRef, ValueType, compare_json_numbers, loop_variable_types,
 };
 use mf_telemetry::{
     Count,
@@ -19,6 +19,8 @@ pub const KIND: &str = mf_runtime::LOOP_KIND;
 struct Config {
     body: PreparedSubgraph,
     max_iterations: u16,
+    #[serde(default)]
+    inputs: BTreeMap<String, ValueType>,
     variables: Vec<LoopVariableDefinition>,
     #[serde(default)]
     until: Option<LoopConditionDefinition>,
@@ -35,13 +37,22 @@ fn plain(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
 
 #[derive(Debug, Snafu)]
 pub enum LoopBuildError {
-    #[snafu(display("Loop stream names must be nonblank and distinct from variables"))]
+    #[snafu(display("Loop stream names must be nonblank and distinct from variables and inputs"))]
     InvalidStreamName,
     #[snafu(display("max_iterations must be in 1..=1000"))]
     InvalidMaximum,
     #[snafu(display("invalid Loop variables: {source}"))]
     Variables {
         source: mf_runtime::LoopVariableError,
+    },
+    #[snafu(display("invalid Loop input name `{name}`"))]
+    InvalidInputName { name: String },
+    #[snafu(display("Loop input `{name}` collides with a variable"))]
+    DuplicateInput { name: String },
+    #[snafu(display("invalid initial value for Loop variable `{variable}`: {source}"))]
+    InitialValue {
+        variable: String,
+        source: mf_runtime::TypeMismatch,
     },
     #[snafu(display("unknown condition variable `{variable}`"))]
     UnknownConditionVariable { variable: String },
@@ -58,7 +69,7 @@ pub enum LoopBuildError {
     #[snafu(display("Loop body outputs must be empty"))]
     BodyOutputs,
     #[snafu(display(
-        "Loop body scope bindings must match its variables and identity state outputs"
+        "Loop body scope bindings must match its variables, inputs, and identity state outputs"
     ))]
     InvalidScopeBindings,
 }
@@ -69,27 +80,60 @@ impl From<LoopBuildError> for NodeBuildError {
     }
 }
 
+struct LoopTypes {
+    state: BTreeMap<String, ValueType>,
+    inputs: BTreeMap<String, ValueType>,
+    combined: BTreeMap<String, ValueType>,
+    initial: BTreeMap<String, ValueRef>,
+}
+
 /// Validate the owning node's options against the prepared stream boundary.
 fn validate_options<'a>(
     max_iterations: u16,
     variables: &[LoopVariableDefinition],
+    inputs: BTreeMap<String, ValueType>,
     until: Option<&LoopConditionDefinition>,
     stream_names: impl IntoIterator<Item = &'a str>,
-) -> Result<BTreeMap<String, ValueType>, LoopBuildError> {
+) -> Result<LoopTypes, LoopBuildError> {
     ensure!(
         (1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&max_iterations),
         InvalidMaximumSnafu
     );
-    let types = loop_variable_types(variables).context(VariablesSnafu)?;
+    let state = loop_variable_types(variables).context(VariablesSnafu)?;
+    for name in inputs.keys() {
+        ensure!(
+            !name.trim().is_empty() && name != "index",
+            InvalidInputNameSnafu { name }
+        );
+        ensure!(!state.contains_key(name), DuplicateInputSnafu { name });
+    }
+    let mut combined = inputs.clone();
+    combined.extend(
+        state
+            .iter()
+            .map(|(name, value_type)| (name.clone(), value_type.clone())),
+    );
+    let mut initial = BTreeMap::new();
+    for variable in variables {
+        if let Some(value) = &variable.initial {
+            let value_type = &state[&variable.name];
+            value_type
+                .validate_value(value)
+                .context(InitialValueSnafu {
+                    variable: &variable.name,
+                })?;
+            initial.insert(variable.name.clone(), ValueRef::from(value.clone()));
+        }
+    }
     ensure!(
         stream_names
             .into_iter()
-            .all(|name| !name.trim().is_empty() && !types.contains_key(name)),
+            .all(|name| !name.trim().is_empty() && !combined.contains_key(name)),
         InvalidStreamNameSnafu
     );
     if let Some(condition) = until {
         let value_type =
-            types
+            state
                 .get(&condition.variable)
                 .with_context(|| UnknownConditionVariableSnafu {
                     variable: &condition.variable,
@@ -152,7 +196,12 @@ fn validate_options<'a>(
             ensure!(compatible, IncompatibleConditionLiteralSnafu);
         }
     }
-    Ok(types)
+    Ok(LoopTypes {
+        state,
+        inputs,
+        combined,
+        initial,
+    })
 }
 
 fn factory(
@@ -163,6 +212,7 @@ fn factory(
     let Config {
         body,
         max_iterations,
+        inputs,
         variables,
         until,
         stream_outputs,
@@ -170,6 +220,7 @@ fn factory(
     let types = validate_options(
         max_iterations,
         &variables,
+        inputs,
         until.as_ref(),
         stream_outputs
             .keys()
@@ -179,9 +230,10 @@ fn factory(
     if let Some(relations) = &body.relations {
         ensure!(
             relations.scope.as_ref().is_some_and(|scope| {
-                scope.values == types
+                scope.values == types.combined
                     && scope.state_outputs
                         == types
+                            .state
                             .keys()
                             .map(|name| (name.clone(), name.clone()))
                             .collect()
@@ -196,7 +248,9 @@ fn factory(
         scope_key: body.scope_key(id, "body"),
         max_iterations,
         until,
-        types,
+        types: types.state,
+        inputs: types.inputs,
+        initial: types.initial,
         body,
     };
     mf_runtime::PreparedNode::subgraph(node, mf_runtime::NodeMetadata::default())
@@ -312,6 +366,8 @@ mod tests {
                 max_iterations: 1,
                 until: None,
                 types,
+                inputs: BTreeMap::new(),
+                initial: BTreeMap::new(),
                 body: prepared,
             };
             let result = SubgraphNode::execute(
@@ -668,20 +724,31 @@ struct LoopNode {
     max_iterations: u16,
     until: Option<LoopConditionDefinition>,
     types: BTreeMap<String, ValueType>,
+    inputs: BTreeMap<String, ValueType>,
+    initial: BTreeMap<String, ValueRef>,
     body: PreparedSubgraph,
 }
 
 impl NodePortContract for LoopNode {
     fn ports(&self) -> NodePorts {
-        let ports: Vec<_> = self
+        let mut inputs: Vec<_> = self
+            .types
+            .iter()
+            .map(|(name, value_type)| {
+                PortSpec::owned(name, value_type.clone(), !self.initial.contains_key(name))
+            })
+            .collect();
+        inputs.extend(
+            self.inputs
+                .iter()
+                .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true)),
+        );
+        let outputs = self
             .types
             .iter()
             .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
             .collect();
-        NodePorts {
-            inputs: ports.clone(),
-            outputs: ports,
-        }
+        NodePorts { inputs, outputs }
     }
 }
 
@@ -714,7 +781,28 @@ impl SubgraphNode for LoopNode {
         ctx: &mut ExecutionContext,
         sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
-        let mut variables = inputs;
+        let mut remaining = inputs;
+        let mut variables = Inputs::new();
+        for name in self.inputs.keys() {
+            let value = remaining
+                .remove(name)
+                .ok_or_else(|| structural_error(format!("missing Loop input `{name}`")))?;
+            variables.insert(name.clone(), value);
+        }
+        for name in self.types.keys() {
+            let value = match remaining.remove(name) {
+                Some(value) => value,
+                None => self
+                    .initial
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| structural_error(format!("missing Loop value `{name}`")))?,
+            };
+            variables.insert(name.clone(), value);
+        }
+        if let Some(name) = remaining.keys().next() {
+            return Err(structural_error(format!("unexpected Loop input `{name}`")));
+        }
         let mut stream = SubgraphStream::new(self.id.as_str(), ctx, sink);
         let mut pass_count = 0;
         let mut reason = LoopStopReason::Maximum;
@@ -778,8 +866,15 @@ impl SubgraphNode for LoopNode {
                 break;
             }
         }
+        let mut outputs = Outputs::new();
+        for name in self.types.keys() {
+            let value = variables
+                .remove(name)
+                .ok_or_else(|| structural_error(format!("missing Loop state `{name}`")))?;
+            outputs.insert(name.clone(), value);
+        }
         Ok(NodeResult {
-            outputs: variables,
+            outputs,
             loop_summary: Some(LoopSummary {
                 pass_count: Count::try_from(pass_count as i64).expect("Loop pass count is bounded"),
                 reason,
