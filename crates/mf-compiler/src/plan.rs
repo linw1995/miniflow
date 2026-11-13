@@ -237,8 +237,7 @@ impl CompiledWorkflow {
                     clusters: Vec::new(),
                 };
                 if original.version.supports_flow_invocations() {
-                    description.version =
-                        mf_telemetry::description::WorkflowDescriptionVersion::V2026_11_09;
+                    description.version = original.version;
                     description.execution = Some(mf_telemetry::description::ExecutionDescription {
                         mode: mf_telemetry::description::ExecutionMode::Single,
                     });

@@ -8,8 +8,10 @@ mod identity;
 mod if_else;
 mod iteration;
 mod loop_declaration;
+mod object;
 mod parameters;
 mod readline;
+mod router;
 
 pub use assert::KIND as ASSERT_KIND;
 pub use batch::KIND as BATCH_KIND;
@@ -25,7 +27,9 @@ pub use iteration::{
     KIND as ITERATION_KIND, MAX_PARALLEL_ITEMS,
 };
 pub use loop_declaration::{KIND as LOOP_KIND, LoopBuildError};
+pub use object::{KIND as OBJECT_KIND, ObjectBuildError, ObjectExecutionError};
 pub use parameters::KIND as PARAMETERS_KIND;
+pub use router::{KIND as ROUTER_KIND, RouterBuildError, RouterExecutionError};
 
 #[cfg(test)]
 mod tests {

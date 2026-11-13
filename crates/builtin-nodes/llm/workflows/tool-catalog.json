@@ -1,0 +1,79 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core"
+    },
+    "llm": {
+      "package": "mfn-llm"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "tools": {
+            "type": {
+              "map": "object"
+            },
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "project",
+      "kind": "builtin.iteration",
+      "config": {
+        "mode": "parallel",
+        "body": {
+          "version": "2026-10-28",
+          "nodes": [
+            {
+              "id": "definition",
+              "kind": "llm.tool_definition",
+              "inputs": {
+                "tool": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                },
+                "name": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "key"
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "result",
+              "node": "definition",
+              "port": "definition"
+            }
+          ]
+        }
+      },
+      "inputs": {
+        "items": {
+          "from": {
+            "node": "params",
+            "port": "tools"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "tools",
+      "node": "project",
+      "port": "results"
+    }
+  ]
+}

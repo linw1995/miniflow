@@ -2,7 +2,7 @@
 
 ## JSON format
 
-Use version `2026-10-28` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+Use version `2026-11-11` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
 `outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
 display-only [node clusters](#node-clusters).
@@ -337,6 +337,25 @@ than reporting fictitious child events. Native callbacks remain usable without g
 See the [complete three-file example](../examples/embedded-workflows) and
 [embedding](embedding.md#repository-example).
 
+### Construct native objects
+
+`builtin.object` assembles named ordinary inputs without Serde or CEL. Declare the required input
+types in `config.fields`; the `value` output is a map whose values retain their payload identity and
+individual secret markers. Homogeneous fields expose `Map(type)`; heterogeneous and empty objects
+expose `Map(Any)`, with checked edges validating narrower destination types.
+
+```json
+{
+  "id": "tools",
+  "kind": "builtin.object",
+  "config": {"fields": {"calculator": "flow"}},
+  "inputs": {"calculator": {"from": {"node": "calculator", "port": "value"}}}
+}
+```
+
+This is general native-value construction, not a tool registry or executable loader. The caller's
+`calculator` key is a business name; it does not create a second callable identity.
+
 ### Supply an already-built runner
 
 Unix hosts can load an existing Linux ELF64 or macOS Mach-O64 runner as the same
@@ -402,6 +421,94 @@ outputs are still validated on every call. The host must keep the executable unc
 a prepared runner; after replacing it, load a new prepared runner. Missing or invalid artifacts fail
 during loading, while a subsequently missing or unlaunchable executable fails at process startup.
 
+## Configured Flow tools
+
+`mfn-llm.agent` is one reusable Flow with a fixed native `params.tools: Map(Object)` input. Each map
+value is a self-contained tool record with required `flow: Flow` and `description: String` fields and an
+optional `parameters: Object` field. The description and parameter documentation travel with the callable;
+there is no separate `descriptions` input. Supplying more tools changes only the input collection, not the
+Agent definition, Loop variables, catalog nodes, or dispatch ports. The Rust `agent_definition()`,
+`tool_catalog_definition()` and `tool_uses_definition()` APIs return those same fixed definitions; none
+accepts a tool list or generates per-tool graph IDs.
+
+Each tool body is produced by an existing `builtin.constant` with `type: "flow"`. An inner
+`builtin.object` assembles its `flow`, `description`, and optional `parameters` into one record; an outer
+`builtin.object` with an `object` field for each business name assembles the `Map(Object)`. Both are
+ordinary native-value construction, not separate documentation or executable registries.
+
+The `llm.tool_definition` adapter reads `record.flow`'s real prepared interface and projects the record's
+caller-owned documentation into a model definition. A fixed catalog Iteration visits the map's values,
+using each business key as its tool name. It outputs only model definitions, not an executable ID or a
+duplicate binding table. `mfn-llm.tool-catalog` and `mfn-llm.tool-uses` both receive this map as
+`params.tools`. The dispatch Iteration consumes original calls and shares the same native tool-record map.
+`llm.tool_arguments` validates against the selected Flow's actual interface, and the Router selects the
+record by name and invokes its `flow` field. A separate CEL assertion validates the entire batch before
+any tool effects. There are no LLM-specific tool producers, collectors, packers, or unpackers. Unknown
+tools, invalid arguments and recoverable child failures become tool-result content. Blank call IDs,
+cancellation and infrastructure failures still fail execution. Every interface is validated before
+dispatch or a model request, including when no tools are called; runtime callable metadata is not inferred
+from source JSON.
+
+Record documentation does not modify child parameter definitions. Types and requiredness come from the
+prepared interface: a tool has exactly one startup node and a finite terminal interface without stdin
+or incremental exports. Secret inputs require an environment or default source, cannot be supplied by
+model arguments, and are omitted from schemas. Literal defaults and environment names stay in the
+native Flow; the catalog exposes only effective requiredness and documented public inputs. A sole required
+string output named `content` becomes plain text; other output shapes are JSON-encoded.
+
+A tool body is prepared and stored only at its Flow constant. Dispatch preserves the callable's identity,
+definition origin and privacy through ordinary data edges; the Router does not own duplicate children
+or create a second invocation runtime. Resolve external tool sources in their original directory before
+composing if that directory differs from the composed workflow's directory. There is no runtime JSON
+catalog override or lexical `flow_ref` transport. The tool adapter remains terminal-only; the broader
+native Flow API's streaming capabilities and existing observed-item nested-scope limits are unchanged.
+
+The Agent calls `mfn-llm.tool-catalog` once, outside its eight-pass native Loop, then invokes
+`mfn-llm.agent-turn` and `mfn-llm.tool-uses`. The latter uses native parallel Iteration for ordered tool
+results. Assistant tool-call messages precede the tool messages; usage facts accumulate across turns.
+Completion returns final `status`, `text`, `usages` and optional `error`, while `answer` streams every
+assistant turn, including tool-call preambles. Provider failures and exhaustion remain explicit failures.
+The same Agent handles empty, single-tool, and multi-tool collections. For no tools, supply an empty
+object with `builtin.object` and `fields: {}`; there is no separate empty-Agent definition.
+
+The [calculator chat Flow](../examples/chat-calculator-flow.json) is a small five-node caller: `params`,
+`calculator`, `calculator_tool`, `tools`, and `agent`. A Flow constant loads
+[the calculator](../examples/agent-calculator/calculator.json). The inner `calculator_tool` object combines
+that Flow with the `calculator_description` and `calculator_parameters` defaults, and the outer `tools`
+object builds the native map `{calculator: Object}`. A normal Call passes only `params.tools` into
+`mfn-llm.agent`. No Agent graph is copied, generated, or specialized. The calculator supports
+add/subtract/multiply/divide and plain-text numeric results. Compile and run it with `--chat`:
+
+```sh
+nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-calculator-flow.json --output target/chat-calculator
+nix develop --command cargo run -p mf-cli --features development-support -- run target/chat-calculator --chat --params.model your-model
+```
+
+Run the concrete addition/unknown-tool example, or emit its definition for standalone compilation:
+
+```sh
+nix develop --command cargo run -p mf-compiler --example flow_tools
+nix develop --command cargo run -p mf-compiler --example flow_tools -- target/flow-tools.json
+nix develop --command cargo run -p mf-cli --features development-support -- compile target/flow-tools.json --output target/flow-tools-runner --build-dir target/flow-tools-build
+nix develop --command ./target/flow-tools-runner --params.calls='[{"id":"one","name":"add","arguments":{"left":2,"right":3}}]'
+```
+
+`builtin.router` is also independently usable. Gate configuration `{"routes":["first","second"]}`
+accepts `route` and emits the selected exclusive Boolean gate, or `else`. Executable configuration
+`{"mode":"execute"}` accepts `route`, `arguments` and a native `flows: Map(Flow)` input by default.
+The optional `flow_field` generalizes executable selection to `Map(Object)`: for example,
+`{"mode":"execute","flow_field":"flow"}` selects the object named by `route` and invokes the Flow in its
+`flow` field. This is a generic object-record selection mechanism, not an Agent-specific decoder; other
+record shapes can choose their own Flow field name. The input contract remains fixed regardless of the
+number of callables. Router invokes the selected handle through `FlowValue::invoke`, returning a `result`
+envelope containing `outputs` or a recoverable business `error`. An empty callable map is valid; unknown
+executable routes fail without invoking another body. Arguments are conservatively private, selected
+route/handle privacy propagates to results, and business-error envelopes are private. Cancellation,
+observation/contract, resource and output failures propagate rather than becoming business results.
+Recovery is deliberately fail-closed: explicit ordinary node execution failures, including known Call
+wrappers, are recoverable; unknown plugin errors are not assumed to be business failures. Router invocation
+drains incremental emissions terminally; it does not expose them as Router stream ports.
+
 ## Node clusters
 
 Version `2026-10-23` accepts an optional `clusters` array in the root graph and in Loop and Iteration bodies. Clusters
@@ -415,6 +522,7 @@ nodes. The [clustered example](../examples/clustered-workflow.json) compiles to 
     {
       "label": "Load and validate",
       "annotation": "Read the input and enforce its schema invariants.",
+      "collapsed": true,
       "nodes": ["read", "parse", "validate"]
     }
   ]
@@ -430,10 +538,15 @@ Both are required and bounded. Members belong to the containing scope, must be u
 one cluster. Clusters are flat and cannot contain `%loop` or `%iteration` synthetic sources. A cluster may contain a
 Loop or Iteration node as an opaque member.
 
-In the terminal UI, `c` collapses or expands the cluster containing the selected node. A collapsed cluster is drawn as
-one node with the short label and an aggregate status; connections to its members attach to that node and internal
-connections are hidden. Expanding restores the member nodes while keeping the annotation visible. Cluster state is
-local to the TUI session and never changes workflow results. Older TUI readers reject the new description version before execution.
+Version `2026-11-11` adds the optional Boolean `collapsed` field, defaulting to `false`. When true, the TUI initially
+shows the aggregate node instead of every member; this is useful for groups of initial constants and other supporting
+plumbing. The field is observation metadata and does not change scheduling or workflow results.
+
+In the terminal UI, `c` collapses or expands the cluster containing the selected node, regardless of its initial value.
+A collapsed cluster is drawn as one node with the short label and an aggregate status; connections to its members attach
+to that node and internal connections are hidden. Expanding restores the member nodes while keeping the annotation
+visible. Later folding changes are local to the TUI session and never modify the definition. Older TUI readers reject
+the new description version before execution.
 
 ## Node dependencies
 
@@ -502,6 +615,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.constant` | Required `value`: any JSON value | None | `value`: inferred from the configured value |
 | `mfn-core` | [`builtin.parameters`](#parameters) | Named parameters with types, optional `env` and `default`, and `secret` (default `true`) | One typed input per parameter; exposed at startup when initial | One matching typed output per parameter |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
+| `mfn-core` | `builtin.object` | Required `fields`: field names mapped to value types; may be empty | One required input per field | `value`: native map preserving field payloads and secrets |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by execution prerequisites | One boolean activation output per branch, plus `else` |
 | `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
@@ -1338,8 +1452,15 @@ failed item are provisional and are not retracted. Cancellation and stream deliv
 fatal under every policy. Without a stream subscriber, the original terminal-only execution path
 and item scheduling apply.
 
+`config.inputs` optionally declares ordinary required inputs shared read-only by every item, for example
+`"inputs":{"policy":"flow","settings":"object"}`. Supply them on the Iteration node and read them
+through `%iteration.policy` and `%iteration.settings` in the body. These are arbitrary native value
+types, not tool-specific captures; cloning preserves Flow identity and sensitivity without JSON
+conversion. Names must be nonblank and cannot replace `item`, `key`, `items`, or `index`. Shared inputs are not
+mutable Loop variables and never grant access to the parent's other outputs or arguments.
+
 The current scope supports one iteration level. Body graphs cannot contain another Iteration node, a structured Loop construct, or access outer
-context outputs directly. Pass values through the input collection or add nodes inside the body. The runner description and
+context outputs directly. Pass values through the input collection or explicitly declared shared inputs, or add nodes inside the body. The runner description and
 terminal UI show the Iteration node as one outer graph node. OTel emits separate item and body-node spans and logs with
 the outer node ID and item index; failures remain visible even under `continue_on_error` and `remove_failed`. See
 [observation contracts](observability.md#iteration-observation).

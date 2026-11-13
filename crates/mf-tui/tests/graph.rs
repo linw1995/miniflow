@@ -189,6 +189,7 @@ fn inline_cluster_folds_hide_descendants_and_preserve_scope_local_members() {
     description.loop_bodies[0]
         .clusters
         .push(ClusterDescription {
+            collapsed: false,
             label: "Preparation".into(),
             annotation: "Prepare the nested input.".into(),
             nodes: vec!["source".into(), "inner".into()],
@@ -243,6 +244,114 @@ fn llm_cards_reserve_stable_metric_rows_before_data_arrives() {
 }
 
 #[test]
+fn layout_defaults_apply_only_without_an_explicit_collapsed_state() {
+    use mf_tui::graph::routing::RoutingLimits;
+
+    for initially_collapsed in [false, true] {
+        let mut graph = description();
+        graph.version = WorkflowDescriptionVersion::V2026_11_11;
+        graph.execution = Some(ExecutionDescription {
+            mode: ExecutionMode::Single,
+        });
+        graph.clusters = vec![ClusterDescription {
+            label: "Input".into(),
+            annotation: "Read and route the input.".into(),
+            nodes: vec!["source".into(), "router".into()],
+            collapsed: initially_collapsed,
+        }];
+        let original = graph.clone();
+        for layout in [
+            GraphLayout::new(&graph).unwrap(),
+            GraphLayout::with_routing_limits(&graph, RoutingLimits::default()).unwrap(),
+            GraphLayout::with_view(&graph, ConnectionView::Execution).unwrap(),
+            GraphLayout::with_view_and_limits(
+                &graph,
+                ConnectionView::Dependencies,
+                RoutingLimits::default(),
+            )
+            .unwrap(),
+        ] {
+            assert_eq!(layout.clusters()[0].collapsed, initially_collapsed);
+            assert_eq!(
+                layout.nodes().len(),
+                graph.nodes.len() - usize::from(initially_collapsed)
+            );
+        }
+        for collapsed in [BTreeSet::new(), BTreeSet::from([0])] {
+            for layout in [
+                GraphLayout::with_view_and_collapsed(&graph, ConnectionView::Ports, &collapsed)
+                    .unwrap(),
+                GraphLayout::with_view_and_limits_collapsed(
+                    &graph,
+                    ConnectionView::Execution,
+                    RoutingLimits::default(),
+                    &collapsed,
+                )
+                .unwrap(),
+                GraphLayout::with_expanded_bodies(
+                    &graph,
+                    ConnectionView::Dependencies,
+                    &BTreeSet::new(),
+                    &BTreeMap::from([(Vec::new(), collapsed.clone())]),
+                )
+                .unwrap(),
+            ] {
+                assert_eq!(layout.clusters()[0].collapsed, collapsed.contains(&0));
+            }
+        }
+        let explicit_empty = GraphLayout::with_expanded_bodies(
+            &graph,
+            ConnectionView::Execution,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(!explicit_empty.clusters()[0].collapsed);
+        assert_eq!(graph, original);
+    }
+}
+
+#[test]
+fn body_layout_defaults_use_the_requested_scope_and_allow_explicit_expansion() {
+    let mut graph = inline_description();
+    graph.version = WorkflowDescriptionVersion::V2026_11_11;
+    for (index, body) in graph.loop_bodies.iter_mut().enumerate() {
+        body.clusters = vec![ClusterDescription {
+            label: "Work".into(),
+            annotation: "Scope-local work.".into(),
+            nodes: vec!["source".into(), "sink".into()],
+            collapsed: index == 1,
+        }];
+    }
+    let original = graph.clone();
+    for body in &graph.loop_bodies {
+        let expected = body.clusters[0].collapsed;
+        for layout in [
+            GraphLayout::from_loop_body(&graph, &body.path).unwrap(),
+            GraphLayout::from_body_with_view(&graph, &body.path, ConnectionView::Execution)
+                .unwrap(),
+        ] {
+            assert_eq!(layout.clusters()[0].collapsed, expected);
+            assert_eq!(
+                layout.nodes().len(),
+                body.nodes.len() - usize::from(expected)
+            );
+        }
+        for collapsed in [BTreeSet::new(), BTreeSet::from([0])] {
+            let layout = GraphLayout::from_body_with_view_and_collapsed(
+                &graph,
+                &body.path,
+                ConnectionView::Ports,
+                &collapsed,
+            )
+            .unwrap();
+            assert_eq!(layout.clusters()[0].collapsed, collapsed.contains(&0));
+        }
+    }
+    assert_eq!(graph, original);
+}
+
+#[test]
 fn clusters_render_expanded_bounds_and_collapse_to_one_node() {
     let mut graph = description();
     graph.version = WorkflowDescriptionVersion::V2026_10_23;
@@ -250,6 +359,7 @@ fn clusters_render_expanded_bounds_and_collapse_to_one_node() {
         mode: ExecutionMode::Single,
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "left and join".into(),
         annotation: "The left branch and its convergence point.".into(),
         nodes: vec!["left".into(), "join".into()],
@@ -315,6 +425,7 @@ fn cluster_titles_preserve_the_remaining_top_border() {
     });
     for label in ["Computation", "Compute a\u{301} with 🦀"] {
         graph.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: label.into(),
             annotation: "Read the source and forward its value.".into(),
             nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -355,6 +466,7 @@ fn cluster_titles_follow_both_scroll_axes() {
     });
     for label in ["Computation", "Compute a\u{301} with 🦀"] {
         graph.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: label.into(),
             annotation: "Read the source and forward its value.".into(),
             nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -386,6 +498,7 @@ fn cluster_annotations_hide_only_while_the_label_is_repositioned() {
     });
     let annotation = "abcdefghijklmnopqrstuv";
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Group".into(),
         annotation: annotation.into(),
         nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -440,6 +553,7 @@ fn pinned_cluster_titles_clip_to_narrow_nonzero_viewports() {
         mode: ExecutionMode::Single,
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Compute a\u{301} 🦀 result".into(),
         annotation: "Forward the source value.".into(),
         nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -500,6 +614,7 @@ fn cluster_titles_disappear_when_the_cluster_leaves_the_viewport() {
         mode: ExecutionMode::Single,
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Computation".into(),
         annotation: "Forward the source value.".into(),
         nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
@@ -627,6 +742,7 @@ fn folding_noncontiguous_members_preserves_projected_cycle_connections() {
         to_input: "extra".into(),
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Endpoints".into(),
         annotation: "The source and final consumer.".into(),
         nodes: vec!["source".into(), "sink-0001".into()],
@@ -676,6 +792,7 @@ fn long_cluster_labels_fit_expanded_and_collapsed_geometry() {
         "Validate a\u{301} configuration with 🦀 and a complete title",
     ] {
         graph.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: label.into(),
             annotation: "Keep the entire title visible in both cluster states.".into(),
             nodes: vec!["source".into()],
@@ -731,11 +848,13 @@ fn cluster_colors_match_borders_and_labels_across_views_and_folds() {
     });
     graph.clusters = vec![
         ClusterDescription {
+            collapsed: false,
             label: "Input".into(),
             annotation: "Read the source and forward its value.".into(),
             nodes: vec!["source".into(), "router".into()],
         },
         ClusterDescription {
+            collapsed: false,
             label: "Output".into(),
             annotation: "Merge the branch results.".into(),
             nodes: vec!["left".into(), "join".into()],
@@ -824,6 +943,7 @@ fn cluster_annotations_wrap_in_the_graph_and_stay_clear_of_connections() {
         mode: ExecutionMode::Single,
     });
     graph.clusters = vec![ClusterDescription {
+        collapsed: false,
         label: "Input".into(),
         annotation: "01234567890123456789012345678901234567890123456789\n\tKeep a\u{301} and 🦀."
             .into(),
@@ -1315,6 +1435,7 @@ fn body_clusters_collapse_within_their_scope() {
         order_edges: Vec::new(),
         execution_order: vec!["%loop".into(), "step".into(), "next".into()],
         clusters: vec![ClusterDescription {
+            collapsed: false,
             label: "Body work".into(),
             annotation: "The body transformation and its successor.".into(),
             nodes: vec!["step".into(), "next".into()],

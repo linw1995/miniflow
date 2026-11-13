@@ -2712,25 +2712,60 @@ impl ObservationView {
             .iter()
             .map(|body| body.path.clone())
             .collect();
-        let execution =
-            GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
+        let collapsed: BTreeMap<Vec<String>, BTreeSet<usize>> =
+            std::iter::once((Vec::new(), &description.clusters))
+                .chain(
+                    description
+                        .loop_bodies
+                        .iter()
+                        .map(|body| (body.path.clone(), &body.clusters)),
+                )
+                .map(|(path, clusters)| {
+                    let folded = clusters
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, cluster)| cluster.collapsed.then_some(index))
+                        .collect();
+                    (path, folded)
+                })
+                .collect();
+        let execution = GraphLayout::with_view_and_collapsed(
+            description,
+            ConnectionView::Execution,
+            &collapsed[&Vec::new()],
+        )
+        .context(GraphSnafu)?;
         let root = Arc::new(
             GraphLayout::with_expanded_bodies(
                 description,
                 ConnectionView::Execution,
                 &expanded,
-                &BTreeMap::new(),
+                &collapsed,
             )
             .context(GraphSnafu)?,
         );
+        // PiPs expose individual running members even when the main graph starts folded.
+        let pip_layout = if collapsed.values().all(BTreeSet::is_empty) {
+            Arc::clone(&root)
+        } else {
+            Arc::new(
+                GraphLayout::with_expanded_bodies(
+                    description,
+                    ConnectionView::Execution,
+                    &expanded,
+                    &BTreeMap::new(),
+                )
+                .context(GraphSnafu)?,
+            )
+        };
         Ok(Self {
             description: description.clone(),
             execution,
-            pip_layout: Arc::clone(&root),
+            pip_layout,
             root,
             expanded,
             viewports: BTreeMap::new(),
-            collapsed: BTreeMap::new(),
+            collapsed,
             cluster_focus: BTreeMap::new(),
             state: ViewState::default(),
         })
@@ -3895,6 +3930,7 @@ mod tests {
     fn parallel_pips_deduplicate_collapsed_clusters_and_use_supplied_body_observations() {
         let mut description = parallel_fixture(3);
         description.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: "parallel group".into(),
             annotation: "Parallel branches".into(),
             nodes: vec!["parallel-0".into(), "parallel-1".into()],
@@ -3930,6 +3966,7 @@ mod tests {
     fn assert_observation_pips_include_every_running_member_of_a_folded_cluster() {
         let mut description = parallel_fixture(2);
         description.clusters = vec![ClusterDescription {
+            collapsed: false,
             label: "parallel group".into(),
             annotation: "Parallel branches".into(),
             nodes: vec!["parallel-0".into(), "parallel-1".into()],
@@ -4054,6 +4091,7 @@ mod tests {
             execution_order: vec!["read".into(), "parse".into(), "publish".into()],
             loop_bodies: Vec::new(),
             clusters: vec![ClusterDescription {
+                collapsed: false,
                 label: "Load".into(),
                 annotation: "Read and parse the input.".into(),
                 nodes: vec!["read".into(), "parse".into()],
@@ -4070,6 +4108,227 @@ mod tests {
         assert!(!view.root.clusters()[0].collapsed);
         assert_eq!(view.root.nodes()[view.state.selected].id, "parse");
         assert_eq!(view.root.nodes().len(), description.nodes.len());
+    }
+
+    #[test]
+    fn root_cluster_defaults_toggle_with_c_and_remain_session_local() {
+        for initially_collapsed in [false, true] {
+            let mut description = parallel_fixture(3);
+            description.version = WorkflowDescriptionVersion::V2026_11_11;
+            description.clusters = vec![ClusterDescription {
+                label: "Parallel work".into(),
+                annotation: "Independent tasks.".into(),
+                nodes: vec!["parallel-0".into(), "parallel-1".into()],
+                collapsed: initially_collapsed,
+            }];
+            let original = description.clone();
+            let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+                .unwrap()
+                .snapshot();
+            snapshot.nodes[0].status = NodeStatus::Running;
+            snapshot.nodes[1].status = NodeStatus::Running;
+            let traces = TraceSnapshot::default();
+            let logs = LogSnapshot::default();
+            let mut view = ObservationView::new(&description).unwrap();
+            view.state.selected = view.root.display_index_for_node_id("parallel-1").unwrap();
+            assert_eq!(view.root.clusters()[0].collapsed, initially_collapsed);
+            assert_eq!(view.execution.clusters()[0].collapsed, initially_collapsed);
+            assert_eq!(
+                view.root.nodes().len(),
+                if initially_collapsed { 2 } else { 3 }
+            );
+            assert!(
+                view.pip_layout
+                    .clusters()
+                    .iter()
+                    .all(|cluster| !cluster.collapsed)
+            );
+            assert_eq!(view.pip_layout.nodes().len(), 3);
+            let initial_pips = render_chat_execution(&view, &snapshot);
+            assert!(
+                initial_pips.contains(" Running: parallel-0 "),
+                "{initial_pips}"
+            );
+            assert!(
+                initial_pips.contains(" Running: parallel-1 "),
+                "{initial_pips}"
+            );
+
+            for collapsed in [
+                initially_collapsed,
+                !initially_collapsed,
+                initially_collapsed,
+            ] {
+                assert_eq!(view.root.clusters()[0].collapsed, collapsed);
+                assert_eq!(view.execution.clusters()[0].collapsed, collapsed);
+                assert_eq!(view.collapsed[&Vec::new()].contains(&0), collapsed);
+                for _ in 0..3 {
+                    view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+                    assert!(view.state.graph_notice.is_none());
+                    assert_eq!(view.root.clusters()[0].collapsed, collapsed);
+                    assert_eq!(view.execution.clusters()[0].collapsed, collapsed);
+                    assert_eq!(
+                        view.root.is_collapsed_cluster(view.state.selected),
+                        collapsed
+                    );
+                    if !collapsed {
+                        assert_eq!(
+                            view.root.nodes()[view.state.selected].id,
+                            if initially_collapsed {
+                                "parallel-0"
+                            } else {
+                                "parallel-1"
+                            }
+                        );
+                    }
+                    assert!(
+                        view.pip_layout
+                            .clusters()
+                            .iter()
+                            .all(|cluster| !cluster.collapsed)
+                    );
+                    assert_eq!(view.pip_layout.nodes().len(), 3);
+                }
+                let text = render_chat_execution(&view, &snapshot);
+                assert!(text.contains(" Running: parallel-0 "), "{text}");
+                assert!(text.contains(" Running: parallel-1 "), "{text}");
+                assert_eq!(view.description, original);
+                view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+                assert!(view.state.graph_notice.is_none());
+            }
+            assert_eq!(description, original);
+            assert_eq!(view.description, original);
+            assert_eq!(
+                ObservationView::new(&description).unwrap().root.clusters()[0].collapsed,
+                initially_collapsed
+            );
+        }
+    }
+
+    #[test]
+    fn authored_cluster_defaults_fold_root_and_body_without_changing_the_description() {
+        let mut description = scope_fixture();
+        description.version = WorkflowDescriptionVersion::V2026_11_11;
+        description.execution = Some(ExecutionDescription {
+            mode: ExecutionMode::Single,
+        });
+        description.clusters = vec![ClusterDescription {
+            label: "Loops".into(),
+            annotation: "Loop containers.".into(),
+            nodes: vec!["first".into(), "second".into()],
+            collapsed: true,
+        }];
+        description.loop_bodies[0].clusters = vec![ClusterDescription {
+            label: "Initial values".into(),
+            annotation: "Supporting body values.".into(),
+            nodes: vec!["source".into(), "target".into()],
+            collapsed: true,
+        }];
+        let original = description.clone();
+        let mut view = ObservationView::new(&description).unwrap();
+        assert_eq!(view.collapsed[&Vec::new()], BTreeSet::from([0]));
+        assert_eq!(view.collapsed[&vec!["first".into()]], BTreeSet::from([0]));
+        assert!(view.root.clusters().iter().all(|cluster| cluster.collapsed));
+        assert!(view.execution.clusters()[0].collapsed);
+        assert!(
+            view.pip_layout
+                .clusters()
+                .iter()
+                .all(|cluster| !cluster.collapsed)
+        );
+
+        view.toggle_cluster().unwrap();
+        assert!(!view.root.clusters()[0].collapsed);
+        assert!(!view.collapsed[&Vec::new()].contains(&0));
+        assert_eq!(view.description, original);
+        assert!(description.clusters[0].collapsed);
+        assert!(description.loop_bodies[0].clusters[0].collapsed);
+    }
+
+    #[test]
+    fn nested_cluster_defaults_are_scoped_and_survive_body_folds_and_view_changes() {
+        let mut description: WorkflowDescription = serde_json::from_value(serde_json::json!({
+            "version":"2026-11-11", "workflow_id":format!("sha256:{}", "9".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"outer","kind":"workflow.call"}],
+            "execution_order":["outer"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[
+                {"path":["outer"], "nodes":[{"id":"source","kind":"fixture.task"},{"id":"inner","kind":"workflow.call"},{"id":"target","kind":"fixture.task"}],
+                 "execution_order":["source","inner","target"], "data_edges":[], "control_edges":[]},
+                {"path":["outer","inner"], "nodes":[{"id":"source","kind":"fixture.task"},{"id":"target","kind":"fixture.task"}],
+                 "execution_order":["source","target"], "data_edges":[], "control_edges":[]}
+            ]
+        })).unwrap();
+        for (index, body) in description.loop_bodies.iter_mut().enumerate() {
+            body.clusters = vec![ClusterDescription {
+                label: "Work".into(),
+                annotation: "Scope-local work.".into(),
+                nodes: vec!["source".into(), "target".into()],
+                collapsed: index == 1,
+            }];
+        }
+        let original = description.clone();
+        let outer = vec!["outer".into()];
+        let inner = vec!["outer".into(), "inner".into()];
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        let mut view = ObservationView::new(&description).unwrap();
+        assert!(view.collapsed[&outer].is_empty());
+        assert_eq!(view.collapsed[&inner], BTreeSet::from([0]));
+        assert!(
+            !view.root.is_collapsed_cluster(
+                view.root
+                    .display_index_for_scoped_node(&outer, "source")
+                    .unwrap()
+            )
+        );
+        view.state.selected = view
+            .root
+            .display_index_for_scoped_node(&inner, "target")
+            .unwrap();
+        assert!(view.root.is_collapsed_cluster(view.state.selected));
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert!(view.state.graph_notice.is_none());
+        assert!(!view.root.is_collapsed_cluster(view.state.selected));
+
+        for collapsed in [false, true, false] {
+            assert_eq!(view.collapsed[&inner].contains(&0), collapsed);
+            for _ in 0..3 {
+                view.fold_body(outer.clone(), false).unwrap();
+                assert!(
+                    view.root
+                        .display_index_for_scoped_node(&inner, "source")
+                        .is_none()
+                );
+                view.switch_connections().unwrap();
+                view.fold_body(outer.clone(), true).unwrap();
+                view.state.selected = view
+                    .root
+                    .display_index_for_scoped_node(&inner, "source")
+                    .unwrap();
+                assert_eq!(
+                    view.root.is_collapsed_cluster(view.state.selected),
+                    collapsed
+                );
+                let cluster = view.root.cluster_of(view.state.selected).unwrap();
+                assert_eq!(view.root.cluster_key(cluster), &(inner.clone(), 0));
+                assert!(
+                    view.pip_layout
+                        .clusters()
+                        .iter()
+                        .all(|cluster| !cluster.collapsed)
+                );
+                assert!(view.collapsed[&outer].is_empty());
+                assert_eq!(view.description, original);
+            }
+            view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+            assert!(view.state.graph_notice.is_none());
+        }
+        assert_eq!(description, original);
+        assert_eq!(view.description, original);
     }
 
     #[test]

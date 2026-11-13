@@ -123,12 +123,20 @@ pub fn child_relations_at(
         }
         mf_runtime::ITERATION_KIND => {
             let config = crate::iteration::parse_config(owner)?;
+            let mut inputs = config.inputs;
+            ensure!(
+                inputs.keys().all(|name| !name.trim().is_empty()
+                    && !matches!(name.as_str(), "item" | "key" | "items" | "index")),
+                crate::compiler::InvalidScopeSnafu {
+                    path: crate::loops::path_label(&owner_path),
+                    message: "Iteration shared inputs must be nonblank and not item, key, items or index",
+                }
+            );
+            inputs.insert("item".into(), ValueType::Any);
+            inputs.insert("key".into(), ValueType::Any);
             relations.scope = Some(ScopeRelations {
                 input: mf_runtime::ITERATION_INPUT_ID.into(),
-                values: BTreeMap::from([
-                    ("item".into(), ValueType::Any),
-                    ("key".into(), ValueType::Any),
-                ]),
+                values: inputs,
                 state_outputs: BTreeMap::new(),
                 writes: BTreeMap::new(),
                 exits: BTreeSet::new(),
@@ -269,6 +277,30 @@ pub fn lower_scope_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iteration_shared_inputs_lower_to_immutable_scope_values() {
+        let owner = NodeDefinition {
+            id: "each".into(),
+            kind: mf_runtime::ITERATION_KIND.into(),
+            config: json!({"inputs":{"flow_0":"flow", "settings":"object"}}),
+        };
+        let relations =
+            child_relations(WorkflowDefinitionVersion::CURRENT, &owner, "body").unwrap();
+        let scope = relations.scope.unwrap();
+        assert_eq!(
+            scope.values,
+            BTreeMap::from([
+                ("flow_0".into(), ValueType::Flow),
+                ("settings".into(), ValueType::Object),
+                ("item".into(), ValueType::Any),
+                ("key".into(), ValueType::Any),
+            ])
+        );
+        assert!(scope.state_outputs.is_empty());
+        assert!(scope.writes.is_empty());
+        assert!(scope.exits.is_empty());
+    }
 
     #[test]
     fn lower_scope_keeps_full_authoring_paths_across_generic_bindings() {

@@ -1,0 +1,218 @@
+{
+  "version": "2026-10-28",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core"
+    },
+    "code": {
+      "package": "mfn-code"
+    },
+    "llm": {
+      "package": "mfn-llm"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "calls": {
+            "type": {
+              "list": "object"
+            },
+            "secret": false
+          },
+          "tools": {
+            "type": {
+              "map": "object"
+            },
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "calls_valid",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "calls": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "valid": "calls.all(c, size(c) == 3 && 'id' in c && type(c.id) == string && c.id.matches(r'\\S') && 'name' in c && type(c.name) == string && 'arguments' in c)"
+        }
+      },
+      "inputs": {
+        "calls": {
+          "from": {
+            "node": "params",
+            "port": "calls"
+          }
+        }
+      }
+    },
+    {
+      "id": "require_calls",
+      "kind": "builtin.assert",
+      "config": {
+        "message": "Tool calls must contain exactly a nonblank string id, a string name, and arguments",
+        "condition": {
+          "source": {
+            "output": "calls_valid.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        }
+      }
+    },
+    {
+      "id": "validated_calls",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "params",
+            "port": "calls"
+          }
+        }
+      }
+    },
+    {
+      "id": "dispatch",
+      "kind": "builtin.iteration",
+      "config": {
+        "mode": "parallel",
+        "on_error": "terminate",
+        "inputs": {
+          "tools": {
+            "map": "object"
+          }
+        },
+        "body": {
+          "version": "2026-10-28",
+          "nodes": [
+            {
+              "id": "arguments",
+              "kind": "llm.tool_arguments",
+              "inputs": {
+                "call": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                },
+                "tools": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "tools"
+                  }
+                }
+              }
+            },
+            {
+              "id": "execute",
+              "kind": "builtin.router",
+              "config": {
+                "mode": "execute",
+                "flow_field": "flow"
+              },
+              "inputs": {
+                "flows": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "tools"
+                  }
+                },
+                "route": {
+                  "from": {
+                    "node": "arguments",
+                    "port": "name"
+                  }
+                },
+                "arguments": {
+                  "from": {
+                    "node": "arguments",
+                    "port": "arguments"
+                  }
+                }
+              }
+            },
+            {
+              "id": "encode",
+              "kind": "llm.tool_result",
+              "inputs": {
+                "call": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "item"
+                  }
+                },
+                "plain_content": {
+                  "from": {
+                    "node": "arguments",
+                    "port": "plain_content"
+                  }
+                },
+                "result": {
+                  "exclusive": [
+                    {
+                      "node": "arguments",
+                      "port": "error"
+                    },
+                    {
+                      "node": "execute",
+                      "port": "result"
+                    }
+                  ]
+                }
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "result",
+              "node": "encode",
+              "port": "result"
+            }
+          ]
+        }
+      },
+      "inputs": {
+        "items": {
+          "from": {
+            "node": "validated_calls",
+            "port": "value"
+          }
+        },
+        "tools": {
+          "from": {
+            "node": "params",
+            "port": "tools"
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "calls_valid",
+      "to_node": "require_calls"
+    },
+    {
+      "from_node": "require_calls",
+      "to_node": "validated_calls"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "results",
+      "node": "dispatch",
+      "port": "results"
+    }
+  ]
+}

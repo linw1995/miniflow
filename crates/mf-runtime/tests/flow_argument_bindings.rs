@@ -315,11 +315,15 @@ fn validation_parses_the_receiver_callback_values_not_same_named_raw_json() {
             "provider": {"normalized": normalized},
         }));
         let original = node.clone();
+        let mut expected = definition();
+        if inherit {
+            expected.version = mf_runtime::WorkflowDefinitionVersion::CURRENT;
+        }
         assert_eq!(
             registration
                 .validate_flow_parameters(&node, mf_runtime::WorkflowDefinitionVersion::CURRENT)
                 .unwrap(),
-            BTreeMap::from([("selected".into(), definition())])
+            BTreeMap::from([("selected".into(), expected)])
         );
         assert!(node.flow_parameters(&["selected"]).is_err());
         assert_eq!(node, original);

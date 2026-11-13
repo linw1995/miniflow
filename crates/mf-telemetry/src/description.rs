@@ -23,6 +23,8 @@ pub enum WorkflowDescriptionVersion {
     V2026_10_23,
     #[serde(rename = "2026-11-09")]
     V2026_11_09,
+    #[serde(rename = "2026-11-11")]
+    V2026_11_11,
 }
 
 impl WorkflowDescriptionVersion {
@@ -36,22 +38,29 @@ impl WorkflowDescriptionVersion {
     pub fn supports_iteration_bodies(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_11_09
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_11_09 | Self::V2026_11_11
         )
     }
 
     pub fn supports_clusters(self) -> bool {
-        matches!(self, Self::V2026_10_23 | Self::V2026_11_09)
+        matches!(
+            self,
+            Self::V2026_10_23 | Self::V2026_11_09 | Self::V2026_11_11
+        )
+    }
+
+    pub fn supports_cluster_collapsed(self) -> bool {
+        self == Self::V2026_11_11
     }
 
     pub fn supports_flow_invocations(self) -> bool {
-        self == Self::V2026_11_09
+        matches!(self, Self::V2026_11_09 | Self::V2026_11_11)
     }
 
     pub fn uses_node_success_edges(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_11_09
+            Self::V2026_10_19 | Self::V2026_10_23 | Self::V2026_11_09 | Self::V2026_11_11
         )
     }
 }
@@ -111,6 +120,8 @@ pub struct ClusterDescription {
     pub label: String,
     pub annotation: String,
     pub nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,6 +394,7 @@ impl WorkflowDescription {
                 | WorkflowDescriptionVersion::V2026_10_19
                 | WorkflowDescriptionVersion::V2026_10_23
                 | WorkflowDescriptionVersion::V2026_11_09
+                | WorkflowDescriptionVersion::V2026_11_11
         ) {
             require(
                 self.execution.is_some(),
@@ -555,6 +567,10 @@ fn validate_clusters(
     nodes: &BTreeMap<&str, &NodeDescription>,
     source: Option<&str>,
 ) -> Result<(), ContractError> {
+    require(
+        clusters.iter().all(|cluster| !cluster.collapsed) || version.supports_cluster_collapsed(),
+        "default-collapsed clusters require description version 2026-11-11",
+    )?;
     require(
         clusters.is_empty() || version.supports_clusters(),
         "node clusters require a supported description version",

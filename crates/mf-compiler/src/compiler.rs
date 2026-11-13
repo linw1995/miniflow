@@ -1051,6 +1051,12 @@ fn validate_clusters(
     }
     let mut members = BTreeSet::new();
     for cluster in &definition.clusters {
+        if cluster.collapsed && !definition.version.supports_cluster_collapsed() {
+            return InvalidClusterSnafu {
+                message: "default-collapsed clusters require version 2026-11-11",
+            }
+            .fail();
+        }
         if cluster.label.trim().is_empty()
             || cluster.label.len() > mf_telemetry::description::MAX_CLUSTER_LABEL_BYTES
             || cluster.label.chars().any(char::is_control)

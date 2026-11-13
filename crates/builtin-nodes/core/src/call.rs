@@ -69,10 +69,10 @@ impl NodePortContract for CallNode {
 
 #[derive(Debug, Snafu)]
 #[snafu(display("Flow call `{node}` ({flow}): {source}"))]
-struct CallFailure {
+pub struct CallFailure {
     node: String,
     flow: String,
-    source: mf_runtime::WorkflowRunError,
+    pub source: mf_runtime::WorkflowRunError,
 }
 
 impl From<CallFailure> for NodeExecutionError {

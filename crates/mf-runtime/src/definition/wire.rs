@@ -99,6 +99,21 @@ fn decode_scope(
         }
     );
     ensure!(
+        version.supports_cluster_collapsed()
+            || scope
+                .get("clusters")
+                .and_then(Value::as_array)
+                .is_none_or(|clusters| {
+                    clusters.iter().all(|cluster| {
+                        cluster.get("collapsed").and_then(Value::as_bool) != Some(true)
+                    })
+                }),
+        InvalidSnafu {
+            path,
+            message: "default-collapsed clusters require version 2026-11-11"
+        }
+    );
+    ensure!(
         scope
             .get("clusters")
             .and_then(Value::as_array)
@@ -261,6 +276,21 @@ fn encode_scope(
         InvalidSnafu {
             path,
             message: "nested flows require version 2026-10-25"
+        }
+    );
+    ensure!(
+        version.supports_cluster_collapsed()
+            || scope
+                .get("clusters")
+                .and_then(Value::as_array)
+                .is_none_or(|clusters| {
+                    clusters.iter().all(|cluster| {
+                        cluster.get("collapsed").and_then(Value::as_bool) != Some(true)
+                    })
+                }),
+        InvalidSnafu {
+            path,
+            message: "default-collapsed clusters require version 2026-11-11"
         }
     );
     ensure!(

@@ -82,6 +82,8 @@ binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)) |
 (binary_id(=mf-cli::examples) &
     test(=documented_examples_compile_and_produce_expected_outputs)) |
+(binary_id(=mf-compiler::flow_tools) &
+    test(=source_free_tool_catalog_and_dispatch_runner_matches_memory)) |
 (binary_id(=mf-compiler::success_dependencies) &
     test(=standalone_success_dependencies_match_memory_and_preserve_manifests)) |
 (binary_id(=mf-compiler::runner_validation) &
@@ -195,6 +197,8 @@ binary_id(=mfn-test-affected::process) |
 (binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)) |
 (binary_id(=mf-cli::examples) &
     test(=documented_examples_compile_and_produce_expected_outputs)) |
+(binary_id(=mf-compiler::flow_tools) &
+    test(=source_free_tool_catalog_and_dispatch_runner_matches_memory)) |
 (binary_id(=mf-compiler::success_dependencies) &
     test(=standalone_success_dependencies_match_memory_and_preserve_manifests)) |
 (binary_id(=mf-compiler::runner_validation) &

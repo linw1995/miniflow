@@ -1866,7 +1866,7 @@ mod tests {
             inherited.children[&"owner".into()]["body"]
                 .definition
                 .version,
-            mf_runtime::WorkflowDefinitionVersion::CURRENT
+            mf_runtime::WorkflowDefinitionVersion::V2026_10_28
         );
         archive.entry = "invalid.json".into();
         let error = archive.resolve(&registry).err().unwrap();
@@ -2036,7 +2036,7 @@ mod tests {
             assert!(outer.relations.host.is_none());
             assert_eq!(
                 outer.definition.version,
-                mf_runtime::WorkflowDefinitionVersion::CURRENT
+                mf_runtime::WorkflowDefinitionVersion::V2026_10_28
             );
             let inner = &outer.children[&"inner".into()]["value"];
             assert!(inner.relations.is_callable());
