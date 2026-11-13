@@ -199,6 +199,16 @@ fn root_variables_reject_explicit_and_provider_selected_streaming() {
         error.to_string().contains("finite callable Flow"),
         "{error}"
     );
+    // A valid finite artifact must also reject a consumer requesting streaming later.
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(definition()), &registry).unwrap();
+    let error = mf_compiler::instantiate_stream(&plan, &registry)
+        .expect_err("root state must not become an autonomous stream");
+    assert!(matches!(
+        find_source::<mf_compiler::StreamBuildError>(&error),
+        Some(mf_compiler::StreamBuildError::InvalidPlan { message })
+            if message.contains("finite callable Flow")
+    ));
 }
 
 #[test]
@@ -299,6 +309,18 @@ fn invalid_declarations_and_scope_ownership_fail_before_execution() {
             "expected {expected}: {error}"
         );
     }
+    // Generic assignments have their own version gate even without a declaration.
+    let error = compile_error(json!({
+        "version":"2026-11-11", "nodes":[
+            {"id":"write", "kind":"workflow.assign", "config":{"variable":"count"}}
+        ]
+    }));
+    assert!(
+        error
+            .to_string()
+            .contains("require definition version 2026-11-13"),
+        "{error}"
+    );
     let mut value = definition();
     value["nodes"][0]["config"]["variables"][0]["type"] = json!("invalid");
     assert!(find_source::<mf_runtime::TypeDescriptorError>(&compile_error(value)).is_some());
@@ -465,6 +487,47 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
             "mutation {mutation}"
         );
     }
+    for dependency in ["data", "control", "success"] {
+        let mut changed = restored.clone();
+        let definition = &mut changed.graph.definition;
+        match dependency {
+            "data" => definition.edges.push(mf_runtime::EdgeDefinition {
+                exclusive: false,
+                from_node: "params".into(),
+                from_output: "value".into(),
+                to_node: "state".into(),
+                to_input: "unused".into(),
+            }),
+            "control" => definition
+                .control_edges
+                .push(mf_runtime::ControlEdgeDefinition {
+                    from_node: "params".into(),
+                    from_output: "value".into(),
+                    to_node: "state".into(),
+                }),
+            _ => definition
+                .order_edges
+                .push(mf_runtime::OrderEdgeDefinition {
+                    from_node: "params".into(),
+                    to_node: "state".into(),
+                }),
+        }
+        changed.graph.execution_order = ["params", "state", "write", "read"]
+            .into_iter()
+            .map(mf_runtime::DefinitionId::from)
+            .collect();
+        let error = mf_runtime::describe_graph(&changed.graph).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("source cannot have incoming dependencies"),
+            "{dependency}: {error}"
+        );
+        assert!(
+            instantiate_compiled(&changed, &registry).is_err(),
+            "{dependency}"
+        );
+    }
     // Artifact consumers must not rediscover engine roles from authored node kinds/config.
     let mut renamed = restored;
     for node in &mut renamed.graph.definition.nodes {
@@ -536,6 +599,27 @@ fn state_cannot_be_used_without_an_owning_declaration() {
             .to_string()
             .contains("assignment requires a state scope"),
         "{error}"
+    );
+}
+
+#[cfg(feature = "codegen")]
+#[test]
+fn generated_root_constructors_follow_compiled_relations_not_authored_config() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut plan = compile_definition(&parse(definition()), &registry).unwrap();
+    for node in &mut plan.graph.definition.nodes {
+        if plan.graph.relations.instruction(&node.id).is_some() {
+            node.kind = "unregistered.provider".into();
+            node.config = json!({"opaque":true});
+        }
+    }
+    let artifacts = plan.generate_artifacts().unwrap();
+    assert!(artifacts.rust_source.contains("prepared_root_source"));
+    assert!(artifacts.rust_source.contains("prepared_root_assign"));
+    assert!(artifacts.rust_source.contains(".with_root_scope("));
+    assert_eq!(
+        mf_compiler::CompiledWorkflow::from_json(&artifacts.plan_json).unwrap(),
+        plan
     );
 }
 

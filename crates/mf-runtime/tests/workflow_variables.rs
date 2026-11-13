@@ -88,6 +88,33 @@ fn root_state_writes_commit_only_with_valid_publication_and_preserve_typed_sourc
 }
 
 #[test]
+fn root_assignments_reject_missing_scopes_and_unknown_targets_without_publishing() {
+    let scope = scope();
+    let mut context = ExecutionContext::default();
+    let assign = prepared_root_assign("write", "missing", ValueType::Int64)
+        .into_task()
+        .unwrap();
+    let inputs = || Inputs::from([("value".into(), 8i64.into())]);
+    let error = assign.node.execute(inputs(), &mut context).unwrap_err();
+    assert!(
+        matches!(error, NodeExecutionError::ExecutionFailed { message }
+        if message.contains("outside a Flow state scope"))
+    );
+    context
+        .run_root_scope(&scope, |context| {
+            let error = assign.node.execute(inputs(), context).unwrap_err();
+            assert!(
+                matches!(error, NodeExecutionError::ExecutionFailed { message }
+                if message == "unknown workflow variable `missing`")
+            );
+            assert!(context.output("write.done").is_err());
+            assert_eq!(current(context, &scope)["count"], json!(7));
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn root_state_preserves_native_payloads_and_sensitivity_only_writes_across_domains() {
     let scope = scope();
     let mut context = ExecutionContext::default();
