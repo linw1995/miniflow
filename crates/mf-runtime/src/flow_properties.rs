@@ -324,6 +324,19 @@ mod tests {
     }
 
     #[test]
+    fn conditional_stdin_reports_its_qualified_trigger() {
+        let schema = WorkflowInputSchema {
+            inputs: schema().inputs,
+            stdin: BTreeMap::from([("read".into(), StdinRequirement::UnlessInput("skip".into()))]),
+        };
+        let properties = interface_properties(&schema, &[], &[]);
+        assert_eq!(
+            properties["stdin"],
+            json!({"read": {"unless_input": "read.skip"}})
+        );
+    }
+
+    #[test]
     fn streams_make_a_body_non_callable() {
         let properties = interface_properties(
             &schema(),

@@ -219,4 +219,12 @@ fn ambiguous_unqualified_startup_names_are_rejected() {
         resolve_workflow_inputs(&schema, &arguments, |_| None),
         Err(WorkflowInputError::Invalid { .. })
     ));
+
+    // An unqualified name that identifies no startup port stays unknown.
+    let unknown = WorkflowArguments::try_from(json!({"missing": 1})).unwrap();
+    let error = resolve_workflow_inputs(&schema, &unknown, |_| None).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown workflow input"),
+        "{error}"
+    );
 }
