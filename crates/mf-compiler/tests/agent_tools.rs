@@ -324,18 +324,12 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
         "mfn-llm.tool-catalog"
     );
     let repeat = node("repeat");
+    let shared_inputs = repeat["config"]["inputs"].as_object().unwrap();
+    assert_eq!(shared_inputs.len(), 5);
+    assert_eq!(shared_inputs["tools"], json!({"map":"object"}));
+    assert_eq!(shared_inputs["tool_definitions"], json!({"list":"object"}));
     let variables = repeat["config"]["variables"].as_array().unwrap();
-    let native_variables = variables
-        .iter()
-        .filter(|variable| variable["type"] == json!({"map":"object"}))
-        .collect::<Vec<_>>();
-    assert_eq!(native_variables.len(), 1);
-    assert_eq!(native_variables[0]["name"], "tools");
-    let schema = variables
-        .iter()
-        .find(|variable| variable["name"] == "tool_definitions")
-        .unwrap();
-    assert_eq!(schema["type"], "array");
+    assert_eq!(variables.len(), 5);
     assert!(variables.iter().all(|variable| variable["type"] != "flow"));
     let body = &repeat["config"]["body"];
     let dispatch = body["nodes"]

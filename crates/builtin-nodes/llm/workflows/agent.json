@@ -1,18 +1,5 @@
 {
   "version": "2026-11-11",
-  "clusters": [
-    {
-      "label": "Initial values",
-      "annotation": "Default state for the bounded Agent loop.",
-      "collapsed": true,
-      "nodes": [
-        "initial_usages",
-        "initial_text",
-        "initial_outcome",
-        "initial_error"
-      ]
-    }
-  ],
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -124,38 +111,21 @@
       }
     },
     {
-      "id": "initial_usages",
-      "kind": "builtin.constant",
-      "config": {
-        "value": []
-      }
-    },
-    {
-      "id": "initial_text",
-      "kind": "builtin.constant",
-      "config": {
-        "value": ""
-      }
-    },
-    {
-      "id": "initial_outcome",
-      "kind": "builtin.constant",
-      "config": {
-        "value": ""
-      }
-    },
-    {
-      "id": "initial_error",
-      "kind": "builtin.constant",
-      "config": {
-        "value": ""
-      }
-    },
-    {
       "id": "repeat",
       "kind": "workflow.loop",
       "config": {
         "max_iterations": 8,
+        "inputs": {
+          "api_key": "string",
+          "base_url": "string",
+          "model": "string",
+          "tool_definitions": {
+            "list": "object"
+          },
+          "tools": {
+            "map": "object"
+          }
+        },
         "variables": [
           {
             "name": "messages",
@@ -164,44 +134,26 @@
             }
           },
           {
-            "name": "tool_definitions",
-            "type": "array"
-          },
-          {
-            "name": "tools",
-            "type": {
-              "map": "object"
-            }
-          },
-          {
-            "name": "model",
-            "type": "string"
-          },
-          {
-            "name": "base_url",
-            "type": "string"
-          },
-          {
-            "name": "api_key",
-            "type": "string"
-          },
-          {
             "name": "usages",
             "type": {
               "list": "object"
-            }
+            },
+            "initial": []
           },
           {
             "name": "text",
-            "type": "string"
+            "type": "string",
+            "initial": ""
           },
           {
             "name": "outcome",
-            "type": "string"
+            "type": "string",
+            "initial": ""
           },
           {
             "name": "error",
-            "type": "string"
+            "type": "string",
+            "initial": ""
           }
         ],
         "until": {
@@ -529,30 +481,6 @@
           "from": {
             "node": "params",
             "port": "api_key"
-          }
-        },
-        "usages": {
-          "from": {
-            "node": "initial_usages",
-            "port": "value"
-          }
-        },
-        "text": {
-          "from": {
-            "node": "initial_text",
-            "port": "value"
-          }
-        },
-        "outcome": {
-          "from": {
-            "node": "initial_outcome",
-            "port": "value"
-          }
-        },
-        "error": {
-          "from": {
-            "node": "initial_error",
-            "port": "value"
           }
         }
       }
