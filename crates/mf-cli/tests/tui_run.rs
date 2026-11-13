@@ -220,7 +220,8 @@ TRACES
                             assert!(!text.contains("Input bindings:"));
                             assert!(!text.contains("e connections"));
                             assert!(text.contains("? help"));
-                            master.write_all(b"d").unwrap();
+                            // Mouse movement is inert but must not disturb the graph controls.
+                            master.write_all(b"\x1b[<35;40;10Md").unwrap();
                             stage = 1;
                         } else if stage == 1 && text.contains("Details") {
                             master.write_all(b"?").unwrap();

@@ -2436,7 +2436,8 @@ impl<'a> GraphView<'a> {
         }
     }
 
-    fn minimap_area(&self, area: Rect) -> Option<Rect> {
+    /// Bounds of the minimap overlay drawn inside `area`, when it is visible.
+    pub fn minimap_area(&self, area: Rect) -> Option<Rect> {
         let (width, height) = self.layout.size();
         if !self.minimap
             || area.width < 24
