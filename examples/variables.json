@@ -1,0 +1,83 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    }
+  },
+  "nodes": [
+    {
+      "id": "state",
+      "kind": "workflow.variables",
+      "config": {
+        "variables": [
+          {
+            "name": "count",
+            "type": "int",
+            "initial": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "value": {
+            "type": "int",
+            "default": 7,
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "assign",
+      "kind": "workflow.assign",
+      "config": {
+        "variable": "count"
+      },
+      "inputs": {
+        "value": {
+          "from": {
+            "node": "params",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "read",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "state",
+            "port": "count"
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "assign",
+      "from_output": "done",
+      "to_node": "read"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "count",
+      "node": "state",
+      "port": "count"
+    },
+    {
+      "name": "observed",
+      "node": "read",
+      "port": "value"
+    }
+  ]
+}

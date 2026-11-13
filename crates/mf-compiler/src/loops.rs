@@ -68,6 +68,7 @@ pub fn parse_config(node: &NodeDefinition) -> Result<LoweringConfig, WorkflowCom
 pub fn validate_scope(
     definition: &WorkflowDefinition,
     enclosing: Option<&BTreeMap<String, ValueType>>,
+    root: Option<&BTreeMap<String, ValueType>>,
     path: &[DefinitionId],
 ) -> Result<(), WorkflowCompileError> {
     for node in &definition.nodes {
@@ -84,6 +85,18 @@ pub fn validate_scope(
                 "scope constructs require definition version 2026-09-29",
             ));
         }
+        if matches!(
+            node.kind.as_str(),
+            mf_runtime::VARIABLES_KIND | mf_runtime::ASSIGN_KIND
+        ) {
+            ensure!(
+                definition.version.supports_workflow_variables(),
+                crate::compiler::InvalidScopeSnafu {
+                    path: path_label(&node_path),
+                    message: "workflow variables and assignments require definition version 2026-11-13",
+                }
+            );
+        }
         match node.kind.as_str() {
             LOOP_SOURCE_ID => ensure!(
                 enclosing.is_some()
@@ -94,8 +107,13 @@ pub fn validate_scope(
                     message: "reserved scope source requires its canonical enclosing scope",
                 }
             ),
-            LOOP_ASSIGN_KIND => {
+            LOOP_ASSIGN_KIND | mf_runtime::ASSIGN_KIND => {
                 let types = enclosing
+                    .or_else(|| {
+                        (node.kind == mf_runtime::ASSIGN_KIND)
+                            .then_some(root)
+                            .flatten()
+                    })
                     .ok_or_else(|| invalid(&node_path, "assignment requires a state scope"))?;
                 let target = assignment_target(&node.config, &node_path)?;
                 ensure!(

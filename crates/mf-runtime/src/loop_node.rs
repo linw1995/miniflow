@@ -53,6 +53,7 @@ pub fn loop_variable_types(
 
 struct ScopeSourceNode {
     types: BTreeMap<String, ValueType>,
+    root: bool,
 }
 
 #[derive(NodeValue)]
@@ -68,7 +69,9 @@ impl NodePortContract for ScopeSourceNode {
             .iter()
             .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
             .collect();
-        outputs.extend(ScopeIndex::ports());
+        if !self.root {
+            outputs.extend(ScopeIndex::ports());
+        }
         NodePorts {
             inputs: Vec::new(),
             outputs,
@@ -85,7 +88,11 @@ impl TaskNode for ScopeSourceNode {
         _: Inputs,
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        ctx.scope_values().map(Into::into)
+        if self.root {
+            ctx.root_values().map(Into::into)
+        } else {
+            ctx.scope_values().map(Into::into)
+        }
     }
 }
 
@@ -94,11 +101,20 @@ pub fn prepared_loop_source_types(types: &BTreeMap<String, ValueType>) -> FlowNo
 }
 
 pub fn prepared_scope_source(id: &str, types: &BTreeMap<String, ValueType>) -> FlowNode {
+    prepared_source(id, types, false)
+}
+
+pub fn prepared_root_source(id: &str, types: &BTreeMap<String, ValueType>) -> FlowNode {
+    prepared_source(id, types, true)
+}
+
+fn prepared_source(id: &str, types: &BTreeMap<String, ValueType>, root: bool) -> FlowNode {
     FlowNode::new(
         id,
         crate::PreparedNode::new(
             ScopeSourceNode {
                 types: types.clone(),
+                root,
             },
             NodeMetadata::default(),
         )
@@ -106,9 +122,10 @@ pub fn prepared_scope_source(id: &str, types: &BTreeMap<String, ValueType>) -> F
     )
 }
 
-struct LoopAssignNode {
+struct AssignmentNode {
     variable: String,
     value_type: ValueType,
+    root: bool,
 }
 
 #[derive(NodeValue)]
@@ -117,7 +134,7 @@ struct AssignmentOutputs {
     done: bool,
 }
 
-impl NodePortContract for LoopAssignNode {
+impl NodePortContract for AssignmentNode {
     fn ports(&self) -> NodePorts {
         NodePorts {
             inputs: vec![PortSpec::new("value", self.value_type.clone(), true)],
@@ -126,7 +143,7 @@ impl NodePortContract for LoopAssignNode {
     }
 }
 
-impl TaskNode for LoopAssignNode {
+impl TaskNode for AssignmentNode {
     fn supports_success_dependencies(&self) -> bool {
         false
     }
@@ -138,18 +155,31 @@ impl TaskNode for LoopAssignNode {
         let value = inputs
             .remove("value")
             .ok_or_else(|| structural_error("missing assignment value"))?;
-        ctx.stage_scope_write(&self.variable, value)?;
+        if self.root {
+            ctx.stage_root_write(&self.variable, value)?;
+        } else {
+            ctx.stage_scope_write(&self.variable, value)?;
+        }
         encode_typed_result(AssignmentOutputs { done: true }.into())
     }
 }
 
 pub fn prepared_loop_assign(id: &str, variable: &str, value_type: ValueType) -> FlowNode {
+    prepared_assignment(id, variable, value_type, false)
+}
+
+pub fn prepared_root_assign(id: &str, variable: &str, value_type: ValueType) -> FlowNode {
+    prepared_assignment(id, variable, value_type, true)
+}
+
+fn prepared_assignment(id: &str, variable: &str, value_type: ValueType, root: bool) -> FlowNode {
     FlowNode::new(
         id,
         crate::PreparedNode::new(
-            LoopAssignNode {
+            AssignmentNode {
                 variable: variable.to_owned(),
                 value_type,
+                root,
             },
             NodeMetadata::default(),
         )

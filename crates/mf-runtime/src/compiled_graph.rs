@@ -13,12 +13,25 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct GraphRelations {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeRelations>,
+    /// Invocation-local state of a callable Flow, independent of container frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<RootScopeRelations>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub streams: BTreeMap<String, crate::OutputReferenceDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+}
+
+/// Root state does not establish a Loop frame or change observation ancestry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootScopeRelations {
+    pub input: DefinitionId,
+    pub values: BTreeMap<String, ValueType>,
+    pub initial: BTreeMap<String, serde_json::Value>,
+    pub writes: BTreeMap<DefinitionId, String>,
 }
 
 /// Explicit source, state, and instruction relationships within a child scope.
@@ -39,6 +52,8 @@ pub struct ScopeRelations {
 /// The execution role of a node explicitly named by scope relationships.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScopeInstruction<'a> {
+    RootInput,
+    RootWrite(&'a str),
     Input,
     Write(&'a str),
     Exit,
@@ -46,6 +61,14 @@ pub enum ScopeInstruction<'a> {
 
 impl GraphRelations {
     pub fn instruction(&self, id: &DefinitionId) -> Option<ScopeInstruction<'_>> {
+        if let Some(root) = &self.root {
+            if id == &root.input {
+                return Some(ScopeInstruction::RootInput);
+            }
+            if let Some(variable) = root.writes.get(id) {
+                return Some(ScopeInstruction::RootWrite(variable));
+            }
+        }
         let scope = self.scope.as_ref()?;
         if id == &scope.input {
             Some(ScopeInstruction::Input)

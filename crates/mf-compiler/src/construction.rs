@@ -256,9 +256,15 @@ pub struct FlowBuilder {
     controls: Vec<crate::ControlEdgeDefinition>,
     orders: Vec<crate::OrderEdgeDefinition>,
     input_schema: crate::WorkflowInputSchema,
+    root_scope: Option<mf_runtime::RootScopeRelations>,
 }
 
 impl FlowBuilder {
+    pub fn with_root_scope(mut self, scope: Option<mf_runtime::RootScopeRelations>) -> Self {
+        self.root_scope = scope;
+        self
+    }
+
     pub fn into_tasks(self) -> Result<mf_runtime::Flow, FlowBuildError> {
         for target in &self.nodes {
             for reference in &target.metadata.context_references {
@@ -366,13 +372,20 @@ impl FlowBuilder {
                 execution_domains,
             },
             data.input_schema,
-        );
+        )
+        .with_root_scope(data.root_scope);
         Ok(crate::dependencies::bind_task_guards(flow, guards))
     }
     pub fn into_stream(
         self,
         execution: crate::StreamExecution,
     ) -> Result<crate::PreparedStream, StreamBuildError> {
+        ensure!(
+            self.root_scope.is_none(),
+            InvalidPlanSnafu {
+                message: "workflow variables require a finite callable Flow",
+            }
+        );
         let data = self;
         let outputs = data
             .outputs
@@ -634,6 +647,7 @@ impl FlowBuilder {
             controls: Vec::new(),
             orders: Vec::new(),
             input_schema: crate::WorkflowInputSchema::default(),
+            root_scope: None,
         };
         flow.prepare_execution();
         Ok(flow)

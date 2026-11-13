@@ -185,7 +185,11 @@ impl NodeRegistry {
             snafu::ensure!(
                 !matches!(
                     registration.kind,
-                    crate::LOOP_ASSIGN_KIND | crate::EXIT_LOOP_KIND | crate::LOOP_SOURCE_ID
+                    crate::LOOP_ASSIGN_KIND
+                        | crate::EXIT_LOOP_KIND
+                        | crate::LOOP_SOURCE_ID
+                        | crate::ASSIGN_KIND
+                        | crate::VARIABLES_KIND
                 ),
                 ReservedKindSnafu {
                     kind: registration.kind
@@ -420,9 +424,19 @@ mod tests {
 
     #[test]
     fn rejects_reserved_workflow_kinds() {
-        assert!(matches!(
-            NodeRegistry::from_registrations([&RESERVED]),
-            Err(NodeRegistryError::ReservedKind { .. })
-        ));
+        static VARIABLES: NodeRegistration = NodeRegistration {
+            kind: crate::VARIABLES_KIND,
+            factory: crate::NodeFactory::Plain(first_factory),
+        };
+        static ASSIGN: NodeRegistration = NodeRegistration {
+            kind: crate::ASSIGN_KIND,
+            factory: crate::NodeFactory::Plain(first_factory),
+        };
+        for registration in [&RESERVED, &VARIABLES, &ASSIGN] {
+            assert!(matches!(
+                NodeRegistry::from_registrations([registration]),
+                Err(NodeRegistryError::ReservedKind { .. })
+            ));
+        }
     }
 }

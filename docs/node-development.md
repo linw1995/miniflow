@@ -60,7 +60,10 @@ initializing executors. Dynamic in-memory callers derive their interfaces normal
 `mfn-core` registers a subgraph factory for `workflow.loop`. The compiler prepares its body and passes
 it to that factory, which constructs the complete Loop executor. A Flow using Loop must declare
 `mfn-core` in its dependencies. `workflow.loop_assign`, `workflow.exit_loop`, and `%loop` remain reserved
-engine kinds. Ordinary nodes inside a Loop body also require their packages in `dependencies`.
+engine kinds. Version `2026-11-13` adds engine-owned `workflow.variables` and `workflow.assign` for
+invocation-local state in finite callable Flows; the generic assignment also works inside Loop bodies.
+These kinds cannot be registered by plugins. Ordinary nodes inside a Loop body also require their
+packages in `dependencies`.
 
 ## Registration contract
 
@@ -1206,6 +1209,14 @@ relationships, not from instruction kind labels. The actual source endpoint is a
 refresh after assignments. Directly supplied manual callbacks have no compiled relationship record and
 retain their existing caller-defined preparation semantics. These are concrete execution relationships,
 not persisted receiving-type schemas or a new factory callback interface.
+
+Callable Flows may separately carry `GraphRelations::root` with their own typed initial values and
+assignment targets. Root state does not turn a callable into a frame-backed child: calls still
+isolate startup inputs, outputs, and state using the existing invocation boundary. Preparation binds
+the root relationships to the executable Flow, and every execution initializes fresh values without
+adding an observation scope. Such Flows use serial domains and dynamic publication, preserving native
+payloads and sensitivity across updates. Root source and assignment instructions require their
+owning invocation and are not exposed as isolated node targets.
 
 The current authored/compiler-prepared child path remains finite, including compatible TaskStream
 forwarding and calls from parent Stream messages. Its preparation rejects autonomous Event/Stream

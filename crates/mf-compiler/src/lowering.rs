@@ -210,6 +210,39 @@ pub fn lower_scope_at(
     relations: &mut GraphRelations,
     path: &[DefinitionId],
 ) -> Result<(), WorkflowCompileError> {
+    // Callable Flows own their own root state; container bodies cannot redeclare it.
+    relations.root = None;
+    for node in definition
+        .nodes
+        .iter()
+        .filter(|node| node.kind == mf_runtime::VARIABLES_KIND)
+    {
+        let mut node_path = path.to_vec();
+        node_path.push(node.id.clone());
+        let label = crate::loops::path_label(&node_path);
+        ensure!(
+            definition.version.supports_workflow_variables(),
+            crate::compiler::InvalidScopeSnafu {
+                path: &label,
+                message: "workflow variables and assignments require definition version 2026-11-13",
+            }
+        );
+        ensure!(
+            relations.scope.is_none() && relations.root.is_none(),
+            crate::compiler::InvalidScopeSnafu {
+                path: &label,
+                message: "workflow.variables requires a callable Flow with exactly one declaration",
+            }
+        );
+        let config: mf_runtime::WorkflowVariablesDefinition =
+            serde_json::from_value(node.config.clone())
+                .context(crate::compiler::ScopeConfigurationSnafu { path: &label })?;
+        relations.root = Some(
+            config
+                .into_scope(node.id.clone())
+                .context(crate::compiler::WorkflowVariablesSnafu { path: &label })?,
+        );
+    }
     if let Some(scope) = &relations.scope {
         ensure!(
             !scope.is_stateful()
@@ -261,7 +294,12 @@ pub fn lower_scope_at(
                 })
                 .collect::<BTreeMap<_, _>>()
         });
-    crate::loops::validate_scope(definition, state_types.as_ref(), path)?;
+    crate::loops::validate_scope(
+        definition,
+        state_types.as_ref(),
+        relations.root.as_ref().map(|root| &root.values),
+        path,
+    )?;
     if let Some(scope) = relations.scope.as_mut() {
         scope.writes.clear();
         scope.exits.clear();
@@ -289,11 +327,19 @@ pub fn lower_scope_at(
                     }
                 );
             }
-            mf_runtime::LOOP_ASSIGN_KIND => {
+            mf_runtime::LOOP_ASSIGN_KIND | mf_runtime::ASSIGN_KIND => {
                 // validate_scope checked ownership, target existence and spelling.
                 let target = crate::loops::assignment_target(&node.config, path)?;
-                let scope = relations.scope.as_mut().expect("validated state scope");
-                scope.writes.insert(node.id.clone(), target);
+                if let Some(scope) = relations.scope.as_mut() {
+                    scope.writes.insert(node.id.clone(), target);
+                } else {
+                    relations
+                        .root
+                        .as_mut()
+                        .expect("validated root state")
+                        .writes
+                        .insert(node.id.clone(), target);
+                }
             }
             mf_runtime::EXIT_LOOP_KIND => {
                 relations

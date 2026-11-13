@@ -724,6 +724,23 @@ pub enum NodeExecutionError {
         #[snafu(source(from(TypeMismatch, Box::new)))]
         source: Box<TypeMismatch>,
     },
+    #[snafu(
+        display("workflow variable `{variable}`: {source}"),
+        visibility(pub(super))
+    )]
+    WorkflowVariableType {
+        variable: String,
+        #[snafu(source(from(TypeMismatch, Box::new)))]
+        source: Box<TypeMismatch>,
+    },
+    #[snafu(
+        display("invalid workflow variables: {source}"),
+        visibility(pub(super))
+    )]
+    WorkflowVariables {
+        #[snafu(source(from(crate::WorkflowVariablesError, Box::new)))]
+        source: Box<crate::WorkflowVariablesError>,
+    },
     #[snafu(display("node execution failed: {message}"), visibility(pub))]
     ExecutionFailed { message: String },
     #[snafu(display("node plugin failed: {source}"), visibility(pub))]

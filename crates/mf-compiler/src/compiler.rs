@@ -285,6 +285,15 @@ pub enum WorkflowCompileError {
         path: String,
         source: serde_json::Error,
     },
+    #[snafu(
+        display("invalid workflow variables at {path}: {source}"),
+        visibility(pub)
+    )]
+    WorkflowVariables {
+        path: String,
+        #[snafu(source(from(mf_runtime::WorkflowVariablesError, Box::new)))]
+        source: Box<mf_runtime::WorkflowVariablesError>,
+    },
 }
 
 #[derive(Clone)]
@@ -553,6 +562,7 @@ fn finalize_origin_identity(
 ) -> Result<WorkflowDefinition, WorkflowCompileError> {
     let mut resolved = graph.clone();
     resolved.definition = resolve_execution(&graph.definition, nodes)?;
+    validate_relations(&resolved, &[])?;
     let workflow_id = resolved.workflow_id().context(GraphSnafu)?;
     // This cell belongs exclusively to this root preparation and is set once,
     // after every factory has returned. Prepared descendants only read it.
@@ -1734,6 +1744,48 @@ fn validate_relations(
             ));
         }
     }
+    if let Some(root) = &graph.relations.root {
+        ensure!(
+            graph.relations.is_callable()
+                && graph.definition.execution.is_none()
+                && graph.definition.version.supports_workflow_variables(),
+            InvalidScopeSnafu {
+                path: crate::loops::path_label(path),
+                message: "workflow variables require a finite callable Flow at version 2026-11-13",
+            }
+        );
+        root.validate_values().context(WorkflowVariablesSnafu {
+            path: crate::loops::path_label(path),
+        })?;
+        let mut instructions = BTreeSet::new();
+        for id in std::iter::once(&root.input).chain(root.writes.keys()) {
+            ensure!(
+                ids.contains(id) && instructions.insert(id) && !graph.children.contains_key(id),
+                InvalidScopeSnafu {
+                    path: crate::loops::path_label(path),
+                    message: "root state instructions must be disjoint known nodes without children",
+                }
+            );
+        }
+        ensure!(
+            root.writes
+                .values()
+                .all(|variable| root.values.contains_key(variable)),
+            InvalidScopeSnafu {
+                path: crate::loops::path_label(path),
+                message: "root write target must name a declared workflow variable",
+            }
+        );
+        ensure!(
+            !dependency_pairs(&graph.definition)
+                .iter()
+                .any(|(_, to)| to == &root.input),
+            InvalidScopeSnafu {
+                path: crate::loops::path_label(path),
+                message: "workflow variables source cannot have incoming dependencies",
+            }
+        );
+    }
     let Some(frame) = &graph.relations.scope else {
         return Ok(());
     };
@@ -1969,7 +2021,10 @@ pub fn prepare_compiled_plan(
     } else {
         builder
     };
-    Ok((resolved, builder))
+    Ok((
+        resolved,
+        builder.with_root_scope(plan.graph.relations.root.clone()),
+    ))
 }
 
 /// Prepare a task workflow and report attributed node preparation failures.
@@ -2311,7 +2366,10 @@ fn prepare_subgraph_body(
     } else {
         builder
     };
-    let flow = builder.into_tasks().context(FlowConstructionSnafu)?;
+    let flow = builder
+        .with_root_scope(graph.relations.root.clone())
+        .into_tasks()
+        .context(FlowConstructionSnafu)?;
     if let Some(layouts) = preparation.body_layouts.as_mut() {
         let streams = stream_outputs
             .iter()
@@ -2442,6 +2500,14 @@ fn resolve_nodes_in_scope(
         .iter()
         .map(|node| {
             match graph.relations.instruction(&node.id) {
+                Some(ScopeInstruction::RootInput) => {
+                    let root = graph.relations.root.as_ref().expect("validated root source");
+                    return Ok(mf_runtime::prepared_root_source(root.input.as_str(), &root.values));
+                }
+                Some(ScopeInstruction::RootWrite(target)) => {
+                    let root = graph.relations.root.as_ref().expect("validated root write");
+                    return Ok(mf_runtime::prepared_root_assign(node.id.as_str(), target, root.values[target].clone()));
+                }
                 Some(ScopeInstruction::Input) => {
                     let frame = graph.relations.scope.as_ref().expect("validated scope input");
                     return Ok(mf_runtime::prepared_scope_source(frame.input.as_str(), &frame.values));

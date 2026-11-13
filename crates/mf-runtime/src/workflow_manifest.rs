@@ -45,6 +45,11 @@ pub enum GraphDescriptionError {
     Invalid { message: String },
     #[snafu(display("invalid compiled workflow definition: {source}"))]
     Definition { source: serde_json::Error },
+    #[snafu(display("invalid compiled workflow variables: {source}"))]
+    Variables {
+        #[snafu(source(from(crate::WorkflowVariablesError, Box::new)))]
+        source: Box<crate::WorkflowVariablesError>,
+    },
     #[snafu(
         display("invalid graph observation projection: {source}"),
         visibility(pub)
@@ -432,6 +437,54 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
                 && nodes.contains(&output.node),
             InvalidSnafu {
                 message: "compiled stream relation has an invalid output endpoint"
+            }
+        );
+    }
+    if let Some(root) = &graph.relations.root {
+        ensure!(
+            graph.relations.is_callable()
+                && graph.definition.execution.is_none()
+                && graph.definition.version.supports_workflow_variables(),
+            InvalidSnafu {
+                message: "workflow variables require a finite callable Flow at version 2026-11-13",
+            }
+        );
+        root.validate_values().context(VariablesSnafu)?;
+        let mut instructions = BTreeSet::new();
+        for id in std::iter::once(&root.input).chain(root.writes.keys()) {
+            ensure!(
+                nodes.contains(id) && instructions.insert(id) && !graph.children.contains_key(id),
+                InvalidSnafu {
+                    message: "root state instructions must be disjoint known nodes without children",
+                }
+            );
+        }
+        ensure!(
+            root.writes
+                .values()
+                .all(|variable| root.values.contains_key(variable)),
+            InvalidSnafu {
+                message: "root write target must name a declared workflow variable",
+            }
+        );
+        ensure!(
+            !graph
+                .definition
+                .edges
+                .iter()
+                .any(|edge| edge.to_node == root.input)
+                && !graph
+                    .definition
+                    .control_edges
+                    .iter()
+                    .any(|edge| edge.to_node == root.input)
+                && !graph
+                    .definition
+                    .order_edges
+                    .iter()
+                    .any(|edge| edge.to_node == root.input),
+            InvalidSnafu {
+                message: "workflow variables source cannot have incoming dependencies",
             }
         );
     }

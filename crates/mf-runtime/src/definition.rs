@@ -233,6 +233,10 @@ impl WorkflowDefinitionVersion {
     pub fn supports_loop_output_updates(self) -> bool {
         matches!(self, Self::V2026_11_13)
     }
+
+    pub fn supports_workflow_variables(self) -> bool {
+        matches!(self, Self::V2026_11_13)
+    }
 }
 
 pub const CALL_KIND: &str = "workflow.call";
@@ -346,6 +350,8 @@ impl NodeDefinition {
     }
 }
 
+pub const VARIABLES_KIND: &str = "workflow.variables";
+pub const ASSIGN_KIND: &str = "workflow.assign";
 pub const LOOP_KIND: &str = "workflow.loop";
 pub const LOOP_ASSIGN_KIND: &str = "workflow.loop_assign";
 pub const EXIT_LOOP_KIND: &str = "workflow.exit_loop";

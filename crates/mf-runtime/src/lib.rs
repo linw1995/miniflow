@@ -31,6 +31,7 @@ mod task_stream;
 mod typed_inputs;
 mod typed_outputs;
 mod value;
+mod variables;
 mod worker;
 mod workflow_inputs;
 mod workflow_manifest;
@@ -38,7 +39,9 @@ mod workflow_manifest;
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
-pub use compiled_graph::{CompiledGraph, GraphRelations, ScopeInstruction, ScopeRelations};
+pub use compiled_graph::{
+    CompiledGraph, GraphRelations, RootScopeRelations, ScopeInstruction, ScopeRelations,
+};
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
     ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult, NodeResult,
@@ -46,13 +49,13 @@ pub use context::{
     execute_resolved_node_in_context, select_context_output,
 };
 pub use definition::{
-    CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
+    ASSIGN_KIND, CALL_KIND, CallConfig, ClusterDefinition, ControlEdgeDefinition, DefinitionId,
     DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, FlowParameterError,
     FlowSource, InputBindingDefinition, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID,
     LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
     MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
     NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    VARIABLES_KIND, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
     validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
@@ -76,7 +79,7 @@ pub use iteration::{
 };
 pub use loop_node::{
     LoopVariableError, loop_variable_types, prepared_loop_assign, prepared_loop_exit,
-    prepared_loop_source_types, prepared_scope_source,
+    prepared_loop_source_types, prepared_root_assign, prepared_root_source, prepared_scope_source,
 };
 pub use mf_runtime_derive::{NodeConfig, NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{FlowOrigin, NodeIdentity, ScopePathEntry, SkipCause};
@@ -134,6 +137,9 @@ pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, Nullable, Shared, decode_default_input,
     decode_input, decode_node_value, decode_object_value, decode_required_input,
     reject_unknown_inputs, unknown_enum_tag, unknown_enum_variant,
+};
+pub use variables::{
+    WorkflowVariableDefinition, WorkflowVariablesDefinition, WorkflowVariablesError,
 };
 
 pub use typed_outputs::{
