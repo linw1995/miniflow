@@ -185,8 +185,7 @@ impl NodeRegistry {
             snafu::ensure!(
                 !matches!(
                     registration.kind,
-                    crate::LOOP_ASSIGN_KIND
-                        | crate::EXIT_LOOP_KIND
+                    crate::EXIT_LOOP_KIND
                         | crate::LOOP_SOURCE_ID
                         | crate::ASSIGN_KIND
                         | crate::ROOT_SOURCE_ID
@@ -322,7 +321,7 @@ mod tests {
     };
 
     static RESERVED: NodeRegistration = NodeRegistration {
-        kind: crate::LOOP_ASSIGN_KIND,
+        kind: crate::EXIT_LOOP_KIND,
         factory: crate::NodeFactory::Plain(first_factory),
     };
 

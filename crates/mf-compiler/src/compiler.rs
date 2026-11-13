@@ -2799,7 +2799,7 @@ mod tests {
         assert_eq!(unbound_invoker.version, root.version);
         let pure_loop = describe(json!({
             "version":"2026-09-29", "dependencies":{},
-            "nodes":[{"id":"repeat", "kind":"workflow.loop", "config":{
+            "nodes":[{"id":"repeat", "kind":"loop.run", "config":{
                 "max_iterations":1, "variables":[{"name":"value", "type":"int"}],
                 "body":{"version":"2026-09-29", "dependencies":{}, "nodes":[]}
             }}]

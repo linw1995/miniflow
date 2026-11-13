@@ -11,7 +11,8 @@ mutable values for conditional updates and sequential refinement without introdu
 - Reuse staged, validated assignment publication and explicit dependency ordering.
 - Keep root state separate from container frames, startup inputs, and observation ancestry.
 - Initialize fresh state for every invocation and serialize root-state execution domains.
-- Preserve `workflow.loop_assign` and Loop-only exits; support `workflow.assign` in Loop bodies too.
+- Remove `workflow.loop_assign`; `workflow.assign` covers root state and Loop frames, while `loop.exit` stays Loop-only.
+- Rename Loop constructs to `loop.run` and `loop.exit`, and stop reserving Loop kinds for providers.
 - Freeze root-state relationships in compiled artifacts and generated runners.
 
 ## Non-goals

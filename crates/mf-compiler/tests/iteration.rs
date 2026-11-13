@@ -272,11 +272,11 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     let mut invalid = definition(json!([1]), "sequential", "terminate");
     invalid["nodes"][1]["config"]["body"]["nodes"][0] = json!({
         "id": "inner_loop",
-        "kind": "workflow.loop",
+        "kind": "loop.run",
         "config": {
             "max_iterations": 1,
             "variables": [{"name": "value", "type": "int"}],
-            "body": {"version":"2026-09-26", "dependencies":{}, "nodes": [{"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "value"}}]}
+            "body": {"version":"2026-09-26", "dependencies":{}, "nodes": [{"id": "assign", "kind": "workflow.assign", "config": {"variable": "value"}}]}
         }
     });
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
@@ -898,7 +898,7 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
     nested["nodes"][1]["config"]["body"] = json!({"version":nested["version"], "dependencies":{},
         "nodes": [
             nested_iteration,
-            {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "items"},
+            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "items"},
              "inputs":{"value":{"from":{"node":"iteration","port":"results"}}}}
         ]
     });

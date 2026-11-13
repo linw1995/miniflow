@@ -232,7 +232,7 @@ fn selected_loops_keep_pass_and_stop_rules() {
             value["nodes"][1]["config"]["body"]["nodes"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!({"id":"aa_exit", "kind":"workflow.exit_loop"}));
+                .push(json!({"id":"aa_exit", "kind":"loop.exit"}));
         }
         let plan = plan(value, &registry);
         let records = targets(&plan, &registry);

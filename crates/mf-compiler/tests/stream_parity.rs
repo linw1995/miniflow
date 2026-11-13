@@ -52,9 +52,9 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         }
         "nested" => {
             nodes = vec![
-                json!({"id":"repeat", "kind":"workflow.loop", "config":{"max_iterations":2, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
+                json!({"id":"repeat", "kind":"loop.run", "config":{"max_iterations":2, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
                     "nodes":[{"id":"increment", "kind":"builtin.code", "config":{"language":"cel", "inputs":{"x":"int"}, "code":{"value":"x + 1"}}},
-                        {"id":"assign", "kind":"workflow.loop_assign", "config":{"variable":"x"}}],
+                        {"id":"assign", "kind":"workflow.assign", "config":{"variable":"x"}}],
                     "edges":[edge("%loop", "x", "increment", "x"), edge("increment", "value", "assign", "value")]
                 }}}),
                 json!({"id":"collect", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}}),

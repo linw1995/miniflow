@@ -1,7 +1,7 @@
 use crate::{DefinitionId, ValueType, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::{
-    EXIT_LOOP_KIND, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopVariableDefinition,
-    NodeDefinition, OutputReferenceDefinition, WorkflowDefinitionVersion,
+    EXIT_LOOP_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopVariableDefinition, NodeDefinition,
+    OutputReferenceDefinition, WorkflowDefinitionVersion,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -77,22 +77,13 @@ pub fn validate_scope(
         if definition.version == WorkflowDefinitionVersion::V2026_09_26
             && matches!(
                 node.kind.as_str(),
-                LOOP_KIND | LOOP_ASSIGN_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
+                LOOP_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
             )
         {
             return Err(invalid(
                 &node_path,
                 "scope constructs require definition version 2026-09-29",
             ));
-        }
-        if node.kind == mf_runtime::ASSIGN_KIND {
-            ensure!(
-                definition.version.supports_workflow_variables(),
-                crate::compiler::InvalidScopeSnafu {
-                    path: path_label(&node_path),
-                    message: "workflow variables and assignments require definition version 2026-11-13",
-                }
-            );
         }
         match node.kind.as_str() {
             mf_runtime::ROOT_SOURCE_ID => ensure!(
@@ -113,14 +104,19 @@ pub fn validate_scope(
                     message: "reserved scope source requires its canonical enclosing scope",
                 }
             ),
-            LOOP_ASSIGN_KIND | mf_runtime::ASSIGN_KIND => {
+            mf_runtime::ASSIGN_KIND => {
                 let types = enclosing
-                    .or_else(|| {
-                        (node.kind == mf_runtime::ASSIGN_KIND)
-                            .then_some(root)
-                            .flatten()
-                    })
+                    .or(root)
                     .ok_or_else(|| invalid(&node_path, "assignment requires a state scope"))?;
+                // Inside a Loop body the assignment keeps the pre-existing immediate-write
+                // contract. Only root state needs the version that introduces it.
+                ensure!(
+                    enclosing.is_some() || definition.version.supports_workflow_variables(),
+                    crate::compiler::InvalidScopeSnafu {
+                        path: path_label(&node_path),
+                        message: "workflow variables and assignments require definition version 2026-11-13",
+                    }
+                );
                 let target = assignment_target(&node.config, &node_path)?;
                 ensure!(
                     types.contains_key(&target),

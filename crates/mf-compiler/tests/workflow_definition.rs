@@ -16,7 +16,7 @@ fn every_executable_child_uses_direct_canonical_flow_parameters() {
         "version":"2026-10-28", "dependencies":{},
         "nodes":[
             {"id":"callA", "kind":"workflow.call", "config":{"flow":"A", "body":leaf}},
-            {"id":"repeat", "kind":"workflow.loop", "config":{
+            {"id":"repeat", "kind":"loop.run", "config":{
                 "max_iterations":1, "variables":[{"name":"count", "type":"int"}],
                 "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"leaf", "kind":"builtin.constant", "config":{"value":42}}]}
             }},
@@ -72,7 +72,7 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
     use serde_json::json;
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-28", "dependencies":{}, "nodes":[
-            {"id":"repeat", "kind":"workflow.loop", "config":{
+            {"id":"repeat", "kind":"loop.run", "config":{
                 "max_iterations":1, "variables":[{"name":"count", "type":"int"}],
                 "body":{"version":"2026-09-29", "dependencies":{}, "nodes":[
                     {"id":"tick", "kind":"builtin.constant", "config":{"value":true}}
@@ -150,7 +150,7 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
 fn removed_container_shapes_are_rejected_instead_of_adapted() {
     use serde_json::json;
     let root = |node| json!({"version":"2026-10-28", "dependencies":{}, "nodes":[node]});
-    let old_loop = root(json!({"id":"repeat", "kind":"workflow.loop", "loop":{
+    let old_loop = root(json!({"id":"repeat", "kind":"loop.run", "loop":{
         "max_iterations":1, "variables":[{"name":"count", "type":"int"}],
         "body":{"nodes":[]}
     }}));
@@ -294,7 +294,7 @@ fn executable_body_clusters_are_preserved_in_descriptions() {
     for (id, kind, label, annotation) in [
         (
             "repeat",
-            "workflow.loop",
+            "loop.run",
             "Body step",
             "The only body transformation.",
         ),
@@ -310,7 +310,7 @@ fn executable_body_clusters_are_preserved_in_descriptions() {
             "nodes":[{"id":"step", "kind":"fixture.task"}],
             "clusters":[{"label":label, "annotation":annotation, "nodes":["step"]}]
         }});
-        if kind == "workflow.loop" {
+        if kind == "loop.run" {
             config["max_iterations"] = json!(1);
             config["variables"] = json!([{"name":"count", "type":"int"}]);
         } else {
@@ -331,7 +331,7 @@ fn executable_body_clusters_are_preserved_in_descriptions() {
         assert_eq!(description.loop_bodies[0].clusters.len(), 1);
         assert_eq!(description.loop_bodies[0].clusters[0].label, label);
         assert_eq!(description.loop_bodies[0].clusters[0].nodes, ["step"]);
-        if kind != "workflow.loop" {
+        if kind != "loop.run" {
             continue;
         }
         let mut legacy = definition;
@@ -367,7 +367,7 @@ fn nested_iteration_clusters_preserve_their_own_definition_version() {
     });
     for id in ["inner", "outer"] {
         node = json!({
-            "id":id,"kind":"workflow.loop","config":{
+            "id":id,"kind":"loop.run","config":{
                 "max_iterations":1,"variables":[{"name":"count","type":"int"}],
                 "body":{"version":"2026-10-23", "dependencies":{}, "nodes":[node]}
             }
@@ -536,7 +536,7 @@ fn cluster_validation_rejects_unknown_duplicate_and_synthetic_members() {
     // its ID happens to have a reserved spelling in an unrelated root scope.
     let scoped: WorkflowDefinition = serde_json::from_value(serde_json::json!({
         "version": "2026-10-23", "dependencies": {},
-        "nodes": [{"id": "repeat", "kind": "workflow.loop", "config": {
+        "nodes": [{"id": "repeat", "kind": "loop.run", "config": {
             "max_iterations": 1,
             "variables": [{"name": "count", "type": "int"}],
             "body": synthetic

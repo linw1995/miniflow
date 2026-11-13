@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-23",
+  "version": "2026-11-13",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -20,7 +20,7 @@
     },
     {
       "id": "repeat",
-      "kind": "workflow.loop",
+      "kind": "loop.run",
       "config": {
         "max_iterations": 5,
         "variables": [
@@ -59,7 +59,7 @@
             },
             {
               "id": "assign",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "count"
               },

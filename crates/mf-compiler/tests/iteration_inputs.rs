@@ -172,7 +172,7 @@ fn iteration_shared_input_configuration_is_strict_and_required() {
 fn iteration_shared_inputs_reject_writeback() {
     let mut owner = definition("sequential", "label")["nodes"][1].clone();
     owner["config"]["body"]["nodes"] = json!([
-        {"id":"write", "kind":"workflow.loop_assign", "config":{"variable":"label"},
+        {"id":"write", "kind":"workflow.assign", "config":{"variable":"label"},
          "inputs":{"value":{"from":{"node":"%iteration", "port":"label"}}}}
     ]);
     let mut value = definition("sequential", "label");

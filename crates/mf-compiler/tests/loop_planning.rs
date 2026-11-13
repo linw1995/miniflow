@@ -115,14 +115,14 @@ fn definition() -> Value {
             {"id": "seed", "kind": "builtin.constant", "config": {"value": 0}},
             {
                 "id": "repeat",
-                "kind": "workflow.loop",
+                "kind": "loop.run",
                 "config": {
                     "max_iterations": 5,
                     "variables": [{"name": "count", "type": "int"}],
                     "until": {"variable": "count", "operator": "gte", "value": 3},
                     "body": {"version":"2026-09-29", "dependencies":{},
                         "nodes": [
-                            {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}},
+                            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}},
                             {"id": "increment", "kind": "builtin.code", "config": {
                                 "language": "cel", "inputs": {"count": "int"},
                                 "code": {"next": "count + 1"}
@@ -154,7 +154,7 @@ fn public_structural_order_validates_root_scope_syntax() {
         ["seed", "repeat"]
     );
     value["nodes"].as_array_mut().unwrap().push(json!({
-        "id": "outside", "kind": "workflow.exit_loop"
+        "id": "outside", "kind": "loop.exit"
     }));
     let error = mf_compiler::structural_order(&parse(value)).unwrap_err();
     assert!(matches!(error,
@@ -212,7 +212,7 @@ fn loop_requires_a_registered_declaration() {
     let error = compile_definition(&parse(value), &NodeRegistry::default())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("workflow.loop"), "{error}");
+    assert!(error.contains("loop.run"), "{error}");
 }
 
 #[test]
@@ -268,18 +268,18 @@ fn rejects_old_schema_and_invalid_loop_structure() {
             .contains("cycle")
     );
 
-    for kind in ["workflow.loop_assign", "workflow.exit_loop"] {
+    for kind in ["workflow.assign", "loop.exit"] {
         let mut value = definition();
         value["nodes"].as_array_mut().unwrap().push(json!({
             "id": "outside", "kind": kind,
-            "config": if kind == "workflow.loop_assign" {
+            "config": if kind == "workflow.assign" {
                 json!({"variable": "count"})
             } else {
                 json!({})
             }
         }));
         let error = plan_definition(&parse(value)).unwrap_err();
-        let expected = if kind == mf_runtime::LOOP_ASSIGN_KIND {
+        let expected = if kind == "workflow.assign" {
             "assignment requires a state scope"
         } else {
             "exit requires a state scope"
@@ -563,7 +563,7 @@ fn assert_invalid_loop_edits_preserve_installed_binary_and_lock(
     assert!(!build.status.success());
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
-        stderr.contains("failed to construct node `repeat` of kind `workflow.loop`")
+        stderr.contains("failed to construct node `repeat` of kind `loop.run`")
             && stderr.contains("max_iterations must be in 1..=1000"),
         "{stderr}"
     );
@@ -636,7 +636,7 @@ fn defaults_and_inputs_definition() -> Value {
         "dependencies": {},
         "nodes": [
             {"id": "seed", "kind": "builtin.constant", "config": {"value": 2}},
-            {"id": "repeat", "kind": "workflow.loop", "config": {
+            {"id": "repeat", "kind": "loop.run", "config": {
                 "max_iterations": 5,
                 "inputs": {"step": "int"},
                 "variables": [
@@ -655,7 +655,7 @@ fn defaults_and_inputs_definition() -> Value {
                             "count": {"from": {"node": "%loop", "port": "count"}},
                             "step": {"from": {"node": "%loop", "port": "step"}}
                         }},
-                        {"id": "assign_count", "kind": "workflow.loop_assign",
+                        {"id": "assign_count", "kind": "workflow.assign",
                          "config": {"variable": "count"},
                          "inputs": {"value": {"from": {"node": "increment", "port": "next"}}}},
                         {"id": "sum", "kind": "builtin.code", "config": {
@@ -665,7 +665,7 @@ fn defaults_and_inputs_definition() -> Value {
                             "total": {"from": {"node": "%loop", "port": "total"}},
                             "step": {"from": {"node": "%loop", "port": "step"}}
                         }},
-                        {"id": "assign_total", "kind": "workflow.loop_assign",
+                        {"id": "assign_total", "kind": "workflow.assign",
                          "config": {"variable": "total"},
                          "inputs": {"value": {"from": {"node": "sum", "port": "next"}}}}
                     ]
@@ -729,7 +729,7 @@ fn loop_defaults_and_shared_inputs_are_optional_and_read_only() {
 fn output_updates_definition() -> Value {
     json!({
         "version":"2026-11-13",
-        "nodes":[{"id":"repeat", "kind":"workflow.loop", "config":{
+        "nodes":[{"id":"repeat", "kind":"loop.run", "config":{
             "max_iterations":5,
             "variables":[
                 {"name":"count", "type":"int", "initial":0},
@@ -777,9 +777,9 @@ fn exited_output_updates_definition() -> Value {
     let mut value = output_updates_definition();
     let body = &mut value["nodes"][0]["config"]["body"];
     body["nodes"].as_array_mut().unwrap().extend([
-        json!({"id":"mark", "kind":"workflow.loop_assign", "config":{"variable":"previous"},
+        json!({"id":"mark", "kind":"workflow.assign", "config":{"variable":"previous"},
             "inputs":{"value":{"from":{"node":"increment", "port":"next"}}}}),
-        json!({"id":"exit", "kind":"workflow.exit_loop"}),
+        json!({"id":"exit", "kind":"loop.exit"}),
         json!({"id":"unvisited", "kind":"builtin.identity", "inputs":{
             "input":{"from":{"node":"increment", "port":"next"}}
         }}),
@@ -813,7 +813,7 @@ fn body_outputs_preserve_native_capabilities_and_secret_labels() {
         {"id":"params", "kind":"builtin.parameters", "config":{"parameters":{
             "function":{"type":"flow", "secret":true}
         }}},
-        {"id":"repeat", "kind":"workflow.loop", "config":{
+        {"id":"repeat", "kind":"loop.run", "config":{
             "max_iterations":2,
             "inputs":{"replacement":"flow"},
             "variables":[{"name":"function", "type":"flow"}],
@@ -1039,9 +1039,9 @@ fn exit_definition() -> Value {
             "id": "stop", "condition": {"source": {"output": "increment.next", "path": ""},
             "operator": "eq", "value": 2}
         }]}}),
-        json!({"id": "exit", "kind": "workflow.exit_loop"}),
+        json!({"id": "exit", "kind": "loop.exit"}),
         json!({"id": "override", "kind": "builtin.constant", "config": {"value": 999}}),
-        json!({"id": "zz_after", "kind": "workflow.loop_assign", "config": {"variable": "count"}}),
+        json!({"id": "zz_after", "kind": "workflow.assign", "config": {"variable": "count"}}),
     ]);
     body["edges"].as_array_mut().unwrap().push(json!({
         "from_node": "override", "from_output": "value", "to_node": "zz_after", "to_input": "value"
@@ -1071,7 +1071,7 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
     let authored_body = &mut authored["nodes"][1]["config"]["body"];
     authored_body["nodes"].as_array_mut().unwrap().extend([
         json!({"id": "read_updated", "kind": "builtin.identity"}),
-        json!({"id": "capture_updated", "kind": "workflow.loop_assign", "config": {"variable": "observed"}}),
+        json!({"id": "capture_updated", "kind": "workflow.assign", "config": {"variable": "observed"}}),
     ]);
     authored_body["edges"].as_array_mut().unwrap().extend([
         json!({"from_node": "%loop", "from_output": "count", "to_node": "read_updated", "to_input": "input"}),
@@ -1213,8 +1213,8 @@ fn nested_definition() -> Value {
     inner["max_iterations"] = json!(1);
     value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
-            {"id": "inner", "kind": "workflow.loop", "config": inner},
-            {"id": "assign_outer", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
+            {"id": "inner", "kind": "loop.run", "config": inner},
+            {"id": "assign_outer", "kind": "workflow.assign", "config": {"variable": "count"}}
         ],
         "edges": [
             {"from_node": "%loop", "from_output": "count", "to_node": "inner", "to_input": "count"},
@@ -1302,7 +1302,7 @@ fn invalid_assignment_does_not_publish_partial_loop_output() {
     value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
             {"id": "wrong", "kind": "test.wrong_type"},
-            {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
+            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}}
         ],
         "edges": [{"from_node": "wrong", "from_output": "value", "to_node": "assign", "to_input": "value"}]
     });
@@ -1575,7 +1575,7 @@ fn failed_body_emits_a_failed_pass_and_no_loop_success() {
     value["nodes"][1]["config"]["body"] = json!({"version":"2026-09-29", "dependencies":{},
         "nodes": [
             {"id": "wrong", "kind": "test.wrong_type"},
-            {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
+            {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}}
         ],
         "edges": [{"from_node": "wrong", "from_output": "value", "to_node": "assign", "to_input": "value"}]
     });
@@ -1760,7 +1760,7 @@ fn legacy_observation_keeps_pass_spans_without_loop_lifecycle_records() {
             RunId::new(),
             vec![NodeIdentity {
                 id: "repeat".into(),
-                kind: "workflow.loop".into(),
+                kind: "loop.run".into(),
                 path: Vec::new(),
             }],
         )
@@ -2155,7 +2155,7 @@ fn resolved_authoring_missing_loop_bodies_fail_at_the_receiving_factory() {
             owner.config["body"]["nodes"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!({"id": "inner", "kind": "workflow.loop"}));
+                .push(json!({"id": "inner", "kind": "loop.run"}));
             "inner"
         } else {
             owner.config.as_object_mut().unwrap().remove("body");

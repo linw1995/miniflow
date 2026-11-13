@@ -172,7 +172,7 @@ fn iteration_calls_isolate_item_bindings_and_observe_nested_skips() {
 fn iteration_calls_cannot_hide_loop_containers_from_either_preparation_path() {
     let loop_body: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{"max_iterations":1,"variables":[{"name":"value","type":"string"}],"body":{"version":"2026-10-25", "dependencies":{}, "nodes":[]}}}],
+        "nodes":[{"id":"repeat","kind":"loop.run","config":{"max_iterations":1,"variables":[{"name":"value","type":"string"}],"body":{"version":"2026-10-25", "dependencies":{}, "nodes":[]}}}],
         "outputs":[{"name":"value","node":"repeat","port":"value"}]
     })).unwrap();
     let body = graph(
@@ -950,7 +950,7 @@ fn generated_calls_match_memory_without_flow_sources() {
 fn call_loop_call_execution_preserves_complete_observation_paths() {
     use mf_telemetry::event::{Event, ScopePathEntry};
     let body = graph(
-        json!([{"id":"repeat","kind":"workflow.loop","config":{
+        json!([{"id":"repeat","kind":"loop.run","config":{
             "max_iterations":1,"variables":[{"name":"value","type":"string"}],
             "body":{"version":"2026-10-25", "dependencies":{}, "nodes":[call("inner", &child())]}
         }}]),
@@ -1067,7 +1067,7 @@ fn calls_inside_loops_share_the_callers_step_budget_and_cancellation() {
     }
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-25","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{
+        "nodes":[{"id":"repeat","kind":"loop.run","config":{
             "max_iterations":1000,"variables":[{"name":"value","type":"string"}],
             "body":{"version":"2026-10-25", "dependencies":{}, "nodes":[call("call", &body)]}
         }}],

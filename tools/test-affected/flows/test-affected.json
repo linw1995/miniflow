@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-19",
+  "version": "2026-11-13",
   "execution": {
     "limits": {
       "max_pending_messages": 2,
@@ -1132,7 +1132,7 @@
     },
     {
       "id": "search",
-      "kind": "workflow.loop",
+      "kind": "loop.run",
       "config": {
         "max_iterations": 100,
         "variables": [
@@ -1175,7 +1175,7 @@
           "value": true
         },
         "body": {
-          "version": "2026-10-19",
+          "version": "2026-11-13",
           "dependencies": {},
           "nodes": [
             {
@@ -1831,7 +1831,7 @@
             },
             {
               "id": "assign_remaining",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "remaining"
               },
@@ -1846,7 +1846,7 @@
             },
             {
               "id": "assign_comparison",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "comparison"
               },
@@ -1861,7 +1861,7 @@
             },
             {
               "id": "assign_done",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "done"
               },
@@ -2368,7 +2368,7 @@
     },
     {
       "id": "graph_search",
-      "kind": "workflow.loop",
+      "kind": "loop.run",
       "config": {
         "max_iterations": 100,
         "variables": [
@@ -2415,7 +2415,7 @@
           "value": true
         },
         "body": {
-          "version": "2026-10-19",
+          "version": "2026-11-13",
           "dependencies": {},
           "nodes": [
             {
@@ -2781,7 +2781,7 @@
             },
             {
               "id": "assign_descriptor",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "descriptor"
               },
@@ -2796,7 +2796,7 @@
             },
             {
               "id": "assign_remaining",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "remaining"
               },
@@ -2811,7 +2811,7 @@
             },
             {
               "id": "assign_done",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "done"
               },

@@ -48,7 +48,7 @@ pub struct WorkflowDefinition {
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub flows: BTreeMap<String, FlowSource>,
-    pub variables: Option<Vec<crate::WorkflowVariableDefinition>>,
+    pub variables: Vec<WorkflowVariableDefinition>,
     pub nodes: Vec<NodeDefinition>,
     pub edges: Vec<EdgeDefinition>,
     pub control_edges: Vec<ControlEdgeDefinition>,
@@ -77,8 +77,8 @@ struct DefinitionFields {
     pub dependencies: BTreeMap<String, NodeDependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flows: BTreeMap<String, FlowSource>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variables: Option<Vec<crate::WorkflowVariableDefinition>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<WorkflowVariableDefinition>,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -354,9 +354,10 @@ impl NodeDefinition {
 }
 
 pub const ASSIGN_KIND: &str = "workflow.assign";
-pub const LOOP_KIND: &str = "workflow.loop";
-pub const LOOP_ASSIGN_KIND: &str = "workflow.loop_assign";
-pub const EXIT_LOOP_KIND: &str = "workflow.exit_loop";
+/// Loop declaration kind. `mfn-core` registers it and the compiler replaces it.
+pub const LOOP_KIND: &str = "loop.run";
+/// Loop exit control. Reserved because it has no provider factory.
+pub const EXIT_LOOP_KIND: &str = "loop.exit";
 pub const LOOP_SOURCE_ID: &str = "%loop";
 /// Synthetic source for the Flow's own variables; authored as a definition field.
 pub const ROOT_SOURCE_ID: &str = "%root";
@@ -376,6 +377,20 @@ pub struct LoopDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<LoopConditionDefinition>,
     pub body: Box<WorkflowDefinition>,
+}
+
+/// Engine-owned declaration of one Flow-level mutable variable.
+///
+/// `initial` is a required field that accepts an explicit null, unlike the
+/// optional Loop default.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowVariableDefinition {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub value_type: Value,
+    #[serde(deserialize_with = "Value::deserialize")]
+    pub initial: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

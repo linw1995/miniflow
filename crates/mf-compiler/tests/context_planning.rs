@@ -117,7 +117,7 @@ fn generated_body_snapshots_reuse_prepared_factories_and_preserve_dotted_keys() 
         "version": "2026-09-29", "dependencies": {},
         "nodes": [
             {"id": "seed", "kind": "builtin.constant", "config": {"value": 0}},
-            {"id": "repeat", "kind": "workflow.loop", "config": {
+            {"id": "repeat", "kind": "loop.run", "config": {
                 "max_iterations": 1,
                 "variables": [{"name": "count", "type": "int"}],
                 "body": {"version":"2026-09-29", "dependencies":{},

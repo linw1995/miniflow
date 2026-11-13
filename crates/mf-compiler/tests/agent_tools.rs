@@ -338,7 +338,7 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|node| { node["kind"] != mf_runtime::LOOP_ASSIGN_KIND })
+            .all(|node| { node["kind"] != mf_runtime::ASSIGN_KIND })
     );
     let dispatch = body["nodes"]
         .as_array()

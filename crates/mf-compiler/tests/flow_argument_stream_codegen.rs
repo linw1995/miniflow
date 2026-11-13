@@ -122,7 +122,7 @@ mod contract_drift {
     inventory::submit! { NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
         flow_parameters: |config| BTreeMap::from([("unrelated".into(), config["body"].clone())]), plain: unexpected, prepared: |_, config, _| unexpected(config),
     } } }
-    inventory::submit! { NodeRegistration { kind: "workflow.loop", factory: NodeFactory::Subgraph {
+    inventory::submit! { NodeRegistration { kind: "loop.run", factory: NodeFactory::Subgraph {
         flow_parameters: |config| BTreeMap::from([("unrelated".into(), config["body"].clone())]), plain: unexpected, prepared: |_, config, _| unexpected(config),
     } } }
     inventory::submit! { NodeRegistration { kind: "builtin.iteration", factory: NodeFactory::Subgraph {
@@ -152,7 +152,7 @@ mod contract_drift {
         );
         for node in [
             json!({"id": "owner", "kind": "workflow.call", "config": {"flow": "child", "body": body}}),
-            json!({"id": "owner", "kind": "workflow.loop", "config": {"max_iterations": 1,
+            json!({"id": "owner", "kind": "loop.run", "config": {"max_iterations": 1,
                 "variables": [{"name": "count", "type": "int"}], "body": {"version":"2026-10-28", "dependencies":{}, "nodes": [child]}}}),
             json!({"id": "owner", "kind": "builtin.iteration", "config": {"body": {"version":"2026-10-28", "dependencies":{},
                 "nodes": [child], "outputs": [{"name":"result", "node": "child", "port": "count"}]}}}),

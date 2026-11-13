@@ -1,22 +1,6 @@
-use crate::{DefinitionId, RootScopeRelations, ValueType};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use crate::{DefinitionId, RootScopeRelations, ValueType, WorkflowVariableDefinition};
 use snafu::{ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
-
-/// Engine-owned declaration of one Flow-level mutable variable.
-///
-/// `initial` is a required field that accepts an explicit null, unlike the
-/// optional Loop default.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowVariableDefinition {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub value_type: Value,
-    #[serde(deserialize_with = "Value::deserialize")]
-    pub initial: Value,
-}
 
 /// Build the root scope record for a Flow's authored definition-level variables.
 ///

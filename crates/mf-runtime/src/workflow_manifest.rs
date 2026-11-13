@@ -456,7 +456,7 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
             }
         );
         ensure!(
-            graph.definition.variables.is_some(),
+            !graph.definition.variables.is_empty(),
             InvalidSnafu {
                 message: "root state requires a definition-level variables declaration",
             }

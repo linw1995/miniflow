@@ -1,7 +1,7 @@
 use crate::{NodeDefinition, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::{
-    EXIT_LOOP_KIND, ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, LOOP_ASSIGN_KIND,
-    LOOP_KIND, LOOP_SOURCE_ID,
+    EXIT_LOOP_KIND, ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, LOOP_KIND,
+    LOOP_SOURCE_ID,
 };
 use serde::Deserialize;
 use snafu::{ResultExt, Snafu, ensure};
@@ -56,7 +56,7 @@ pub fn validate_body_structure(body: &WorkflowDefinition) -> Result<(), ScopeStr
         ensure!(
             !matches!(
                 node.kind.as_str(),
-                LOOP_KIND | LOOP_ASSIGN_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
+                LOOP_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
             ),
             StateScopeSnafu {
                 node: node.id.clone()

@@ -18,8 +18,8 @@ state and cannot mutate its caller's state.
 
 `workflow.assign` uses the existing `{variable}` configuration, required typed `value` input, and
 `done` control output. It targets the current graph's writable state, never searches through caller
-or container boundaries, and cannot name a read-only input. `workflow.loop_assign` remains Loop-only.
-`workflow.exit_loop` remains Loop-only; definition-level variables do not authorize an exit.
+or container boundaries, and cannot name a read-only input. `workflow.assign` targets the nearest writable state: a Loop frame when one is present, otherwise root state.
+`loop.exit` remains Loop-only; definition-level variables do not authorize an exit.
 
 Writes are validated and staged before publishing `done`. Successful publication commits the write
 and refreshes the `%root` output. Skips preserve the variable and skip `done`; failure

@@ -92,7 +92,7 @@ fn loop_definition(mut body: Value) -> WorkflowDefinition {
         "version": "2026-09-29", "dependencies": {},
         "nodes": [
             {"id": "seed", "kind": "builtin.constant", "config": {"value": 0}},
-            {"id": "repeat", "kind": "workflow.loop", "config": {
+            {"id": "repeat", "kind": "loop.run", "config": {
                 "max_iterations": 1, "variables": [{"name": "x", "type": "int"}],
                 "body": body
             }}
@@ -252,7 +252,7 @@ fn malformed_iteration_configuration_remains_a_typed_json_error() {
 #[test]
 fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
     let definition = loop_definition(json!({"nodes": [{
-        "id": "assign", "kind": "workflow.loop_assign", "config": {}
+        "id": "assign", "kind": "workflow.assign", "config": {}
     }]}));
     let error = plan_definition(&definition).unwrap_err();
     assert!(
@@ -265,7 +265,7 @@ fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
 
     let definition = loop_definition(json!({"nodes": [{
-        "id": "assign", "kind": "workflow.loop_assign", "config": {"variable": " "}
+        "id": "assign", "kind": "workflow.assign", "config": {"variable": " "}
     }]}));
     let error = plan_definition(&definition).unwrap_err();
     assert!(
@@ -281,7 +281,7 @@ fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
 #[test]
 fn loop_structure_errors_preserve_the_typed_inner_compilation_error() {
     let definition = loop_definition(json!({
-        "nodes": [{"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "x"}}],
+        "nodes": [{"id": "assign", "kind": "workflow.assign", "config": {"variable": "x"}}],
         "edges": [{"from_node": "missing", "from_output": "value", "to_node": "assign", "to_input": "value"}]
     }));
     let error = plan_definition(&definition).unwrap_err();

@@ -2,10 +2,10 @@
 
 ### Requirement: Accept generic assignment in Loop bodies
 
-For definition version `2026-11-13`, `workflow.assign` SHALL support the same typed assignment and
-`done` publication contract as `workflow.loop_assign` in a Loop body. It SHALL target only the
-nearest frame's writable variables, not read-only inputs or caller root variables. Existing
-`workflow.loop_assign` and `workflow.exit_loop` syntax SHALL remain Loop-only.
+`workflow.assign` SHALL support the typed assignment and `done` publication contract in a Loop body
+for every definition version that supports Loop constructs. It SHALL target only the nearest frame's
+writable variables, not read-only inputs or caller root variables. `workflow.loop_assign` is removed;
+`loop.exit` SHALL remain Loop-only.
 
 #### Scenario: Refine a Loop variable with generic assignment
 

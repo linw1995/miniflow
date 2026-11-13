@@ -150,7 +150,7 @@ fn nested_calls_project_public_streams_and_keep_terminal_adaptation_unsubscribed
 #[test]
 fn calls_export_loop_streams_without_exposing_loop_state() {
     let body = json!({"version":"2026-10-28","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{
+        "nodes":[{"id":"repeat","kind":"loop.run","config":{
             "max_iterations":2,"variables":[{"name":"count","type":"usize"}],
             "stream_outputs":{"delta":{"node":"step","port":"delta"}},
             "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"from":{"node":"%loop","port":"count"}}}}]}

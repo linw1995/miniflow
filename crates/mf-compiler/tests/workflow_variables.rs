@@ -289,10 +289,6 @@ fn invalid_declarations_and_scope_ownership_fail_before_execution() {
             "require definition version 2026-11-13",
         ),
         (
-            Box::new(|v| v["variables"] = json!([])),
-            "variables must not be empty",
-        ),
-        (
             Box::new(|v| v["variables"][1]["name"] = json!("count")),
             "duplicate variable",
         ),
@@ -306,14 +302,14 @@ fn invalid_declarations_and_scope_ownership_fail_before_execution() {
         ),
         (
             Box::new(|v| v["nodes"][1]["kind"] = json!("workflow.loop_assign")),
-            "assignment requires a state scope",
+            "unknown kind `workflow.loop_assign`",
         ),
         (
             Box::new(|v| {
                 v["nodes"]
                     .as_array_mut()
                     .unwrap()
-                    .push(json!({"id":"exit", "kind":"workflow.exit_loop"}));
+                    .push(json!({"id":"exit", "kind":"loop.exit"}));
             }),
             "exit requires a state scope",
         ),
@@ -347,9 +343,9 @@ fn invalid_declarations_and_scope_ownership_fail_before_execution() {
     }
     // Generic assignments have their own version gate even without a declaration.
     let error = compile_error(json!({
-        "version":"2026-11-11", "nodes":[
-            {"id":"write", "kind":"workflow.assign", "config":{"variable":"count"}}
-        ]
+        "version":"2026-11-11",
+        "variables":[{"name":"count", "type":"int", "initial":0}],
+        "nodes":[{"id":"write", "kind":"workflow.assign", "config":{"variable":"count"}}]
     }));
     assert!(
         error
@@ -375,7 +371,7 @@ fn nested() -> Value {
     let mut value = definition();
     value["nodes"].as_array_mut().unwrap().extend([
         json!({"id": "child", "kind": "workflow.call", "config": {"flow": "local-child", "body": definition()}}),
-        json!({"id": "repeat", "kind": "workflow.loop", "config": {
+        json!({"id": "repeat", "kind": "loop.run", "config": {
             "variables": [{"name": "count", "type": "int", "initial": 10}], "max_iterations": 2,
             "body": {"nodes": [
                 {"id":"inc", "kind":"builtin.code", "config": {"language":"cel", "inputs":{"count":"int"}, "code":{"next":"count + 1"}},
@@ -418,7 +414,7 @@ fn exited_loop_output_updates() -> Value {
     let mut value = loop_output_updates();
     let body = &mut value["nodes"][4]["config"]["body"];
     body["nodes"].as_array_mut().unwrap().extend([
-        json!({"id":"exit", "kind":"workflow.exit_loop"}),
+        json!({"id":"exit", "kind":"loop.exit"}),
         json!({"id":"zz_unvisited", "kind":"builtin.code", "config":{
             "language":"cel", "inputs":{"count":"int"}, "code":{"next":"count + 1000"}
         }, "inputs":{"count":{"from":{"node":"%loop", "port":"count"}}}}),
@@ -519,7 +515,7 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
                     mf_runtime::WorkflowDefinitionVersion::V2026_11_11;
             }
             _ => {
-                changed.graph.definition.variables = None;
+                changed.graph.definition.variables.clear();
             }
         }
         assert!(
@@ -648,7 +644,7 @@ fn finite_stateful_calls_can_forward_task_streams_without_promoting_root_state()
 #[test]
 fn state_cannot_be_used_without_an_owning_declaration() {
     let mut value = definition();
-    value.as_object_mut().unwrap().remove("variables");
+    value["variables"] = json!([]);
     let error = plan_definition(&parse(value)).unwrap_err();
     assert!(
         error

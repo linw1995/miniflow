@@ -57,9 +57,9 @@ Host and target implementations must expose the same configured interface even i
 Initialization can still fail for an unavailable runtime resource; inspection returns the frozen interface without
 initializing executors. Dynamic in-memory callers derive their interfaces normally and require no manifest.
 
-`mfn-core` registers a subgraph factory for `workflow.loop`. The compiler prepares its body and passes
+`mfn-core` registers a subgraph factory for `loop.run`. The compiler prepares its body and passes
 it to that factory, which constructs the complete Loop executor. A Flow using Loop must declare
-`mfn-core` in its dependencies. `workflow.loop_assign`, `workflow.exit_loop`, and `%loop` remain reserved
+`mfn-core` in its dependencies. `workflow.assign`, `loop.exit`, and `%loop` remain reserved
 engine kinds. Version `2026-11-13` adds a definition-level `variables` field for invocation-local
 state in finite callable Flows. The compiler injects the reserved `%root` source for it, so authors
 never write a declaration node. `workflow.assign` is the reserved engine kind that writes that state;

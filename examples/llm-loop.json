@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-23",
+  "version": "2026-11-13",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -17,7 +17,7 @@
   "nodes": [
     {
       "id": "repeat",
-      "kind": "workflow.loop",
+      "kind": "loop.run",
       "config": {
         "max_iterations": 2,
         "variables": [
@@ -37,7 +37,7 @@
           }
         ],
         "body": {
-          "version": "2026-10-23",
+          "version": "2026-11-13",
           "dependencies": {},
           "nodes": [
             {
@@ -58,7 +58,7 @@
             },
             {
               "id": "remember",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "history"
               },
@@ -73,7 +73,7 @@
             },
             {
               "id": "answer",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "text"
               },

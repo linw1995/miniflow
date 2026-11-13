@@ -2203,12 +2203,12 @@ mod tests {
                 execution: None,
                 dependencies: BTreeMap::new(),
                 flows: BTreeMap::new(),
-                variables: None,
+                variables: Vec::new(),
                 nodes: [
                     ("custom-input", "custom.source"),
                     ("custom-write", "custom.write"),
                     ("custom-exit", "custom.exit"),
-                    ("ordinary", crate::LOOP_ASSIGN_KIND),
+                    ("ordinary", crate::ASSIGN_KIND),
                 ]
                 .into_iter()
                 .map(|(id, kind)| crate::NodeDefinition {

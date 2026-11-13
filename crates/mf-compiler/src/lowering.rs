@@ -212,7 +212,7 @@ pub fn lower_scope_at(
 ) -> Result<(), WorkflowCompileError> {
     // Callable Flows own their own root state; container bodies cannot redeclare it.
     relations.root = None;
-    if let Some(variables) = &definition.variables {
+    if !definition.variables.is_empty() {
         let mut variables_path = path.to_vec();
         variables_path.push(DefinitionId::from("variables"));
         let label = crate::loops::path_label(&variables_path);
@@ -231,7 +231,7 @@ pub fn lower_scope_at(
             }
         );
         relations.root = Some(
-            mf_runtime::root_scope(variables, mf_runtime::ROOT_SOURCE_ID.into())
+            mf_runtime::root_scope(&definition.variables, mf_runtime::ROOT_SOURCE_ID.into())
                 .context(crate::compiler::WorkflowVariablesSnafu { path: &label })?,
         );
         if !definition
@@ -335,7 +335,7 @@ pub fn lower_scope_at(
                     }
                 );
             }
-            mf_runtime::LOOP_ASSIGN_KIND | mf_runtime::ASSIGN_KIND => {
+            mf_runtime::ASSIGN_KIND => {
                 // validate_scope checked ownership, target existence and spelling.
                 let target = crate::loops::assignment_target(&node.config, path)?;
                 if let Some(scope) = relations.scope.as_mut() {
@@ -422,8 +422,8 @@ mod tests {
         assert_eq!(context.relations.key.as_deref(), Some("repeat"));
         let mut definition = WorkflowDefinition::from_json(
             &json!({
-                "version":"2026-10-28", "dependencies":{}, "nodes":[{
-                    "id":"write", "kind":mf_runtime::LOOP_ASSIGN_KIND,
+                "version":"2026-11-13", "nodes":[{
+                    "id":"write", "kind":mf_runtime::ASSIGN_KIND,
                     "config":{"variable":"missing"}
                 }]
             })
