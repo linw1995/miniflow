@@ -27,7 +27,7 @@
           },
           "tools": {
             "type": {
-              "map": "object"
+              "map": "flow"
             },
             "secret": false
           },
@@ -54,6 +54,12 @@
           "api_key": {
             "type": "string",
             "env": "OPENAI_API_KEY"
+          },
+          "tool_properties": {
+            "type": {
+              "map": "object"
+            },
+            "secret": false
           }
         }
       }
@@ -65,10 +71,10 @@
         "flow": "tool-catalog"
       },
       "inputs": {
-        "params.tools": {
+        "params.properties": {
           "from": {
             "node": "params",
-            "port": "tools"
+            "port": "tool_properties"
           }
         }
       }
@@ -123,6 +129,9 @@
             "list": "object"
           },
           "tools": {
+            "map": "flow"
+          },
+          "tool_properties": {
             "map": "object"
           }
         },
@@ -311,6 +320,12 @@
                     "node": "%loop",
                     "port": "tools"
                   }
+                },
+                "params.tool_properties": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "tool_properties"
+                  }
                 }
               }
             },
@@ -481,6 +496,12 @@
           "from": {
             "node": "params",
             "port": "api_key"
+          }
+        },
+        "tool_properties": {
+          "from": {
+            "node": "params",
+            "port": "tool_properties"
           }
         }
       }

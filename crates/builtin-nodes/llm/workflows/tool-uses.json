@@ -25,6 +25,12 @@
           },
           "tools": {
             "type": {
+              "map": "flow"
+            },
+            "secret": false
+          },
+          "tool_properties": {
+            "type": {
               "map": "object"
             },
             "secret": false
@@ -91,14 +97,31 @@
         "inputs": {
           "tools": {
             "map": "object"
+          },
+          "flows": {
+            "map": "flow"
           }
         },
         "body": {
           "version": "2026-10-28",
           "nodes": [
             {
-              "id": "arguments",
-              "kind": "llm.tool_arguments",
+              "id": "classify",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "call": "object",
+                  "tools": "object"
+                },
+                "code": {
+                  "name": "call.name",
+                  "ok": "call.name in tools && type(call.arguments) == map && size(call.arguments) == size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) && tools[call.name].interface.required.all(r, r in call.arguments) && tools[call.name].interface.parameters.all(p, !p.secret || p.has_env || p.has_default)",
+                  "arguments": "call.name in tools && type(call.arguments) == map ? call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v) : {}",
+                  "error": "cel.bind(missing, (call.name in tools ? tools[call.name].interface.required.filter(r, !(r in (type(call.arguments) == map ? call.arguments : {}))) : []), {'error': !(call.name in tools) ? 'unknown tool' : type(call.arguments) != map ? 'arguments must be a JSON object' : size(call.arguments) != size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) ? 'unknown or secret argument' : size(missing) > 0 ? 'missing required argument `' + missing[0] + '`' : ''})",
+                  "plain": "call.name in tools && tools[call.name].interface.plain"
+                }
+              },
               "inputs": {
                 "call": {
                   "from": {
@@ -115,29 +138,68 @@
               }
             },
             {
+              "id": "gate",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "ok",
+                    "condition": {
+                      "source": {
+                        "output": "classify.ok",
+                        "path": ""
+                      },
+                      "operator": "eq",
+                      "value": true
+                    }
+                  }
+                ]
+              }
+            },
+            {
               "id": "execute",
               "kind": "builtin.router",
               "config": {
-                "mode": "execute",
-                "flow_field": "flow"
+                "mode": "execute"
               },
               "inputs": {
                 "flows": {
                   "from": {
                     "node": "%iteration",
-                    "port": "tools"
+                    "port": "flows"
                   }
                 },
                 "route": {
                   "from": {
-                    "node": "arguments",
+                    "node": "classify",
                     "port": "name"
                   }
                 },
                 "arguments": {
                   "from": {
-                    "node": "arguments",
+                    "node": "classify",
                     "port": "arguments"
+                  }
+                }
+              }
+            },
+            {
+              "id": "fail",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "error": "object"
+                },
+                "code": {
+                  "value": "error"
+                }
+              },
+              "inputs": {
+                "error": {
+                  "from": {
+                    "node": "classify",
+                    "port": "error"
                   }
                 }
               }
@@ -154,15 +216,15 @@
                 },
                 "plain_content": {
                   "from": {
-                    "node": "arguments",
-                    "port": "plain_content"
+                    "node": "classify",
+                    "port": "plain"
                   }
                 },
                 "result": {
                   "exclusive": [
                     {
-                      "node": "arguments",
-                      "port": "error"
+                      "node": "fail",
+                      "port": "value"
                     },
                     {
                       "node": "execute",
@@ -171,6 +233,22 @@
                   ]
                 }
               }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "classify",
+              "to_node": "gate"
+            },
+            {
+              "from_node": "gate",
+              "from_output": "ok",
+              "to_node": "execute"
+            },
+            {
+              "from_node": "gate",
+              "from_output": "else",
+              "to_node": "fail"
             }
           ],
           "outputs": [
@@ -190,6 +268,12 @@
           }
         },
         "tools": {
+          "from": {
+            "node": "params",
+            "port": "tool_properties"
+          }
+        },
+        "flows": {
           "from": {
             "node": "params",
             "port": "tools"

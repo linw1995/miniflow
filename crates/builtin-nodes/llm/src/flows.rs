@@ -44,6 +44,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             params.config["parameters"]["tools"]["type"],
+            json!({"map":"flow"})
+        );
+        assert_eq!(
+            params.config["parameters"]["tool_properties"]["type"],
             json!({"map":"object"})
         );
         assert!(params.config["parameters"].get("descriptions").is_none());
@@ -53,7 +57,10 @@ mod tests {
             .iter()
             .find(|node| node.id.as_str() == "repeat")
             .unwrap();
-        assert_eq!(repeat.config["inputs"].as_object().unwrap().len(), 5);
+        let loop_inputs = repeat.config["inputs"].as_object().unwrap();
+        assert_eq!(loop_inputs.len(), 6);
+        assert_eq!(loop_inputs["tools"], json!({"map":"flow"}));
+        assert_eq!(loop_inputs["tool_properties"], json!({"map":"object"}));
         let variables = repeat.config["variables"].as_array().unwrap();
         assert_eq!(variables.len(), 5);
         assert!(
@@ -93,9 +100,14 @@ mod tests {
         assert_eq!(
             body.nodes
                 .iter()
-                .filter(|node| node.kind == "llm.tool_definition")
+                .filter(|node| node.kind == "builtin.code")
                 .count(),
             1
+        );
+        assert!(
+            body.nodes
+                .iter()
+                .all(|node| node.kind != "llm.tool_definition")
         );
         assert_eq!(
             definition

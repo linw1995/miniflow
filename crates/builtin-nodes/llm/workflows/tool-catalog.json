@@ -4,8 +4,8 @@
     "core": {
       "package": "mfn-core"
     },
-    "llm": {
-      "package": "mfn-llm"
+    "code": {
+      "package": "mfn-code"
     }
   },
   "nodes": [
@@ -14,7 +14,7 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
-          "tools": {
+          "properties": {
             "type": {
               "map": "object"
             },
@@ -33,9 +33,22 @@
           "nodes": [
             {
               "id": "definition",
-              "kind": "llm.tool_definition",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "item": "object",
+                  "name": "string"
+                },
+                "code": {
+                  "structure": "item.interface.callable",
+                  "documented": "cel.bind(docs, ('parameters' in item ? item.parameters : {}), size(docs) == size(item.interface.allowed.transformMap(k, v, k in docs, v)))",
+                  "portable": "item.interface.parameters.all(p, p.secret || !p.runtime_only)",
+                  "value": "cel.bind(docs, ('parameters' in item ? item.parameters : {}), {'name': name, 'description': item.description, 'input_schema': {'type': 'object', 'properties': item.interface.allowed.transformMap(k, v, true, k in docs ? v + docs[k] : v), 'required': item.interface.required, 'additionalProperties': false}})"
+                }
+              },
               "inputs": {
-                "tool": {
+                "item": {
                   "from": {
                     "node": "%iteration",
                     "port": "item"
@@ -48,13 +61,72 @@
                   }
                 }
               }
+            },
+            {
+              "id": "require_structure",
+              "kind": "builtin.assert",
+              "config": {
+                "message": "Every tool requires exactly one startup node, a terminal interface, no stdin, and a resolvable secret source",
+                "condition": {
+                  "source": {
+                    "output": "definition.structure",
+                    "path": ""
+                  },
+                  "operator": "eq",
+                  "value": true
+                }
+              }
+            },
+            {
+              "id": "require_documented",
+              "kind": "builtin.assert",
+              "config": {
+                "message": "Tool documentation must describe declared inputs only",
+                "condition": {
+                  "source": {
+                    "output": "definition.documented",
+                    "path": ""
+                  },
+                  "operator": "eq",
+                  "value": true
+                }
+              }
+            },
+            {
+              "id": "require_portable",
+              "kind": "builtin.assert",
+              "config": {
+                "message": "Tool inputs cannot expose runtime-only values to a model",
+                "condition": {
+                  "source": {
+                    "output": "definition.portable",
+                    "path": ""
+                  },
+                  "operator": "eq",
+                  "value": true
+                }
+              }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "definition",
+              "to_node": "require_structure"
+            },
+            {
+              "from_node": "definition",
+              "to_node": "require_documented"
+            },
+            {
+              "from_node": "definition",
+              "to_node": "require_portable"
             }
           ],
           "outputs": [
             {
               "name": "result",
               "node": "definition",
-              "port": "definition"
+              "port": "value"
             }
           ]
         }
@@ -63,7 +135,7 @@
         "items": {
           "from": {
             "node": "params",
-            "port": "tools"
+            "port": "properties"
           }
         }
       }

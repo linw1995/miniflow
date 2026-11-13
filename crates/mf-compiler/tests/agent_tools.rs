@@ -63,9 +63,9 @@ fn calculator_tools() -> BTreeMap<String, FlowTool> {
     // not the compiler test's directory.
     local_dependencies(&mut body);
     let parameters = serde_json::from_value(json!({
-        "calculate.operation":{"description":"The arithmetic operation."},
-        "calculate.left":{"description":"First operand."},
-        "calculate.right":{"description":"Second operand."}
+        "operation":{"description":"The arithmetic operation."},
+        "left":{"description":"First operand."},
+        "right":{"description":"Second operand."}
     }))
     .unwrap();
     BTreeMap::from([(
@@ -255,16 +255,25 @@ fn assert_catalog_once_outside_loop(recording: &Snapshots, tool_count: usize) {
     let snapshot = repeat.snapshot.node(&repeat.scope, &repeat.node).unwrap();
     let tools = snapshot.inputs.get("tools").unwrap().as_object().unwrap();
     assert_eq!(tools.len(), tool_count);
-    for tool in tools.values() {
-        let record = tool.as_object().unwrap();
+    // Each capability stays a native Flow; the callable properties travel beside it.
+    assert!(tools.values().all(|tool| tool.as_str() == Some("<Flow>")));
+    let properties = snapshot
+        .inputs
+        .get("tool_properties")
+        .unwrap()
+        .as_object()
+        .unwrap();
+    assert_eq!(properties.len(), tool_count);
+    for property in properties.values() {
+        let record = property.as_object().unwrap();
         assert_eq!(record.len(), 3);
-        assert_eq!(record["flow"].as_str(), Some("<Flow>"));
         assert!(
             record["description"]
                 .as_str()
                 .is_some_and(|description| !description.is_empty() && description != "[REDACTED]")
         );
         assert!(record["parameters"].is_object());
+        assert_eq!(record["interface"]["callable"].as_bool(), Some(true));
     }
     for entry in history {
         let snapshot = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
@@ -312,8 +321,12 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
             .unwrap()
     };
     let parameters = node("params")["config"]["parameters"].as_object().unwrap();
-    assert_eq!(parameters.len(), 7);
-    assert_eq!(parameters["tools"]["type"], json!({"map":"object"}));
+    assert_eq!(parameters.len(), 8);
+    assert_eq!(parameters["tools"]["type"], json!({"map":"flow"}));
+    assert_eq!(
+        parameters["tool_properties"]["type"],
+        json!({"map":"object"})
+    );
     assert!(parameters["tools"].get("default").is_none());
     assert!(parameters.get("descriptions").is_none());
     assert!(!value.to_string().contains("flow_0"));
@@ -325,8 +338,9 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
     );
     let repeat = node("repeat");
     let shared_inputs = repeat["config"]["inputs"].as_object().unwrap();
-    assert_eq!(shared_inputs.len(), 5);
-    assert_eq!(shared_inputs["tools"], json!({"map":"object"}));
+    assert_eq!(shared_inputs.len(), 6);
+    assert_eq!(shared_inputs["tools"], json!({"map":"flow"}));
+    assert_eq!(shared_inputs["tool_properties"], json!({"map":"object"}));
     assert_eq!(shared_inputs["tool_definitions"], json!({"list":"object"}));
     let variables = repeat["config"]["variables"].as_array().unwrap();
     assert_eq!(variables.len(), 5);
@@ -347,7 +361,7 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["params.calls", "params.tools"]
+        ["params.calls", "params.tool_properties", "params.tools"]
     );
     assert!(dispatch["config"].get("body").is_none());
 
@@ -689,7 +703,9 @@ fn unknown_and_invalid_tool_arguments_are_ordered_results_and_the_agent_can_reco
     assert!(errors[1].contains("arguments must be a JSON object"));
     assert!(errors[2].contains("required"));
     assert!(errors[3].contains("left"));
-    assert!(errors[4].contains("unknown or secret argument `extra`"));
+    // A dynamic map caller cannot enumerate unexpected keys, so the report is
+    // deliberately coarser than a compiled adapter's single-key message.
+    assert!(errors[4].contains("unknown or secret argument"));
     assert_eq!(messages[7]["content"], "5.0");
 }
 
