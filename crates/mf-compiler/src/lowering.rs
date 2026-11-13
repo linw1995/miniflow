@@ -315,17 +315,8 @@ pub fn lower_scope_at(
         node_path.push(node.id.clone());
         let path = node_path.as_slice();
         match node.kind.as_str() {
-            mf_runtime::ROOT_SOURCE_ID => {
-                ensure!(
-                    relations.root.is_some()
-                        && node.id.as_str() == mf_runtime::ROOT_SOURCE_ID
-                        && node.config == json!({}),
-                    crate::compiler::InvalidScopeSnafu {
-                        path: crate::loops::path_label(path),
-                        message: "reserved scope source requires its canonical enclosing scope",
-                    }
-                );
-            }
+            // `validate_scope` already proved the canonical endpoint above.
+            mf_runtime::ROOT_SOURCE_ID => {}
             mf_runtime::LOOP_SOURCE_ID | mf_runtime::ITERATION_INPUT_KIND => {
                 let scope = relations.scope.as_ref();
                 let valid = scope.is_some_and(|scope| {

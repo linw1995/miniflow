@@ -217,6 +217,34 @@ fn root_variables_reject_explicit_and_provider_selected_streaming() {
 }
 
 #[test]
+fn authored_root_source_nodes_are_rejected() {
+    // The reserved kind cannot appear under another ID.
+    let mut value = definition();
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"named", "kind":"%root", "config":{}}));
+    let error = compile_error(value);
+    assert!(
+        error.to_string().contains("canonical enclosing scope"),
+        "{error}"
+    );
+    // The reserved ID cannot be claimed by an ordinary provider kind.
+    let mut value = definition();
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"%root", "kind":"builtin.identity", "config":{}}));
+    let error = compile_error(value);
+    assert!(
+        error
+            .to_string()
+            .contains("must use its canonical declaration"),
+        "{error}"
+    );
+}
+
+#[test]
 fn synthetic_root_source_is_injected_before_ordinary_nodes() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&parse(definition()), &registry).unwrap();
