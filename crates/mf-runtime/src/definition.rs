@@ -165,19 +165,24 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_28,
     #[serde(rename = "2026-11-11")]
     V2026_11_11,
+    #[serde(rename = "2026-11-13")]
+    V2026_11_13,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_11_11;
+    pub const CURRENT: Self = Self::V2026_11_13;
 
     pub fn supports_child_streams(self) -> bool {
-        matches!(self, Self::V2026_10_28 | Self::V2026_11_11)
+        matches!(
+            self,
+            Self::V2026_10_28 | Self::V2026_11_11 | Self::V2026_11_13
+        )
     }
 
     pub fn supports_nested_flows(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_11
+            Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_11 | Self::V2026_11_13
         )
     }
 
@@ -190,6 +195,7 @@ impl WorkflowDefinitionVersion {
                 | Self::V2026_10_25
                 | Self::V2026_10_28
                 | Self::V2026_11_11
+                | Self::V2026_11_13
         )
     }
 
@@ -201,22 +207,31 @@ impl WorkflowDefinitionVersion {
                 | Self::V2026_10_25
                 | Self::V2026_10_28
                 | Self::V2026_11_11
+                | Self::V2026_11_13
         )
     }
 
     pub fn supports_clusters(self) -> bool {
         matches!(
             self,
-            Self::V2026_10_23 | Self::V2026_10_25 | Self::V2026_10_28 | Self::V2026_11_11
+            Self::V2026_10_23
+                | Self::V2026_10_25
+                | Self::V2026_10_28
+                | Self::V2026_11_11
+                | Self::V2026_11_13
         )
     }
 
     pub fn supports_cluster_collapsed(self) -> bool {
-        matches!(self, Self::V2026_11_11)
+        matches!(self, Self::V2026_11_11 | Self::V2026_11_13)
     }
 
     pub fn supports_loop_inputs(self) -> bool {
-        matches!(self, Self::V2026_11_11)
+        matches!(self, Self::V2026_11_11 | Self::V2026_11_13)
+    }
+
+    pub fn supports_loop_output_updates(self) -> bool {
+        matches!(self, Self::V2026_11_13)
     }
 }
 

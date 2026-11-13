@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-11",
+  "version": "2026-11-13",
   "dependencies": {
     "core": {
       "package": "mfn-core"
@@ -162,7 +162,7 @@
           "value": "tool_calls"
         },
         "body": {
-          "version": "2026-10-28",
+          "version": "2026-11-13",
           "dependencies": {},
           "flows": {
             "agent-turn": {
@@ -345,81 +345,6 @@
                   }
                 }
               }
-            },
-            {
-              "id": "save_messages",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "messages"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "append_tool_results",
-                    "port": "messages"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_usages",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "usages"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "collect_usages",
-                    "port": "value"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_text",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "text"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "turn",
-                    "port": "text"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_outcome",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "outcome"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "turn",
-                    "port": "outcome"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_error",
-              "kind": "workflow.loop_assign",
-              "config": {
-                "variable": "error"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "turn",
-                    "port": "error"
-                  }
-                }
-              }
             }
           ],
           "edges": [
@@ -437,7 +362,35 @@
               "to_node": "dispatch"
             }
           ],
-          "outputs": []
+          "outputs": [
+            {
+              "name": "messages",
+              "node": "append_tool_results",
+              "port": "messages",
+              "optional": true
+            },
+            {
+              "name": "usages",
+              "node": "collect_usages",
+              "port": "value"
+            },
+            {
+              "name": "text",
+              "node": "turn",
+              "port": "text"
+            },
+            {
+              "name": "outcome",
+              "node": "turn",
+              "port": "outcome"
+            },
+            {
+              "name": "error",
+              "node": "turn",
+              "port": "error",
+              "optional": true
+            }
+          ]
         },
         "stream_outputs": {
           "answer": {

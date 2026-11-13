@@ -332,6 +332,14 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
     assert_eq!(variables.len(), 5);
     assert!(variables.iter().all(|variable| variable["type"] != "flow"));
     let body = &repeat["config"]["body"];
+    assert_eq!(body["outputs"].as_array().unwrap().len(), 5);
+    assert!(
+        body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| { node["kind"] != mf_runtime::LOOP_ASSIGN_KIND })
+    );
     let dispatch = body["nodes"]
         .as_array()
         .unwrap()

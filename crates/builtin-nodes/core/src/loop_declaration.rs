@@ -2,7 +2,8 @@ use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, LoopComparisonOperator, LoopConditionDefinition,
     LoopVariableDefinition, NodeBuildError, NodeConfig, NodeExecutionError, NodePortContract,
     NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedSubgraph, SubgraphNode,
-    SubgraphStream, ValueRef, ValueType, compare_json_numbers, loop_variable_types,
+    SubgraphStream, TypeCompatibility, ValueRef, ValueType, compare_json_numbers,
+    loop_variable_types,
 };
 use mf_telemetry::{
     Count,
@@ -10,7 +11,10 @@ use mf_telemetry::{
 };
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 pub const KIND: &str = mf_runtime::LOOP_KIND;
 
@@ -66,8 +70,20 @@ pub enum LoopBuildError {
     IncompatibleConditionLiteral,
     #[snafu(display("Loop body must contain at least one node"))]
     EmptyBody,
-    #[snafu(display("Loop body outputs must be empty"))]
-    BodyOutputs,
+    #[snafu(display("Loop body output `{variable}` must name a mutable variable"))]
+    UnknownBodyOutput { variable: String },
+    #[snafu(display("duplicate Loop body output `{variable}`"))]
+    DuplicateBodyOutput { variable: String },
+    #[snafu(display(
+        "Loop body output `{variable}` cannot update a variable written by loop_assign"
+    ))]
+    ConflictingBodyOutput { variable: String },
+    #[snafu(display("Loop body output `{variable}` of type {actual} cannot update {expected}"))]
+    BodyOutputType {
+        variable: String,
+        actual: ValueType,
+        expected: ValueType,
+    },
     #[snafu(display(
         "Loop body scope bindings must match its variables, inputs, and identity state outputs"
     ))]
@@ -242,7 +258,33 @@ fn factory(
         );
     }
     ensure!(!body.nodes.is_empty(), EmptyBodySnafu);
-    ensure!(body.outputs.is_empty(), BodyOutputsSnafu);
+    let mut output_names = BTreeSet::new();
+    for port in &body.outputs {
+        let variable = port.name.as_ref();
+        let expected = types
+            .state
+            .get(variable)
+            .context(UnknownBodyOutputSnafu { variable })?;
+        ensure!(
+            output_names.insert(variable),
+            DuplicateBodyOutputSnafu { variable }
+        );
+        ensure!(
+            port.value_type.compatibility_with(expected) != TypeCompatibility::Incompatible,
+            BodyOutputTypeSnafu {
+                variable,
+                actual: port.value_type.clone(),
+                expected: expected.clone(),
+            }
+        );
+        ensure!(
+            body.relations
+                .as_ref()
+                .and_then(|relations| relations.scope.as_ref())
+                .is_none_or(|scope| scope.writes.values().all(|target| target != variable)),
+            ConflictingBodyOutputSnafu { variable }
+        );
+    }
     let node = LoopNode {
         id: id.into(),
         scope_key: body.scope_key(id, "body"),
@@ -513,8 +555,58 @@ mod tests {
         let error = build_error(self::config(), terminal);
         assert!(matches!(
             business_error(&error),
-            LoopBuildError::BodyOutputs
+            LoopBuildError::UnknownBodyOutput { .. }
         ));
+    }
+
+    #[test]
+    fn loop_factory_validates_prepared_output_contracts() {
+        let mut duplicate = body();
+        duplicate.outputs = vec![
+            PortSpec::new("x", ValueType::Int64, true),
+            PortSpec::new("x", ValueType::Int64, true),
+        ];
+        let error = build_error(config(), duplicate);
+        assert!(matches!(
+            business_error(&error),
+            LoopBuildError::DuplicateBodyOutput { .. }
+        ));
+
+        for (outputs, required, expected) in [
+            (Outputs::new(), true, "required update"),
+            (
+                Outputs::from([("unexpected".into(), 1.into())]),
+                false,
+                "undeclared update",
+            ),
+            (
+                Outputs::from([("x".into(), "wrong".into())]),
+                true,
+                "invalid Loop body update",
+            ),
+        ] {
+            let prepared = PreparedSubgraph::new(
+                body().nodes,
+                vec![PortSpec::new("x", ValueType::Any, required)],
+                move |_| Ok(outputs.clone()),
+            );
+            let node = factory(
+                "repeat",
+                config(),
+                BTreeMap::from([("body".into(), prepared)]),
+            )
+            .unwrap()
+            .execution
+            .into_task_node()
+            .unwrap();
+            let error = node
+                .execute(
+                    Inputs::from([("x".into(), 0.into())]),
+                    &mut ExecutionContext::default(),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]
@@ -753,6 +845,48 @@ impl NodePortContract for LoopNode {
 }
 
 #[derive(Debug, Snafu)]
+enum LoopUpdateError {
+    #[snafu(display("Loop body returned undeclared update `{variable}`"))]
+    UndeclaredUpdate { variable: String },
+    #[snafu(display("Loop body did not return required update `{variable}`"))]
+    MissingUpdate { variable: String },
+    #[snafu(display("invalid Loop body update `{variable}`: {source}"))]
+    UpdateType {
+        variable: String,
+        source: mf_runtime::TypeMismatch,
+    },
+}
+
+impl From<LoopUpdateError> for NodeExecutionError {
+    fn from(source: LoopUpdateError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
+impl LoopNode {
+    fn validate_updates(&self, updates: &Outputs) -> Result<(), NodeExecutionError> {
+        for port in &self.body.outputs {
+            ensure!(
+                !port.required || updates.contains_key(port.name.as_ref()),
+                MissingUpdateSnafu {
+                    variable: port.name.as_ref(),
+                }
+            );
+        }
+        for (variable, value) in updates {
+            ensure!(
+                self.body.outputs.iter().any(|port| port.name == *variable),
+                UndeclaredUpdateSnafu { variable }
+            );
+            self.types[variable]
+                .validate_shared(value)
+                .context(UpdateTypeSnafu { variable })?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Snafu)]
 #[snafu(display("Loop `{node}` pass {index}: {source}"))]
 struct LoopPassFailure {
     node: String,
@@ -816,7 +950,7 @@ impl SubgraphNode for LoopNode {
                 std::mem::take(&mut variables),
                 self.types.clone(),
             )?;
-            let (_, updated, exited) = ctx
+            let (updates, updated, exited) = ctx
                 .run_scope(scope, |state| {
                     let path = state.invocation_path();
                     let mut pass = state.observation_mut().and_then(|run| {
@@ -828,7 +962,15 @@ impl SubgraphNode for LoopNode {
                     });
                     let _guard = pass.as_ref().map(|pass| pass.enter());
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        self.body.execute_with_sink(state, &mut stream)
+                        let updates = self.body.execute_with_sink(state, &mut stream)?;
+                        if !state.scope_exit_requested() {
+                            self.validate_updates(&updates).context(
+                                mf_runtime::NodeExecutionSnafu {
+                                    definition_id: self.id.as_str(),
+                                },
+                            )?;
+                        }
+                        Ok(updates)
                     }));
                     let outcome = if !matches!(&result, Ok(Ok(_))) {
                         LoopPassOutcome::Failed
@@ -859,6 +1001,7 @@ impl SubgraphNode for LoopNode {
                 reason = LoopStopReason::Exit;
                 break;
             }
+            variables.extend(updates);
             if let Some(condition) = &self.until
                 && condition_matches(condition, &variables)?
             {

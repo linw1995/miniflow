@@ -581,6 +581,11 @@ impl Flow {
         // it across domains, Loop passes, and Iteration items.
         let _owned_workers = state.worker_scope();
         execute(state, worker_limit)?;
+        // An explicit scope exit abandons end-of-pass selections. Their producers
+        // may be unvisited; only already committed immediate writes survive.
+        if state.scope_exit_requested() {
+            return Ok(FlowOutputs::new());
+        }
         let mut workflow_outputs = FlowOutputs::new();
         for output in self.inner.plan.outputs.iter() {
             let id = self.inner.nodes[output.node_id.index()]

@@ -211,6 +211,15 @@ pub fn lower_scope_at(
     path: &[DefinitionId],
 ) -> Result<(), WorkflowCompileError> {
     if let Some(scope) = &relations.scope {
+        ensure!(
+            !scope.is_stateful()
+                || definition.outputs.is_empty()
+                || definition.version.supports_loop_output_updates(),
+            crate::compiler::InvalidScopeSnafu {
+                path: crate::loops::path_label(path),
+                message: "Loop body output updates require definition version 2026-11-13",
+            }
+        );
         if !scope.is_stateful() {
             crate::iteration::validate_body_structure(definition).context(
                 crate::compiler::ScopeStructureSnafu {

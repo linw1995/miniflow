@@ -1,0 +1,106 @@
+{
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "step": {
+            "type": "int",
+            "default": 1,
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "repeat",
+      "kind": "workflow.loop",
+      "config": {
+        "max_iterations": 5,
+        "inputs": {
+          "step": "int"
+        },
+        "variables": [
+          {
+            "name": "count",
+            "type": "int",
+            "initial": 0
+          }
+        ],
+        "until": {
+          "variable": "count",
+          "operator": "gte",
+          "value": 3
+        },
+        "body": {
+          "dependencies": {
+            "code": {
+              "package": "mfn-code",
+              "path": "../crates/builtin-nodes/code"
+            }
+          },
+          "nodes": [
+            {
+              "id": "increment",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "count": "int",
+                  "step": "int"
+                },
+                "code": {
+                  "next": "count + step"
+                }
+              },
+              "inputs": {
+                "count": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "count"
+                  }
+                },
+                "step": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "step"
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "count",
+              "node": "increment",
+              "port": "next"
+            }
+          ]
+        }
+      },
+      "inputs": {
+        "step": {
+          "from": {
+            "node": "params",
+            "port": "step"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "count",
+      "node": "repeat",
+      "port": "count"
+    }
+  ]
+}
