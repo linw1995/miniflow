@@ -40,6 +40,8 @@
             fileset = pkgs.lib.fileset.unions [
               (craneLib.fileset.commonCargoSources ./.)
               ./.config/nextest.toml
+              # Loop regression tests execute the documented workflow definition.
+              ./docs/workflows.md
               ./examples
               ./tools/test-affected
               ./crates/mf-chat/migrations
