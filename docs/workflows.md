@@ -2,7 +2,7 @@
 
 ## JSON format
 
-Use version `2026-11-11` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+Use version `2026-11-13` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
 `outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
 display-only [node clusters](#node-clusters).
@@ -1257,8 +1257,9 @@ A Loop node's `config` has required `max_iterations`, a nonempty `variables` lis
 `inputs`, an optional `until` condition, and a `body` using the same Flow definition grammar. Its
 `version` may inherit the root, and empty `dependencies` may be omitted. The old top-level `loop`
 field is not supported. Each variable creates a Loop input and a required Loop output for its final
-value; the input is optional when the variable declares an `initial` literal. The body's terminal
-`outputs` must be empty; Loop returns its variables rather than a second set of child results. The
+value; the input is optional when the variable declares an `initial` literal. Loop returns its
+variables rather than a second set of child results. A body using version `2026-11-13` may select
+terminal `outputs` as end-of-pass variable updates; older bodies require empty terminal outputs. The
 body reads current values, read-only inputs, and a zero-based `index` through the synthetic `%loop`
 node. Every body node ID is local to that body; `%loop` and `index` are reserved there. Cross-scope
 edges and implicit reads of outer outputs are rejected. Import an outer value through a Loop input,
@@ -1337,6 +1338,47 @@ pass index when execution has begun. This feature follows Dify's
 [Loop](https://docs.dify.ai/en/cloud/use-dify/nodes/loop) pattern of sequential refinement; Dify's
 array [Iteration](https://docs.dify.ai/en/cloud/use-dify/nodes/iteration), export format,
 conversation variables, parallel execution, and error-continue modes are separate features.
+
+### End-of-pass variable updates
+
+With body definition version `2026-11-13`, select terminal outputs by variable name instead of adding
+assignment nodes. For example, the following body updates `count` after its increment completes:
+
+```json
+{
+  "version": "2026-11-13",
+  "nodes": [
+    {
+      "id": "increment",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {"count": "int"},
+        "code": {"next": "count + 1"}
+      },
+      "inputs": {"count": {"from": {"node": "%loop", "port": "count"}}}
+    }
+  ],
+  "outputs": [{"name": "count", "node": "increment", "port": "next"}]
+}
+```
+
+The receiving Loop must declare `count` as a mutable variable. After each complete successful pass,
+all selected values are validated and applied together, before evaluating `until`. Body reads in that
+pass still see the current state, not these pending updates. Unselected variables retain their values.
+Use `optional: true` for a selection whose producer may be explicitly skipped; that also retains the
+variable. Required skipped selections and unexpectedly missing producer outputs still fail normally.
+
+Only mutable variables may be targets, not read-only inputs or `index`. A body output cannot target
+a variable also written by `workflow.loop_assign` in that body. Immediate assignments to other
+variables remain supported, including their existing explicit ordering requirements. An explicit
+`workflow.exit_loop` abandons all end-of-pass selections without reading unvisited producers, while
+retaining completed immediate assignments. A failed pass never publishes partial Loop outputs;
+external side effects are not rolled back. Values retain their native identity and secret labels.
+TaskStream deltas remain separate under `stream_outputs` and cannot be selected as terminal updates.
+
+The built-in Agent uses this form for `messages`, `usages`, `text`, `outcome`, and `error`; no assignment
+nodes are needed in its body. Streaming `answer` remains independent of those terminal updates.
 
 ### Forwarding child streams
 

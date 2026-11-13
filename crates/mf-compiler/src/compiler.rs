@@ -1738,6 +1738,15 @@ fn validate_relations(
         return Ok(());
     };
     ensure!(
+        !frame.is_stateful()
+            || graph.definition.outputs.is_empty()
+            || graph.definition.version.supports_loop_output_updates(),
+        InvalidScopeSnafu {
+            path: crate::loops::path_label(path),
+            message: "Loop body output updates require definition version 2026-11-13",
+        }
+    );
+    ensure!(
         !graph
             .definition
             .clusters

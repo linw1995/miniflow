@@ -106,7 +106,7 @@ fn child_json_parser_retains_duplicate_key_rejection() {
 }
 
 #[test]
-fn default_collapsed_clusters_require_the_current_schema() {
+fn default_collapsed_clusters_require_a_supported_schema() {
     let value = json!({
         "version": "2026-11-11",
         "nodes": [{"id": "source", "kind": "fixture.source"}],
@@ -118,7 +118,7 @@ fn default_collapsed_clusters_require_the_current_schema() {
         }]
     });
     let parsed = WorkflowDefinition::from_json(&value.to_string()).unwrap();
-    assert_eq!(parsed.version, WorkflowDefinitionVersion::CURRENT);
+    assert_eq!(parsed.version, WorkflowDefinitionVersion::V2026_11_11);
     assert!(parsed.version.supports_cluster_collapsed());
     assert!(parsed.version.supports_child_streams());
     assert!(parsed.version.supports_nested_flows());
@@ -168,7 +168,13 @@ fn default_collapsed_clusters_require_the_current_schema() {
 
 #[test]
 fn expanded_clusters_default_to_false_and_remain_old_schema_compatible() {
-    for version in ["2026-10-23", "2026-10-25", "2026-10-28", "2026-11-11"] {
+    for version in [
+        "2026-10-23",
+        "2026-10-25",
+        "2026-10-28",
+        "2026-11-11",
+        "2026-11-13",
+    ] {
         for collapsed in [None, Some(false)] {
             let mut value = json!({
                 "version": version,

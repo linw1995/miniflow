@@ -448,6 +448,22 @@ fn generated_loop_matches_in_memory_without_build_inputs() {
             defaults_and_inputs_definition(),
             json!({"count": 4, "total": 4}),
         ),
+        (
+            output_updates_definition(),
+            json!({"count":3, "previous":2, "unchanged":"seed"}),
+        ),
+        (
+            nested_output_updates_definition(),
+            json!({"count":3, "previous":2, "unchanged":"seed"}),
+        ),
+        (
+            optional_output_updates_definition(),
+            json!({"count":1, "previous":1, "unchanged":"seed"}),
+        ),
+        (
+            exited_output_updates_definition(),
+            json!({"count":0, "previous":1, "unchanged":"seed"}),
+        ),
         (skipped_definition(), json!({})),
     ]
     .into_iter()
@@ -674,6 +690,298 @@ fn loop_defaults_and_shared_inputs_are_optional_and_read_only() {
     expect_error(
         |value| value["version"] = json!("2026-10-28"),
         "Loop inputs and variable defaults require definition version 2026-11-11",
+    );
+}
+
+fn output_updates_definition() -> Value {
+    json!({
+        "version":"2026-11-13",
+        "nodes":[{"id":"repeat", "kind":"workflow.loop", "config":{
+            "max_iterations":5,
+            "variables":[
+                {"name":"count", "type":"int", "initial":0},
+                {"name":"previous", "type":"int", "initial":-1},
+                {"name":"unchanged", "type":"string", "initial":"seed"}
+            ],
+            "until":{"variable":"count", "operator":"gte", "value":3},
+            "body":{"nodes":[
+                {"id":"increment", "kind":"builtin.code", "config":{
+                    "language":"cel", "inputs":{"count":"int"}, "code":{"next":"count + 1"}
+                }, "inputs":{"count":{"from":{"node":"%loop", "port":"count"}}}}
+            ], "outputs":[
+                {"name":"count", "node":"increment", "port":"next"},
+                {"name":"previous", "node":"%loop", "port":"count"}
+            ]}
+        }}],
+        "outputs":[
+            {"name":"count", "node":"repeat", "port":"count"},
+            {"name":"previous", "node":"repeat", "port":"previous"},
+            {"name":"unchanged", "node":"repeat", "port":"unchanged"}
+        ]
+    })
+}
+
+fn optional_output_updates_definition() -> Value {
+    let mut value = output_updates_definition();
+    let config = &mut value["nodes"][0]["config"];
+    config["max_iterations"] = json!(2);
+    config.as_object_mut().unwrap().remove("until");
+    config["body"]["nodes"].as_array_mut().unwrap().push(json!({
+        "id":"route", "kind":"builtin.if_else", "config":{"branches":[{
+            "id":"first", "condition":{"source":{"output":"%loop.index", "path":""},
+                "operator":"eq", "value":0}
+        }]}
+    }));
+    config["body"]["edges"] = json!([
+        {"from_node":"%loop", "from_output":"index", "to_node":"route"},
+        {"from_node":"route", "from_output":"first", "to_node":"increment"}
+    ]);
+    config["body"]["outputs"][0]["optional"] = json!(true);
+    value
+}
+
+fn exited_output_updates_definition() -> Value {
+    let mut value = output_updates_definition();
+    let body = &mut value["nodes"][0]["config"]["body"];
+    body["nodes"].as_array_mut().unwrap().extend([
+        json!({"id":"mark", "kind":"workflow.loop_assign", "config":{"variable":"previous"},
+            "inputs":{"value":{"from":{"node":"increment", "port":"next"}}}}),
+        json!({"id":"exit", "kind":"workflow.exit_loop"}),
+        json!({"id":"unvisited", "kind":"builtin.identity", "inputs":{
+            "input":{"from":{"node":"increment", "port":"next"}}
+        }}),
+    ]);
+    // Both wait for the immediate write; the canonical order puts exit first.
+    body["edges"] = json!([
+        {"from_node":"mark", "from_output":"done", "to_node":"exit"},
+        {"from_node":"mark", "from_output":"done", "to_node":"unvisited"}
+    ]);
+    body["outputs"] = json!([{"name":"count", "node":"unvisited", "port":"value"}]);
+    value
+}
+
+fn nested_output_updates_definition() -> Value {
+    let mut value = output_updates_definition();
+    let mut inner = value["nodes"][0].clone();
+    inner["id"] = json!("inner");
+    inner["config"]["max_iterations"] = json!(1);
+    inner["config"].as_object_mut().unwrap().remove("until");
+    inner["inputs"] = json!({"count":{"from":{"node":"%loop", "port":"count"}}});
+    let body = &mut value["nodes"][0]["config"]["body"];
+    body["nodes"] = json!([inner]);
+    body["outputs"][0] = json!({"name":"count", "node":"inner", "port":"count"});
+    value
+}
+
+#[test]
+fn body_outputs_preserve_native_capabilities_and_secret_labels() {
+    use mf_runtime::{FlowValue, PreparedSubgraph, ValueRef, WorkflowArguments};
+    let definition = parse(json!({"version":"2026-11-13", "nodes":[
+        {"id":"params", "kind":"builtin.parameters", "config":{"parameters":{
+            "function":{"type":"flow", "secret":true}
+        }}},
+        {"id":"repeat", "kind":"workflow.loop", "config":{
+            "max_iterations":2,
+            "inputs":{"replacement":"flow"},
+            "variables":[{"name":"function", "type":"flow"}],
+            "body":{"nodes":[
+                {"id":"pick", "kind":"builtin.identity", "inputs":{
+                    "input":{"from":{"node":"%loop", "port":"replacement"}}
+                }}
+            ], "outputs":[{"name":"function", "node":"pick", "port":"value"}]}
+        }, "inputs":{
+            "function":{"from":{"node":"params", "port":"function"}},
+            "replacement":{"from":{"node":"params", "port":"function"}}
+        }}
+    ], "outputs":[{"name":"function", "node":"repeat", "port":"function"}]}));
+    let capability = ValueRef::from(
+        FlowValue::new(PreparedSubgraph::new(
+            Vec::new(),
+            vec![PortSpec::new("content", ValueType::String, true)],
+            |_| {
+                Ok(Outputs::from([(
+                    "content".into(),
+                    "private-capability-result".into(),
+                )]))
+            },
+        ))
+        .unwrap(),
+    )
+    .into_secret();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let snapshots = Snapshots::memory();
+    let mut context = ExecutionContext::default();
+    context.set_snapshot_recorder(snapshots.recorder());
+    context.set_workflow_arguments(WorkflowArguments(Inputs::from([(
+        "params.function".into(),
+        capability.clone(),
+    )])));
+    let output = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_in_context(&mut context)
+        .unwrap();
+    assert!(output["function"].is_secret());
+    assert_eq!(output["function"].as_flow(), capability.as_flow());
+    let result = output["function"]
+        .as_flow()
+        .unwrap()
+        .invoke("tool", Default::default(), &mut ExecutionContext::default())
+        .unwrap();
+    assert_eq!(result["content"], json!("private-capability-result"));
+    for entry in snapshots.history() {
+        let snapshot = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+        assert!(
+            !serde_json::to_string(snapshot)
+                .unwrap()
+                .contains("private-capability-result")
+        );
+    }
+}
+
+#[test]
+fn body_outputs_commit_together_before_until_and_survive_saved_plans() {
+    let value = output_updates_definition();
+    let expected = json!({"count":3, "previous":2, "unchanged":"seed"});
+    assert_eq!(run_in_memory(value.clone()).unwrap(), expected);
+    assert_eq!(
+        run_in_memory(nested_output_updates_definition()).unwrap(),
+        expected
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(value), &registry).unwrap();
+    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    saved.manifest(&registry).unwrap().validate().unwrap();
+    assert_eq!(
+        serde_json::to_value(
+            instantiate_compiled(&saved, &registry)
+                .unwrap()
+                .execute()
+                .unwrap()
+        )
+        .unwrap(),
+        expected
+    );
+    assert_eq!(
+        run_in_memory(optional_output_updates_definition()).unwrap(),
+        json!({"count":1, "previous":1, "unchanged":"seed"})
+    );
+}
+
+#[test]
+fn exit_discards_body_outputs_but_retains_immediate_assignments() {
+    assert_eq!(
+        run_in_memory(exited_output_updates_definition()).unwrap(),
+        json!({"count":0, "previous":1, "unchanged":"seed"})
+    );
+}
+
+#[test]
+fn body_output_updates_reject_old_versions_bad_targets_types_and_conflicting_writes() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for target in ["missing", "index", "input"] {
+        let mut value = output_updates_definition();
+        value["nodes"][0]["config"]["inputs"] = json!({"input":"int"});
+        value["nodes"][0]["config"]["body"]["outputs"][0]["name"] = json!(target);
+        let error = compile_definition(&parse(value), &registry).unwrap_err();
+        assert!(matches!(find_source::<mfn_core::LoopBuildError>(&error),
+            Some(mfn_core::LoopBuildError::UnknownBodyOutput { variable }) if variable == target));
+    }
+    let mut wrong_type = output_updates_definition();
+    wrong_type["nodes"][0]["config"]["body"]["outputs"][0] =
+        json!({"name":"count", "node":"%loop", "port":"unchanged"});
+    let error = compile_definition(&parse(wrong_type), &registry).unwrap_err();
+    assert!(matches!(
+        find_source::<mfn_core::LoopBuildError>(&error),
+        Some(mfn_core::LoopBuildError::BodyOutputType { .. })
+    ));
+
+    let mut conflict = exited_output_updates_definition();
+    conflict["nodes"][0]["config"]["body"]["outputs"][0]["name"] = json!("previous");
+    let error = compile_definition(&parse(conflict), &registry).unwrap_err();
+    assert!(matches!(
+        find_source::<mfn_core::LoopBuildError>(&error),
+        Some(mfn_core::LoopBuildError::ConflictingBodyOutput { .. })
+    ));
+
+    let mut old = output_updates_definition();
+    old["nodes"][0]["config"]["body"]["version"] = json!("2026-11-11");
+    let error = compile_definition(&parse(old), &registry).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Loop body output updates require definition version 2026-11-13")
+    );
+
+    let mut old = compile_definition(&parse(output_updates_definition()), &registry).unwrap();
+    old.graph
+        .children
+        .get_mut(&"repeat".into())
+        .unwrap()
+        .get_mut("body")
+        .unwrap()
+        .definition
+        .version = WorkflowDefinitionVersion::V2026_11_11;
+    assert!(instantiate_compiled(&old, &registry).is_err());
+}
+
+#[test]
+fn required_skips_and_missing_producers_are_not_silent_state_retention() {
+    let mut value = optional_output_updates_definition();
+    value["nodes"][0]["config"]["body"]["outputs"][0]["optional"] = json!(false);
+    assert!(
+        run_in_memory(value)
+            .unwrap_err()
+            .contains("requires skipped output")
+    );
+
+    let mut value = output_updates_definition();
+    value["nodes"][0]["config"]["body"]["nodes"][0] = json!({
+        "id":"increment", "kind":"test.omit_on_second",
+        "inputs":{"index":{"from":{"node":"%loop", "port":"index"}}}
+    });
+    value["nodes"][0]["config"]["body"]["outputs"][0] = json!({
+        "name":"count", "node":"increment", "port":"value", "optional":true
+    });
+    assert!(run_in_memory(value).is_err());
+}
+
+#[test]
+fn invalid_body_update_retains_typed_sources_and_marks_the_pass_failed() {
+    let mut value = output_updates_definition();
+    let config = &mut value["nodes"][0]["config"];
+    config["variables"][0]["type"] = json!({"list":{"map":"int"}});
+    config["variables"][0]["initial"] = json!([]);
+    config.as_object_mut().unwrap().remove("until");
+    config["body"] = json!({"nodes":[{"id":"wrong", "kind":"test.wrong_type"}],
+        "outputs":[{"name":"count", "node":"wrong", "port":"value"}]});
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(value), &registry).unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let error = execute_compiled(&plan, &registry, Some(observation)).unwrap_err();
+    assert!(find_source::<mf_runtime::TypeMismatch>(&error).is_some());
+    assert!(
+        error
+            .to_string()
+            .contains("invalid Loop body update `count`")
+    );
+    assert!(harness.records().iter().any(|record| matches!(
+        record.decode().unwrap().event,
+        Event::LoopPassFinished {
+            outcome: LoopPassOutcome::Failed,
+            ..
+        }
+    )));
+    assert!(
+        !harness
+            .records()
+            .iter()
+            .any(|record| matches!(record.decode().unwrap().event,
+        Event::NodeFinished { node, outcome: mf_telemetry::event::Outcome::Succeeded, .. }
+            if node.id == "repeat"))
     );
 }
 

@@ -4,6 +4,7 @@ mod capture;
 mod common;
 #[path = "fixtures/multi-nodes/src/task_stream.rs"]
 mod fixture;
+extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
@@ -127,6 +128,57 @@ fn loop_forwards_child_emissions_in_order_and_completes_once_with_its_summary() 
                 })
         }));
     }
+}
+
+#[test]
+fn body_output_updates_advance_state_without_collecting_stream_deltas() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut value = definition();
+    value["version"] = json!("2026-11-13");
+    value["nodes"][0]["config"]["until"] = json!({"variable":"count", "operator":"gte", "value":4});
+    let body = &mut value["nodes"][0]["config"]["body"];
+    body["version"] = json!("2026-11-13");
+    body["nodes"].as_array_mut().unwrap().push(json!({
+        "id":"advance", "kind":"builtin.code", "config":{
+            "language":"cel", "inputs":{"total":"int"}, "code":{"next":"total + 1"}
+        }, "inputs":{"total":{"from":{"node":"step", "port":"total"}}}
+    }));
+    body["outputs"] = json!([{"name":"count", "node":"advance", "port":"next"}]);
+    let plan =
+        compile_definition(&serde_json::from_value(value.clone()).unwrap(), &registry).unwrap();
+    let instance = instantiate_stream(&plan, &registry)
+        .unwrap()
+        .start_with_options(options())
+        .unwrap();
+    let mut outputs = Vec::new();
+    while let Some(output) = instance.recv().unwrap() {
+        outputs.push(serde_json::to_value(output.outputs).unwrap());
+    }
+    instance.join().unwrap();
+    // Stream increments and terminal outputs occupy independent message domains.
+    assert_eq!(
+        outputs
+            .iter()
+            .filter_map(|output| output.get("increment"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![json!(0), json!(1), json!(0), json!(1), json!(2)]
+    );
+    assert_eq!(
+        outputs
+            .iter()
+            .filter_map(|output| output.get("count"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![json!(4)]
+    );
+    value["outputs"] = json!([{"name":"count", "node":"repeat", "port":"count"}]);
+    let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
+    let terminal = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute_with_inputs(options().arguments)
+        .unwrap();
+    assert_eq!(terminal["count"], json!(4));
 }
 
 #[test]
@@ -349,6 +401,11 @@ fn standalone_loop_streams_preserve_guards_delivery_and_frozen_contracts() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("executed");
         let mut value = guarded_definition(enabled, &marker);
+        value["version"] = json!("2026-11-13");
+        value["nodes"][0]["config"]["body"]["version"] = json!("2026-11-13");
+        value["nodes"][0]["config"]["body"]["outputs"] = json!([
+            {"name":"count", "node":"step", "port":"total", "optional":true}
+        ]);
         value["execution"] = json!({"limits":{"workers":1,"max_pending_messages":2}});
         value["dependencies"] = json!({
             "core":{"package":"mfn-core","path":common::crates_dir().join("builtin-nodes/core")},

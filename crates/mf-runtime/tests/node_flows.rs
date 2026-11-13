@@ -489,9 +489,9 @@ fn unsupported_parent_schemas_still_reject_resolved_calls() {
 fn current_schema_parsing_rejects_unintroduced_and_invalid_versions() {
     assert_eq!(
         WorkflowDefinitionVersion::CURRENT,
-        WorkflowDefinitionVersion::V2026_11_11
+        WorkflowDefinitionVersion::V2026_11_13
     );
-    let current = definition("2026-11-11");
+    let current = definition("2026-11-13");
     assert_eq!(
         WorkflowDefinition::from_json(&serde_json::to_string(&current).unwrap()).unwrap(),
         current
