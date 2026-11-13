@@ -2802,11 +2802,23 @@ mod tests {
                 .iter()
                 .find(|node| node.definition_id.as_str() == "make")
                 .unwrap();
-            assert_eq!(
-                make.metadata.output_derivations,
-                [OutputDerivation::known_type("value", ValueType::Flow)]
+            // The native capability keeps its known type; its own interface
+            // travels beside it as literal JSON data.
+            assert!(
+                make.metadata
+                    .output_derivations
+                    .contains(&OutputDerivation::known_type("value", ValueType::Flow))
             );
+            assert!(matches!(
+                make.metadata
+                    .output_derivations
+                    .iter()
+                    .find(|derivation| matches!(derivation,
+                        OutputDerivation::Literal { output, .. } if output == "properties")),
+                Some(OutputDerivation::Literal { .. })
+            ));
             assert_eq!(make.metadata.ports.outputs[0].value_type, ValueType::Flow);
+            assert_eq!(make.metadata.ports.outputs[1].value_type, ValueType::Object);
             let producer = make.node.as_ref().unwrap().as_task_node().unwrap();
             let result = producer
                 .execute(

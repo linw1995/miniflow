@@ -2,6 +2,7 @@ use crate::{
     ExecutionContext, Flow, FlowOutputs, NodeBuildError, NodeIdentity, NodePorts, PortSpec,
     PreparedSubgraph, WorkflowArguments, WorkflowRunError,
 };
+use serde_json::Value;
 use snafu::{ResultExt, Snafu, ensure};
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
@@ -163,6 +164,15 @@ impl FlowValue {
         &self.0
     }
 
+    /// Interface properties owned by this callable body.
+    ///
+    /// A caller can consume them as ordinary JSON without receiving the native
+    /// Flow. Derivation reads only the prepared interface; it never executes the
+    /// body or serializes its nodes.
+    pub fn properties(&self) -> Value {
+        self.0.properties()
+    }
+
     /// Uses Call's qualified `node.port` names and effective requiredness.
     pub fn input_ports(&self) -> Vec<PortSpec> {
         let mut ports: Vec<_> = self
@@ -223,7 +233,7 @@ impl FlowValue {
     pub fn invoke_with_sink(
         &self,
         id: &str,
-        mut arguments: WorkflowArguments,
+        arguments: WorkflowArguments,
         context: &mut ExecutionContext,
         sink: &mut dyn crate::EmissionSink,
     ) -> Result<FlowOutputs, WorkflowRunError> {
@@ -237,6 +247,12 @@ impl FlowValue {
                 message: "Flow invocation requires an independent body; an implicit scope frame is unavailable",
             }
         );
+        let mut arguments = arguments;
+        // Dynamic callers supply flat startup names; runtime invocation keeps one
+        // canonical `node.port` key space for secrets, defaults, and observations.
+        arguments
+            .qualify_inputs(&self.0.inputs)
+            .map_err(|source| crate::WorkflowRunError::WorkflowInputs { source })?;
         self.0.inputs.mark_secrets(&mut arguments);
         if matches!(self.1, InvocationBoundary::External) {
             return context.run_external_flow(id, arguments, |child| {
