@@ -444,6 +444,10 @@ fn generated_loop_matches_in_memory_without_build_inputs() {
         (definition(), json!({"count": 3})),
         (nested_definition(), json!({"count": 2})),
         (exit_definition(), json!({"count": 2})),
+        (
+            defaults_and_inputs_definition(),
+            json!({"count": 4, "total": 4}),
+        ),
         (skipped_definition(), json!({})),
     ]
     .into_iter()
@@ -575,6 +579,102 @@ fn run_in_memory(value: Value) -> Result<Value, String> {
     let flow = instantiate_compiled(&plan, &registry).map_err(|error| error.to_string())?;
     let output = flow.execute().map_err(|error| error.to_string())?;
     Ok(serde_json::to_value(output).unwrap())
+}
+
+fn defaults_and_inputs_definition() -> Value {
+    json!({
+        "version": "2026-11-11",
+        "dependencies": {},
+        "nodes": [
+            {"id": "seed", "kind": "builtin.constant", "config": {"value": 2}},
+            {"id": "repeat", "kind": "workflow.loop", "config": {
+                "max_iterations": 5,
+                "inputs": {"step": "int"},
+                "variables": [
+                    {"name": "count", "type": "int", "initial": 0},
+                    {"name": "total", "type": "int", "initial": 0}
+                ],
+                "until": {"variable": "count", "operator": "gte", "value": 4},
+                "body": {
+                    "version": "2026-10-28",
+                    "dependencies": {},
+                    "nodes": [
+                        {"id": "increment", "kind": "builtin.code", "config": {
+                            "language": "cel", "inputs": {"count": "int", "step": "int"},
+                            "code": {"next": "count + step"}
+                        }, "inputs": {
+                            "count": {"from": {"node": "%loop", "port": "count"}},
+                            "step": {"from": {"node": "%loop", "port": "step"}}
+                        }},
+                        {"id": "assign_count", "kind": "workflow.loop_assign",
+                         "config": {"variable": "count"},
+                         "inputs": {"value": {"from": {"node": "increment", "port": "next"}}}},
+                        {"id": "sum", "kind": "builtin.code", "config": {
+                            "language": "cel", "inputs": {"total": "int", "step": "int"},
+                            "code": {"next": "total + step"}
+                        }, "inputs": {
+                            "total": {"from": {"node": "%loop", "port": "total"}},
+                            "step": {"from": {"node": "%loop", "port": "step"}}
+                        }},
+                        {"id": "assign_total", "kind": "workflow.loop_assign",
+                         "config": {"variable": "total"},
+                         "inputs": {"value": {"from": {"node": "sum", "port": "next"}}}}
+                    ]
+                }
+            }, "inputs": {"step": {"from": {"node": "seed", "port": "value"}}}}
+        ],
+        "outputs": [
+            {"name": "count", "node": "repeat", "port": "count"},
+            {"name": "total", "node": "repeat", "port": "total"}
+        ]
+    })
+}
+
+#[test]
+fn loop_defaults_and_shared_inputs_are_optional_and_read_only() {
+    assert_eq!(
+        run_in_memory(defaults_and_inputs_definition()).unwrap(),
+        json!({"count": 4, "total": 4})
+    );
+
+    // An explicit Loop input overrides the variable default.
+    let mut bound = defaults_and_inputs_definition();
+    bound["nodes"][1]["inputs"]["count"] = json!({"from": {"node": "seed", "port": "value"}});
+    assert_eq!(
+        run_in_memory(bound).unwrap(),
+        json!({"count": 4, "total": 2})
+    );
+
+    fn expect_error(edit: impl FnOnce(&mut Value), expected: &str) {
+        let mut value = defaults_and_inputs_definition();
+        edit(&mut value);
+        let error = compile_definition(&parse(value), &NodeRegistry::from_inventory().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+    expect_error(
+        |value| value["nodes"][1]["config"]["until"]["variable"] = json!("step"),
+        "unknown condition variable `step`",
+    );
+    expect_error(
+        |value| {
+            value["nodes"][1]["config"]["body"]["nodes"][1]["config"]["variable"] = json!("step");
+        },
+        "unknown variable `step`",
+    );
+    expect_error(
+        |value| value["nodes"][1]["config"]["inputs"]["count"] = json!("int"),
+        "Loop inputs must be nonblank, distinct from variables, and not index",
+    );
+    expect_error(
+        |value| value["nodes"][1]["config"]["variables"][0]["initial"] = json!("zero"),
+        "invalid initial value for Loop variable `count`",
+    );
+    expect_error(
+        |value| value["version"] = json!("2026-10-28"),
+        "Loop inputs and variable defaults require definition version 2026-11-11",
+    );
 }
 
 #[test]

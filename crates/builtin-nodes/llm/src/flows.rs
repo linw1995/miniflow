@@ -47,10 +47,20 @@ mod tests {
             json!({"map":"object"})
         );
         assert!(params.config["parameters"].get("descriptions").is_none());
-        assert_eq!(definition.clusters.len(), 1);
-        assert_eq!(definition.clusters[0].label, "Initial values");
-        assert!(definition.clusters[0].collapsed);
-        assert_eq!(definition.clusters[0].nodes.len(), 4);
+        assert!(definition.clusters.is_empty());
+        let repeat = definition
+            .nodes
+            .iter()
+            .find(|node| node.id.as_str() == "repeat")
+            .unwrap();
+        assert_eq!(repeat.config["inputs"].as_object().unwrap().len(), 5);
+        let variables = repeat.config["variables"].as_array().unwrap();
+        assert_eq!(variables.len(), 5);
+        assert!(
+            variables.iter().any(|variable| {
+                variable["name"] == "usages" && variable["initial"] == json!([])
+            })
+        );
         let serialized = serde_json::to_string(&definition).unwrap();
         for synthetic in [
             "flow_0",

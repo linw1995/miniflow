@@ -102,15 +102,42 @@ pub fn child_relations_at(
     match owner.kind.as_str() {
         mf_runtime::LOOP_KIND => {
             let config = crate::loops::parse_config(owner)?;
-            let values = mf_runtime::loop_variable_types(&config.variables).context(
+            ensure!(
+                version.supports_loop_inputs()
+                    || (config.inputs.is_empty()
+                        && config
+                            .variables
+                            .iter()
+                            .all(|variable| variable.initial.is_none())),
+                crate::compiler::InvalidScopeSnafu {
+                    path: crate::loops::path_label(&owner_path),
+                    message: "Loop inputs and variable defaults require definition version 2026-11-11",
+                }
+            );
+            let variables = mf_runtime::loop_variable_types(&config.variables).context(
                 crate::compiler::ScopeVariablesSnafu {
                     path: crate::loops::path_label(&owner_path),
                 },
             )?;
-            let state_outputs = values
+            ensure!(
+                config.inputs.keys().all(|name| !name.trim().is_empty()
+                    && name != "index"
+                    && !variables.contains_key(name)),
+                crate::compiler::InvalidScopeSnafu {
+                    path: crate::loops::path_label(&owner_path),
+                    message: "Loop inputs must be nonblank, distinct from variables, and not index",
+                }
+            );
+            let state_outputs = variables
                 .keys()
                 .map(|name| (name.clone(), name.clone()))
                 .collect();
+            let mut values = config.inputs;
+            values.extend(
+                variables
+                    .iter()
+                    .map(|(name, value_type)| (name.clone(), value_type.clone())),
+            );
             relations.scope = Some(ScopeRelations {
                 input: mf_runtime::LOOP_SOURCE_ID.into(),
                 values,
@@ -209,15 +236,23 @@ pub fn lower_scope_at(
     }
     // Validate authoring source/control syntax before turning it into operands.
     // This is the only boundary that interprets these node-kind tokens.
-    crate::loops::validate_scope(
-        definition,
-        relations
-            .scope
-            .as_ref()
-            .filter(|scope| scope.is_stateful())
-            .map(|scope| &scope.values),
-        path,
-    )?;
+    let state_types = relations
+        .scope
+        .as_ref()
+        .filter(|scope| scope.is_stateful())
+        .map(|scope| {
+            scope
+                .state_outputs
+                .keys()
+                .filter_map(|name| {
+                    scope
+                        .values
+                        .get(name)
+                        .map(|value_type| (name.clone(), value_type.clone()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        });
+    crate::loops::validate_scope(definition, state_types.as_ref(), path)?;
     if let Some(scope) = relations.scope.as_mut() {
         scope.writes.clear();
         scope.exits.clear();

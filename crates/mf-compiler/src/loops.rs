@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 /// The receiving node owns all remaining configuration and business validation.
 #[derive(Deserialize)]
 pub struct LoweringConfig {
+    #[serde(default)]
+    pub inputs: BTreeMap<String, ValueType>,
     pub variables: Vec<LoopVariableDefinition>,
     #[serde(default)]
     pub stream_outputs: BTreeMap<String, OutputReferenceDefinition>,

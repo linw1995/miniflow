@@ -1253,12 +1253,13 @@ The compiler replaces the Loop declaration with an engine-prepared executor. `wo
 register. The outer graph and every Loop body remain acyclic. The engine repeats a body's fixed
 execution order instead of adding a graph back edge.
 
-A Loop node's `config` has required `max_iterations`, a nonempty `variables` list, an optional `until`
-condition, and a `body` using the same Flow definition grammar. Its `version` may inherit the root,
-and empty `dependencies` may be omitted. The old top-level `loop` field is not supported.
-Each variable creates a required Loop input for its initial value and a required Loop output for its
-final value. The body's terminal `outputs` must be empty; Loop returns its variables rather than a
-second set of child results. The body reads current values and a zero-based `index` through the synthetic `%loop`
+A Loop node's `config` has required `max_iterations`, a nonempty `variables` list, optional read-only
+`inputs`, an optional `until` condition, and a `body` using the same Flow definition grammar. Its
+`version` may inherit the root, and empty `dependencies` may be omitted. The old top-level `loop`
+field is not supported. Each variable creates a Loop input and a required Loop output for its final
+value; the input is optional when the variable declares an `initial` literal. The body's terminal
+`outputs` must be empty; Loop returns its variables rather than a second set of child results. The
+body reads current values, read-only inputs, and a zero-based `index` through the synthetic `%loop`
 node. Every body node ID is local to that body; `%loop` and `index` are reserved there. Cross-scope
 edges and implicit reads of outer outputs are rejected. Import an outer value through a Loop input,
 including when initializing a nested Loop.
@@ -1288,6 +1289,26 @@ including when initializing a nested Loop.
 
 The surrounding graph binds the initial `count` input and may bind the final `count` output.
 Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `number`, `int`, `uint`, `usize`, `float`, `double`, `string`, `array`, `object`, and nested `{"list": T}`, `{"map": T}`, or `{"nullable": T}`.
+
+Version `2026-11-11` adds read-only inputs and per-variable defaults:
+
+```json
+{
+  "max_iterations": 5,
+  "inputs": {"step": "int"},
+  "variables": [
+    {"name": "count", "type": "int", "initial": 0},
+    {"name": "total", "type": "int", "initial": 0}
+  ],
+  "until": {"variable": "count", "operator": "gte", "value": 4}
+}
+```
+
+Read-only `inputs` are required Loop inputs shared by every pass. The body reads them through
+`%loop`, they produce no Loop outputs, and neither `workflow.loop_assign` nor `until` can name them.
+A variable's `initial` literal supplies its first value, makes that Loop input optional, and must
+match the declared type; an explicit input binding overrides the default. Both forms require
+definition version `2026-11-11`.
 `builtin.code` supports the descriptors documented under [built-in nodes](#built-in-nodes), excluding `number`,
 `nullable`, `usize`, and `float`. Initial values, assignments, and final outputs are checked against each variable's
 declared type; a broad source is checked at runtime when necessary.
