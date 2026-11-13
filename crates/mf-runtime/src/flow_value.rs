@@ -558,6 +558,35 @@ mod tests {
                 }
             ));
         }
+        // A flat name shared by two startup nodes cannot select one argument.
+        let shared = WorkflowInputSchema {
+            inputs: BTreeMap::from([
+                (
+                    "first".into(),
+                    BTreeMap::from([("value".into(), input.clone())]),
+                ),
+                (
+                    "second".into(),
+                    BTreeMap::from([("value".into(), input.clone())]),
+                ),
+            ]),
+            stdin: BTreeMap::new(),
+        };
+        let flow = FlowValue::new(body().with_input_schema(shared.clone())).unwrap();
+        let error = flow
+            .invoke(
+                "ambiguous",
+                WorkflowArguments(crate::Inputs::from([("value".into(), 1.into())])),
+                &mut ExecutionContext::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, WorkflowRunError::WorkflowInputs { source }
+                if source.to_string().contains("ambiguous workflow input name")),
+            "{error}"
+        );
+        assert_eq!(shared.inputs.len(), 2);
+
         let mut deep = ValueType::Flow;
         for _ in 0..ValueType::MAX_DEPTH {
             deep = ValueType::List(Box::new(deep));

@@ -201,7 +201,7 @@
         },
         "params.tool_properties": {
           "from": {
-            "node": "calculator_properties",
+            "node": "tool_properties",
             "port": "value"
           }
         }
