@@ -58,13 +58,14 @@ Nix checks and CI coverage use the `ci` nextest profile. It shares the prewarmed
 CI's Linux `check` job reports formatting and workflow validation separately from package builds and Clippy.
 Package builds and Clippy share one Nix invocation so they can run in parallel and reuse dependencies.
 The `coverage` job runs affected package tests on PRs and the complete Linux suite on `main`.
-Its PR job summary explains the selected packages or full-workspace fallback. Main-only macOS jobs
-build the package and run static checks; nightly runs the complete macOS suite.
+Its PR job summary explains the selected packages or full-workspace fallback. Main validation stays
+Linux-only so an unavailable macOS runner cannot block coverage-graph publication; nightly runs
+the complete macOS suite.
 
 After a PR's CI run completes, the independent `CI timing monitor` workflow updates a single bot comment
 with job and step durations. Its baseline is the median of the latest five successful CI pushes to the
 PR's base branch completed before that run started. Only matching jobs contribute to the wall time,
-including queueing and dependencies; main-only macOS checks are excluded from PR comparisons.
+including queueing and dependencies; jobs that only run in other workflows are excluded from PR comparisons.
 Failed runs show their status without claiming a wall-time improvement. The monitor also writes the
 report to its job summary, handles fork PRs, and ignores superseded heads and older attempts.
 It executes only default-branch code and reads timings from GitHub's API. A new `workflow_run` workflow

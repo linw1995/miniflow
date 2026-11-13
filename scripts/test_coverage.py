@@ -11,6 +11,27 @@ import pr_validation
 
 
 class CoverageTests(unittest.TestCase):
+    def test_default_branch_validation_stays_independent_of_macos_availability(self):
+        root = Path(__file__).resolve().parent.parent
+        ci = (root / ".github/workflows/CI.yaml").read_text()
+        # An unavailable macOS runner must not block main success records or graphs.
+        self.assertNotIn("macos", ci.lower())
+        # The main-branch ruleset requires this exact status context.
+        self.assertIn("name: check (ubuntu-latest)", ci)
+        self.assertIn("needs: [lint, check, coverage]", ci)
+        nightly = (root / ".github/workflows/Nightly.yaml").read_text()
+        self.assertIn("macos-14", nightly)
+        self.assertIn("nix flake check -L", nightly)
+
+    def test_codecov_reporting_cannot_block_validation(self):
+        root = Path(__file__).resolve().parent.parent
+        for filename in ["CI.yaml", "Nightly.yaml"]:
+            with self.subTest(workflow=filename):
+                workflow = (root / ".github/workflows" / filename).read_text()
+                # External reporting must not gate the local coverage decision.
+                self.assertNotIn("fail_ci_if_error: true", workflow)
+                self.assertIn("fail_ci_if_error: false", workflow)
+
     def test_workflows_run_selected_packages_together_before_reporting(self):
         root = Path(__file__).resolve().parent.parent
         for filename in ["CI.yaml", "Nightly.yaml"]:

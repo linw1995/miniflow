@@ -109,7 +109,8 @@ def baseline_runs(api, run, branch, current_jobs):
         if timestamp(candidate["updated_at"]) > run_start(run):
             continue
         jobs = timings(api.jobs(candidate))
-        # main also runs macOS. Compare only the exact jobs present in this PR.
+        # Workflows may expose different jobs (for example nightly-only macOS verification).
+        # Compare only the exact jobs present in this PR.
         if not all(name in jobs and jobs[name]["conclusion"] == "success" for name in current_jobs):
             continue
         samples.append((candidate, {name: jobs[name] for name in current_jobs}))
@@ -231,7 +232,7 @@ def render_report(run, jobs, samples, branch, validation=None):
         "### Timing comparison",
         "",
         f"Baseline: median of {len(samples)} successful CI pushes to **{label(branch)}** completed before this run started.",
-        "Only matching jobs are compared; additional base-branch jobs (including macOS) are excluded.",
+        "Only matching jobs are compared; jobs that only run in other workflows are excluded.",
         "Wall time includes queueing and job dependencies; job durations include setup and cache upload.",
         "Step baselines include only successful executions of the same step; skipped and missing steps are not zero-duration samples.",
         "",
