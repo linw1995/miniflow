@@ -597,6 +597,39 @@ fn run_in_memory(value: Value) -> Result<Value, String> {
     Ok(serde_json::to_value(output).unwrap())
 }
 
+#[test]
+fn documented_loop_example_executes_with_default_and_explicit_step() {
+    let section = include_str!("../../../docs/workflows.md")
+        .split_once("## Structured Loop\n")
+        .unwrap()
+        .1;
+    let example = section
+        .split_once("```json\n")
+        .unwrap()
+        .1
+        .split_once("\n```")
+        .unwrap()
+        .0;
+    let definition = WorkflowDefinition::from_json(example).unwrap();
+    assert_eq!(
+        definition,
+        WorkflowDefinition::from_json(include_str!("../../../examples/loop-outputs.json")).unwrap()
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    for (inputs, expected) in [
+        (json!({}), json!({"count":3})),
+        (json!({"params.step":2}), json!({"count":4})),
+        (json!({}), json!({"count":3})),
+    ] {
+        let outputs = flow
+            .execute_with_inputs(mf_runtime::WorkflowArguments::try_from(inputs).unwrap())
+            .unwrap();
+        assert_eq!(serde_json::to_value(outputs).unwrap(), expected);
+    }
+}
+
 fn defaults_and_inputs_definition() -> Value {
     json!({
         "version": "2026-11-11",

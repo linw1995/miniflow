@@ -1246,8 +1246,10 @@ This interface supports text and function tools, not media inputs.
 
 ## Structured Loop
 
-The [Loop example](../examples/loop.json) returns `{"count":3}`. It declares `mfn-core` for both its
-initial constant and the `workflow.loop` declaration, and `mfn-code` for the body transformation.
+The complete [Loop output example](../examples/loop-outputs.json) below returns `{"count":3}` with
+its default step size. It uses `mfn-core` for parameters and the Loop declaration, and `mfn-code`
+for the body transformation. `count` starts at zero, `step` is a read-only input, and the body selects
+the next `count` at the end of each pass.
 The compiler replaces the Loop declaration with an engine-prepared executor. `workflow.loop_assign`,
 `workflow.exit_loop`, and the synthetic `%loop` source remain engine controls that plugins cannot
 register. The outer graph and every Loop body remain acyclic. The engine repeats a body's fixed
@@ -1267,59 +1269,85 @@ including when initializing a nested Loop.
 
 ```json
 {
-  "id": "repeat",
-  "kind": "workflow.loop",
-  "config": {
-    "max_iterations": 5,
-    "variables": [{"name": "count", "type": "int"}],
-    "until": {"variable": "count", "operator": "gte", "value": 3},
-    "body": {
-      "version": "2026-10-28",
-      "dependencies": {},
-      "nodes": [
-        {"id": "increment", "kind": "builtin.code", "config": {
-          "language": "cel", "inputs": {"count": "int"}, "code": {"next": "count + 1"}
-        }, "inputs": {"count": {"from": {"node": "%loop", "port": "count"}}}},
-        {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"},
-         "inputs": {"value": {"from": {"node": "increment", "port": "next"}}}}
-      ]
+  "version": "2026-11-13",
+  "dependencies": {
+    "core": {"package": "mfn-core", "path": "../crates/builtin-nodes/core"}
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "step": {"type": "int", "default": 1, "secret": false}
+        }
+      }
+    },
+    {
+      "id": "repeat",
+      "kind": "workflow.loop",
+      "config": {
+        "max_iterations": 5,
+        "inputs": {"step": "int"},
+        "variables": [{"name": "count", "type": "int", "initial": 0}],
+        "until": {"variable": "count", "operator": "gte", "value": 3},
+        "body": {
+          "dependencies": {
+            "code": {"package": "mfn-code", "path": "../crates/builtin-nodes/code"}
+          },
+          "nodes": [
+            {
+              "id": "increment",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {"count": "int", "step": "int"},
+                "code": {"next": "count + step"}
+              },
+              "inputs": {
+                "count": {"from": {"node": "%loop", "port": "count"}},
+                "step": {"from": {"node": "%loop", "port": "step"}}
+              }
+            }
+          ],
+          "outputs": [{"name": "count", "node": "increment", "port": "next"}]
+        }
+      },
+      "inputs": {
+        "step": {"from": {"node": "params", "port": "step"}}
+      }
     }
-  }
-}
-```
-
-The surrounding graph binds the initial `count` input and may bind the final `count` output.
-Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `number`, `int`, `uint`, `usize`, `float`, `double`, `string`, `array`, `object`, and nested `{"list": T}`, `{"map": T}`, or `{"nullable": T}`.
-
-Version `2026-11-11` adds read-only inputs and per-variable defaults:
-
-```json
-{
-  "max_iterations": 5,
-  "inputs": {"step": "int"},
-  "variables": [
-    {"name": "count", "type": "int", "initial": 0},
-    {"name": "total", "type": "int", "initial": 0}
   ],
-  "until": {"variable": "count", "operator": "gte", "value": 4}
+  "outputs": [{"name": "count", "node": "repeat", "port": "count"}]
 }
 ```
 
-Read-only `inputs` are required Loop inputs shared by every pass. The body reads them through
-`%loop`, they produce no Loop outputs, and neither `workflow.loop_assign` nor `until` can name them.
-A variable's `initial` literal supplies its first value, makes that Loop input optional, and must
-match the declared type; an explicit input binding overrides the default. Both forms require
-definition version `2026-11-11`.
+This example is a complete workflow, not a node or body fragment. Its dependency paths assume the
+file is saved under `examples/` in this checkout. The body inherits version `2026-11-13` from the
+root and declares its own code dependency. Its `outputs` update Loop state; the root `outputs`
+select the final result after the Loop completes. With `params.step` set to `2`,
+the result is `{"count":4}`: the updated count is checked against `until` after each pass.
+
+Read-only `config.inputs` and per-variable `initial` defaults are supported from version `2026-11-11`.
+Read-only inputs must be bound on the Loop node, as `step` is above, and are shared by every pass.
+The body reads them through `%loop`; they produce no Loop outputs, and neither `workflow.loop_assign`
+nor `until` can target them. A variable's `initial` literal supplies its first value, makes that Loop
+input optional, and must match the declared type; an explicit input binding overrides the default.
+
+Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `number`, `int`, `uint`, `usize`, `float`, `double`, `string`, `array`, `object`, and nested `{"list": T}`, `{"map": T}`, or `{"nullable": T}`.
 `builtin.code` supports the descriptors documented under [built-in nodes](#built-in-nodes), excluding `number`,
 `nullable`, `usize`, and `float`. Initial values, assignments, and final outputs are checked against each variable's
 declared type; a broad source is checked at runtime when necessary.
 
-`workflow.loop_assign` takes one required `value` input and produces a `done` control output. A
-reached assignment overwrites its target variable; a skipped assignment leaves it unchanged. A later
-body step that must read the new value needs an explicit data or control dependency on the
-assignment. `workflow.exit_loop` has no data ports; when activated by a control dependency, it ends
-the nearest Loop immediately and leaves the rest of that pass unvisited. A skipped exit has no
-effect. Assignment and exit steps are invalid outside a Loop.
+For immediate writes within a pass, `workflow.loop_assign` remains supported; the
+[legacy Loop example](../examples/loop.json) demonstrates that form with an explicitly bound initial
+value. It takes one required `value` input and produces a `done` control output. A reached assignment
+overwrites its target variable; a skipped assignment leaves it unchanged. A later body step that
+must read the new value needs an explicit data or control dependency on the assignment.
+
+`workflow.exit_loop` has no data ports; when activated by a control dependency, it ends the nearest
+Loop immediately and leaves the rest of that pass unvisited. A skipped exit has no effect.
+Assignment and exit steps are invalid outside a Loop.
 
 An active Loop runs at least one pass. Each pass starts with fresh body outputs and skip markers
 while variable values persist. After a complete pass, `until` compares a declared scalar variable
@@ -1342,29 +1370,11 @@ conversation variables, parallel execution, and error-continue modes are separat
 ### End-of-pass variable updates
 
 With body definition version `2026-11-13`, select terminal outputs by variable name instead of adding
-assignment nodes. For example, the following body updates `count` after its increment completes:
+assignment nodes. The complete example above selects `increment.next` as `count` in
+`config.body.outputs`; it does not also assign `count` with `workflow.loop_assign`.
 
-```json
-{
-  "version": "2026-11-13",
-  "nodes": [
-    {
-      "id": "increment",
-      "kind": "builtin.code",
-      "config": {
-        "language": "cel",
-        "inputs": {"count": "int"},
-        "code": {"next": "count + 1"}
-      },
-      "inputs": {"count": {"from": {"node": "%loop", "port": "count"}}}
-    }
-  ],
-  "outputs": [{"name": "count", "node": "increment", "port": "next"}]
-}
-```
-
-The receiving Loop must declare `count` as a mutable variable. After each complete successful pass,
-all selected values are validated and applied together, before evaluating `until`. Body reads in that
+The receiving Loop must declare each selected name as a mutable variable. After each complete successful
+pass, all selected values are validated and applied together, before evaluating `until`. Body reads in that
 pass still see the current state, not these pending updates. Unselected variables retain their values.
 Use `optional: true` for a selection whose producer may be explicitly skipped; that also retains the
 variable. Required skipped selections and unexpectedly missing producer outputs still fail normally.
