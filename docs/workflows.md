@@ -1254,26 +1254,24 @@ mf compile examples/variables.json --output ./variables
 ./variables --params.value 42
 ```
 
-Declare one engine-owned `workflow.variables` source in a Flow:
+Declare variables as a definition-level field, beside `nodes`:
 
 ```json
 {
-  "id": "state",
-  "kind": "workflow.variables",
-  "config": {
-    "variables": [
-      {"name": "count", "type": "int", "initial": 0},
-      {"name": "answer", "type": {"nullable": "string"}, "initial": null}
-    ]
-  }
+  "variables": [
+    {"name": "count", "type": "int", "initial": 0},
+    {"name": "answer", "type": {"nullable": "string"}, "initial": null}
+  ]
 }
 ```
 
-The variable list must be nonempty, with unique nonblank names and compatible `initial` literals.
-Every variable requires an `initial` field, even when its value is null. Types use the shared port
-descriptor grammar. The declaration has one output per variable, no inputs, and no intrinsic `index`.
-It cannot have incoming data or execution dependencies. Startup parameters remain ordinary initial
-node inputs; use an assignment to apply a supplied parameter to a variable.
+This is authored data, not a node. The compiler injects the synthetic `%root` source that exposes
+one output per variable, with no inputs and no intrinsic `index`. Do not add a `%root` node or an
+`workflow.variables` node; neither name can be registered as a provider kind. The list must be nonempty, with
+unique nonblank names and compatible `initial` literals. Every variable requires an `initial` field,
+even when its value is null; an omitted field is not an implicit null. Types use the shared port
+descriptor grammar. Startup parameters remain ordinary initial node inputs; use an assignment to
+apply a supplied parameter to a variable.
 
 Use `workflow.assign` to overwrite a declared variable:
 
@@ -1291,7 +1289,7 @@ A skipped assignment preserves the previous value and skips `done`. Invalid valu
 write is committed, including when the source has a broader type. Native values and secret metadata
 are preserved. Initial literals do not specialize the declared variable type for later reads.
 
-Reads use the declaration's current output, for example `state.count`. **A reader that needs an
+Reads use the synthetic source's current output, for example `%root.count`. **A reader that needs an
 updated value must explicitly depend on `assign.done`**, in addition to its data binding:
 
 ```json
@@ -1303,7 +1301,7 @@ updated value must explicitly depend on `assign.done`**, in addition to its data
 ```
 
 Reading the source does not infer a dependency on writers. Already computed ordinary node outputs
-are not retroactively updated. Selecting `state.count` as a workflow output returns the final value.
+are not retroactively updated. Selecting `%root.count` as a workflow output returns the final value.
 Assignment controls use output prerequisites, not node-success edges.
 
 State belongs to one Flow invocation and starts fresh on every execution, including when reusing
@@ -1311,15 +1309,16 @@ prepared executors. It is not conversation or persistent session state. Each cal
 declare its own variables; it cannot implicitly read or mutate its caller's variables. Loop bodies
 keep their existing variable declarations and `%loop` source; they can use `workflow.assign` with the
 same contract as `workflow.loop_assign`. Read-only Loop and Iteration inputs remain immutable, and
-container bodies cannot add a root `workflow.variables` declaration. Root state does not authorize
+container bodies cannot declare a root `variables` field. Root state does not authorize
 `workflow.exit_loop`.
 
 Root-state Flow domains execute serially to avoid competing writes. Node-owned parallel work can
 still use the bounded worker pool. Autonomous streaming Flows cannot declare root variables; finite
 TaskStream execution and callable-child stream forwarding retain their existing contracts. Root
 state does not add a Loop frame or change observation paths, and its engine instructions cannot be
-run as isolated node targets. Both new kinds are engine-owned and require no provider dependency;
-ordinary nodes such as the example's parameters and identity still require `mfn-core`.
+run as isolated node targets. `workflow.assign` and the synthetic `%root` source are engine-owned and
+require no provider dependency; ordinary nodes such as the example's parameters and identity still
+require `mfn-core`.
 
 ## Structured Loop
 

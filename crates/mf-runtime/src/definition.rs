@@ -48,6 +48,7 @@ pub struct WorkflowDefinition {
     pub execution: Option<crate::StreamExecution>,
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub flows: BTreeMap<String, FlowSource>,
+    pub variables: Option<Vec<crate::WorkflowVariableDefinition>>,
     pub nodes: Vec<NodeDefinition>,
     pub edges: Vec<EdgeDefinition>,
     pub control_edges: Vec<ControlEdgeDefinition>,
@@ -76,6 +77,8 @@ struct DefinitionFields {
     pub dependencies: BTreeMap<String, NodeDependency>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flows: BTreeMap<String, FlowSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<Vec<crate::WorkflowVariableDefinition>>,
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
@@ -350,12 +353,13 @@ impl NodeDefinition {
     }
 }
 
-pub const VARIABLES_KIND: &str = "workflow.variables";
 pub const ASSIGN_KIND: &str = "workflow.assign";
 pub const LOOP_KIND: &str = "workflow.loop";
 pub const LOOP_ASSIGN_KIND: &str = "workflow.loop_assign";
 pub const EXIT_LOOP_KIND: &str = "workflow.exit_loop";
 pub const LOOP_SOURCE_ID: &str = "%loop";
+/// Synthetic source for the Flow's own variables; authored as a definition field.
+pub const ROOT_SOURCE_ID: &str = "%root";
 pub const MAX_LOOP_ITERATIONS: u16 = mf_telemetry::MAX_LOOP_ITERATIONS;
 pub const MAX_LOOP_DEPTH: usize = mf_telemetry::MAX_LOOP_DEPTH;
 pub const MAX_SCHEDULED_STEPS: usize = 10_000;

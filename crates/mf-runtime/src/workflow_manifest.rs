@@ -449,6 +449,18 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
                 message: "workflow variables require a finite callable Flow at version 2026-11-13",
             }
         );
+        ensure!(
+            root.input.as_str() == crate::ROOT_SOURCE_ID,
+            InvalidSnafu {
+                message: "workflow variables require the canonical root source",
+            }
+        );
+        ensure!(
+            graph.definition.variables.is_some(),
+            InvalidSnafu {
+                message: "root state requires a definition-level variables declaration",
+            }
+        );
         root.validate_values().context(VariablesSnafu)?;
         let mut instructions = BTreeSet::new();
         for id in std::iter::once(&root.input).chain(root.writes.keys()) {
@@ -459,6 +471,18 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
                 }
             );
         }
+        ensure!(
+            graph
+                .definition
+                .nodes
+                .iter()
+                .any(|node| node.id.as_str() == crate::ROOT_SOURCE_ID
+                    && node.kind == crate::ROOT_SOURCE_ID
+                    && node.config == serde_json::json!({})),
+            InvalidSnafu {
+                message: "workflow variables require a canonical synthetic root source",
+            }
+        );
         ensure!(
             root.writes
                 .values()

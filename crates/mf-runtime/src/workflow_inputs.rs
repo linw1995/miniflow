@@ -87,7 +87,9 @@ impl WorkflowInterface {
         let roots: BTreeSet<_> = description
             .nodes
             .iter()
-            .filter(|node| !incoming.contains(node.id.as_str()))
+            .filter(|node| {
+                !incoming.contains(node.id.as_str()) && node.kind != crate::ROOT_SOURCE_ID
+            })
             .map(|node| node.id.as_str())
             .collect();
         let declared: BTreeSet<_> = self.schema.inputs.keys().map(String::as_str).collect();

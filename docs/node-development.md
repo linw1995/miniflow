@@ -60,9 +60,11 @@ initializing executors. Dynamic in-memory callers derive their interfaces normal
 `mfn-core` registers a subgraph factory for `workflow.loop`. The compiler prepares its body and passes
 it to that factory, which constructs the complete Loop executor. A Flow using Loop must declare
 `mfn-core` in its dependencies. `workflow.loop_assign`, `workflow.exit_loop`, and `%loop` remain reserved
-engine kinds. Version `2026-11-13` adds engine-owned `workflow.variables` and `workflow.assign` for
-invocation-local state in finite callable Flows; the generic assignment also works inside Loop bodies.
-These kinds cannot be registered by plugins. Ordinary nodes inside a Loop body also require their
+engine kinds. Version `2026-11-13` adds a definition-level `variables` field for invocation-local
+state in finite callable Flows. The compiler injects the reserved `%root` source for it, so authors
+never write a declaration node. `workflow.assign` is the reserved engine kind that writes that state;
+the generic assignment also works inside Loop bodies. Reserved kinds and the `%root` source name
+cannot be registered or authored by plugins. Ordinary nodes inside a Loop body also require their
 packages in `dependencies`.
 
 ## Registration contract

@@ -212,36 +212,42 @@ pub fn lower_scope_at(
 ) -> Result<(), WorkflowCompileError> {
     // Callable Flows own their own root state; container bodies cannot redeclare it.
     relations.root = None;
-    for node in definition
-        .nodes
-        .iter()
-        .filter(|node| node.kind == mf_runtime::VARIABLES_KIND)
-    {
-        let mut node_path = path.to_vec();
-        node_path.push(node.id.clone());
-        let label = crate::loops::path_label(&node_path);
+    if let Some(variables) = &definition.variables {
+        let mut variables_path = path.to_vec();
+        variables_path.push(DefinitionId::from("variables"));
+        let label = crate::loops::path_label(&variables_path);
         ensure!(
             definition.version.supports_workflow_variables(),
             crate::compiler::InvalidScopeSnafu {
                 path: &label,
-                message: "workflow variables and assignments require definition version 2026-11-13",
+                message: "workflow variables require definition version 2026-11-13",
             }
         );
         ensure!(
-            relations.scope.is_none() && relations.root.is_none(),
+            relations.scope.is_none(),
             crate::compiler::InvalidScopeSnafu {
                 path: &label,
-                message: "workflow.variables requires a callable Flow with exactly one declaration",
+                message: "workflow variables require a callable Flow; container bodies cannot declare them",
             }
         );
-        let config: mf_runtime::WorkflowVariablesDefinition =
-            serde_json::from_value(node.config.clone())
-                .context(crate::compiler::ScopeConfigurationSnafu { path: &label })?;
         relations.root = Some(
-            config
-                .into_scope(node.id.clone())
+            mf_runtime::root_scope(variables, mf_runtime::ROOT_SOURCE_ID.into())
                 .context(crate::compiler::WorkflowVariablesSnafu { path: &label })?,
         );
+        if !definition
+            .nodes
+            .iter()
+            .any(|node| node.id.as_str() == mf_runtime::ROOT_SOURCE_ID)
+        {
+            definition.nodes.insert(
+                0,
+                NodeDefinition {
+                    id: mf_runtime::ROOT_SOURCE_ID.into(),
+                    kind: mf_runtime::ROOT_SOURCE_ID.into(),
+                    config: json!({}),
+                },
+            );
+        }
     }
     if let Some(scope) = &relations.scope {
         ensure!(
@@ -309,6 +315,17 @@ pub fn lower_scope_at(
         node_path.push(node.id.clone());
         let path = node_path.as_slice();
         match node.kind.as_str() {
+            mf_runtime::ROOT_SOURCE_ID => {
+                ensure!(
+                    relations.root.is_some()
+                        && node.id.as_str() == mf_runtime::ROOT_SOURCE_ID
+                        && node.config == json!({}),
+                    crate::compiler::InvalidScopeSnafu {
+                        path: crate::loops::path_label(path),
+                        message: "reserved scope source requires its canonical enclosing scope",
+                    }
+                );
+            }
             mf_runtime::LOOP_SOURCE_ID | mf_runtime::ITERATION_INPUT_KIND => {
                 let scope = relations.scope.as_ref();
                 let valid = scope.is_some_and(|scope| {
@@ -352,7 +369,8 @@ pub fn lower_scope_at(
             _ => {
                 ensure!(
                     node.id.as_str() != mf_runtime::LOOP_SOURCE_ID
-                        && node.id.as_str() != mf_runtime::ITERATION_INPUT_ID,
+                        && node.id.as_str() != mf_runtime::ITERATION_INPUT_ID
+                        && node.id.as_str() != mf_runtime::ROOT_SOURCE_ID,
                     crate::compiler::InvalidScopeSnafu {
                         path: crate::loops::path_label(path),
                         message: "reserved scope source must use its canonical declaration",

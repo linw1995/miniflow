@@ -2,20 +2,21 @@
 
 ### Requirement: Declare typed invocation-local state
 
-Definition version `2026-11-13` SHALL support one engine-owned `workflow.variables` declaration per
-finite callable Flow. Each variable SHALL have a unique nonblank name, a port type descriptor, and a
-required compatible initial literal. The declaration SHALL expose typed outputs without startup
-inputs or an intrinsic index, and MUST NOT have incoming dependencies or executable children.
+Definition version `2026-11-13` SHALL accept a definition-level `variables` list in each finite
+callable Flow and MUST NOT require a declaration node. Compilation SHALL inject one canonical
+synthetic `%root` source. Each variable SHALL have a unique nonblank name, a port type descriptor, and
+a required compatible initial literal. The source SHALL expose typed outputs without startup inputs
+or an intrinsic index, and MUST NOT be authored, receive dependencies, or own executable children.
 
 #### Scenario: Declare a nullable value
 
 - **WHEN** a variable declares a nullable string type and an explicit null initial value
-- **THEN** the declaration is valid and exposes a null value initially
+- **THEN** the definition is valid and `%root` exposes a null value initially
 - **AND** omitting the initial field instead fails preparation
 
 #### Scenario: Reject invalid declarations
 
-- **WHEN** declarations are duplicated, variables are empty or duplicated, or an initial value conflicts with its type
+- **WHEN** a node uses the reserved source ID or kind, variables are empty or duplicated, or an initial value conflicts with its type
 - **THEN** preparation fails before any node executes
 - **AND** descriptor and type failures retain their typed sources
 
@@ -23,14 +24,14 @@ inputs or an intrinsic index, and MUST NOT have incoming dependencies or executa
 
 `workflow.assign` SHALL take a required typed `value` input and publish `done` only after validation
 and successful write publication. A reached assignment SHALL overwrite its current graph's variable
-and refresh the declaration output. A skipped or failed assignment MUST NOT change it. Consumers
+and refresh the `%root` output. A skipped or failed assignment MUST NOT change it. Consumers
 requiring a write SHALL explicitly depend on the assignment; ordinary cached outputs SHALL not change.
 
 #### Scenario: Read a committed update
 
-- **WHEN** a reader consumes the declaration output and depends on `assign.done`
+- **WHEN** a reader consumes the `%root` output and depends on `assign.done`
 - **THEN** it sees the assigned value in both interpreted and generated execution
-- **AND** selecting the declaration output at Flow completion yields the final value
+- **AND** selecting the `%root` output at Flow completion yields the final value
 
 #### Scenario: Preserve a skipped assignment
 
@@ -48,7 +49,7 @@ requiring a write SHALL explicitly depend on the assignment; ordinary cached out
 Every invocation SHALL initialize fresh root state and release it on success, failure, or unwinding.
 Root state MUST NOT add Loop frames, conceal startup inputs, or grant cross-scope access. Callable
 child Flows SHALL own independent state. Loop assignments SHALL target only current Loop variables;
-Iteration inputs SHALL remain immutable. Root declarations MUST NOT authorize Loop exits.
+Iteration inputs SHALL remain immutable. Definition-level variables MUST NOT authorize Loop exits.
 
 #### Scenario: Reuse a prepared Flow
 
@@ -76,8 +77,9 @@ their parallel scheduling and typed execution behavior.
 ### Requirement: Freeze authoritative state relationships
 
 Compiled graphs and generated runners SHALL retain and validate root source, types, initial values,
-and write targets without reconstructing them from provider labels. New state kinds SHALL be
-reserved against plugin registration and rejected on earlier definition versions.
+and write targets without reconstructing them from provider labels. `workflow.assign` and the
+`%root` source name SHALL be reserved against plugin registration, and earlier definition versions
+SHALL reject the field.
 
 #### Scenario: Execute without authoring sources
 

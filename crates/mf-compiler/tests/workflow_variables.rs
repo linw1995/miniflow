@@ -17,25 +17,25 @@ use std::{
 fn definition() -> Value {
     json!({
         "version": "2026-11-13",
+        "variables": [
+            {"name": "count", "type": "int", "initial": 0},
+            {"name": "maybe", "type": {"nullable": "string"}, "initial": null}
+        ],
         "nodes": [
-            {"id": "state", "kind": "workflow.variables", "config": {"variables": [
-                {"name": "count", "type": "int", "initial": 0},
-                {"name": "maybe", "type": {"nullable": "string"}, "initial": null}
-            ]}},
             {"id": "params", "kind": "builtin.parameters", "config": {"parameters": {
                 "value": {"type": "int", "default": 7, "secret": false}
             }}},
             {"id": "write", "kind": "workflow.assign", "config": {"variable": "count"},
              "inputs": {"value": {"from": {"node": "params", "port": "value"}}}},
             {"id": "read", "kind": "builtin.identity", "inputs": {
-                "input": {"from": {"node": "state", "port": "count"}}
+                "input": {"from": {"node": "%root", "port": "count"}}
             }}
         ],
         "edges": [{"from_node": "write", "from_output": "done", "to_node": "read"}],
         "outputs": [
-            {"name": "count", "node": "state", "port": "count"},
+            {"name": "count", "node": "%root", "port": "count"},
             {"name": "observed", "node": "read", "port": "value"},
-            {"name": "maybe", "node": "state", "port": "maybe"}
+            {"name": "maybe", "node": "%root", "port": "maybe"}
         ]
     })
 }
@@ -95,7 +95,12 @@ fn assignments_refresh_root_outputs_and_preserve_startup_inputs_and_fresh_invoca
             .collect::<Vec<_>>(),
         ["value"]
     );
-    assert!(flow.input_schema().inputs["state"].is_empty());
+    assert!(
+        !flow
+            .input_schema()
+            .inputs
+            .contains_key(mf_runtime::ROOT_SOURCE_ID)
+    );
     let mut context = mf_runtime::ExecutionContext::default();
     for value in [42, 9, 7] {
         context.set_workflow_arguments(
@@ -150,7 +155,7 @@ fn gate_writes(mut value: Value) -> Value {
 #[test]
 fn skipped_writes_keep_initial_values_and_skip_dependent_readers() {
     let mut value = gate_writes(definition());
-    value["nodes"][1]["config"]["parameters"]["value"]["default"] = json!(-1);
+    value["nodes"][0]["config"]["parameters"]["value"]["default"] = json!(-1);
     assert_eq!(run(value), json!({"count": 0, "maybe": null}));
 }
 
@@ -158,7 +163,7 @@ fn skipped_writes_keep_initial_values_and_skip_dependent_readers() {
 fn stateful_domains_keep_prior_reads_and_multiple_updates_ordered() {
     let mut value = definition();
     value["nodes"].as_array_mut().unwrap().extend([
-        json!({"id":"before", "kind":"builtin.identity", "inputs":{"input":{"from":{"node":"state", "port":"count"}}}}),
+        json!({"id":"before", "kind":"builtin.identity", "inputs":{"input":{"from":{"node":"%root", "port":"count"}}}}),
         json!({"id":"second", "kind":"workflow.assign", "config":{"variable":"count"}, "inputs":{"value":{"from":{"node":"before", "port":"value"}}}})
     ]);
     value["edges"].as_array_mut().unwrap().extend([
@@ -212,15 +217,25 @@ fn root_variables_reject_explicit_and_provider_selected_streaming() {
 }
 
 #[test]
-fn declaration_visitation_does_not_reset_an_earlier_write() {
-    let mut value = definition();
-    // Independent source visitation can sort after the assignment. No hidden dependency is inferred.
-    value["nodes"][0]["id"] = json!("zz_state");
-    value["nodes"][3]["inputs"]["input"]["from"]["node"] = json!("zz_state");
-    value["outputs"][0]["node"] = json!("zz_state");
-    value["outputs"][2]["node"] = json!("zz_state");
+fn synthetic_root_source_is_injected_before_ordinary_nodes() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(definition()), &registry).unwrap();
     assert_eq!(
-        run(value),
+        plan.graph.execution_order[0].as_str(),
+        mf_runtime::ROOT_SOURCE_ID
+    );
+    let source = plan
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == mf_runtime::ROOT_SOURCE_ID)
+        .expect("the root source is synthesized from the definition field");
+    assert_eq!(source.kind, mf_runtime::ROOT_SOURCE_ID);
+    assert_eq!(source.config, json!({}));
+    // Visiting the source after the assignment must not republish initial literals.
+    assert_eq!(
+        run(definition()),
         json!({"count": 7, "observed": 7, "maybe": null})
     );
 }
@@ -228,8 +243,8 @@ fn declaration_visitation_does_not_reset_an_earlier_write() {
 #[test]
 fn declared_types_not_initial_literals_drive_inference() {
     let mut value = definition();
-    value["nodes"][0]["config"]["variables"][0]["type"] = json!("any");
-    value["nodes"][1]["config"]["parameters"]["value"] =
+    value["variables"][0]["type"] = json!("any");
+    value["nodes"][0]["config"]["parameters"]["value"] =
         json!({"type": "string", "default": "changed", "secret": false});
     assert_eq!(
         run(value),
@@ -246,39 +261,23 @@ fn invalid_declarations_and_scope_ownership_fail_before_execution() {
             "require definition version 2026-11-13",
         ),
         (
-            Box::new(|v| {
-                let second = v["nodes"][0].clone();
-                v["nodes"].as_array_mut().unwrap().push(second);
-            }),
-            "exactly one declaration",
-        ),
-        (
-            Box::new(|v| v["nodes"][0]["config"]["variables"] = json!([])),
+            Box::new(|v| v["variables"] = json!([])),
             "variables must not be empty",
         ),
         (
-            Box::new(|v| v["nodes"][0]["config"]["variables"][1]["name"] = json!("count")),
+            Box::new(|v| v["variables"][1]["name"] = json!("count")),
             "duplicate variable",
         ),
         (
-            Box::new(|v| v["nodes"][0]["config"]["variables"][0]["name"] = json!(" ")),
+            Box::new(|v| v["variables"][0]["name"] = json!(" ")),
             "invalid variable name",
         ),
         (
-            Box::new(|v| {
-                v["nodes"][0]["config"]["variables"][0]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("initial");
-            }),
-            "missing field `initial`",
-        ),
-        (
-            Box::new(|v| v["nodes"][2]["config"]["variable"] = json!("missing")),
+            Box::new(|v| v["nodes"][1]["config"]["variable"] = json!("missing")),
             "unknown variable `missing`",
         ),
         (
-            Box::new(|v| v["nodes"][2]["kind"] = json!("workflow.loop_assign")),
+            Box::new(|v| v["nodes"][1]["kind"] = json!("workflow.loop_assign")),
             "assignment requires a state scope",
         ),
         (
@@ -295,9 +294,18 @@ fn invalid_declarations_and_scope_ownership_fail_before_execution() {
                 v["edges"]
                     .as_array_mut()
                     .unwrap()
-                    .push(json!({"from_node":"params", "from_output":"value", "to_node":"state"}))
+                    .push(json!({"from_node":"params", "from_output":"value", "to_node":"%root"}))
             }),
             "source cannot have incoming dependencies",
+        ),
+        (
+            Box::new(|v| {
+                v["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id":"named", "kind":"workflow.variables", "config":{}}));
+            }),
+            "unknown kind `workflow.variables`",
         ),
     ];
     for (edit, expected) in cases {
@@ -322,10 +330,16 @@ fn invalid_declarations_and_scope_ownership_fail_before_execution() {
         "{error}"
     );
     let mut value = definition();
-    value["nodes"][0]["config"]["variables"][0]["type"] = json!("invalid");
+    value["variables"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("initial");
+    assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
+    let mut value = definition();
+    value["variables"][0]["type"] = json!("invalid");
     assert!(find_source::<mf_runtime::TypeDescriptorError>(&compile_error(value)).is_some());
     let mut value = definition();
-    value["nodes"][0]["config"]["variables"][0]["initial"] = json!("wrong");
+    value["variables"][0]["initial"] = json!("wrong");
     assert!(find_source::<mf_runtime::TypeMismatch>(&compile_error(value)).is_some());
 }
 
@@ -342,7 +356,7 @@ fn nested() -> Value {
             ]}
         }})
     ]);
-    value["nodes"][4]["config"]["body"]["nodes"][1]["config"]["parameters"]["value"]["default"] =
+    value["nodes"][3]["config"]["body"]["nodes"][0]["config"]["parameters"]["value"]["default"] =
         json!(99);
     value["outputs"].as_array_mut().unwrap().extend([
         json!({"name":"child", "node":"child", "port":"count"}),
@@ -353,7 +367,7 @@ fn nested() -> Value {
 
 fn loop_output_updates() -> Value {
     let mut value = nested();
-    let repeat = &mut value["nodes"][5]["config"];
+    let repeat = &mut value["nodes"][4]["config"];
     repeat["variables"].as_array_mut().unwrap().push(json!({
         "name":"observed", "type":"int", "initial":0
     }));
@@ -374,7 +388,7 @@ fn loop_output_updates() -> Value {
 
 fn exited_loop_output_updates() -> Value {
     let mut value = loop_output_updates();
-    let body = &mut value["nodes"][5]["config"]["body"];
+    let body = &mut value["nodes"][4]["config"]["body"];
     body["nodes"].as_array_mut().unwrap().extend([
         json!({"id":"exit", "kind":"workflow.exit_loop"}),
         json!({"id":"zz_unvisited", "kind":"builtin.code", "config":{
@@ -392,7 +406,7 @@ fn exited_loop_output_updates() -> Value {
 #[test]
 fn generic_assignments_cannot_overlap_end_of_pass_updates() {
     let mut value = nested();
-    value["nodes"][5]["config"]["body"]["outputs"] = json!([
+    value["nodes"][4]["config"]["body"]["outputs"] = json!([
         {"name":"count", "node":"inc", "port":"next"}
     ]);
     let error = compile_error(value);
@@ -431,21 +445,20 @@ fn callable_and_loop_state_remain_isolated_from_parent_root_state() {
         json!({"count":7, "observed":7, "maybe":null, "child":99, "loop":12})
     );
     let mut value = nested();
-    value["nodes"][5]["config"]["variables"][0]["name"] = json!("local");
+    value["nodes"][4]["config"]["variables"][0]["name"] = json!("local");
     assert!(
         compile_error(value)
             .to_string()
             .contains("unknown variable `count`")
     );
     let mut value = nested();
-    value["nodes"][5]["config"]["body"]["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .push(definition()["nodes"][0].clone());
+    value["nodes"][4]["config"]["body"]["variables"] = json!([
+        {"name":"nested", "type":"int", "initial":1}
+    ]);
     assert!(
         compile_error(value)
             .to_string()
-            .contains("exactly one declaration")
+            .contains("container bodies cannot declare them")
     );
 }
 
@@ -456,7 +469,7 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
     let encoded = plan.to_json().unwrap();
     let restored = mf_compiler::CompiledWorkflow::from_json(&encoded).unwrap();
     assert_eq!(plan, restored);
-    for mutation in 0..6 {
+    for mutation in 0..7 {
         let mut changed = restored.clone();
         let root = changed.graph.relations.root.as_mut().unwrap();
         match mutation {
@@ -473,9 +486,12 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
             4 => {
                 root.initial.remove("count");
             }
-            _ => {
+            5 => {
                 changed.graph.definition.version =
                     mf_runtime::WorkflowDefinitionVersion::V2026_11_11;
+            }
+            _ => {
+                changed.graph.definition.variables = None;
             }
         }
         assert!(
@@ -495,7 +511,7 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
                 exclusive: false,
                 from_node: "params".into(),
                 from_output: "value".into(),
-                to_node: "state".into(),
+                to_node: "%root".into(),
                 to_input: "unused".into(),
             }),
             "control" => definition
@@ -503,16 +519,16 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
                 .push(mf_runtime::ControlEdgeDefinition {
                     from_node: "params".into(),
                     from_output: "value".into(),
-                    to_node: "state".into(),
+                    to_node: "%root".into(),
                 }),
             _ => definition
                 .order_edges
                 .push(mf_runtime::OrderEdgeDefinition {
                     from_node: "params".into(),
-                    to_node: "state".into(),
+                    to_node: "%root".into(),
                 }),
         }
-        changed.graph.execution_order = ["params", "state", "write", "read"]
+        changed.graph.execution_order = ["%root", "params", "write", "read"]
             .into_iter()
             .map(mf_runtime::DefinitionId::from)
             .collect();
@@ -528,10 +544,12 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
             "{dependency}"
         );
     }
-    // Artifact consumers must not rediscover engine roles from authored node kinds/config.
-    let mut renamed = restored;
+    // Assignment instructions remain relation-driven; the synthetic source keeps its identity.
+    let mut renamed = restored.clone();
     for node in &mut renamed.graph.definition.nodes {
-        if renamed.graph.relations.instruction(&node.id).is_some() {
+        if node.id.as_str() != mf_runtime::ROOT_SOURCE_ID
+            && renamed.graph.relations.instruction(&node.id).is_some()
+        {
             node.kind = "unregistered.provider".into();
             node.config = json!({"opaque":true});
         }
@@ -541,15 +559,25 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
         .execute()
         .unwrap();
     assert_eq!(outputs["count"], json!(7));
+    // The canonical synthetic source is not interchangeable with an authored node.
+    let mut forged = restored;
+    for node in &mut forged.graph.definition.nodes {
+        if node.id.as_str() == mf_runtime::ROOT_SOURCE_ID {
+            node.kind = "unregistered.provider".into();
+        }
+    }
+    assert!(instantiate_compiled(&forged, &registry).is_err());
+    assert!(mf_runtime::describe_graph(&forged.graph).is_err());
 }
 
 #[test]
 fn finite_stateful_calls_can_forward_task_streams_without_promoting_root_state() {
-    let child = json!({"version":"2026-11-13", "nodes":[
-        {"id":"state", "kind":"workflow.variables", "config":{"variables":[{"name":"count","type":"usize","initial":2}]}},
-        {"id":"step", "kind":"fixture.task_stream", "inputs":{"count":{"from":{"node":"state","port":"count"}}}},
+    let child = json!({"version":"2026-11-13",
+        "variables":[{"name":"count","type":"usize","initial":2}],
+        "nodes":[
+        {"id":"step", "kind":"fixture.task_stream", "inputs":{"count":{"from":{"node":"%root","port":"count"}}}},
         {"id":"save", "kind":"workflow.assign", "config":{"variable":"count"}, "inputs":{"value":{"from":{"node":"step","port":"total"}}}}
-    ], "outputs":[{"name":"delta","node":"step","port":"delta"},{"name":"count","node":"state","port":"count"}]});
+    ], "outputs":[{"name":"delta","node":"step","port":"delta"},{"name":"count","node":"%root","port":"count"}]});
     assert!(
         compile_error(child.clone())
             .to_string()
@@ -592,7 +620,7 @@ fn finite_stateful_calls_can_forward_task_streams_without_promoting_root_state()
 #[test]
 fn state_cannot_be_used_without_an_owning_declaration() {
     let mut value = definition();
-    value["nodes"].as_array_mut().unwrap().remove(0);
+    value.as_object_mut().unwrap().remove("variables");
     let error = plan_definition(&parse(value)).unwrap_err();
     assert!(
         error
@@ -608,7 +636,9 @@ fn generated_root_constructors_follow_compiled_relations_not_authored_config() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut plan = compile_definition(&parse(definition()), &registry).unwrap();
     for node in &mut plan.graph.definition.nodes {
-        if plan.graph.relations.instruction(&node.id).is_some() {
+        if node.id.as_str() != mf_runtime::ROOT_SOURCE_ID
+            && plan.graph.relations.instruction(&node.id).is_some()
+        {
             node.kind = "unregistered.provider".into();
             node.config = json!({"opaque":true});
         }
@@ -633,7 +663,7 @@ fn generated_variables_match_memory_without_sources() {
     let binary = directory.path().join("runner");
     let build = directory.path().join("build");
     let mut value = gate_writes(loop_output_updates());
-    value["nodes"][1]["config"]["parameters"]["value"]["type"] = json!("any");
+    value["nodes"][0]["config"]["parameters"]["value"]["type"] = json!("any");
     value["dependencies"] = json!({
         "core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")},
         "code":{"package":"mfn-code", "path":common::crates_dir().join("builtin-nodes/code")}

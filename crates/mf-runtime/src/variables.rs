@@ -4,22 +4,51 @@ use serde_json::Value;
 use snafu::{ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
 
-/// Engine-owned declaration of invocation-local, typed mutable values.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowVariablesDefinition {
-    pub variables: Vec<WorkflowVariableDefinition>,
-}
-
+/// Engine-owned declaration of one Flow-level mutable variable.
+///
+/// `initial` is a required field that accepts an explicit null, unlike the
+/// optional Loop default.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowVariableDefinition {
     pub name: String,
     #[serde(rename = "type")]
     pub value_type: Value,
-    // Require the field while accepting an explicit JSON null.
     #[serde(deserialize_with = "Value::deserialize")]
     pub initial: Value,
+}
+
+/// Build the root scope record for a Flow's authored definition-level variables.
+///
+/// Unlike Loop variables, a root variable must state its first value explicitly;
+/// an omitted field is not an implicit null.
+pub fn root_scope(
+    variables: &[WorkflowVariableDefinition],
+    input: DefinitionId,
+) -> Result<RootScopeRelations, WorkflowVariablesError> {
+    let mut values = BTreeMap::new();
+    let mut initial = BTreeMap::new();
+    for variable in variables {
+        let value_type =
+            ValueType::parse_descriptor(&variable.value_type).context(VariableTypeSnafu {
+                variable: &variable.name,
+            })?;
+        ensure!(
+            values.insert(variable.name.clone(), value_type).is_none(),
+            DuplicateVariableSnafu {
+                variable: &variable.name
+            }
+        );
+        initial.insert(variable.name.clone(), variable.initial.clone());
+    }
+    let scope = RootScopeRelations {
+        input,
+        values,
+        initial,
+        writes: BTreeMap::new(),
+    };
+    scope.validate_values()?;
+    Ok(scope)
 }
 
 #[derive(Debug, Snafu)]
@@ -47,37 +76,6 @@ pub enum WorkflowVariablesError {
         variable: String,
         source: crate::TypeMismatch,
     },
-}
-
-impl WorkflowVariablesDefinition {
-    pub fn into_scope(
-        self,
-        input: DefinitionId,
-    ) -> Result<RootScopeRelations, WorkflowVariablesError> {
-        let mut values = BTreeMap::new();
-        let mut initial = BTreeMap::new();
-        for variable in self.variables {
-            let value_type =
-                ValueType::parse_descriptor(&variable.value_type).context(VariableTypeSnafu {
-                    variable: &variable.name,
-                })?;
-            ensure!(
-                values.insert(variable.name.clone(), value_type).is_none(),
-                DuplicateVariableSnafu {
-                    variable: &variable.name
-                }
-            );
-            initial.insert(variable.name, variable.initial);
-        }
-        let scope = RootScopeRelations {
-            input,
-            values,
-            initial,
-            writes: BTreeMap::new(),
-        };
-        scope.validate_values()?;
-        Ok(scope)
-    }
 }
 
 impl RootScopeRelations {

@@ -428,11 +428,15 @@ pub fn into_task(node: FlowNode) -> Result<mf_runtime::TaskFlowNode, FlowBuildEr
 }
 impl FlowBuilder {
     pub fn with_workflow_inputs(mut self) -> Result<Self, crate::WorkflowInputError> {
+        let root_input = self.root_scope.as_ref().map(|root| &root.input);
         let initial: BTreeSet<_> = self
             .execution_order
             .iter()
             .enumerate()
-            .filter(|(position, _)| self.dependencies[*position].is_empty())
+            .filter(|(position, id)| {
+                self.dependencies[*position].is_empty()
+                    && root_input.is_none_or(|root| *root != self.nodes[id.index()].definition_id)
+            })
             .map(|(_, id)| id.index())
             .collect();
         let input_schema = workflow_input_schema(

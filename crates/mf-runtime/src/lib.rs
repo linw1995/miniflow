@@ -55,7 +55,7 @@ pub use definition::{
     LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
     MAX_CALL_DEPTH, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition,
     NodeDependency, NodeDependencyError, OrderEdgeDefinition, OutputReferenceDefinition,
-    VARIABLES_KIND, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    ROOT_SOURCE_ID, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
     validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
@@ -138,9 +138,7 @@ pub use typed_inputs::{
     decode_input, decode_node_value, decode_object_value, decode_required_input,
     reject_unknown_inputs, unknown_enum_tag, unknown_enum_variant,
 };
-pub use variables::{
-    WorkflowVariableDefinition, WorkflowVariablesDefinition, WorkflowVariablesError,
-};
+pub use variables::{WorkflowVariableDefinition, WorkflowVariablesError, root_scope};
 
 pub use typed_outputs::{
     NodeOutputs, OutputEncodeError, OutputField, OutputValue, RustValueType, TypedField,

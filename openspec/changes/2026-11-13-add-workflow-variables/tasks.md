@@ -1,6 +1,6 @@
 ## Implementation
 
-- [x] Add versioned root variable declarations and reserved generic assignment syntax.
+- [x] Add definition-level root variables, the synthetic `%root` source, and reserved generic assignment syntax.
 - [x] Freeze and validate root-state relationships independently of container frames.
 - [x] Bind invocation-local root state and staged writes through shared execution and domain merging.
 - [x] Integrate dynamic preparation and generated runners without changing observation ancestry.

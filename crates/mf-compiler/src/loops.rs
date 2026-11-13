@@ -85,10 +85,7 @@ pub fn validate_scope(
                 "scope constructs require definition version 2026-09-29",
             ));
         }
-        if matches!(
-            node.kind.as_str(),
-            mf_runtime::VARIABLES_KIND | mf_runtime::ASSIGN_KIND
-        ) {
+        if node.kind == mf_runtime::ASSIGN_KIND {
             ensure!(
                 definition.version.supports_workflow_variables(),
                 crate::compiler::InvalidScopeSnafu {
@@ -98,6 +95,15 @@ pub fn validate_scope(
             );
         }
         match node.kind.as_str() {
+            mf_runtime::ROOT_SOURCE_ID => ensure!(
+                root.is_some()
+                    && node.id.as_str() == mf_runtime::ROOT_SOURCE_ID
+                    && node.config == json!({}),
+                crate::compiler::InvalidScopeSnafu {
+                    path: path_label(&node_path),
+                    message: "reserved scope source requires its canonical enclosing scope",
+                }
+            ),
             LOOP_SOURCE_ID => ensure!(
                 enclosing.is_some()
                     && node.id.as_str() == LOOP_SOURCE_ID

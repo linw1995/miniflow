@@ -1506,6 +1506,7 @@ fn canonical_definition(
         version: definition.version,
         execution: definition.execution.clone(),
         flows: definition.flows.clone(),
+        variables: definition.variables.clone(),
         dependencies: definition.dependencies.clone(),
         nodes,
         edges,
@@ -2014,6 +2015,7 @@ pub fn prepare_compiled_plan(
     .and_then(|flow| flow.with_control_edges(plan.graph.definition.control_edges.clone()))
     .and_then(|flow| flow.with_order_edges(plan.graph.definition.order_edges.clone()))
     .context(FlowConstructionSnafu)?;
+    let builder = builder.with_root_scope(plan.graph.relations.root.clone());
     let builder = if plan.graph.definition.version.supports_startup_inputs()
         && plan.graph.relations.is_callable()
     {
@@ -2021,10 +2023,7 @@ pub fn prepare_compiled_plan(
     } else {
         builder
     };
-    Ok((
-        resolved,
-        builder.with_root_scope(plan.graph.relations.root.clone()),
-    ))
+    Ok((resolved, builder))
 }
 
 /// Prepare a task workflow and report attributed node preparation failures.

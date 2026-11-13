@@ -1,10 +1,12 @@
 ## State ownership
 
-`workflow.variables` declares a nonempty list of `{name, type, initial}` values. `initial` is mandatory,
-including for nullable variables; an explicit null is not an omitted default. One declaration is
-allowed in each callable Flow, including independently invoked child Flows. The declaration cannot
-have incoming dependencies or own executable children. It exposes typed output ports, not inputs or
-an intrinsic index. Variable names are exact nonblank strings and must be unique.
+`variables` is a definition-level list of `{name, type, initial}` values, not a node. `initial` is
+mandatory, including for nullable variables; an explicit null is not an omitted default. It is
+available in each callable Flow, including independently invoked child Flows, and absent from
+container bodies. Lowering injects the synthetic `%root` source with the canonical ID and kind, so
+readers keep using ordinary `{node, port}` references. The source exposes typed output ports, not
+inputs or an intrinsic index. It is not authored, cannot receive dependencies, and cannot own
+children. Variable names are exact nonblank strings and must be unique.
 
 Lowering freezes a `RootScopeRelations` record containing the source endpoint, variable descriptors,
 initial literals, and assignment instruction targets. Readers of compiled graphs use these facts,
@@ -17,17 +19,17 @@ state and cannot mutate its caller's state.
 `workflow.assign` uses the existing `{variable}` configuration, required typed `value` input, and
 `done` control output. It targets the current graph's writable state, never searches through caller
 or container boundaries, and cannot name a read-only input. `workflow.loop_assign` remains Loop-only.
-`workflow.exit_loop` remains Loop-only; a root variable declaration does not authorize an exit.
+`workflow.exit_loop` remains Loop-only; definition-level variables do not authorize an exit.
 
 Writes are validated and staged before publishing `done`. Successful publication commits the write
-and refreshes the declaration's current output. Skips preserve the variable and skip `done`; failure
+and refreshes the `%root` output. Skips preserve the variable and skip `done`; failure
 publishes neither the write nor completion. Native payload identity and secret metadata survive.
 A reader requiring the new value must depend explicitly on `assign.done`, in addition to its data
-binding from the declaration. A cached ordinary node output is not retroactively recomputed.
+binding from the `%root` source. A cached ordinary node output is not retroactively recomputed.
 
 A source task reads the current variable map, so assignment before source visitation cannot reset a
-value to its initial literal. Selecting a declaration output at workflow completion returns its final
-value. The declaration does not impose a hidden barrier or infer read-after-write dependencies.
+value to its initial literal. Selecting a `%root` output at workflow completion returns its final
+value. The source does not impose a hidden barrier or infer read-after-write dependencies.
 
 ## Execution lifecycle
 

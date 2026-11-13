@@ -82,10 +82,9 @@ pub use mf_runtime::{
     NodeDefinition, NodeDependency, NodeExecutionError, NodeFactory, NodeId, NodeMetadata,
     NodePorts, NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult, OrderEdgeDefinition,
     OutputDerivation, OutputDerivationError, OutputReferenceDefinition, Outputs, PortSpec,
-    PreparedNode, RunObservation, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch,
-    VARIABLES_KIND, ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
-    WorkflowOutputDefinition, WorkflowRunError, WorkflowVariableDefinition,
-    WorkflowVariablesDefinition, WorkflowVariablesError, deserialize_config,
+    PreparedNode, ROOT_SOURCE_ID, RunObservation, TaskNode, TypeCompatibility, TypeDepthError,
+    TypeMismatch, ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
+    WorkflowOutputDefinition, WorkflowRunError, WorkflowVariablesError, deserialize_config,
     execute_node_in_context, output_id, select_context_output, validate_exclusive_inputs,
 };
 pub use mf_runtime::{IterationErrorPolicy, IterationMode};

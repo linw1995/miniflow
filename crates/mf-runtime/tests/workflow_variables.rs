@@ -1,7 +1,8 @@
 use mf_runtime::{
-    ExecutionContext, Inputs, NodeExecutionError, Outputs, RootScopeRelations, ValueRef, ValueType,
-    WorkflowRunError, WorkflowVariablesDefinition, execute_generated_node_in_context,
-    execute_node_in_context, prepared_root_assign, prepared_root_source,
+    ExecutionContext, Inputs, NodeExecutionError, Outputs, ROOT_SOURCE_ID, RootScopeRelations,
+    ValueRef, ValueType, WorkflowRunError, WorkflowVariableDefinition,
+    execute_generated_node_in_context, execute_node_in_context, prepared_root_assign,
+    prepared_root_source, root_scope,
 };
 use serde_json::json;
 use snafu::ResultExt;
@@ -10,12 +11,23 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
 };
 
+fn variable(
+    name: &str,
+    value_type: serde_json::Value,
+    initial: serde_json::Value,
+) -> WorkflowVariableDefinition {
+    WorkflowVariableDefinition {
+        name: name.into(),
+        value_type,
+        initial,
+    }
+}
+
 fn scope() -> RootScopeRelations {
-    serde_json::from_value::<WorkflowVariablesDefinition>(json!({"variables": [
-        {"name": "count", "type": "int", "initial": 7}
-    ]}))
-    .unwrap()
-    .into_scope("state".into())
+    root_scope(
+        &[variable("count", json!("int"), json!(7))],
+        ROOT_SOURCE_ID.into(),
+    )
     .unwrap()
 }
 
@@ -59,7 +71,7 @@ fn root_state_writes_commit_only_with_valid_publication_and_preserve_typed_sourc
             assert_eq!(current(context, &scope)["count"], json!(8));
             assert_eq!(
                 context
-                    .select_output("value", "state", "count", false)?
+                    .select_output("value", ROOT_SOURCE_ID, "count", false)?
                     .unwrap(),
                 json!(8)
             );
@@ -81,7 +93,7 @@ fn root_state_writes_commit_only_with_valid_publication_and_preserve_typed_sourc
             Ok(())
         })
         .unwrap();
-    let node = prepared_root_source("state", &scope.values)
+    let node = prepared_root_source(ROOT_SOURCE_ID, &scope.values)
         .into_task()
         .unwrap();
     assert!(node.node.execute(Inputs::new(), &mut context).is_err());
@@ -132,7 +144,7 @@ fn root_state_preserves_native_payloads_and_sensitivity_only_writes_across_domai
             assert!(updated.is_secret());
             assert!(updated.ptr_eq(&secret));
             let value = context
-                .select_output("final", "state", "count", false)?
+                .select_output("final", ROOT_SOURCE_ID, "count", false)?
                 .unwrap();
             assert!(value.is_secret());
             assert!(value.ptr_eq(&secret));
@@ -164,7 +176,7 @@ fn root_state_is_fresh_and_unwound_on_success_failure_and_panic() {
             })
         }));
         assert_eq!(result.is_err(), outcome == 2);
-        let node = prepared_root_source("state", &scope.values)
+        let node = prepared_root_source(ROOT_SOURCE_ID, &scope.values)
             .into_task()
             .unwrap();
         let error = node.node.execute(Inputs::new(), &mut context).unwrap_err();
@@ -211,20 +223,20 @@ fn root_assignment_nested_mismatch_keeps_the_exact_path_and_previous_value() {
 
 #[test]
 fn root_initials_are_required_even_when_null_and_index_is_an_ordinary_variable() {
+    // An omitted field is not an implicit null; an explicit null is retained.
     assert!(
-        serde_json::from_value::<WorkflowVariablesDefinition>(json!({"variables":[
-            {"name":"value", "type":"any"}
-        ]}))
-        .is_err()
+        serde_json::from_value::<WorkflowVariableDefinition>(json!({"name":"value", "type":"any"}))
+            .is_err()
     );
-    let scope = serde_json::from_value::<WorkflowVariablesDefinition>(json!({"variables":[
-        {"name":"value", "type":"null", "initial":null},
-        {"name":"index", "type":"string", "initial":"not a loop"}
-    ]}))
-    .unwrap()
-    .into_scope("state".into())
+    let scope = root_scope(
+        &[
+            variable("value", json!("null"), json!(null)),
+            variable("index", json!("string"), json!("not a loop")),
+        ],
+        ROOT_SOURCE_ID.into(),
+    )
     .unwrap();
-    let source = prepared_root_source("state", &scope.values);
+    let source = prepared_root_source(ROOT_SOURCE_ID, &scope.values);
     assert_eq!(source.metadata.ports.outputs.len(), 2);
     assert_eq!(
         source.metadata.ports.outputs[0].value_type,

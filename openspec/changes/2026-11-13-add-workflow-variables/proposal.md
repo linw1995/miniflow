@@ -5,8 +5,9 @@ mutable values for conditional updates and sequential refinement without introdu
 
 ## What Changes
 
-- Add definition version `2026-11-13`, engine-owned `workflow.variables`, and `workflow.assign`.
-- Declare one typed root state source per finite callable Flow, with required literal initial values.
+- Add definition version `2026-11-13`, definition-level `variables`, and `workflow.assign`.
+- Inject a synthetic `%root` source for the declaration instead of requiring a declaration node.
+- Declare typed root state per finite callable Flow, with required literal initial values.
 - Reuse staged, validated assignment publication and explicit dependency ordering.
 - Keep root state separate from container frames, startup inputs, and observation ancestry.
 - Initialize fresh state for every invocation and serialize root-state execution domains.

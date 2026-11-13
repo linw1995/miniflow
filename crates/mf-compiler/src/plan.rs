@@ -948,7 +948,13 @@ fn generate_scope(
         let plan_ident = format_ident!("FLOW_PLAN_{}", scope.to_uppercase());
         let bind_inputs = (scope == "root" || matches!(build, ScopeBuild::Call))
             && definition.version.supports_startup_inputs();
-        let initial = initial_nodes(definition, order);
+        let mut initial = initial_nodes(definition, order);
+        if let Some(root) = &graph.relations.root
+            && let Some(position) = order.iter().position(|id| id == &root.input)
+        {
+            // The synthetic root source is never a startup input.
+            initial[position] = false;
+        }
         let flow_binding = if bind_inputs || graph.relations.root.is_some() {
             quote! { let mut #flow_ident = mf_runtime::Flow::from_plan(
                 vec![#(mf_compiler::into_task(#nodes)?),*], #plan_ident.clone(), Default::default(),
@@ -2197,6 +2203,7 @@ mod tests {
                 execution: None,
                 dependencies: BTreeMap::new(),
                 flows: BTreeMap::new(),
+                variables: None,
                 nodes: [
                     ("custom-input", "custom.source"),
                     ("custom-write", "custom.write"),

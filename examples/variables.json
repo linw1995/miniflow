@@ -6,20 +6,14 @@
       "path": "../crates/builtin-nodes/core"
     }
   },
-  "nodes": [
+  "variables": [
     {
-      "id": "state",
-      "kind": "workflow.variables",
-      "config": {
-        "variables": [
-          {
-            "name": "count",
-            "type": "int",
-            "initial": 0
-          }
-        ]
-      }
-    },
+      "name": "count",
+      "type": "int",
+      "initial": 0
+    }
+  ],
+  "nodes": [
     {
       "id": "params",
       "kind": "builtin.parameters",
@@ -54,7 +48,7 @@
       "inputs": {
         "input": {
           "from": {
-            "node": "state",
+            "node": "%root",
             "port": "count"
           }
         }
@@ -71,7 +65,7 @@
   "outputs": [
     {
       "name": "count",
-      "node": "state",
+      "node": "%root",
       "port": "count"
     },
     {
