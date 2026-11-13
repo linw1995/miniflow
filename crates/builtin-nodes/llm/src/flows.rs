@@ -50,7 +50,7 @@ mod tests {
         assert_eq!(definition.clusters.len(), 1);
         assert_eq!(definition.clusters[0].label, "Initial values");
         assert!(definition.clusters[0].collapsed);
-        assert_eq!(definition.clusters[0].nodes.len(), 6);
+        assert_eq!(definition.clusters[0].nodes.len(), 4);
         let serialized = serde_json::to_string(&definition).unwrap();
         for synthetic in [
             "flow_0",
