@@ -49,8 +49,10 @@ in parallel, avoiding nested thread pools. Export, indexer-build, and indexing t
 are reported separately. Aggregate coverage reports retain their existing coverage data.
 
 Formatting, package builds, Clippy, repository hooks, and CI script tests
-also run in CI. Main additionally builds and checks the macOS package;
-complete macOS test execution runs in nightly.
+also run in CI. Main validation is Linux-only so a temporarily unavailable macOS
+runner cannot block default-branch success records or coverage-graph publication;
+nightly runs the complete macOS flake checks, including package builds, Clippy,
+formatting, workflows, and test execution.
 Nix prepares separate dependency artifacts for the release CLI build, workspace
 Clippy checks, and full nextest suite. Each preparation runs only the Cargo phase
 its consumer needs, with matching package, target, feature, and profile settings.
@@ -193,7 +195,10 @@ the configured nextest suite.
 Main/nightly publish the same crate flags alongside the full `rust` report, without
 carry-forward. Crate reports are not cumulative PR patch coverage. The old
 Codecov patch status is disabled and the required local `coverage`/`validation`
-checks provide the incremental coverage decision.
+checks provide the incremental coverage decision. Codecov uploads are best-effort
+reporting: an unavailable or deactivated Codecov repository cannot block successful
+validation or coverage-graph publication because local reports and the changed-line
+gate remain authoritative.
 
 The `coverage` artifact contains current LCOV, source provenance, and `selection.json`
 with complete/partial suites, inventory fallback, execution completion, and published
@@ -207,7 +212,9 @@ when report generation succeeded, but never publish a successful validation reco
 
 `Nightly full tests` checks the default branch daily at 18:23 UTC (02:23 in
 Asia/Shanghai). It runs all macOS flake checks plus Linux build, formatting,
-Clippy, and workflow checks. The complete Linux nextest suite runs once with
+Clippy, and workflow checks. The macOS job is the complete macOS verification,
+including package builds, Clippy, formatting, workflows, and test execution.
+The complete Linux nextest suite runs once with
 coverage instead of being repeated by the flake `test` check, and generates a
 complete coverage report for Codecov.
 

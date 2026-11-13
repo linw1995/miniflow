@@ -100,7 +100,7 @@ jobs:
           files: target/coverage/result/crates/mf-chat.lcov
           disable_search: true
           flags: mf-chat
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mf-cli)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-cli')
@@ -109,7 +109,7 @@ jobs:
           files: target/coverage/result/crates/mf-cli.lcov
           disable_search: true
           flags: mf-cli
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mf-compiler)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-compiler')
@@ -118,7 +118,7 @@ jobs:
           files: target/coverage/result/crates/mf-compiler.lcov
           disable_search: true
           flags: mf-compiler
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mf-runtime)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-runtime')
@@ -127,7 +127,7 @@ jobs:
           files: target/coverage/result/crates/mf-runtime.lcov
           disable_search: true
           flags: mf-runtime
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mf-runtime-derive)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-runtime-derive')
@@ -136,7 +136,7 @@ jobs:
           files: target/coverage/result/crates/mf-runtime-derive.lcov
           disable_search: true
           flags: mf-runtime-derive
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mf-telemetry)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-telemetry')
@@ -145,7 +145,7 @@ jobs:
           files: target/coverage/result/crates/mf-telemetry.lcov
           disable_search: true
           flags: mf-telemetry
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mf-tui)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-tui')
@@ -154,7 +154,7 @@ jobs:
           files: target/coverage/result/crates/mf-tui.lcov
           disable_search: true
           flags: mf-tui
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mfn-code)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-code')
@@ -163,7 +163,7 @@ jobs:
           files: target/coverage/result/crates/mfn-code.lcov
           disable_search: true
           flags: mfn-code
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mfn-core)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-core')
@@ -172,7 +172,7 @@ jobs:
           files: target/coverage/result/crates/mfn-core.lcov
           disable_search: true
           flags: mfn-core
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mfn-deepseek)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-deepseek')
@@ -181,7 +181,7 @@ jobs:
           files: target/coverage/result/crates/mfn-deepseek.lcov
           disable_search: true
           flags: mfn-deepseek
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mfn-llm)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-llm')
@@ -190,7 +190,7 @@ jobs:
           files: target/coverage/result/crates/mfn-llm.lcov
           disable_search: true
           flags: mfn-llm
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload crate coverage (mfn-test-affected)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-test-affected')
@@ -199,7 +199,7 @@ jobs:
           files: target/coverage/result/crates/mfn-test-affected.lcov
           disable_search: true
           flags: mfn-test-affected
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
@@ -207,5 +207,5 @@ jobs:
           files: target/coverage/result/lcov.info
           disable_search: true
           flags: rust
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
