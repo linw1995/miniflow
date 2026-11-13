@@ -329,6 +329,49 @@ impl TryFrom<Value> for WorkflowArguments {
     }
 }
 
+impl WorkflowArguments {
+    /// Rewrites unqualified startup input names to their qualified `node.port`
+    /// form.
+    ///
+    /// A dynamic caller sees the flat names in a body's [`crate::interface_properties`]
+    /// and cannot synthesize `node.port` keys. Qualified names stay canonical, so
+    /// repeated resolution is a no-op. An unqualified name must identify exactly
+    /// one startup port; sharing it across nodes is ambiguous and rejected.
+    pub fn qualify_inputs(
+        &mut self,
+        schema: &WorkflowInputSchema,
+    ) -> Result<(), WorkflowInputError> {
+        let mut renamed = Vec::new();
+        for name in self.0.keys() {
+            if name.contains('.') {
+                continue;
+            }
+            let mut matches = schema
+                .inputs
+                .iter()
+                .filter(|(_, ports)| ports.contains_key(name))
+                .map(|(node, _)| crate::output_id(node, name));
+            match (matches.next(), matches.next()) {
+                (Some(qualified), None) => renamed.push((name.clone(), qualified)),
+                (Some(_), Some(_)) => {
+                    return InvalidSnafu {
+                        path: pointer("", name),
+                        message: "ambiguous workflow input name",
+                    }
+                    .fail();
+                }
+                _ => {}
+            }
+        }
+        for (name, qualified) in renamed {
+            if let Some(value) = self.0.remove(&name) {
+                self.0.entry(qualified).or_insert(value);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl WorkflowInputSchema {
     /// Checks supplied values and declarations without resolving external sources.
     pub fn validate(&self, arguments: &WorkflowArguments) -> Result<(), WorkflowInputError> {

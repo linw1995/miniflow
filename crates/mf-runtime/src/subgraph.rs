@@ -323,6 +323,14 @@ impl<N: SubgraphNode> crate::TaskStreamNode for SubgraphTask<N> {
 }
 
 impl PreparedSubgraph {
+    /// Interface properties owned by this prepared body.
+    ///
+    /// Derivation reads only the prepared interface; it never executes the body
+    /// or serializes its nodes.
+    pub fn properties(&self) -> serde_json::Value {
+        crate::interface_properties(&self.inputs, &self.outputs, &self.stream_outputs)
+    }
+
     /// Retains an already compiled Flow and captures its execution interface metadata.
     pub fn from_flow(flow: Flow, nodes: Vec<NodeIdentity>) -> Self {
         let outputs = flow

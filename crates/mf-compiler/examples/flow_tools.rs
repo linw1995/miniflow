@@ -23,7 +23,7 @@ fn definition() -> Result<WorkflowDefinition, Box<dyn Error>> {
                 "calls":{"type":{"list":"object"},"secret":false},
                 "add_description":{"type":"string","secret":false,"default":"Add two integers."},
                 "add_parameters":{"type":"object","secret":false,"default":{
-                    "calculate.left":{"description":"Left operand."},"calculate.right":{"description":"Right operand."}
+                    "left":{"description":"Left operand."},"right":{"description":"Right operand."}
                 }}
             }}},
             {"id":"add","kind":"builtin.constant","config":{"type":"flow","value":{
@@ -31,22 +31,26 @@ fn definition() -> Result<WorkflowDefinition, Box<dyn Error>> {
                     "language":"cel","inputs":{"left":"int","right":"int"},"code":{"sum":"left + right"}
                 }}],"outputs":[{"name":"sum","node":"calculate","port":"sum"}]
             }}},
-            {"id":"add_tool","kind":"builtin.object","config":{"fields":{
-                "flow":"flow","description":"string","parameters":"object"
+            {"id":"add_properties","kind":"builtin.object","config":{"fields":{
+                "description":"string","parameters":"object","interface":"object"
             }},"inputs":{
-                "flow":{"from":{"node":"add","port":"value"}},
                 "description":{"from":{"node":"params","port":"add_description"}},
-                "parameters":{"from":{"node":"params","port":"add_parameters"}}
+                "parameters":{"from":{"node":"params","port":"add_parameters"}},
+                "interface":{"from":{"node":"add","port":"properties"}}
             }},
-            {"id":"tools","kind":"builtin.object","config":{"fields":{"add":"object"}},"inputs":{
-                "add":{"from":{"node":"add_tool","port":"value"}}
+            {"id":"tools","kind":"builtin.object","config":{"fields":{"add":"flow"}},"inputs":{
+                "add":{"from":{"node":"add","port":"value"}}
+            }},
+            {"id":"tool_properties","kind":"builtin.object","config":{"fields":{"add":"object"}},"inputs":{
+                "add":{"from":{"node":"add_properties","port":"value"}}
             }},
             {"id":"catalog","kind":"workflow.call","config":{"flow":"catalog"},"inputs":{
-                "params.tools":{"from":{"node":"tools","port":"value"}}
+                "params.properties":{"from":{"node":"tool_properties","port":"value"}}
             }},
             {"id":"dispatch","kind":"workflow.call","config":{"flow":"dispatch"},"inputs":{
                 "params.calls":{"from":{"node":"params","port":"calls"}},
-                "params.tools":{"from":{"node":"tools","port":"value"}}
+                "params.tools":{"from":{"node":"tools","port":"value"}},
+                "params.tool_properties":{"from":{"node":"tool_properties","port":"value"}}
             }}
         ],
         "edges":[{"from_node":"catalog","from_output":"tools","to_node":"dispatch"}],

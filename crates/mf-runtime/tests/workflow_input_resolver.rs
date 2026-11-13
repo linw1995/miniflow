@@ -178,3 +178,53 @@ fn non_unicode_environment_reports_the_input_path_without_leaking_the_value() {
     assert!(!format!("{error:?}").contains("sentinel-secret"));
     assert!(matches!(error, WorkflowInputError::Invalid { path, .. } if path == "/params.a~1b~0c"));
 }
+
+#[test]
+fn unqualified_startup_names_resolve_when_they_identify_one_port() {
+    let schema = schema(json!({
+        "left": {"type": "int", "required": true},
+        "right": {"type": "int", "required": true}
+    }));
+    let arguments = WorkflowArguments::try_from(json!({"left": 2, "right": 3})).unwrap();
+    let resolved = resolve_workflow_inputs(&schema, &arguments, |_| None).unwrap();
+    assert_eq!(
+        serde_json::to_value(&resolved).unwrap(),
+        json!({"params.left": 2, "params.right": 3})
+    );
+    // The caller's value is untouched and repeated resolution is a no-op.
+    assert_eq!(arguments.0.len(), 2);
+    let mut canonical = resolved.clone();
+    canonical.qualify_inputs(&schema).unwrap();
+    assert_eq!(canonical, resolved);
+
+    // A qualified name stays canonical and explicit even if a flat alias exists.
+    let qualified = WorkflowArguments::try_from(json!({"params.left": 5})).unwrap();
+    let mut canonical = qualified.clone();
+    canonical.qualify_inputs(&schema).unwrap();
+    assert_eq!(canonical, qualified);
+}
+
+#[test]
+fn ambiguous_unqualified_startup_names_are_rejected() {
+    let shared = json!({"value": {"type": "int", "required": true}});
+    let schema: WorkflowInputSchema = serde_json::from_value(json!({
+        "inputs": {"first": shared, "second": shared}, "stdin": {}
+    }))
+    .unwrap();
+    let arguments = WorkflowArguments::try_from(json!({"value": 1})).unwrap();
+    let mut canonical = arguments.clone();
+    let error = canonical.qualify_inputs(&schema).unwrap_err();
+    assert!(error.to_string().contains("ambiguous workflow input name"));
+    assert!(matches!(
+        resolve_workflow_inputs(&schema, &arguments, |_| None),
+        Err(WorkflowInputError::Invalid { .. })
+    ));
+
+    // An unqualified name that identifies no startup port stays unknown.
+    let unknown = WorkflowArguments::try_from(json!({"missing": 1})).unwrap();
+    let error = resolve_workflow_inputs(&schema, &unknown, |_| None).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown workflow input"),
+        "{error}"
+    );
+}

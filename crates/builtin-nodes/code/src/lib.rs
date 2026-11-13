@@ -136,7 +136,10 @@ fn result_type(cel_type: &CelType) -> Result<ValueType, CodeTypeError> {
         CelType::Double => Ok(ValueType::Float64),
         CelType::String => Ok(ValueType::String),
         CelType::List(inner) => Ok(ValueType::List(Box::new(result_type(inner)?))),
-        CelType::Map(key, value) if key.as_ref() == &CelType::String => {
+        // Map macros such as `transformMap` accumulate into an untyped map, so the
+        // checker reports `dyn` keys even when every produced key is a string.
+        // The JSON conversion still rejects non-string keys at execution time.
+        CelType::Map(key, value) if matches!(key.as_ref(), CelType::String | CelType::Dyn) => {
             Ok(ValueType::Map(Box::new(result_type(value)?)))
         }
         _ => UnsupportedResultSnafu {

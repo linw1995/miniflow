@@ -46,15 +46,23 @@ fn select_local_sources(value: &mut Value) {
     }
 }
 
+/// Assembles the two collections dispatch needs.
+///
+/// `tools` holds the native capabilities the Router invokes; `tool_properties`
+/// holds the plain JSON each body publishes about itself, joined with the
+/// caller-owned description and parameter documentation. Flow values never enter
+/// JSON or CEL.
 fn caller(tools: BTreeMap<String, FlowTool>) -> Value {
     let mut nodes = Vec::new();
-    let mut fields = BTreeMap::new();
-    let mut inputs = BTreeMap::new();
+    let mut flow_fields = BTreeMap::new();
+    let mut flow_inputs = BTreeMap::new();
+    let mut property_fields = BTreeMap::new();
+    let mut property_inputs = BTreeMap::new();
     for (name, tool) in tools {
         let producer = format!("tool_{name}");
         let description = format!("{producer}_description");
         let parameters = format!("{producer}_parameters");
-        let record = format!("{producer}_record");
+        let properties = format!("{producer}_properties");
         let mut body = serde_json::to_value(tool.body).unwrap();
         select_local_sources(&mut body);
         nodes.extend([
@@ -63,24 +71,29 @@ fn caller(tools: BTreeMap<String, FlowTool>) -> Value {
             }),
             json!({"id":description,"kind":"builtin.constant","config":{"value":tool.description}}),
             json!({"id":parameters,"kind":"builtin.constant","config":{"value":tool.parameters}}),
-            // Compose each self-contained tool natively; never serialize its Flow.
             json!({
-                "id":record,"kind":"builtin.object",
-                "config":{"fields":{"flow":"flow","description":"string","parameters":"object"}},
+                "id":properties,"kind":"builtin.object",
+                "config":{"fields":{"description":"string","parameters":"object","interface":"object"}},
                 "inputs":{
-                    "flow":edge(&producer,"value"),
                     "description":edge(&description,"value"),
-                    "parameters":edge(&parameters,"value")
+                    "parameters":edge(&parameters,"value"),
+                    "interface":edge(&producer,"properties")
                 }
             }),
         ]);
-        fields.insert(name.clone(), "object");
-        inputs.insert(name, edge(&record, "value"));
+        flow_fields.insert(name.clone(), "flow");
+        flow_inputs.insert(name.clone(), edge(&producer, "value"));
+        property_fields.insert(name.clone(), "object");
+        property_inputs.insert(name, edge(&properties, "value"));
     }
-    // This node constructs a native map; Flow values never enter JSON/CEL.
-    nodes.push(
-        json!({"id":"tools","kind":"builtin.object","config":{"fields":fields},"inputs":inputs}),
-    );
+    // These nodes construct native maps; Flow values never enter JSON/CEL.
+    nodes.push(json!({
+        "id":"tools","kind":"builtin.object","config":{"fields":flow_fields},"inputs":flow_inputs
+    }));
+    nodes.push(json!({
+        "id":"tool_properties","kind":"builtin.object",
+        "config":{"fields":property_fields},"inputs":property_inputs
+    }));
     json!({
         "version":"2026-10-28", "dependencies":local_dependencies(),
         "nodes":nodes,"outputs":[]
@@ -98,11 +111,12 @@ pub fn configured_tools(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition
             "calls":{"type":{"list":"object"},"secret":false}
         }}}),
         json!({"id":"catalog","kind":"workflow.call","config":{"flow":"tool-catalog"},"inputs":{
-            "params.tools":edge("tools","value")
+            "params.properties":edge("tool_properties","value")
         }}),
         json!({"id":"dispatch","kind":"workflow.call","config":{"flow":"tool-uses"},"inputs":{
             "params.calls":edge("params","calls"),
-            "params.tools":edge("tools","value")
+            "params.tools":edge("tools","value"),
+            "params.tool_properties":edge("tool_properties","value")
         }}),
     ]);
     // ToolUses reads the same native Flows directly. Its execution still waits
@@ -135,6 +149,10 @@ pub fn configured_agent(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition
         inputs.insert(format!("params.{name}"), edge("params", name));
     }
     inputs.insert("params.tools".into(), edge("tools", "value"));
+    inputs.insert(
+        "params.tool_properties".into(),
+        edge("tool_properties", "value"),
+    );
     value["nodes"].as_array_mut().unwrap().extend([
         json!({"id":"params","kind":"builtin.parameters","config":{"parameters":parameters}}),
         json!({"id":"agent","kind":"workflow.call","config":{"flow":"agent"},"inputs":inputs}),

@@ -285,6 +285,11 @@ pub fn resolve_workflow_inputs(
     arguments: &WorkflowArguments,
     mut environment: impl FnMut(&str) -> Option<OsString>,
 ) -> Result<WorkflowArguments, WorkflowInputError> {
+    let mut arguments = arguments.clone();
+    // A dynamic caller supplies flat startup names derived from the body's own
+    // properties; normalize before validation so both forms share one contract.
+    arguments.qualify_inputs(schema)?;
+    let arguments = &arguments;
     schema.validate(arguments)?;
     let mut resolved = arguments.clone();
     let mut environment_bytes = 0usize;
