@@ -105,18 +105,11 @@ pub fn validate_scope(
                 }
             ),
             mf_runtime::ASSIGN_KIND => {
+                // Lowering validates the declaration version; inside a Loop body the
+                // assignment keeps the pre-existing immediate-write contract.
                 let types = enclosing
                     .or(root)
                     .ok_or_else(|| invalid(&node_path, "assignment requires a state scope"))?;
-                // Inside a Loop body the assignment keeps the pre-existing immediate-write
-                // contract. Only root state needs the version that introduces it.
-                ensure!(
-                    enclosing.is_some() || definition.version.supports_workflow_variables(),
-                    crate::compiler::InvalidScopeSnafu {
-                        path: path_label(&node_path),
-                        message: "workflow variables and assignments require definition version 2026-11-13",
-                    }
-                );
                 let target = assignment_target(&node.config, &node_path)?;
                 ensure!(
                     types.contains_key(&target),
