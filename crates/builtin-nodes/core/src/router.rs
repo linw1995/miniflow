@@ -98,8 +98,13 @@ impl TaskNode for Router {
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         let route = &inputs["route"];
-        let source = format!("%{}", context.current_node().unwrap_or(KIND));
-        let values = context.node_state(&source, self.config.initial());
+        let values = if let Some(id) = context.current_node() {
+            let source = format!("%{id}");
+            context.node_state(&source, self.config.initial())
+        } else {
+            // Direct native calls have no stable owner for assignable state.
+            self.config.initial()
+        };
         let enables = &values["enables"];
         let selected = enables
             .as_array()
@@ -329,6 +334,24 @@ mod tests {
             );
         }
         assert!(factory(json!({"routes":[]})).is_ok());
+    }
+
+    #[test]
+    fn direct_native_gates_without_an_owner_do_not_share_state() {
+        let mut context = ExecutionContext::default();
+        for route in ["first", "second", "first"] {
+            let prepared = factory(json!({"routes":[route]})).unwrap();
+            let result = prepared
+                .execution
+                .as_task_node()
+                .unwrap()
+                .execute(
+                    Inputs::from([("route".into(), ValueRef::from(route))]),
+                    &mut context,
+                )
+                .unwrap();
+            assert!(result.outputs.contains_key(route));
+        }
     }
 
     #[test]

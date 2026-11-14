@@ -48,7 +48,7 @@ fn select_local_sources(value: &mut Value) {
 
 /// Assembles the two collections dispatch needs.
 ///
-/// `tools` holds the native capabilities the Router invokes; `tool_properties`
+/// `tools` holds the native capabilities the compiler binds to static Calls; `tool_properties`
 /// holds the plain JSON each body publishes about itself, joined with the
 /// caller-owned description and parameter documentation. Flow values never enter
 /// JSON or CEL.

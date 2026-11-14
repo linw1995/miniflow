@@ -270,7 +270,7 @@ impl Freezing<'_> {
             actual.len() <= mf_telemetry::MAX_SCOPE_DEPTH,
             crate::compiler::InvalidGraphSnafu {
                 definition_id: mf_runtime::DefinitionId::from("workflow"),
-                message: "compiled Flow candidates exceed the scope nesting limit",
+                message: "static Flow dispatch exceeds the scope nesting limit",
             }
         );
         for index in 0..scope.definition.nodes.len() {
@@ -410,6 +410,14 @@ fn expand_dispatch(
         .filter(|edge| edge.to_node == *id && edge.to_input == "arguments")
         .cloned()
         .collect();
+    // Rewrite only authored result consumers. A route may itself be named
+    // result, so generated branch gates must not enter this remapping.
+    for edge in &mut scope.definition.control_edges {
+        if edge.from_node == *id && edge.from_output == "result" {
+            edge.from_node = result_id.clone();
+            edge.from_output = "value".into();
+        }
+    }
     for (route, body) in &bodies {
         let call_id = mf_runtime::DefinitionId::from(format!("{id}:route:{route}"));
         let mut call = NodeDefinition {
@@ -521,12 +529,6 @@ fn expand_dispatch(
         if selection.node == *id && selection.port == "result" {
             selection.node = result_id.clone();
             selection.port = "value".into();
-        }
-    }
-    for edge in &mut scope.definition.control_edges {
-        if edge.from_node == *id && edge.from_output == "result" {
-            edge.from_node = result_id.clone();
-            edge.from_output = "value".into();
         }
     }
     for edge in &mut scope.definition.order_edges {

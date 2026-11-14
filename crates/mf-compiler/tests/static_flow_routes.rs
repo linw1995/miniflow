@@ -362,6 +362,51 @@ fn runtime_handles_cannot_replace_static_targets_or_add_routes() {
 }
 
 #[test]
+fn route_names_do_not_collide_with_dispatch_helpers_or_legacy_config_fields() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for (first, second) in [
+        ("result", "enables"),
+        ("mode", "flow_field"),
+        ("set_enables", "route:first"),
+    ] {
+        let mut source = definition();
+        source
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "tools")
+            .unwrap()
+            .config["fields"] = json!({first:"flow",second:"flow"});
+        source
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "params")
+            .unwrap()
+            .config["parameters"]["route"]["default"] = json!(first);
+        for edge in &mut source.edges {
+            if edge.to_node.as_str() == "tools" {
+                edge.to_input = if edge.to_input == "first" {
+                    first.into()
+                } else {
+                    second.into()
+                };
+            }
+        }
+        let plan = compile_definition(&source, &registry).unwrap();
+        assert_eq!(
+            plan.graph.children[&format!("execute:route:{first}").into()].len(),
+            1
+        );
+        assert_eq!(
+            instantiate_compiled(&plan, &registry)
+                .unwrap()
+                .execute()
+                .unwrap()["result"]["outputs"]["value"],
+            json!(10)
+        );
+    }
+}
+
+#[test]
 fn every_static_body_is_checked_even_when_its_route_starts_disabled() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut body = effect(false);
