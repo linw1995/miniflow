@@ -10,8 +10,8 @@
 ## 2. Structured messages and source correlation
 
 - [x] 2.1 Add optional terminal messages and typed append/replay-safe message events to the chat contract/decoder.
-- [x] 2.2 Reuse the single Agent `messages` log; derive current-invocation output/events from its immutable initial
-  boundary, excluding historical/system inputs and the admitted prompt without a parallel transcript accumulator.
+- [x] 2.2 Return the single Agent `messages` log as complete authoritative context; accept complete input messages,
+  remove initial-boundary bookkeeping, and generate immutable event identities in the publishing node.
 - [x] 2.3 Propagate explicit message/model/tool origin to standard dispatch observations without changing provider arguments.
 - [x] 2.4 Add a shared reducer for semantic calls and independent executions, including unlinked and contradictory facts.
 
@@ -20,8 +20,8 @@
 - [x] 3.1 Evolve canonical message storage for multiple assistant/tool rows, empty-text tool calls, complete metadata,
   source keys, and transactional session ordering without a fixed two-message reservation.
 - [x] 3.2 Persist every valid Flow message and complete call/result structure; do not substitute lossy display summaries.
-- [x] 3.3 Restore full successful-turn model history from message relations; keep partial unsuccessful turns inspectable
-  without adding them or metrics-only observations to model context.
+- [x] 3.3 Restore only the latest successful complete context version; allow arbitrary valid history/system rewrites,
+  retain older versions and immutable audit events, and exclude failed versions and telemetry from model context.
 - [x] 3.4 Add scoped call/execution/checkpoint FKs, link tools to persisted message rows, and remove live JSON storage.
 - [x] 3.5 Migrate prior draft journals as observation-only records without invented messages, run IDs, or associations.
 - [x] 3.6 Atomically apply message/relation/cursor changes, finalize messages with the turn, and retain complete save-only recovery.
@@ -42,6 +42,8 @@
 - [x] 5.3 Test idle/no-render delivery, reliable message backpressure, cancellation, final draining, and restart without execution.
 - [x] 5.4 Recompile the affected-test Flow and run selected tests, focused coverage, `prek -a`, and strict OpenSpec validation.
 - [x] 5.5 Update PR scope/validation/AI disclosure and verify no conflicts with current main before readiness.
+- [x] 5.6 Prove custom Flow compaction/reordering/reset survives restart and reaches the next provider request without
+  resurrected history/system input; prove immutable payload sharing preserves duplicate positions and sensitivity.
 
 The earlier baseline is not evidence for the revised architecture. Final verification below is tracked against the
 new message/relation/event implementation, including real restart and next-provider-request checks.

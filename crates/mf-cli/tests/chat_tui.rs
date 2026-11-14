@@ -197,7 +197,7 @@ fn reused_provider_tool_ids_remain_separate_across_real_model_rounds() {
                 let CompletionState::Committed(completion) = resolution.state else {
                     panic!("multi-round conversation did not commit")
                 };
-                assert_eq!(completion.result.messages.unwrap().len(), 5);
+                assert_eq!(completion.result.messages.unwrap().len(), 6);
                 break *tool_uses.unwrap();
             }
             Some(ChatEvent::Error { source, .. }) => panic!("multi-round tools: {source}"),
@@ -338,7 +338,7 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
                     panic!("expected the scripted final response to commit")
                 };
                 assert_eq!(completion.result.text, "Recovered: 20");
-                assert_eq!(completion.result.messages.as_ref().unwrap().len(), 5);
+                assert_eq!(completion.result.messages.as_ref().unwrap().len(), 6);
                 break *tool_uses.expect("host-owned tool evidence");
             }
             _ => thread::sleep(Duration::from_millis(10)),
@@ -469,8 +469,8 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
                 assert_eq!(completion.result.text, "Context restored");
                 assert_eq!(
                     completion.result.messages.unwrap().len(),
-                    1,
-                    "return only this invocation's new messages"
+                    8,
+                    "return the complete authoritative context, including inherited messages"
                 );
                 break;
             }

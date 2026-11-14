@@ -38,6 +38,9 @@ pub struct ToolOrigin {
 /// Message semantics remain separate from the observed phase of each execution attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct ChatToolUse {
+    #[value(default)]
+    #[serde(default)]
+    pub context_only: bool,
     pub id: String,
     pub assistant_message_id: String,
     pub model_call_id: Option<String>,

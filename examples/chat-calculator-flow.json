@@ -38,6 +38,12 @@
             },
             "default": []
           },
+          "messages": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
           "model": {
             "type": "string",
             "default": "your-model",
@@ -179,6 +185,12 @@
           "from": {
             "node": "params",
             "port": "history"
+          }
+        },
+        "params.messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
           }
         },
         "params.model": {

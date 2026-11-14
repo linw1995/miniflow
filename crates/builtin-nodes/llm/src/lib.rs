@@ -33,7 +33,7 @@ pub const KIND: &str = "builtin.llm";
 
 pub type MessageMetadata = BTreeMap<String, ValueRef>;
 mod messages;
-pub use messages::MessageBatch;
+pub use messages::MessageEvent;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
 pub struct UsageScope {

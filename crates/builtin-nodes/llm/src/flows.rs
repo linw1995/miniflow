@@ -58,8 +58,7 @@ mod tests {
             .find(|node| node.id.as_str() == "repeat")
             .unwrap();
         let loop_inputs = repeat.config["inputs"].as_object().unwrap();
-        assert_eq!(loop_inputs.len(), 7);
-        assert_eq!(loop_inputs["initial_message_count"], json!("int"));
+        assert_eq!(loop_inputs.len(), 6);
         assert_eq!(loop_inputs["tools"], json!({"map":"flow"}));
         assert_eq!(loop_inputs["tool_properties"], json!({"map":"object"}));
         let variables = repeat.config["variables"].as_array().unwrap();
@@ -76,6 +75,7 @@ mod tests {
             })
         );
         let serialized = serde_json::to_string(&definition).unwrap();
+        assert!(!serialized.contains("initial_message_count"));
         assert!(!serialized.contains("public_messages"));
         assert!(!serialized.contains("public_assistant"));
         for synthetic in [

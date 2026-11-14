@@ -4,6 +4,120 @@ use mf_runtime::{BuiltinFlowRegistry, WorkflowArguments};
 use serde_json::json;
 
 #[test]
+fn custom_flow_rewrites_complete_context_and_reopened_next_provider_receives_only_that_version() {
+    use mf_chat::{ChatDatabase, ModelIdentity};
+    use mfn_llm::test_support::{Reply, Server};
+    let server = Server::start(vec![
+        Reply::text("first reply"),
+        Reply::text("second reply"),
+    ]);
+    // An ordinary custom Flow: consume generic messages, call a model, return a compacted context.
+    // No persistence counts, source ordinals, or Agent-specific append protocol are needed.
+    let definition = serde_json::from_value(json!({
+        "version":"2026-11-13", "dependencies":{},
+        "nodes":[
+            {"id":"params","kind":"builtin.parameters","config":{"parameters":{
+                "prompt":{"type":"string"}, "messages":{"type":{"list":"object"}},
+                "model":{"type":"string","default":"example-model","secret":false},
+                "base_url":{"type":"string","secret":false},"api_key":{"type":"string"}
+            }}},
+            {"id":"model","kind":"builtin.llm","config":{
+                "model":{"$ref":"params.model"},"base_url":{"$ref":"params.base_url"},"api_key":{"$ref":"params.api_key"}
+            },"inputs":{"messages":{"from":{"node":"params","port":"messages"}}}},
+            {"id":"compact","kind":"builtin.code","config":{
+                "language":"cel","inputs":{"reply":"object"},
+                "code":{"messages":"[dyn({'role':'system','content':'Replacement instruction'}), dyn({'role':'assistant','content':'Compacted summary'}), reply]"}
+            },"inputs":{"reply":{"from":{"node":"model","port":"message"}}}}
+        ],
+        "outputs":[
+            {"name":"status","node":"model","port":"status"},
+            {"name":"text","node":"model","port":"text"},
+            {"name":"usages","node":"model","port":"usages"},
+            {"name":"messages","node":"compact","port":"messages"}
+        ]
+    })).unwrap();
+    let profile = WorkflowProfile::new(
+        "custom",
+        definition,
+        WorkflowArguments::try_from(json!({
+            "params.base_url":server.base_url, "params.api_key":"synthetic-key"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("chat.sqlite");
+    let database = ChatDatabase::open(&path).unwrap();
+    let session = database
+        .create_session("custom", Some("Old instruction".into()), None)
+        .unwrap();
+    let model = ModelIdentity {
+        profile: "custom".into(),
+        model: Some("example-model".into()),
+    };
+    let first = database
+        .begin_turn(&session.id, "Old prompt", model.clone(), None)
+        .unwrap();
+    let reply = profile
+        .backend()
+        .invoke(
+            &first.invocation,
+            first.request,
+            &mut mf_runtime::ExecutionContext::default(),
+            None,
+            None,
+        )
+        .unwrap();
+    let first_context = reply.messages.clone().unwrap();
+    database
+        .complete_turn(first.invocation.clone(), reply)
+        .unwrap();
+    drop(database);
+    let database = ChatDatabase::open(&path).unwrap();
+    let second = database
+        .begin_turn(&session.id, "New prompt", model, None)
+        .unwrap();
+    let reply = profile
+        .backend()
+        .invoke(
+            &second.invocation,
+            second.request,
+            &mut mf_runtime::ExecutionContext::default(),
+            None,
+            None,
+        )
+        .unwrap();
+    database.complete_turn(second.invocation, reply).unwrap();
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].body["messages"],
+        json!([
+            {"role":"system","content":[{"type":"text","text":"Replacement instruction"}]},
+            {"role":"assistant","content":[{"type":"text","text":"Compacted summary"}]},
+            {"role":"assistant","content":[{"type":"text","text":"first reply"}]},
+            {"role":"user","content":"New prompt"}
+        ])
+    );
+    assert!(!requests[1].body.to_string().contains("Old prompt"));
+    assert!(!requests[1].body.to_string().contains("Old instruction"));
+    assert_eq!(
+        database
+            .conversation_messages(&first.invocation.call_id)
+            .unwrap(),
+        Some(first_context)
+    );
+    let current = database.history(&session.id).unwrap();
+    assert!(current.system.is_none());
+    assert_eq!(current.history.len(), 3);
+    assert!(
+        !serde_json::to_string(&current.history)
+            .unwrap()
+            .contains("first reply")
+    );
+}
+
+#[test]
 fn agent_turn_is_provider_owned_and_keeps_the_streaming_chat_contract() {
     let builtins = BuiltinFlowRegistry::from_inventory().unwrap();
     let registration = builtins.get("mfn-llm.agent-turn").unwrap();

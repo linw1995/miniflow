@@ -104,7 +104,11 @@ fn render_tools(
         transcript.plain(
             format!("{call_key}:semantic"),
             vec![Line::styled(
-                format!("  [{state}] {}", safe(&call.name)),
+                format!(
+                    "  [{}{state}] {}",
+                    if call.context_only { "context: " } else { "" },
+                    safe(&call.name)
+                ),
                 Style::default().fg(Color::Cyan),
             )],
         );
@@ -1398,6 +1402,7 @@ mod tests {
         history.runs.extend([retry, unlinked]);
         history.calls = vec![
             mf_chat::ChatToolUse {
+                context_only: false,
                 id: "semantic".into(),
                 assistant_message_id: "message".into(),
                 model_call_id: Some("model".into()),
@@ -1408,6 +1413,7 @@ mod tests {
                 execution_ids: vec!["dispatch:0".into(), "retry".into()],
             },
             mf_chat::ChatToolUse {
+                context_only: true,
                 id: "unobserved".into(),
                 assistant_message_id: "message".into(),
                 model_call_id: None,
@@ -1424,6 +1430,7 @@ mod tests {
         let screen = render(&view, 160, 60);
         for expected in [
             "[returned] requested-name",
+            "[context: returned] messages-only",
             "[failed] observed-name",
             "[succeeded] retry-name",
             "Returned content: returned error content",

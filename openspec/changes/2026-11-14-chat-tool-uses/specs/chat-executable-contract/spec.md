@@ -4,17 +4,29 @@
 
 ### Requirement: Expose optional structured conversation messages
 
-Chat workflows MAY return current-invocation structured messages and a declared typed message-event stream. The host SHALL retain support for workflows omitting them. Message identity/order SHALL permit idempotent event replay and final-result reconciliation. Historical inputs SHALL NOT be reingested as newly generated messages, and raw message text SHALL NOT replace canonical final text implicitly.
+Chat workflows MAY accept complete input messages and return complete authoritative context messages, with an optional declared immutable message-event stream. A Flow MAY compact, reorder, replace, or remove history and system instructions. The host SHALL retain support for workflows omitting these ports. The Flow SHALL NOT need a persistence boundary count or host cursor. Raw message text SHALL NOT replace canonical final text implicitly.
 
 #### Scenario: Receive a message and its final-list replay
 
 - **WHEN** an assistant tool-call message arrives in the stream and is repeated in the terminal message result
-- **THEN** it describes one semantic call using the same source identity, not a second execution
+- **THEN** its presence in a context version does not create another execution or erase the immutable event evidence
 
 #### Scenario: Expose an Agent transcript
 
 - **WHEN** the Agent's internal context contains system/history input, the admitted prompt, and new assistant/tool messages
-- **THEN** its public new-message output explicitly excludes the inherited prefix rather than asking the host to guess it
+- **THEN** it returns that complete context directly, without maintaining a second transcript or excluding a host-owned prefix
+
+#### Scenario: Replace earlier history
+
+- **WHEN** a custom Flow summarizes, edits, reorders, or removes earlier messages and returns a valid complete context
+- **THEN** the next invocation receives exactly that successful returned context plus its new user message
+- **AND** older history and removed system instructions are not reinserted from admission or audit records
+
+#### Scenario: Publish a message fact
+
+- **WHEN** a Flow uses the message publisher with complete messages and optional model origin
+- **THEN** the publisher generates a scoped event identity and the host assigns/replays its journal cursor
+- **AND** a different final context does not retroactively rewrite the published fact
 
 #### Scenario: Run an older workflow
 
@@ -39,7 +51,7 @@ The host SHALL persist every structured message accepted by the chat contract, i
 #### Scenario: Restore and continue after restart
 
 - **WHEN** the host reopens a successful conversation and submits its next turn
-- **THEN** the next Flow receives the stored canonical assistant/tool message sequence and metadata in order
+- **THEN** the next Flow receives the latest successful complete context and metadata in its exact stored order
 - **AND** the provider adapter receives the supported conversation fields, without promoting opaque metadata to provider parameters
 - **AND** model context is not reconstructed from diagnostic observations or clipped tool display strings
 

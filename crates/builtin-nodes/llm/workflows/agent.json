@@ -41,6 +41,12 @@
             },
             "default": []
           },
+          "messages": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
           "model": {
             "type": "string",
             "default": "your-model",
@@ -89,11 +95,13 @@
           "system": "string",
           "history": {
             "list": "object"
+          },
+          "messages": {
+            "list": "object"
           }
         },
         "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]",
-          "initial_message_count": "size(history) + (system == '' ? 1 : 2)"
+          "messages": "size(messages) > 0 ? messages : (system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
         }
       },
       "inputs": {
@@ -114,6 +122,12 @@
             "node": "params",
             "port": "history"
           }
+        },
+        "messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
         }
       }
     },
@@ -123,7 +137,6 @@
       "config": {
         "max_iterations": 8,
         "inputs": {
-          "initial_message_count": "int",
           "api_key": "string",
           "base_url": "string",
           "model": "string",
@@ -234,7 +247,8 @@
                   }
                 },
                 "code": {
-                  "origin": "size(usages) > 0 ? {'model_call_id': usages[0].call_id} : {}"
+                  "origin": "size(usages) > 0 ? {'model_call_id': usages[0].call_id} : {}",
+                  "model_call_id": "size(usages) > 0 ? string(usages[0].call_id) : ''"
                 }
               },
               "inputs": {
@@ -250,10 +264,16 @@
               "id": "publish_assistant",
               "kind": "llm.message_events",
               "inputs": {
-                "batch": {
+                "messages": {
                   "from": {
                     "node": "append_assistant",
-                    "port": "batch"
+                    "port": "events"
+                  }
+                },
+                "model_call_id": {
+                  "from": {
+                    "node": "prepare_origin",
+                    "port": "model_call_id"
                   }
                 }
               }
@@ -292,10 +312,16 @@
               "id": "publish_results",
               "kind": "llm.message_events",
               "inputs": {
-                "batch": {
+                "messages": {
                   "from": {
                     "node": "append_tool_results",
-                    "port": "batch"
+                    "port": "events"
+                  }
+                },
+                "model_call_id": {
+                  "from": {
+                    "node": "prepare_origin",
+                    "port": "model_call_id"
                   }
                 }
               }
@@ -360,15 +386,11 @@
                   "messages": {
                     "list": "object"
                   },
-                  "message": "object",
-                  "initial_message_count": "int",
-                  "usages": {
-                    "list": "object"
-                  }
+                  "message": "object"
                 },
                 "code": {
                   "messages": "messages + [dyn(message)]",
-                  "batch": "{'offset': size(messages) - initial_message_count, 'model_call_id': size(usages) > 0 ? usages[0].call_id : null, 'messages': [message]}"
+                  "events": "[message]"
                 }
               },
               "inputs": {
@@ -382,18 +404,6 @@
                   "from": {
                     "node": "turn",
                     "port": "message"
-                  }
-                },
-                "initial_message_count": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "initial_message_count"
-                  }
-                },
-                "usages": {
-                  "from": {
-                    "node": "turn",
-                    "port": "usages"
                   }
                 }
               }
@@ -440,30 +450,16 @@
                   "assistant": {
                     "list": "object"
                   },
-                  "initial_message_count": "int",
-                  "origin": "object",
                   "results": {
                     "list": "object"
                   }
                 },
                 "code": {
                   "messages": "assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))",
-                  "batch": "{'offset': size(assistant) - initial_message_count, 'model_call_id': 'model_call_id' in origin ? origin.model_call_id : null, 'messages': results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))}"
+                  "events": "results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
                 }
               },
               "inputs": {
-                "initial_message_count": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "initial_message_count"
-                  }
-                },
-                "origin": {
-                  "from": {
-                    "node": "prepare_origin",
-                    "port": "origin"
-                  }
-                },
                 "assistant": {
                   "from": {
                     "node": "append_assistant",
@@ -545,12 +541,6 @@
         }
       },
       "inputs": {
-        "initial_message_count": {
-          "from": {
-            "node": "initial_messages",
-            "port": "initial_message_count"
-          }
-        },
         "messages": {
           "from": {
             "node": "initial_messages",
@@ -604,7 +594,6 @@
           "messages": {
             "list": "object"
           },
-          "initial_message_count": "int",
           "text": "string",
           "outcome": "string",
           "error": "string",
@@ -613,7 +602,7 @@
           }
         },
         "code": {
-          "messages": "messages.transformList(index, message, index >= initial_message_count, message)",
+          "messages": "messages",
           "status": "outcome == 'completed' ? 'succeeded' : 'failed'",
           "text": "text",
           "usages": "usages",
@@ -621,12 +610,6 @@
         }
       },
       "inputs": {
-        "initial_message_count": {
-          "from": {
-            "node": "initial_messages",
-            "port": "initial_message_count"
-          }
-        },
         "messages": {
           "from": {
             "node": "repeat",

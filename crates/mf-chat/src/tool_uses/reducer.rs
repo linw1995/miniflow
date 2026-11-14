@@ -15,7 +15,9 @@ pub fn call_id(invocation: &Invocation, message: usize, ordinal: usize) -> Strin
 pub struct ToolUseReducer {
     history: ToolUseHistory,
     messages: Vec<ChatMessage>,
+    context: Vec<ChatMessage>,
     origins: BTreeMap<usize, String>,
+    event_ids: BTreeMap<usize, String>,
     pending: BTreeMap<i64, MessageBatch>,
     running: BTreeSet<String>,
 }
@@ -30,7 +32,9 @@ impl ToolUseReducer {
                 finished: false,
             },
             messages: Vec::new(),
+            context: Vec::new(),
             origins: BTreeMap::new(),
+            event_ids: BTreeMap::new(),
             pending: BTreeMap::new(),
             running: BTreeSet::new(),
         }
@@ -40,6 +44,38 @@ impl ToolUseReducer {
     }
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
+    }
+
+    /// Context-only calls are semantic state, never evidence of a newly dispatched execution.
+    pub fn set_context(&mut self, messages: Vec<ChatMessage>) -> Result<bool, ChatError> {
+        crate::message_log::validate(&messages, false)?;
+        let before = self.history.clone();
+        self.context = messages;
+        self.project();
+        Ok(before != self.history)
+    }
+
+    pub fn event_batch(&self, event: crate::MessageEvent) -> Result<MessageBatch, ChatError> {
+        ensure!(
+            !event.id.trim().is_empty() && !event.messages.is_empty(),
+            InvalidSnafu {
+                field: "message event",
+                reason: "requires an identity and messages"
+            }
+        );
+        let offset = self
+            .event_ids
+            .iter()
+            .find_map(|(index, id)| (id == &event.id).then_some(*index))
+            .unwrap_or(self.messages.len());
+        Ok(MessageBatch {
+            event_id: Some(event.id),
+            offset: i64::try_from(offset).context(crate::error::IntegerSnafu {
+                operation: "assign producer event order",
+            })?,
+            model_call_id: event.model_call_id,
+            messages: event.messages,
+        })
     }
 
     pub fn apply_messages(&mut self, batch: MessageBatch) -> Result<bool, ChatError> {
@@ -98,6 +134,27 @@ impl ToolUseReducer {
         })?;
         let mut messages = self.messages.clone();
         let mut origins = self.origins.clone();
+        let mut event_ids = self.event_ids.clone();
+        if let Some(id) = &batch.event_id {
+            ensure!(
+                !id.trim().is_empty() && !batch.messages.is_empty(),
+                InvalidSnafu {
+                    field: "message event",
+                    reason: "requires an identity and messages"
+                }
+            );
+            let previous: Vec<_> = event_ids
+                .iter()
+                .filter(|(_, old)| *old == id)
+                .map(|(index, _)| *index)
+                .collect();
+            ensure!(
+                previous.is_empty()
+                    || (previous.first() == Some(&offset)
+                        && previous.len() == batch.messages.len()),
+                ConflictSnafu { id }
+            );
+        }
         for (index, message) in batch.messages.into_iter().enumerate() {
             let ordinal = offset + index;
             if let Some(old) = messages.get(ordinal) {
@@ -109,6 +166,13 @@ impl ToolUseReducer {
                 );
             } else {
                 messages.push(message);
+            }
+            if let Some(id) = &batch.event_id {
+                ensure!(
+                    event_ids.get(&ordinal).is_none_or(|old| old == id),
+                    ConflictSnafu { id }
+                );
+                event_ids.insert(ordinal, id.clone());
             }
             if let Some(origin) = &batch.model_call_id {
                 ensure!(
@@ -123,6 +187,7 @@ impl ToolUseReducer {
         crate::message_log::validate(&messages, false)?;
         self.messages = messages;
         self.origins = origins;
+        self.event_ids = event_ids;
         Ok(())
     }
 
@@ -131,12 +196,15 @@ impl ToolUseReducer {
         let mut batches: Vec<MessageBatch> = Vec::new();
         for (index, message) in self.messages.iter().enumerate() {
             let origin = self.origins.get(&index).cloned();
+            let event_id = self.event_ids.get(&index).cloned();
             if let Some(last) = batches.last_mut()
                 && last.model_call_id == origin
+                && last.event_id == event_id
             {
                 last.messages.push(message.clone());
             } else {
                 batches.push(MessageBatch {
+                    event_id,
                     offset: index as i64,
                     model_call_id: origin,
                     messages: vec![message.clone()],
@@ -220,9 +288,14 @@ impl ToolUseReducer {
         fn text(value: &str, limit: usize) -> String {
             value[..value.floor_char_boundary(value.len().min(limit))].into()
         }
+        let messages = if self.messages.is_empty() {
+            &self.context
+        } else {
+            &self.messages
+        };
         let mut calls: Vec<ChatToolUse> = Vec::new();
         let mut identities: BTreeMap<_, usize> = BTreeMap::new();
-        for (index, message) in self.messages.iter().enumerate() {
+        for (index, message) in messages.iter().enumerate() {
             if let ChatMessage::Assistant {
                 tool_calls: Some(tools),
                 ..
@@ -235,7 +308,7 @@ impl ToolUseReducer {
             }
         }
         let mut pending = BTreeMap::new();
-        for (index, message) in self.messages.iter().enumerate() {
+        for (index, message) in messages.iter().enumerate() {
             match message {
                 ChatMessage::Assistant {
                     tool_calls: Some(tools),
@@ -262,6 +335,7 @@ impl ToolUseReducer {
                         let arguments = serde_json::to_string(&tool.arguments.redacted())
                             .unwrap_or_else(|_| "[unavailable]".into());
                         calls.push(ChatToolUse {
+                            context_only: self.messages.is_empty(),
                             id: call_id(&self.history.invocation, index, ordinal),
                             assistant_message_id: message_id(&self.history.invocation, index),
                             model_call_id,

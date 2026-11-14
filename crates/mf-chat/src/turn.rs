@@ -287,6 +287,21 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             .context(DatabaseSnafu {
                 operation: "reserve session message order",
             })?;
+        let mut request = ConversationInputs {
+            messages: None,
+            context: Some(ConversationContext {
+                title: crate::contract::TitleContext {
+                    source: owner.title_source.clone(),
+                    revision: owner.title_revision,
+                    attempted: crate::title::attempted(connection, &input.session_id)?,
+                    enabled: true,
+                },
+            }),
+            prompt: input.prompt.clone(),
+            system: context.system,
+            history: Some(context.history),
+        };
+        request.messages = Some(request.message_context());
         Ok(TurnStarted {
             database_path: input.database_path.clone(),
             invocation: Invocation {
@@ -294,19 +309,7 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
                 turn_id: turn.id,
                 call_id: call.id,
             },
-            request: ConversationInputs {
-                context: Some(ConversationContext {
-                    title: crate::contract::TitleContext {
-                        source: owner.title_source.clone(),
-                        revision: owner.title_revision,
-                        attempted: crate::title::attempted(connection, &input.session_id)?,
-                        enabled: true,
-                    },
-                }),
-                prompt: input.prompt.clone(),
-                system: context.system,
-                history: Some(context.history),
-            },
+            request,
         })
     })
 }
@@ -419,7 +422,8 @@ pub fn saved_result(
     call: &ModelCall,
 ) -> Result<ConversationResult, ChatError> {
     Ok(ConversationResult {
-        messages: crate::message_log::load(connection, &call.id)?,
+        messages: crate::conversation_state::load(connection, &call.id)?
+            .or(crate::message_log::load(connection, &call.id)?),
         status: "succeeded".into(),
         error: None,
         title: call.result_title.clone(),
@@ -475,7 +479,7 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             ensure!(
                 turn.state == "succeeded"
                     && result_matches(&call, &input.response)
-                    && crate::message_log::load(connection, &call.id)? == input.response.messages,
+                    && saved_result(connection, &call)?.messages == input.response.messages,
                 ConflictSnafu { id: &call.id }
             );
             return Ok(CompletionOutputs {
@@ -492,6 +496,7 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
         let timestamp = session::now()?;
         if let Some(messages) = &input.response.messages {
             crate::message_log::settle(connection, &input.invocation, messages)?;
+            crate::conversation_state::display_reply(connection, &input.invocation, messages)?;
         } else {
             ensure!(
                 crate::message_log::load(connection, &call.id)?.is_none(),

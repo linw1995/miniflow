@@ -138,13 +138,14 @@ pub fn configured_agent(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition
         "prompt":{"type":"string"},
         "system":{"type":"string","default":""},
         "history":{"type":{"list":"object"},"default":[]},
+        "messages":{"type":{"list":"object"},"default":[]},
         "model":{"type":"string","default":"your-model","secret":false},
         "base_url":{"type":"string","default":"https://api.openai.com/v1","secret":false},
         "api_key":{"type":"string","env":"OPENAI_API_KEY"}
     });
     let mut inputs = serde_json::Map::new();
     for name in [
-        "prompt", "system", "history", "model", "base_url", "api_key",
+        "prompt", "system", "history", "messages", "model", "base_url", "api_key",
     ] {
         inputs.insert(format!("params.{name}"), edge("params", name));
     }

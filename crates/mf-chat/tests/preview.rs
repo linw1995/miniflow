@@ -305,6 +305,7 @@ fn direct_embedded_invocation_reuses_the_call_stream_interface() {
         .invoke(
             &Invocation::new("session"),
             ConversationInputs {
+                messages: None,
                 prompt: "hello".into(),
                 system: None,
                 history: None,
@@ -466,6 +467,7 @@ fn pre_cancelled_requests_do_not_begin_application_or_embedded_flows() {
     let result = backend.invoke(
         &invocation,
         ConversationInputs {
+            messages: None,
             prompt: "hello".into(),
             system: None,
             history: None,

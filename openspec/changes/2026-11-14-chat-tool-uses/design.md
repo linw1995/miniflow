@@ -6,10 +6,11 @@ The implementation replaces the earlier telemetry-only, render/checkpoint-pollin
 canonical messages, typed append events, the shared reducer, related tables and event-driven ToolUse consumers are
 implemented together. Verification of this revision is recorded separately in `verification.md`.
 
-`ConversationResult.messages` reuses `mfn_llm::ChatMessage`. The standard Agent exposes only its current invocation's
-new messages. `llm.message_events` forwards checked `Shared<MessageBatch>` values so publishing does not erase native
-sensitivity. Assistant and result publishers retain separate native domains (`message_events` and
-`tool_message_events`), with invocation-scoped offsets and terminal-list reconciliation.
+`ConversationResult.messages` reuses `mfn_llm::ChatMessage` as a complete, authoritative context version. A custom
+Flow may compact, reorder, replace, or remove earlier history, including system instructions. The standard Agent
+keeps one `messages` accumulator and returns it unchanged. It has no persistence boundary/count parameter.
+`llm.message_events` publishes immutable message facts with native producer identities and preserved sensitivity;
+assistant/result streams remain independent of the final context version. Journal cursors belong to the host.
 
 ## Two sources with different authority
 
@@ -34,15 +35,17 @@ Markdown commands or image requests.
 Add optional terminal `messages` and typed `message_events`/`tool_message_events` streams without making them mandatory for
 existing chat Flows. Reuse `ChatMessage` roles/tool-call values rather than parsing text into calls.
 
-- `messages` contains this invocation's new messages. Existing system/history input and the already-admitted user
-  prompt are not returned as new messages. The builtin Agent keeps `messages` as its sole evolving transcript,
-  including the final assistant reply. An immutable `initial_message_count` marks the system/history/prompt prefix;
-  event offsets and the terminal suffix derive from that same list. Do not maintain a parallel `public_messages`
-  accumulator or duplicate assistant/result append logic. The host must not guess a prefix from equal message text.
-- Message events have stable per-invocation sequence/message keys and carry structured message values. An explicit
-  originating model-call ID is carried where available. Producer fragments are not committed as complete arguments.
-- Append/replay is idempotent. A final message list reconciles with the same sequence, rather than adding a second set
-  of calls. Conflicting revisions and invalid ordering are explicit errors/uncertainty, not last-writer-wins updates.
+- Optional input `messages` supplies the complete context including the current user message. Legacy prompt/system/
+  history inputs remain supported; the host assembles the complete input when needed. A supplied complete input takes
+  precedence, so the Agent does not append the prompt or system instruction twice.
+- Output `messages` is the complete next context, not a current-turn delta. No fixed prefix, text-based deduplication,
+  message-boundary count, or second transcript accumulator is required from a custom Flow.
+- Immutable message events carry a publisher-generated ID, optional originating model-call ID and complete messages.
+  The host assigns journal positions and checkpoints event identity atomically. Producer fragments are not complete
+  arguments. Exact event replay is idempotent; conflicting reuse of an event identity is an error.
+- The final context need not equal the event journal: compaction may remove or rewrite previously emitted messages.
+  The journal remains audit evidence, while the final context alone controls the next request. A conflicting second
+  terminal result for the same invocation is still rejected.
 - Terminal-only Flows may omit the stream. Older Flows may omit both outputs and still expose observation-only tools.
 
 ## Durable messages are the session recovery source
@@ -51,27 +54,27 @@ Every Flow-produced message accepted by the `mf-chat` contract must be persisted
 ToolUse. The ordered canonical messages are the recovery source; ToolUse is a linked projection and telemetry is
 additional evidence. Losing a valid assistant/tool message while retaining its display card is not successful storage.
 
-Persist all accepted roles, complete content, message metadata, assistant tool calls/arguments, and tool-result
-identities in order. The existing `messages` table must support multiple assistant/tool messages in a turn and
-assistant messages with tool calls but empty text. Remove its one-message-per-role assumption and stop reserving
-exactly two message positions per turn. Allocate stable session order transactionally for each accepted new message,
-with a unique source-message key scoped to its owning invocation. Replays reuse that mapping and never append a
-second message. Existing message IDs/order remain valid through migration.
+Persist every accepted role, complete content, metadata, assistant tool call/argument, tool-result identity and exact
+position in an immutable context version owned by the invocation. Ordered membership establishes message identity;
+shared immutable payload rows reduce storage without merging equal messages or inferring execution provenance.
+The existing `messages` table retains admission, display and streamed audit records with stable session order. Old
+versions and evidence are never deleted by context replacement. No two-slot or one-message-per-role assumption is
+reintroduced. Exact result replay does not rewrite memberships, payloads, or audit rows.
 
 Canonical recovery data is not the lossy tool display summary. A 2048-byte display limit or 64-item observation window
 must not truncate or discard otherwise valid message content/calls. Preserve the accepted message structure according
 to existing chat-storage/privacy rules; reject data that cannot be persisted safely rather than silently substituting
 a redacted/truncated display copy and reporting successful recovery. Public diagnostic copies remain bounded/redacted.
 
-On restart, history loading reconstructs the full successful-turn `ChatMessage` sequence, including assistant
-`tool_calls`, tool results, and metadata, rather than only user/final-text pairs or reconstructed ToolUse summaries.
-Keep the existing session isolation and unsuccessful-turn exclusion for model context: failed/cancelled/interrupted
-message prefixes remain available in the UI/recovery record, but are not silently fed into the next model request.
-Metrics-only records never become model-history messages.
+On restart, history loading starts from the latest successfully settled complete context version, including tool
+calls/results and metadata, not concatenated older turns. Removed history and system instructions must not reappear.
+Later legacy text-only turns may append to that version; pre-version databases keep their original history behavior.
+Failed/cancelled/interrupted versions and streamed prefixes remain inspectable but never advance the successful
+context head. Metrics-only records never become model-history messages.
 
-Message events may be persisted during execution in short transactions. Persist each message, its semantic call/result
-relations, and the applied source cursor atomically. Final settlement checks the terminal message result and commits
-message completeness, final result/usage/title, and successful turn state together. A storage failure retains the full
+Message events may be persisted during execution in short transactions. Persist each event identity, assigned cursor,
+message and semantic call/result relations atomically. Final settlement commits the complete context version,
+its completeness marker, final result/usage/title and successful turn state together. A storage failure retains the full
 pending message changes with save-only recovery; no caller may report the turn saved because only `text` was stored.
 Canonical append events use reliable bounded backpressure, not latest-value coalescing that could drop a message.
 Execution-status updates may still coalesce by identity without blocking on frontend rendering.
@@ -79,7 +82,8 @@ Execution-status updates may still coalesce by identity without blocking on fron
 If `messages` is supplied, its final assistant record must represent the canonical final reply; a postprocessing Flow
 must make the exposed final message consistent with `text`. The host must neither silently rewrite the transcript
 from raw model text nor append another assistant message from `text`. Only a legacy Flow omitting `messages` retains
-the existing admitted-user plus final-text fallback. Historical input and the admitted prompt are never inserted twice.
+the existing admitted-user plus final-text fallback. Display/audit rows never reconstruct model context once a complete
+version exists, so an admitted prompt or earlier history is not automatically added back to a rewritten context.
 
 ## Identity, correlation, and merged projection
 
@@ -130,8 +134,12 @@ rows and their source links; it does not subscribe to an old process or replay a
 
 Remove the live `model_calls.tool_uses` column. Use related tables, conceptually:
 
-- `messages`: authoritative ordered message rows, with role/content/metadata and stable invocation/source-message
-  identity. Evolve this existing table rather than persisting a second whole-transcript JSON copy.
+- `conversation_states`, `conversation_state_entries`, `conversation_payloads`, and `conversation_payload_tools`:
+  immutable per-invocation complete contexts, ordered membership, session-scoped interned message payloads and
+  relational full tool arguments. Payload keys include sensitivity sidecars; they are storage keys, not provenance.
+- `messages` and `message_sources`: admission/display rows and immutable streamed message evidence, with stable
+  invocation-scoped source identity. These do not override a later canonical context version.
+- `message_event_sources`: native producer identity to host-assigned journal cursor mapping for zero-write replay.
 - `chat_tool_calls`: stable semantic ID, conversation-call FK, originating persisted assistant-message FK and model
   identity, provider tool-call ID, ordinal, name, and complete submitted argument structure. A tool-result association
   links to the persisted tool-message row; returned content is not duplicated in a display-summary blob. A small
@@ -144,9 +152,9 @@ Remove the live `model_calls.tool_uses` column. Use related tables, conceptually
 
 Unique constraints enforce source-scoped identity and idempotent replay; foreign keys enforce ownership. Late links
 update the association, not copies of the content. Bounded message-page queries batch-load related calls/executions;
-model-call reads and usage updates do not load or rewrite tool payloads. History reconstruction joins canonical
-message/call/result relations, while usage is attached once to the turn's final response rather than repeated on every
-intermediate assistant message.
+model-call reads and usage updates do not rewrite tool payloads. History reconstruction loads the latest successful
+context membership and complete payload/tool relations; usage is attached once to the turn's final displayed reply.
+Terminal-only context tool projections are bounded and carry no invented execution or model-call origin.
 
 Insert a new call once. Update only changed columns in the affected call/execution row. A phase/duration update must
 not rewrite arguments/results or touch sibling calls, and exact replay must perform no payload write. Batch adjacent
@@ -164,8 +172,9 @@ multiple attempts, cancellation before a tool result, contradictory facts, and a
 replay/final-list reconciliation does not duplicate messages or calls, historical context is not reingested, final
 canonical text is not replaced, and protected values stay protected. Round-trip multiple assistant/tool messages,
 empty-text tool-call assistants, metadata, large valid payloads, and valid call counts above the display/observation
-window. After restart, submit another turn and assert the provider receives the complete prior successful message
-sequence, not just a visually restored tool card or user/final-text pair.
+window. After restart, submit another turn and assert the provider receives exactly the last successful returned
+context plus the new user input. Cover compaction, role/order changes, edited prompts, replaced/removed system input,
+repeated equal messages, failed replacement, and old-version inspection; no discarded history may be resurrected.
 
 Use database triggers/update instrumentation to prove a status-only change writes no payload columns or sibling rows
 and that replay writes nothing. Test migration of legacy JSON as observation-only records, rollback/reopen, scoped FKs,

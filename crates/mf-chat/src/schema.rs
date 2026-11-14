@@ -129,7 +129,61 @@ diesel::joinable!(message_streams -> model_calls (call_id));
 diesel::joinable!(message_sources -> message_streams (call_id));
 diesel::joinable!(message_sources -> messages (message_id));
 diesel::joinable!(chat_tool_calls -> model_calls (call_id));
+diesel::table! {
+    conversation_states (call_id) {
+        call_id -> Text,
+        session_id -> Text,
+        finished -> Bool,
+    }
+}
+diesel::table! {
+    conversation_payloads (session_id, id) {
+        session_id -> Text,
+        id -> Text,
+        role -> Text,
+        content -> Text,
+        metadata -> Nullable<Text>,
+        metadata_secrets -> Nullable<Text>,
+        tool_calls_present -> Bool,
+        tool_call_id -> Nullable<Text>,
+    }
+}
+diesel::table! {
+    conversation_payload_tools (session_id, payload_id, ordinal) {
+        session_id -> Text,
+        payload_id -> Text,
+        ordinal -> BigInt,
+        provider_tool_call_id -> Text,
+        name -> Text,
+        arguments -> Text,
+        argument_secrets -> Nullable<Text>,
+        public_arguments -> Text,
+    }
+}
+diesel::table! {
+    conversation_state_entries (call_id, ordinal) {
+        call_id -> Text,
+        session_id -> Text,
+        ordinal -> BigInt,
+        payload_id -> Text,
+    }
+}
+diesel::table! {
+    message_event_sources (call_id, id) {
+        call_id -> Text,
+        id -> Text,
+        offset -> BigInt,
+        count -> BigInt,
+    }
+}
+diesel::joinable!(conversation_states -> model_calls (call_id));
+diesel::joinable!(conversation_state_entries -> conversation_states (call_id));
 diesel::allow_tables_to_appear_in_same_query!(
+    conversation_states,
+    conversation_payloads,
+    conversation_payload_tools,
+    conversation_state_entries,
+    message_event_sources,
     sessions,
     turns,
     messages,

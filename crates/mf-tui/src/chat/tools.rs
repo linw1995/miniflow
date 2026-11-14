@@ -363,6 +363,44 @@ impl Capture {
             }
         }));
     }
+    pub fn event(
+        &mut self,
+        event: mf_chat::MessageEvent,
+        database: &ChatDatabase,
+    ) -> Result<(), mf_chat::ChatError> {
+        let batch = self
+            .shared
+            .state
+            .lock()
+            .expect("tool state was not poisoned")
+            .reducer
+            .event_batch(event)?;
+        // Reduce first: a failed checkpoint must retain both messages and native event identity for Save.
+        self.messages(batch, database)
+    }
+    pub fn context(
+        &mut self,
+        messages: Vec<mf_chat::ChatMessage>,
+        database: &ChatDatabase,
+    ) -> Result<(), mf_chat::ChatError> {
+        let invocation = {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .expect("tool state was not poisoned");
+            if state.reducer.set_context(messages.clone())? {
+                self.shared.publish(&mut state);
+            }
+            state.reducer.history().invocation.clone()
+        };
+        let _write = self
+            .shared
+            .persistence
+            .lock()
+            .expect("message persistence was not poisoned");
+        database.record_conversation_state(&invocation, &messages)
+    }
     pub fn messages(
         &mut self,
         batch: MessageBatch,

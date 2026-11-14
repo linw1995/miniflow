@@ -24,17 +24,22 @@ Storage SHALL use related semantic-call, execution, and small source-checkpoint 
 
 ### Requirement: Persist ordered canonical workflow messages
 
-Valid Flow messages SHALL be stored with stable source identity and session order, not only as ToolUse projections. Storage SHALL support multiple assistant/tool messages per turn, empty-text tool-call assistants, metadata, and complete call/result relations. Successful history loading SHALL reconstruct these messages, while unsuccessful prefixes remain recoverable outside model context. Display limits SHALL NOT truncate canonical recovery data.
+Valid Flow messages SHALL be stored as immutable complete context versions with ordered membership and full role/content/metadata/tool-call/result values. History SHALL restore only the latest successfully settled version. Unsuccessful versions and event journals SHALL remain inspectable outside model context. Display limits SHALL NOT truncate canonical recovery data.
 
 #### Scenario: Store more than a user and final assistant pair
 
 - **WHEN** a turn emits several assistant tool calls, tool results, and a final reply
 - **THEN** all accepted messages and their relations survive restart in the same order without violating a fixed two-slot or one-message-per-role assumption
 
-#### Scenario: Replay a message during final reconciliation
+#### Scenario: Replace history while retaining audit evidence
 
-- **WHEN** an already-persisted streamed message appears again in the terminal message list
-- **THEN** its source key resolves to the original message row without a duplicate sequence allocation
+- **WHEN** the final complete context drops or changes messages that were previously streamed or stored
+- **THEN** the new version controls subsequent model context without modifying old versions or execution evidence
+
+#### Scenario: Replay a terminal context
+
+- **WHEN** an already-settled invocation returns the exact same complete context
+- **THEN** no membership, payload, audit row, or context-head state is rewritten
 
 #### Scenario: Fail final persistence
 
@@ -45,6 +50,16 @@ Valid Flow messages SHALL be stored with stable source identity and session orde
 
 - **WHEN** a turn includes telemetry-only tool executions without corresponding canonical messages
 - **THEN** they remain inspectable without fabricated assistant/tool history records
+
+### Requirement: Share payloads without merging identities
+
+Storage MAY intern equal immutable payloads across positions or versions. Ordered memberships SHALL retain distinct message positions, and sensitivity SHALL be preserved. Payload equality SHALL NOT establish execution identity or provenance.
+
+#### Scenario: Share equal payloads without merging messages
+
+- **WHEN** multiple positions or versions contain equal canonical message payloads
+- **THEN** immutable payload rows may be shared while ordered memberships remain distinct
+- **AND** sensitivity is preserved and no execution association is inferred from payload equality
 
 ### Requirement: Write tool evidence incrementally
 

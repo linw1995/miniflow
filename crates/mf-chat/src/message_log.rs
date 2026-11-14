@@ -5,8 +5,20 @@ use crate::{
     storage, turn,
 };
 use diesel::{connection::SimpleConnection, prelude::*};
+use mf_runtime::NodeValue;
 use mf_runtime::ValueRef;
-use mfn_llm::MessageBatch;
+
+/// Host-assigned journal positions; never required in a user-authored Flow.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
+pub struct MessageBatch {
+    #[value(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    pub offset: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_call_id: Option<String>,
+    pub messages: Vec<ChatMessage>,
+}
 use snafu::{OptionExt, ResultExt, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,7 +50,7 @@ struct SemanticCall {
 
 // JSON business encoding intentionally omits native sensitivity. Preserve its small path sidecar
 // separately so reopening history cannot turn protected arguments/metadata into public values.
-fn secret_paths(value: &ValueRef) -> Result<Option<String>, ChatError> {
+pub fn secret_paths(value: &ValueRef) -> Result<Option<String>, ChatError> {
     fn visit(value: &ValueRef, path: &mut Vec<String>, paths: &mut Vec<Vec<String>>) {
         if value.is_secret() {
             paths.push(path.clone());
@@ -66,7 +78,7 @@ fn secret_paths(value: &ValueRef) -> Result<Option<String>, ChatError> {
         Ok(Some(serde_json::to_string(&paths).context(JsonSnafu)?))
     }
 }
-fn restore_secrets(value: ValueRef, encoded: Option<&str>) -> Result<ValueRef, ChatError> {
+pub fn restore_secrets(value: ValueRef, encoded: Option<&str>) -> Result<ValueRef, ChatError> {
     fn apply(
         value: &ValueRef,
         path: &mut Vec<String>,
@@ -107,7 +119,7 @@ fn restore_secrets(value: ValueRef, encoded: Option<&str>) -> Result<ValueRef, C
     );
     Ok(value)
 }
-fn metadata_value(metadata: &mfn_llm::MessageMetadata) -> ValueRef {
+pub fn metadata_value(metadata: &mfn_llm::MessageMetadata) -> ValueRef {
     ValueRef::object(
         metadata
             .iter()
@@ -350,6 +362,32 @@ pub fn append(
             reason: "requires a nonnegative offset and nonblank model identity"
         }
     );
+    let event_source = if let Some(id) = &batch.event_id {
+        ensure!(
+            !id.trim().is_empty() && !batch.messages.is_empty(),
+            InvalidSnafu {
+                field: "message event",
+                reason: "requires an identity and messages"
+            }
+        );
+        let previous = message_event_sources::table
+            .find((&call.id, id))
+            .select((message_event_sources::offset, message_event_sources::count))
+            .first::<(i64, i64)>(connection)
+            .optional()
+            .context(DatabaseSnafu {
+                operation: "verify producer event identity",
+            })?;
+        if let Some((offset, count)) = previous {
+            ensure!(
+                offset == batch.offset && usize::try_from(count).ok() == Some(batch.messages.len()),
+                ConflictSnafu { id }
+            );
+        }
+        Some((id, previous.is_none()))
+    } else {
+        None
+    };
     let stored = load(connection, &call.id)?;
     let mut prefix = stored.clone().unwrap_or_default();
     let offset = usize::try_from(batch.offset).context(IntegerSnafu {
@@ -542,6 +580,23 @@ pub fn append(
                 operation: "advance canonical message order",
             })?;
     }
+    if let Some((id, true)) = event_source {
+        diesel::insert_into(message_event_sources::table)
+            .values((
+                message_event_sources::call_id.eq(&call.id),
+                message_event_sources::id.eq(id),
+                message_event_sources::offset.eq(batch.offset),
+                message_event_sources::count.eq(i64::try_from(batch.messages.len()).context(
+                    IntegerSnafu {
+                        operation: "count event messages",
+                    },
+                )?),
+            ))
+            .execute(connection)
+            .context(DatabaseSnafu {
+                operation: "checkpoint producer event identity",
+            })?;
+    }
     crate::tool_uses::link_executions(connection, &call.id)?;
     Ok(())
 }
@@ -551,21 +606,17 @@ pub fn settle(
     invocation: &Invocation,
     messages: &[ChatMessage],
 ) -> Result<(), ChatError> {
-    append(
-        connection,
-        invocation,
-        &MessageBatch {
-            offset: 0,
-            model_call_id: None,
-            messages: messages.to_vec(),
-        },
-    )?;
-    ensure!(
-        load(connection, &invocation.call_id)?.as_deref() == Some(messages),
-        ConflictSnafu {
-            id: &invocation.call_id
-        }
-    );
+    crate::conversation_state::save(connection, invocation, messages)?;
+    diesel::update(
+        conversation_states::table
+            .find(&invocation.call_id)
+            .filter(conversation_states::finished.eq(false)),
+    )
+    .set(conversation_states::finished.eq(true))
+    .execute(connection)
+    .context(DatabaseSnafu {
+        operation: "settle authoritative context version",
+    })?;
     diesel::update(
         message_streams::table
             .find(&invocation.call_id)
@@ -583,6 +634,59 @@ pub fn settle(
 mod tests;
 
 impl ChatDatabase {
+    /// Assign journal positions to immutable producer events. The Flow owns neither cursors nor offsets.
+    pub fn record_message_event(
+        &self,
+        invocation: &Invocation,
+        event: &crate::MessageEvent,
+    ) -> Result<MessageBatch, ChatError> {
+        ensure!(
+            !event.id.trim().is_empty() && !event.messages.is_empty(),
+            InvalidSnafu {
+                field: "message event",
+                reason: "requires an identity and messages"
+            }
+        );
+        let mut connection = storage::connect(self.path())?;
+        connection
+            .batch_execute("PRAGMA busy_timeout = 0;")
+            .context(DatabaseSnafu {
+                operation: "configure producer event checkpoint",
+            })?;
+        connection.immediate_transaction(|connection| {
+            let previous = message_event_sources::table
+                .find((&invocation.call_id, &event.id))
+                .select((message_event_sources::offset, message_event_sources::count))
+                .first::<(i64, i64)>(connection)
+                .optional()
+                .context(DatabaseSnafu {
+                    operation: "load producer event cursor",
+                })?;
+            let offset = match previous {
+                Some((offset, count)) => {
+                    ensure!(
+                        usize::try_from(count).ok() == Some(event.messages.len()),
+                        ConflictSnafu { id: &event.id }
+                    );
+                    offset
+                }
+                None => i64::try_from(
+                    load(connection, &invocation.call_id)?.map_or(0, |messages| messages.len()),
+                )
+                .context(IntegerSnafu {
+                    operation: "assign message event order",
+                })?,
+            };
+            let batch = MessageBatch {
+                event_id: Some(event.id.clone()),
+                offset,
+                model_call_id: event.model_call_id.clone(),
+                messages: event.messages.clone(),
+            };
+            append(connection, invocation, &batch)?;
+            Ok(batch)
+        })
+    }
     pub fn record_messages(
         &self,
         invocation: &Invocation,
@@ -601,6 +705,11 @@ impl ChatDatabase {
         call_id: &str,
     ) -> Result<Option<Vec<ChatMessage>>, ChatError> {
         let mut connection = storage::connect(self.path())?;
-        connection.transaction(|connection| load(connection, call_id))
+        connection.transaction(|connection| {
+            Ok(
+                crate::conversation_state::load(connection, call_id)?
+                    .or(load(connection, call_id)?),
+            )
+        })
     }
 }

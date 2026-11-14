@@ -9,11 +9,12 @@ and persistence must be designed together rather than concatenating two tool lis
 
 ## What Changes
 
-- Add optional current-invocation `messages` and typed message events to the shared chat contract. Existing workflows
-  remain valid; internal full-context Agent messages must be adapted before being exposed as new messages.
+- Add optional complete `messages` input/output and immutable typed message events to the shared chat contract.
+  Existing workflows remain valid. Custom Flows may compact, reorder or replace history; they need no host persistence
+  counter, prefix slicing, or second transcript accumulator.
 - Persist every accepted Flow message as canonical ordered chat data, including message metadata, assistant tool calls,
-  arguments, and tool results. Rebuild successful conversation context from those messages after restart; ToolUse
-  summaries alone are not sufficient recovery data.
+  arguments, and tool results. Restore exactly the latest successful complete context after restart, retaining older
+  versions and event evidence for inspection without resurrecting discarded history. ToolUse summaries are not recovery data.
 - Derive semantic tool calls/results from messages. Preserve execution observations as a separate source of actual
   state, resolved arguments, and duration, including observation-only tools.
 - Correlate only through explicit scoped identities. Merge proven matches into one semantic item with execution
@@ -41,5 +42,5 @@ and persistence must be designed together rather than concatenating two tool lis
 
 ## Status
 
-This is the revised plan requested during review. The existing metrics-only/polling/JSON implementation is the
-baseline to replace, not evidence that this design is complete. New implementation and validation are pending.
+The review-requested implementation and local validation are complete, including Flow-owned full-context
+replacement. See `verification.md` for evidence and the separately tracked CI gate; the PR remains Draft.

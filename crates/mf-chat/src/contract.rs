@@ -22,9 +22,33 @@ pub struct ConversationContext {
 #[derive(Clone, Debug, NodeValue)]
 pub struct ConversationInputs {
     pub prompt: String,
+    /// Complete input context including the current user message; preferred by new Flows.
+    pub messages: Option<Vec<mfn_llm::ChatMessage>>,
     pub system: Option<String>,
     pub history: Option<Vec<mfn_llm::ChatMessage>>,
     pub context: Option<ConversationContext>,
+}
+
+impl ConversationInputs {
+    /// A generic Flow input, independent of persistence cursors or turn boundaries.
+    pub fn message_context(&self) -> Vec<mfn_llm::ChatMessage> {
+        if let Some(messages) = &self.messages {
+            return messages.clone();
+        }
+        let mut messages = Vec::new();
+        if let Some(system) = self.system.as_ref().filter(|system| !system.is_empty()) {
+            messages.push(mfn_llm::ChatMessage::System {
+                content: system.clone(),
+                metadata: None,
+            });
+        }
+        messages.extend(self.history.clone().unwrap_or_default());
+        messages.push(mfn_llm::ChatMessage::User {
+            content: self.prompt.clone(),
+            metadata: None,
+        });
+        messages
+    }
 }
 
 /// Application-owned call facts enriched with event-derived performance measurements.
@@ -356,6 +380,9 @@ impl ChatContract {
         self.parameters.validate(parameters)?;
         input.system.get_or_insert_default();
         input.history.get_or_insert_default();
+        if input.messages.is_none() {
+            input.messages = Some(input.message_context());
+        }
         let mut arguments = parameters.clone();
         for (name, value) in input.into_values()? {
             if let Some(target) = self.inputs.get(&name) {
@@ -476,7 +503,7 @@ pub fn decode_answer_delta(
 pub struct ConversationOutputDecoder {
     answer: bool,
     message_streams: std::collections::BTreeSet<String>,
-    messages: Vec<crate::MessageBatch>,
+    messages: Vec<crate::MessageEvent>,
     received_messages: bool,
     result: Option<ConversationResult>,
 }
@@ -505,19 +532,20 @@ impl ConversationOutputDecoder {
                         reason: "the workflow did not declare this message stream"
                     }
                 );
-                let batch = <crate::MessageBatch as mf_runtime::InputField>::decode_field(
+                let batch = <crate::MessageEvent as mf_runtime::InputField>::decode_field(
                     name,
                     Some(value),
                 )?;
                 ensure!(
-                    batch.offset >= 0
+                    !batch.id.trim().is_empty()
+                        && !batch.messages.is_empty()
                         && batch
                             .model_call_id
                             .as_ref()
                             .is_none_or(|id| !id.trim().is_empty()),
                     InvalidSnafu {
                         field: "message events",
-                        reason: "requires a nonnegative offset and a nonblank origin"
+                        reason: "requires an event identity, messages, and a nonblank optional origin"
                     }
                 );
                 self.messages.push(batch);
@@ -560,7 +588,7 @@ impl ConversationOutputDecoder {
         Ok(delta)
     }
 
-    pub fn take_message_events(&mut self) -> Vec<crate::MessageBatch> {
+    pub fn take_message_events(&mut self) -> Vec<crate::MessageEvent> {
         std::mem::take(&mut self.messages)
     }
 
@@ -608,22 +636,17 @@ mod output_tests {
         let mut decoder = decoder(true);
         decoder.message_streams = ["message_events".into(), "tool_message_events".into()].into();
         decoder.accept(values(json!({"status":"succeeded", "text":"canonical", "usages":[], "messages":[{"role":"assistant", "content":"canonical"}]}))).unwrap();
-        decoder.accept(values(json!({"message_events":{"offset":0, "model_call_id":"model", "messages":[{"role":"assistant", "content":"canonical"}]}}))).unwrap();
+        decoder.accept(values(json!({"message_events":{"id":"event", "model_call_id":"model", "messages":[{"role":"assistant", "content":"canonical"}]}}))).unwrap();
         let batches = decoder.take_message_events();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].model_call_id.as_deref(), Some("model"));
         assert!(decoder.take_message_events().is_empty());
         assert!(decoder.finish().unwrap().messages.is_some());
         let mut decoder = self::decoder(false);
-        assert!(
-            decoder
-                .accept(values(json!({"message_events":{"offset":0,"messages":[]}})))
-                .is_err()
-        );
+        let event = json!({"message_events":{"id":"event","messages":[{"role":"assistant","content":"canonical"}]}});
+        assert!(decoder.accept(values(event.clone())).is_err());
         decoder.message_streams.insert("message_events".into());
-        decoder
-            .accept(values(json!({"message_events":{"offset":0,"messages":[]}})))
-            .unwrap();
+        decoder.accept(values(event)).unwrap();
         decoder
             .accept(values(
                 json!({"status":"succeeded","text":"canonical","usages":[]}),

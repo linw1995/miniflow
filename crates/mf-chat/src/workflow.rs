@@ -1600,6 +1600,7 @@ mod tests {
                     database_path: "chat.sqlite".into(),
                     invocation: Invocation::new("session"),
                     request: ConversationInputs {
+                        messages: None,
                         prompt: "Hello".into(),
                         system: None,
                         history: None,
@@ -1645,6 +1646,7 @@ mod tests {
             .invoke(
                 &Invocation::new("session"),
                 ConversationInputs {
+                    messages: None,
                     prompt: "hello".into(),
                     system: None,
                     history: None,
@@ -1769,6 +1771,7 @@ mod tests {
         };
         let mut event = final_event();
         let request = ConversationInputs {
+            messages: None,
             prompt: "Prompt".into(),
             system: None,
             history: None,
@@ -1941,6 +1944,7 @@ mod tests {
             database_path: "unused.sqlite".into(),
             invocation: Invocation::new("session"),
             request: ConversationInputs {
+                messages: None,
                 prompt: "hello".into(),
                 system: None,
                 history: None,

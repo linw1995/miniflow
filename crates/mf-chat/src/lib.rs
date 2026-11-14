@@ -1,5 +1,6 @@
 //! Persistent chat operations shared by direct APIs and application-owned workflow nodes.
 
+mod conversation_state;
 mod error;
 pub mod flows;
 mod host;
@@ -26,6 +27,7 @@ pub use contract::{
 };
 pub use error::{BackendSnafu, CaptureSnafu, ChatError};
 pub use host::{ChatHost, ChatJob, HostConfig};
+pub use message_log::MessageBatch;
 pub use models::{Message, ModelCall, Session, Turn};
 pub use preview::{PreviewConsumer, PreviewEvent, PreviewReceiver};
 pub use session::{HistoryContext, MessagePage, MessageRecord, SessionPage};
@@ -42,7 +44,7 @@ pub use usage::{
 };
 
 pub use mfn_llm::{
-    ChatMessage, MessageBatch, MessageMetadata, TextDelta, UsageAttribution, UsageNode, UsageScope,
+    ChatMessage, MessageEvent, MessageMetadata, TextDelta, UsageAttribution, UsageNode, UsageScope,
 };
 
 pub use workflow::{ConversationBackend, WorkflowProfile};

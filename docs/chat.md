@@ -42,8 +42,11 @@ Registered kinds are `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.ar
 
 Chat Flow `messages` are canonical conversation data, not disposable inputs to a tool-card extractor. The host
 persists their complete accepted content, metadata, assistant `tool_calls`/arguments and tool-result links in order.
-`MessageRecord.chat_message` and successful model history reconstruct these messages after restart. Display budgets
-never truncate that recovery representation; failed/interrupted prefixes remain inspectable outside model context.
+`ChatDatabase::conversation_messages` restores each complete context version after restart. Model history uses only
+the latest successfully settled version, not a concatenation of old turns. Flows may edit, reorder, summarize or drop
+history, including system instructions; discarded content is never automatically restored. Earlier versions and
+`MessageRecord.chat_message` audit records remain inspectable. Display budgets never truncate recovery data, and
+failed/interrupted versions do not advance the successful context head.
 
 Tool presentation combines two independent sources. Messages describe requests and returned content; runtime
 observations describe actual preparation/execution, resolved arguments, outcomes and duration. A returned tool
@@ -51,13 +54,17 @@ message does **not** prove execution succeeded. Matching requires the same conve
 identity and provider tool-call ID. Names, parameter similarity and timestamps never establish a match. One semantic
 call may have multiple attempts. Different names, arguments or results stay separately labeled, and unmatched
 observations appear as **Unlinked execution**. Messages without execution evidence say **Execution not observed**.
+Tools projected only from a terminal context are labeled **context**; retaining an old exchange is not evidence of a
+new dispatch in the current turn.
 
 The shared `ToolUseReducer` runs on producer changes. Receiver registration bootstraps existing observations and
 hands off live lifecycle/value updates without a gap. A separate bounded/coalescing storage subscriber writes changes;
 frontend notifications are independent. Neither a timer nor terminal drawing collects evidence or writes storage.
 Canonical message appends use the backpressured Flow-output consumer rather than lossy latest-value coalescing.
 
-Storage uses message/source, semantic-call and execution relations, not a `model_calls.tool_uses` JSON column.
+Storage uses immutable context versions with ordered membership and interned relational message/tool payloads,
+alongside message/source, semantic-call and execution evidence relations, not a `model_calls.tool_uses` JSON column.
+Sharing equal payloads saves storage; it does not merge message positions or establish execution provenance.
 `ChatDatabase::tool_uses` and each `MessageRecord.tool_uses` expose a bounded projection for its owning invocation.
 Status-only updates change no argument/result payload or sibling execution; exact replays write no duplicate rows.
 Message/relation/cursor appends and final settlement use short transactions. Final storage failures retain the original
@@ -73,7 +80,8 @@ interrupted/unknown without rewriting observed successes. Complete observation p
 identity can be attached later without rewriting them. Earlier draft JSON journals migrate as observation-only rows,
 without invented messages or associations. Historical absence still means **not recorded**, not **no tools**.
 In-process/custom hosts do not acquire the executable observer automatically; they can record public observations
-through `record_tool_uses`, or append accepted messages through `record_messages`.
+through `record_tool_uses`, publish immutable facts with `record_message_event`, and checkpoint complete contexts
+with `record_conversation_state`. `record_messages` remains a host-assigned journal-batch API, not a Flow requirement.
 
 Terminal chat displays **Tool uses** inline once per turn, before the assistant reply. Status, public arguments/results,
 and observed duration appear while the turn is running and after loading history. `Ctrl+E` only hides the separate
@@ -234,12 +242,12 @@ or `save_recovered` saves the retained result without invoking either model agai
 
 The [calculator example](../examples/chat-calculator-flow.json) uses the provider-owned bounded Agent
 composition with a native Loop and parallel tool dispatch. Its calculator supports addition, subtraction,
-multiplication and division. It exports only the current invocation's new assistant/tool messages, excluding
-system/history inputs and the already-admitted user prompt. The single `messages` loop variable retains the full
-context and every new message, including the final reply; an immutable initial count selects the returned suffix and
-zero-based event offsets, without a second transcript accumulator. These complete new messages are persisted and
-restored into the next turn's context. `llm.message_events` publishes explicit append batches before dispatch and after tool
-results; `message_events` and `tool_message_events` preserve their respective native stream domains. Each model
+multiplication and division. Its single `messages` loop variable retains and returns the complete context, including
+the final reply, without a second transcript, boundary counter or host-specific suffix selection. Complete input
+`messages` takes precedence over legacy prompt/system/history assembly. A custom Flow may return a rewritten context;
+the host restores exactly that successful version. `llm.message_events` publishes immutable message facts before
+dispatch and after tool results, generating its own scoped event IDs rather than asking the Flow to maintain cursors.
+`message_events` and `tool_message_events` preserve their respective native stream domains. Each model
 turn reports its usage, and `answer` streams assistant text, including preambles accompanying tool calls. Catalog projection runs once before
 the first model request, not once per tool round.
 
@@ -256,8 +264,8 @@ other chat examples.
 ## Shared conversation contract
 
 `mf_chat::contract` owns the common contract, argument binding, and result reconciliation for both
-execution backends. `ConversationInputs` contains `prompt`, optional `system`, optional `history`, and
-optional `context`. Context is application-owned input rather than a caller-supplied configuration
+execution backends. `ConversationInputs` contains `prompt`, optional complete `messages` (including the admitted
+prompt), legacy optional `system`/`history`, and optional `context`. Context is application-owned input rather than a caller-supplied configuration
 parameter. A workflow that does not declare context continues to receive only the inputs it supports.
 
 ```json
@@ -271,14 +279,14 @@ parameter. A workflow that does not declare context continues to receive only th
 }
 ```
 
-`ConversationResult` contains `status`, `text`, `usages`, optional message `metadata`, `finish_reason`,
+`ConversationResult` contains `status`, `text`, `usages`, optional complete `messages`, message `metadata`, `finish_reason`,
 `error`, and optional `title`. `Completion.result` retains this result. A failed result requires an error
 summary and cannot update the title. A successful result requires nonempty text. The title is a candidate,
 not confirmation that a concurrent rename allowed it to be applied. Read the saved session for its title.
 
-Context and optional outputs can later carry compaction state and a summary proposal. No compaction is
-implemented: history loading passes all successful messages to execution without a byte bound. A future
-compaction stage also needs a history-loading policy and revision-checked summary persistence.
+Custom Flows can implement compaction by returning a valid complete `messages` state. Each invocation owns an
+immutable version; only successful atomic settlement advances the context head. The host does not impose an automatic
+summarization policy or truncate canonical payloads. Older text-only Flows retain their existing append behavior.
 
 ## Usage statistics
 
@@ -388,8 +396,9 @@ that complete reply available for save-only retry without invoking the backend a
 node counts, control edges, preprocessing, and loops are workflow implementation choices. Execute the whole
 workflow; there is no isolated-model execution mode or assumption that a workflow contains one LLM.
 
-The startup interface supplies an unambiguous `prompt` string and optionally `system`, `history`, and `context`.
-The Flow converts these application inputs into the model node's complete `messages` list.
+The startup interface supplies an unambiguous `prompt` string and optionally complete `messages`, legacy `system`/
+`history`, and `context`. Complete messages already include the current user input; a Flow must not append the prompt
+again. The host assembles them from legacy inputs when needed. The standard Agent prefers complete input messages.
 Their qualified names can belong to any startup node. Remaining declared inputs form `contract.parameters`;
 resolve them with `mf_runtime::resolve_workflow_inputs` before admission. The contract rejects ambiguous or
 mistyped conversation ports and stdin-dependent execution.
@@ -398,13 +407,14 @@ Finite executables keep their existing final JSON transport. Native streaming ex
 ordinary output named `answer` containing `text` and `model_call_id`. The backend drains standard JSONL
 records, validates deltas, and retains the final conversation result until execution completes.
 
-An optional terminal `messages` output contains only newly produced `mfn_llm::ChatMessage` values, not input history,
-system instructions or the admitted prompt. Its final assistant message must represent canonical `text`; the host
-never appends another text-derived reply or silently substitutes raw model text. Optional `message_events` and
-`tool_message_events` streams carry `{offset, model_call_id?, messages}` batches. Offsets are invocation-scoped,
-append/replay-safe message identities. Independent domains may arrive out of order and are reconciled against the
-terminal list; message streams require that list. Explicit model identity permits observation links, but its absence
-does not prevent message storage or semantic display. Final completion still requires all stream domains to drain.
+An optional terminal `messages` output is the complete authoritative `mfn_llm::ChatMessage` context for the next turn.
+It may replace, reorder or remove any input history; no prefix count or text-matching deduplication is required. Its
+final assistant message must represent canonical `text`; the host never substitutes raw model text. Optional
+`message_events` and `tool_message_events` carry immutable `{id, model_call_id?, messages}` facts. The publishing
+node generates scoped IDs; the host assigns journal positions and makes exact replay zero-write. Event evidence is
+independent of the final context: a Flow may compact away an emitted tool exchange without deleting its audit facts.
+Message streams require a terminal context, but not an identical list. Explicit model identity permits observation
+links; absent identity never implies execution or a guessed link. Completion requires all stream domains to drain.
 
 `workflows/conversation.json` remains the embedded application graph. For executable chat, the host
 composes its invocation stage into input preparation, `workflow.call`, and result completion. The call
@@ -436,9 +446,10 @@ backend invocation; the terminal's backend supplies process supervision and chil
 
 ## History metadata
 
-Application history reconstructs the canonical successful message sequence, including assistant `tool_calls` and
-`tool` results when a Flow supplies them. Each message accepts optional object-valued `metadata`; omitting it means
-no annotations. Configured system instructions and the current prompt remain separate inputs.
+Application history reconstructs the latest successful complete context, including assistant `tool_calls` and `tool`
+results when retained by the Flow. Each message accepts optional object-valued `metadata`; omitting it means no
+annotations. A returned context may change or remove system instructions. Legacy separate inputs remain available,
+but cannot override or reinsert content into a complete returned state.
 
 ```json
 {
@@ -455,8 +466,8 @@ Metadata is opaque application data and is omitted from provider requests. Flow-
 preserves annotations on existing messages; the LLM node returns only its current assistant message.
 The chat application persists metadata on every accepted returned message through save retries and database reopen.
 Legacy text-only results retain response metadata on their single new assistant message. A returned `history` output
-never rewrites existing records; `messages` appends only the current invocation's canonical messages. Admitted user
-messages currently have no metadata.
+never rewrites existing records; `messages` establishes a new complete context version without deleting older ones.
+Admission audit rows have no metadata; a Flow may add metadata to user messages in its returned context.
 
 Metadata is retained in history and contributes to the executable response limit. Existing SQLite
 databases receive a forward migration; old messages retain absent metadata.
@@ -464,7 +475,7 @@ databases receive a forward migration; old messages retain absent metadata.
 ## Workflow results and reported calls
 
 Executables declare `status`, `text`, and a nonoptional `usages` output. A successful result has nonempty
-text. Optional `messages` carries the complete new message sequence described above; when omitted, optional
+text. Optional `messages` carries the complete authoritative context described above; when omitted, optional
 `metadata` belongs to the text-derived assistant message. `finish_reason` is optional. An optional `title` proposes a
 session title. Other outputs, including returned `history`, do not replace persisted conversation state.
 

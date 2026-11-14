@@ -91,6 +91,10 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 23] {
             "chat-calculator-flow.json",
             None,
             json!({"status":"succeeded", "text":CALCULATOR_ANSWER, "error":"", "usages":[agent_usage(0), agent_usage(1)], "messages":[
+                {"role":"system","content":"Use the calculator."},
+                {"role":"user","content":"Earlier question"},
+                {"role":"assistant","content":"Earlier answer"},
+                {"role":"user","content":CALCULATOR_PROMPT},
                 {"role":"assistant","content":"","tool_calls":[
                     {"id":"call_add","name":"calculator","arguments":{"operation":"add","left":2.0,"right":3.0}},
                     {"id":"call_multiply","name":"calculator","arguments":{"operation":"multiply","left":3.0,"right":4.0}}

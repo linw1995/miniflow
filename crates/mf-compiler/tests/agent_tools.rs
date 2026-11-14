@@ -187,7 +187,7 @@ fn message_agent(tools: BTreeMap<String, FlowTool>, events: bool) -> WorkflowDef
 }
 
 fn assert_message_batches(outputs: &[Value], expected: &Value) {
-    let mut batches = outputs
+    let batches = outputs
         .iter()
         .flat_map(|output| {
             ["message_events", "tool_message_events"]
@@ -195,10 +195,14 @@ fn assert_message_batches(outputs: &[Value], expected: &Value) {
                 .filter_map(move |name| output.get(name))
         })
         .collect::<Vec<_>>();
-    batches.sort_by_key(|batch| batch["offset"].as_i64().unwrap());
     let mut messages = Vec::new();
+    let mut identities = std::collections::BTreeSet::new();
     for batch in batches {
-        assert_eq!(batch["offset"], json!(messages.len()), "{outputs:?}");
+        assert!(identities.insert(batch["id"].as_str().unwrap()));
+        assert!(
+            batch.get("offset").is_none(),
+            "Flow events do not maintain host cursors"
+        );
         assert!(!batch["model_call_id"].as_str().unwrap().is_empty());
         assert!(
             terminal(outputs)["usages"]
@@ -210,7 +214,12 @@ fn assert_message_batches(outputs: &[Value], expected: &Value) {
         messages.extend(batch["messages"].as_array().unwrap().iter().cloned());
     }
     assert_eq!(json!(messages), *expected);
-    assert_eq!(terminal(outputs)["messages"], *expected);
+    assert!(
+        terminal(outputs)["messages"]
+            .as_array()
+            .unwrap()
+            .ends_with(expected.as_array().unwrap())
+    );
 }
 
 fn assert_success(output: &Value, text: &str, calls: usize) {
@@ -355,7 +364,7 @@ fn author_graph(graph: &CompiledGraph) -> Value {
 }
 
 #[test]
-fn current_messages_use_a_positional_boundary_even_when_history_repeats_the_reply() {
+fn full_messages_preserve_history_even_when_old_and_new_text_are_identical() {
     for system in ["", "Keep the conversation."] {
         for streaming in [false, true] {
             let server = Server::start(vec![if streaming {
@@ -371,14 +380,21 @@ fn current_messages_use_a_positional_boundary_even_when_history_repeats_the_repl
                 {"role":"assistant","content":"Repeated answer","metadata":{"source":"history"}}
             ]);
             let expected = json!([{"role":"assistant","content":"Repeated answer"}]);
+            let mut full = args["params.history"].as_array().unwrap().clone();
+            if !system.is_empty() {
+                full.insert(0, json!({"role":"system","content":system}));
+            }
+            full.push(json!({"role":"user","content":"Repeated prompt"}));
+            full.extend(expected.as_array().unwrap().iter().cloned());
             if streaming {
                 let outputs = finite_stream(message_agent(BTreeMap::new(), true), args);
                 assert_success(terminal(&outputs), "Repeated answer", 1);
                 assert_message_batches(&outputs, &expected);
+                assert_eq!(terminal(&outputs)["messages"], json!(full));
             } else {
                 let (output, _) = memory(message_agent(BTreeMap::new(), false), args);
                 assert_success(&output, "Repeated answer", 1);
-                assert_eq!(output["messages"], expected);
+                assert_eq!(output["messages"], json!(full));
             }
             let requests = server.requests();
             assert_eq!(requests.len(), 1);
@@ -390,7 +406,7 @@ fn current_messages_use_a_positional_boundary_even_when_history_repeats_the_repl
 }
 
 #[test]
-fn current_message_events_and_terminal_suffix_share_the_single_multi_round_log() {
+fn immutable_message_events_remain_independent_of_the_full_context_output() {
     let server = Server::start(vec![
         tool_reply(
             json!([call(
@@ -483,6 +499,33 @@ fn failed_rounds_keep_only_already_appended_messages_without_an_invented_reply()
 }
 
 #[test]
+fn complete_messages_input_overrides_legacy_context_without_host_bookkeeping() {
+    let server = Server::start(vec![Reply::text("fresh reply")]);
+    let mut args = inputs(&server);
+    args["params.prompt"] = "Legacy prompt must not be appended".into();
+    args["params.system"] = "Legacy system must not be restored".into();
+    args["params.history"] = json!([{"role":"assistant","content":"Legacy history"}]);
+    args["params.messages"] = json!([{"role":"system","content":"Rewritten system"},{"role":"user","content":"Rewritten prompt"}]);
+    let (output, _) = memory(message_agent(BTreeMap::new(), false), args);
+    assert_success(&output, "fresh reply", 1);
+    assert_eq!(
+        output["messages"],
+        json!([
+            {"role":"system","content":"Rewritten system"},
+            {"role":"user","content":"Rewritten prompt"},
+            {"role":"assistant","content":"fresh reply"}
+        ])
+    );
+    assert_eq!(
+        server.requests()[0].body["messages"],
+        json!([
+            {"role":"system","content":[{"type":"text","text":"Rewritten system"}]},
+            {"role":"user","content":"Rewritten prompt"}
+        ])
+    );
+}
+
+#[test]
 fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
     let source = agent_definition().unwrap();
     let value = serde_json::to_value(&source).unwrap();
@@ -495,7 +538,7 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
             .unwrap()
     };
     let parameters = node("params")["config"]["parameters"].as_object().unwrap();
-    assert_eq!(parameters.len(), 8);
+    assert_eq!(parameters.len(), 9);
     assert_eq!(parameters["tools"]["type"], json!({"map":"flow"}));
     assert_eq!(
         parameters["tool_properties"]["type"],
@@ -512,8 +555,8 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
     );
     let repeat = node("repeat");
     let shared_inputs = repeat["config"]["inputs"].as_object().unwrap();
-    assert_eq!(shared_inputs.len(), 7);
-    assert_eq!(shared_inputs["initial_message_count"], json!("int"));
+    assert_eq!(shared_inputs.len(), 6);
+    assert!(!value.to_string().contains("initial_message_count"));
     assert_eq!(shared_inputs["tools"], json!({"map":"flow"}));
     assert_eq!(shared_inputs["tool_properties"], json!({"map":"object"}));
     assert_eq!(shared_inputs["tool_definitions"], json!({"list":"object"}));
@@ -808,7 +851,7 @@ fn native_agent_loop_stops_after_eight_tool_turns() {
     let (output, recording) = memory(message_agent(calculator_tools(), false), inputs(&server));
     assert_eq!(output["status"], "failed");
     let messages = output["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 16);
+    assert_eq!(messages.len(), 17);
     assert_eq!(messages.last().unwrap()["role"], "tool");
     assert!(
         output["error"]

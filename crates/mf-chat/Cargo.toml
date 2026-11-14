@@ -25,6 +25,7 @@ fs2.workspace = true
 # Typed values and diagnostics.
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 snafu.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 

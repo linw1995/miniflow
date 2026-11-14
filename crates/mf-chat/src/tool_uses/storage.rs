@@ -123,7 +123,7 @@ pub fn load_histories(
             })
         })
         .collect();
-    let mut recorded: BTreeSet<_> = streams.into_iter().collect();
+    let mut recorded: BTreeSet<_> = streams.iter().cloned().collect();
     for (id, incomplete, finished) in sources {
         recorded.insert(id.clone());
         if let Some(history) = histories.get_mut(&id) {
@@ -224,6 +224,7 @@ pub fn load_histories(
                 continue;
             }
             history.calls.push(ChatToolUse {
+                context_only: false,
                 execution_ids: links.remove(&id).unwrap_or_default(),
                 id,
                 assistant_message_id,
@@ -234,6 +235,20 @@ pub fn load_histories(
                 output: result
                     .and_then(|id| results.get(&id).map(|text| clip(text, MAX_TOOL_TEXT_BYTES))),
             });
+        }
+    }
+    let terminal_only: Vec<_> = call_ids
+        .iter()
+        .filter(|id| !streams.contains(id))
+        .cloned()
+        .collect();
+    for (id, mut calls) in crate::conversation_state::tool_projections(connection, &terminal_only)?
+    {
+        recorded.insert(id.clone());
+        if let Some(history) = histories.get_mut(&id) {
+            history.incomplete |= calls.len() > MAX_TOOL_USES;
+            calls.truncate(MAX_TOOL_USES);
+            history.calls = calls;
         }
     }
     histories.retain(|id, _| recorded.contains(id));

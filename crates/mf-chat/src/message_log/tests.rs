@@ -134,7 +134,7 @@ fn canonical_arguments_and_metadata_retain_sensitivity_without_exposing_it_in_to
     assert!(!tools.calls[0].arguments.contains("protected argument"));
     let history = database.history(&invocation.session_id).unwrap();
     assert!(
-        matches!(&history.history[1], ChatMessage::Assistant { tool_calls: Some(calls), .. } if calls[0].arguments.contains_secret())
+        matches!(&history.history[0], ChatMessage::Assistant { tool_calls: Some(calls), .. } if calls[0].arguments.contains_secret())
     );
 }
 
@@ -167,6 +167,9 @@ fn legacy_json_migrates_as_observations_without_invented_messages_or_origins() {
         )
         .unwrap();
     let mut connection = storage::connect(&path).unwrap();
+    connection
+        .revert_last_migration(storage::MIGRATIONS)
+        .unwrap();
     connection
         .revert_last_migration(storage::MIGRATIONS)
         .unwrap();
@@ -277,6 +280,7 @@ fn full_messages_round_trip_and_next_turn_receives_all_successful_context() {
             .record_messages(
                 &invocation,
                 &MessageBatch {
+                    event_id: None,
                     offset,
                     model_call_id: Some(model.into()),
                     messages: messages[range].to_vec(),
@@ -331,12 +335,8 @@ fn full_messages_round_trip_and_next_turn_receives_all_successful_context() {
             None,
         )
         .unwrap();
-    let expected = std::iter::once(ChatMessage::User {
-        content: "calculate".into(),
-        metadata: None,
-    })
-    .chain(messages.clone())
-    .collect::<Vec<_>>();
+    // The returned complete state deliberately omits the admitted prompt.
+    let expected = messages.clone();
     assert_eq!(next.request.history.as_deref(), Some(expected.as_slice()));
     let crate::contract::InvocationState::Committed(saved) =
         database.inspect_invocation(&invocation).unwrap()
@@ -352,6 +352,7 @@ fn exact_replays_do_not_write_messages_payloads_relations_or_cursors() {
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
     let invocation = begin(&database);
     let batch = MessageBatch {
+        event_id: None,
         offset: 0,
         model_call_id: Some("model".into()),
         messages: vec![request("one", ""), result("one")],
@@ -402,6 +403,7 @@ fn explicit_identities_link_both_arrival_orders_multiple_attempts_and_keep_confl
         let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
         let invocation = begin(&database);
         let batch = MessageBatch {
+            event_id: None,
             offset: 0,
             model_call_id: Some("model-one".into()),
             messages: vec![request("reused", ""), result("reused")],
@@ -487,6 +489,7 @@ fn ambiguous_late_identity_keeps_both_messages_and_execution_without_a_guessed_l
         .unwrap();
     for offset in [0, 2] {
         let batch = MessageBatch {
+            event_id: None,
             offset,
             model_call_id: Some("ambiguous-model".into()),
             messages: vec![request("reused", ""), result("reused")],
@@ -523,6 +526,7 @@ fn messages_without_origins_do_not_guess_an_execution_from_name_arguments_or_too
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
     let invocation = begin(&database);
     let batch = MessageBatch {
+        event_id: None,
         offset: 0,
         model_call_id: None,
         messages: vec![request("same", ""), result("same")],
@@ -638,7 +642,7 @@ fn canonical_messages_are_not_limited_by_observation_windows_and_history_pages_k
         Some(messages.clone())
     );
     assert_eq!(
-        &database.history(&invocation.session_id).unwrap().history[1..],
+        &database.history(&invocation.session_id).unwrap().history,
         &messages
     );
     let tools = database.tool_uses(&invocation.call_id).unwrap().unwrap();
@@ -653,6 +657,7 @@ fn interrupted_message_prefixes_survive_restart_but_never_enter_successful_conte
     let database = ChatDatabase::open(&path).unwrap();
     let invocation = begin(&database);
     let batch = MessageBatch {
+        event_id: None,
         offset: 0,
         model_call_id: Some("model".into()),
         messages: vec![request("one", "")],
@@ -692,6 +697,7 @@ fn reducer_and_storage_agree_for_out_of_order_delivery_and_neither_source_finish
     let invocation = begin(&database);
     let mut reducer = ToolUseReducer::new(invocation.clone());
     let returned = MessageBatch {
+        event_id: None,
         offset: 1,
         model_call_id: Some("model".into()),
         messages: vec![result("one")],
@@ -699,6 +705,7 @@ fn reducer_and_storage_agree_for_out_of_order_delivery_and_neither_source_finish
     assert!(!reducer.apply_messages(returned).unwrap());
     reducer
         .apply_messages(MessageBatch {
+            event_id: None,
             offset: 0,
             model_call_id: Some("model".into()),
             messages: vec![request("one", "")],
@@ -718,6 +725,7 @@ fn reducer_and_storage_agree_for_out_of_order_delivery_and_neither_source_finish
     reducer.finish(false);
     reducer
         .apply_messages(MessageBatch {
+            event_id: None,
             offset: 2,
             model_call_id: Some("final-model".into()),
             messages: vec![final_message()],

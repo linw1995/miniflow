@@ -146,13 +146,37 @@ pub fn load(connection: &mut SqliteConnection, id: &str) -> Result<Session, Chat
 
 pub fn history(connection: &mut SqliteConnection, id: &str) -> Result<HistoryContext, ChatError> {
     let session = load(connection, id)?;
-    let mut result = Vec::new();
+    let latest = crate::schema::conversation_states::table
+        .inner_join(model_calls::table)
+        .inner_join(turns::table.on(model_calls::turn_id.eq(turns::id.nullable())))
+        .filter(crate::schema::conversation_states::session_id.eq(id))
+        .filter(crate::schema::conversation_states::finished.eq(true))
+        .filter(model_calls::state.eq("succeeded"))
+        .filter(turns::state.eq("succeeded"))
+        .order(turns::sequence.desc())
+        .select((model_calls::id, turns::sequence))
+        .first::<(String, i64)>(connection)
+        .optional()
+        .context(DatabaseSnafu {
+            operation: "load authoritative conversation head",
+        })?;
+    let (mut result, boundary, system) = if let Some((call, sequence)) = latest {
+        (
+            crate::conversation_state::load(connection, &call)?
+                .context(ConflictSnafu { id: &call })?,
+            sequence,
+            None,
+        )
+    } else {
+        (Vec::new(), -1, session.system)
+    };
     let mut after = -1i64;
     loop {
         let page: Vec<Message> = messages::table
             .inner_join(turns::table)
             .filter(messages::session_id.eq(id))
             .filter(turns::state.eq("succeeded"))
+            .filter(turns::sequence.gt(boundary))
             .filter(messages::sequence.gt(after))
             .order(messages::sequence.asc())
             .limit(100)
@@ -176,7 +200,7 @@ pub fn history(connection: &mut SqliteConnection, id: &str) -> Result<HistoryCon
     }
     Ok(HistoryContext {
         history: result,
-        system: session.system,
+        system,
     })
 }
 

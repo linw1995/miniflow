@@ -818,20 +818,15 @@ impl ExternalBackend {
                     consume(delta)?;
                 }
                 for batch in decoder.take_message_events() {
-                    tools.borrow_mut().messages(batch, &self.database)?;
+                    tools.borrow_mut().event(batch, &self.database)?;
                 }
                 if !terminal_messages
                     && let Some(messages) =
                         decoder.result().and_then(|result| result.messages.as_ref())
                 {
-                    tools.borrow_mut().messages(
-                        mf_chat::MessageBatch {
-                            offset: 0,
-                            model_call_id: None,
-                            messages: messages.clone(),
-                        },
-                        &self.database,
-                    )?;
+                    tools
+                        .borrow_mut()
+                        .context(messages.clone(), &self.database)?;
                     terminal_messages = true;
                 }
                 Ok(())
@@ -854,14 +849,7 @@ impl ExternalBackend {
             && let Ok(completion) = &mut completion
             && let Ok(result) = mf_chat::ConversationResult::from_json(&completion.outcome.stdout)
             && let Some(messages) = result.messages
-            && let Err(error) = tools.borrow_mut().messages(
-                mf_chat::MessageBatch {
-                    offset: 0,
-                    model_call_id: None,
-                    messages,
-                },
-                &self.database,
-            )
+            && let Err(error) = tools.borrow_mut().context(messages, &self.database)
         {
             completion.protocol_failure = Some(error);
         }

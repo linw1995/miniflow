@@ -137,6 +137,7 @@ fn conversation_inputs_are_bound_separately_from_parameters() {
     let contract = ChatContract::from_manifest(&manifest).unwrap();
     let parameters = parameters(&contract);
     let input = mf_chat::ConversationInputs {
+        messages: None,
         context: None,
         prompt: "hello".into(),
         system: None,
@@ -154,6 +155,7 @@ fn conversation_inputs_are_bound_separately_from_parameters() {
         contract
             .arguments(
                 mf_chat::ConversationInputs {
+                    messages: None,
                     context: None,
                     prompt: "override".into(),
                     system: None,
@@ -261,6 +263,7 @@ fn history_metadata_round_trips_through_argument_binding() {
     let arguments = contract
         .arguments(
             mf_chat::ConversationInputs {
+                messages: None,
                 context: None,
                 prompt: "continue".into(),
                 system: None,
@@ -428,6 +431,7 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
             .insert("params.base_url".into(), server.base_url.clone().into());
         let previous = json!([{"role":"user","content":"prior question"},{"role":"assistant","content":"prior answer","metadata":{"tags":["retained"],"count":1}}]);
         let input = mf_chat::ConversationInputs {
+            messages: None,
             context: None,
             prompt: "hello".into(),
             system: Some("Keep context".into()),
