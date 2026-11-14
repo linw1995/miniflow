@@ -92,7 +92,8 @@
           }
         },
         "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]",
+          "initial_message_count": "size(history) + (system == '' ? 1 : 2)"
         }
       },
       "inputs": {
@@ -122,6 +123,7 @@
       "config": {
         "max_iterations": 8,
         "inputs": {
+          "initial_message_count": "int",
           "api_key": "string",
           "base_url": "string",
           "model": "string",
@@ -222,6 +224,83 @@
               }
             },
             {
+              "id": "prepare_origin",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "usages": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "origin": "size(usages) > 0 ? {'model_call_id': usages[0].call_id} : {}"
+                }
+              },
+              "inputs": {
+                "usages": {
+                  "from": {
+                    "node": "turn",
+                    "port": "usages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "publish_assistant",
+              "kind": "llm.message_events",
+              "inputs": {
+                "batch": {
+                  "from": {
+                    "node": "append_assistant",
+                    "port": "batch"
+                  }
+                }
+              }
+            },
+            {
+              "id": "no_tools",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "append_assistant",
+                    "port": "messages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "next_messages",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "exclusive": [
+                    {
+                      "node": "no_tools",
+                      "port": "value"
+                    },
+                    {
+                      "node": "append_tool_results",
+                      "port": "messages"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "publish_results",
+              "kind": "llm.message_events",
+              "inputs": {
+                "batch": {
+                  "from": {
+                    "node": "append_tool_results",
+                    "port": "batch"
+                  }
+                }
+              }
+            },
+            {
               "id": "collect_usages",
               "kind": "builtin.code",
               "config": {
@@ -281,10 +360,15 @@
                   "messages": {
                     "list": "object"
                   },
-                  "message": "object"
+                  "message": "object",
+                  "initial_message_count": "int",
+                  "usages": {
+                    "list": "object"
+                  }
                 },
                 "code": {
-                  "messages": "messages + [dyn(message)]"
+                  "messages": "messages + [dyn(message)]",
+                  "batch": "{'offset': size(messages) - initial_message_count, 'model_call_id': size(usages) > 0 ? usages[0].call_id : null, 'messages': [message]}"
                 }
               },
               "inputs": {
@@ -299,6 +383,18 @@
                     "node": "turn",
                     "port": "message"
                   }
+                },
+                "initial_message_count": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "initial_message_count"
+                  }
+                },
+                "usages": {
+                  "from": {
+                    "node": "turn",
+                    "port": "usages"
+                  }
                 }
               }
             },
@@ -309,6 +405,12 @@
                 "flow": "tool-uses"
               },
               "inputs": {
+                "params.origin": {
+                  "from": {
+                    "node": "prepare_origin",
+                    "port": "origin"
+                  }
+                },
                 "params.calls": {
                   "from": {
                     "node": "turn",
@@ -338,15 +440,30 @@
                   "assistant": {
                     "list": "object"
                   },
+                  "initial_message_count": "int",
+                  "origin": "object",
                   "results": {
                     "list": "object"
                   }
                 },
                 "code": {
-                  "messages": "assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
+                  "messages": "assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))",
+                  "batch": "{'offset': size(assistant) - initial_message_count, 'model_call_id': 'model_call_id' in origin ? origin.model_call_id : null, 'messages': results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))}"
                 }
               },
               "inputs": {
+                "initial_message_count": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "initial_message_count"
+                  }
+                },
+                "origin": {
+                  "from": {
+                    "node": "prepare_origin",
+                    "port": "origin"
+                  }
+                },
                 "assistant": {
                   "from": {
                     "node": "append_assistant",
@@ -364,24 +481,29 @@
           ],
           "edges": [
             {
+              "from_node": "route",
+              "from_output": "else",
+              "to_node": "no_tools"
+            },
+            {
+              "from_node": "publish_assistant",
+              "to_node": "dispatch"
+            },
+            {
               "from_node": "turn",
               "to_node": "route"
             },
             {
               "from_node": "route",
               "from_output": "tool_calls",
-              "to_node": "append_assistant"
-            },
-            {
-              "from_node": "append_assistant",
               "to_node": "dispatch"
             }
           ],
           "outputs": [
             {
               "name": "messages",
-              "node": "append_tool_results",
-              "port": "messages",
+              "node": "next_messages",
+              "port": "value",
               "optional": true
             },
             {
@@ -408,6 +530,14 @@
           ]
         },
         "stream_outputs": {
+          "message_events": {
+            "node": "publish_assistant",
+            "port": "event"
+          },
+          "tool_message_events": {
+            "node": "publish_results",
+            "port": "event"
+          },
           "answer": {
             "node": "turn",
             "port": "answer"
@@ -415,6 +545,12 @@
         }
       },
       "inputs": {
+        "initial_message_count": {
+          "from": {
+            "node": "initial_messages",
+            "port": "initial_message_count"
+          }
+        },
         "messages": {
           "from": {
             "node": "initial_messages",
@@ -465,6 +601,10 @@
       "config": {
         "language": "cel",
         "inputs": {
+          "messages": {
+            "list": "object"
+          },
+          "initial_message_count": "int",
           "text": "string",
           "outcome": "string",
           "error": "string",
@@ -473,6 +613,7 @@
           }
         },
         "code": {
+          "messages": "messages.transformList(index, message, index >= initial_message_count, message)",
           "status": "outcome == 'completed' ? 'succeeded' : 'failed'",
           "text": "text",
           "usages": "usages",
@@ -480,6 +621,18 @@
         }
       },
       "inputs": {
+        "initial_message_count": {
+          "from": {
+            "node": "initial_messages",
+            "port": "initial_message_count"
+          }
+        },
+        "messages": {
+          "from": {
+            "node": "repeat",
+            "port": "messages"
+          }
+        },
         "text": {
           "from": {
             "node": "repeat",
@@ -509,6 +662,23 @@
   ],
   "edges": [],
   "outputs": [
+    {
+      "name": "messages",
+      "node": "result",
+      "port": "messages"
+    },
+    {
+      "name": "message_events",
+      "node": "repeat",
+      "port": "message_events",
+      "optional": true
+    },
+    {
+      "name": "tool_message_events",
+      "node": "repeat",
+      "port": "tool_message_events",
+      "optional": true
+    },
     {
       "name": "answer",
       "node": "repeat",

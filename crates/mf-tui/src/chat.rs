@@ -7,7 +7,10 @@ use crate::{
 use mf_chat::contract::{
     ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
 };
-use mf_chat::{ChatDatabase, Invocation, MessagePage, Session, SessionPage, UncommittedCompletion};
+use mf_chat::{
+    ChatDatabase, Invocation, MessagePage, Session, SessionPage, ToolUseHistory,
+    UncommittedCompletion,
+};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     io,
@@ -24,6 +27,7 @@ use std::{
 
 mod preview;
 pub use preview::LivePreview;
+pub mod tools;
 mod transcript;
 mod ui;
 pub use ui::run_chat;
@@ -137,12 +141,17 @@ pub enum ChatEvent {
         invocation: Invocation,
         preview: LivePreview,
     },
+    Tools {
+        invocation: Invocation,
+        history: Box<ToolUseHistory>,
+    },
     Finished {
         invocation: Invocation,
         resolution: Result<ReconciledCompletion, mf_chat::ChatError>,
         status: Option<ExitStatus>,
         stderr: String,
         capture_error: Option<String>,
+        tool_uses: Option<Box<ToolUseHistory>>,
     },
     Error {
         admission: bool,
@@ -157,6 +166,7 @@ pub struct ChatController {
     deferred: Mutex<Option<ChatEvent>>,
     preview: Arc<Mutex<LivePreview>>,
     preview_revision: AtomicU64,
+    tool_updates: Arc<Mutex<Option<ToolUseHistory>>>,
     presented_invocation: Mutex<Option<Invocation>>,
     closed: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
@@ -172,6 +182,7 @@ impl ChatController {
         let busy = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let preview = Arc::new(Mutex::new(LivePreview::default()));
+        let tool_updates = Arc::new(Mutex::new(None));
         let controller = Controller {
             launch: Arc::new(launch),
             database: Arc::clone(&database),
@@ -182,6 +193,7 @@ impl ChatController {
             cancel: Arc::clone(&cancel),
             retained: None,
             preview: preview.clone(),
+            tool_updates: tool_updates.clone(),
         };
         let worker = thread::Builder::new()
             .name("mf-chat-controller".into())
@@ -196,6 +208,7 @@ impl ChatController {
             deferred: Mutex::new(None),
             preview,
             preview_revision: AtomicU64::new(0),
+            tool_updates,
             presented_invocation: Mutex::new(None),
             closed,
             busy,
@@ -245,15 +258,26 @@ impl ChatController {
             *self.presented_invocation.lock().unwrap() = Some(invocation.clone());
         }
         if matches!(event, Some(ChatEvent::Finished { .. }))
-            && let Some(preview) = self.updated_preview()
+            && let Some(update) = self.updated_tools().or_else(|| self.updated_preview())
         {
             *self.deferred.lock().unwrap() = event;
-            return Some(preview);
+            return Some(update);
         }
         if matches!(event, Some(ChatEvent::Finished { .. })) {
             *self.presented_invocation.lock().unwrap() = None;
         }
-        event.or_else(|| self.updated_preview())
+        event
+            .or_else(|| self.updated_tools())
+            .or_else(|| self.updated_preview())
+    }
+
+    fn updated_tools(&self) -> Option<ChatEvent> {
+        let expected = self.presented_invocation.lock().unwrap().clone()?;
+        let history = self.tool_updates.lock().unwrap().take()?;
+        (history.invocation == expected).then(|| ChatEvent::Tools {
+            invocation: expected,
+            history: Box::new(history),
+        })
     }
 
     fn updated_preview(&self) -> Option<ChatEvent> {
@@ -305,6 +329,8 @@ enum RetainedResponse {
 struct Retained {
     invocation: Invocation,
     response: RetainedResponse,
+    tool_uses: Option<ToolUseHistory>,
+    messages: Vec<mf_chat::MessageBatch>,
 }
 struct Controller {
     launch: Arc<ChatLaunch>,
@@ -316,6 +342,7 @@ struct Controller {
     cancel: Arc<AtomicBool>,
     retained: Option<Retained>,
     preview: Arc<Mutex<LivePreview>>,
+    tool_updates: Arc<Mutex<Option<ToolUseHistory>>>,
 }
 impl Controller {
     fn emit(&self, event: ChatEvent) {
@@ -439,8 +466,14 @@ impl Controller {
             self.preview.lock().unwrap().begin(invocation.clone());
         }
         let captured = Arc::new(Mutex::new(None));
+        let captured_tools = Arc::new(Mutex::new(None));
+        let captured_messages = Arc::new(Mutex::new(Vec::new()));
         let cancellation = mf_runtime::StreamCancellation::default();
         let backend = ExternalBackend {
+            database: self.database.clone(),
+            captured_tools: captured_tools.clone(),
+            captured_messages: captured_messages.clone(),
+            tool_updates: self.tool_updates.clone(),
             cancellation: cancellation.clone(),
             launch: Arc::clone(&self.launch),
             parameters,
@@ -494,7 +527,7 @@ impl Controller {
                 preview.lock().unwrap().apply(event)
             })
         });
-        let resolution = mf_chat::workflow::run_conversation_with_preview(
+        let mut resolution = mf_chat::workflow::run_conversation_with_preview(
             &self.database,
             request,
             Arc::new(backend),
@@ -515,6 +548,29 @@ impl Controller {
             );
             return Err(resolution.diagnostics.remove(0).into());
         }
+        for batch in captured_messages
+            .lock()
+            .expect("message recovery was not poisoned")
+            .iter()
+        {
+            if let Err(error) = self.database.record_messages(&invocation, batch) {
+                resolution = Err(error);
+                break;
+            }
+        }
+        let tool_uses = captured_tools
+            .lock()
+            .expect("tool capture was not poisoned")
+            .take();
+        if let Some(history) = &tool_uses
+            && let Err(error) = self.database.record_tool_uses(&invocation, history)
+        {
+            if resolution.is_ok() {
+                resolution = Err(error);
+            } else {
+                eprintln!("chat final tool evidence: {error}");
+            }
+        }
         let status = outcome.as_ref().map(|outcome| outcome.status);
         let stderr = outcome
             .as_ref()
@@ -530,12 +586,16 @@ impl Controller {
             }) => Some(Retained {
                 invocation: invocation.clone(),
                 response: RetainedResponse::Ready(pending.clone()),
+                messages: captured_messages.lock().unwrap().clone(),
+                tool_uses: tool_uses.clone(),
             }),
             Err(_) => Some(Retained {
                 invocation: invocation.clone(),
                 response: RetainedResponse::Exited(
                     outcome.expect("failed reconciliation retains the exit"),
                 ),
+                messages: captured_messages.lock().unwrap().clone(),
+                tool_uses: tool_uses.clone(),
             }),
             _ => None,
         };
@@ -546,12 +606,20 @@ impl Controller {
             status,
             stderr,
             capture_error,
+            tool_uses: tool_uses.map(Box::new),
         });
         Ok(())
     }
     fn recover(&mut self, abandon: bool) -> Result<(), ChatRunError> {
         let retained = self.retained.as_ref().context(MissingReplySnafu)?;
         let invocation = retained.invocation.clone();
+        for batch in &retained.messages {
+            self.database.record_messages(&invocation, batch)?;
+        }
+        let tool_uses = retained.tool_uses.clone();
+        if let Some(history) = &tool_uses {
+            self.database.record_tool_uses(&invocation, history)?;
+        }
         let mut resolution = match &retained.response {
             RetainedResponse::Ready(pending) => ReconciledCompletion {
                 state: CompletionState::Uncommitted(pending.clone()),
@@ -585,12 +653,17 @@ impl Controller {
             status: None,
             stderr: String::new(),
             capture_error: None,
+            tool_uses: tool_uses.map(Box::new),
         });
         Ok(())
     }
 }
 
 struct ExternalBackend {
+    database: Arc<ChatDatabase>,
+    captured_tools: Arc<Mutex<Option<ToolUseHistory>>>,
+    captured_messages: Arc<Mutex<Vec<mf_chat::MessageBatch>>>,
+    tool_updates: Arc<Mutex<Option<ToolUseHistory>>>,
     cancellation: mf_runtime::StreamCancellation,
     launch: Arc<ChatLaunch>,
     parameters: mf_runtime::WorkflowArguments,
@@ -634,7 +707,14 @@ impl mf_chat::ConversationBackend for ExternalBackend {
                 prompt: request.prompt.clone(),
             },
         );
-        let execution = self.execute(request, context, preview);
+        let execution = self.execute(invocation, request, context, preview);
+        let tool_persistence = self
+            .captured_tools
+            .lock()
+            .expect("tool capture was not poisoned")
+            .as_ref()
+            .map(|history| self.database.record_tool_uses(invocation, history))
+            .transpose();
         let failure = match execution.as_ref().err() {
             Some(ChatRunError::Runner {
                 source: RunnerError::Cancelled { .. },
@@ -672,10 +752,12 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         } else {
             mf_chat::ConversationResult::from_json(&outcome.stdout).boxed()
         };
-        let result = result.map(|mut response| {
-            outcome.call_events.apply(&mut response.usages);
-            response
-        });
+        let result = result
+            .map(|mut response| {
+                outcome.call_events.apply(&mut response.usages);
+                response
+            })
+            .and_then(|response| tool_persistence.boxed().map(|_| response));
         let reply = if result.is_err() {
             mf_chat::ConversationResult::from_json(&outcome.stdout)
                 .ok()
@@ -700,13 +782,20 @@ impl mf_chat::ConversationBackend for ExternalBackend {
 impl ExternalBackend {
     fn execute(
         &self,
+        invocation: &Invocation,
         request: mf_chat::ConversationInputs,
         context: &mut mf_runtime::ExecutionContext,
         mut preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), mf_chat::ChatError>>,
     ) -> Result<(LocalOutcome, Option<mf_chat::ChatError>), ChatRunError> {
         let arguments = self.launch.contract.arguments(request, &self.parameters)?;
         let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);
-        let completion = RunnerInvocation {
+        let tools = std::cell::RefCell::new(tools::Capture::new(
+            invocation.clone(),
+            self.database.clone(),
+            self.tool_updates.clone(),
+        )?);
+        let mut terminal_messages = false;
+        let mut completion = RunnerInvocation {
             runner: &self.launch.runner,
             arguments: &arguments,
             verbose: self.launch.options.run.verbose,
@@ -715,6 +804,7 @@ impl ExternalBackend {
         .run(
             context.cancellation(),
             |observation| {
+                tools.borrow_mut().observe(observation.clone());
                 emit(
                     &self.output,
                     &self.closed,
@@ -726,6 +816,23 @@ impl ExternalBackend {
                     && let Some(consume) = preview.as_mut()
                 {
                     consume(delta)?;
+                }
+                for batch in decoder.take_message_events() {
+                    tools.borrow_mut().messages(batch, &self.database)?;
+                }
+                if !terminal_messages
+                    && let Some(messages) =
+                        decoder.result().and_then(|result| result.messages.as_ref())
+                {
+                    tools.borrow_mut().messages(
+                        mf_chat::MessageBatch {
+                            offset: 0,
+                            model_call_id: None,
+                            messages: messages.clone(),
+                        },
+                        &self.database,
+                    )?;
+                    terminal_messages = true;
                 }
                 Ok(())
             },
@@ -742,7 +849,34 @@ impl ExternalBackend {
                 }
                 cancelled
             },
-        )?;
+        );
+        if !self.launch.contract.streaming
+            && let Ok(completion) = &mut completion
+            && let Ok(result) = mf_chat::ConversationResult::from_json(&completion.outcome.stdout)
+            && let Some(messages) = result.messages
+            && let Err(error) = tools.borrow_mut().messages(
+                mf_chat::MessageBatch {
+                    offset: 0,
+                    model_call_id: None,
+                    messages,
+                },
+                &self.database,
+            )
+        {
+            completion.protocol_failure = Some(error);
+        }
+        *self
+            .captured_messages
+            .lock()
+            .expect("message recovery was not poisoned") = tools.borrow().batches();
+        let interrupted = completion
+            .as_ref()
+            .map_or(true, |completion| completion.outcome.interrupted);
+        *self
+            .captured_tools
+            .lock()
+            .expect("tool capture was not poisoned") = Some(tools.into_inner().finish(interrupted));
+        let completion = completion?;
         let mut outcome = completion.outcome;
         let mut protocol_failure = completion.protocol_failure;
         if self.launch.contract.streaming {

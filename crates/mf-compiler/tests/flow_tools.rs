@@ -174,7 +174,7 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["calls", "tool_properties", "tools"]
+        ["calls", "origin", "tool_properties", "tools"]
     );
     let dispatch = &dispatch_call.children[&"dispatch".into()]["body"];
     assert!(dispatch.children.is_empty());

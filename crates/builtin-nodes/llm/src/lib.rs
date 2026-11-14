@@ -32,6 +32,8 @@ use std::{
 pub const KIND: &str = "builtin.llm";
 
 pub type MessageMetadata = BTreeMap<String, ValueRef>;
+mod messages;
+pub use messages::MessageBatch;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
 pub struct UsageScope {
@@ -77,29 +79,36 @@ pub struct CallUsage {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, NodeEnum)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeEnum)]
+#[serde(tag = "role", rename_all = "snake_case")]
 #[value(tag = "role")]
 pub enum ChatMessage {
     #[value(rename = "system")]
     System {
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<MessageMetadata>,
     },
     #[value(rename = "user")]
     User {
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<MessageMetadata>,
     },
     #[value(rename = "assistant")]
     Assistant {
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ToolCall>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<MessageMetadata>,
     },
     #[value(rename = "tool")]
+    #[serde(rename = "tool")]
     ToolResult {
         tool_call_id: String,
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<MessageMetadata>,
     },
 }

@@ -656,6 +656,115 @@ fn paused_rendering_keeps_capture_draining_with_bounded_previews() {
 }
 
 #[test]
+fn save_only_recovery_persists_tools_with_the_original_reply_and_never_executes_again() {
+    use mf_chat::{ToolUse, ToolUseHistory, ToolUsePhase};
+    let root = tempfile::tempdir().unwrap();
+    let mut launch = launch(root.path());
+    let state = root.path().join("state");
+    let offline = root.path().join("offline");
+    launch.options.database_path = state.join("chat.sqlite");
+    let marker = root.path().join("unexpected-execution");
+    fs::write(launch.runner.executable().with_extension("script"), format!(
+        "#!/bin/sh\ntouch '{}'\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"wrong rerun\",\"usages\":[]}}'\n", marker.display()
+    )).unwrap();
+    let database = Arc::new(ChatDatabase::open(&launch.options.database_path).unwrap());
+    let session = database.create_session("default", None, None).unwrap();
+    let begun = database
+        .begin_turn(
+            &session.id,
+            "paid prompt",
+            mf_chat::ModelIdentity {
+                profile: "default".into(),
+                model: None,
+            },
+            None,
+        )
+        .unwrap();
+    let history = ToolUseHistory {
+        calls: Vec::new(),
+        invocation: begun.invocation.clone(),
+        finished: true,
+        incomplete: false,
+        runs: vec![ToolUse {
+            origin: None,
+            id: "actual-tool-call".into(),
+            name: "calculator".into(),
+            phase: ToolUsePhase::Succeeded,
+            arguments: "12 + 8".into(),
+            output: "20".into(),
+            duration_ns: Some(50),
+        }],
+    };
+    let (_commands, input) = mpsc::sync_channel(QUEUE_CAPACITY);
+    let (output, events) = mpsc::sync_channel(QUEUE_CAPACITY);
+    let busy = Arc::new(AtomicBool::new(true));
+    let mut worker = Controller {
+        launch: Arc::new(launch),
+        database: database.clone(),
+        input,
+        output,
+        closed: Arc::new(AtomicBool::new(false)),
+        busy: busy.clone(),
+        cancel: Arc::new(AtomicBool::new(false)),
+        preview: Default::default(),
+        tool_updates: Default::default(),
+        retained: Some(Retained {
+            messages: Vec::new(),
+            invocation: begun.invocation.clone(),
+            tool_uses: Some(history.clone()),
+            response: RetainedResponse::Ready(UncommittedCompletion {
+                database_path: database.path().to_owned(),
+                completion: mf_chat::Completion {
+                    invocation: begun.invocation.clone(),
+                    result: mf_chat::ConversationResult {
+                        text: "original paid reply".into(),
+                        ..Default::default()
+                    },
+                },
+            }),
+        }),
+    };
+    assert_eq!(
+        database
+            .messages(&session.id, 10, None)
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    fs::rename(&state, &offline).unwrap();
+    fs::write(&state, "unavailable").unwrap();
+    assert!(worker.recover(false).is_err());
+    assert!(worker.retained.is_some() && busy.load(Ordering::Acquire));
+    fs::remove_file(&state).unwrap();
+    fs::rename(&offline, &state).unwrap();
+    worker.recover(false).unwrap();
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        ChatEvent::Finished {
+            resolution: Ok(ReconciledCompletion {
+                state: CompletionState::Committed(_),
+                ..
+            }),
+            tool_uses: Some(_),
+            ..
+        }
+    ));
+    assert!(!busy.load(Ordering::Acquire));
+    assert!(
+        !marker.exists(),
+        "save-only recovery must not launch a workflow"
+    );
+    let path = database.path().to_owned();
+    drop(worker);
+    drop(database);
+    let reopened = ChatDatabase::open(path).unwrap();
+    let page = reopened.messages(&session.id, 10, None).unwrap();
+    assert_eq!(page.messages[1].message.content, "original paid reply");
+    assert_eq!(page.messages[1].tool_uses, Some(history));
+}
+
+#[test]
 fn closing_a_live_controller_reaps_a_child_without_rendering() {
     let root = tempfile::tempdir().unwrap();
     let (launch, _) = live_launch(root.path(), "gated");

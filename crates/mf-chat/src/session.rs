@@ -77,10 +77,13 @@ pub struct MessagesInputs {
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct MessageRecord {
+    pub chat_message: mfn_llm::ChatMessage,
     pub message: Message,
     pub turn_state: String,
     #[value(default)]
     pub usages: Option<Vec<crate::CallUsage>>,
+    #[value(default)]
+    pub tool_uses: Option<crate::ToolUseHistory>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -161,20 +164,14 @@ pub fn history(connection: &mut SqliteConnection, id: &str) -> Result<HistoryCon
         if page.is_empty() {
             break;
         }
+        let mut canonical = crate::message_log::reconstruct(connection, &page)?;
         for message in page {
-            let mut values = mf_runtime::NodeValues::from([
-                ("role".into(), message.role.into()),
-                ("content".into(), message.content.into()),
-            ]);
-            mf_runtime::encode_output(&mut values, "metadata", message.metadata)?;
-            let history_message = mf_runtime::decode_required_input(
-                "history",
-                Some(mf_runtime::ValueRef::object(
-                    values.into_iter().map(|(key, value)| (key.into(), value)),
-                )),
-            )?;
             after = message.sequence;
-            result.push(history_message);
+            result.push(
+                canonical
+                    .remove(&message.id)
+                    .expect("reconstructed each history message"),
+            );
         }
     }
     Ok(HistoryContext {
@@ -381,12 +378,47 @@ fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> 
             .into_iter()
             .filter_map(|(turn_id, usages)| turn_id.map(|id| (id, Option::from(usages))))
             .collect();
+        let tool_turns: Vec<_> = rows.iter().map(|(message, _)| &message.turn_id).collect();
+        let tool_calls = model_calls::table
+            .filter(model_calls::session_id.eq(&input.session_id))
+            .filter(model_calls::turn_id.eq_any(tool_turns))
+            .filter(model_calls::purpose.eq("conversation"))
+            .select((model_calls::id, model_calls::turn_id))
+            .load::<(String, Option<String>)>(connection)
+            .context(DatabaseSnafu {
+                operation: "load message tool owners",
+            })?;
+        let ids: Vec<_> = tool_calls.iter().map(|(id, _)| id.clone()).collect();
+        let mut histories = crate::tool_uses::load_histories(connection, &ids)?;
+        let tools: std::collections::BTreeMap<_, _> = tool_calls
+            .into_iter()
+            .filter_map(|(id, turn)| turn.map(|turn| (turn, histories.remove(&id))))
+            .collect();
+        let last_assistants: std::collections::BTreeMap<_, _> = messages::table
+            .filter(messages::session_id.eq(&input.session_id))
+            .filter(messages::role.eq("assistant"))
+            .group_by(messages::turn_id)
+            .select((messages::turn_id, diesel::dsl::max(messages::sequence)))
+            .load::<(String, Option<i64>)>(connection)
+            .context(DatabaseSnafu {
+                operation: "locate final response usage",
+            })?
+            .into_iter()
+            .collect();
+        let message_rows: Vec<_> = rows.iter().map(|(message, _)| message.clone()).collect();
+        let mut canonical = crate::message_log::reconstruct(connection, &message_rows)?;
         Ok(MessagePageOutputs {
             page: MessagePage {
                 messages: rows
                     .into_iter()
                     .map(|(message, turn_state)| MessageRecord {
-                        usages: if message.role == "assistant" {
+                        chat_message: canonical
+                            .remove(&message.id)
+                            .expect("reconstructed each page message"),
+                        tool_uses: tools.get(&message.turn_id).cloned().flatten(),
+                        usages: if last_assistants.get(&message.turn_id)
+                            == Some(&Some(message.sequence))
+                        {
                             usages.remove(&message.turn_id).flatten()
                         } else {
                             None

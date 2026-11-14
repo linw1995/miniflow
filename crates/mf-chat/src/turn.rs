@@ -214,7 +214,7 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
         let timestamp = session::now()?;
         let next = owner
             .next_sequence
-            .checked_add(2)
+            .checked_add(1)
             .context(ArithmeticSnafu {
                 operation: "reserve message order",
             })?;
@@ -414,8 +414,12 @@ pub fn result_matches(call: &ModelCall, reply: &ConversationResult) -> bool {
         && call.result_title == reply.title
 }
 
-pub fn saved_result(call: &ModelCall) -> Result<ConversationResult, ChatError> {
+pub fn saved_result(
+    connection: &mut SqliteConnection,
+    call: &ModelCall,
+) -> Result<ConversationResult, ChatError> {
     Ok(ConversationResult {
+        messages: crate::message_log::load(connection, &call.id)?,
         status: "succeeded".into(),
         error: None,
         title: call.result_title.clone(),
@@ -436,6 +440,7 @@ pub fn save_response(
     timestamp: i64,
     disposition: &str,
 ) -> Result<(), ChatError> {
+    crate::tool_uses::seal_call(connection, call_id, crate::ToolUsePhase::Unknown)?;
     diesel::update(model_calls::table.find(call_id))
         .set((
             model_calls::state.eq("succeeded"),
@@ -468,13 +473,15 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
         let turn = load_turn(connection, &input.invocation.turn_id)?;
         if call.state == "succeeded" {
             ensure!(
-                turn.state == "succeeded" && result_matches(&call, &input.response),
+                turn.state == "succeeded"
+                    && result_matches(&call, &input.response)
+                    && crate::message_log::load(connection, &call.id)? == input.response.messages,
                 ConflictSnafu { id: &call.id }
             );
             return Ok(CompletionOutputs {
                 completion: Completion {
                     invocation: input.invocation.clone(),
-                    result: saved_result(&call)?,
+                    result: saved_result(connection, &call)?,
                 },
             });
         }
@@ -483,24 +490,43 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             ConflictSnafu { id: &call.id }
         );
         let timestamp = session::now()?;
-        let message = crate::Message {
-            metadata: input.response.metadata.clone(),
-            id: uuid::Uuid::new_v4().to_string(),
-            session_id: call.session_id.clone(),
-            turn_id: turn.id.clone(),
-            sequence: turn.sequence.checked_add(1).context(ArithmeticSnafu {
-                operation: "order assistant message",
-            })?,
-            role: "assistant".into(),
-            content: input.response.text.clone(),
-            created_at: timestamp,
-        };
-        diesel::insert_into(messages::table)
-            .values(message)
-            .execute(connection)
-            .context(DatabaseSnafu {
-                operation: "save assistant message",
-            })?;
+        if let Some(messages) = &input.response.messages {
+            crate::message_log::settle(connection, &input.invocation, messages)?;
+        } else {
+            ensure!(
+                crate::message_log::load(connection, &call.id)?.is_none(),
+                ConflictSnafu { id: &call.id }
+            );
+            let owner = session::load(connection, &call.session_id)?;
+            let next = owner
+                .next_sequence
+                .checked_add(1)
+                .context(ArithmeticSnafu {
+                    operation: "order assistant message",
+                })?;
+            let message = crate::Message {
+                metadata: input.response.metadata.clone(),
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: call.session_id.clone(),
+                turn_id: turn.id.clone(),
+                sequence: owner.next_sequence,
+                role: "assistant".into(),
+                content: input.response.text.clone(),
+                created_at: timestamp,
+            };
+            diesel::insert_into(messages::table)
+                .values(message)
+                .execute(connection)
+                .context(DatabaseSnafu {
+                    operation: "save assistant message",
+                })?;
+            diesel::update(sessions::table.find(&owner.id))
+                .set(sessions::next_sequence.eq(next))
+                .execute(connection)
+                .context(DatabaseSnafu {
+                    operation: "advance assistant message order",
+                })?;
+        }
         save_response(
             connection,
             &call.id,
@@ -529,10 +555,11 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             .context(DatabaseSnafu {
                 operation: "update completed session",
             })?;
+        let saved = load_call(connection, &call.id)?;
         Ok(CompletionOutputs {
             completion: Completion {
                 invocation: input.invocation.clone(),
-                result: saved_result(&load_call(connection, &call.id)?)?,
+                result: saved_result(connection, &saved)?,
             },
         })
     })
@@ -572,6 +599,15 @@ pub fn finalize_call(
         }
         return Ok(Changed { changed: false });
     }
+    crate::tool_uses::seal_call(
+        connection,
+        id,
+        if matches!(state, "cancelled" | "interrupted") {
+            crate::ToolUsePhase::Interrupted
+        } else {
+            crate::ToolUsePhase::Unknown
+        },
+    )?;
     let timestamp = session::now()?;
     diesel::update(model_calls::table.find(id))
         .set((
@@ -678,6 +714,7 @@ pub fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     connection.immediate_transaction(|connection| {
         let timestamp = session::now()?;
+        crate::tool_uses::recover(connection)?;
         let calls = diesel::update(model_calls::table.filter(model_calls::state.eq("running")))
             .set((
                 model_calls::state.eq("interrupted"),

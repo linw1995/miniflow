@@ -381,22 +381,29 @@ fn settle_result(input: CompleteTurnInputs) -> Result<Settlement, ChatError> {
             turn: None,
         })
     } else {
-        crate::turn::fail(crate::nodes::FailTurnInputs {
-            database_path: input.database_path.clone(),
-            invocation: input.invocation.clone(),
-            state: "failed".into(),
-            error: input
-                .response
-                .error
-                .expect("validated failure has an error"),
-            usages: Some(input.response.usages),
-        })?;
-        Ok(Settlement {
-            completion: None,
-            turn: Some(crate::turn::load_turn(
-                &mut crate::storage::connect(std::path::Path::new(&input.database_path))?,
-                &input.invocation.turn_id,
-            )?),
+        let mut connection = crate::storage::connect(std::path::Path::new(&input.database_path))?;
+        connection.immediate_transaction(|connection| {
+            if let Some(messages) = &input.response.messages {
+                crate::message_log::settle(connection, &input.invocation, messages)?;
+            }
+            crate::turn::finalize_call(
+                connection,
+                &input.invocation.call_id,
+                "failed",
+                input
+                    .response
+                    .error
+                    .as_deref()
+                    .expect("validated failure has an error"),
+                Some(&input.response.usages),
+            )?;
+            Ok(Settlement {
+                completion: None,
+                turn: Some(crate::turn::load_turn(
+                    connection,
+                    &input.invocation.turn_id,
+                )?),
+            })
         })
     }
 }

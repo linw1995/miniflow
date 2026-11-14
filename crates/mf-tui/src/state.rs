@@ -251,7 +251,7 @@ pub(super) fn invalid(message: impl Into<String>) -> StateError {
 }
 
 pub struct SessionState {
-    description: WorkflowDescription,
+    description: Arc<WorkflowDescription>,
     run_id: RunId,
     node_positions: BTreeMap<String, usize>,
     nodes: Vec<NodeObservation>,
@@ -334,7 +334,7 @@ impl SessionState {
         });
         Ok(Self {
             stream,
-            description,
+            description: Arc::new(description),
             run_id,
             node_positions,
             nodes,
@@ -356,6 +356,10 @@ impl SessionState {
             closed: false,
             snapshot_cache: Mutex::new(None),
         })
+    }
+
+    pub fn description(&self) -> Arc<WorkflowDescription> {
+        Arc::clone(&self.description)
     }
 
     pub fn expected_event_schema_version(&self) -> i64 {

@@ -38,11 +38,62 @@ History includes only completed successful turns from the requested session. It 
 
 Registered kinds are `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.archive`, `.restore`, `mf_chat.messages.list`, and `mf_chat.history.load`. All node inputs name an explicit database path; node preparation never reads storage.
 
+## Tool-use evidence
+
+Chat Flow `messages` are canonical conversation data, not disposable inputs to a tool-card extractor. The host
+persists their complete accepted content, metadata, assistant `tool_calls`/arguments and tool-result links in order.
+`MessageRecord.chat_message` and successful model history reconstruct these messages after restart. Display budgets
+never truncate that recovery representation; failed/interrupted prefixes remain inspectable outside model context.
+
+Tool presentation combines two independent sources. Messages describe requests and returned content; runtime
+observations describe actual preparation/execution, resolved arguments, outcomes and duration. A returned tool
+message does **not** prove execution succeeded. Matching requires the same conversation invocation, explicit model
+identity and provider tool-call ID. Names, parameter similarity and timestamps never establish a match. One semantic
+call may have multiple attempts. Different names, arguments or results stay separately labeled, and unmatched
+observations appear as **Unlinked execution**. Messages without execution evidence say **Execution not observed**.
+
+The shared `ToolUseReducer` runs on producer changes. Receiver registration bootstraps existing observations and
+hands off live lifecycle/value updates without a gap. A separate bounded/coalescing storage subscriber writes changes;
+frontend notifications are independent. Neither a timer nor terminal drawing collects evidence or writes storage.
+Canonical message appends use the backpressured Flow-output consumer rather than lossy latest-value coalescing.
+
+Storage uses message/source, semantic-call and execution relations, not a `model_calls.tool_uses` JSON column.
+`ChatDatabase::tool_uses` and each `MessageRecord.tool_uses` expose a bounded projection for its owning invocation.
+Status-only updates change no argument/result payload or sibling execution; exact replays write no duplicate rows.
+Message/relation/cursor appends and final settlement use short transactions. Final storage failures retain the original
+messages and evidence for save-only recovery, without another workflow/model request.
+
+Observation/display windows retain at most 64 entries, with names and public argument/result previews bounded to
+128/2048 UTF-8 bytes. Those are not canonical-message limits. Runtime evidence follows validated iteration-body
+dataflow into `llm.tool_result`, supporting Flow-property classifiers and legacy dispatchers without fixed node IDs.
+Only an observed classifier rejection proves argument failure; an error-shaped object on success does not.
+
+Successful, failed and cancelled turns retain recorded facts. Recovery settles unfinished executions as
+interrupted/unknown without rewriting observed successes. Complete observation payloads are immutable; missing
+identity can be attached later without rewriting them. Earlier draft JSON journals migrate as observation-only rows,
+without invented messages or associations. Historical absence still means **not recorded**, not **no tools**.
+In-process/custom hosts do not acquire the executable observer automatically; they can record public observations
+through `record_tool_uses`, or append accepted messages through `record_messages`.
+
+Terminal chat displays **Tool uses** inline once per turn, before the assistant reply. Status, public arguments/results,
+and observed duration appear while the turn is running and after loading history. `Ctrl+E` only hides the separate
+Flow execution panel; it does not hide these records or stop collection. Starting another turn preserves earlier tools,
+and paged or cancelled user-only history keeps its own evidence without an invented assistant message.
+
+Details are rendered literally, with terminal controls escaped; Markdown/image syntax in tool output cannot load
+resources or issue terminal commands. Missing durations stay unknown and incomplete observations are labeled.
+`[save pending]` distinguishes retained evidence awaiting persistence confirmation. Old missing journals show
+`Tool-use details not recorded`, not a fabricated empty/successful tool list.
+
 ## Turn lifecycle
 
 `mf_chat.turn.begin` atomically records a user message, running turn, and running model call. It reserves message order and loads successful history before releasing its short transaction. Only one conversation turn may run in a session; another session can still use the database while the provider is pending.
 
-`mf_chat.turn.complete` saves the assistant message, reported usages, optional title candidate, and successful turn state together. It applies an eligible title in the same transaction. Replaying the same call and response returns the saved completion. Reusing its identity with different text, metadata, title, or usages fails. A failure halfway through completion leaves no assistant message or partial usage update.
+`mf_chat.turn.complete` reconciles all supplied canonical messages, reported usages, an optional title candidate and
+successful turn state together. Legacy results without `messages` retain the user/final-text fallback. Ordering supports
+multiple assistant/tool messages per turn, including empty-text tool-call assistants. Replaying the same call and
+response returns the full saved completion; conflicting text, messages, metadata, title or usages fail. A failed final
+transaction exposes no successful partial turn; already-recorded prefixes remain available for save-only recovery.
 
 `mf_chat.turn.fail` and `mf_chat.call.fail` finalize unsuccessful work and cannot overwrite committed success. Error summaries are bounded, while live errors retain typed sources. `mf_chat.turn.load` and `mf_chat.call.load` expose individual records for inspection.
 
@@ -183,9 +234,13 @@ or `save_recovered` saves the retained result without invoking either model agai
 
 The [calculator example](../examples/chat-calculator-flow.json) uses the provider-owned bounded Agent
 composition with a native Loop and parallel tool dispatch. Its calculator supports addition, subtraction,
-multiplication and division. Tool-call assistant messages and ordered tool results stay in the internal
-transcript; only the final assistant result is persisted. Each model turn reports its usage, and `answer`
-streams assistant text, including preambles accompanying tool calls. Catalog projection runs once before
+multiplication and division. It exports only the current invocation's new assistant/tool messages, excluding
+system/history inputs and the already-admitted user prompt. The single `messages` loop variable retains the full
+context and every new message, including the final reply; an immutable initial count selects the returned suffix and
+zero-based event offsets, without a second transcript accumulator. These complete new messages are persisted and
+restored into the next turn's context. `llm.message_events` publishes explicit append batches before dispatch and after tool
+results; `message_events` and `tool_message_events` preserve their respective native stream domains. Each model
+turn reports its usage, and `answer` streams assistant text, including preambles accompanying tool calls. Catalog projection runs once before
 the first model request, not once per tool round.
 
 The example is a small ordinary caller, not a generated Agent graph. A Flow constant produces the
@@ -343,6 +398,14 @@ Finite executables keep their existing final JSON transport. Native streaming ex
 ordinary output named `answer` containing `text` and `model_call_id`. The backend drains standard JSONL
 records, validates deltas, and retains the final conversation result until execution completes.
 
+An optional terminal `messages` output contains only newly produced `mfn_llm::ChatMessage` values, not input history,
+system instructions or the admitted prompt. Its final assistant message must represent canonical `text`; the host
+never appends another text-derived reply or silently substitutes raw model text. Optional `message_events` and
+`tool_message_events` streams carry `{offset, model_call_id?, messages}` batches. Offsets are invocation-scoped,
+append/replay-safe message identities. Independent domains may arrive out of order and are reconciled against the
+terminal list; message streams require that list. Explicit model identity permits observation links, but its absence
+does not prevent message storage or semantic display. Final completion still requires all stream domains to drain.
+
 `workflows/conversation.json` remains the embedded application graph. For executable chat, the host
 composes its invocation stage into input preparation, `workflow.call`, and result completion. The call
 publishes validated `answer` deltas through the preview node; completion requires successful call closure
@@ -373,8 +436,9 @@ backend invocation; the terminal's backend supplies process supervision and chil
 
 ## History metadata
 
-Application history remains a list of user and assistant messages. Each message accepts an optional object-valued
-`metadata` field; omitting it means no annotations. System instructions and the current prompt remain separate.
+Application history reconstructs the canonical successful message sequence, including assistant `tool_calls` and
+`tool` results when a Flow supplies them. Each message accepts optional object-valued `metadata`; omitting it means
+no annotations. Configured system instructions and the current prompt remain separate inputs.
 
 ```json
 {
@@ -389,8 +453,10 @@ Application history remains a list of user and assistant messages. Each message 
 
 Metadata is opaque application data and is omitted from provider requests. Flow-level message assembly
 preserves annotations on existing messages; the LLM node returns only its current assistant message.
-The chat application persists response metadata on the new assistant message, including through save retries and database reopen. Workflow history outputs never replace
-stored messages or change their metadata. New user messages currently have no metadata.
+The chat application persists metadata on every accepted returned message through save retries and database reopen.
+Legacy text-only results retain response metadata on their single new assistant message. A returned `history` output
+never rewrites existing records; `messages` appends only the current invocation's canonical messages. Admitted user
+messages currently have no metadata.
 
 Metadata is retained in history and contributes to the executable response limit. Existing SQLite
 databases receive a forward migration; old messages retain absent metadata.
@@ -398,8 +464,9 @@ databases receive a forward migration; old messages retain absent metadata.
 ## Workflow results and reported calls
 
 Executables declare `status`, `text`, and a nonoptional `usages` output. A successful result has nonempty
-text; optional `metadata` belongs to that assistant message. `finish_reason` is optional. An optional `title` proposes a session title. Other workflow
-outputs, including returned history, do not change persisted conversation state.
+text. Optional `messages` carries the complete new message sequence described above; when omitted, optional
+`metadata` belongs to the text-derived assistant message. `finish_reason` is optional. An optional `title` proposes a
+session title. Other outputs, including returned `history`, do not replace persisted conversation state.
 
 ```json
 {

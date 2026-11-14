@@ -58,17 +58,26 @@ mod tests {
             .find(|node| node.id.as_str() == "repeat")
             .unwrap();
         let loop_inputs = repeat.config["inputs"].as_object().unwrap();
-        assert_eq!(loop_inputs.len(), 6);
+        assert_eq!(loop_inputs.len(), 7);
+        assert_eq!(loop_inputs["initial_message_count"], json!("int"));
         assert_eq!(loop_inputs["tools"], json!({"map":"flow"}));
         assert_eq!(loop_inputs["tool_properties"], json!({"map":"object"}));
         let variables = repeat.config["variables"].as_array().unwrap();
-        assert_eq!(variables.len(), 5);
+        assert_eq!(
+            variables
+                .iter()
+                .map(|variable| variable["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["messages", "usages", "text", "outcome", "error"]
+        );
         assert!(
             variables.iter().any(|variable| {
                 variable["name"] == "usages" && variable["initial"] == json!([])
             })
         );
         let serialized = serde_json::to_string(&definition).unwrap();
+        assert!(!serialized.contains("public_messages"));
+        assert!(!serialized.contains("public_assistant"));
         for synthetic in [
             "flow_0",
             "tool_0",
@@ -78,7 +87,7 @@ mod tests {
         ] {
             assert!(!serialized.contains(synthetic), "{synthetic}");
         }
-        assert_eq!(definition.outputs.len(), 5);
+        assert_eq!(definition.outputs.len(), 8);
         assert!(
             definition
                 .nodes
