@@ -7,7 +7,10 @@ use crate::{
 use mf_chat::contract::{
     ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
 };
-use mf_chat::{ChatDatabase, Invocation, MessagePage, Session, SessionPage, UncommittedCompletion};
+use mf_chat::{
+    ChatDatabase, Invocation, MessagePage, Session, SessionPage, ToolUseHistory,
+    UncommittedCompletion,
+};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     io,
@@ -24,6 +27,7 @@ use std::{
 
 mod preview;
 pub use preview::LivePreview;
+pub mod tools;
 mod transcript;
 mod ui;
 pub use ui::run_chat;
@@ -143,6 +147,7 @@ pub enum ChatEvent {
         status: Option<ExitStatus>,
         stderr: String,
         capture_error: Option<String>,
+        tool_uses: Option<Box<ToolUseHistory>>,
     },
     Error {
         admission: bool,
@@ -305,6 +310,7 @@ enum RetainedResponse {
 struct Retained {
     invocation: Invocation,
     response: RetainedResponse,
+    tool_uses: Option<ToolUseHistory>,
 }
 struct Controller {
     launch: Arc<ChatLaunch>,
@@ -439,8 +445,11 @@ impl Controller {
             self.preview.lock().unwrap().begin(invocation.clone());
         }
         let captured = Arc::new(Mutex::new(None));
+        let captured_tools = Arc::new(Mutex::new(None));
         let cancellation = mf_runtime::StreamCancellation::default();
         let backend = ExternalBackend {
+            database: self.database.clone(),
+            captured_tools: captured_tools.clone(),
             cancellation: cancellation.clone(),
             launch: Arc::clone(&self.launch),
             parameters,
@@ -494,7 +503,7 @@ impl Controller {
                 preview.lock().unwrap().apply(event)
             })
         });
-        let resolution = mf_chat::workflow::run_conversation_with_preview(
+        let mut resolution = mf_chat::workflow::run_conversation_with_preview(
             &self.database,
             request,
             Arc::new(backend),
@@ -515,6 +524,19 @@ impl Controller {
             );
             return Err(resolution.diagnostics.remove(0).into());
         }
+        let tool_uses = captured_tools
+            .lock()
+            .expect("tool capture was not poisoned")
+            .take();
+        if let Some(history) = &tool_uses
+            && let Err(error) = self.database.record_tool_uses(&invocation, history)
+        {
+            if resolution.is_ok() {
+                resolution = Err(error);
+            } else {
+                eprintln!("chat final tool evidence: {error}");
+            }
+        }
         let status = outcome.as_ref().map(|outcome| outcome.status);
         let stderr = outcome
             .as_ref()
@@ -530,12 +552,14 @@ impl Controller {
             }) => Some(Retained {
                 invocation: invocation.clone(),
                 response: RetainedResponse::Ready(pending.clone()),
+                tool_uses: tool_uses.clone(),
             }),
             Err(_) => Some(Retained {
                 invocation: invocation.clone(),
                 response: RetainedResponse::Exited(
                     outcome.expect("failed reconciliation retains the exit"),
                 ),
+                tool_uses: tool_uses.clone(),
             }),
             _ => None,
         };
@@ -546,12 +570,17 @@ impl Controller {
             status,
             stderr,
             capture_error,
+            tool_uses: tool_uses.map(Box::new),
         });
         Ok(())
     }
     fn recover(&mut self, abandon: bool) -> Result<(), ChatRunError> {
         let retained = self.retained.as_ref().context(MissingReplySnafu)?;
         let invocation = retained.invocation.clone();
+        let tool_uses = retained.tool_uses.clone();
+        if let Some(history) = &tool_uses {
+            self.database.record_tool_uses(&invocation, history)?;
+        }
         let mut resolution = match &retained.response {
             RetainedResponse::Ready(pending) => ReconciledCompletion {
                 state: CompletionState::Uncommitted(pending.clone()),
@@ -585,12 +614,15 @@ impl Controller {
             status: None,
             stderr: String::new(),
             capture_error: None,
+            tool_uses: tool_uses.map(Box::new),
         });
         Ok(())
     }
 }
 
 struct ExternalBackend {
+    database: Arc<ChatDatabase>,
+    captured_tools: Arc<Mutex<Option<ToolUseHistory>>>,
     cancellation: mf_runtime::StreamCancellation,
     launch: Arc<ChatLaunch>,
     parameters: mf_runtime::WorkflowArguments,
@@ -634,7 +666,14 @@ impl mf_chat::ConversationBackend for ExternalBackend {
                 prompt: request.prompt.clone(),
             },
         );
-        let execution = self.execute(request, context, preview);
+        let execution = self.execute(invocation, request, context, preview);
+        let tool_persistence = self
+            .captured_tools
+            .lock()
+            .expect("tool capture was not poisoned")
+            .as_ref()
+            .map(|history| self.database.record_tool_uses(invocation, history))
+            .transpose();
         let failure = match execution.as_ref().err() {
             Some(ChatRunError::Runner {
                 source: RunnerError::Cancelled { .. },
@@ -672,10 +711,12 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         } else {
             mf_chat::ConversationResult::from_json(&outcome.stdout).boxed()
         };
-        let result = result.map(|mut response| {
-            outcome.call_events.apply(&mut response.usages);
-            response
-        });
+        let result = result
+            .map(|mut response| {
+                outcome.call_events.apply(&mut response.usages);
+                response
+            })
+            .and_then(|response| tool_persistence.boxed().map(|_| response));
         let reply = if result.is_err() {
             mf_chat::ConversationResult::from_json(&outcome.stdout)
                 .ok()
@@ -700,12 +741,14 @@ impl mf_chat::ConversationBackend for ExternalBackend {
 impl ExternalBackend {
     fn execute(
         &self,
+        invocation: &Invocation,
         request: mf_chat::ConversationInputs,
         context: &mut mf_runtime::ExecutionContext,
         mut preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), mf_chat::ChatError>>,
     ) -> Result<(LocalOutcome, Option<mf_chat::ChatError>), ChatRunError> {
         let arguments = self.launch.contract.arguments(request, &self.parameters)?;
         let mut decoder = mf_chat::contract::ConversationOutputDecoder::new(&self.launch.contract);
+        let tools = std::cell::RefCell::new(tools::Capture::new(invocation.clone()));
         let completion = RunnerInvocation {
             runner: &self.launch.runner,
             arguments: &arguments,
@@ -715,6 +758,7 @@ impl ExternalBackend {
         .run(
             context.cancellation(),
             |observation| {
+                tools.borrow_mut().observe(observation.clone());
                 emit(
                     &self.output,
                     &self.closed,
@@ -732,6 +776,9 @@ impl ExternalBackend {
             || {
                 let cancelled =
                     self.cancel.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire);
+                if !cancelled && let Err(error) = tools.borrow_mut().checkpoint(&self.database) {
+                    eprintln!("chat tool evidence checkpoint: {error}");
+                }
                 if cancelled {
                     self.cancellation.cancel(
                         mf_runtime::StreamExecutionSnafu {
@@ -742,7 +789,15 @@ impl ExternalBackend {
                 }
                 cancelled
             },
-        )?;
+        );
+        let interrupted = completion
+            .as_ref()
+            .map_or(true, |completion| completion.outcome.interrupted);
+        *self
+            .captured_tools
+            .lock()
+            .expect("tool capture was not poisoned") = Some(tools.into_inner().finish(interrupted));
+        let completion = completion?;
         let mut outcome = completion.outcome;
         let mut protocol_failure = completion.protocol_failure;
         if self.launch.contract.streaming {

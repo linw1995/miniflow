@@ -38,6 +38,31 @@ History includes only completed successful turns from the requested session. It 
 
 Registered kinds are `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.archive`, `.restore`, `mf_chat.messages.list`, and `mf_chat.history.load`. All node inputs name an explicit database path; node preparation never reads storage.
 
+## Tool-use evidence
+
+The executable `ChatController` checkpoints bounded, redacted tool-use observations in the owning `mf-chat`
+database independently of terminal or desktop rendering. `model_calls.tool_uses` is a nullable JSON journal;
+`ModelCall.tool_uses` and each `MessageRecord.tool_uses` expose it with its exact session/turn/call identity.
+Records cover standard tool dispatch boundaries (`llm.tool_arguments`, `builtin.router`, `llm.tool_result`),
+not tool names guessed from model text. A successful conversation does not prove an unobserved tool succeeded.
+
+A journal retains at most 64 distinct calls, with bounded names and at most 2048 UTF-8 bytes each for arguments
+and results. Values are redacted before persistence. Missing observations and capacity truncation remain explicit;
+they never become empty successful tool runs. Checkpoints use a non-waiting write transaction so storage contention
+does not block cancellation. Final persistence errors remain failures and retain evidence with the original reply
+for save-only recovery, without another workflow/model request.
+
+Successful, failed, and cancelled turns retain their tool evidence. Recovery settles unfinished checkpoints as
+interrupted/unknown without changing observed successes. Complete final evidence is immutable; incomplete evidence
+can be refined without deleting calls or rewriting known terminal phases. Retrying a model creates a separate journal.
+Message pages may repeat a turn's journal on both user and assistant records; views display it once per turn.
+The model-history API still returns only ordinary successful chat messages, not the observation journal.
+
+Existing databases migrate automatically, but historical calls without recorded evidence retain `None`. That means
+“not recorded”, not “no tool use”; such records cannot be reconstructed from a final reply or rerun without changing
+history. In-process `ChatHost` and custom backends do not acquire this executable observer automatically; a host may
+record its own public evidence through `ChatDatabase::record_tool_uses`.
+
 ## Turn lifecycle
 
 `mf_chat.turn.begin` atomically records a user message, running turn, and running model call. It reserves message order and loads successful history before releasing its short transaction. Only one conversation turn may run in a session; another session can still use the database while the provider is pending.
@@ -184,7 +209,9 @@ or `save_recovered` saves the retained result without invoking either model agai
 The [calculator example](../examples/chat-calculator-flow.json) uses the provider-owned bounded Agent
 composition with a native Loop and parallel tool dispatch. Its calculator supports addition, subtraction,
 multiplication and division. Tool-call assistant messages and ordered tool results stay in the internal
-transcript; only the final assistant result is persisted. Each model turn reports its usage, and `answer`
+transcript; only the final assistant result becomes a chat message. Executable chat separately persists bounded,
+redacted tool-use evidence for historical inspection, not the model's internal transcript. Each model turn reports
+its usage, and `answer`
 streams assistant text, including preambles accompanying tool calls. Catalog projection runs once before
 the first model request, not once per tool round.
 

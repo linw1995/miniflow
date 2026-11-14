@@ -125,4 +125,8 @@ pub struct ModelCall {
     #[diesel(serialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
     pub metadata: Option<mfn_llm::MessageMetadata>,
     pub result_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[diesel(deserialize_as = crate::storage::StoredJson<crate::ToolUseHistory>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<crate::ToolUseHistory>)]
+    pub tool_uses: Option<crate::ToolUseHistory>,
 }

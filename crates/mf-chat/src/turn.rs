@@ -239,6 +239,7 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             created_at: timestamp,
         };
         let call = ModelCall {
+            tool_uses: None,
             usages: None,
             metadata: None,
             id: input.call_id.clone(),
@@ -436,6 +437,7 @@ pub fn save_response(
     timestamp: i64,
     disposition: &str,
 ) -> Result<(), ChatError> {
+    crate::tool_uses::seal_call(connection, call_id, crate::ToolUsePhase::Unknown)?;
     diesel::update(model_calls::table.find(call_id))
         .set((
             model_calls::state.eq("succeeded"),
@@ -572,6 +574,15 @@ pub fn finalize_call(
         }
         return Ok(Changed { changed: false });
     }
+    crate::tool_uses::seal_call(
+        connection,
+        id,
+        if matches!(state, "cancelled" | "interrupted") {
+            crate::ToolUsePhase::Interrupted
+        } else {
+            crate::ToolUsePhase::Unknown
+        },
+    )?;
     let timestamp = session::now()?;
     diesel::update(model_calls::table.find(id))
         .set((
@@ -678,6 +689,7 @@ pub fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     connection.immediate_transaction(|connection| {
         let timestamp = session::now()?;
+        crate::tool_uses::recover(connection)?;
         let calls = diesel::update(model_calls::table.filter(model_calls::state.eq("running")))
             .set((
                 model_calls::state.eq("interrupted"),

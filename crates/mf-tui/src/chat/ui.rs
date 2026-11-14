@@ -1163,6 +1163,7 @@ mod tests {
         view.session = Some(session.clone());
         view.event(
             ChatEvent::Finished {
+                tool_uses: None,
                 invocation: begun.invocation.clone(),
                 resolution: Ok(ReconciledCompletion {
                     state: CompletionState::Uncommitted(mf_chat::UncommittedCompletion {
@@ -1190,6 +1191,7 @@ mod tests {
             .unwrap();
         view.event(
             ChatEvent::Finished {
+                tool_uses: None,
                 invocation: begun.invocation,
                 resolution: Ok(ReconciledCompletion {
                     state: CompletionState::Committed(completion),
@@ -1845,6 +1847,7 @@ mod tests {
         assert!(!screen.contains("provisional"));
         assert!(!screen.contains("segment"));
         let finish = |invocation: Invocation, text: &str| ChatEvent::Finished {
+            tool_uses: None,
             invocation: invocation.clone(),
             resolution: Ok(ReconciledCompletion {
                 state: CompletionState::Committed(mf_chat::Completion {
@@ -1968,6 +1971,7 @@ mod tests {
             .unwrap();
         view.event(
             ChatEvent::Finished {
+                tool_uses: None,
                 invocation: invocation.clone(),
                 resolution: Ok(ReconciledCompletion {
                     state: CompletionState::Committed(completion),
@@ -2026,6 +2030,7 @@ mod tests {
             });
         view.event(
             ChatEvent::Finished {
+                tool_uses: None,
                 invocation: invocation.clone(),
                 resolution: Ok(ReconciledCompletion {
                     state: CompletionState::NotBegun,
@@ -2043,6 +2048,7 @@ mod tests {
         assert!(!screen.contains(LOADING_FRAMES));
         view.event(
             ChatEvent::Finished {
+                tool_uses: None,
                 invocation: invocation.clone(),
                 resolution: Ok(ReconciledCompletion {
                     state: CompletionState::Uncommitted(UncommittedCompletion {

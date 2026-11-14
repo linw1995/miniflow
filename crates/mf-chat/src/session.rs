@@ -81,6 +81,8 @@ pub struct MessageRecord {
     pub turn_state: String,
     #[value(default)]
     pub usages: Option<Vec<crate::CallUsage>>,
+    #[value(default)]
+    pub tool_uses: Option<crate::ToolUseHistory>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -381,11 +383,26 @@ fn message_page(input: MessagesInputs) -> Result<MessagePageOutputs, ChatError> 
             .into_iter()
             .filter_map(|(turn_id, usages)| turn_id.map(|id| (id, Option::from(usages))))
             .collect();
+        let tool_turns: Vec<_> = rows.iter().map(|(message, _)| &message.turn_id).collect();
+        let tools = model_calls::table
+            .filter(model_calls::session_id.eq(&input.session_id))
+            .filter(model_calls::turn_id.eq_any(tool_turns))
+            .filter(model_calls::purpose.eq("conversation"))
+            .select((model_calls::turn_id, model_calls::tool_uses))
+            .load::<(Option<String>, storage::StoredJson<crate::ToolUseHistory>)>(connection)
+            .context(DatabaseSnafu {
+                operation: "load message tool evidence",
+            })?;
+        let tools: std::collections::BTreeMap<_, _> = tools
+            .into_iter()
+            .filter_map(|(turn, tools)| turn.map(|turn| (turn, Option::from(tools))))
+            .collect();
         Ok(MessagePageOutputs {
             page: MessagePage {
                 messages: rows
                     .into_iter()
                     .map(|(message, turn_state)| MessageRecord {
+                        tool_uses: tools.get(&message.turn_id).cloned().flatten(),
                         usages: if message.role == "assistant" {
                             usages.remove(&message.turn_id).flatten()
                         } else {

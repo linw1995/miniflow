@@ -13,6 +13,7 @@ mod schema;
 mod session;
 mod storage;
 mod title;
+mod tool_uses;
 mod turn;
 mod usage;
 pub use call_events::{CallEventCollector, CallEventError};
@@ -28,6 +29,9 @@ pub use models::{Message, ModelCall, Session, Turn};
 pub use preview::{PreviewConsumer, PreviewEvent, PreviewReceiver};
 pub use session::{HistoryContext, MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;
+pub use tool_uses::{
+    MAX_TOOL_NAME_BYTES, MAX_TOOL_TEXT_BYTES, MAX_TOOL_USES, ToolUse, ToolUseHistory, ToolUsePhase,
+};
 pub use turn::{Invocation, ModelIdentity};
 pub use usage::CallPurpose;
 pub use usage::{
