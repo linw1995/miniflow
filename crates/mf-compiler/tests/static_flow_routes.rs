@@ -345,6 +345,35 @@ fn enabling_removing_and_readding_tools_does_not_change_the_compiled_superset() 
 }
 
 #[test]
+fn candidate_freezing_does_not_overwrite_invalid_authored_configuration() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for config in [
+        json!({"mode":"execute", "flow_candidates":false}),
+        json!({"mode":"execute", "flow_candidate_0":{"path":"must-not-read.json"}}),
+        json!({"mode":"execute", "flow_candidates":{"flow_candidate_0":{"route":"first", "source":[]}}, "flow_candidate_0":{"path":"must-not-read.json"}}),
+        json!({"mode":"execute", "flow_field":17}),
+    ] {
+        let mut source = definition(false);
+        source
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "execute")
+            .unwrap()
+            .config = config;
+        let error = compile_definition(&source, &registry).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                mf_compiler::WorkflowCompileError::NodeConstruction { .. }
+            ),
+            "{error}"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(!error.to_string().contains("could not read"), "{error}");
+    }
+}
+
+#[test]
 fn a_new_name_or_substituted_capability_cannot_expand_the_superset() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition(false), &registry).unwrap();

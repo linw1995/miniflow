@@ -297,6 +297,28 @@ fn validate_routes(routes: &[String]) -> Result<(), RouterBuildError> {
     Ok(())
 }
 
+fn bindings(config: &Value) -> FlowBindings {
+    let mut ordinary = config.clone();
+    if mf_runtime::take_flow_candidates(&mut ordinary).is_err() {
+        return FlowBindings::default();
+    }
+    let Ok(Config {
+        routes: None,
+        mode: Some(Mode::Execute),
+        flow_field,
+    }) = mf_runtime::deserialize_config(ordinary)
+    else {
+        return FlowBindings::default();
+    };
+    FlowBindings {
+        invocation: Some(FlowInvocationBinding {
+            input: "flows".into(),
+            field: flow_field,
+        }),
+        ..Default::default()
+    }
+}
+
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     prepared_factory(KIND, config, BTreeMap::new())
 }
@@ -388,7 +410,7 @@ inventory::submit! {
             factory: &NodeFactory::Subgraph {
                 scope: None,
                 flow_parameters: |config| {
-                    if config.get("mode").and_then(Value::as_str) == Some("execute") {
+                    if bindings(config).invocation.is_some() {
                         mf_runtime::flow_candidate_parameters(config)
                     } else {
                         BTreeMap::new()
@@ -397,13 +419,7 @@ inventory::submit! {
                 plain: factory,
                 prepared: prepared_factory,
             },
-            bindings: |config| FlowBindings {
-                invocation: (config.get("mode").and_then(Value::as_str) == Some("execute")).then(|| FlowInvocationBinding {
-                    input: "flows".into(),
-                    field: config.get("flow_field").and_then(Value::as_str).map(str::to_owned),
-                }),
-                ..Default::default()
-            },
+            bindings,
         },
     }
 }
