@@ -12,8 +12,6 @@ use std::collections::BTreeMap;
 struct Config {
     flow: String,
     body: PreparedSubgraph,
-    #[serde(default)]
-    pack: bool,
 }
 
 fn plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
@@ -37,30 +35,15 @@ fn flow_parameters(config: &Value) -> BTreeMap<String, Value> {
     }
 }
 
-struct CallNode {
+pub struct CallNode {
     id: String,
     scope_key: String,
     flow: String,
     body: PreparedSubgraph,
-    pack: bool,
 }
 
 impl NodePortContract for CallNode {
     fn ports(&self) -> NodePorts {
-        if self.pack {
-            return NodePorts {
-                inputs: vec![mf_runtime::PortSpec::new(
-                    "arguments",
-                    mf_runtime::ValueType::Object,
-                    true,
-                )],
-                outputs: vec![mf_runtime::PortSpec::new(
-                    "result",
-                    mf_runtime::ValueType::Object,
-                    true,
-                )],
-            };
-        }
         NodePorts {
             inputs: self
                 .body
@@ -109,14 +92,8 @@ impl SubgraphNode for CallNode {
         context: &mut ExecutionContext,
         sink: &mut dyn mf_runtime::EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
-        let mut stream = SubgraphStream::new(self.id.as_str(), context, sink);
-        let outputs = context
-            .run_call(
-                &self.scope_key,
-                WorkflowArguments(inputs),
-                &self.body.nodes,
-                |state| self.body.execute_with_sink(state, &mut stream),
-            )
+        let outputs = self
+            .invoke(WorkflowArguments(inputs), context, sink)
             .context(CallFailureSnafu {
                 node: &self.id,
                 flow: &self.flow,
@@ -136,18 +113,43 @@ impl SubgraphNode for CallNode {
     }
 }
 
-impl mf_runtime::TaskNode for CallNode {
-    fn execute(
-        &self,
-        inputs: Inputs,
-        context: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        self.execute_packed(inputs, context)
-    }
-}
-
 impl CallNode {
-    fn execute_packed(
+    pub fn new(
+        id: &str,
+        binding: &str,
+        flow: String,
+        body: PreparedSubgraph,
+    ) -> Result<Self, NodeBuildError> {
+        ensure!(!flow.trim().is_empty(), BlankFlowSnafu);
+        ensure!(body.inputs.stdin.is_empty(), StdinSnafu);
+        ensure!(
+            body.relations
+                .as_ref()
+                .is_none_or(|relations| relations.is_callable()),
+            ScopedBodySnafu
+        );
+        Ok(Self {
+            id: id.into(),
+            scope_key: body.scope_key(id, binding),
+            flow,
+            body,
+        })
+    }
+
+    fn invoke(
+        &self,
+        arguments: WorkflowArguments,
+        context: &mut ExecutionContext,
+        sink: &mut dyn mf_runtime::EmissionSink,
+    ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+        let mut stream = SubgraphStream::new(self.id.as_str(), context, sink);
+        context.run_call(&self.scope_key, arguments, &self.body.nodes, |state| {
+            self.body.invoke_with_sink(state, &mut stream)
+        })
+    }
+
+    /// Uses the same Call boundary with flat arguments and a terminal result envelope.
+    pub fn execute_packed(
         &self,
         inputs: Inputs,
         context: &mut ExecutionContext,
@@ -166,10 +168,7 @@ impl CallNode {
         let outputs = (|| {
             arguments.qualify_inputs(&self.body.inputs)?;
             self.body.inputs.mark_secrets(&mut arguments);
-            context.run_call(&self.scope_key, arguments, &self.body.nodes, |state| {
-                self.body
-                    .invoke_with_sink(state, &mut mf_runtime::DiscardSink)
-            })
+            self.invoke(arguments, context, &mut mf_runtime::DiscardSink)
         })();
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
@@ -253,16 +252,8 @@ fn factory(
     config: Value,
     bodies: BTreeMap<String, PreparedSubgraph>,
 ) -> Result<PreparedNode, NodeBuildError> {
-    let Config { flow, body, pack } = Config::from_config(config, bodies)?;
-    ensure!(!flow.trim().is_empty(), BlankFlowSnafu);
-    ensure!(body.inputs.stdin.is_empty(), StdinSnafu);
-    ensure!(
-        body.relations
-            .as_ref()
-            .is_none_or(|relations| relations.is_callable()),
-        ScopedBodySnafu
-    );
-    let mut input_bindings: BTreeMap<_, _> = body
+    let Config { flow, body } = Config::from_config(config, bodies)?;
+    let input_bindings: BTreeMap<_, _> = body
         .inputs
         .inputs
         .iter()
@@ -281,44 +272,22 @@ fn factory(
                 })
         })
         .collect();
-    if pack {
-        input_bindings = BTreeMap::from([(
-            "arguments".into(),
-            mf_runtime::InputBinding {
-                secret: true,
-                ..Default::default()
-            },
-        )]);
-    }
-    let node = CallNode {
-        pack,
-        id: id.into(),
-        scope_key: body.scope_key(id, "body"),
-        flow,
-        body,
-    };
+    let node = CallNode::new(id, "body", flow, body)?;
     let metadata = NodeMetadata {
         input_bindings,
         ..Default::default()
     };
-    if pack {
-        PreparedNode::new(node, metadata)
-    } else {
-        PreparedNode::subgraph(node, metadata)
-    }
+    PreparedNode::subgraph(node, metadata)
 }
 
 inventory::submit! {
     NodeRegistration {
         kind: mf_runtime::CALL_KIND,
-        factory: NodeFactory::WithFlowBindings {
-            factory: &NodeFactory::Subgraph {
-                scope: Some(mf_runtime::SubgraphScope::Host),
-                flow_parameters,
-                plain,
-                prepared: factory,
-            },
-            bindings: mf_runtime::FlowDispatchConfig::bindings,
+        factory: NodeFactory::Subgraph {
+            scope: Some(mf_runtime::SubgraphScope::Host),
+            flow_parameters,
+            plain,
+            prepared: factory,
         },
     }
 }
@@ -336,21 +305,9 @@ mod tests {
         body: PreparedSubgraph,
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        let node = mf_runtime::FlowNode::new(
-            "invoke",
-            factory(
-                "invoke",
-                json!({"flow":"tool","body":{},"pack":true}),
-                BTreeMap::from([("body".into(), body)]),
-            )
-            .unwrap(),
-        )
-        .into_task()
-        .unwrap();
-        assert!(node.metadata.input_bindings["arguments"].secret);
-        assert!(node.metadata.stream_outputs.is_empty());
+        let node = CallNode::new("invoke", "body", "tool".into(), body).unwrap();
         context.with_node("invoke".into(), |context| {
-            node.node.execute(
+            node.execute_packed(
                 Inputs::from([("arguments".into(), mf_runtime::ValueRef::from(json!({})))]),
                 context,
             )

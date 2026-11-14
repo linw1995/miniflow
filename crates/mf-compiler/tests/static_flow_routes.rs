@@ -1,4 +1,4 @@
-//! A fixed capability map specializes dispatch into a gate and static Calls.
+//! Authored routers own static route bodies without a compiler topology rewrite.
 extern crate mfn_core as _;
 
 use mf_compiler::{
@@ -11,13 +11,12 @@ use mf_runtime::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
 static FIRST: AtomicUsize = AtomicUsize::new(0);
 static SECOND: AtomicUsize = AtomicUsize::new(0);
-
 struct Effect {
     first: bool,
 }
@@ -45,13 +44,8 @@ impl TaskNode for Effect {
     }
 }
 inventory::submit! {
-    NodeRegistration { kind: "test.static-route-effect", factory: NodeFactory::Plain(|config| {
-        PreparedNode::new(Effect { first: config["first"] == true }, NodeMetadata::default())
-    }) }
+    NodeRegistration { kind:"test.static-route-effect", factory:NodeFactory::Plain(|config| PreparedNode::new(Effect { first:config["first"] == true },NodeMetadata::default())) }
 }
-
-// An opaque filter must retain the full incoming provenance, not just the
-// runtime-selected keys. Substituting a handle cannot replace a static body.
 struct Filter;
 impl NodePortContract for Filter {
     fn ports(&self) -> NodePorts {
@@ -92,53 +86,399 @@ impl TaskNode for Filter {
     }
 }
 inventory::submit! {
-    NodeRegistration { kind: "test.static-route-filter", factory: NodeFactory::Plain(|_| PreparedNode::new(Filter, NodeMetadata::default())) }
+    NodeRegistration { kind:"test.static-route-filter", factory:NodeFactory::Plain(|_| PreparedNode::new(Filter,NodeMetadata::default())) }
 }
 inventory::submit! {
-    NodeRegistration {
-        kind: "test.static-route-source",
-        factory: NodeFactory::WithFlowBindings {
-            factory: &NodeFactory::Subgraph {
-                scope: None,
-                flow_parameters: |config| BTreeMap::from([("body".into(), config["body"].clone())]),
-                plain: |_| mf_runtime::NodeInvalidSubgraphSnafu { message:"a prepared body is required" }.fail(),
-                prepared: |id, config, mut bodies| NodeRegistry::from_inventory().unwrap().get("builtin.constant").unwrap().instantiate_subgraphs(
-                    id, json!({"type":"flow", "value":config["body"]}), BTreeMap::from([("value".into(), bodies.remove("body").unwrap())]),
-                ),
-            },
-            bindings: |_| mf_runtime::FlowBindings {
-                outputs: BTreeMap::from([("value".into(), mf_runtime::FlowBindingSource::Child("body".into()))]),
-                ..Default::default()
-            },
+    NodeRegistration { kind:"test.static-route-source", factory:NodeFactory::WithFlowBindings {
+        factory: &NodeFactory::Subgraph {
+            scope:None, flow_parameters:|config| BTreeMap::from([("body".into(),config["body"].clone())]),
+            plain:|_| mf_runtime::NodeInvalidSubgraphSnafu { message:"a prepared body is required" }.fail(),
+            prepared:|id,config,mut bodies| NodeRegistry::from_inventory().unwrap().get("builtin.constant").unwrap().instantiate_subgraphs(
+                id,json!({"type":"flow","value":config["body"]}),BTreeMap::from([("value".into(),bodies.remove("body").unwrap())])),
         },
-    }
+        bindings:|_| mf_runtime::FlowBindings { outputs:BTreeMap::from([("value".into(),mf_runtime::FlowBindingSource::Child("body".into()))]), ..Default::default() },
+    } }
+}
+inventory::submit! {
+    NodeRegistration { kind:"test.host-static-route-source", factory:NodeFactory::WithFlowBindings {
+        factory: &NodeFactory::Subgraph {
+            scope:Some(mf_runtime::SubgraphScope::Host), flow_parameters:|config| BTreeMap::from([("body".into(),config["body"].clone())]),
+            plain:|_| mf_runtime::NodeInvalidSubgraphSnafu { message:"a prepared body is required" }.fail(),
+            prepared:|id,config,bodies| NodeRegistry::from_inventory().unwrap().get("test.static-route-source").unwrap().instantiate_subgraphs(id,config,bodies),
+        },
+        bindings:|config| NodeRegistry::from_inventory().unwrap().get("test.static-route-source").unwrap().factory.flow_bindings(config),
+    } }
+}
+fn edge(node: &str, port: &str) -> Value {
+    json!({"from":{"node":node,"port":port}})
+}
+fn effect(first: bool) -> Value {
+    json!({"version":"2026-11-13","nodes":[{"id":"effect","kind":"test.static-route-effect","config":{"first":first}}],
+        "outputs":[{"name":"value","node":"effect","port":"value"}]})
+}
+fn definition() -> WorkflowDefinition {
+    WorkflowDefinition::from_json(&json!({"version":"2026-11-13","nodes":[
+        {"id":"first","kind":"builtin.constant","config":{"type":"flow","value":effect(true)}},
+        {"id":"second","kind":"builtin.constant","config":{"type":"flow","value":effect(false)}},
+        {"id":"params","kind":"builtin.parameters","config":{"parameters":{
+            "enabled":{"type":"int","default":3,"secret":false},"route":{"type":"string","default":"first","secret":false},"value":{"type":"int","default":10,"secret":false}
+        }}},
+        {"id":"tools","kind":"builtin.object","config":{"fields":{"first":"flow","second":"flow"}},"inputs":{"first":edge("first","value"),"second":edge("second","value")}},
+        {"id":"filter","kind":"test.static-route-filter","inputs":{"tools":edge("tools","value"),"enabled":edge("params","enabled")}},
+        {"id":"arguments","kind":"builtin.object","config":{"fields":{"value":"int"}},"inputs":{"value":edge("params","value")}},
+        {"id":"enabled_routes","kind":"builtin.keys","inputs":{"object":edge("filter","value")}},
+        {"id":"set_enables","kind":"workflow.assign","config":{"variable":"%execute.enables"},"inputs":{"value":edge("enabled_routes","keys")}},
+        {"id":"execute","kind":"builtin.router","config":{"routes":[]},"inputs":{"route":edge("params","route"),"flows":edge("filter","value"),"arguments":edge("arguments","value")}}
+    ],"edges":[{"from_node":"set_enables","from_output":"done","to_node":"execute"}],
+    "outputs":[{"name":"result","node":"execute","port":"result"}]}).to_string()).unwrap()
+}
+fn arguments(enabled: i64, route: &str, value: i64) -> WorkflowArguments {
+    WorkflowArguments::try_from(
+        json!({"params.enabled":enabled,"params.route":route,"params.value":value}),
+    )
+    .unwrap()
+}
+fn assert_static_routes(graph: &mf_runtime::CompiledGraph) {
+    let node = graph
+        .definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "execute")
+        .unwrap();
+    assert_eq!(node.kind, "builtin.router");
+    assert_eq!(node.config["routes"], json!(["first", "second"]));
+    assert_eq!(
+        graph.children[&node.id]
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert!(
+        graph.children[&node.id]
+            .values()
+            .all(|child| child.relations.static_binding)
+    );
 }
 
-inventory::submit! {
-    NodeRegistration {
-        kind: "test.host-static-route-source",
-        factory: NodeFactory::WithFlowBindings {
-            factory: &NodeFactory::Subgraph {
-                scope: Some(mf_runtime::SubgraphScope::Host),
-                flow_parameters: |config| BTreeMap::from([("body".into(),config["body"].clone())]),
-                plain: |_| mf_runtime::NodeInvalidSubgraphSnafu { message:"a prepared body is required" }.fail(),
-                prepared: |id, config, bodies| NodeRegistry::from_inventory().unwrap().get("test.static-route-source").unwrap().instantiate_subgraphs(id,config,bodies),
-            },
-            bindings: |config| NodeRegistry::from_inventory().unwrap().get("test.static-route-source").unwrap().factory.flow_bindings(config),
-        },
+#[test]
+fn compiler_binds_router_children_without_rewriting_authored_nodes_or_data_edges() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let source = definition();
+    let plan = compile_definition(&source, &registry).unwrap();
+    assert_static_routes(&plan.graph);
+    let authored: BTreeSet<_> = source.nodes.iter().map(|node| node.id.clone()).collect();
+    let compiled: BTreeSet<_> = plan
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .filter(|node| node.kind != "builtin.router_state")
+        .map(|node| node.id.clone())
+        .collect();
+    assert_eq!(compiled, authored);
+    assert!(
+        !plan
+            .graph
+            .definition
+            .nodes
+            .iter()
+            .any(|node| node.kind == "workflow.call")
+    );
+    assert_eq!(plan.graph.definition.edges.len(), source.edges.len());
+    for edge in &source.edges {
+        assert!(plan.graph.definition.edges.contains(edge));
+    }
+    assert_eq!(plan.graph.definition.outputs, source.outputs);
+    let description = describe_compiled(&plan).unwrap();
+    assert_eq!(description.body_paths_for_node(&[], "execute").len(), 2);
+    let manifest = plan.manifest(&registry).unwrap();
+    let restored = mf_runtime::WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
+    assert_eq!(restored.description().unwrap(), description);
+    assert_eq!(
+        restored
+            .graph
+            .definition
+            .nodes
+            .iter()
+            .find(|node| node.id.as_str() == "execute")
+            .unwrap()
+            .config,
+        json!({"routes":["first","second"]})
+    );
+}
+
+#[test]
+fn freezing_preserves_initial_enable_validation_and_rejects_legacy_fields() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for extra in [
+        json!({"enables":["missing"]}),
+        json!({"enables":["first","first"]}),
+        json!({"mode":"execute"}),
+        json!({"flow_field":"run"}),
+        json!({"flow-route:first":{"path":"must-not-read.json"}}),
+    ] {
+        let mut source = definition();
+        let router = source
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "execute")
+            .unwrap();
+        router
+            .config
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let error = compile_definition(&source, &registry).unwrap_err();
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(!error.to_string().contains("could not read"), "{error}");
+        if extra.get("enables").is_some() {
+            assert!(error.to_string().contains("enables"), "{error}");
+        }
     }
 }
 
 #[test]
-fn host_owned_static_calls_do_not_require_unlinked_body_providers() {
-    let mut registry = NodeRegistry::from_inventory().unwrap();
-    let body = WorkflowDefinition::from_json(
-        &json!({"version":"2026-11-13",
-        "nodes":[{"id":"unlinked","kind":"test.unlinked-provider"}],
-        "outputs":[{"name":"value","node":"unlinked","port":"value"}]})
-        .to_string(),
+fn saved_router_bindings_cannot_omit_or_add_declared_children() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let original = compile_definition(&definition(), &registry).unwrap();
+    for add in [false, true] {
+        let mut plan = original.clone();
+        let children = plan.graph.children.get_mut(&"execute".into()).unwrap();
+        if add {
+            children.insert("third".into(), children["first"].clone());
+        } else {
+            children.remove("first");
+        }
+        assert!(instantiate_compiled(&plan, &registry).is_err());
+    }
+    assert_eq!(FIRST.load(Ordering::SeqCst), 0);
+    assert_eq!(SECOND.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn removing_and_readding_enabled_routes_keeps_the_same_static_children() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition(), &registry).unwrap();
+    let before = describe_compiled(&plan).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    for (enabled, route) in [(1, "first"), (2, "second"), (3, "first"), (1, "first")] {
+        assert_eq!(
+            flow.execute_with_inputs(arguments(enabled, route, 17))
+                .unwrap()["result"]["outputs"]["value"],
+            json!(17)
+        );
+    }
+    for (enabled, route) in [(0, "first"), (1, "second"), (2, "first"), (3, "missing")] {
+        assert!(
+            flow.execute_with_inputs(arguments(enabled, route, 0))
+                .unwrap()["result"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("disabled")
+        );
+    }
+    assert_eq!(FIRST.load(Ordering::SeqCst), 3);
+    assert_eq!(SECOND.load(Ordering::SeqCst), 1);
+    assert_eq!(describe_compiled(&plan).unwrap(), before);
+}
+#[test]
+fn runtime_handles_cannot_replace_static_targets_or_add_routes() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let flow = instantiate_compiled(
+        &compile_definition(&definition(), &registry).unwrap(),
+        &registry,
     )
     .unwrap();
+    assert_eq!(
+        flow.execute_with_inputs(arguments(4, "first", 12)).unwrap()["result"]["outputs"]["value"],
+        json!(12)
+    );
+    assert_eq!(FIRST.load(Ordering::SeqCst), 1);
+    assert_eq!(SECOND.load(Ordering::SeqCst), 0);
+    assert!(
+        flow.execute_with_inputs(arguments(5, "new", 0))
+            .unwrap_err()
+            .to_string()
+            .contains("enables")
+    );
+}
+#[test]
+fn route_names_are_not_config_fields_or_generated_call_ids() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for (first, second) in [
+        ("result", "enables"),
+        ("routes", "arguments"),
+        ("mode", "flow_field"),
+        ("set_enables", "route:first"),
+    ] {
+        let mut source = definition();
+        source
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "tools")
+            .unwrap()
+            .config["fields"] = json!({first:"flow",second:"flow"});
+        source
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "params")
+            .unwrap()
+            .config["parameters"]["route"]["default"] = json!(first);
+        for edge in &mut source.edges {
+            if edge.to_node.as_str() == "tools" {
+                edge.to_input = if edge.to_input == "first" {
+                    first.into()
+                } else {
+                    second.into()
+                };
+            }
+        }
+        let plan = compile_definition(&source, &registry).unwrap();
+        assert!(plan.graph.children[&"execute".into()].contains_key(first));
+        assert_eq!(
+            instantiate_compiled(&plan, &registry)
+                .unwrap()
+                .execute()
+                .unwrap()["result"]["outputs"]["value"],
+            json!(10)
+        );
+    }
+}
+#[test]
+fn disabled_branches_are_still_checked_and_invalid_runtime_arguments_have_no_effects() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut source = definition();
+    source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "execute")
+        .unwrap()
+        .config["enables"] = json!([]);
+    source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "second")
+        .unwrap()
+        .config["value"]["outputs"][0]["port"] = json!("missing");
+    assert!(compile_definition(&source, &registry).is_err());
+    let mut source = definition();
+    source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "arguments")
+        .unwrap()
+        .config["fields"]["value"] = json!("string");
+    source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "params")
+        .unwrap()
+        .config["parameters"]["value"] = json!({"type":"string","default":"wrong","secret":false});
+    let plan = compile_definition(&source, &registry).unwrap();
+    let output = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap();
+    assert!(output["result"]["error"].as_str().unwrap().contains("int"));
+    assert!(output["result"].is_secret());
+    assert_eq!(FIRST.load(Ordering::SeqCst), 0);
+    assert_eq!(SECOND.load(Ordering::SeqCst), 0);
+}
+#[test]
+fn provenance_is_provider_declared_and_forwards_across_ordinary_calls() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut source = definition();
+    for node in &mut source.nodes {
+        if matches!(node.id.as_str(), "first" | "second") {
+            node.kind = "test.static-route-source".into();
+            node.config = json!({"body":node.config["value"]});
+        }
+    }
+    let filter = source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "filter")
+        .unwrap();
+    filter.kind = "workflow.call".into();
+    filter.config = json!({"flow":"filter","body":{"version":"2026-11-13","nodes":[{"id":"filter","kind":"test.static-route-filter"}],"outputs":[{"name":"value","node":"filter","port":"value"}]}});
+    for edge in &mut source.edges {
+        if edge.to_node.as_str() == "filter" {
+            edge.to_input = format!("filter.{}", edge.to_input);
+        }
+    }
+    let plan = compile_definition(&source, &registry).unwrap();
+    assert_static_routes(&plan.graph);
+    assert_eq!(
+        instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_with_inputs(arguments(2, "second", 19))
+            .unwrap()["result"]["outputs"]["value"],
+        json!(19)
+    );
+}
+#[test]
+fn workflow_state_assignments_keep_provenance_and_explicit_reader_prerequisites() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut value = serde_json::to_value(definition()).unwrap();
+    value["variables"] = json!([{"name":"available","type":{"map":"flow"},"initial":{}}]);
+    value["nodes"].as_array_mut().unwrap().push(json!({"id":"write","kind":"workflow.assign","config":{"variable":"available"},"inputs":{"value":edge("filter","value")}}));
+    for node in value["nodes"].as_array_mut().unwrap() {
+        if node["id"] == "execute" {
+            node["inputs"]["flows"] = edge("%root", "available");
+        }
+        if node["id"] == "enabled_routes" {
+            node["inputs"]["object"] = edge("%root", "available");
+        }
+    }
+    value["edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"from_node":"write","from_output":"done","to_node":"enabled_routes"}));
+    let source = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+    let plan = compile_definition(&source, &registry).unwrap();
+    assert_static_routes(&plan.graph);
+    assert_eq!(
+        instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_with_inputs(arguments(2, "second", 12))
+            .unwrap()["result"]["outputs"]["value"],
+        json!(12)
+    );
+}
+#[test]
+fn nested_router_children_use_the_normal_call_boundary_at_each_binding() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut source = definition();
+    source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "first")
+        .unwrap()
+        .config["value"] = serde_json::to_value(definition()).unwrap();
+    source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "arguments")
+        .unwrap()
+        .config["fields"] = json!({});
+    source
+        .edges
+        .retain(|edge| edge.to_node.as_str() != "arguments");
+    let plan = compile_definition(&source, &registry).unwrap();
+    assert_static_routes(&plan.graph.children[&"execute".into()]["first"]);
+    assert_eq!(
+        instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute()
+            .unwrap()["result"]["outputs"]["result"]["outputs"]["value"],
+        json!(10)
+    );
+}
+#[test]
+fn host_owned_branches_do_not_require_unlinked_body_providers() {
+    let mut registry = NodeRegistry::from_inventory().unwrap();
+    let body = WorkflowDefinition::from_json(&json!({"version":"2026-11-13","nodes":[{"id":"unlinked","kind":"test.unlinked-provider"}],"outputs":[{"name":"value","node":"unlinked","port":"value"}]}).to_string()).unwrap();
     let schema = serde_json::from_value(
         json!({"inputs":{"unlinked":{"value":{"type":"int","required":true}}},"stdin":{}}),
     )
@@ -170,7 +510,7 @@ fn host_owned_static_calls_do_not_require_unlinked_body_providers() {
     first.config = json!({"flow":"external","body":body});
     let plan = compile_definition(&source, &registry).unwrap();
     assert_eq!(
-        plan.graph.children[&"execute:route:first".into()]["body"]
+        plan.graph.children[&"execute".into()]["first"]
             .relations
             .host
             .as_deref(),
@@ -184,18 +524,12 @@ fn host_owned_static_calls_do_not_require_unlinked_body_providers() {
         json!(10)
     );
 }
-
 #[test]
-fn one_callee_source_is_specialized_independently_for_each_call_site() {
+fn same_callee_source_binds_different_supersets_at_distinct_call_sites() {
     let callee = json!({"version":"2026-11-13","nodes":[
-        {"id":"params","kind":"builtin.parameters","config":{"parameters":{
-            "tools":{"type":{"map":"flow"},"secret":false},
-            "route":{"type":"string","secret":false},
-            "arguments":{"type":"object","secret":false}
-        }}},
-        {"id":"execute","kind":"workflow.call","config":{"dispatch":true},"inputs":{
-            "flows":edge("params","tools"),"route":edge("params","route"),"arguments":edge("params","arguments")
-        }}],"outputs":[{"name":"result","node":"execute","port":"result"}]});
+        {"id":"params","kind":"builtin.parameters","config":{"parameters":{"tools":{"type":{"map":"flow"},"secret":false},"route":{"type":"string","secret":false},"arguments":{"type":"object","secret":false}}}},
+        {"id":"execute","kind":"builtin.router","config":{"routes":[]},"inputs":{"flows":edge("params","tools"),"route":edge("params","route"),"arguments":edge("params","arguments")}}
+    ],"outputs":[{"name":"result","node":"execute","port":"result"}]});
     let mut value = serde_json::to_value(definition()).unwrap();
     value["nodes"].as_array_mut().unwrap().retain(|node| {
         matches!(
@@ -203,35 +537,29 @@ fn one_callee_source_is_specialized_independently_for_each_call_site() {
             Some("first" | "second" | "params" | "arguments")
         )
     });
+    value["edges"] = json!([]);
     for route in ["first", "second"] {
         value["nodes"].as_array_mut().unwrap().extend([
             json!({"id":format!("{route}_map"),"kind":"builtin.object","config":{"fields":{route:"flow"}},"inputs":{route:edge(route,"value")}}),
-            json!({"id":format!("{route}_route"),"kind":"builtin.constant","config":{"value":route}}),
-            json!({"id":format!("{route}_call"),"kind":"workflow.call","config":{"flow":"callee","body":callee},"inputs":{
-                "params.tools":edge(&format!("{route}_map"),"value"),"params.route":edge(&format!("{route}_route"),"value"),"params.arguments":edge("arguments","value")
-            }})
+            json!({"id":format!("{route}_name"),"kind":"builtin.constant","config":{"value":route}}),
+            json!({"id":format!("{route}_call"),"kind":"workflow.call","config":{"flow":"callee","body":callee},"inputs":{"params.tools":edge(&format!("{route}_map"),"value"),"params.route":edge(&format!("{route}_name"),"value"),"params.arguments":edge("arguments","value")}})
         ]);
     }
-    value["outputs"] = json!([
-        {"name":"first","node":"first_call","port":"result"},
-        {"name":"second","node":"second_call","port":"result"}
-    ]);
-    let source = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+    value["outputs"] = json!([{"name":"first","node":"first_call","port":"result"},{"name":"second","node":"second_call","port":"result"}]);
     let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&source, &registry).unwrap();
+    let plan = compile_definition(
+        &WorkflowDefinition::from_json(&value.to_string()).unwrap(),
+        &registry,
+    )
+    .unwrap();
     for route in ["first", "second"] {
-        let child = &plan.graph.children[&format!("{route}_call").into()]["body"];
         assert_eq!(
-            child
-                .definition
-                .nodes
-                .iter()
-                .find(|node| node.id.as_str() == "execute")
-                .unwrap()
-                .config["routes"],
-            json!([route])
+            plan.graph.children[&format!("{route}_call").into()]["body"].children
+                [&"execute".into()]
+                .keys()
+                .collect::<Vec<_>>(),
+            [route]
         );
-        assert_eq!(child.children.len(), 1);
     }
     let output = instantiate_compiled(&plan, &registry)
         .unwrap()
@@ -240,352 +568,47 @@ fn one_callee_source_is_specialized_independently_for_each_call_site() {
     assert_eq!(output["first"]["outputs"]["value"], json!(10));
     assert_eq!(output["second"]["outputs"]["value"], json!(10));
 }
-
-fn edge(node: &str, port: &str) -> Value {
-    json!({"from":{"node":node,"port":port}})
-}
-fn effect(first: bool) -> Value {
-    json!({"version":"2026-11-13", "nodes":[{"id":"effect", "kind":"test.static-route-effect", "config":{"first":first}}],
-        "outputs":[{"name":"value", "node":"effect", "port":"value"}]})
-}
-fn definition() -> WorkflowDefinition {
-    WorkflowDefinition::from_json(&json!({"version":"2026-11-13", "nodes":[
-        {"id":"first", "kind":"builtin.constant", "config":{"type":"flow", "value":effect(true)}},
-        {"id":"second", "kind":"builtin.constant", "config":{"type":"flow", "value":effect(false)}},
-        {"id":"params", "kind":"builtin.parameters", "config":{"parameters":{
-            "enabled":{"type":"int", "default":3, "secret":false},
-            "route":{"type":"string", "default":"first", "secret":false},
-            "value":{"type":"int", "default":10, "secret":false}
-        }}},
-        {"id":"tools", "kind":"builtin.object", "config":{"fields":{"first":"flow", "second":"flow"}},
-            "inputs":{"first":edge("first","value"), "second":edge("second","value")}},
-        {"id":"filter", "kind":"test.static-route-filter", "inputs":{"tools":edge("tools","value"), "enabled":edge("params","enabled")}},
-        {"id":"arguments", "kind":"builtin.object", "config":{"fields":{"value":"int"}}, "inputs":{"value":edge("params","value")}},
-        {"id":"execute", "kind":"workflow.call", "config":{"dispatch":true},
-            "inputs":{"route":edge("params","route"), "flows":edge("filter","value"), "arguments":edge("arguments","value")}}
-    ], "outputs":[{"name":"result", "node":"execute", "port":"result"}]}).to_string()).unwrap()
-}
-fn arguments(enabled: i64, route: &str, value: i64) -> WorkflowArguments {
-    WorkflowArguments::try_from(
-        json!({"params.enabled":enabled,"params.route":route,"params.value":value}),
-    )
-    .unwrap()
-}
-fn assert_static_calls(graph: &mf_runtime::CompiledGraph) {
-    assert!(!graph.children.contains_key(&"execute".into()));
-    let router = graph
-        .definition
-        .nodes
-        .iter()
-        .find(|node| node.id.as_str() == "execute")
-        .unwrap();
-    assert_eq!(router.kind, "builtin.router");
-    assert_eq!(router.config, json!({"routes":["first","second"]}));
-    for route in ["first", "second"] {
-        let call_id = format!("execute:route:{route}");
-        let call = graph
-            .definition
-            .nodes
-            .iter()
-            .find(|node| node.id.as_str() == call_id)
-            .unwrap();
-        assert_eq!(call.kind, "workflow.call");
-        assert_eq!(call.config["flow"], route);
-        assert_eq!(graph.children[&call_id.into()].len(), 1);
-    }
-}
-
-#[test]
-fn filtering_removing_and_readding_routes_keeps_the_same_static_calls_and_description() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let source = definition();
-    let plan = compile_definition(&source, &registry).unwrap();
-    assert_static_calls(&plan.graph);
-    let description = describe_compiled(&plan).unwrap();
-    for route in ["first", "second"] {
-        assert_eq!(
-            description
-                .body_paths_for_node(&[], &format!("execute:route:{route}"))
-                .len(),
-            1
-        );
-    }
-    let bytes = plan.manifest(&registry).unwrap().to_bytes().unwrap();
-    assert_eq!(
-        mf_runtime::WorkflowManifest::from_bytes(&bytes)
-            .unwrap()
-            .description()
-            .unwrap(),
-        description
-    );
-    let flow = instantiate_compiled(&plan, &registry).unwrap();
-    for (enabled, route) in [(1, "first"), (2, "second"), (3, "first"), (1, "first")] {
-        assert_eq!(
-            flow.execute_with_inputs(arguments(enabled, route, 17))
-                .unwrap()["result"]["outputs"]["value"],
-            json!(17)
-        );
-    }
-    for (enabled, route) in [(0, "first"), (1, "second"), (2, "first"), (3, "missing")] {
-        assert!(
-            flow.execute_with_inputs(arguments(enabled, route, 0))
-                .unwrap()["result"]["error"]
-                .as_str()
-                .unwrap()
-                .contains("disabled")
-        );
-    }
-    assert_eq!(FIRST.load(Ordering::SeqCst), 3);
-    assert_eq!(SECOND.load(Ordering::SeqCst), 1);
-    assert_eq!(describe_compiled(&plan).unwrap(), description);
-}
-
-#[test]
-fn runtime_handles_cannot_replace_static_targets_or_add_routes() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let flow = instantiate_compiled(
-        &compile_definition(&definition(), &registry).unwrap(),
-        &registry,
-    )
-    .unwrap();
-    assert_eq!(
-        flow.execute_with_inputs(arguments(4, "first", 12)).unwrap()["result"]["outputs"]["value"],
-        json!(12)
-    );
-    assert_eq!(FIRST.load(Ordering::SeqCst), 1);
-    assert_eq!(SECOND.load(Ordering::SeqCst), 0);
-    let error = flow
-        .execute_with_inputs(arguments(5, "new", 0))
-        .unwrap_err();
-    assert!(error.to_string().contains("enables"), "{error}");
-    assert!(std::error::Error::source(&error).is_some());
-}
-
-#[test]
-fn route_names_do_not_collide_with_dispatch_helpers_or_legacy_config_fields() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    for (first, second) in [
-        ("result", "enables"),
-        ("mode", "flow_field"),
-        ("set_enables", "route:first"),
-    ] {
-        let mut source = definition();
-        source
-            .nodes
-            .iter_mut()
-            .find(|node| node.id.as_str() == "tools")
-            .unwrap()
-            .config["fields"] = json!({first:"flow",second:"flow"});
-        source
-            .nodes
-            .iter_mut()
-            .find(|node| node.id.as_str() == "params")
-            .unwrap()
-            .config["parameters"]["route"]["default"] = json!(first);
-        for edge in &mut source.edges {
-            if edge.to_node.as_str() == "tools" {
-                edge.to_input = if edge.to_input == "first" {
-                    first.into()
-                } else {
-                    second.into()
-                };
-            }
-        }
-        let plan = compile_definition(&source, &registry).unwrap();
-        assert_eq!(
-            plan.graph.children[&format!("execute:route:{first}").into()].len(),
-            1
-        );
-        assert_eq!(
-            instantiate_compiled(&plan, &registry)
-                .unwrap()
-                .execute()
-                .unwrap()["result"]["outputs"]["value"],
-            json!(10)
-        );
-    }
-}
-
-#[test]
-fn every_static_body_is_checked_even_when_its_route_starts_disabled() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let mut body = effect(false);
-    body["outputs"][0]["port"] = json!("missing");
-    let source = WorkflowDefinition::from_json(&json!({"version":"2026-11-13","nodes":[
-        {"id":"route","kind":"builtin.constant","config":{"value":"second"}},
-        {"id":"choose","kind":"builtin.router","config":{"routes":["second"],"enables":[]},"inputs":{"route":edge("route","value")}},
-        {"id":"call","kind":"workflow.call","config":{"flow":"tool","body":body}}
-    ],"edges":[{"from_node":"choose","from_output":"second","to_node":"call"}]}).to_string()).unwrap();
-    assert!(compile_definition(&source, &registry).is_err());
-    assert_eq!(FIRST.load(Ordering::SeqCst), 0);
-    assert_eq!(SECOND.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn static_calls_validate_runtime_arguments_before_business_effects() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let mut source = definition();
-    source
-        .nodes
-        .iter_mut()
-        .find(|node| node.id.as_str() == "arguments")
-        .unwrap()
-        .config["fields"]["value"] = json!("string");
-    source
-        .nodes
-        .iter_mut()
-        .find(|node| node.id.as_str() == "params")
-        .unwrap()
-        .config["parameters"]["value"] =
-        json!({"type":"string", "default":"wrong", "secret":false});
-    let plan = compile_definition(&source, &registry).unwrap();
-    assert_static_calls(&plan.graph);
-    let output = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute()
-        .unwrap();
-    assert!(output["result"]["error"].as_str().unwrap().contains("int"));
-    assert!(output["result"].is_secret());
-    assert_eq!(FIRST.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn provider_metadata_authorizes_provenance_without_a_builtin_producer_name() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let mut source = definition();
-    for node in &mut source.nodes {
-        if matches!(node.id.as_str(), "first" | "second") {
-            node.kind = "test.static-route-source".into();
-            node.config = json!({"body":node.config["value"]});
-        }
-    }
-    let plan = compile_definition(&source, &registry).unwrap();
-    assert_static_calls(&plan.graph);
-    assert_eq!(
-        instantiate_compiled(&plan, &registry)
-            .unwrap()
-            .execute()
-            .unwrap()["result"]["outputs"]["value"],
-        json!(10)
-    );
-}
-
-#[test]
-fn startup_nodes_forward_provenance_across_a_configured_call() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let mut source = definition();
-    let filter = source
-        .nodes
-        .iter_mut()
-        .find(|node| node.id.as_str() == "filter")
-        .unwrap();
-    filter.kind = "workflow.call".into();
-    filter.config = json!({"flow":"filter", "body":{"version":"2026-11-13",
-        "nodes":[{"id":"filter", "kind":"test.static-route-filter"}],
-        "outputs":[{"name":"value", "node":"filter", "port":"value"}]}});
-    for edge in &mut source.edges {
-        if edge.to_node.as_str() == "filter" {
-            edge.to_input = format!("filter.{}", edge.to_input);
-        }
-    }
-    let plan = compile_definition(&source, &registry).unwrap();
-    assert_static_calls(&plan.graph);
-    assert_eq!(
-        instantiate_compiled(&plan, &registry)
-            .unwrap()
-            .execute_with_inputs(arguments(2, "second", 19))
-            .unwrap()["result"]["outputs"]["value"],
-        json!(19)
-    );
-}
-
-#[test]
-fn workflow_state_assignments_preserve_the_static_superset() {
-    let registry = NodeRegistry::from_inventory().unwrap();
+fn state_flow(target: &str) -> WorkflowDefinition {
     let mut value = serde_json::to_value(definition()).unwrap();
-    value["variables"] = json!([{"name":"available","type":{"map":"flow"},"initial":{}}]);
-    value["nodes"].as_array_mut().unwrap().push(json!({"id":"write","kind":"workflow.assign","config":{"variable":"available"},"inputs":{"value":edge("filter","value")}}));
-    // Serialized modern definitions carry data wiring on nodes, not in edges.
-    let execute = value["nodes"]
-        .as_array_mut()
-        .unwrap()
+    let nodes = value["nodes"].as_array_mut().unwrap();
+    nodes.retain(|node| {
+        !matches!(
+            node["id"].as_str(),
+            Some("filter" | "enabled_routes" | "set_enables")
+        )
+    });
+    nodes
+        .iter_mut()
+        .find(|node| node["id"] == "params")
+        .unwrap()["config"]["parameters"]["enables"] =
+        json!({"type":{"list":"string"},"secret":false});
+    let router = nodes
         .iter_mut()
         .find(|node| node["id"] == "execute")
         .unwrap();
-    execute["inputs"]["flows"] = edge("%root", "available");
-    value["edges"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"from_node":"write","from_output":"done","to_node":"execute"}));
-    let source = WorkflowDefinition::from_json(&value.to_string()).unwrap();
-    let plan = compile_definition(&source, &registry).unwrap();
-    assert_static_calls(&plan.graph);
-    assert_eq!(
-        instantiate_compiled(&plan, &registry)
-            .unwrap()
-            .execute_with_inputs(arguments(2, "second", 12))
-            .unwrap()["result"]["outputs"]["value"],
-        json!(12)
-    );
+    router["config"] = json!({"routes":["first","second"],"enables":["first"]});
+    router["inputs"]["flows"] = edge("tools", "value");
+    nodes.extend([
+        json!({"id":"write","kind":"workflow.assign","config":{"variable":target},"inputs":{"value":edge("params","enables")}}),
+        json!({"id":"read","kind":"builtin.identity","inputs":{"input":edge("%execute","enables")}})
+    ]);
+    value["edges"] = json!([{"from_node":"write","from_output":"done","to_node":"execute"},{"from_node":"write","from_output":"done","to_node":"read"}]);
+    value["outputs"].as_array_mut().unwrap().extend([
+        json!({"name":"routes","node":"%execute","port":"routes"}),
+        json!({"name":"enables","node":"read","port":"value"}),
+    ]);
+    WorkflowDefinition::from_json(&value.to_string()).unwrap()
 }
-
 #[test]
-fn nested_dispatches_are_specialized_at_their_actual_call_sites() {
+fn assign_replaces_enables_without_changing_routes_or_leaking_between_invocations() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    let mut source = definition();
-    source
-        .nodes
-        .iter_mut()
-        .find(|node| node.id.as_str() == "first")
-        .unwrap()
-        .config["value"] = serde_json::to_value(definition()).unwrap();
-    source
-        .nodes
-        .iter_mut()
-        .find(|node| node.id.as_str() == "arguments")
-        .unwrap()
-        .config["fields"] = json!({});
-    source
-        .edges
-        .retain(|edge| edge.to_node.as_str() != "arguments");
-    let plan = compile_definition(&source, &registry).unwrap();
-    assert_static_calls(&plan.graph);
-    assert_static_calls(&plan.graph.children[&"execute:route:first".into()]["body"]);
-    assert_eq!(
-        instantiate_compiled(&plan, &registry)
-            .unwrap()
-            .execute()
-            .unwrap()["result"]["outputs"]["result"]["outputs"]["value"],
-        json!(10)
-    );
-}
-
-fn state_flow(target: &str) -> WorkflowDefinition {
-    WorkflowDefinition::from_json(&json!({"version":"2026-11-13", "nodes":[
-        {"id":"params","kind":"builtin.parameters","config":{"parameters":{
-            "enables":{"type":{"list":"string"},"secret":false},
-            "route":{"type":"string","default":"first","secret":false}
-        }}},
-        {"id":"choose","kind":"builtin.router","config":{"routes":["first","second"],"enables":["first"]},"inputs":{"route":edge("params","route")}},
-        {"id":"write","kind":"workflow.assign","config":{"variable":target},"inputs":{"value":edge("params","enables")}},
-        {"id":"read","kind":"builtin.identity","inputs":{"input":edge("%choose","enables")}}
-    ],"edges":[{"from_node":"write","from_output":"done","to_node":"choose"},{"from_node":"write","from_output":"done","to_node":"read"}],
-    "outputs":[{"name":"routes","node":"%choose","port":"routes"},{"name":"enables","node":"read","port":"value"},
-        {"name":"first","node":"choose","port":"first","optional":true},
-        {"name":"second","node":"choose","port":"second","optional":true},
-        {"name":"else","node":"choose","port":"else","optional":true}]}).to_string()).unwrap()
-}
-
-#[test]
-fn assign_replaces_only_enables_and_each_invocation_keeps_independent_state() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&state_flow("%choose.enables"), &registry).unwrap();
+    let plan = compile_definition(&state_flow("%execute.enables"), &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    for (enables, route, selected) in [
-        (json!([]), "first", "else"),
-        (json!(["second"]), "first", "else"),
-        (json!(["second"]), "second", "second"),
-        (json!(["first", "second"]), "first", "first"),
+    for (enables, route, active) in [
+        (json!([]), "first", false),
+        (json!(["second"]), "first", false),
+        (json!(["second"]), "second", true),
+        (json!(["first", "second"]), "first", true),
     ] {
         let output = flow
             .execute_with_inputs(
@@ -595,33 +618,30 @@ fn assign_replaces_only_enables_and_each_invocation_keeps_independent_state() {
             .unwrap();
         assert_eq!(output["routes"], json!(["first", "second"]));
         assert_eq!(output["enables"], enables);
-        assert_eq!(output[selected], json!(true));
-        assert_eq!(output.len(), 3);
+        assert_eq!(output["result"].get("outputs").is_some(), active);
     }
-    let router = plan
-        .graph
-        .definition
-        .nodes
-        .iter()
-        .find(|node| node.id.as_str() == "choose")
-        .unwrap();
     assert_eq!(
-        router.config,
+        plan.graph
+            .definition
+            .nodes
+            .iter()
+            .find(|node| node.id.as_str() == "execute")
+            .unwrap()
+            .config,
         json!({"routes":["first","second"],"enables":["first"]})
     );
 }
-
 #[test]
-fn node_state_rejects_readonly_unknown_duplicate_and_invalid_writes() {
+fn readonly_unknown_duplicate_and_invalid_node_state_writes_are_rejected() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for target in [
-        "%choose.routes",
-        "%choose.config.routes",
+        "%execute.routes",
+        "%execute.config.routes",
         "%missing.enables",
     ] {
         assert!(compile_definition(&state_flow(target), &registry).is_err());
     }
-    let plan = compile_definition(&state_flow("%choose.enables"), &registry).unwrap();
+    let plan = compile_definition(&state_flow("%execute.enables"), &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     for enables in [
         json!(["missing"]),

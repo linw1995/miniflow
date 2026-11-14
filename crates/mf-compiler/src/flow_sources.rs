@@ -973,10 +973,7 @@ impl Resolver {
             // Input-contract calls receive their handle through an ordinary edge.
             // Only static selectors take the alias/bootstrap path; dynamic calls
             // keep normal selected-receiver discovery and factory validation.
-            if node.kind == CALL_KIND
-                && !CallConfig::is_dynamic(&node.config)
-                && node.config.get("dispatch") != Some(&serde_json::Value::Bool(true))
-            {
+            if node.kind == CALL_KIND && !CallConfig::is_dynamic(&node.config) {
                 let explicit_body = node.config.get("body").is_some_and(|body| !body.is_null());
                 // Validate the named selector without interpreting
                 // the receiving field before its selected metadata authorizes it.

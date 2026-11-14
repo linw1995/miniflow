@@ -157,10 +157,37 @@
               }
             },
             {
-              "id": "execute",
-              "kind": "workflow.call",
+              "id": "enabled_routes",
+              "kind": "builtin.keys",
+              "inputs": {
+                "object": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "flows"
+                  }
+                }
+              }
+            },
+            {
+              "id": "set_enables",
+              "kind": "workflow.assign",
               "config": {
-                "dispatch": true
+                "variable": "%execute.enables"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "enabled_routes",
+                    "port": "keys"
+                  }
+                }
+              }
+            },
+            {
+              "id": "execute",
+              "kind": "builtin.router",
+              "config": {
+                "routes": []
               },
               "inputs": {
                 "flows": {
@@ -243,6 +270,11 @@
             {
               "from_node": "gate",
               "from_output": "ok",
+              "to_node": "enabled_routes"
+            },
+            {
+              "from_node": "set_enables",
+              "from_output": "done",
               "to_node": "execute"
             },
             {

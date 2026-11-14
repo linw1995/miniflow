@@ -30,16 +30,17 @@ pub fn lower(
     for (source, config) in &routers {
         if let Some(existing) = definition
             .nodes
-            .iter()
+            .iter_mut()
             .find(|node| node.id.as_str() == source)
         {
             ensure!(
-                lowered_sources && existing.kind == SOURCE && existing.config == *config,
+                lowered_sources && existing.kind == SOURCE,
                 crate::compiler::InvalidGraphSnafu {
                     definition_id: existing.id.clone(),
                     message: "router state sources are implicit",
                 }
             );
+            existing.config = config.clone();
         } else {
             definition.nodes.push(NodeDefinition {
                 id: source.clone().into(),
@@ -90,7 +91,7 @@ pub fn lower(
             }
         );
         let source = source.to_owned();
-        node.config = json!({"source":source,"routes":routers[&source]["routes"]});
+        node.config = json!({"source":source});
         node.kind = ASSIGN.into();
         definition
             .control_edges

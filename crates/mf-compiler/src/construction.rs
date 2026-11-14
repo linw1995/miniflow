@@ -935,10 +935,10 @@ fn validate_compiled_providers(
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
-        let fields = registration.flow_parameters(&node.config);
+        let fields = registration.compiled_bindings(&node.config);
         ensure!(
             fields
-                .keys()
+                .iter()
                 .eq(children.into_iter().flat_map(BTreeMap::keys)),
             InvalidDefinitionSnafu {
                 definition_id: node.id.clone(),
@@ -1052,10 +1052,10 @@ fn validated_node_config(
             definition_id: DefinitionId::from(definition_id),
         })?,
     };
-    let fields = registration.flow_parameters(&node.config);
+    let fields = registration.compiled_bindings(&node.config);
     ensure!(
         fields
-            .keys()
+            .iter()
             .map(String::as_str)
             .eq(expected.iter().copied()),
         InvalidDefinitionSnafu {

@@ -22,6 +22,9 @@ pub struct GraphRelations {
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// This child is bound from static provenance, not an executable config field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub static_binding: bool,
 }
 
 /// Root state does not establish a Loop frame or change observation ancestry.

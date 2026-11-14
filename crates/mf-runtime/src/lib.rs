@@ -69,9 +69,7 @@ pub use flow::{
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
 };
-pub use flow_bindings::{
-    FlowBindingSource, FlowBindings, FlowDispatchConfig, FlowInvocationBinding,
-};
+pub use flow_bindings::{FlowBindingSource, FlowBindings, FlowInvocationBinding};
 pub use flow_invocation::{FlowEmission, FlowInvocation};
 pub use flow_properties::{interface_properties, value_schema};
 pub use flow_value::{FlowValue, FlowValueBuildError};

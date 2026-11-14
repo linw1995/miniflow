@@ -2,7 +2,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
@@ -1407,6 +1407,20 @@ pub enum SubgraphScope {
 #[derive(Clone, Copy, Debug)]
 pub enum NodeFactory {
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
+    /// Receives static child bindings without embedding their bodies in config.
+    BoundSubgraph {
+        bindings: fn(&Value) -> BTreeSet<String>,
+        plain: fn(Value) -> Result<PreparedNode, NodeBuildError>,
+        #[expect(
+            clippy::type_complexity,
+            reason = "Use the standard prepared binding map."
+        )]
+        prepared: fn(
+            &str,
+            Value,
+            BTreeMap<String, crate::PreparedSubgraph>,
+        ) -> Result<PreparedNode, NodeBuildError>,
+    },
     /// Adds static capability provenance without changing construction or port types.
     WithFlowBindings {
         factory: &'static NodeFactory,
@@ -1454,7 +1468,10 @@ impl NodeFactory {
 impl NodeRegistration {
     /// Whether this factory can receive prepared Flow parameters.
     pub fn accepts_subgraphs(&self) -> bool {
-        matches!(self.factory.base(), NodeFactory::Subgraph { .. })
+        matches!(
+            self.factory.base(),
+            NodeFactory::Subgraph { .. } | NodeFactory::BoundSubgraph { .. }
+        )
     }
 
     /// The child Flow frame this kind expects, if it receives Flow parameters.
@@ -1471,6 +1488,14 @@ impl NodeRegistration {
                 flow_parameters, ..
             } => flow_parameters(config),
             _ => BTreeMap::new(),
+        }
+    }
+
+    /// Expected bindings in the compiled child tree, whether config-owned or static.
+    pub fn compiled_bindings(&self, config: &Value) -> BTreeSet<String> {
+        match self.factory.base() {
+            NodeFactory::BoundSubgraph { bindings, .. } => bindings(config),
+            _ => self.flow_parameters(config).into_keys().collect(),
         }
     }
 
@@ -1511,6 +1536,18 @@ impl NodeRegistration {
         arguments: BTreeMap<String, crate::PreparedSubgraph>,
     ) -> Result<PreparedNode, NodeBuildError> {
         match self.factory.base() {
+            NodeFactory::BoundSubgraph { prepared, .. } => {
+                ensure!(
+                    self.compiled_bindings(&config).iter().eq(arguments.keys()),
+                    InvalidSubgraphSnafu {
+                        message: format!(
+                            "node `{}` static child bindings differ from its declared routes",
+                            self.kind
+                        ),
+                    }
+                );
+                prepared(id, config, arguments)
+            }
             NodeFactory::Subgraph { prepared, .. } => {
                 // Prepared children are authoritative. The receiver selects binding
                 // names here, but decoding child definitions belongs to authoring.
@@ -1548,9 +1585,9 @@ impl NodeRegistration {
 
     pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
         match self.factory.base() {
-            NodeFactory::Plain(factory) | NodeFactory::Subgraph { plain: factory, .. } => {
-                factory(config)
-            }
+            NodeFactory::Plain(factory)
+            | NodeFactory::Subgraph { plain: factory, .. }
+            | NodeFactory::BoundSubgraph { plain: factory, .. } => factory(config),
             NodeFactory::WithFlowBindings { .. } => unreachable!("base factory is unwrapped"),
         }
     }

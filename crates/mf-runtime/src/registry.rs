@@ -452,6 +452,54 @@ mod tests {
     }
 
     #[test]
+    fn bound_subgraphs_validate_static_names_without_config_flow_discovery() {
+        static BOUND: NodeRegistration = NodeRegistration {
+            kind: "test.bound",
+            factory: crate::NodeFactory::BoundSubgraph {
+                bindings: |_| std::collections::BTreeSet::from(["child".into()]),
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        };
+        let registry = NodeRegistry::from_registrations([&BOUND]).unwrap();
+        let config = serde_json::json!({"routes":["child"],"child":{"path":"must-not-read.json"}});
+        assert!(BOUND.accepts_subgraphs());
+        assert_eq!(BOUND.subgraph_scope(), None);
+        assert!(BOUND.flow_parameters(&config).is_empty());
+        assert!(registry.flow_extractors()["test.bound"](&config).is_empty());
+        assert_eq!(
+            BOUND.compiled_bindings(&config),
+            std::collections::BTreeSet::from(["child".into()])
+        );
+        let body =
+            || crate::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Default::default()));
+        assert!(
+            BOUND
+                .instantiate_subgraphs("owner", config.clone(), BTreeMap::new())
+                .is_err()
+        );
+        assert!(
+            BOUND
+                .instantiate_subgraphs(
+                    "owner",
+                    config.clone(),
+                    BTreeMap::from([("other".into(), body())])
+                )
+                .is_err()
+        );
+        assert!(
+            BOUND
+                .instantiate_subgraphs(
+                    "owner",
+                    config.clone(),
+                    BTreeMap::from([("child".into(), body())])
+                )
+                .is_ok()
+        );
+        assert!(BOUND.instantiate(config).is_ok());
+    }
+
+    #[test]
     fn flow_extractors_include_plain_kinds_and_preserve_receiver_selection() {
         static FLOW: NodeRegistration = NodeRegistration {
             kind: "test.flow",

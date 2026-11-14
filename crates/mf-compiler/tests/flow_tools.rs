@@ -177,18 +177,21 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
         ["calls", "tool_properties", "tools"]
     );
     let dispatch = &dispatch_call.children[&"dispatch".into()]["body"];
-    assert!(!dispatch.children.contains_key(&"execute".into()));
+    assert_eq!(dispatch.children[&"execute".into()].len(), 2);
     let description = mf_compiler::describe_compiled(&plan).unwrap();
-    for route in ["add", "echo"] {
-        let call = format!("execute:route:{route}");
-        assert_eq!(dispatch.children[&call.clone().into()].len(), 1);
-        assert_eq!(
-            description
-                .body_paths_for_node(&["dispatch".into(), "dispatch".into()], &call)
-                .len(),
-            1
-        );
-    }
+    assert_eq!(
+        description
+            .body_paths_for_node(&["dispatch".into(), "dispatch".into()], "execute")
+            .len(),
+        2
+    );
+    assert!(
+        dispatch
+            .definition
+            .nodes
+            .iter()
+            .all(|node| node.kind != "workflow.call")
+    );
     assert!(
         dispatch
             .definition
@@ -735,7 +738,7 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_with_native_flows() 
         dispatch_call.child_scope_key(call, "body"),
         iteration.id.to_string(),
     ];
-    let candidate = graph.body_paths_for_node(&iteration_path, "execute:route:add")[0]
+    let candidate = graph.body_paths_for_node(&iteration_path, "execute")[0]
         .last()
         .unwrap()
         .clone();

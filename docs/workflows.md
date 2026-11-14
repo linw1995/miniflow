@@ -473,9 +473,9 @@ exactly one startup node with a terminal interface and no stdin, at most declare
 and no public input is runtime-only. Dispatch consumes original calls and the same properties map.
 
 `mfn-llm.tool-uses` is an ordinary composed Flow. Per call it classifies the request with CEL, then a
-`builtin.if_else` activates dispatch or a small CEL error producer. Its compile-time `workflow.call`
-dispatch template is specialized for the caller's tool superset: a pure `builtin.router` gate selects
-one ordinary static `workflow.call` per route. An `exclusive` input joins the selected result for
+`builtin.if_else` activates an explicitly authored `builtin.router` or a small CEL error producer.
+The router owns the caller's statically bound tool branches and selects one enabled child at runtime,
+reusing Call's invocation implementation rather than generating Call nodes. An `exclusive` input joins the selected result for
 `llm.tool_result`. Unknown tools, non-object arguments, unknown or secret argument names, and missing
 required arguments become tool-result content. Argument names travel flat and are qualified to
 `node.port` when they identify a single startup port; an ambiguous flat name is rejected. Child input
@@ -490,10 +490,10 @@ unexpected keys, an unknown-argument report is coarser than a compiled adapter's
 a missing required argument is still named.
 
 Tool constants remain the caller-owned static declarations. The compiler follows their provenance
-across ordinary data edges and Call boundaries, then binds a copy of each executable definition to its
-static dispatch Call. Different call sites may specialize the same callee source with different route
-sets. Runtime map entries only control enablement; replacing a handle cannot replace a compiled body.
-The Router owns no executable children and uses no alternate invocation runtime. Resolve external tool
+across ordinary data edges and Call boundaries, then binds each executable definition directly beneath
+its authored router. Different call sites may bind the same callee source with different route sets.
+Runtime map entries only control enablement; replacing a handle cannot replace a compiled body.
+The router invokes its selected child through Call's shared implementation. Resolve external tool
 sources in their original directory before composing when that directory differs from the composed
 workflow's directory. There is no runtime JSON catalog override or lexical `flow_ref` transport. Tool
 dispatch remains terminal-only; native dynamic Calls and existing observed-item nested-scope limits are
@@ -514,7 +514,7 @@ The [calculator chat Flow](../examples/chat-calculator-flow.json) is a small cal
 inner `calculator_properties` object joins that interface with the `calculator_description` and
 `calculator_parameters` defaults; the outer `tools` object builds `Map(Flow)` and `tool_properties`
 builds the matching `Map(Object)`. A normal Call passes both maps into the unchanged `mfn-llm.agent`
-source; the compiler specializes its dispatch Calls rather than requiring caller-generated Agent JSON. The calculator supports
+source; the compiler binds its router children without requiring caller-generated Agent JSON. The calculator supports
 add/subtract/multiply/divide and plain-text numeric results. Compile and run it with `--chat`:
 
 ```sh
@@ -531,12 +531,13 @@ nix develop --command cargo run -p mf-cli --features development-support -- comp
 nix develop --command ./target/flow-tools-runner --params.calls='[{"id":"one","name":"add","arguments":{"left":2,"right":3}}]'
 ```
 
-`builtin.router` is a pure gate. Configuration `{"routes":["first","second"]}` fixes the full set of
-Boolean output ports, plus `else`; the sole input `route` selects **one** eligible branch per invocation.
-`enables` is an allowed subset, not a list of branches to execute. Omission enables all routes;
-`"enables": []` disables all. Unknown or disabled selections activate `else`. Blank, reserved `else`,
-and duplicate routes are rejected, as are duplicate or unknown names in `enables`. An empty full route
-set is valid and only exposes `else`. Router never receives or executes a Flow.
+`builtin.router` is a composite selection-and-call node. Configuration `{"routes":["first","second"]}`
+fixes its full static branch set. The `route` input selects **one** eligible child, and `arguments`
+provides its flat input object. `enables` is an allowed subset, not a list of branches to execute.
+Omission enables all routes; `"enables": []` disables all. Unknown or disabled selections return an
+error result without invoking any child. Blank, reserved `else`, and duplicate routes are rejected,
+as are duplicate or unknown names in `enables`. The output is always the same `result: Object`,
+independent of the number of branches.
 
 Each router `choose` has an implicit node-local source `%choose`:
 
@@ -551,32 +552,37 @@ on the router itself; referencing a mutable source does not order it after a wri
 the current invocation and is isolated across Calls and item/container frames. Writes never add ports,
 change compiled children, or exclude disabled branches from static validation.
 
-A `workflow.call` with `{"dispatch":true}` is compile-time authoring syntax, not a dynamic runtime
-selector. Its inputs are `flows: Map(Flow)`, `route: String`, and `arguments: Object`; its output is
-`result: Object`. The compiler follows the supplied Flow map through Call parameters and shared
-Loop/Iteration inputs, replaces the template with a pure router, and creates a static Call for each
-route. Each Call owns the usual `body` binding in `CompiledGraph.children`. Runtime map keys are
-projected by `builtin.keys` and assigned to the router's `enables`; removing and re-adding declared keys
-only changes eligibility. Unknown keys fail subset validation. A substituted handle cannot change the
-static executable target. Empty maps compile to an empty route set. No Agent source rewrite, ordinal
-candidate IDs, or router-owned body metadata is needed.
+The router's optional `flows: Map(Flow)` input supplies static provenance. The compiler follows that
+map through Call parameters and shared Loop/Iteration inputs, binding one child per route in
+`CompiledGraph.children[router_id]`. An authored empty `routes` list is filled from the discovered
+superset; an explicit nonempty list must match it. Branch bodies live in the child tree, not in
+synthetic config fields. The router remains the authored node: there is no dispatch template,
+per-route Call-node expansion, or generated result-join topology.
+
+ToolUses explicitly authors `builtin.keys` and `workflow.assign` to replace `%execute.enables` with the
+current map keys before executing the router. Removing and re-adding declared keys only changes
+eligibility. Unknown keys fail subset validation. The runtime never selects an executor from the
+supplied handles, so substituting a handle cannot replace a static target. An empty map binds no
+children. No caller-specific Agent source or ordinal candidate IDs are needed.
 
 Providers declare capability provenance with `NodeFactory::WithFlowBindings`, wrapping their existing
 factory. `FlowBindingSource` describes child exports, forwarded inputs, and native object fields;
-`FlowInvocationBinding` marks a dispatch template's receiving collection. These callbacks inspect
-metadata only and never run node work. Opaque transformations conservatively retain incoming
-capabilities. Discovery is independent of inferred port types; sources without declared provenance
-cannot introduce static bodies. All discovered bodies are checked, whether enabled or not. The final
-artifact stores ordinary gates, static Calls, and their children, so replay, generated runners,
+`FlowInvocationBinding` identifies a receiving node's Flow collection. These callbacks inspect metadata
+only and never run node work. `NodeFactory::BoundSubgraph` declares the expected static child names
+without treating ordinary config as Flow definitions. Opaque transformations conservatively retain
+incoming capabilities. Discovery is independent of inferred port types; sources without declared
+provenance cannot introduce static bodies. All discovered bodies are checked, whether enabled or not.
+The final artifact retains the authored router and its children, so replay, generated runners,
 descriptions, and TUI need no rediscovery or runtime graph projection.
 
-Generated static Calls use `"pack":true` to accept a flat `arguments` object and return a `result`
-envelope containing `outputs` or a recoverable business `error`. Arguments are conservatively private
-in snapshots, and business-error envelopes are private. Cancellation, observation/contract, resource,
-and output failures propagate rather than becoming business results. Recovery is fail-closed: explicit
-ordinary node execution failures, including known Call wrappers, are recoverable; unknown plugin errors
-are not assumed to be business failures. Packed invocation drains incremental emissions terminally and
-does not expose them as Call stream ports.
+Router invocation reuses Call's argument qualification, isolated call context, cancellation checks,
+and typed errors. It returns a `result` envelope containing `outputs` or a recoverable business `error`.
+Arguments are conservatively private in snapshots, and business-error envelopes are private.
+Cancellation, observation/contract, resource, and output failures propagate rather than becoming
+business results. Recovery is fail-closed: explicit ordinary node execution failures, including known
+Call wrappers, are recoverable; unknown plugin errors are not assumed to be business failures.
+Invocation drains incremental emissions terminally without exposing Router stream ports. Ordinary
+`workflow.call` syntax and topology are unchanged.
 
 ## Node clusters
 

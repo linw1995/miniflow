@@ -402,13 +402,11 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
         let router = &resolved_child.children[&"repeat".into()]["body"].children
             [&"dispatch".into()]["body"]
             .children[&"dispatch".into()]["body"];
-        assert!(!router.children.contains_key(&"execute".into()));
         assert_eq!(
             router
                 .children
-                .keys()
-                .filter(|id| id.as_str().starts_with("execute:"))
-                .count(),
+                .get(&"execute".into())
+                .map_or(0, BTreeMap::len),
             names.len()
         );
         assert_eq!(

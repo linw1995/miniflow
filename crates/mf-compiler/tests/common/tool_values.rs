@@ -48,7 +48,7 @@ fn select_local_sources(value: &mut Value) {
 
 /// Assembles the two collections dispatch needs.
 ///
-/// `tools` holds the native capabilities the compiler binds to static Calls; `tool_properties`
+/// `tools` holds the native capabilities bound to router children; `tool_properties`
 /// holds the plain JSON each body publishes about itself, joined with the
 /// caller-owned description and parameter documentation. Flow values never enter
 /// JSON or CEL.
@@ -102,32 +102,11 @@ fn caller(tools: BTreeMap<String, FlowTool>) -> Value {
 
 pub fn without_specialized_routes(graph: &mf_runtime::CompiledGraph) -> mf_runtime::CompiledGraph {
     let mut graph = graph.clone();
-    let calls: std::collections::BTreeSet<_> = graph
-        .definition
-        .nodes
-        .iter()
-        .filter(|node| node.kind == "workflow.call" && node.config["pack"] == true)
-        .map(|node| node.id.clone())
-        .collect();
-    graph
-        .definition
-        .nodes
-        .retain(|node| !calls.contains(&node.id));
-    graph.execution_order.retain(|id| !calls.contains(id));
-    graph.children.retain(|id, _| !calls.contains(id));
-    graph
-        .definition
-        .edges
-        .retain(|edge| !calls.contains(&edge.from_node) && !calls.contains(&edge.to_node));
-    graph
-        .definition
-        .control_edges
-        .retain(|edge| !calls.contains(&edge.from_node) && !calls.contains(&edge.to_node));
-    for edge in &mut graph.definition.edges {
-        if edge.to_node.as_str().ends_with(":result") {
-            edge.exclusive = false;
-        }
-    }
+    graph.children.retain(|_, children| {
+        !children
+            .values()
+            .all(|child| child.relations.static_binding)
+    });
     for node in &mut graph.definition.nodes {
         if node.config.get("routes").is_some() {
             node.config["routes"] = json!([]);
