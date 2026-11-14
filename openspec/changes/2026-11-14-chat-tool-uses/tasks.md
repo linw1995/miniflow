@@ -9,13 +9,13 @@
 
 ## 2. Terminal presentation
 
-- [ ] 2.1 Render live tool status and literal details inline, independently of the execution panel.
-- [ ] 2.2 Restore per-turn saved tools once, including paged and user-only history; label legacy missing evidence.
-- [ ] 2.3 Preserve history across new turns, reject stale events, and label retained unsaved evidence.
-- [ ] 2.4 Test terminal rendering, Unicode/control safety, state/duration uncertainty, cancellation, and real CLI restart.
+- [x] 2.1 Render live tool status and literal details inline, independently of the execution panel.
+- [x] 2.2 Restore per-turn saved tools once, including paged and user-only history; label legacy missing evidence.
+- [x] 2.3 Preserve history across new turns, reject stale events, and label retained unsaved evidence.
+- [x] 2.4 Test terminal rendering, Unicode/control safety, state/duration uncertainty, cancellation, and real CLI restart.
 
 ## 3. Scope and validation
 
 - [x] 3.1 Remove desktop proposals and desktop-only license changes from the PR; preserve experiments locally.
-- [ ] 3.2 Run focused tests, the shared affected-test Flow, coverage when relevant, and `nix develop --command prek -a`.
-- [ ] 3.3 Update ToolUse documentation and the draft PR title/body with current validation and AI disclosure.
+- [x] 3.2 Run focused tests, the shared affected-test Flow, coverage when relevant, and `nix develop --command prek -a`.
+- [x] 3.3 Update ToolUse documentation and the draft PR title/body with current validation and AI disclosure.

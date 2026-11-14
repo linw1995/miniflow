@@ -163,10 +163,15 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
         "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
     let mut reply = Reply::stream_text("");
     reply.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    let mut live_reply = Reply::stream_text("Live: 20");
+    live_reply.header_delay = Duration::from_secs(3);
     let server = Server::start(vec![
-        reply,
+        reply.clone(),
         Reply::stream_text("Recovered: 20"),
         Reply::text("Calculator tools"),
+        reply,
+        live_reply,
+        Reply::text("Live calculator"),
     ]);
     let binary = compiled(root.path(), &server, "chat-calculator-flow.json");
     let options = ChatOptions {
@@ -296,6 +301,136 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
         3,
         "loading history must not repeat model or tool execution"
     );
+    tool_chat(&binary, &root.path().join("chat.sqlite"), false);
+    assert_eq!(server.requests().len(), 6);
+    tool_chat(&binary, &root.path().join("chat.sqlite"), true);
+    assert_eq!(
+        server.requests().len(),
+        6,
+        "terminal history must not execute models or tools"
+    );
+}
+
+fn tool_chat(binary: &Path, database: &Path, restart: bool) {
+    let pty = openpty(
+        Some(&Winsize {
+            ws_row: 50,
+            ws_col: 180,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }),
+        None,
+    )
+    .unwrap();
+    let flags = FdFlag::from_bits_truncate(fcntl(&pty.master, FcntlArg::F_GETFD).unwrap());
+    fcntl(&pty.master, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
+    let original = tcgetattr(&pty.slave).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .args(["run", "--chat", "--chat-db"])
+        .arg(database)
+        .arg(binary)
+        .args(["--params.model", "fixture-model"])
+        .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+        .env("PATH", "")
+        .env("MF_CHAT_TUI_KEY", "synthetic-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut master = fs::File::from(pty.master);
+    fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+    let mut screen = Screen::new(180, 50);
+    let mut stage = 0;
+    let mut observed = String::new();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let mut bytes = [0; 16384];
+        if let Ok(count) = master.read(&mut bytes)
+            && count > 0
+        {
+            screen.feed(&bytes[..count]);
+            let text = screen.text();
+            observed.push_str(&text);
+            observed.push('\n');
+            match stage {
+                0 if text.contains("What would you like") => {
+                    master
+                        .write_all(if restart {
+                            b"\x05\x13"
+                        } else {
+                            b"\x05Use calculator now\x1b\r"
+                        })
+                        .unwrap();
+                    stage = 1;
+                }
+                1 if restart
+                    && text.contains("Switch chat")
+                    && text.contains("Live calculator") =>
+                {
+                    master.write_all(b"\x1b[B\r").unwrap();
+                    stage = 2;
+                }
+                1 if !restart
+                    && text.contains("Tool uses")
+                    && text.contains("[succeeded] calculator")
+                    && text.contains("[failed] missing") =>
+                {
+                    assert!(
+                        !text.contains("Live: 20"),
+                        "tools must be visible before the delayed final reply: {text}"
+                    );
+                    assert!(!text.contains("Flow execution"));
+                    stage = 2;
+                }
+                2 if text.contains("Live: 20")
+                    && text.contains("Tool uses")
+                    && (restart || text.contains("Saved")) =>
+                {
+                    assert!(
+                        text.contains("[succeeded] calculator")
+                            && text.contains("[failed] missing"),
+                        "{text}"
+                    );
+                    assert_eq!(text.matches("Tool uses").count(), 1, "{text}");
+                    assert!(
+                        text.contains("Arguments:") && text.contains("Result:"),
+                        "{text}"
+                    );
+                    assert!(!text.contains("Flow execution") && !text.contains("synthetic-key"));
+                    master.write_all(b"\x11").unwrap();
+                    stage = 3;
+                }
+                _ => {}
+            }
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "{status}: {observed}");
+            break;
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("tool chat stalled at stage {stage}: {observed}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(stage, 3, "{observed}");
+    let restored = tcgetattr(&pty.slave).unwrap();
+    assert_eq!(
+        original.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO),
+        restored.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO)
+    );
+    let mut stdout = vec![];
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    assert!(stdout.is_empty());
 }
 
 fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {

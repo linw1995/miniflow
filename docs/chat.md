@@ -41,7 +41,7 @@ Registered kinds are `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.ar
 ## Tool-use evidence
 
 The executable `ChatController` checkpoints bounded, redacted tool-use observations in the owning `mf-chat`
-database independently of terminal or desktop rendering. `model_calls.tool_uses` is a nullable JSON journal;
+database independently of terminal rendering. `model_calls.tool_uses` is a nullable JSON journal;
 `ModelCall.tool_uses` and each `MessageRecord.tool_uses` expose it with its exact session/turn/call identity.
 Records follow validated iteration-body dataflow into `llm.tool_result`: the call classifier feeds the execution
 router and encoder in the same runtime scope. This supports the current Flow-property `builtin.code` classifier
@@ -66,6 +66,16 @@ Existing databases migrate automatically, but historical calls without recorded 
 “not recorded”, not “no tool use”; such records cannot be reconstructed from a final reply or rerun without changing
 history. In-process `ChatHost` and custom backends do not acquire this executable observer automatically; a host may
 record its own public evidence through `ChatDatabase::record_tool_uses`.
+
+Terminal chat displays **Tool uses** inline once per turn, before the assistant reply. Status, public arguments/results,
+and observed duration appear while the turn is running and after loading history. `Ctrl+E` only hides the separate
+Flow execution panel; it does not hide these records or stop collection. Starting another turn preserves earlier tools,
+and paged or cancelled user-only history keeps its own evidence without an invented assistant message.
+
+Details are rendered literally, with terminal controls escaped; Markdown/image syntax in tool output cannot load
+resources or issue terminal commands. Missing durations stay unknown and incomplete observations are labeled.
+`[save pending]` distinguishes retained evidence awaiting persistence confirmation. Old missing journals show
+`Tool-use details not recorded`, not a fabricated empty/successful tool list.
 
 ## Turn lifecycle
 

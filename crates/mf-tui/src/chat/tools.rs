@@ -217,6 +217,35 @@ pub fn collect(
         .collect()
 }
 
+/// Refresh bounded public evidence without writing storage. Both the host recorder
+/// and terminal presentation use this projection; a final journal stays frozen.
+pub fn refresh(history: &mut ToolUseHistory, observation: &LocalObservation, finished: bool) {
+    if history.finished {
+        return;
+    }
+    let snapshot = observation.reader.snapshot_shared();
+    let description = observation.reader.description();
+    let runs = collect(&snapshot, finished, &description, |node| {
+        let (trace, span) = node.correlation.as_ref()?;
+        observation.reader.span_data(trace, span).node
+    });
+    let tool_bodies: Vec<_> = snapshot
+        .iterations
+        .items
+        .iter()
+        .filter_map(|item| description.body(&item.iteration_path))
+        .filter(|body| body.nodes.iter().any(|node| node.kind == "llm.tool_result"))
+        .collect();
+    history.incomplete |= snapshot.iterations.retention_overflows > 0
+        || snapshot.iterations.protocol_conflicts > 0
+        || snapshot.iterations.known_missing_count > 0
+        || tool_bodies.len() > MAX_TOOL_USES
+        || tool_bodies.iter().any(|body| dispatch(body).is_none())
+        || (finished && runs.iter().any(|run| run.name == UNOBSERVED_NAME))
+        || (finished && snapshot.lifecycle.completeness != crate::state::Completeness::Complete);
+    merge(history, runs);
+}
+
 pub(super) struct Capture {
     observation: Option<LocalObservation>,
     history: ToolUseHistory,
@@ -244,32 +273,11 @@ impl Capture {
     }
 
     fn refresh(&mut self, finished: bool) {
-        let Some(observation) = &self.observation else {
+        if let Some(observation) = &self.observation {
+            refresh(&mut self.history, observation, finished);
+        } else {
             self.history.incomplete = true;
-            return;
-        };
-        let snapshot = observation.reader.snapshot_shared();
-        let description = observation.reader.description();
-        let runs = collect(&snapshot, finished, &description, |node| {
-            let (trace, span) = node.correlation.as_ref()?;
-            observation.reader.span_data(trace, span).node
-        });
-        let tool_bodies: Vec<_> = snapshot
-            .iterations
-            .items
-            .iter()
-            .filter_map(|item| description.body(&item.iteration_path))
-            .filter(|body| body.nodes.iter().any(|node| node.kind == "llm.tool_result"))
-            .collect();
-        self.history.incomplete |= snapshot.iterations.retention_overflows > 0
-            || snapshot.iterations.protocol_conflicts > 0
-            || snapshot.iterations.known_missing_count > 0
-            || tool_bodies.len() > MAX_TOOL_USES
-            || tool_bodies.iter().any(|body| dispatch(body).is_none())
-            || (finished && runs.iter().any(|run| run.name == UNOBSERVED_NAME))
-            || (finished
-                && snapshot.lifecycle.completeness != crate::state::Completeness::Complete);
-        merge(&mut self.history, runs);
+        }
     }
 
     pub fn checkpoint(&mut self, database: &ChatDatabase) -> Result<(), mf_chat::ChatError> {
