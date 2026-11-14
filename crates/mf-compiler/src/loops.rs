@@ -1,7 +1,7 @@
 use crate::{DefinitionId, ValueType, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::{
-    EXIT_LOOP_KIND, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopVariableDefinition,
-    NodeDefinition, OutputReferenceDefinition, WorkflowDefinitionVersion,
+    EXIT_LOOP_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopVariableDefinition, NodeDefinition,
+    OutputReferenceDefinition, WorkflowDefinitionVersion,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -68,6 +68,7 @@ pub fn parse_config(node: &NodeDefinition) -> Result<LoweringConfig, WorkflowCom
 pub fn validate_scope(
     definition: &WorkflowDefinition,
     enclosing: Option<&BTreeMap<String, ValueType>>,
+    root: Option<&BTreeMap<String, ValueType>>,
     path: &[DefinitionId],
 ) -> Result<(), WorkflowCompileError> {
     for node in &definition.nodes {
@@ -76,7 +77,7 @@ pub fn validate_scope(
         if definition.version == WorkflowDefinitionVersion::V2026_09_26
             && matches!(
                 node.kind.as_str(),
-                LOOP_KIND | LOOP_ASSIGN_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
+                LOOP_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
             )
         {
             return Err(invalid(
@@ -85,6 +86,15 @@ pub fn validate_scope(
             ));
         }
         match node.kind.as_str() {
+            mf_runtime::ROOT_SOURCE_ID => ensure!(
+                root.is_some()
+                    && node.id.as_str() == mf_runtime::ROOT_SOURCE_ID
+                    && node.config == json!({}),
+                crate::compiler::InvalidScopeSnafu {
+                    path: path_label(&node_path),
+                    message: "reserved scope source requires its canonical enclosing scope",
+                }
+            ),
             LOOP_SOURCE_ID => ensure!(
                 enclosing.is_some()
                     && node.id.as_str() == LOOP_SOURCE_ID
@@ -94,8 +104,11 @@ pub fn validate_scope(
                     message: "reserved scope source requires its canonical enclosing scope",
                 }
             ),
-            LOOP_ASSIGN_KIND => {
+            mf_runtime::ASSIGN_KIND => {
+                // Lowering validates the declaration version; inside a Loop body the
+                // assignment keeps the pre-existing immediate-write contract.
                 let types = enclosing
+                    .or(root)
                     .ok_or_else(|| invalid(&node_path, "assignment requires a state scope"))?;
                 let target = assignment_target(&node.config, &node_path)?;
                 ensure!(

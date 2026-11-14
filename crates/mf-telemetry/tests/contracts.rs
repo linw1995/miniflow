@@ -336,7 +336,7 @@ fn nested_descriptions_validate_scope_ownership_and_version() {
     for source in ["%loop", "$loop"] {
         let mut value = serde_json::to_value(graph()).unwrap();
         value["version"] = json!("2026-09-29");
-        value["nodes"] = json!([{"id": "repeat", "kind": "workflow.loop"}]);
+        value["nodes"] = json!([{"id": "repeat", "kind": "loop.run"}]);
         value["data_edges"] = json!([]);
         value["control_edges"] = json!([]);
         value["execution_order"] = json!(["repeat"]);
@@ -374,7 +374,7 @@ fn nested_descriptions_validate_scope_ownership_and_version() {
 
 #[test]
 fn body_sources_are_explicit_endpoints_independent_of_instruction_labels() {
-    for kind in ["workflow.loop", "builtin.iteration", "workflow.call"] {
+    for kind in ["loop.run", "builtin.iteration", "workflow.call"] {
         let value = json!({
             "version": "2026-10-23",
             "workflow_id": graph().workflow_id,
@@ -517,7 +517,7 @@ fn scope_operators_follow_frame_relations_for_direct_and_encoded_body_keys() {
 fn loop_summaries_require_owned_stateful_bodies_instead_of_provider_labels() {
     use mf_telemetry::event::{LoopStopReason, LoopSummary, NodeIdentity, Outcome};
 
-    for kind in ["foreign.provider", "workflow.loop"] {
+    for kind in ["foreign.provider", "loop.run"] {
         for key in [
             "owner".to_owned(),
             LoopPathEntry::binding_key("owner", "body"),
@@ -623,8 +623,8 @@ fn static_custom_children() -> WorkflowDescription {
         "version": "2026-09-29", "workflow_id": graph().workflow_id,
         "nodes": [
             {"id": "dispatch", "kind": "user.dispatch"},
-            {"id": "repeat", "kind": "workflow.loop"},
-            {"id": claimed, "kind": "workflow.loop"}
+            {"id": "repeat", "kind": "loop.run"},
+            {"id": claimed, "kind": "loop.run"}
         ],
         "execution_order": ["dispatch", "repeat", claimed],
         "data_edges": [], "control_edges": [],

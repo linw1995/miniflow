@@ -207,6 +207,7 @@ struct FlowData {
     generated_domains: BTreeMap<usize, Arc<GeneratedDomainExecutor>>,
     input_guards: BTreeMap<NodeId, Arc<crate::ExecutionGuard>>,
     stream_outputs: Vec<crate::SubgraphStreamOutput>,
+    root_scope: Option<crate::RootScopeRelations>,
 }
 
 impl Flow {
@@ -266,9 +267,20 @@ impl Flow {
                 generated_domains: BTreeMap::new(),
                 input_guards: BTreeMap::new(),
                 stream_outputs: Vec::new(),
+                root_scope: None,
             }),
         }
     }
+    /// Binds a compiler-validated invocation-local state schema to this graph.
+    pub fn with_root_scope(mut self, scope: Option<crate::RootScopeRelations>) -> Self {
+        self.data_mut().root_scope = scope;
+        self
+    }
+
+    pub fn root_scope(&self) -> Option<&crate::RootScopeRelations> {
+        self.inner.root_scope.as_ref()
+    }
+
     /// Binds compiler-validated typed bodies without changing the domain graph.
     pub fn with_generated_domains(
         mut self,
@@ -278,7 +290,10 @@ impl Flow {
             self.data_mut().generated_domains.insert(
                 id,
                 Arc::new(move |flow, state| {
-                    if state.snapshot_recorder().is_none() && state.scope_path().is_empty() {
+                    if state.snapshot_recorder().is_none()
+                        && state.scope_path().is_empty()
+                        && flow.inner.root_scope.is_none()
+                    {
                         executor(flow, state)
                     } else {
                         flow.execute_domain_positions(
@@ -572,7 +587,7 @@ impl Flow {
         }
         // Scoped domains retain their ordering for Loop writes and exit cutoffs;
         // parallel work inside those domains still uses the full shared pool.
-        let worker_limit = if state.scope_path().is_empty() {
+        let worker_limit = if state.scope_path().is_empty() && self.inner.root_scope.is_none() {
             state.worker_limit().get()
         } else {
             1
@@ -580,24 +595,31 @@ impl Flow {
         // Nested parallel work initializes this scope's pool on demand and shares
         // it across domains, Loop passes, and Iteration items.
         let _owned_workers = state.worker_scope();
-        execute(state, worker_limit)?;
-        // An explicit scope exit abandons end-of-pass selections. Their producers
-        // may be unvisited; only already committed immediate writes survive.
-        if state.scope_exit_requested() {
-            return Ok(FlowOutputs::new());
-        }
-        let mut workflow_outputs = FlowOutputs::new();
-        for output in self.inner.plan.outputs.iter() {
-            let id = self.inner.nodes[output.node_id.index()]
-                .definition_id
-                .as_str();
-            if let Some(value) =
-                state.select_output_keyed(&output.name, id, &output.key, output.optional)?
-            {
-                workflow_outputs.insert(output.name.clone().into_owned(), value);
+        let run = |state: &mut crate::ExecutionContext| {
+            execute(state, worker_limit)?;
+            // An explicit scope exit abandons end-of-pass selections. Their producers
+            // may be unvisited; only already committed immediate writes survive.
+            if state.scope_exit_requested() {
+                return Ok(FlowOutputs::new());
             }
+            let mut workflow_outputs = FlowOutputs::new();
+            for output in self.inner.plan.outputs.iter() {
+                let id = self.inner.nodes[output.node_id.index()]
+                    .definition_id
+                    .as_str();
+                if let Some(value) =
+                    state.select_output_keyed(&output.name, id, &output.key, output.optional)?
+                {
+                    workflow_outputs.insert(output.name.clone().into_owned(), value);
+                }
+            }
+            Ok(workflow_outputs)
+        };
+        if let Some(scope) = &self.inner.root_scope {
+            state.run_root_scope(scope, run)
+        } else {
+            run(state)
         }
-        Ok(workflow_outputs)
     }
 
     fn execute_domains(

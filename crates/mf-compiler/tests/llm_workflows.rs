@@ -435,7 +435,7 @@ fn llm_workflows_match_memory_and_standalone_runners() {
                 assert_eq!(json!(messages(&request)), expected_messages);
             }
         }
-        if value["nodes"][0]["kind"] == "workflow.loop" {
+        if value["nodes"][0]["kind"] == "loop.run" {
             assert_eq!(generated[0]["history"].as_array().unwrap().len(), 4);
             assert_eq!(messages(&server.requests()[1]).len(), 3);
         }

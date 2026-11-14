@@ -116,11 +116,11 @@ fn workflow(kind: &str, workers: usize) -> WorkflowDefinition {
     let (subgraph, input, output, seed) = if kind == "loop" {
         (
             json!({
-                "id": "subgraph", "kind": "workflow.loop", "config": {
+                "id": "subgraph", "kind": "loop.run", "config": {
                     "max_iterations": 3,
                     "variables": [{"name": "threads", "type": {"list": "string"}}],
                     "body": {"version":"2026-09-29", "dependencies":{},
-                        "nodes": [probe, {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "threads"}}],
+                        "nodes": [probe, {"id": "assign", "kind": "workflow.assign", "config": {"variable": "threads"}}],
                         "edges": [{"from_node": "probe", "from_output": "value", "to_node": "assign", "to_input": "value"}]
                     }
                 }

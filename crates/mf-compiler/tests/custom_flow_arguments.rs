@@ -628,7 +628,7 @@ fn iteration_checks_all_self_contained_flow_fields_for_transitive_containers() {
     value["nodes"][1]["config"]["body"]["nodes"][0]["config"]["left"]["definition"]["nodes"][1]["config"]
         ["right"]["definition"] = json!({
         "version":"2026-10-28", "dependencies":{},
-        "nodes":[{"id":"repeat", "kind":"workflow.loop", "config":{
+        "nodes":[{"id":"repeat", "kind":"loop.run", "config":{
             "max_iterations":1, "variables":[{"name":"content", "type":"string"}], "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[]}
         }}],
         "outputs":[{"name":"content", "node":"repeat", "port":"content"}]

@@ -18,7 +18,7 @@ fn nodes() -> Vec<NodeDefinition> {
         {"id": "call", "kind": "workflow.call", "config": {
             "flow": "child", "body": child
         }},
-        {"id": "loop", "kind": "workflow.loop", "config": {
+        {"id": "loop", "kind": "loop.run", "config": {
             "max_iterations": 3, "variables": [], "body": child
         }},
         {"id": "iteration", "kind": "builtin.iteration", "config": {
@@ -57,7 +57,7 @@ fn receiver(node: &NodeDefinition) -> NodeRegistration {
         kind: "test.child",
         factory: NodeFactory::Subgraph {
             flow_parameters: match node.kind.as_str() {
-                "workflow.call" | "workflow.loop" | "builtin.iteration" => {
+                "workflow.call" | "loop.run" | "builtin.iteration" => {
                     |config| extract(config, "body")
                 }
                 "user.dispatch" => |config| extract(config, "selected"),
@@ -119,7 +119,7 @@ fn setters_preserve_full_definitions_and_unrelated_configuration_for_every_kind(
     let mut parent = definition("2026-10-28");
     for mut node in nodes() {
         let name = parameter(&node);
-        if matches!(node.kind.as_str(), "workflow.loop" | "builtin.iteration") {
+        if matches!(node.kind.as_str(), "loop.run" | "builtin.iteration") {
             node.config["stream_outputs"] =
                 json!({"events": {"node": "normalized", "port": "value"}});
         }
@@ -158,7 +158,7 @@ fn manifest_projects_explicit_compiled_sources_with_complete_child_orders() {
     parent.nodes = nodes();
     for node in &mut parent.nodes {
         let source = match node.kind.as_str() {
-            "workflow.loop" => json!({"id": "%loop", "kind": "%loop", "config": {}}),
+            "loop.run" => json!({"id": "%loop", "kind": "%loop", "config": {}}),
             "builtin.iteration" => json!({"id": "%iteration", "kind": "builtin.iteration_input"}),
             _ => continue,
         };
@@ -374,7 +374,7 @@ fn definition_is_still_an_ordinary_custom_field_not_a_global_alias_for_body() {
 fn old_top_level_loop_and_incomplete_definitions_are_rejected() {
     assert!(
         serde_json::from_value::<NodeDefinition>(json!({
-            "id": "loop", "kind": "workflow.loop", "loop": {
+            "id": "loop", "kind": "loop.run", "loop": {
                 "max_iterations": 3, "variables": [], "body": {"nodes": []}
             }
         }))

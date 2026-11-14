@@ -118,7 +118,7 @@
     },
     {
       "id": "repeat",
-      "kind": "workflow.loop",
+      "kind": "loop.run",
       "config": {
         "max_iterations": 8,
         "inputs": {

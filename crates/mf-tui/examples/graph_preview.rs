@@ -601,7 +601,7 @@ fn dump_graph() -> PreviewResult<()> {
         }
         fixture.nodes = vec![NodeDescription {
             id: "repeat".into(),
-            kind: "workflow.loop".into(),
+            kind: "loop.run".into(),
         }];
         fixture.execution_order = vec!["repeat".into()];
         fixture.data_edges.clear();

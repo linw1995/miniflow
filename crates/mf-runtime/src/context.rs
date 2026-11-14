@@ -96,6 +96,25 @@ impl Drop for ScopeGuard<'_> {
     }
 }
 
+#[derive(Clone, Debug)]
+struct RootState {
+    source_id: crate::DefinitionId,
+    variables: Outputs,
+    types: BTreeMap<String, crate::ValueType>,
+}
+
+struct RootStateGuard<'a> {
+    context: &'a mut ExecutionContext,
+    previous: Option<RootState>,
+}
+
+impl Drop for RootStateGuard<'_> {
+    fn drop(&mut self) {
+        self.context.root_state = self.previous.take();
+        self.context.pending_root_write = None;
+    }
+}
+
 struct NodeInvocationGuard<'a> {
     context: &'a mut ExecutionContext,
     previous: Option<crate::DefinitionId>,
@@ -200,6 +219,8 @@ pub struct ExecutionContext {
     body_observation: Option<BodyObservation>,
     scopes: Vec<ExecutionScope>,
     pending_loop_write: Option<(String, Value)>,
+    root_state: Option<RootState>,
+    pending_root_write: Option<(String, Value)>,
     current_position: Option<usize>,
     current_node: Option<crate::DefinitionId>,
     scope_exit_cutoff: Arc<AtomicUsize>,
@@ -224,6 +245,8 @@ impl Default for ExecutionContext {
             body_observation: None,
             scopes: Vec::new(),
             pending_loop_write: None,
+            root_state: None,
+            pending_root_write: None,
             current_position: None,
             current_node: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
@@ -320,6 +343,8 @@ impl ExecutionContext {
             body_observation: None,
             scopes: Vec::new(),
             pending_loop_write: None,
+            root_state: None,
+            pending_root_write: None,
             current_position: None,
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
@@ -344,6 +369,7 @@ impl ExecutionContext {
         self.observation = source.observation.clone();
         self.body_observation = source.body_observation.clone();
         self.scopes = source.scopes.clone();
+        self.root_state = source.root_state.clone();
         self.scope_prefix = source.scope_prefix.clone();
         self.scope_exit_cutoff = source.scope_exit_cutoff.clone();
         self.snapshots = source.snapshots.clone();
@@ -390,6 +416,8 @@ impl ExecutionContext {
         self.remaining_steps = StepBudget::new(crate::MAX_SCHEDULED_STEPS);
         self.current_position = None;
         self.pending_loop_write = None;
+        self.root_state = None;
+        self.pending_root_write = None;
         self.scope_exit_cutoff = Arc::new(AtomicUsize::new(usize::MAX));
         Ok(())
     }
@@ -544,6 +572,8 @@ impl ExecutionContext {
             body_observation: self.body_observation.clone(),
             scopes: self.scopes.clone(),
             pending_loop_write: None,
+            root_state: self.root_state.clone(),
+            pending_root_write: None,
             current_position: None,
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
@@ -567,6 +597,19 @@ impl ExecutionContext {
         nodes: impl IntoIterator<Item = &'a FlowNode<N>>,
     ) {
         self.outputs.merge_nodes(&source.outputs, nodes);
+        if let (Some(target), Some(source)) = (&mut self.root_state, &source.root_state) {
+            for (name, value) in &source.variables {
+                if !target
+                    .variables
+                    .get(name)
+                    .is_some_and(|previous| previous.ptr_eq(value))
+                {
+                    target.variables.insert(name.clone(), value.clone());
+                    self.outputs
+                        .set_value(output_id(target.source_id.as_str(), name), value.clone());
+                }
+            }
+        }
         for (scope_index, scope) in source.scopes.iter().enumerate() {
             if let Some(target) = self.scopes.get_mut(scope_index) {
                 for (name, value) in &scope.variables {
@@ -1060,6 +1103,68 @@ impl ExecutionContext {
         self.outputs.output(id)
     }
 
+    /// Establish invocation-local state without adding a container or hiding startup arguments.
+    pub fn run_root_scope<T>(
+        &mut self,
+        scope: &crate::RootScopeRelations,
+        run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
+    ) -> Result<T, WorkflowRunError> {
+        scope
+            .validate_values()
+            .context(crate::node::WorkflowVariablesSnafu)
+            .context(NodeExecutionSnafu {
+                definition_id: scope.input.clone(),
+            })?;
+        let previous = self.root_state.replace(RootState {
+            source_id: scope.input.clone(),
+            variables: scope
+                .initial
+                .iter()
+                .map(|(name, value)| (name.clone(), Value::from(value.clone())))
+                .collect(),
+            types: scope.values.clone(),
+        });
+        let guard = RootStateGuard {
+            context: self,
+            previous,
+        };
+        run(guard.context)
+    }
+
+    pub(crate) fn root_values(&self) -> Result<Outputs, NodeExecutionError> {
+        self.root_state
+            .as_ref()
+            .map(|state| state.variables.clone())
+            .context(crate::NodeExecutionFailedSnafu {
+                message: "variables source is outside a Flow state scope",
+            })
+    }
+
+    pub(crate) fn stage_root_write(
+        &mut self,
+        variable: &str,
+        value: Value,
+    ) -> Result<(), NodeExecutionError> {
+        let state = self
+            .root_state
+            .as_ref()
+            .context(crate::NodeExecutionFailedSnafu {
+                message: "assignment is outside a Flow state scope",
+            })?;
+        let value_type =
+            state
+                .types
+                .get(variable)
+                .with_context(|| crate::NodeExecutionFailedSnafu {
+                    message: format!("unknown workflow variable `{variable}`"),
+                })?;
+        value_type
+            .validate_shared(&value)
+            .context(crate::node::WorkflowVariableTypeSnafu { variable })?;
+        self.pending_root_write = Some((variable.to_owned(), value));
+        Ok(())
+    }
+
     pub(crate) fn scope_values(&self) -> Result<Outputs, NodeExecutionError> {
         let frame = self
             .scopes
@@ -1143,7 +1248,16 @@ impl ExecutionContext {
         self.remaining_steps.reserve(id)
     }
 
-    fn commit_pending_loop_write(&mut self) {
+    fn commit_pending_writes(&mut self) {
+        if let Some((variable, value)) = self.pending_root_write.take() {
+            let state = self
+                .root_state
+                .as_mut()
+                .expect("validated root write has state");
+            state.variables.insert(variable.clone(), value.clone());
+            self.outputs
+                .set_value(output_id(state.source_id.as_str(), &variable), value);
+        }
         if let Some((variable, value)) = self.pending_loop_write.take() {
             let frame = self
                 .scopes
@@ -1161,8 +1275,13 @@ impl ExecutionContext {
         node: &FlowNode<N>,
         result: Option<GeneratedNodeResult>,
     ) -> Result<(), WorkflowRunError> {
-        self.outputs.publish_generated(node, result)?;
-        self.commit_pending_loop_write();
+        self.outputs
+            .publish_generated(node, result)
+            .inspect_err(|_| {
+                self.pending_loop_write = None;
+                self.pending_root_write = None;
+            })?;
+        self.commit_pending_writes();
         Ok(())
     }
 
@@ -1171,8 +1290,11 @@ impl ExecutionContext {
         node: &FlowNode<N>,
         result: Option<NodeResult>,
     ) -> Result<(), WorkflowRunError> {
-        self.outputs.publish(node, result)?;
-        self.commit_pending_loop_write();
+        self.outputs.publish(node, result).inspect_err(|_| {
+            self.pending_loop_write = None;
+            self.pending_root_write = None;
+        })?;
+        self.commit_pending_writes();
         Ok(())
     }
 }
@@ -1335,6 +1457,7 @@ pub fn execute_resolved_node_in_context<N>(
     let id = node.definition_id.as_str();
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
+    ctx.pending_root_write = None;
     let mut step = ctx.begin_step_observation(id);
     let _root_context = match &step {
         Some(StepObservation::Root(step)) => Some(step.enter()),

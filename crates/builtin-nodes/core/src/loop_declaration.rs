@@ -75,7 +75,7 @@ pub enum LoopBuildError {
     #[snafu(display("duplicate Loop body output `{variable}`"))]
     DuplicateBodyOutput { variable: String },
     #[snafu(display(
-        "Loop body output `{variable}` cannot update a variable written by loop_assign"
+        "Loop body output `{variable}` cannot update a variable written by an immediate assignment"
     ))]
     ConflictingBodyOutput { variable: String },
     #[snafu(display("Loop body output `{variable}` of type {actual} cannot update {expected}"))]

@@ -514,7 +514,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let value = json!({
             "version": "2026-10-28", "dependencies": {}, "nodes": [{
-                "id": "repeat", "kind": "workflow.loop", "config": {
+                "id": "repeat", "kind": "loop.run", "config": {
                     "max_iterations": 1, "variables": [],
                     "body": {"path": "not-included.flow"}
                 }

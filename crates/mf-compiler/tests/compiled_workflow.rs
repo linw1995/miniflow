@@ -408,7 +408,7 @@ fn resolved_handoffs_and_saved_graphs_validate_actual_binding_owners_and_keys() 
 }
 
 #[test]
-fn authoring_rejects_noncanonical_loop_sources_before_lowering() {
+fn authoring_rejects_explicit_loop_sources_before_lowering() {
     for (id, kind, config) in [
         ("source", "%loop", json!({})),
         ("%loop", "example.constant", json!({"value": 41})),
@@ -424,11 +424,7 @@ fn authoring_rejects_noncanonical_loop_sources_before_lowering() {
         authored.nodes[0].kind = kind.into();
         authored.nodes[0].config = config;
         let expected_path = json!([id]).to_string();
-        let expected = if kind == "%loop" {
-            "reserved scope source requires its canonical enclosing scope"
-        } else {
-            "reserved scope source must use its canonical declaration"
-        };
+        let expected = "scope sources are implicit; reference them without declaring a node";
         let error = mf_compiler::plan_resolved_definition(
             &authored,
             &NodeRegistry::from_inventory().unwrap(),

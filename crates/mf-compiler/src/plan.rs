@@ -200,6 +200,12 @@ impl CompiledWorkflow {
         nodes
             .iter()
             .enumerate()
+            .filter(|(_, node)| {
+                self.graph
+                    .relations
+                    .instruction(&node.definition_id)
+                    .is_none()
+            })
             .map(|(index, node)| {
                 let id = node.definition_id.to_string();
                 ensure!(
@@ -840,6 +846,33 @@ fn generate_scope(
             continue;
         }
         let constructor = match graph.relations.instruction(id) {
+            Some(mf_runtime::ScopeInstruction::RootInput) => {
+                let root = graph
+                    .relations
+                    .root
+                    .as_ref()
+                    .expect("validated root source");
+                let types = LitStr::new(
+                    &serde_json::to_string(&root.values).context(SerializeSnafu)?,
+                    Span::call_site(),
+                );
+                quote! {{
+                    let types = serde_json::from_str(#types).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu { definition_id: mf_runtime::DefinitionId::from(#id_lit) })?;
+                    mf_runtime::prepared_root_source(#id_lit, &types)
+                }}
+            }
+            Some(mf_runtime::ScopeInstruction::RootWrite(target)) => {
+                let root = graph.relations.root.as_ref().expect("validated root write");
+                let target_lit = LitStr::new(target, Span::call_site());
+                let value_type = LitStr::new(
+                    &serde_json::to_string(&root.values[target]).context(SerializeSnafu)?,
+                    Span::call_site(),
+                );
+                quote! {{
+                    let value_type = serde_json::from_str(#value_type).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu { definition_id: mf_runtime::DefinitionId::from(#id_lit) })?;
+                    mf_runtime::prepared_root_assign(#id_lit, #target_lit, value_type)
+                }}
+            }
             Some(mf_runtime::ScopeInstruction::Write(target)) => {
                 let value_type = graph
                     .relations
@@ -915,8 +948,14 @@ fn generate_scope(
         let plan_ident = format_ident!("FLOW_PLAN_{}", scope.to_uppercase());
         let bind_inputs = (scope == "root" || matches!(build, ScopeBuild::Call))
             && definition.version.supports_startup_inputs();
-        let initial = initial_nodes(definition, order);
-        let flow_binding = if bind_inputs {
+        let mut initial = initial_nodes(definition, order);
+        if let Some(root) = &graph.relations.root
+            && let Some(position) = order.iter().position(|id| id == &root.input)
+        {
+            // The synthetic root source is never a startup input.
+            initial[position] = false;
+        }
+        let flow_binding = if bind_inputs || graph.relations.root.is_some() {
             quote! { let mut #flow_ident = mf_runtime::Flow::from_plan(
                 vec![#(mf_compiler::into_task(#nodes)?),*], #plan_ident.clone(), Default::default(),
             ); }
@@ -926,6 +965,16 @@ fn generate_scope(
             ); }
         };
         preparations.push(flow_binding);
+        if let Some(root) = &graph.relations.root {
+            let root_json = LitStr::new(
+                &serde_json::to_string(root).context(SerializeSnafu)?,
+                Span::call_site(),
+            );
+            preparations.push(quote! {
+                #flow_ident = #flow_ident.with_root_scope(Some(serde_json::from_str(#root_json)
+                    .context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu { definition_id: mf_runtime::DefinitionId::from("<workflow>") })?));
+            });
+        }
         if bind_inputs {
             preparations
                 .push(quote! { #flow_ident = mf_compiler::bind_workflow_inputs(#flow_ident, &[#(#initial),*])?; });
@@ -1199,7 +1248,8 @@ impl CompiledWorkflow {
         )
         .and_then(|flow| flow.with_control_edges(self.graph.definition.control_edges.clone()))
         .and_then(|flow| flow.with_order_edges(self.graph.definition.order_edges.clone()))
-        .map_err(crate::WorkflowBuildError::from)?;
+        .map_err(crate::WorkflowBuildError::from)?
+        .with_root_scope(self.graph.relations.root.clone());
         let flow = if self.graph.definition.version.supports_startup_inputs() {
             flow.with_workflow_inputs()
                 .map_err(crate::WorkflowBuildError::from)?
@@ -2153,11 +2203,12 @@ mod tests {
                 execution: None,
                 dependencies: BTreeMap::new(),
                 flows: BTreeMap::new(),
+                variables: Vec::new(),
                 nodes: [
                     ("custom-input", "custom.source"),
                     ("custom-write", "custom.write"),
                     ("custom-exit", "custom.exit"),
-                    ("ordinary", crate::LOOP_ASSIGN_KIND),
+                    ("ordinary", crate::ASSIGN_KIND),
                 ]
                 .into_iter()
                 .map(|(id, kind)| crate::NodeDefinition {

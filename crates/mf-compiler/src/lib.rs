@@ -73,19 +73,19 @@ pub use embedding::{EmbedRequest, EmbeddingError, embed_workflows};
 #[cfg(feature = "codegen")]
 pub use inputs::{BuildInputs, InputError};
 pub use mf_runtime::{
-    CALL_KIND, CallConfig, ContextReference, ContextValue, ControlEdgeDefinition, DefinitionId,
-    DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, ExecutionContext,
-    Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowSource, InputBindingDefinition,
-    Inputs, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopComparisonOperator,
+    ASSIGN_KIND, CALL_KIND, CallConfig, ContextReference, ContextValue, ControlEdgeDefinition,
+    DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError,
+    ExecutionContext, Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowSource,
+    InputBindingDefinition, Inputs, LOOP_KIND, LOOP_SOURCE_ID, LoopComparisonOperator,
     LoopConditionDefinition, LoopDefinition, LoopVariableDefinition, MAX_CALL_DEPTH,
     MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeBuildError, NodeDefinition,
     NodeDependency, NodeExecutionError, NodeFactory, NodeId, NodeMetadata, NodePorts,
     NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult, OrderEdgeDefinition,
     OutputDerivation, OutputDerivationError, OutputReferenceDefinition, Outputs, PortSpec,
-    PreparedNode, RunObservation, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch,
-    ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
-    WorkflowOutputDefinition, WorkflowRunError, deserialize_config, execute_node_in_context,
-    output_id, select_context_output, validate_exclusive_inputs,
+    PreparedNode, ROOT_SOURCE_ID, RunObservation, TaskNode, TypeCompatibility, TypeDepthError,
+    TypeMismatch, ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
+    WorkflowOutputDefinition, WorkflowRunError, WorkflowVariablesError, deserialize_config,
+    execute_node_in_context, output_id, select_context_output, validate_exclusive_inputs,
 };
 pub use mf_runtime::{IterationErrorPolicy, IterationMode};
 pub use mf_runtime::{NodeExecution, PreparedStream, StreamExecution, StreamLimits};
