@@ -1,7 +1,7 @@
 use mf_runtime::{
-    ContextValue, ExecutionContext, FlowBindings, FlowInvocationBinding, Inputs, NodeBuildError,
-    NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
-    NodeResult, Outputs, PortSpec, PreparedNode, PreparedSubgraph, TaskNode, ValueRef, ValueType,
+    ContextValue, ExecutionContext, FlowBindings, Inputs, NodeBuildError, NodeExecutionError,
+    NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, Outputs,
+    PortSpec, PreparedNode, PreparedSubgraph, TaskNode, ValueRef, ValueType,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -221,12 +221,7 @@ fn bindings(config: &Value) -> FlowBindings {
     if serde_json::from_value::<Config>(config.clone())
         .is_ok_and(|config| validate_routes(&config.routes).is_ok())
     {
-        FlowBindings {
-            invocation: Some(FlowInvocationBinding {
-                input: "flows".into(),
-            }),
-            ..Default::default()
-        }
+        FlowBindings::invoker("flows")
     } else {
         FlowBindings::default()
     }
@@ -373,6 +368,20 @@ mod tests {
         }
         assert!(factory(json!({"routes":[]})).is_ok());
     }
+    #[test]
+    fn cancellation_prevents_selection_before_any_child_is_invoked() {
+        let node = mf_runtime::FlowNode::new("choose", router(None))
+            .into_task()
+            .unwrap();
+        let mut context = ExecutionContext::default();
+        context
+            .cancellation()
+            .cancel(mf_runtime::StreamError::InputFailure {
+                message: "cancelled".into(),
+            });
+        assert!(node.node.execute(Inputs::new(), &mut context).is_err());
+    }
+
     #[test]
     fn configuration_is_strict_and_children_must_match_routes() {
         for config in [

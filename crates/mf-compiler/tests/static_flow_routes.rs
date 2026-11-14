@@ -632,6 +632,54 @@ fn assign_replaces_enables_without_changing_routes_or_leaking_between_invocation
     );
 }
 #[test]
+fn node_state_sources_cannot_be_authored_shadowed_or_given_extra_write_fields() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for (node, expected) in [
+        (
+            json!({"id":"manual_source","kind":"builtin.router_state","config":{"routes":[]}}),
+            "instructions are implicit",
+        ),
+        (
+            json!({"id":"%execute","kind":"builtin.constant","config":{"value":[]}}),
+            "sources are implicit",
+        ),
+    ] {
+        let mut value = serde_json::to_value(state_flow("%execute.enables")).unwrap();
+        value["nodes"].as_array_mut().unwrap().push(node);
+        let source = WorkflowDefinition::from_json(&value.to_string()).unwrap();
+        let error = compile_definition(&source, &registry).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    let mut source = state_flow("%execute.enables");
+    source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "write")
+        .unwrap()
+        .config["extra"] = json!(true);
+    let error = compile_definition(&source, &registry).unwrap_err();
+    assert!(
+        error.to_string().contains("only accepts variable"),
+        "{error}"
+    );
+}
+
+#[test]
+fn node_state_writes_require_output_prerequisites_not_node_success() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut source = state_flow("%execute.enables");
+    source
+        .control_edges
+        .retain(|edge| edge.to_node.as_str() != "execute");
+    source.order_edges.push(mf_runtime::OrderEdgeDefinition {
+        from_node: "write".into(),
+        to_node: "execute".into(),
+    });
+    let error = compile_definition(&source, &registry).unwrap_err();
+    assert!(error.to_string().contains("node-success"), "{error}");
+}
+
+#[test]
 fn readonly_unknown_duplicate_and_invalid_node_state_writes_are_rejected() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for target in [
