@@ -3343,6 +3343,25 @@ mod rendering_tests {
                 .is_none(),
             "the producer must not keep its original body after projection"
         );
+
+        let missing = InvokedBodies::from([(
+            vec!["execute".into()],
+            BTreeSet::from([vec!["missing".into()]]),
+        )]);
+        let layout = GraphLayout::with_expanded_bodies_and_invocations(
+            &description,
+            ConnectionView::Execution,
+            &expanded,
+            &BTreeMap::new(),
+            &missing,
+        )
+        .unwrap();
+        assert!(
+            layout
+                .display_index_for_scoped_node(&target, "calculate")
+                .is_some(),
+            "unknown invocation origins leave the producer body in place"
+        );
     }
 
     #[test]

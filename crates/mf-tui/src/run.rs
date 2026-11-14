@@ -6834,5 +6834,45 @@ mod tests {
         let source = view.root.sources(display)[0];
         let observed = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
         assert_eq!(observed[source].status, NodeStatus::Running);
+
+        // Unknown origins are ignored without dropping the valid projection.
+        let mut invalid = snapshot.clone();
+        invalid.loop_passes.push(LoopPassObservation {
+            path: vec![ScopePathEntry::Flow {
+                call_id: "execute".into(),
+                definition: FlowOrigin {
+                    workflow_id: description.workflow_id.clone(),
+                    path: vec!["missing".into()],
+                },
+            }],
+            nodes: Vec::new(),
+            started: true,
+            outcome: None,
+            interrupted: false,
+            stream_invocation: None,
+            compact_statuses: Vec::new(),
+        });
+        view.refresh_invocations(&invalid).unwrap();
+        assert!(
+            view.root
+                .display_index_for_scoped_node(&target, "calculate")
+                .is_some()
+        );
+
+        // The selected projected node may disappear when its producer body and
+        // invocation are no longer visible; selection stays inside the layout.
+        view.state.selected = display;
+        view.state.sync_scope(&view.root);
+        view.expanded.remove(&target);
+        let empty = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        view.refresh_invocations(&empty).unwrap();
+        assert!(view.state.selected < view.root.nodes().len());
+
+        // An out-of-range selection has no anchor and is clamped after refresh.
+        view.state.selected = usize::MAX;
+        view.refresh_invocations(&snapshot).unwrap();
+        assert!(view.state.selected < view.root.nodes().len());
     }
 }
