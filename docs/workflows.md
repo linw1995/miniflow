@@ -353,14 +353,12 @@ ordinary input-call arguments are conservatively secret at the invocation bounda
 cannot expose a selected callee's private input before its handle is decoded. Secret callable selection
 also propagates to terminal and incremental values.
 Invocation creates isolated input/value state while sharing the caller's step budget, cancellation, and
-worker limits. Observation distinguishes the
-invocation node from the producer's actual definition origin; no fictitious child is created beneath
-the invoker in the compiled graph or description. After an invocation is observed, the TUI may display
-that body beneath the actual call site as a runtime projection; this changes presentation only and
-retains the producer as the definition owner. Observed calls currently require a target origin in the
-running workflow's frozen description; an unmapped native callback or a handle from a different
-artifact fails explicitly rather than reporting fictitious child events. Native callbacks remain usable
-without graph observation.
+worker limits. Native dynamic Call observation distinguishes the invocation node from the producer's
+actual definition origin. Observed dynamic calls require a target origin in the running workflow's
+frozen description; an unmapped native callback or a handle from a different artifact fails explicitly
+rather than reporting fictitious child events. Native callbacks remain usable without graph observation.
+Compiled Router invocations instead use the static candidate children described below; their execution
+and observation follow the same child-scope protocol as a configured Call.
 See the [complete three-file example](../examples/embedded-workflows) and
 [embedding](embedding.md#repository-example).
 
@@ -536,9 +534,32 @@ The optional `flow_field` generalizes executable selection to `Map(Object)`: for
 `{"mode":"execute","flow_field":"flow"}` selects the object named by `route` and invokes the Flow in its
 `flow` field. This is a generic object-record selection mechanism, not an Agent-specific decoder; other
 record shapes can choose their own Flow field name. The input contract remains fixed regardless of the
-number of callables. Router invokes the selected handle through `FlowValue::invoke`, returning a `result`
-envelope containing `outputs` or a recoverable business `error`. An empty callable map is valid; unknown
-executable routes fail without invoking another body. Arguments are conservatively private, selected
+number of callables. The caller still declares its tool superset with ordinary Flow constants and native
+object construction, and passes it through `params.tools`; neither a separate route declaration nor a
+caller-specific Agent source is required. During source resolution, the compiler follows those capabilities
+through data edges, Call parameters, and shared Loop/Iteration inputs and freezes every candidate into
+`CompiledGraph.children` beneath the Router. Description and TUI therefore expose all candidate bodies
+before execution, just as they expose configured Call bodies.
+
+The runtime map may remove and re-enable declared tools without changing this graph. Selection must
+match both the declared route and its original Flow definition; a new name, substituted capability,
+or foreign/anonymous Flow cannot expand the compiled superset. A compiled Router with no discoverable
+candidates has an empty superset. Direct native factory users may still execute unbound handles without
+compiling an authored graph. Candidate discovery is independent of port type inference: runtime argument
+and selected-body validation still apply.
+
+Providers can declare capability provenance with `NodeFactory::WithFlowBindings`, wrapping their existing
+factory. `FlowBindingSource` describes child exports, forwarded inputs, qualified workflow parameters,
+and native object fields; `FlowInvocationBinding` declares the receiving collection and optional record
+field. These callbacks inspect metadata only and never run node work. Opaque transformations retain a
+conservative superset of incoming capabilities; they cannot introduce undeclared executable targets.
+Compiler-produced candidate metadata and child bodies are persisted together, so replay and generated
+runners do not rediscover tools or depend on live telemetry. Execution still invokes the selected original
+handle at the frozen child binding, preserving native identity and shared preparation across call sites;
+a description child does not replace the capability's executor.
+
+Router returns a `result` envelope containing `outputs` or a recoverable business `error`. An empty callable
+map is valid; unknown executable routes fail without invoking another body. Arguments are conservatively private, selected
 route/handle privacy propagates to results, and business-error envelopes are private. Cancellation,
 observation/contract, resource and output failures propagate rather than becoming business results.
 Recovery is deliberately fail-closed: explicit ordinary node execution failures, including known Call

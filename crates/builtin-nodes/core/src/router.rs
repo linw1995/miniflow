@@ -3,6 +3,7 @@ use mf_runtime::{
     NodePortContract, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode,
     TaskNode, ValueRef, ValueType, WorkflowArguments, WorkflowRunError,
 };
+use mf_runtime::{FlowBindings, FlowCandidate, FlowInvocationBinding};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
@@ -92,8 +93,15 @@ impl TaskNode for Router {
     }
 }
 
+struct CompiledRoute {
+    candidate: FlowCandidate,
+    binding: String,
+    flow: mf_runtime::FlowValue,
+}
+
 struct ExecuteRouter {
     flow_field: Option<String>,
+    candidates: Option<Vec<CompiledRoute>>,
 }
 
 impl NodePortContract for ExecuteRouter {
@@ -120,6 +128,8 @@ pub enum RouterExecutionError {
     UnknownRoute { node: String, route: String },
     #[snafu(display("Router `{node}` route `{route}` is not a native Flow value"))]
     InvalidFlow { node: String, route: String },
+    #[snafu(display("Router `{node}` route `{route}` is outside its compiled Flow superset"))]
+    UndeclaredFlow { node: String, route: String },
     #[snafu(display("Router `{node}` Flow `{route}`: {source}"))]
     Child {
         node: String,
@@ -205,6 +215,27 @@ impl TaskNode for ExecuteRouter {
             node: &id,
             route: display_route,
         })?;
+        let compiled = self
+            .candidates
+            .as_ref()
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .find(|compiled| {
+                        compiled.candidate.route == route
+                            && mf_runtime::validate_flow_candidate_source(
+                                flow,
+                                &compiled.candidate,
+                                compiled.flow.body(),
+                            )
+                    })
+                    .context(UndeclaredFlowSnafu {
+                        node: &id,
+                        route: display_route,
+                    })
+                    .map_err(NodeExecutionError::from)
+            })
+            .transpose()?;
         let arguments = inputs["arguments"]
             .as_object()
             .expect("validated arguments object")
@@ -213,12 +244,19 @@ impl TaskNode for ExecuteRouter {
             .collect();
         // invoke owns validation, origin, isolation and the invocation lifecycle.
         // Router deliberately drains emissions and exposes only terminal outputs.
-        let result = flow
-            .invoke(&id, WorkflowArguments(arguments), context)
-            .context(ChildSnafu {
-                node: &id,
-                route: display_route,
-            });
+        let result = match compiled {
+            Some(compiled) => flow.invoke_bound(
+                &id,
+                &compiled.binding,
+                WorkflowArguments(arguments),
+                context,
+            ),
+            None => flow.invoke(&id, WorkflowArguments(arguments), context),
+        }
+        .context(ChildSnafu {
+            node: &id,
+            route: display_route,
+        });
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
@@ -260,13 +298,48 @@ fn validate_routes(routes: &[String]) -> Result<(), RouterBuildError> {
 }
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
+    prepared_factory(KIND, config, BTreeMap::new())
+}
+
+fn prepared_factory(
+    _: &str,
+    mut config: Value,
+    mut bodies: BTreeMap<String, mf_runtime::PreparedSubgraph>,
+) -> Result<PreparedNode, NodeBuildError> {
+    let candidates = mf_runtime::take_flow_candidates(&mut config)?;
+    let candidates = candidates
+        .map(|candidates| {
+            candidates
+                .into_iter()
+                .map(|(binding, candidate)| {
+                    let body =
+                        bodies
+                            .remove(&binding)
+                            .context(mf_runtime::NodeInvalidSubgraphSnafu {
+                                message: format!("missing frozen router body `{binding}`"),
+                            })?;
+                    Ok(CompiledRoute {
+                        candidate,
+                        binding,
+                        flow: mf_runtime::FlowValue::new(body)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, NodeBuildError>>()
+        })
+        .transpose()?;
+    ensure!(
+        bodies.is_empty(),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "unexpected frozen router bodies",
+        }
+    );
     let Config {
         routes,
         mode,
         flow_field,
     } = mf_runtime::deserialize_config(config)?;
     match (routes, mode, flow_field) {
-        (Some(routes), None, None) => {
+        (Some(routes), None, None) if candidates.is_none() => {
             ensure!(!routes.is_empty(), EmptySnafu);
             validate_routes(&routes)?;
             let node = Router { routes };
@@ -286,7 +359,10 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
                 ensure!(!field.trim().is_empty(), FlowFieldSnafu);
             }
             PreparedNode::new(
-                ExecuteRouter { flow_field },
+                ExecuteRouter {
+                    flow_field,
+                    candidates,
+                },
                 NodeMetadata {
                     // Dynamic callees' privacy contracts are not known when snapshots
                     // are taken; match workflow.call's conservative argument policy.
@@ -308,7 +384,27 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
 inventory::submit! {
     NodeRegistration {
         kind: KIND,
-        factory: NodeFactory::Plain(factory),
+        factory: NodeFactory::WithFlowBindings {
+            factory: &NodeFactory::Subgraph {
+                scope: None,
+                flow_parameters: |config| {
+                    if config.get("mode").and_then(Value::as_str) == Some("execute") {
+                        mf_runtime::flow_candidate_parameters(config)
+                    } else {
+                        BTreeMap::new()
+                    }
+                },
+                plain: factory,
+                prepared: prepared_factory,
+            },
+            bindings: |config| FlowBindings {
+                invocation: (config.get("mode").and_then(Value::as_str) == Some("execute")).then(|| FlowInvocationBinding {
+                    input: "flows".into(),
+                    field: config.get("flow_field").and_then(Value::as_str).map(str::to_owned),
+                }),
+                ..Default::default()
+            },
+        },
     }
 }
 
@@ -483,7 +579,10 @@ mod tests {
         }
         let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
         let registration = registry.get(KIND).unwrap();
-        assert!(matches!(registration.factory, NodeFactory::Plain(_)));
+        assert!(matches!(
+            registration.factory.base(),
+            NodeFactory::Subgraph { scope: None, .. }
+        ));
         assert!(
             registration
                 .flow_parameters(&json!({"mode": "execute"}))

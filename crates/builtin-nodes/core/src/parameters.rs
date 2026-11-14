@@ -1,7 +1,7 @@
 use mf_runtime::{
-    ExecutionContext, InputBinding, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
-    NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, PortSpec,
-    PreparedNode, TaskNode, ValueType, deserialize_config,
+    ExecutionContext, FlowBindingSource, FlowBindings, InputBinding, Inputs, NodeBuildError,
+    NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
+    NodeResult, PortSpec, PreparedNode, TaskNode, ValueType, deserialize_config,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -120,5 +120,16 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
 }
 
 inventory::submit! {
-    NodeRegistration { kind: KIND, factory: NodeFactory::Plain(factory) }
+    NodeRegistration {
+        kind: KIND,
+        factory: NodeFactory::WithFlowBindings {
+            factory: &NodeFactory::Plain(factory),
+            bindings: |config| FlowBindings {
+                outputs: config.get("parameters").and_then(Value::as_object).into_iter().flatten()
+                    .map(|(name, _)| (name.clone(), FlowBindingSource::Input(name.clone())))
+                    .collect(),
+                ..Default::default()
+            },
+        },
+    }
 }

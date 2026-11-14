@@ -148,6 +148,7 @@ impl FlowSourceBundle {
             embedded_sources: Some(sources),
             extractors: registry.flow_extractors(),
             subgraphs: registry.subgraph_scopes(),
+            bindings: registry.flow_bindings(),
             ..Default::default()
         };
         let subgraphs = resolver.subgraphs.clone();
@@ -157,7 +158,7 @@ impl FlowSourceBundle {
             0,
             ScopeContext::default().with_subgraphs(subgraphs),
         )?;
-        Ok(resolver.finish_resolution(definition))
+        resolver.finish_resolution(definition)
     }
 }
 
@@ -279,6 +280,7 @@ struct Resolver {
     unlinked: bool,
     extractors: BTreeMap<String, FlowExtractor>,
     subgraphs: BTreeMap<String, mf_runtime::SubgraphScope>,
+    bindings: crate::flow_bindings::BindingExtractors,
     pending_scopes: Vec<BTreeSet<String>>,
     builtin_catalog: BTreeMap<String, WorkflowDefinition>,
     selected_packages: BTreeSet<String>,
@@ -300,6 +302,7 @@ pub fn load_workflow_with_registry(
     let mut resolver = Resolver {
         extractors: registry.flow_extractors(),
         subgraphs: registry.subgraph_scopes(),
+        bindings: registry.flow_bindings(),
         ..Default::default()
     };
     let subgraphs = resolver.subgraphs.clone();
@@ -309,7 +312,7 @@ pub fn load_workflow_with_registry(
         0,
         ScopeContext::default().with_subgraphs(subgraphs),
     )?;
-    Ok(resolver.finish_resolution(definition))
+    resolver.finish_resolution(definition)
 }
 
 /// Loads Flow files while the embedding host retains authority over provider dependencies.
@@ -319,12 +322,13 @@ pub fn load_embedded_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResol
         host_dependencies: true,
         extractors: registry.flow_extractors(),
         subgraphs: registry.subgraph_scopes(),
+        bindings: registry.flow_bindings(),
         ..Default::default()
     };
     let subgraphs = resolver.subgraphs.clone();
     let context = ScopeContext::default().with_subgraphs(subgraphs);
     let definition = resolver.file(path, &BTreeMap::new(), 0, context)?;
-    Ok(resolver.into_resolved(definition))
+    resolver.into_resolved(definition)
 }
 
 pub fn resolve_flows(
@@ -342,6 +346,7 @@ pub fn resolve_flows_with_registry(
     let mut resolver = Resolver {
         extractors: registry.flow_extractors(),
         subgraphs: registry.subgraph_scopes(),
+        bindings: registry.flow_bindings(),
         ..Default::default()
     };
     let mut definition = definition.clone();
@@ -354,7 +359,7 @@ pub fn resolve_flows_with_registry(
         "workflow",
         ScopeContext::default().with_subgraphs(subgraphs),
     )?;
-    Ok(resolver.finish_resolution(scope))
+    resolver.finish_resolution(scope)
 }
 
 /// Resolve everything whose linked metadata is available, without executing factories.
@@ -454,6 +459,7 @@ impl FlowDiscovery {
         let mut resolver = Resolver {
             extractors: registry.flow_extractors(),
             subgraphs: registry.subgraph_scopes(),
+            bindings: registry.flow_bindings(),
             builtin_catalog,
             selected_packages,
             ..Default::default()
@@ -461,7 +467,7 @@ impl FlowDiscovery {
         let subgraphs = resolver.subgraphs.clone();
         let context = ScopeContext::default().with_subgraphs(subgraphs);
         let definition = resolver.file(path, &BTreeMap::new(), 0, context)?;
-        Ok(resolver.finish_resolution(definition))
+        resolver.finish_resolution(definition)
     }
 
     /// Replay authored sources with an application-owned static builtin catalog.
@@ -560,15 +566,17 @@ fn discover_file(
 }
 
 impl Resolver {
-    fn finish_resolution(self, mut scope: Scope) -> ResolvedWorkflow {
+    fn finish_resolution(self, mut scope: Scope) -> Result<ResolvedWorkflow, FlowResolutionError> {
         self.finish(&mut scope.definition);
         self.into_resolved(scope)
     }
 
-    fn into_resolved(self, mut scope: Scope) -> ResolvedWorkflow {
+    fn into_resolved(self, mut scope: Scope) -> Result<ResolvedWorkflow, FlowResolutionError> {
         debug_assert!(!self.discovery);
         scope.sources = self.sources;
-        scope.into_resolved()
+        let mut resolved = scope.into_resolved();
+        crate::flow_bindings::freeze(&mut resolved, &self.bindings).context(LoweringSnafu)?;
+        Ok(resolved)
     }
 
     fn finish_discovery(self, mut scope: Scope) -> FlowDiscovery {
@@ -1179,7 +1187,7 @@ mod tests {
             definition: &WorkflowDefinition,
         ) -> Result<crate::CompiledWorkflow, crate::WorkflowCompileError> {
             let scope = self.resolve(&mut definition.clone(), None)?;
-            crate::compiler::plan_resolved_workflow(&self.into_resolved(scope))
+            crate::compiler::plan_resolved_workflow(&self.into_resolved(scope)?)
         }
     }
 
@@ -2795,7 +2803,7 @@ mod tests {
                 .insert(mf_runtime::LOOP_KIND.into(), body_parameter);
             let result = resolver.resolve(&mut parent, None);
             if calls == 16 {
-                let resolved = resolver.into_resolved(result.unwrap());
+                let resolved = resolver.into_resolved(result.unwrap()).unwrap();
                 let plan = crate::compiler::plan_resolved_workflow(&resolved).unwrap();
                 let mut graph = &plan.graph;
                 for index in (0..calls).rev() {
@@ -2946,7 +2954,7 @@ mod tests {
                 BTreeMap::from([("body".into(), config["selected"].clone())])
             });
         let scope = resolver.resolve(&mut parent, None).unwrap();
-        let resolved = resolver.into_resolved(scope);
+        let resolved = resolver.into_resolved(scope).unwrap();
         assert_eq!(resolved.children[&"owner".into()]["body"].definition, child);
         assert_eq!(resolved.definition.nodes[0].config["body"], json!(child));
         assert_eq!(resolved.children.len(), 1);

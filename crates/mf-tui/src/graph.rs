@@ -150,37 +150,6 @@ struct TransferEvent {
     snapshot: Arc<mf_runtime::NodeSnapshot>,
 }
 
-/// Runtime Flow invocations projected at their actual call site.
-///
-/// Keys are static invoker node paths; values are definition body paths. The
-/// description still owns every body at its producer; this projection only
-/// selects which producer body should also be drawn beneath a dynamic invoker.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct InvokedBodies {
-    bodies: BTreeMap<Vec<String>, BTreeSet<Vec<String>>>,
-}
-
-impl InvokedBodies {
-    pub(crate) fn insert(&mut self, invoker: Vec<String>, target: Vec<String>) {
-        self.bodies.entry(invoker).or_default().insert(target);
-    }
-
-    fn targets_for(&self, invoker: &[String]) -> Option<&BTreeSet<Vec<String>>> {
-        self.bodies.get(invoker)
-    }
-
-    fn targets(&self) -> impl Iterator<Item = &Vec<String>> {
-        self.bodies.values().flatten()
-    }
-}
-
-#[derive(Clone, Copy)]
-struct InvocationScope<'a> {
-    invoked: &'a InvokedBodies,
-    targets: &'a BTreeSet<Vec<String>>,
-    projected: bool,
-}
-
 pub struct GraphLayout {
     streaming: bool,
     view: ConnectionView,
@@ -194,8 +163,6 @@ pub struct GraphLayout {
     node_annotations: Vec<Vec<String>>,
     all_nodes: Vec<NodeDescription>,
     source_paths: Vec<Vec<String>>,
-    /// Definition paths rendered as runtime projections rather than producer bodies.
-    projected_paths: BTreeSet<Vec<String>>,
     cluster_keys: Vec<(Vec<String>, usize)>,
     expanded_nodes: BTreeSet<usize>,
     body_nodes: BTreeSet<usize>,
@@ -1040,7 +1007,6 @@ impl GraphLayout {
             node_annotations,
             all_nodes: description.nodes.clone(),
             source_paths: vec![Vec::new(); description.nodes.len()],
-            projected_paths: BTreeSet::new(),
             cluster_keys: (0..description.clusters.len())
                 .map(|index| (Vec::new(), index))
                 .collect(),
@@ -1060,47 +1026,17 @@ impl GraphLayout {
         expanded: &BTreeSet<Vec<String>>,
         collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
     ) -> Result<Self, GraphError> {
-        Self::with_expanded_bodies_and_invocations(
-            description,
-            view,
-            expanded,
-            collapsed,
-            &InvokedBodies::default(),
-        )
-    }
-
-    pub(crate) fn with_expanded_bodies_and_invocations(
-        description: &WorkflowDescription,
-        view: ConnectionView,
-        expanded: &BTreeSet<Vec<String>>,
-        collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
-        invoked: &InvokedBodies,
-    ) -> Result<Self, GraphError> {
         description.validate().context(DescriptionSnafu)?;
-        let invoked_targets: BTreeSet<Vec<String>> = invoked.targets().cloned().collect();
         let mut remaining = MAX_SESSION_NODES;
-        Self::inline_scope_with_invocations(
-            description,
-            &[],
-            view,
-            expanded,
-            collapsed,
-            InvocationScope {
-                invoked,
-                targets: &invoked_targets,
-                projected: false,
-            },
-            &mut remaining,
-        )
+        Self::inline_scope(description, &[], view, expanded, collapsed, &mut remaining)
     }
 
-    fn inline_scope_with_invocations(
+    fn inline_scope(
         description: &WorkflowDescription,
         path: &[String],
         view: ConnectionView,
         expanded: &BTreeSet<Vec<String>>,
         collapsed: &BTreeMap<Vec<String>, BTreeSet<usize>>,
-        invocation: InvocationScope<'_>,
         remaining: &mut usize,
     ) -> Result<Self, GraphError> {
         let body;
@@ -1126,22 +1062,18 @@ impl GraphLayout {
             .flat_map(|(_, cluster)| cluster.nodes.iter().map(String::as_str))
             .collect();
         let mut children: BTreeMap<String, Self> = BTreeMap::new();
-        let mut invoked_nodes = BTreeSet::new();
         for node in &scope.nodes {
             if hidden.contains(node.id.as_str()) {
                 continue;
             }
             for child_path in description.body_paths_for_node(path, &node.id) {
-                // A dynamically invoked body is drawn once, beneath the actual
-                // invoker. Keep the producer body folded to avoid duplicate nodes.
-                if expanded.contains(child_path) && !invocation.targets.contains(child_path) {
-                    let child = Self::inline_scope_with_invocations(
+                if expanded.contains(child_path) {
+                    let child = Self::inline_scope(
                         description,
                         child_path,
                         view,
                         expanded,
                         collapsed,
-                        invocation,
                         remaining,
                     )?;
                     if let Some(existing) = children.get_mut(&node.id) {
@@ -1149,33 +1081,6 @@ impl GraphLayout {
                     } else {
                         children.insert(node.id.clone(), child);
                     }
-                }
-            }
-            let mut invoker_path = path.to_vec();
-            invoker_path.push(node.id.clone());
-            if let Some(targets) = invocation.invoked.targets_for(&invoker_path) {
-                for target in targets {
-                    if description.body(target).is_none() {
-                        continue;
-                    }
-                    let child = Self::inline_scope_with_invocations(
-                        description,
-                        target,
-                        view,
-                        expanded,
-                        collapsed,
-                        InvocationScope {
-                            projected: true,
-                            ..invocation
-                        },
-                        remaining,
-                    )?;
-                    if let Some(existing) = children.get_mut(&node.id) {
-                        existing.stack_below(child);
-                    } else {
-                        children.insert(node.id.clone(), child);
-                    }
-                    invoked_nodes.insert(node.id.clone());
                 }
             }
         }
@@ -1187,17 +1092,13 @@ impl GraphLayout {
             &children,
         )?;
         layout.source_paths.fill(path.to_vec());
-        if invocation.projected {
-            layout.projected_paths.insert(path.to_vec());
-        }
         layout.body_nodes = layout
             .nodes
             .iter()
             .enumerate()
             .filter_map(|(index, node)| {
                 (node.kind != CLUSTER_KIND
-                    && (!description.body_paths_for_node(path, &node.id).is_empty()
-                        || invoked_nodes.contains(&node.id)))
+                    && !description.body_paths_for_node(path, &node.id).is_empty())
                 .then_some(index)
             })
             .collect();
@@ -1291,7 +1192,6 @@ impl GraphLayout {
         self.node_annotations.extend(child.node_annotations);
         self.all_nodes.extend(child.all_nodes);
         self.source_paths.extend(child.source_paths);
-        self.projected_paths.extend(child.projected_paths);
         self.cluster_keys.extend(child.cluster_keys);
         self.clusters.extend(child.clusters);
         self.edges.extend(child.edges);
@@ -1309,10 +1209,6 @@ impl GraphLayout {
 
     pub fn source_path(&self, source: usize) -> &[String] {
         self.source_paths.get(source).map_or(&[], Vec::as_slice)
-    }
-
-    pub(crate) fn is_projected_path(&self, path: &[String]) -> bool {
-        self.projected_paths.contains(path)
     }
 
     pub fn node_path(&self, display: usize) -> &[String] {
@@ -3216,7 +3112,6 @@ mod rendering_tests {
             node_clusters: vec![None, None],
             node_annotations: vec![Vec::new(), Vec::new()],
             source_paths: vec![Vec::new(); nodes.len()],
-            projected_paths: BTreeSet::new(),
             cluster_keys: Vec::new(),
             expanded_nodes: BTreeSet::new(),
             body_nodes: BTreeSet::new(),
@@ -3304,84 +3199,6 @@ mod rendering_tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn runtime_invocations_project_a_producer_body_beneath_the_invoker() {
-        use mf_telemetry::event::ScopePathEntry;
-        use serde_json::json;
-
-        let target = vec![ScopePathEntry::binding_key("producer", "value")];
-        let description: mf_telemetry::description::WorkflowDescription =
-            serde_json::from_value(json!({
-                "version":"2026-11-09",
-                "workflow_id":format!("sha256:{}", "a".repeat(64)),
-                "execution":{"mode":"single"},
-                "nodes":[
-                    {"id":"producer", "kind":"builtin.constant"},
-                    {"id":"execute", "kind":"builtin.router"}
-                ],
-                "execution_order":["producer", "execute"],
-                "data_edges":[], "control_edges":[],
-                "loop_bodies":[{
-                    "path":target,
-                    "nodes":[{"id":"calculate", "kind":"builtin.code"}],
-                    "execution_order":["calculate"], "data_edges":[], "control_edges":[]
-                }]
-            }))
-            .unwrap();
-        let expanded = BTreeSet::from([target.clone()]);
-        let mut invoked = InvokedBodies::default();
-        invoked.insert(vec!["execute".into()], target.clone());
-        let layout = GraphLayout::with_expanded_bodies_and_invocations(
-            &description,
-            ConnectionView::Execution,
-            &expanded,
-            &BTreeMap::new(),
-            &invoked,
-        )
-        .unwrap();
-        let calculate = layout
-            .display_index_for_scoped_node(&target, "calculate")
-            .expect("the invoked body is projected");
-        let invoker = layout
-            .display_index_for_scoped_node(&[], "execute")
-            .expect("the invoker remains visible");
-        assert_eq!(layout.sources(calculate).len(), 1);
-        assert!(layout.is_expanded_body(invoker));
-        assert_eq!(
-            layout
-                .nodes()
-                .iter()
-                .filter(|node| node.id == "calculate")
-                .count(),
-            1,
-            "the producer body must not be drawn twice"
-        );
-        assert!(layout.nodes()[calculate].rect.y > layout.nodes()[invoker].rect.y);
-        assert!(
-            layout
-                .display_index_for_scoped_node(&[], "calculate")
-                .is_none(),
-            "the producer must not keep its original body after projection"
-        );
-
-        let mut missing = InvokedBodies::default();
-        missing.insert(vec!["execute".into()], vec!["missing".into()]);
-        let layout = GraphLayout::with_expanded_bodies_and_invocations(
-            &description,
-            ConnectionView::Execution,
-            &expanded,
-            &BTreeMap::new(),
-            &missing,
-        )
-        .unwrap();
-        assert!(
-            layout
-                .display_index_for_scoped_node(&target, "calculate")
-                .is_some(),
-            "unknown invocation origins leave the producer body in place"
-        );
     }
 
     #[test]

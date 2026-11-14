@@ -1350,12 +1350,13 @@ pub fn plan_resolved_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let resolved = resolve_inline_scopes(
+    let mut resolved = resolve_inline_scopes(
         definition,
         registry,
         crate::lowering::ScopeContext::resolved().with_subgraphs(registry.subgraph_scopes()),
         0,
     )?;
+    crate::flow_bindings::freeze(&mut resolved, &registry.flow_bindings())?;
     plan_resolved_workflow(&resolved)
 }
 

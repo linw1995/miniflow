@@ -1,7 +1,8 @@
 use mf_runtime::{
-    FlowValue, NodeBuildError, NodeConfig, NodeExecutionError, NodeFactory, NodeMetadata,
-    NodeRegistration, NodeValue, OutputDerivation, PortSpec, PreparedNode, PreparedSubgraph,
-    TypedNodeResult, TypedTaskNode, ValueRef, ValueType, deserialize_config,
+    FlowBindingSource, FlowBindings, FlowValue, NodeBuildError, NodeConfig, NodeExecutionError,
+    NodeFactory, NodeMetadata, NodeRegistration, NodeValue, OutputDerivation, PortSpec,
+    PreparedNode, PreparedSubgraph, TypedNodeResult, TypedTaskNode, ValueRef, ValueType,
+    deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -155,11 +156,21 @@ fn flow_factory(
 inventory::submit! {
     NodeRegistration {
         kind: KIND,
-        factory: NodeFactory::Subgraph {
-            scope: None,
-            flow_parameters,
-            plain: constant_factory,
-            prepared: flow_factory,
+        factory: NodeFactory::WithFlowBindings {
+            factory: &NodeFactory::Subgraph {
+                scope: None,
+                flow_parameters,
+                plain: constant_factory,
+                prepared: flow_factory,
+            },
+            bindings: |config| FlowBindings {
+                outputs: if is_flow(config) {
+                    BTreeMap::from([("value".into(), FlowBindingSource::Child("value".into()))])
+                } else {
+                    BTreeMap::new()
+                },
+                ..Default::default()
+            },
         },
     }
 }

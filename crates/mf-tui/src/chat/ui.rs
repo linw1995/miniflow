@@ -799,10 +799,6 @@ impl ChatView {
             }
             self.mode = Mode::Input;
         }
-        if let Some(observation) = &self.observation {
-            let snapshot = observation.reader.snapshot_shared();
-            self.inspector.refresh_invocations(&snapshot)?;
-        }
         terminal.draw(|frame| self.render(frame)).context(IoSnafu {
             operation: "draw chat",
         })?;

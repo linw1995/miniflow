@@ -943,12 +943,17 @@ B child beneath A. The runtime path still contains the enclosing call/loop/item 
 definition cursor switches to B for subsequent node and nested scope validation. Validation checks
 the callsite, owning workflow identity, and target body before accepting the scope.
 
-The compiled description retains B's static definition at its producer; no child is fabricated
-beneath the consumer. Once an invocation is observed, the TUI projects that body beneath the actual
-invoker and stops drawing the producer copy for that target, so the graph still contains each
-definition once per display location. Repeated targets share one projection per invoker while Details
-retain individual invocation history. Snapshots replace callable payloads with `"<Flow>"`, or
-`"[REDACTED]"` when secret. Business JSON serialization does not use this placeholder: it rejects
-executable values.
-The metadata reference cannot manufacture or select an executable; execution uses the native handle
-that arrived through the edge.
+For native dynamic Calls, the compiled description retains B's definition at its producer. The metadata
+reference cannot manufacture or select an executable; execution uses the native handle that arrived
+through the edge.
+
+Compiled Routers have a statically frozen candidate superset instead. The compiler follows caller-owned
+Flow constants and native-map wiring, preserving their definitions as Router children before execution.
+`body_paths_for_node` exposes these children through the same description contract as configured Calls.
+The selected candidate uses an ordinary Call scope at that child binding, including item correlation and
+nested-body detail. The TUI needs no runtime invocation cache, graph reconstruction, or projection of a
+producer body beneath the consumer. Disabled or unused candidates remain visible as unexecuted bodies;
+adding/removing entries from the runtime map never adds/removes static graph definitions.
+
+Snapshots replace callable payloads with `"<Flow>"`, or `"[REDACTED]"` when secret. Business JSON
+serialization does not use this placeholder: it rejects executable values.

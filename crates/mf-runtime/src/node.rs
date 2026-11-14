@@ -1407,6 +1407,11 @@ pub enum SubgraphScope {
 #[derive(Clone, Copy, Debug)]
 pub enum NodeFactory {
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
+    /// Adds static capability provenance without changing construction or port types.
+    WithFlowBindings {
+        factory: &'static NodeFactory,
+        bindings: fn(&Value) -> crate::flow_bindings::FlowBindings,
+    },
     Subgraph {
         /// `None` when the Flow parameter is an ordinary value rather than a child frame.
         scope: Option<SubgraphScope>,
@@ -1430,26 +1435,42 @@ pub struct NodeRegistration {
     pub factory: NodeFactory,
 }
 
+impl NodeFactory {
+    pub fn base(&self) -> Self {
+        match self {
+            Self::WithFlowBindings { factory, .. } => factory.base(),
+            factory => *factory,
+        }
+    }
+
+    pub fn flow_bindings(&self, config: &Value) -> crate::flow_bindings::FlowBindings {
+        match self {
+            Self::WithFlowBindings { bindings, .. } => bindings(config),
+            _ => crate::flow_bindings::FlowBindings::default(),
+        }
+    }
+}
+
 impl NodeRegistration {
     /// Whether this factory can receive prepared Flow parameters.
     pub fn accepts_subgraphs(&self) -> bool {
-        matches!(self.factory, NodeFactory::Subgraph { .. })
+        matches!(self.factory.base(), NodeFactory::Subgraph { .. })
     }
 
     /// The child Flow frame this kind expects, if it receives Flow parameters.
     pub fn subgraph_scope(&self) -> Option<SubgraphScope> {
-        match self.factory {
+        match self.factory.base() {
             NodeFactory::Subgraph { scope, .. } => scope,
-            NodeFactory::Plain(_) => None,
+            _ => None,
         }
     }
 
     pub fn flow_parameters(&self, config: &Value) -> BTreeMap<String, Value> {
-        match self.factory {
+        match self.factory.base() {
             NodeFactory::Subgraph {
                 flow_parameters, ..
             } => flow_parameters(config),
-            NodeFactory::Plain(_) => BTreeMap::new(),
+            _ => BTreeMap::new(),
         }
     }
 
@@ -1489,7 +1510,7 @@ impl NodeRegistration {
         config: Value,
         arguments: BTreeMap<String, crate::PreparedSubgraph>,
     ) -> Result<PreparedNode, NodeBuildError> {
-        match self.factory {
+        match self.factory.base() {
             NodeFactory::Subgraph { prepared, .. } => {
                 // Prepared children are authoritative. The receiver selects binding
                 // names here, but decoding child definitions belongs to authoring.
@@ -1526,10 +1547,11 @@ impl NodeRegistration {
     }
 
     pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
-        match self.factory {
+        match self.factory.base() {
             NodeFactory::Plain(factory) | NodeFactory::Subgraph { plain: factory, .. } => {
                 factory(config)
             }
+            NodeFactory::WithFlowBindings { .. } => unreachable!("base factory is unwrapped"),
         }
     }
 }
