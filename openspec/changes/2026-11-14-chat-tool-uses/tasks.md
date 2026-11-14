@@ -10,7 +10,8 @@
 ## 2. Structured messages and source correlation
 
 - [x] 2.1 Add optional terminal messages and typed append/replay-safe message events to the chat contract/decoder.
-- [x] 2.2 Expose only current-invocation Agent messages, excluding historical/system inputs and the admitted prompt.
+- [x] 2.2 Reuse the single Agent `messages` log; derive current-invocation output/events from its immutable initial
+  boundary, excluding historical/system inputs and the admitted prompt without a parallel transcript accumulator.
 - [x] 2.3 Propagate explicit message/model/tool origin to standard dispatch observations without changing provider arguments.
 - [x] 2.4 Add a shared reducer for semantic calls and independent executions, including unlinked and contradictory facts.
 

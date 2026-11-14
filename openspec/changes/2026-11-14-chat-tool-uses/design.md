@@ -35,8 +35,10 @@ Add optional terminal `messages` and typed `message_events`/`tool_message_events
 existing chat Flows. Reuse `ChatMessage` roles/tool-call values rather than parsing text into calls.
 
 - `messages` contains this invocation's new messages. Existing system/history input and the already-admitted user
-  prompt are not returned as new messages. The builtin Agent adapts its internal full-context list at this boundary;
-  the host must not guess a prefix from equal message text.
+  prompt are not returned as new messages. The builtin Agent keeps `messages` as its sole evolving transcript,
+  including the final assistant reply. An immutable `initial_message_count` marks the system/history/prompt prefix;
+  event offsets and the terminal suffix derive from that same list. Do not maintain a parallel `public_messages`
+  accumulator or duplicate assistant/result append logic. The host must not guess a prefix from equal message text.
 - Message events have stable per-invocation sequence/message keys and carry structured message values. An explicit
   originating model-call ID is carried where available. Producer fragments are not committed as complete arguments.
 - Append/replay is idempotent. A final message list reconciles with the same sequence, rather than adding a second set

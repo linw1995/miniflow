@@ -235,8 +235,10 @@ or `save_recovered` saves the retained result without invoking either model agai
 The [calculator example](../examples/chat-calculator-flow.json) uses the provider-owned bounded Agent
 composition with a native Loop and parallel tool dispatch. Its calculator supports addition, subtraction,
 multiplication and division. It exports only the current invocation's new assistant/tool messages, excluding
-system/history inputs and the already-admitted user prompt. These complete messages are persisted and restored
-into the next turn's context. `llm.message_events` publishes explicit append batches before dispatch and after tool
+system/history inputs and the already-admitted user prompt. The single `messages` loop variable retains the full
+context and every new message, including the final reply; an immutable initial count selects the returned suffix and
+zero-based event offsets, without a second transcript accumulator. These complete new messages are persisted and
+restored into the next turn's context. `llm.message_events` publishes explicit append batches before dispatch and after tool
 results; `message_events` and `tool_message_events` preserve their respective native stream domains. Each model
 turn reports its usage, and `answer` streams assistant text, including preambles accompanying tool calls. Catalog projection runs once before
 the first model request, not once per tool round.

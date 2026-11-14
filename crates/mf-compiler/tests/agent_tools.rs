@@ -167,6 +167,52 @@ fn tool_reply(calls: Value, stream: bool) -> Reply {
     }
 }
 
+fn message_agent(tools: BTreeMap<String, FlowTool>, events: bool) -> WorkflowDefinition {
+    let mut definition = configured_agent(tools);
+    definition.outputs.push(
+        serde_json::from_value(json!({"name":"messages", "node":"agent", "port":"messages"}))
+            .unwrap(),
+    );
+    if events {
+        for name in ["message_events", "tool_message_events"] {
+            definition.outputs.push(
+                serde_json::from_value(
+                    json!({"name":name, "node":"agent", "port":name, "optional":true}),
+                )
+                .unwrap(),
+            );
+        }
+    }
+    definition
+}
+
+fn assert_message_batches(outputs: &[Value], expected: &Value) {
+    let mut batches = outputs
+        .iter()
+        .flat_map(|output| {
+            ["message_events", "tool_message_events"]
+                .into_iter()
+                .filter_map(move |name| output.get(name))
+        })
+        .collect::<Vec<_>>();
+    batches.sort_by_key(|batch| batch["offset"].as_i64().unwrap());
+    let mut messages = Vec::new();
+    for batch in batches {
+        assert_eq!(batch["offset"], json!(messages.len()), "{outputs:?}");
+        assert!(!batch["model_call_id"].as_str().unwrap().is_empty());
+        assert!(
+            terminal(outputs)["usages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|usage| usage["call_id"] == batch["model_call_id"])
+        );
+        messages.extend(batch["messages"].as_array().unwrap().iter().cloned());
+    }
+    assert_eq!(json!(messages), *expected);
+    assert_eq!(terminal(outputs)["messages"], *expected);
+}
+
 fn assert_success(output: &Value, text: &str, calls: usize) {
     assert_eq!(output["status"], "succeeded", "{output}");
     assert_eq!(output["text"], text);
@@ -309,6 +355,134 @@ fn author_graph(graph: &CompiledGraph) -> Value {
 }
 
 #[test]
+fn current_messages_use_a_positional_boundary_even_when_history_repeats_the_reply() {
+    for system in ["", "Keep the conversation."] {
+        for streaming in [false, true] {
+            let server = Server::start(vec![if streaming {
+                Reply::stream_text("Repeated answer")
+            } else {
+                Reply::text("Repeated answer")
+            }]);
+            let mut args = inputs(&server);
+            args["params.system"] = system.into();
+            args["params.prompt"] = "Repeated prompt".into();
+            args["params.history"] = json!([
+                {"role":"user","content":"Repeated prompt","metadata":{"source":"history"}},
+                {"role":"assistant","content":"Repeated answer","metadata":{"source":"history"}}
+            ]);
+            let expected = json!([{"role":"assistant","content":"Repeated answer"}]);
+            if streaming {
+                let outputs = finite_stream(message_agent(BTreeMap::new(), true), args);
+                assert_success(terminal(&outputs), "Repeated answer", 1);
+                assert_message_batches(&outputs, &expected);
+            } else {
+                let (output, _) = memory(message_agent(BTreeMap::new(), false), args);
+                assert_success(&output, "Repeated answer", 1);
+                assert_eq!(output["messages"], expected);
+            }
+            let requests = server.requests();
+            assert_eq!(requests.len(), 1);
+            let messages = requests[0].body["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 3 + usize::from(!system.is_empty()));
+            assert_eq!(messages.last().unwrap()["content"], "Repeated prompt");
+        }
+    }
+}
+
+#[test]
+fn current_message_events_and_terminal_suffix_share_the_single_multi_round_log() {
+    let server = Server::start(vec![
+        tool_reply(
+            json!([call(
+                "reused",
+                "calculator",
+                json!({"operation":"add","left":2.0,"right":3.0})
+            )]),
+            true,
+        ),
+        tool_reply(
+            json!([call(
+                "reused",
+                "calculator",
+                json!({"operation":"multiply","left":3.0,"right":4.0})
+            )]),
+            true,
+        ),
+        Reply::stream_text("Repeated answer"),
+    ]);
+    let mut args = inputs(&server);
+    args["params.system"] = "Use tools.".into();
+    args["params.history"] = json!([
+        {"role":"assistant","content":"Repeated answer","tool_calls":[{"id":"reused","name":"calculator","arguments":{"operation":"add","left":2.0,"right":3.0}}]},
+        {"role":"tool","tool_call_id":"reused","content":"5.0","metadata":{"source":"history"}}
+    ]);
+    let outputs = finite_stream(message_agent(calculator_tools(), true), args);
+    assert_success(terminal(&outputs), "Repeated answer", 3);
+    assert_message_batches(
+        &outputs,
+        &json!([
+            {"role":"assistant","content":"","tool_calls":[{"id":"reused","name":"calculator","arguments":{"operation":"add","left":2.0,"right":3.0}}]},
+            {"role":"tool","tool_call_id":"reused","content":"5.0"},
+            {"role":"assistant","content":"","tool_calls":[{"id":"reused","name":"calculator","arguments":{"operation":"multiply","left":3.0,"right":4.0}}]},
+            {"role":"tool","tool_call_id":"reused","content":"12.0"},
+            {"role":"assistant","content":"Repeated answer"}
+        ]),
+    );
+    let requests = server.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.body["messages"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        [4, 6, 8]
+    );
+    assert_eq!(
+        requests[2].body["messages"][2]["metadata"],
+        Value::Null,
+        "opaque history metadata is not a provider parameter"
+    );
+}
+
+#[test]
+fn failed_rounds_keep_only_already_appended_messages_without_an_invented_reply() {
+    for has_tool_round in [false, true] {
+        let mut failure = Reply::json(json!({"error":{"message":"PRIVATE_PROVIDER_SENTINEL"}}));
+        failure.status = 401;
+        let mut replies = Vec::new();
+        if has_tool_round {
+            replies.push(tool_reply(
+                json!([call(
+                    "one",
+                    "calculator",
+                    json!({"operation":"add","left":2.0,"right":3.0})
+                )]),
+                true,
+            ));
+        }
+        replies.push(failure);
+        let server = Server::start(replies);
+        let mut args = inputs(&server);
+        args["params.history"] = json!([{"role":"user","content":"Earlier input"},{"role":"assistant","content":"Earlier reply"}]);
+        let outputs = finite_stream(message_agent(calculator_tools(), true), args);
+        assert_eq!(terminal(&outputs)["status"], "failed");
+        let expected = if has_tool_round {
+            json!([
+                {"role":"assistant","content":"","tool_calls":[{"id":"one","name":"calculator","arguments":{"operation":"add","left":2.0,"right":3.0}}]},
+                {"role":"tool","tool_call_id":"one","content":"5.0"}
+            ])
+        } else {
+            json!([])
+        };
+        assert_message_batches(&outputs, &expected);
+        assert!(
+            !terminal(&outputs)
+                .to_string()
+                .contains("PRIVATE_PROVIDER_SENTINEL")
+        );
+    }
+}
+
+#[test]
 fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
     let source = agent_definition().unwrap();
     let value = serde_json::to_value(&source).unwrap();
@@ -338,15 +512,22 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
     );
     let repeat = node("repeat");
     let shared_inputs = repeat["config"]["inputs"].as_object().unwrap();
-    assert_eq!(shared_inputs.len(), 6);
+    assert_eq!(shared_inputs.len(), 7);
+    assert_eq!(shared_inputs["initial_message_count"], json!("int"));
     assert_eq!(shared_inputs["tools"], json!({"map":"flow"}));
     assert_eq!(shared_inputs["tool_properties"], json!({"map":"object"}));
     assert_eq!(shared_inputs["tool_definitions"], json!({"list":"object"}));
     let variables = repeat["config"]["variables"].as_array().unwrap();
-    assert_eq!(variables.len(), 6);
+    assert_eq!(
+        variables
+            .iter()
+            .map(|variable| variable["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["messages", "usages", "text", "outcome", "error"]
+    );
     assert!(variables.iter().all(|variable| variable["type"] != "flow"));
     let body = &repeat["config"]["body"];
-    assert_eq!(body["outputs"].as_array().unwrap().len(), 6);
+    assert_eq!(body["outputs"].as_array().unwrap().len(), 5);
     assert!(
         body["nodes"]
             .as_array()
@@ -624,8 +805,11 @@ fn native_agent_loop_stops_after_eight_tool_turns() {
         })
         .collect();
     let server = Server::start(replies);
-    let (output, recording) = memory(configured_agent(calculator_tools()), inputs(&server));
+    let (output, recording) = memory(message_agent(calculator_tools(), false), inputs(&server));
     assert_eq!(output["status"], "failed");
+    let messages = output["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 16);
+    assert_eq!(messages.last().unwrap()["role"], "tool");
     assert!(
         output["error"]
             .as_str()

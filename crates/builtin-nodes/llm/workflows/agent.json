@@ -92,7 +92,8 @@
           }
         },
         "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]",
+          "initial_message_count": "size(history) + (system == '' ? 1 : 2)"
         }
       },
       "inputs": {
@@ -122,6 +123,7 @@
       "config": {
         "max_iterations": 8,
         "inputs": {
+          "initial_message_count": "int",
           "api_key": "string",
           "base_url": "string",
           "model": "string",
@@ -136,13 +138,6 @@
           }
         },
         "variables": [
-          {
-            "name": "public_messages",
-            "type": {
-              "list": "object"
-            },
-            "initial": []
-          },
           {
             "name": "messages",
             "type": {
@@ -252,52 +247,12 @@
               }
             },
             {
-              "id": "prepare_public_assistant",
-              "kind": "builtin.code",
-              "config": {
-                "language": "cel",
-                "inputs": {
-                  "message": "object",
-                  "messages": {
-                    "list": "object"
-                  },
-                  "usages": {
-                    "list": "object"
-                  }
-                },
-                "code": {
-                  "messages": "messages + [dyn(message)]",
-                  "batch": "{'offset': size(messages), 'model_call_id': size(usages) > 0 ? usages[0].call_id : null, 'messages': [message]}"
-                }
-              },
-              "inputs": {
-                "message": {
-                  "from": {
-                    "node": "turn",
-                    "port": "message"
-                  }
-                },
-                "messages": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "public_messages"
-                  }
-                },
-                "usages": {
-                  "from": {
-                    "node": "turn",
-                    "port": "usages"
-                  }
-                }
-              }
-            },
-            {
               "id": "publish_assistant",
               "kind": "llm.message_events",
               "inputs": {
                 "batch": {
                   "from": {
-                    "node": "prepare_public_assistant",
+                    "node": "append_assistant",
                     "port": "batch"
                   }
                 }
@@ -309,14 +264,14 @@
               "inputs": {
                 "input": {
                   "from": {
-                    "node": "prepare_public_assistant",
+                    "node": "append_assistant",
                     "port": "messages"
                   }
                 }
               }
             },
             {
-              "id": "public_messages",
+              "id": "next_messages",
               "kind": "builtin.identity",
               "inputs": {
                 "input": {
@@ -327,7 +282,7 @@
                     },
                     {
                       "node": "append_tool_results",
-                      "port": "public_messages"
+                      "port": "messages"
                     }
                   ]
                 }
@@ -405,10 +360,15 @@
                   "messages": {
                     "list": "object"
                   },
-                  "message": "object"
+                  "message": "object",
+                  "initial_message_count": "int",
+                  "usages": {
+                    "list": "object"
+                  }
                 },
                 "code": {
-                  "messages": "messages + [dyn(message)]"
+                  "messages": "messages + [dyn(message)]",
+                  "batch": "{'offset': size(messages) - initial_message_count, 'model_call_id': size(usages) > 0 ? usages[0].call_id : null, 'messages': [message]}"
                 }
               },
               "inputs": {
@@ -422,6 +382,18 @@
                   "from": {
                     "node": "turn",
                     "port": "message"
+                  }
+                },
+                "initial_message_count": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "initial_message_count"
+                  }
+                },
+                "usages": {
+                  "from": {
+                    "node": "turn",
+                    "port": "usages"
                   }
                 }
               }
@@ -468,9 +440,7 @@
                   "assistant": {
                     "list": "object"
                   },
-                  "public_assistant": {
-                    "list": "object"
-                  },
+                  "initial_message_count": "int",
                   "origin": "object",
                   "results": {
                     "list": "object"
@@ -478,15 +448,14 @@
                 },
                 "code": {
                   "messages": "assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))",
-                  "public_messages": "public_assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))",
-                  "batch": "{'offset': size(public_assistant), 'model_call_id': 'model_call_id' in origin ? origin.model_call_id : null, 'messages': results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))}"
+                  "batch": "{'offset': size(assistant) - initial_message_count, 'model_call_id': 'model_call_id' in origin ? origin.model_call_id : null, 'messages': results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))}"
                 }
               },
               "inputs": {
-                "public_assistant": {
+                "initial_message_count": {
                   "from": {
-                    "node": "prepare_public_assistant",
-                    "port": "messages"
+                    "node": "%loop",
+                    "port": "initial_message_count"
                   }
                 },
                 "origin": {
@@ -527,24 +496,14 @@
             {
               "from_node": "route",
               "from_output": "tool_calls",
-              "to_node": "append_assistant"
-            },
-            {
-              "from_node": "append_assistant",
               "to_node": "dispatch"
             }
           ],
           "outputs": [
             {
-              "name": "public_messages",
-              "node": "public_messages",
-              "port": "value",
-              "optional": true
-            },
-            {
               "name": "messages",
-              "node": "append_tool_results",
-              "port": "messages",
+              "node": "next_messages",
+              "port": "value",
               "optional": true
             },
             {
@@ -586,6 +545,12 @@
         }
       },
       "inputs": {
+        "initial_message_count": {
+          "from": {
+            "node": "initial_messages",
+            "port": "initial_message_count"
+          }
+        },
         "messages": {
           "from": {
             "node": "initial_messages",
@@ -639,6 +604,7 @@
           "messages": {
             "list": "object"
           },
+          "initial_message_count": "int",
           "text": "string",
           "outcome": "string",
           "error": "string",
@@ -647,7 +613,7 @@
           }
         },
         "code": {
-          "messages": "messages",
+          "messages": "messages.transformList(index, message, index >= initial_message_count, message)",
           "status": "outcome == 'completed' ? 'succeeded' : 'failed'",
           "text": "text",
           "usages": "usages",
@@ -655,10 +621,16 @@
         }
       },
       "inputs": {
+        "initial_message_count": {
+          "from": {
+            "node": "initial_messages",
+            "port": "initial_message_count"
+          }
+        },
         "messages": {
           "from": {
             "node": "repeat",
-            "port": "public_messages"
+            "port": "messages"
           }
         },
         "text": {
