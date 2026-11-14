@@ -54,6 +54,8 @@
   turns, redaction, bounds, contention, identity isolation, and save-only recovery without another model request.
 - [x] 4.6 Restore per-turn tool cards in the isolated frontend and enable real macOS native glass with reviewed
   upstream component backports; verify GUI regressions, native effect setup, and nonopaque scene grounds.
+- [x] 4.7 Integrate merged Flow-property tool composition (#294); collect from validated scoped dataflow, distinguish
+  classifier rejection from a successful error-object output, and test real dispatch plus restart without execution.
 
 ## 5. Supervised exit and release validation
 

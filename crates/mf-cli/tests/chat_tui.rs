@@ -137,6 +137,167 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
     );
 }
 
+#[test]
+fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
+    use mf_chat::{ToolUsePhase, contract::CompletionState};
+    use mf_tui::{
+        chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
+        run::RunOptions,
+    };
+    use serde_json::json;
+
+    let root = tempfile::tempdir().unwrap();
+    let calls = json!([
+        {"index":0,"id":"valid","type":"function","function":{"name":"calculator","arguments":json!({
+            "operation":"add","left":12.0,"right":8.0
+        }).to_string()}},
+        {"index":1,"id":"invalid","type":"function","function":{"name":"calculator","arguments":json!({
+            "operation":"add","left":12.0
+        }).to_string()}},
+        {"index":2,"id":"unknown","type":"function","function":{"name":"missing","arguments":"{}"}}
+    ]);
+    let chunk = json!({"id":"tools","object":"chat.completion.chunk","created":0,"model":"example-model",
+        "choices":[{"index":0,"delta":{"tool_calls":calls},"finish_reason":null}]});
+    let finish = json!({"id":"tools","object":"chat.completion.chunk","created":0,"model":"example-model",
+        "choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],
+        "usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+    let mut reply = Reply::stream_text("");
+    reply.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    let server = Server::start(vec![
+        reply,
+        Reply::stream_text("Recovered: 20"),
+        Reply::text("Calculator tools"),
+    ]);
+    let binary = compiled(root.path(), &server, "chat-calculator-flow.json");
+    let options = ChatOptions {
+        database_path: root.path().join("chat.sqlite"),
+        profile: "calculator".into(),
+        run: RunOptions {
+            arguments: vec![
+                "--params.model=fixture-model".into(),
+                "--params.api_key=synthetic-key".into(),
+            ],
+            ..Default::default()
+        },
+    };
+    let controller =
+        ChatController::open(ChatLaunch::prepare(&binary, options.clone()).unwrap()).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "Use the calculator".into(),
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let evidence = loop {
+        assert!(
+            Instant::now() < deadline,
+            "calculator conversation deadline"
+        );
+        match controller.try_event() {
+            Some(ChatEvent::Error { source, .. }) => panic!("calculator: {source}"),
+            Some(ChatEvent::Finished {
+                resolution,
+                tool_uses,
+                ..
+            }) => {
+                let resolution = resolution.unwrap();
+                assert!(
+                    resolution.diagnostics.is_empty(),
+                    "{:?}",
+                    resolution.diagnostics
+                );
+                let CompletionState::Committed(completion) = resolution.state else {
+                    panic!("expected the scripted final response to commit")
+                };
+                assert_eq!(completion.result.text, "Recovered: 20");
+                break *tool_uses.expect("host-owned tool evidence");
+            }
+            _ => thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    assert!(evidence.finished);
+    assert_eq!(evidence.runs.len(), 3, "{evidence:?}");
+    assert_eq!(
+        evidence
+            .runs
+            .iter()
+            .filter(|run| run.name == "calculator" && run.phase == ToolUsePhase::Succeeded)
+            .count(),
+        1,
+        "{evidence:?}"
+    );
+    assert_eq!(
+        evidence
+            .runs
+            .iter()
+            .filter(|run| run.phase == ToolUsePhase::Failed)
+            .count(),
+        2,
+        "{evidence:?}"
+    );
+    assert!(
+        evidence
+            .runs
+            .iter()
+            .any(|run| run.name == "missing" && run.phase == ToolUsePhase::Failed)
+    );
+    assert!(
+        evidence
+            .runs
+            .iter()
+            .find(|run| run.phase == ToolUsePhase::Succeeded)
+            .unwrap()
+            .duration_ns
+            .is_some()
+    );
+    controller.close().unwrap();
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "two conversation calls and one automatic title"
+    );
+    assert!(
+        requests[1].body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| { message["role"] == "tool" && message["content"] == "20.0" }),
+        "the actual calculator result must reach the model"
+    );
+    let controller = ChatController::open(ChatLaunch::prepare(&binary, options).unwrap()).unwrap();
+    controller
+        .send(ChatCommand::Load {
+            session_id: evidence.invocation.session_id.clone(),
+            before: None,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "history restore deadline");
+        match controller.try_event() {
+            Some(ChatEvent::Loaded { page, .. }) => {
+                assert_eq!(page.messages.len(), 2);
+                assert!(
+                    page.messages
+                        .iter()
+                        .all(|record| record.tool_uses.as_ref() == Some(&evidence))
+                );
+                break;
+            }
+            Some(ChatEvent::Error { source, .. }) => panic!("history: {source}"),
+            _ => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    controller.close().unwrap();
+    assert_eq!(
+        server.requests().len(),
+        3,
+        "loading history must not repeat model or tool execution"
+    );
+}
+
 fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let definition = root.join("flow.json");
@@ -150,6 +311,22 @@ fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
         crates.join("builtin-nodes/core").to_str().unwrap().into();
     if let Some(code) = value["dependencies"].get_mut("code") {
         code["path"] = crates.join("builtin-nodes/code").to_str().unwrap().into();
+    }
+    for node in value["nodes"].as_array_mut().unwrap() {
+        if node["kind"] == "builtin.constant"
+            && node["config"]["type"] == "flow"
+            && let Some(path) = node["config"]["value"]["path"].as_str()
+            && Path::new(path).is_relative()
+        {
+            node["config"]["value"]["path"] = crates
+                .parent()
+                .unwrap()
+                .join("examples")
+                .join(path)
+                .to_str()
+                .unwrap()
+                .into();
+        }
     }
     let parameters = &mut value["nodes"][0]["config"]["parameters"];
     parameters["model"]["default"] = "wrong-default-model".into();

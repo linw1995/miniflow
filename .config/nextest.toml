@@ -45,6 +45,7 @@ platform = 'cfg(unix)'
 # Match build-oriented targets as a whole so new or renamed cases retain the cache.
 # Provider discovery also builds probes before some CLI validation failures.
 filter = '''
+(binary_id(=mf-cli::chat_tui) & test(=calculator_tool_history_restores_flow_property_dispatch_without_rerunning)) |
 binary_id(=mf-tui::runner_flow) |
 (binary_id(=mf-compiler) & test(pipeline::tests::)) |
 binary_id(=mf-compiler::custom_flow_runner) |
@@ -160,6 +161,7 @@ setup = "package-dependencies"
 platform = 'cfg(unix)'
 # Serialize generated builds that share the prewarmed Cargo target.
 filter = '''
+(binary_id(=mf-cli::chat_tui) & test(=calculator_tool_history_restores_flow_property_dispatch_without_rerunning)) |
 binary_id(=mf-tui::runner_flow) |
 (binary_id(=mf-compiler) & test(pipeline::tests::)) |
 binary_id(=mf-compiler::custom_flow_runner) |

@@ -43,8 +43,12 @@ Registered kinds are `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.ar
 The executable `ChatController` checkpoints bounded, redacted tool-use observations in the owning `mf-chat`
 database independently of terminal or desktop rendering. `model_calls.tool_uses` is a nullable JSON journal;
 `ModelCall.tool_uses` and each `MessageRecord.tool_uses` expose it with its exact session/turn/call identity.
-Records cover standard tool dispatch boundaries (`llm.tool_arguments`, `builtin.router`, `llm.tool_result`),
-not tool names guessed from model text. A successful conversation does not prove an unobserved tool succeeded.
+Records follow validated iteration-body dataflow into `llm.tool_result`: the call classifier feeds the execution
+router and encoder in the same runtime scope. This supports the current Flow-property `builtin.code` classifier
+and legacy compiled dispatchers, rather than depending on a removed `llm.tool_arguments` kind or fixed node IDs.
+Unrelated/nested code and router nodes are not tool evidence, and names are never guessed from model text.
+A successful conversation does not prove an unobserved tool succeeded. The current classifier publishes an error
+object even on success; only its observed rejection flag, not the mere presence of that object, proves rejection.
 
 A journal retains at most 64 distinct calls, with bounded names and at most 2048 UTF-8 bytes each for arguments
 and results. Values are redacted before persistence. Missing observations and capacity truncation remain explicit;

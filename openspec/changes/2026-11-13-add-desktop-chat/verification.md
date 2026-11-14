@@ -53,7 +53,7 @@ copy actions, tool cards/groups, status messages, and recovery alert. The compos
 submit-policy/admission override. `ChatContainer` paints an opaque ground, so its small layout is composed from
 Ely stacks to leave native glass visible. The expanded GUI/probe suite passes 31 tests, including stored tool cards
 without a live reader, cards surviving another turn, and unsuccessful user-only history without invented replies.
-The shared storage/controller/collector suites pass 222 tests; these include migration/reopen, phase settlement,
+The shared storage/controller/collector suites pass 224 tests; these include migration/reopen, phase settlement,
 privacy in SQLite/WAL, bounds, contention, immutable complete journals, and failed save-only recovery without execution.
 Clippy with all targets/features and `-D warnings`, repository hooks, and native linking pass.
 
@@ -138,6 +138,25 @@ release requirements. Detailed reports and dependency trees remain local under `
 The workspace/release reports still exclude Ely because the product graph does not include the ignored probe.
 Its separate three-target report passes using the same repository policy and template. Actual desktop dependency
 integration, final artifact resource notices, and platform acceptance remain separate tasks.
+
+## Compatibility with merged Flow-property tools
+
+Main commit `a806e75a` (#294) is merged into this branch. Tool collection now follows validated item-body dataflow
+from the call classifier through its router to `llm.tool_result`, with exact runtime-scope matching. It does not
+require the removed `llm.tool_arguments` kind, fixed node IDs, or an already-started encoder. Nested/unrelated routers
+cannot supply another call's status. A successful classifier's always-present error object is not a failure;
+its observed rejection flag remains authoritative even if the error detail is unavailable. Legacy compiled dispatcher
+topology remains supported, and retention loss cannot erase an already-observed tool name.
+
+The compiled calculator regression uses the actual current example and an HTTP test provider. One valid call really
+calculates 20, while a missing required parameter and an unknown tool are retained as failures despite the final
+successful model reply. After controller restart all three records restore identically with no further provider calls.
+The entire executable-chat integration target passes three tests, and the shared libraries pass 224 tests.
+
+The recompiled shared test-affected Flow selected `mf-tui` and its CLI consumer for this follow-up: all 389 tests passed,
+with a completed successful execution report. The earlier 1769-test workspace result above predates this main sync;
+it is not presented as a rerun against #294. The adapted ignored prototype again passes 31 tests. Clippy and `prek -a`
+pass on the merged implementation. The immutable tested snapshot contains the same code as the compatibility update.
 
 ## Remaining acceptance
 

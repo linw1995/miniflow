@@ -204,6 +204,15 @@ pub struct ObservationReader {
 }
 
 impl ObservationReader {
+    /// Immutable validated topology shared by this run's collectors and views.
+    pub fn description(&self) -> Arc<WorkflowDescription> {
+        self.context
+            .state
+            .lock()
+            .expect("receiver state was not poisoned")
+            .description()
+    }
+
     pub fn snapshot(&self) -> StateSnapshot {
         self.context
             .state
