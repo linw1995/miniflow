@@ -202,6 +202,23 @@ inventory::submit! {
     }
 }
 
+inventory::submit! {
+    NodeRegistration {
+        kind: "test.host-static-source",
+        factory: NodeFactory::WithFlowBindings {
+            factory: &NodeFactory::Subgraph {
+                scope: Some(mf_runtime::SubgraphScope::Host),
+                flow_parameters: |config| BTreeMap::from([("body".into(), config["body"].clone())]),
+                plain: |_| mf_runtime::NodeInvalidSubgraphSnafu { message:"a prepared body is required" }.fail(),
+                prepared: |id, config, bodies| NodeRegistry::from_inventory().unwrap()
+                    .get("test.declared-static-source").unwrap().instantiate_subgraphs(id, config, bodies),
+            },
+            bindings: |config| NodeRegistry::from_inventory().unwrap()
+                .get("test.declared-static-source").unwrap().factory.flow_bindings(config),
+        },
+    }
+}
+
 fn edge(node: &str, port: &str) -> Value {
     json!({"from":{"node":node,"port":port}})
 }
@@ -291,6 +308,59 @@ fn provider_metadata_not_node_names_or_flow_port_types_authorizes_candidates() {
         }
     }
     assert_eq!(UNDECLARED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn host_owned_candidates_do_not_require_unlinked_body_providers() {
+    let mut registry = NodeRegistry::from_inventory().unwrap();
+    let body = WorkflowDefinition::from_json(
+        &json!({
+            "version":"2026-11-13", "nodes":[{"id":"unlinked", "kind":"test.unlinked-provider"}],
+            "outputs":[{"name":"value", "node":"unlinked", "port":"value"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let schema = serde_json::from_value(
+        json!({"inputs":{"unlinked":{"value":{"type":"int", "required":true}}}, "stdin":{}}),
+    )
+    .unwrap();
+    registry
+        .register_flow(
+            "external",
+            body.clone(),
+            mf_runtime::PreparedSubgraph::new(
+                vec![],
+                vec![PortSpec::new("value", ValueType::Int64, true)],
+                |context| {
+                    Ok(Outputs::from([(
+                        "value".into(),
+                        context.workflow_arguments().0["unlinked.value"].clone(),
+                    )]))
+                },
+            )
+            .with_input_schema(schema),
+        )
+        .unwrap();
+    let mut source = definition(false);
+    let first = source
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "first")
+        .unwrap();
+    first.kind = "test.host-static-source".into();
+    first.config = json!({"flow":"external", "body":body});
+    let plan = compile_definition(&source, &registry).unwrap();
+    assert!(
+        plan.graph.children[&"execute".into()]
+            .values()
+            .any(|child| child.relations.host.as_deref() == Some("external"))
+    );
+    let result = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap();
+    assert_eq!(result["result"]["outputs"]["value"], json!(10));
 }
 
 #[test]

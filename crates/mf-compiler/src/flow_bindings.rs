@@ -308,7 +308,6 @@ impl Freezing<'_> {
                     )?;
                     let mut body = body.clone();
                     body.relations.key = None;
-                    body.relations.host = None;
                     let binding = flow_candidate_binding(candidates.len());
                     let candidate = FlowCandidate {
                         route: route.clone(),
