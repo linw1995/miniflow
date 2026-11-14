@@ -309,7 +309,7 @@ fn author_graph(graph: &CompiledGraph) -> Value {
 }
 
 #[test]
-fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
+fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
     let source = agent_definition().unwrap();
     let value = serde_json::to_value(&source).unwrap();
     let node = |id: &str| {
@@ -375,7 +375,6 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
 
     let registry = NodeRegistry::from_inventory().unwrap();
     let calculator = calculator_tools().remove("calculator").unwrap();
-    let mut resolved_baseline = None;
     let mut compiled_baseline = None;
     let mut caller_baseline = None;
     for names in [
@@ -400,14 +399,19 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
         }
         let resolved = resolve_flows(&definition, None).unwrap();
         let resolved_child = &resolved.children[&"agent".into()]["body"];
-        if let Some(baseline) = &resolved_baseline {
-            assert_eq!(&resolved_child.definition, baseline);
-        } else {
-            resolved_baseline = Some(resolved_child.definition.clone());
-        }
+        let router = &resolved_child.children[&"repeat".into()]["body"].children
+            [&"dispatch".into()]["body"]
+            .children[&"dispatch".into()]["body"];
+        assert_eq!(
+            router
+                .children
+                .get(&"execute".into())
+                .map_or(0, BTreeMap::len),
+            names.len()
+        );
         let plan = compile_definition(&definition, &registry).unwrap();
         let child = &plan.graph.children[&"agent".into()]["body"];
-        let shape = author_graph(child);
+        let shape = author_graph(&tool_values::without_candidates(child));
         if let Some(baseline) = &compiled_baseline {
             assert_eq!(&shape, baseline);
         } else {

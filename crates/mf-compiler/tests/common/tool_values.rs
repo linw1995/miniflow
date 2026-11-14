@@ -100,6 +100,32 @@ fn caller(tools: BTreeMap<String, FlowTool>) -> Value {
     })
 }
 
+pub fn without_candidates(graph: &mf_runtime::CompiledGraph) -> mf_runtime::CompiledGraph {
+    let mut graph = graph.clone();
+    for node in &mut graph.definition.nodes {
+        if let Some(candidates) = node
+            .config
+            .get(mf_runtime::FLOW_CANDIDATES)
+            .and_then(Value::as_object)
+        {
+            let bindings: Vec<_> = candidates.keys().cloned().collect();
+            let config = node.config.as_object_mut().unwrap();
+            for binding in bindings {
+                config.remove(&binding);
+            }
+            config.remove(mf_runtime::FLOW_CANDIDATES);
+            graph.children.remove(&node.id);
+        } else if let Some(children) = graph.children.get_mut(&node.id) {
+            for (binding, child) in children {
+                *child = without_candidates(child);
+                node.set_node_flow(binding, child.definition.clone())
+                    .unwrap();
+            }
+        }
+    }
+    graph
+}
+
 pub fn configured_tools(tools: BTreeMap<String, FlowTool>) -> WorkflowDefinition {
     let mut value = caller(tools);
     value["flows"] = json!({

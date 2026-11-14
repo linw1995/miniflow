@@ -7,6 +7,7 @@ mod execution_domains;
 mod execution_inputs;
 mod execution_outputs;
 mod flow;
+mod flow_bindings;
 mod flow_invocation;
 mod flow_properties;
 mod flow_value;
@@ -67,6 +68,12 @@ pub use execution_outputs::{ContextValue, ExecutionOutputs, OutputVisibility};
 pub use flow::{
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
+};
+pub use flow_bindings::{
+    FLOW_CANDIDATES, FlowBindingSource, FlowBindings, FlowCandidate, FlowInvocationBinding,
+    candidate_binding as flow_candidate_binding, candidate_parameters as flow_candidate_parameters,
+    take_candidates as take_flow_candidates,
+    validate_candidate_source as validate_flow_candidate_source,
 };
 pub use flow_invocation::{FlowEmission, FlowInvocation};
 pub use flow_properties::{interface_properties, value_schema};

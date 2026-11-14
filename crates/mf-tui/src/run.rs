@@ -2839,6 +2839,7 @@ impl ObservationView {
             state: ViewState::default(),
         })
     }
+
     fn collapse_body_path(&self) -> Option<Vec<String>> {
         self.selected_body()
             .filter(|path| self.expanded.contains(path))
@@ -6646,5 +6647,71 @@ mod tests {
         assert_eq!(capture.stderr_tail.len(), MAX_STDERR_BYTES);
         assert_eq!(capture.stderr_dropped, MAX_STDERR_BYTES as u64);
         assert!(capture.error.is_none());
+    }
+
+    #[test]
+    fn frozen_router_branches_are_visible_before_execution_and_keep_independent_state() {
+        use mf_telemetry::event::ScopePathEntry;
+        use serde_json::json;
+
+        let selected = vec![ScopePathEntry::binding_key("execute", "first")];
+        let unused = vec![ScopePathEntry::binding_key("execute", "second")];
+        let description: WorkflowDescription = serde_json::from_value(json!({
+            "version":"2026-11-09",
+            "workflow_id":format!("sha256:{}", "b".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[{"id":"execute", "kind":"builtin.router"}],
+            "execution_order":["execute"], "data_edges":[], "control_edges":[],
+            "loop_bodies":[
+                {"path":selected, "nodes":[{"id":"calculate", "kind":"builtin.code"}],
+                 "execution_order":["calculate"], "data_edges":[], "control_edges":[]},
+                {"path":unused, "nodes":[{"id":"search", "kind":"builtin.code"}],
+                 "execution_order":["search"], "data_edges":[], "control_edges":[]}
+            ]
+        }))
+        .unwrap();
+        let view = ObservationView::new(&description).unwrap();
+        let selected_display = view
+            .root
+            .display_index_for_scoped_node(&selected, "calculate")
+            .unwrap();
+        let unused_display = view
+            .root
+            .display_index_for_scoped_node(&unused, "search")
+            .unwrap();
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let observed = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
+        assert_eq!(
+            observed[view.root.sources(selected_display)[0]].status,
+            NodeStatus::Pending
+        );
+        assert_eq!(
+            observed[view.root.sources(unused_display)[0]].status,
+            NodeStatus::Pending
+        );
+        let mut calculate = NodeObservation::pending("calculate", "builtin.code");
+        calculate.status = NodeStatus::Running;
+        snapshot.loop_passes.push(LoopPassObservation {
+            path: vec![ScopePathEntry::Call {
+                call_id: selected[0].clone(),
+            }],
+            nodes: vec![calculate],
+            started: true,
+            outcome: None,
+            interrupted: false,
+            stream_invocation: None,
+            compact_statuses: Vec::new(),
+        });
+        let observed = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
+        assert_eq!(
+            observed[view.root.sources(selected_display)[0]].status,
+            NodeStatus::Running
+        );
+        assert_eq!(
+            observed[view.root.sources(unused_display)[0]].status,
+            NodeStatus::Pending
+        );
     }
 }

@@ -1,8 +1,8 @@
 use mf_runtime::{
-    ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
-    NodePortContract, NodePorts, NodeRegistration, NodeResult, OutputDerivation, Outputs, PortSpec,
-    PreparedNode, TaskNode, ValueRef, ValueType, decode_input, deserialize_config,
-    reject_unknown_inputs,
+    ExecutionContext, FlowBindingSource, FlowBindings, Inputs, NodeBuildError, NodeExecutionError,
+    NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult,
+    OutputDerivation, Outputs, PortSpec, PreparedNode, TaskNode, ValueRef, ValueType, decode_input,
+    deserialize_config, reject_unknown_inputs,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -117,7 +117,19 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
 }
 
 inventory::submit! {
-    NodeRegistration { kind: KIND, factory: NodeFactory::Plain(factory) }
+    NodeRegistration {
+        kind: KIND,
+        factory: NodeFactory::WithFlowBindings {
+            factory: &NodeFactory::Plain(factory),
+            bindings: |config| FlowBindings {
+                outputs: BTreeMap::from([("value".into(), FlowBindingSource::Object(
+                    config.get("fields").and_then(Value::as_object).into_iter().flatten()
+                        .map(|(field, _)| (field.clone(), field.clone())).collect(),
+                ))]),
+                ..Default::default()
+            },
+        },
+    }
 }
 
 #[cfg(test)]

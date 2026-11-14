@@ -127,8 +127,8 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
     ]));
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    // The caller constants alone own business bodies. Native map construction
-    // does not duplicate them under the catalog or dispatch callsites.
+    // Caller constants still declare the superset; compilation also freezes
+    // executable candidates beneath dispatch without changing caller wiring.
     let producers: Vec<_> = plan
         .graph
         .definition
@@ -146,8 +146,8 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
     let empty = compile_definition(&configured_tools(BTreeMap::new()), &registry).unwrap();
     for owner in ["catalog", "dispatch"] {
         assert_eq!(
-            plan.graph.children[&owner.into()],
-            empty.graph.children[&owner.into()]
+            tool_values::without_candidates(&plan.graph.children[&owner.into()]["body"]),
+            tool_values::without_candidates(&empty.graph.children[&owner.into()]["body"]),
         );
     }
     let catalog_call = &plan.graph.children[&"catalog".into()]["body"];
@@ -177,7 +177,14 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
         ["calls", "tool_properties", "tools"]
     );
     let dispatch = &dispatch_call.children[&"dispatch".into()]["body"];
-    assert!(dispatch.children.is_empty());
+    assert_eq!(dispatch.children[&"execute".into()].len(), 2);
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(
+        description
+            .body_paths_for_node(&["dispatch".into(), "dispatch".into()], "execute")
+            .len(),
+        2
+    );
     assert!(
         dispatch
             .definition
@@ -280,7 +287,7 @@ fn configured_example_executes_and_exports_an_ordinary_workflow() {
 }
 
 #[test]
-fn fixed_agent_builtin_owns_no_caller_tool_bodies_or_per_tool_structure() {
+fn fixed_agent_source_keeps_caller_wiring_while_compilation_binds_tool_children() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let definition = configured_agent(BTreeMap::from([
         ("add".into(), addition()),
@@ -289,8 +296,8 @@ fn fixed_agent_builtin_owns_no_caller_tool_bodies_or_per_tool_structure() {
     let plan = compile_definition(&definition, &registry).unwrap();
     let empty = compile_definition(&configured_agent(BTreeMap::new()), &registry).unwrap();
     assert_eq!(
-        plan.graph.children[&"agent".into()],
-        empty.graph.children[&"agent".into()]
+        tool_values::without_candidates(&plan.graph.children[&"agent".into()]["body"]),
+        tool_values::without_candidates(&empty.graph.children[&"agent".into()]["body"]),
     );
     assert!(!plan.graph.children.contains_key(&"tools".into()));
     let producers: Vec<_> = plan
@@ -706,15 +713,6 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_with_native_flows() 
     let plan = compile_definition(&definition, &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     let graph = mf_compiler::describe_compiled(&plan).unwrap();
-    let producer = plan
-        .graph
-        .definition
-        .nodes
-        .iter()
-        .find(|node| node.kind == "builtin.constant" && node.config["type"] == "flow")
-        .unwrap();
-    let producer_key =
-        plan.graph.children[&producer.id]["value"].child_scope_key(producer, "value");
     let call = plan
         .graph
         .definition
@@ -733,6 +731,10 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_with_native_flows() 
         dispatch_call.child_scope_key(call, "body"),
         iteration.id.to_string(),
     ];
+    let candidate = graph.body_paths_for_node(&iteration_path, "execute")[0]
+        .last()
+        .unwrap()
+        .clone();
     for _ in 0..2 {
         use mf_telemetry::{event::Event, identity::RunId};
         let harness = capture::Harness::new(true);
@@ -769,18 +771,17 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_with_native_flows() 
             })
             .count();
         assert_eq!(projections, 1);
-        // A dynamic invocation belongs to its producer's definition, while its
-        // runtime ancestry remains inside the dispatch item. The extended detail
-        // protocol must preserve both, rather than invent Router-owned children.
+        // Frozen candidates use the ordinary Call scope protocol beneath the
+        // router, retaining per-item ancestry without a TUI-only projection.
         let wire = harness.records();
         let details: Vec<_> = wire
             .iter()
             .filter_map(|record| {
                 record
                     .attributes
-                    .get(mf_telemetry::iteration::DETAIL_CONTEXT_ATTRIBUTE)
+                    .get(mf_telemetry::iteration::CONTEXT_ATTRIBUTE)
                     .map(|value| {
-                        mf_telemetry::iteration::IterationDetailContext::from_json(
+                        mf_telemetry::iteration::IterationContext::from_json(
                             value.as_str().unwrap(),
                         )
                         .unwrap()
@@ -790,20 +791,13 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_with_native_flows() 
         assert!(!details.is_empty());
         let executions: Vec<_> = details
             .iter()
-            .filter(|detail| {
-                detail.body_scope.iter().any(|entry| matches!(entry,
-                mf_telemetry::event::ScopePathEntry::Flow { call_id, .. } if call_id == "execute"
-            ))
-            })
+            .filter(|detail| detail.body_path.last() == Some(&candidate))
             .collect();
         assert!(!executions.is_empty());
         for detail in executions {
-            assert_eq!(detail.context.iteration_path, iteration_path);
-            assert!(detail.body_scope.iter().any(|entry| matches!(entry,
-                mf_telemetry::event::ScopePathEntry::Flow { call_id, definition }
-                if call_id == "execute" && definition.workflow_id == graph.workflow_id
-                    && definition.path == vec![producer_key.clone()]
-            )));
+            assert_eq!(detail.iteration_path, iteration_path);
+            assert!(detail.body_path.starts_with(&iteration_path));
+            assert_eq!(detail.body_path.len(), iteration_path.len() + 1);
         }
         let records: Vec<_> = wire
             .into_iter()

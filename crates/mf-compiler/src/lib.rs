@@ -1,4 +1,5 @@
 mod calls;
+mod flow_bindings;
 mod flow_sources;
 pub use flow_sources::{
     FlowDiscovery, FlowResolutionError, FlowSourceBundle, ResolvedWorkflow,

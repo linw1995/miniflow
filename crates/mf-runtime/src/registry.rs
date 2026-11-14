@@ -165,13 +165,26 @@ impl NodeRegistry {
         self.iter()
             .map(|registration| {
                 let extractor: fn(&serde_json::Value) -> BTreeMap<String, serde_json::Value> =
-                    match registration.factory {
+                    match registration.factory.base() {
                         crate::NodeFactory::Subgraph {
                             flow_parameters, ..
                         } => flow_parameters,
-                        crate::NodeFactory::Plain(_) => |_| BTreeMap::new(),
+                        _ => |_| BTreeMap::new(),
                     };
                 (registration.kind.to_owned(), extractor)
+            })
+            .collect()
+    }
+
+    pub fn flow_bindings(
+        &self,
+    ) -> BTreeMap<String, fn(&serde_json::Value) -> crate::flow_bindings::FlowBindings> {
+        self.iter()
+            .filter_map(|registration| match registration.factory {
+                crate::NodeFactory::WithFlowBindings { bindings, .. } => {
+                    Some((registration.kind.to_owned(), bindings))
+                }
+                _ => None,
             })
             .collect()
     }
