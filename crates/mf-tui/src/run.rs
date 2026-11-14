@@ -1894,7 +1894,7 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
 /// per-invocation history in Details.
 fn invoked_bodies(description: &WorkflowDescription, snapshot: &StateSnapshot) -> InvokedBodies {
     use mf_telemetry::event::ScopePathEntry;
-    let mut invoked: InvokedBodies = BTreeMap::new();
+    let mut invoked = InvokedBodies::default();
     let mut collect = |path: &[ScopePathEntry]| {
         for (index, entry) in path.iter().enumerate() {
             let ScopePathEntry::Flow { definition, .. } = entry else {
@@ -1905,10 +1905,7 @@ fn invoked_bodies(description: &WorkflowDescription, snapshot: &StateSnapshot) -
             }
             let invoker = runtime_static_owner_path(&path[..=index]);
             if !invoker.is_empty() {
-                invoked
-                    .entry(invoker)
-                    .or_default()
-                    .insert(definition.path.clone());
+                invoked.insert(invoker, definition.path.clone());
             }
         }
     };
@@ -2873,7 +2870,7 @@ impl ObservationView {
             &collapsed[&Vec::new()],
         )
         .context(GraphSnafu)?;
-        let invoked = InvokedBodies::new();
+        let invoked = InvokedBodies::default();
         let root = Arc::new(
             GraphLayout::with_expanded_bodies_and_invocations(
                 description,

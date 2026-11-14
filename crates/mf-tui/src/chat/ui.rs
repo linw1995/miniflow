@@ -801,9 +801,7 @@ impl ChatView {
         }
         if let Some(observation) = &self.observation {
             let snapshot = observation.reader.snapshot_shared();
-            self.inspector
-                .refresh_invocations(&snapshot)
-                .map_err(|source| crate::chat::ChatRunError::Observation { source })?;
+            self.inspector.refresh_invocations(&snapshot)?;
         }
         terminal.draw(|frame| self.render(frame)).context(IoSnafu {
             operation: "draw chat",
