@@ -250,9 +250,9 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     assert!(
         matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
             if definition_id.as_str() == "iteration"
-                && matches!(source.as_ref(), WorkflowCompileError::ScopeStructure { source, .. }
-                    if matches!(source, ScopeStructureError::ReservedNode { node }
-                        if node.as_str() == "%iteration"))),
+                && matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
+                    if path == "[\"iteration\",\"%iteration\"]"
+                        && message == "scope sources are implicit; reference them without declaring a node")),
         "{error:?}"
     );
 

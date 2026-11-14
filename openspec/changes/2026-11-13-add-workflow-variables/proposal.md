@@ -7,6 +7,7 @@ mutable values for conditional updates and sequential refinement without introdu
 
 - Add definition version `2026-11-13`, definition-level `variables`, and `workflow.assign`.
 - Inject a synthetic `%root` source for the declaration instead of requiring a declaration node.
+- Make `%root`, `%loop`, and `%iteration` reference-only in authoring: reject explicit source node declarations while retaining internal compiled instructions.
 - Declare typed root state per finite callable Flow, with required literal initial values.
 - Reuse staged, validated assignment publication and explicit dependency ordering.
 - Keep root state separate from container frames, startup inputs, and observation ancestry.

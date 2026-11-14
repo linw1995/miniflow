@@ -20,6 +20,25 @@ or an intrinsic index, and MUST NOT be authored, receive dependencies, or own ex
 - **THEN** preparation fails before any node executes
 - **AND** descriptor and type failures retain their typed sources
 
+### Requirement: Reference scope values without declaring source nodes
+
+`%root`, `%loop`, and `%iteration` SHALL be available in input bindings and output selections without
+source node declarations. Authoring preparation MUST reject nodes using reserved source IDs or
+internal source kinds. The compiler SHALL supply internal source instructions; compiled-artifact
+replay SHALL use stored relationships without authoring lowering.
+
+#### Scenario: Read and assign without a source declaration
+
+- **WHEN** a Flow reads root variables, a Loop body assigns a current-frame variable, or an Iteration selects the current item without defining a source node
+- **THEN** the appropriate scope values are available and execution succeeds
+- **AND** the compiled plan can be saved and replayed with its internal source instructions intact
+
+#### Scenario: Reject an explicit source declaration
+
+- **WHEN** an authored node claims `%root`, `%loop`, `%iteration`, or an internal source kind, even with a canonical ID, kind, and empty config
+- **THEN** preparation rejects the declaration with a diagnostic explaining that scope sources are implicit
+- **AND** source-like JSON values in an ordinary node's opaque configuration are not interpreted as declarations
+
 ### Requirement: Assign through explicit execution dependencies
 
 `workflow.assign` SHALL take a required typed `value` input and publish `done` only after validation

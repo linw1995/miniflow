@@ -139,11 +139,13 @@ fn normalization_inserts_each_canonical_scope_source_once_and_preserves_child_ve
     );
     assert_eq!(child.relations.key.as_deref(), Some("callA"));
     assert_eq!(child.child_scope_key(call, "body"), "callA");
-    let round_trip = WorkflowDefinition::from_json(
-        &serde_json::to_string(&normalized.graph.definition).unwrap(),
-    )
-    .unwrap();
+    // Authored definitions round-trip without adding source declarations.
+    let round_trip =
+        WorkflowDefinition::from_json(&serde_json::to_string(&definition).unwrap()).unwrap();
     assert_eq!(plan_definition(&round_trip).unwrap(), normalized);
+    // Compiled graphs retain source instructions; replay does not lower them as authoring.
+    let replay = mf_compiler::CompiledWorkflow::from_json(&normalized.to_json().unwrap()).unwrap();
+    assert_eq!(replay, normalized);
 }
 
 #[test]

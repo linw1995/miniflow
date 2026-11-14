@@ -226,7 +226,7 @@ fn authored_root_source_nodes_are_rejected() {
         .push(json!({"id":"named", "kind":"%root", "config":{}}));
     let error = compile_error(value);
     assert!(
-        error.to_string().contains("canonical enclosing scope"),
+        error.to_string().contains("scope sources are implicit"),
         "{error}"
     );
     // The reserved ID cannot be claimed by an ordinary provider kind.
@@ -237,9 +237,7 @@ fn authored_root_source_nodes_are_rejected() {
         .push(json!({"id":"%root", "kind":"builtin.identity", "config":{}}));
     let error = compile_error(value);
     assert!(
-        error
-            .to_string()
-            .contains("must use its canonical declaration"),
+        error.to_string().contains("scope sources are implicit"),
         "{error}"
     );
 }

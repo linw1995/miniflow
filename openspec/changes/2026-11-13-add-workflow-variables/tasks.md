@@ -6,6 +6,8 @@
 - [x] Integrate dynamic preparation and generated runners without changing observation ancestry.
 - [x] Cover initialization, ordering, skips, failures, repeated invocation, calls, and Loop isolation.
 - [x] Add standalone runner parity, source-free execution, and artifact validation regressions.
+- [x] Make scope sources implicit in authoring, rejecting explicit source nodes while preserving resolved and registered host Flow adapters.
+- [x] Verify direct references and assignments without source declarations, compiled replay, and opaque configuration handling.
 - [x] Document authoring, compatibility, and execution limitations.
 - [x] Validate the independent implementation before stacking (1,651 passed; 6 skipped; repository hooks passed).
 - [x] Rebase on #293, preserving its version, exit handling, and example registration.

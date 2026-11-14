@@ -9,7 +9,7 @@ use serde_json::json;
 use snafu::{ResultExt, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Authoring-only traversal state. Only `relations` crosses a phase boundary;
+/// Lowering-only traversal state. Only `relations` crosses a phase boundary;
 /// ancestry and diagnostic paths are carried explicitly during source lowering.
 #[derive(Clone, Debug, Default)]
 pub struct ScopeContext {
@@ -18,9 +18,18 @@ pub struct ScopeContext {
     /// The original authored root, unchanged by explicit child version overrides.
     pub root_version: Option<WorkflowDefinitionVersion>,
     inside_items: bool,
+    /// Resolved-definition adapters may receive sources inserted by an earlier lowering pass.
+    lowered_sources: bool,
 }
 
 impl ScopeContext {
+    pub fn resolved() -> Self {
+        Self {
+            lowered_sources: true,
+            ..Self::default()
+        }
+    }
+
     /// Enter a child only after its receiving callback authorizes this binding.
     pub fn child(
         &self,
@@ -66,6 +75,7 @@ impl ScopeContext {
             path,
             root_version: self.root_version,
             inside_items,
+            lowered_sources: self.lowered_sources,
         })
     }
 
@@ -74,7 +84,12 @@ impl ScopeContext {
         definition: &mut WorkflowDefinition,
     ) -> Result<(), WorkflowCompileError> {
         self.root_version.get_or_insert(definition.version);
-        lower_scope_at(definition, &mut self.relations, &self.path)
+        lower_scope_at(
+            definition,
+            &mut self.relations,
+            &self.path,
+            self.lowered_sources,
+        )
     }
 }
 
@@ -202,14 +217,57 @@ pub fn lower_scope(
     definition: &mut WorkflowDefinition,
     relations: &mut GraphRelations,
 ) -> Result<(), WorkflowCompileError> {
-    lower_scope_at(definition, relations, &[])
+    lower_scope_at(definition, relations, &[], false)
 }
 
 pub fn lower_scope_at(
     definition: &mut WorkflowDefinition,
     relations: &mut GraphRelations,
     path: &[DefinitionId],
+    lowered_sources: bool,
 ) -> Result<(), WorkflowCompileError> {
+    // Scope sources are implicit references, never authored node declarations.
+    // Reject both reserved IDs and internal kinds before injecting any source.
+    // Resolved-definition adapters retain canonical sources from an earlier pass;
+    // authored definitions cannot opt into that path. Artifact replay uses stored relations.
+    for node in &definition.nodes {
+        let reserved = matches!(
+            node.id.as_str(),
+            mf_runtime::ROOT_SOURCE_ID
+                | mf_runtime::LOOP_SOURCE_ID
+                | mf_runtime::ITERATION_INPUT_ID
+        ) || matches!(
+            node.kind.as_str(),
+            mf_runtime::ROOT_SOURCE_ID
+                | mf_runtime::LOOP_SOURCE_ID
+                | mf_runtime::ITERATION_INPUT_KIND
+        );
+        if !reserved {
+            continue;
+        }
+        let mut node_path = path.to_vec();
+        node_path.push(node.id.clone());
+        ensure!(
+            lowered_sources
+                && node.config == json!({})
+                && ((relations.scope.is_none()
+                    && !definition.variables.is_empty()
+                    && node.id.as_str() == mf_runtime::ROOT_SOURCE_ID
+                    && node.kind == mf_runtime::ROOT_SOURCE_ID)
+                    || relations.scope.as_ref().is_some_and(|scope| {
+                        let kind = if scope.is_stateful() {
+                            mf_runtime::LOOP_SOURCE_ID
+                        } else {
+                            mf_runtime::ITERATION_INPUT_KIND
+                        };
+                        node.id == scope.input && node.kind == kind
+                    })),
+            crate::compiler::InvalidScopeSnafu {
+                path: crate::loops::path_label(&node_path),
+                message: "scope sources are implicit; reference them without declaring a node",
+            }
+        );
+    }
     // Callable Flows own their own root state; container bodies cannot redeclare it.
     relations.root = None;
     if !definition.variables.is_empty() {

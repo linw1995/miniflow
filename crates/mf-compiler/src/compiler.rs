@@ -1351,7 +1351,7 @@ pub fn plan_resolved_definition(
     let resolved = resolve_inline_scopes(
         definition,
         registry,
-        crate::lowering::ScopeContext::default(),
+        crate::lowering::ScopeContext::resolved(),
         0,
     )?;
     plan_resolved_workflow(&resolved)
@@ -1864,7 +1864,7 @@ fn canonical_host_definition(
     definition: &WorkflowDefinition,
     shape: &mf_runtime::CompiledGraph,
     root_version: mf_runtime::WorkflowDefinitionVersion,
-    mut relations: GraphRelations,
+    relations: GraphRelations,
     depth: usize,
 ) -> Result<WorkflowDefinition, WorkflowCompileError> {
     ensure!(
@@ -1875,11 +1875,13 @@ fn canonical_host_definition(
         }
     );
     let mut definition = definition.clone();
-    // The registered definition is authoring input, not a compiled artifact.
-    // Recompute instruction relationships rather than trusting the stored shape.
-    crate::lowering::lower_scope(&mut definition, &mut relations)?;
+    // Registered executors may retain canonical sources from an earlier lowering pass.
+    // Recompute and validate their relationships rather than trusting the stored shape.
+    let mut context = crate::lowering::ScopeContext::resolved();
+    context.relations = relations;
+    context.lower_scope(&mut definition)?;
     ensure!(
-        relations == shape.relations,
+        context.relations == shape.relations,
         InvalidGraphSnafu {
             definition_id: DefinitionId::from("workflow"),
             message: "host Flow relationships differ from the frozen call graph"

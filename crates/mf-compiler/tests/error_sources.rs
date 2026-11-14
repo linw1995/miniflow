@@ -551,7 +551,7 @@ fn loop_validation_preserves_variable_and_descriptor_sources() {
 }
 
 #[test]
-fn iteration_validation_preserves_the_structural_graph_error() {
+fn iteration_source_declarations_preserve_typed_scope_errors() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version": "2026-09-26", "dependencies": {},
         "nodes": [{"id": "each", "kind": "builtin.iteration", "config": {"body": {"version":"2026-09-26", "dependencies":{},
@@ -572,12 +572,12 @@ fn iteration_validation_preserves_the_structural_graph_error() {
         assert!(
             matches!(&error, WorkflowCompileError::ChildGraph { definition_id, source }
                 if definition_id.as_str() == "each"
-                    && matches!(source.as_ref(), WorkflowCompileError::ScopeStructure { source, .. }
-                        if matches!(source, mf_compiler::ScopeStructureError::ReservedNode { node }
-                            if node.as_str() == "%iteration"))),
+                    && matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
+                        if path == "[\"each\",\"%iteration\"]"
+                            && message == "scope sources are implicit; reference them without declaring a node")),
             "{error:?}"
         );
-        assert!(find_source::<mf_compiler::ScopeStructureError>(&error).is_some());
+        assert!(find_source::<Box<WorkflowCompileError>>(&error).is_some());
     }
 }
 
@@ -596,7 +596,7 @@ fn authoring_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
                 &error,
                 WorkflowCompileError::InvalidScope { path, message }
                     if path == &json!([id]).to_string()
-                        && message == "reserved scope source requires its canonical enclosing scope"
+                        && message == "scope sources are implicit; reference them without declaring a node"
             ),
             "{error}"
         );
@@ -617,7 +617,7 @@ fn authoring_cannot_expose_internal_iteration_sources_as_ordinary_nodes() {
                     if definition_id.as_str() == "invoke"
                         && matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
                             if path == &json!(["invoke", id]).to_string()
-                                && message == "reserved scope source requires its canonical enclosing scope")
+                                && message == "scope sources are implicit; reference them without declaring a node")
             ),
             "{error}"
         );

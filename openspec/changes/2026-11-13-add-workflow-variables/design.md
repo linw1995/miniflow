@@ -14,6 +14,21 @@ not provider names or configuration discovery. Root state and container state ca
 same graph. A Loop body continues to use its own frame; a callable Flow inside a Loop gets fresh root
 state and cannot mutate its caller's state.
 
+## Implicit scope sources
+
+Authors reference `%root`, `%loop`, and `%iteration` directly in input bindings and output selections;
+they never declare the source nodes. `workflow.assign` also needs no source declaration. Before
+injecting an internal source, lowering rejects authored nodes with any reserved source ID or internal
+source kind, including a declaration that exactly matches the canonical internal node. Only the
+current authorized scope is checked; ordinary configuration values remain opaque.
+
+Source instructions remain in compiled graphs for type inference, scheduling, and publication.
+Compiled-artifact replay consumes stored relationships and does not re-enter authoring lowering.
+Resolved-definition adapters may retain canonical sources inserted by an earlier pass, but cannot
+introduce a source outside its owning scope or with a forged ID, kind, or configuration. This internal
+path is not selected by authored files. No input-reference grammar, assignment ordering, state
+lifetime, or observation path changes are needed.
+
 ## Assignment and ordering
 
 `workflow.assign` uses the existing `{variable}` configuration, required typed `value` input, and

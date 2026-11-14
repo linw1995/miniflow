@@ -44,6 +44,25 @@ with an optional version override, independent dependency declarations, and loca
 message-domain restrictions. Source-file aliases used by a nested Call belong to its containing Flow,
 not an outer body's table.
 
+### Implicit scope sources
+
+Scope values are available without declaring a source node in `nodes`:
+
+| Reference source | Declared by | Available values |
+| --- | --- | --- |
+| `%root` | The Flow's definition-level `variables` | That invocation's mutable variables |
+| `%loop` | The enclosing `loop.run` node's `config.variables` and `config.inputs` | Loop variables, read-only inputs, and `index` |
+| `%iteration` | The enclosing `builtin.iteration` node | Current `item`, `key`, `index`, and read-only `config.inputs` |
+
+For example, `{"from":{"node":"%loop","port":"count"}}` reads a Loop variable directly;
+there is no `%loop` node to declare first. Workflow outputs use the same source and port fields.
+`workflow.assign` likewise needs only its target `config.variable` and a `value` input, not a variable
+source declaration. A reader requiring an updated value still needs the assignment's `done` dependency.
+
+Do not add nodes with these reserved IDs or their internal source kinds (`%root`, `%loop`, or
+`builtin.iteration_input`); authored declarations are rejected. The compiler supplies internal source
+instructions in compiled graphs. These instructions are an implementation detail, not an authoring step.
+
 ## Reusable Flows
 
 Version `2026-10-25` adds `workflow.call`, supplied by `mfn-core`. Declare reusable
@@ -1338,8 +1357,9 @@ field is not supported. Each variable creates a Loop input and a required Loop o
 value; the input is optional when the variable declares an `initial` literal. Loop returns its
 variables rather than a second set of child results. A body using version `2026-11-13` may select
 terminal `outputs` as end-of-pass variable updates; older bodies require empty terminal outputs. The
-body reads current values, read-only inputs, and a zero-based `index` through the synthetic `%loop`
-node. Every body node ID is local to that body; `%loop` and `index` are reserved there. Cross-scope
+body reads current values, read-only inputs, and a zero-based `index` through the implicit `%loop`
+source. The compiler supplies it; do not declare a `%loop` node in the body. Every body node ID is local
+to that body; `%loop` and `index` are reserved there. Cross-scope
 edges and implicit reads of outer outputs are rejected. Import an outer value through a Loop input,
 including when initializing a nested Loop.
 
@@ -1548,9 +1568,9 @@ array after the body has passed validation. Other input shapes fail at execution
 }
 ```
 
-The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`. `%iteration` is a
-reserved body
-source with outputs `item` (the current array element or map value), `key` (the map key, or JSON null for an array),
+The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`.
+`%iteration` is an implicit body source, supplied by the compiler; do not declare a `%iteration` or
+`builtin.iteration_input` node. It has outputs `item` (the current array element or map value), `key` (the map key, or JSON null for an array),
 and `index` (a zero-based signed integer). Maps are visited in lexicographic key order; their `index` and collected
 results use that order in both execution modes. The outer `items` input holds the complete collection.
 For example, the body above maps `{"b":2,"a":1}` to `[1,2]`.
