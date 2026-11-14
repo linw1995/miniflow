@@ -776,6 +776,7 @@ mod tests {
         mf_runtime::NodeRegistration {
             kind: "fixture.first",
             factory: mf_runtime::NodeFactory::Subgraph {
+                scope: None,
                 flow_parameters: |config| config.get("host_extra").filter(|value| !value.is_null())
                     .map(|value| BTreeMap::from([("host_extra".into(), value.clone())]))
                     .unwrap_or_default(),
@@ -859,6 +860,7 @@ checksum = "original"
     const CALL_REGISTRATION: &str = r#"
 inventory::submit! {
     NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
+        scope: Some(SubgraphScope::Host),
         flow_parameters: |config| config.get("body").filter(|value| !value.is_null())
             .map(|body| BTreeMap::from([("body".into(), body.clone())]))
             .unwrap_or_default(), plain, prepared,
@@ -1062,7 +1064,7 @@ inventory::submit! {
             "[package]\nname = {package:?}\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\nexpanded = []\n\n[dependencies]\nmf-runtime = {{ path = {:?} }}\nserde_json = \"1.0.151\"\ninventory = \"0.3.24\"\n", runtime.to_str().unwrap()
         )).unwrap();
         fs::write(directory.join("src/lib.rs"), format!(r#"
-use mf_runtime::{{NodeBuildError, NodeFactory, NodeRegistration, PreparedNode, PreparedSubgraph}};
+use mf_runtime::{{NodeBuildError, NodeFactory, NodeRegistration, PreparedNode, PreparedSubgraph, SubgraphScope}};
 use serde_json::Value;
 use std::collections::BTreeMap;
 fn plain(_: Value) -> Result<PreparedNode, NodeBuildError> {{
@@ -1073,6 +1075,7 @@ fn prepared(_: &str, _: Value, _: BTreeMap<String, PreparedSubgraph>) -> Result<
 }}
 inventory::submit! {{
     NodeRegistration {{ kind: {kind:?}, factory: NodeFactory::Subgraph {{
+        scope: None,
         flow_parameters: |config| config.get("body").filter(|value| !value.is_null())
             .map(|body| BTreeMap::from([("body".into(), body.clone())]))
             .unwrap_or_default(), plain, prepared,

@@ -54,6 +54,7 @@ fn registration(flow_parameters: fn(&Value) -> BTreeMap<String, Value>) -> NodeR
     NodeRegistration {
         kind: "user.dispatch",
         factory: NodeFactory::Subgraph {
+            scope: None,
             flow_parameters,
             plain: factory,
             prepared: |_, _, _| factory(Value::Null),
@@ -91,6 +92,7 @@ fn dispatch_registration() -> NodeRegistration {
     NodeRegistration {
         kind: "user.dispatch",
         factory: NodeFactory::Subgraph {
+            scope: None,
             flow_parameters: DispatchConfig::flow_parameters,
             plain: factory,
             prepared: |_, config, arguments| {
@@ -431,6 +433,7 @@ fn matching_arguments_leave_nonobject_and_business_validation_to_the_provider() 
     let registration = NodeRegistration {
         kind: "user.dispatch",
         factory: NodeFactory::Subgraph {
+            scope: None,
             flow_parameters: selected,
             plain: factory,
             prepared: |id, config, arguments| {

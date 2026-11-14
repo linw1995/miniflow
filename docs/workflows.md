@@ -197,7 +197,10 @@ versions. A declared field accepts a local path, a built-in name, or an inline d
 ```
 
 This fragment assumes a provider registering `my-provider.dispatch` with `NodeFactory::Subgraph`
-and `Config::flow_parameters` extracting a `body: Flow` field; it is not a new core built-in. Alternatively, use
+and `Config::flow_parameters` extracting a `body: Flow` field; it is not a new core built-in. The
+receiver also declares a `scope` (`Some(SubgraphScope::Loop)`, `Some(SubgraphScope::Iteration)`,
+`Some(SubgraphScope::Host)`, or `None`), and the compiler derives Loop frames, item frames, and
+host selectors from that declaration rather than from the kind string. Alternatively, use
 `"body": {"path": "./worker.json"}` or `"body": {"builtin": "my-provider.worker"}`. Relative paths
 belong to the source file that declares them. Providers decide their own input ports, selection,
 child arguments, execution policy, result shape, and error handling. There is no global Flow environment.

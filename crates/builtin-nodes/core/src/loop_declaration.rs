@@ -302,6 +302,7 @@ inventory::submit! {
     NodeRegistration {
         kind: KIND,
         factory: mf_runtime::NodeFactory::Subgraph {
+            scope: Some(mf_runtime::SubgraphScope::Loop),
             flow_parameters: Config::flow_parameters,
             plain,
             prepared: factory,

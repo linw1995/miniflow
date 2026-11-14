@@ -46,6 +46,7 @@ inventory::submit! {
     mf_runtime::NodeRegistration {
         kind: "test.mixed_version_owner",
         factory: mf_runtime::NodeFactory::Subgraph {
+            scope: None,
             flow_parameters: Config::flow_parameters,
             plain: plain_owner,
             prepared: prepared_owner,

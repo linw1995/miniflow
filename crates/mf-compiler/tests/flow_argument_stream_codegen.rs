@@ -120,12 +120,15 @@ mod contract_drift {
     }
 
     inventory::submit! { NodeRegistration { kind: "workflow.call", factory: NodeFactory::Subgraph {
+        scope: None,
         flow_parameters: |config| BTreeMap::from([("unrelated".into(), config["body"].clone())]), plain: unexpected, prepared: |_, config, _| unexpected(config),
     } } }
     inventory::submit! { NodeRegistration { kind: "loop.run", factory: NodeFactory::Subgraph {
+        scope: None,
         flow_parameters: |config| BTreeMap::from([("unrelated".into(), config["body"].clone())]), plain: unexpected, prepared: |_, config, _| unexpected(config),
     } } }
     inventory::submit! { NodeRegistration { kind: "builtin.iteration", factory: NodeFactory::Subgraph {
+        scope: None,
         flow_parameters: |config| BTreeMap::from([("unrelated".into(), config["body"].clone())]), plain: unexpected, prepared: |_, config, _| unexpected(config),
     } } }
     inventory::submit! { NodeRegistration { kind: "test.contract_child", factory: NodeFactory::Plain(|config| {

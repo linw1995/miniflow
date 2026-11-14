@@ -79,7 +79,12 @@ the workflow. Manifest inspection reads the frozen graph and interface without c
 Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
 
 Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
-Use `NodeFactory::Subgraph { flow_parameters, plain, prepared }` for executable child fields.
+Use `NodeFactory::Subgraph { scope, flow_parameters, plain, prepared }` for executable child fields.
+The `scope` declaration tells the compiler which frame a child executes in: `SubgraphScope::Loop`
+for a mutable Loop frame, `SubgraphScope::Iteration` for an immutable item frame,
+`SubgraphScope::Host` for a named host Flow, and `None` for an ordinary child Flow value.
+The compiler derives `%loop`, `%iteration`, host selectors, and scope relationships from this
+declaration rather than matching provider kind strings.
 Its prepared factory takes `(id: &str, config: Value, children: BTreeMap<String, PreparedSubgraph>)`;
 there is no separate execution-options argument. Set `flow_parameters` to `Config::flow_parameters`,
 which extracts the present executable child values from the supplied configuration.
@@ -1156,6 +1161,7 @@ struct Config {
 //
 // In NodeRegistration, using the provider's plain and prepared factory functions:
 // factory: NodeFactory::Subgraph {
+//     scope: Some(SubgraphScope::Host), // or Loop, Iteration, None
 //     flow_parameters: Config::flow_parameters,
 //     plain,
 //     prepared,

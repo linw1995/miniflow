@@ -1,7 +1,7 @@
 use crate::{DefinitionId, ValueType, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::{
-    EXIT_LOOP_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopVariableDefinition, NodeDefinition,
-    OutputReferenceDefinition, WorkflowDefinitionVersion,
+    EXIT_LOOP_KIND, LOOP_SOURCE_ID, LoopVariableDefinition, NodeDefinition,
+    OutputReferenceDefinition, SubgraphScope, WorkflowDefinitionVersion,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -70,15 +70,14 @@ pub fn validate_scope(
     enclosing: Option<&BTreeMap<String, ValueType>>,
     root: Option<&BTreeMap<String, ValueType>>,
     path: &[DefinitionId],
+    subgraphs: &BTreeMap<String, SubgraphScope>,
 ) -> Result<(), WorkflowCompileError> {
     for node in &definition.nodes {
         let mut node_path = path.to_vec();
         node_path.push(node.id.clone());
         if definition.version == WorkflowDefinitionVersion::V2026_09_26
-            && matches!(
-                node.kind.as_str(),
-                LOOP_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
-            )
+            && (matches!(node.kind.as_str(), EXIT_LOOP_KIND | LOOP_SOURCE_ID)
+                || subgraphs.get(node.kind.as_str()) == Some(&SubgraphScope::Loop))
         {
             return Err(invalid(
                 &node_path,
