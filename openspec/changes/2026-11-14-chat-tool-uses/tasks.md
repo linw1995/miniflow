@@ -5,6 +5,7 @@
 - [x] 1.1 Inspect the actual message/result/preview contracts and identify missing public Agent message outputs.
 - [x] 1.2 Plan source authority, scoped identities, late association, multiple attempts, and conflict presentation.
 - [x] 1.3 Plan event-driven delivery, related tables, differential writes, and preservation of legacy observation data.
+- [x] 1.4 Inspect existing two-slot/role constraints and require canonical message persistence for session restoration.
 
 ## 2. Structured messages and source correlation
 
@@ -15,10 +16,15 @@
 
 ## 3. Relational persistence
 
-- [ ] 3.1 Add scoped FK/unique-key tables for semantic calls, executions, and small source checkpoints; remove live JSON storage.
-- [ ] 3.2 Migrate prior draft journals as observation-only records without invented messages, run IDs, or associations.
-- [ ] 3.3 Apply only dirty fields/rows, batch page loads, retain failed/cancelled facts, and preserve save-only recovery.
-- [ ] 3.4 Prove no payload/sibling rewrite on status changes and no write on exact replay; test migration and ownership.
+- [ ] 3.1 Evolve canonical message storage for multiple assistant/tool rows, empty-text tool calls, complete metadata,
+  source keys, and transactional session ordering without a fixed two-message reservation.
+- [ ] 3.2 Persist every valid Flow message and complete call/result structure; do not substitute lossy display summaries.
+- [ ] 3.3 Restore full successful-turn model history from message relations; keep partial unsuccessful turns inspectable
+  without adding them or metrics-only observations to model context.
+- [ ] 3.4 Add scoped call/execution/checkpoint FKs, link tools to persisted message rows, and remove live JSON storage.
+- [ ] 3.5 Migrate prior draft journals as observation-only records without invented messages, run IDs, or associations.
+- [ ] 3.6 Atomically apply message/relation/cursor changes, finalize messages with the turn, and retain complete save-only recovery.
+- [ ] 3.7 Update only dirty rows/fields, batch page loads, and prove no payload/sibling write or redundant replay write.
 
 ## 4. Event-driven presentation
 
@@ -30,8 +36,10 @@
 ## 5. Validation and review
 
 - [ ] 5.1 Test messages-only, observations-only, both arrival orders, ID reuse, multiple attempts, and conflict cases.
-- [ ] 5.2 Test idle/no-render delivery, backpressure, cancellation, final draining, and real terminal restart without execution.
-- [ ] 5.3 Recompile the affected-test Flow and run selected tests, focused coverage, `prek -a`, and strict OpenSpec validation.
-- [ ] 5.4 Update PR scope/validation/AI disclosure and verify no conflicts with current main before readiness.
+- [ ] 5.2 Round-trip multiple/empty-text tool messages, full metadata, large valid content, and call counts beyond display
+  limits; after restart assert the next provider request contains the complete prior successful conversation.
+- [ ] 5.3 Test idle/no-render delivery, reliable message backpressure, cancellation, final draining, and restart without execution.
+- [ ] 5.4 Recompile the affected-test Flow and run selected tests, focused coverage, `prek -a`, and strict OpenSpec validation.
+- [ ] 5.5 Update PR scope/validation/AI disclosure and verify no conflicts with current main before readiness.
 
 The earlier implementation's passing tests validate its prior behavior only. They do not complete these revised tasks.

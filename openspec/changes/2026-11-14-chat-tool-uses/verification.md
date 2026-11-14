@@ -4,7 +4,7 @@
 
 The two-source, event-driven, relational redesign in `design.md` is a plan pending implementation. The checks below
 record the earlier telemetry-only/polling/JSON baseline. They do not validate the new message contract, source merge,
-association tables, differential writes, or event subscriptions. This planning revision changes no runtime code.
+canonical message persistence/history reconstruction, association tables, differential writes, or event subscriptions. This planning revision changes no runtime code.
 Fresh verification is required after the revised tasks are implemented.
 
 ## Previous implementation scope

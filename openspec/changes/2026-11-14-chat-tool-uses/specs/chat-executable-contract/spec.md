@@ -23,5 +23,26 @@ Chat workflows MAY return current-invocation structured messages and a declared 
 
 #### Scenario: Postprocess the final answer
 
-- **WHEN** raw assistant messages differ from the workflow's canonical terminal text
-- **THEN** tool extraction does not silently substitute the raw answer for that terminal text
+- **WHEN** a workflow supplies both canonical terminal text and structured messages after postprocessing
+- **THEN** its final assistant message represents that canonical reply and the host does not append another reply from text
+- **AND** incompatible final content is rejected explicitly rather than silently rewriting the conversation
+
+### Requirement: Retain accepted messages as recoverable conversation data
+
+The host SHALL persist every structured message accepted by the chat contract, including roles, content, metadata, assistant tool calls, arguments, and tool-result links. ToolUse extraction SHALL NOT replace message storage. Successful completion SHALL require durable, reconciled message data; save-only recovery SHALL retain that data without another execution. A legacy workflow omitting messages SHALL retain the existing text fallback.
+
+#### Scenario: Save only a tool display summary
+
+- **WHEN** a workflow returns valid structured messages containing tool calls and results
+- **THEN** persisting only display summaries or final text is insufficient to report the conversation saved
+
+#### Scenario: Restore and continue after restart
+
+- **WHEN** the host reopens a successful conversation and submits its next turn
+- **THEN** the provider receives its stored canonical assistant/tool message sequence and metadata in order
+- **AND** model context is not reconstructed from diagnostic observations or clipped tool display strings
+
+#### Scenario: Persist a valid message larger than the preview budget
+
+- **WHEN** an accepted message or argument exceeds a tool-display limit
+- **THEN** the host retains its complete valid recovery representation independently of the bounded display copy

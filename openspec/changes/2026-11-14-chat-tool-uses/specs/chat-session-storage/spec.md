@@ -4,7 +4,7 @@
 
 ### Requirement: Persist tool sources in associated rows
 
-Storage SHALL use related semantic-call, execution, and small source-checkpoint records rather than a whole-turn model-call JSON column. Scoped unique keys and foreign keys SHALL preserve identity and ownership. Public payloads SHALL be bounded/redacted before writing. Absent legacy data SHALL remain unrecorded, not empty success. Diagnostic execution records SHALL NOT enter model-input history implicitly.
+Storage SHALL use related semantic-call, execution, and small source-checkpoint records rather than a whole-turn model-call JSON column. Scoped unique keys and foreign keys SHALL preserve identity and ownership. Diagnostic payloads SHALL be bounded/redacted before writing. Absent legacy data SHALL remain unrecorded, not empty success. Diagnostic execution records SHALL NOT enter model-input history implicitly.
 
 #### Scenario: Reopen mixed source data
 
@@ -21,6 +21,30 @@ Storage SHALL use related semantic-call, execution, and small source-checkpoint 
 - **WHEN** a database contains the earlier telemetry-derived JSON journal
 - **THEN** its IDs and public facts migrate as observation-only evidence before the obsolete column is removed
 - **AND** no semantic messages, unknown run identity, or guessed source links are fabricated
+
+### Requirement: Persist ordered canonical workflow messages
+
+Valid Flow messages SHALL be stored with stable source identity and session order, not only as ToolUse projections. Storage SHALL support multiple assistant/tool messages per turn, empty-text tool-call assistants, metadata, and complete call/result relations. Successful history loading SHALL reconstruct these messages, while unsuccessful prefixes remain recoverable outside model context. Display limits SHALL NOT truncate canonical recovery data.
+
+#### Scenario: Store more than a user and final assistant pair
+
+- **WHEN** a turn emits several assistant tool calls, tool results, and a final reply
+- **THEN** all accepted messages and their relations survive restart in the same order without violating a fixed two-slot or one-message-per-role assumption
+
+#### Scenario: Replay a message during final reconciliation
+
+- **WHEN** an already-persisted streamed message appears again in the terminal message list
+- **THEN** its source key resolves to the original message row without a duplicate sequence allocation
+
+#### Scenario: Fail final persistence
+
+- **WHEN** final message reconciliation or turn/usage/title persistence fails
+- **THEN** no successful turn is reported and the complete pending message changes remain available for save-only recovery
+
+#### Scenario: Keep diagnostic tool observations outside context
+
+- **WHEN** a turn includes telemetry-only tool executions without corresponding canonical messages
+- **THEN** they remain inspectable without fabricated assistant/tool history records
 
 ### Requirement: Write tool evidence incrementally
 
@@ -49,7 +73,7 @@ Write contention SHALL fail promptly without blocking cancellation. Unpersisted 
 #### Scenario: Retry a failed write
 
 - **WHEN** storage recovers after retaining a reply and its source records
-- **THEN** Save persists the original changes without another model or workflow request
+- **THEN** Save persists the original messages, relations, and execution changes without another model or workflow request
 
 #### Scenario: Reject another turn's update
 

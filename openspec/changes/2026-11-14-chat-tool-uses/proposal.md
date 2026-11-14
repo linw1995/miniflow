@@ -11,6 +11,9 @@ and persistence must be designed together rather than concatenating two tool lis
 
 - Add optional current-invocation `messages` and typed message events to the shared chat contract. Existing workflows
   remain valid; internal full-context Agent messages must be adapted before being exposed as new messages.
+- Persist every accepted Flow message as canonical ordered chat data, including message metadata, assistant tool calls,
+  arguments, and tool results. Rebuild successful conversation context from those messages after restart; ToolUse
+  summaries alone are not sufficient recovery data.
 - Derive semantic tool calls/results from messages. Preserve execution observations as a separate source of actual
   state, resolved arguments, and duration, including observation-only tools.
 - Correlate only through explicit scoped identities. Merge proven matches into one semantic item with execution
@@ -26,7 +29,8 @@ and persistence must be designed together rather than concatenating two tool lis
 ### Modified Capabilities
 
 - `chat-executable-contract`: Optional structured message results/events and explicit per-invocation ordering.
-- `chat-session-storage`: Source-aware relational tool records, incremental updates, migration, and recovery.
+- `chat-session-storage`: Durable structured messages and complete history reconstruction, linked tool/execution rows,
+  incremental updates, migration, and recovery.
 - `workflow-terminal-ui`: Event-driven, correlated message/observation presentation without duplicate or invented calls.
 
 ## Non-Goals
