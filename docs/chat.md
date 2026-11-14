@@ -215,12 +215,13 @@ its usage, and `answer`
 streams assistant text, including preambles accompanying tool calls. Catalog projection runs once before
 the first model request, not once per tool round.
 
-The example is a small ordinary five-node caller, not a generated Agent graph. A Flow constant produces
-the calculator, one generic `builtin.object` combines it with its description and parameter documentation
-as a `{flow, description, parameters}` record, and a second `builtin.object` puts that record in a native
-`Map(Object)`. A normal Call supplies only `params.tools` to the fixed `mfn-llm.agent` Flow; documentation
-is part of each record rather than a separate input. Zero, one or many tools use the same Agent and ports.
-See [configured Flow tools](workflows.md#configured-flow-tools) for the record contract and compilation
+The example is a small ordinary caller, not a generated Agent graph. A Flow constant produces the
+calculator and publishes its own interface; one generic `builtin.object` joins that interface with the
+description and parameter documentation, and outer `builtin.object` nodes build `Map(Flow)` and the
+matching `Map(Object)` of callable properties. A normal Call supplies `params.tools` and
+`params.tool_properties` to the fixed `mfn-llm.agent` Flow; documentation travels beside the capability
+rather than in a record. Zero, one or many tools use the same Agent and ports. See
+[configured Flow tools](workflows.md#configured-flow-tools) for the properties contract and compilation
 commands. The executable supports the same `--chat`, model, endpoint and credential parameters as the
 other chat examples.
 

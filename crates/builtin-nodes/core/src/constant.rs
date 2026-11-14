@@ -1,7 +1,7 @@
 use mf_runtime::{
     FlowValue, NodeBuildError, NodeConfig, NodeExecutionError, NodeFactory, NodeMetadata,
-    NodeRegistration, NodeValue, OutputDerivation, PreparedNode, PreparedSubgraph, TypedNodeResult,
-    TypedTaskNode, ValueRef, ValueType, deserialize_config,
+    NodeRegistration, NodeValue, OutputDerivation, PortSpec, PreparedNode, PreparedSubgraph,
+    TypedNodeResult, TypedTaskNode, ValueRef, ValueType, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -48,12 +48,45 @@ struct ConstantNode {
     value: ValueRef,
 }
 
+/// A flow constant publishes both the native capability and its own interface
+/// properties. The properties are plain JSON data; the Flow itself stays opaque.
+struct FlowConstantNode {
+    value: ValueRef,
+    properties: ValueRef,
+}
+
 #[derive(NodeValue)]
 struct ConstantInputs {}
 
 #[derive(NodeValue)]
 struct ConstantOutputs {
     value: ValueRef,
+}
+
+impl mf_runtime::NodePortContract for FlowConstantNode {
+    fn ports(&self) -> mf_runtime::NodePorts {
+        mf_runtime::NodePorts {
+            inputs: Vec::new(),
+            outputs: vec![
+                PortSpec::new("value", ValueType::Flow, true),
+                PortSpec::new("properties", ValueType::Object, true),
+            ],
+        }
+    }
+}
+
+impl mf_runtime::TaskNode for FlowConstantNode {
+    fn execute(
+        &self,
+        _inputs: mf_runtime::Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok(mf_runtime::Outputs::from([
+            ("value".into(), self.value.clone()),
+            ("properties".into(), self.properties.clone()),
+        ])
+        .into())
+    }
 }
 
 impl TypedTaskNode for ConstantNode {
@@ -99,15 +132,21 @@ fn flow_factory(
         value_type: FlowType::Flow,
         value,
     } = FlowConfig::from_config(config, flows)?;
-    let node = ConstantNode {
-        value: FlowValue::new(value)?.into(),
+    let value = FlowValue::new(value)?;
+    let properties: ValueRef = value.properties().into();
+    let node = FlowConstantNode {
+        value: value.into(),
+        properties: properties.clone(),
     };
     // Native capabilities are never literal evidence: only their known type may
     // be serialized into compiler metadata. Keep the ordinary typed task adapter.
-    PreparedNode::typed_task(
+    PreparedNode::new(
         node,
         NodeMetadata {
-            output_derivations: vec![OutputDerivation::known_type("value", ValueType::Flow)],
+            output_derivations: vec![
+                OutputDerivation::known_type("value", ValueType::Flow),
+                OutputDerivation::literal("properties", properties),
+            ],
             ..Default::default()
         },
     )
@@ -127,7 +166,7 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{ExecutionContext, Inputs, PortSpec};
+    use mf_runtime::{ExecutionContext, Inputs};
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -142,6 +181,7 @@ mod tests {
             effects.fetch_add(1, Ordering::SeqCst);
             Ok(Default::default())
         });
+        let properties = body.properties();
         let prepared = flow_factory(
             "definition",
             json!({"type":"flow", "value":{"opaque":true}}),
@@ -155,11 +195,17 @@ mod tests {
         assert!(prepared.metadata.stream_outputs.is_empty());
         assert_eq!(
             prepared.metadata.ports.outputs,
-            [PortSpec::new("value", ValueType::Any, true)]
+            [
+                PortSpec::new("value", ValueType::Flow, true),
+                PortSpec::new("properties", ValueType::Object, true),
+            ]
         );
         assert_eq!(
             prepared.metadata.output_derivations,
-            [OutputDerivation::known_type("value", ValueType::Flow)]
+            [
+                OutputDerivation::known_type("value", ValueType::Flow),
+                OutputDerivation::literal("properties", properties),
+            ]
         );
         serde_json::to_value(&prepared.metadata).unwrap();
         let task = prepared.execution.as_task_node().unwrap();
@@ -170,6 +216,14 @@ mod tests {
         assert!(first.outputs["value"].ptr_eq(&second.outputs["value"]));
         let flow = first.outputs["value"].as_flow().unwrap();
         assert_eq!(flow, second.outputs["value"].as_flow().unwrap());
+        assert_eq!(
+            first.outputs["properties"],
+            json!({
+                "callable": false, "startup": null,
+                "parameters": [], "allowed": {}, "required": [], "plain": false,
+                "outputs": [], "streams": [], "stdin": {},
+            })
+        );
         flow.invoke("call", Default::default(), &mut context)
             .unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 1);

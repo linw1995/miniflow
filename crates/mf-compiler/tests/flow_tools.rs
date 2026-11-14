@@ -29,13 +29,13 @@ fn addition() -> FlowTool {
         description: "Add two integers.".into(),
         parameters: BTreeMap::from([
             (
-                "calculate.left".into(),
+                "left".into(),
                 ParameterDescription {
                     description: "Left operand.".into(),
                 },
             ),
             (
-                "calculate.right".into(),
+                "right".into(),
                 ParameterDescription {
                     description: "Right operand.".into(),
                 },
@@ -174,18 +174,25 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["calls", "tools"]
+        ["calls", "tool_properties", "tools"]
     );
     let dispatch = &dispatch_call.children[&"dispatch".into()]["body"];
     assert!(dispatch.children.is_empty());
+    assert!(
+        dispatch
+            .definition
+            .nodes
+            .iter()
+            .all(|node| node.kind != "llm.tool_arguments")
+    );
     assert_eq!(
         dispatch
             .definition
             .nodes
             .iter()
-            .filter(|node| node.kind == "llm.tool_arguments")
+            .filter(|node| node.kind == "builtin.code")
             .count(),
-        1
+        2
     );
     assert_eq!(
         dispatch
@@ -241,19 +248,16 @@ fn configured_example_executes_and_exports_an_ordinary_workflow() {
         .find(|node| node.id.as_str() == "tools")
         .unwrap();
     assert_eq!(tools.kind, "builtin.object");
-    assert_eq!(
-        tools.config,
-        json!({"fields":{"add":"object","echo":"object"}})
-    );
-    let record = exported
+    assert_eq!(tools.config, json!({"fields":{"add":"flow","echo":"flow"}}));
+    let properties = exported
         .nodes
         .iter()
-        .find(|node| node.id.as_str() == "tool_add_record")
+        .find(|node| node.id.as_str() == "tool_add_properties")
         .unwrap();
-    assert_eq!(record.kind, "builtin.object");
+    assert_eq!(properties.kind, "builtin.object");
     assert_eq!(
-        record.config,
-        json!({"fields":{"flow":"flow","description":"string","parameters":"object"}})
+        properties.config,
+        json!({"fields":{"description":"string","parameters":"object","interface":"object"}})
     );
     let description = exported
         .nodes
@@ -264,7 +268,7 @@ fn configured_example_executes_and_exports_an_ordinary_workflow() {
     assert!(exported.edges.iter().any(|edge| {
         edge.from_node.as_str() == "tool_add_description"
             && edge.from_output == "value"
-            && edge.to_node.as_str() == "tool_add_record"
+            && edge.to_node.as_str() == "tool_add_properties"
             && edge.to_input == "description"
     }));
     assert!(
@@ -352,7 +356,7 @@ fn empty_catalog_and_dispatch_keep_capabilities_internal() {
 fn every_tool_interface_is_validated_even_without_calls() {
     let mut tool = addition();
     tool.parameters.insert(
-        "calculate.missing".into(),
+        "missing".into(),
         ParameterDescription {
             description: "Not an input.".into(),
         },
@@ -374,7 +378,10 @@ fn every_tool_interface_is_validated_even_without_calls() {
             .unwrap()
             .execute_in_context(&mut context)
             .unwrap_err();
-        assert!(error.to_string().contains("unknown input"), "{error}");
+        assert!(
+            error.to_string().contains("declared inputs only"),
+            "{error}"
+        );
         assert!(std::error::Error::source(&error).is_some());
         // Even a valid business call cannot start before catalog validation.
         assert!(!recording.history().iter().any(|entry| {
@@ -577,12 +584,15 @@ fn private_arguments_do_not_hide_other_calls_or_public_selections() {
     let history = recording.history();
     let names: Vec<_> = history
         .iter()
-        .filter(|entry| entry.node.as_ref() == "arguments")
+        .filter(|entry| entry.node.as_ref() == "classify")
         .filter_map(|entry| entry.snapshot.node(&entry.scope, &entry.node))
         .filter_map(|snapshot| snapshot.outputs.get("name"))
         .collect();
-    assert!(!names.is_empty());
-    assert!(names.iter().all(|name| name.as_str() == Some("echo")));
+    // The adapter marks every derived output with its call's privacy, so the
+    // private call's tool name is redacted while the public call stays readable.
+    let mut names: Vec<_> = names.iter().map(|name| name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, [Some("[REDACTED]"), Some("echo")]);
 }
 
 #[test]
@@ -678,7 +688,7 @@ fn secret_tool_selection_stays_private_through_native_dispatch() {
         let history = recording.history();
         let selected: Vec<_> = history
             .iter()
-            .filter(|entry| entry.node.as_ref() == "arguments")
+            .filter(|entry| entry.node.as_ref() == "classify")
             .filter_map(|entry| entry.snapshot.node(&entry.scope, &entry.node))
             .filter(|snapshot| snapshot.outputs.get("name").is_some())
             .collect();
@@ -741,16 +751,24 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_with_native_flows() 
         assert_eq!(output["catalog"].as_array().unwrap().len(), 1);
         harness.traces.force_flush().unwrap();
         let spans = harness.spans.get_finished_spans().unwrap();
-        assert_eq!(
-            spans
-                .iter()
-                .filter(|span| span.attributes.iter().any(|attribute| {
-                    attribute.key.as_str() == "mf.node.kind"
-                        && attribute.value.as_str() == "llm.tool_definition"
-                }))
-                .count(),
-            1
-        );
+        // One catalog projection node runs once, outside the dispatch iteration.
+        let projections = spans
+            .iter()
+            .filter(|span| {
+                let mut node = String::new();
+                let mut kind = String::new();
+                for attribute in &span.attributes {
+                    let text = attribute.value.as_str().to_string();
+                    match attribute.key.as_str() {
+                        "mf.node.id" => node = text,
+                        "mf.node.kind" => kind = text,
+                        _ => {}
+                    }
+                }
+                node == "definition" && kind == "builtin.code"
+            })
+            .count();
+        assert_eq!(projections, 1);
         // A dynamic invocation belongs to its producer's definition, while its
         // runtime ancestry remains inside the dispatch item. The extended detail
         // protocol must preserve both, rather than invent Router-owned children.

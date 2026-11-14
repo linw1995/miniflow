@@ -8,6 +8,7 @@ mod execution_inputs;
 mod execution_outputs;
 mod flow;
 mod flow_invocation;
+mod flow_properties;
 mod flow_value;
 #[cfg(feature = "async")]
 mod future_execution;
@@ -65,6 +66,7 @@ pub use flow::{
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
 };
 pub use flow_invocation::{FlowEmission, FlowInvocation};
+pub use flow_properties::{interface_properties, value_schema};
 pub use flow_value::{FlowValue, FlowValueBuildError};
 #[cfg(feature = "async")]
 pub use future_execution::FutureExecutionError;

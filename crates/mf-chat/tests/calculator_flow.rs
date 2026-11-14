@@ -53,7 +53,8 @@ fn calculator_profile_loads_real_tool_bodies_without_specialized_nodes() {
         std::collections::BTreeSet::from([
             "params",
             "calculator",
-            "calculator_tool",
+            "calculator_properties",
+            "tool_properties",
             "tools",
             "agent",
         ])
@@ -90,6 +91,10 @@ fn calculator_profile_loads_real_tool_bodies_without_specialized_nodes() {
         .unwrap();
     assert_eq!(
         params.config["parameters"]["tools"]["type"],
+        json!({"map":"flow"})
+    );
+    assert_eq!(
+        params.config["parameters"]["tool_properties"]["type"],
         json!({"map":"object"})
     );
     assert!(params.config["parameters"].get("descriptions").is_none());

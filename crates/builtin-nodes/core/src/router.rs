@@ -139,6 +139,12 @@ impl From<RouterExecutionError> for NodeExecutionError {
 /// Only known invocation wrappers are unwrapped; unknown plugin errors propagate.
 /// This keeps new runtime contracts fail-closed.
 fn is_business_failure(error: &WorkflowRunError) -> bool {
+    // Selection and arguments are caller data. Their validation happens before any
+    // child body effect, so an invalid invocation is a business result rather than
+    // an infrastructure failure. `Context` and resource errors stay fatal.
+    if matches!(error, WorkflowRunError::WorkflowInputs { .. }) {
+        return true;
+    }
     let WorkflowRunError::NodeExecution { source, .. } = error else {
         return false;
     };
@@ -780,15 +786,17 @@ mod tests {
             })
             .with_input_schema(schema()),
         );
-        let error = execute(candidates).unwrap_err();
+        let result = execute(candidates).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(matches!(
-            execution_error(&error),
-            RouterExecutionError::Child {
-                source: WorkflowRunError::WorkflowInputs { .. },
-                ..
-            }
-        ));
+        // Invalid caller arguments stay a business result and never reach the body.
+        assert!(
+            result.outputs["result"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("required")),
+            "{}",
+            result.outputs["result"]
+        );
+        assert!(result.outputs["result"].is_secret());
     }
 
     #[test]
@@ -1403,22 +1411,24 @@ mod tests {
             ]);
             assert!(execute(candidates.clone()).is_ok());
             if selected {
-                let error = execute_with(
+                let outcome = execute_with(
                     &executable(),
                     "constrained".into(),
                     candidates,
                     json!({}).into(),
                     &mut Default::default(),
-                )
-                .unwrap_err();
-                assert!(matches!(
-                    execution_error(&error),
-                    RouterExecutionError::Child {
-                        source: WorkflowRunError::Context { .. }
-                            | WorkflowRunError::WorkflowInputs { .. },
-                        ..
-                    }
-                ));
+                );
+                match outcome {
+                    // Caller-data violations are business results, not infrastructure.
+                    Ok(result) => assert!(result.outputs["result"].get("error").is_some()),
+                    Err(error) => assert!(matches!(
+                        execution_error(&error),
+                        RouterExecutionError::Child {
+                            source: WorkflowRunError::Context { .. },
+                            ..
+                        }
+                    )),
+                }
             }
         }
     }

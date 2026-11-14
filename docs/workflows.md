@@ -222,7 +222,9 @@ special parameter-default rule is involved.
 
 When a definition needs a fixed Flow value, the existing `builtin.constant` accepts an explicit Flow
 type. Its top-level `value` is prepared as a receiver-authorized source and its ordinary `value` output
-publishes the callable without executing B:
+publishes the callable without executing B. A flow constant also publishes `properties`: the callable's
+own interface as plain JSON (`callable`, `startup`, `parameters`, `allowed`, `required`, `plain`,
+`outputs`, `streams`, `stdin`), so a caller can consume it with ordinary value nodes:
 
 ```json
 {
@@ -423,44 +425,52 @@ during loading, while a subsequently missing or unlaunchable executable fails at
 
 ## Configured Flow tools
 
-`mfn-llm.agent` is one reusable Flow with a fixed native `params.tools: Map(Object)` input. Each map
-value is a self-contained tool record with required `flow: Flow` and `description: String` fields and an
-optional `parameters: Object` field. The description and parameter documentation travel with the callable;
-there is no separate `descriptions` input. Supplying more tools changes only the input collection, not the
-Agent definition, Loop variables, catalog nodes, or dispatch ports. The Rust `agent_definition()`,
+A Flow owns its own callable properties. `builtin.constant` with `type: "flow"` publishes both the
+native capability (`value`) and its interface as plain JSON (`properties`), derived from the prepared
+body: `callable`, `startup`, `parameters`, `allowed`, `required`, `plain`, `outputs`, `streams` and
+`stdin`. Nothing is inferred from the source JSON, re-declared in a tool record, or exposed as a
+separate projection node. `callable` is true only for a body with exactly one startup node, no stdin and
+no incremental outputs; such a body also publishes `allowed` (non-secret input names mapped to JSON
+Schema) and `required` (effective required names, already excluding inputs with an environment or
+default). `plain` reports the sole required string `content` output that encodes as plain text.
+
+`mfn-llm.agent` accepts a fixed `params.tools: Map(Flow)` plus `params.tool_properties: Map(Object)`
+holding, per business name, the caller-owned `description`, optional `parameters` documentation, and
+the constant's `interface`. Supplying more tools changes only those collections, not the Agent
+definition, Loop variables, catalog nodes, or dispatch ports. The Rust `agent_definition()`,
 `tool_catalog_definition()` and `tool_uses_definition()` APIs return those same fixed definitions; none
 accepts a tool list or generates per-tool graph IDs.
 
-Each tool body is produced by an existing `builtin.constant` with `type: "flow"`. An inner
-`builtin.object` assembles its `flow`, `description`, and optional `parameters` into one record; an outer
-`builtin.object` with an `object` field for each business name assembles the `Map(Object)`. Both are
-ordinary native-value construction, not separate documentation or executable registries.
+Both maps are ordinary native-value construction: one `builtin.constant` per tool, an inner
+`builtin.object` joining its `properties` with the caller's documentation, and outer `builtin.object`
+nodes with one field per business name. A fixed catalog Iteration visits the properties map, using each
+business key as the tool name, and projects a model definition with a CEL `builtin.code` node. Three
+assertions validate the whole catalog before any model request, including when no tools are called:
+exactly one startup node with a terminal interface and no stdin, at most declared inputs are documented,
+and no public input is runtime-only. Dispatch consumes original calls and the same properties map.
 
-The `llm.tool_definition` adapter reads `record.flow`'s real prepared interface and projects the record's
-caller-owned documentation into a model definition. A fixed catalog Iteration visits the map's values,
-using each business key as its tool name. It outputs only model definitions, not an executable ID or a
-duplicate binding table. `mfn-llm.tool-catalog` and `mfn-llm.tool-uses` both receive this map as
-`params.tools`. The dispatch Iteration consumes original calls and shares the same native tool-record map.
-`llm.tool_arguments` validates against the selected Flow's actual interface, and the Router selects the
-record by name and invokes its `flow` field. A separate CEL assertion validates the entire batch before
-any tool effects. There are no LLM-specific tool producers, collectors, packers, or unpackers. Unknown
-tools, invalid arguments and recoverable child failures become tool-result content. Blank call IDs,
-cancellation and infrastructure failures still fail execution. Every interface is validated before
-dispatch or a model request, including when no tools are called; runtime callable metadata is not inferred
-from source JSON.
+`mfn-llm.tool-uses` is an ordinary composed Flow, not a specialized node. Per call it classifies the
+request with CEL, then a `builtin.if_else` activates exactly one branch: a `builtin.router` in
+`execute` mode invokes the selected Flow, or a small CEL producer publishes the error object. An
+`exclusive` input selects between them for `llm.tool_result`. Unknown tools, non-object arguments,
+unknown or secret argument names, and missing required arguments become tool-result content. Argument
+names travel flat and are qualified to `node.port` by the runtime when they identify a single startup
+port; an ambiguous flat name is rejected. Child input validation failures are caller-data failures and
+are published as business results, while blank call IDs, cancellation and infrastructure failures still
+fail execution.
 
-Record documentation does not modify child parameter definitions. Types and requiredness come from the
-prepared interface: a tool has exactly one startup node and a finite terminal interface without stdin
-or incremental exports. Secret inputs require an environment or default source, cannot be supplied by
-model arguments, and are omitted from schemas. Literal defaults and environment names stay in the
-native Flow; the catalog exposes only effective requiredness and documented public inputs. A sole required
-string output named `content` becomes plain text; other output shapes are JSON-encoded.
+Assertions cover tool structure; types and requiredness come from the prepared interface. Secret inputs
+must carry an environment or default source, cannot be supplied by model arguments, and are omitted from
+`allowed`. Literal defaults and environment names stay in the native Flow; the catalog exposes only
+effective requiredness and documented public inputs. Because a dynamic caller cannot enumerate
+unexpected keys, an unknown-argument report is coarser than a compiled adapter's single-key message;
+a missing required argument is still named.
 
 A tool body is prepared and stored only at its Flow constant. Dispatch preserves the callable's identity,
 definition origin and privacy through ordinary data edges; the Router does not own duplicate children
 or create a second invocation runtime. Resolve external tool sources in their original directory before
 composing if that directory differs from the composed workflow's directory. There is no runtime JSON
-catalog override or lexical `flow_ref` transport. The tool adapter remains terminal-only; the broader
+catalog override or lexical `flow_ref` transport. Tool dispatch remains terminal-only; the broader
 native Flow API's streaming capabilities and existing observed-item nested-scope limits are unchanged.
 
 The Agent calls `mfn-llm.tool-catalog` once, outside its eight-pass native Loop, then invokes
@@ -468,15 +478,16 @@ The Agent calls `mfn-llm.tool-catalog` once, outside its eight-pass native Loop,
 results. Assistant tool-call messages precede the tool messages; usage facts accumulate across turns.
 Completion returns final `status`, `text`, `usages` and optional `error`, while `answer` streams every
 assistant turn, including tool-call preambles. Provider failures and exhaustion remain explicit failures.
-The same Agent handles empty, single-tool, and multi-tool collections. For no tools, supply an empty
-object with `builtin.object` and `fields: {}`; there is no separate empty-Agent definition.
+The same Agent handles empty, single-tool, and multi-tool collections. For no tools, supply empty
+`tools` and `tool_properties` objects with `builtin.object` and `fields: {}`; there is no separate
+empty-Agent definition.
 
-The [calculator chat Flow](../examples/chat-calculator-flow.json) is a small five-node caller: `params`,
-`calculator`, `calculator_tool`, `tools`, and `agent`. A Flow constant loads
-[the calculator](../examples/agent-calculator/calculator.json). The inner `calculator_tool` object combines
-that Flow with the `calculator_description` and `calculator_parameters` defaults, and the outer `tools`
-object builds the native map `{calculator: Object}`. A normal Call passes only `params.tools` into
-`mfn-llm.agent`. No Agent graph is copied, generated, or specialized. The calculator supports
+The [calculator chat Flow](../examples/chat-calculator-flow.json) is a small caller: `params`,
+`calculator`, `calculator_properties`, `tools`, `tool_properties`, and `agent`. A Flow constant loads
+[the calculator](../examples/agent-calculator/calculator.json) and publishes its own interface. The
+inner `calculator_properties` object joins that interface with the `calculator_description` and
+`calculator_parameters` defaults; the outer `tools` object builds `Map(Flow)` and `tool_properties`
+builds the matching `Map(Object)`. A normal Call passes both maps into `mfn-llm.agent`. No Agent graph is copied, generated, or specialized. The calculator supports
 add/subtract/multiply/divide and plain-text numeric results. Compile and run it with `--chat`:
 
 ```sh
@@ -612,7 +623,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 
 | Package | Kind | Configuration | Input ports | Output ports |
 | --- | --- | --- | --- | --- |
-| `mfn-core` | `builtin.constant` | Required `value`: any JSON value | None | `value`: inferred from the configured value |
+| `mfn-core` | `builtin.constant` | Required `value`: any JSON value, or `type: "flow"` with a prepared Flow source | None | `value`: inferred from the configured value; a flow constant also publishes required `properties`: its interface as an `Object` |
 | `mfn-core` | [`builtin.parameters`](#parameters) | Named parameters with types, optional `env` and `default`, and `secret` (default `true`) | One typed input per parameter; exposed at startup when initial | One matching typed output per parameter |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.object` | Required `fields`: field names mapped to value types; may be empty | One required input per field | `value`: native map preserving field payloads and secrets |

@@ -61,13 +61,13 @@
             "type": "object",
             "secret": false,
             "default": {
-              "calculate.operation": {
+              "operation": {
                 "description": "Operation to perform: add, subtract, multiply, or divide."
               },
-              "calculate.left": {
+              "left": {
                 "description": "Left operand."
               },
-              "calculate.right": {
+              "right": {
                 "description": "Right operand; must be nonzero for division."
               }
             }
@@ -86,22 +86,16 @@
       }
     },
     {
-      "id": "calculator_tool",
+      "id": "calculator_properties",
       "kind": "builtin.object",
       "config": {
         "fields": {
-          "flow": "flow",
           "description": "string",
-          "parameters": "object"
+          "parameters": "object",
+          "interface": "object"
         }
       },
       "inputs": {
-        "flow": {
-          "from": {
-            "node": "calculator",
-            "port": "value"
-          }
-        },
         "description": {
           "from": {
             "node": "params",
@@ -113,11 +107,17 @@
             "node": "params",
             "port": "calculator_parameters"
           }
+        },
+        "interface": {
+          "from": {
+            "node": "calculator",
+            "port": "properties"
+          }
         }
       }
     },
     {
-      "id": "tools",
+      "id": "tool_properties",
       "kind": "builtin.object",
       "config": {
         "fields": {
@@ -127,7 +127,24 @@
       "inputs": {
         "calculator": {
           "from": {
-            "node": "calculator_tool",
+            "node": "calculator_properties",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "tools",
+      "kind": "builtin.object",
+      "config": {
+        "fields": {
+          "calculator": "flow"
+        }
+      },
+      "inputs": {
+        "calculator": {
+          "from": {
+            "node": "calculator",
             "port": "value"
           }
         }
@@ -180,6 +197,12 @@
           "from": {
             "node": "params",
             "port": "api_key"
+          }
+        },
+        "params.tool_properties": {
+          "from": {
+            "node": "tool_properties",
+            "port": "value"
           }
         }
       }
