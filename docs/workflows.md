@@ -355,9 +355,12 @@ also propagates to terminal and incremental values.
 Invocation creates isolated input/value state while sharing the caller's step budget, cancellation, and
 worker limits. Observation distinguishes the
 invocation node from the producer's actual definition origin; no fictitious child is created beneath
-the invoker. Observed calls currently require a target origin in the running workflow's frozen
-description; an unmapped native callback or a handle from a different artifact fails explicitly rather
-than reporting fictitious child events. Native callbacks remain usable without graph observation.
+the invoker in the compiled graph or description. After an invocation is observed, the TUI may display
+that body beneath the actual call site as a runtime projection; this changes presentation only and
+retains the producer as the definition owner. Observed calls currently require a target origin in the
+running workflow's frozen description; an unmapped native callback or a handle from a different
+artifact fails explicitly rather than reporting fictitious child events. Native callbacks remain usable
+without graph observation.
 See the [complete three-file example](../examples/embedded-workflows) and
 [embedding](embedding.md#repository-example).
 

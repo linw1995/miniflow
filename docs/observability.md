@@ -943,8 +943,12 @@ B child beneath A. The runtime path still contains the enclosing call/loop/item 
 definition cursor switches to B for subsequent node and nested scope validation. Validation checks
 the callsite, owning workflow identity, and target body before accepting the scope.
 
-The TUI retains B's static definition at its producer and distinguishes its actual invoked target
-from the consumer's placement. Snapshots replace callable payloads with `"<Flow>"`, or `"[REDACTED]"`
-when secret. Business JSON serialization does not use this placeholder: it rejects executable values.
+The compiled description retains B's static definition at its producer; no child is fabricated
+beneath the consumer. Once an invocation is observed, the TUI projects that body beneath the actual
+invoker and stops drawing the producer copy for that target, so the graph still contains each
+definition once per display location. Repeated targets share one projection per invoker while Details
+retain individual invocation history. Snapshots replace callable payloads with `"<Flow>"`, or
+`"[REDACTED]"` when secret. Business JSON serialization does not use this placeholder: it rejects
+executable values.
 The metadata reference cannot manufacture or select an executable; execution uses the native handle
 that arrived through the edge.

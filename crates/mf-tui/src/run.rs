@@ -2,7 +2,9 @@
 
 use crate::{
     duration::format_duration_ns,
-    graph::{ConnectionView, GraphCluster, GraphError, GraphLayout, GraphRect, GraphView},
+    graph::{
+        ConnectionView, GraphCluster, GraphError, GraphLayout, GraphRect, GraphView, InvokedBodies,
+    },
     logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
@@ -1887,6 +1889,43 @@ fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
     );
 }
 
+/// Collect definition bodies observed at dynamic call sites. A body may be
+/// invoked many times; the inspector draws one projection per invoker and leaves
+/// per-invocation history in Details.
+fn invoked_bodies(description: &WorkflowDescription, snapshot: &StateSnapshot) -> InvokedBodies {
+    use mf_telemetry::event::ScopePathEntry;
+    let mut invoked: InvokedBodies = BTreeMap::new();
+    let mut collect = |path: &[ScopePathEntry]| {
+        for (index, entry) in path.iter().enumerate() {
+            let ScopePathEntry::Flow { definition, .. } = entry else {
+                continue;
+            };
+            if description.body(&definition.path).is_none() {
+                continue;
+            }
+            let invoker = runtime_static_owner_path(&path[..=index]);
+            if !invoker.is_empty() {
+                invoked
+                    .entry(invoker)
+                    .or_default()
+                    .insert(definition.path.clone());
+            }
+        }
+    };
+    for pass in &snapshot.loop_passes {
+        collect(&pass.path);
+    }
+    for node in snapshot
+        .iterations
+        .items
+        .iter()
+        .flat_map(|item| &item.nodes)
+    {
+        collect(&node.runtime_path);
+    }
+    invoked
+}
+
 /// The static graph retains definitions under producers. Runtime follow stops at
 /// the first dynamic invoker instead of jumping selection to its producer's body.
 fn runtime_static_owner_path(path: &[mf_telemetry::event::ScopePathEntry]) -> Vec<String> {
@@ -1898,6 +1937,26 @@ fn runtime_static_owner_path(path: &[mf_telemetry::event::ScopePathEntry]) -> Ve
         }
     }
     projected
+}
+
+/// Resolve a static definition path to the latest runtime pass that entered it
+/// through a Flow invocation. This lets a projected call-site body keep live
+/// node status while the description remains anchored at the producer.
+fn dynamic_scope_pass<'a>(
+    description: &WorkflowDescription,
+    snapshot: &'a StateSnapshot,
+    path: &[String],
+) -> Option<&'a LoopPassObservation> {
+    snapshot.loop_passes.iter().rev().find(|pass| {
+        pass.path
+            .iter()
+            .any(mf_telemetry::event::ScopePathEntry::is_flow)
+            && description
+                .scope_definition_path(&pass.path)
+                .ok()
+                .as_deref()
+                == Some(path)
+    })
 }
 
 fn scope_pass<'a>(
@@ -2080,7 +2139,16 @@ fn inline_observations_with_items(
             && let Some(item) = iteration_for_scope(snapshot, path, offsets, selected)
         {
             item.display_nodes(path, order())
-        } else if !static_body && let Some(pass) = scope_pass(snapshot, path, offsets) {
+        } else if let Some(pass) = (!static_body)
+            .then(|| scope_pass(snapshot, path, offsets))
+            .flatten()
+            .or_else(|| {
+                layout
+                    .is_projected_path(path)
+                    .then(|| dynamic_scope_pass(description, snapshot, path))
+                    .flatten()
+            })
+        {
             pass.display_nodes(order())
         } else {
             order()
@@ -2769,6 +2837,7 @@ pub struct ObservationView {
     execution: GraphLayout,
     pip_layout: Arc<GraphLayout>,
     expanded: BTreeSet<Vec<String>>,
+    invoked: InvokedBodies,
     viewports: BTreeMap<ConnectionView, GraphViewport>,
     collapsed: BTreeMap<Vec<String>, BTreeSet<usize>>,
     cluster_focus: BTreeMap<(Vec<String>, usize), String>,
@@ -2804,12 +2873,14 @@ impl ObservationView {
             &collapsed[&Vec::new()],
         )
         .context(GraphSnafu)?;
+        let invoked = InvokedBodies::new();
         let root = Arc::new(
-            GraphLayout::with_expanded_bodies(
+            GraphLayout::with_expanded_bodies_and_invocations(
                 description,
                 ConnectionView::Execution,
                 &expanded,
                 &collapsed,
+                &invoked,
             )
             .context(GraphSnafu)?,
         );
@@ -2818,11 +2889,12 @@ impl ObservationView {
             Arc::clone(&root)
         } else {
             Arc::new(
-                GraphLayout::with_expanded_bodies(
+                GraphLayout::with_expanded_bodies_and_invocations(
                     description,
                     ConnectionView::Execution,
                     &expanded,
                     &BTreeMap::new(),
+                    &invoked,
                 )
                 .context(GraphSnafu)?,
             )
@@ -2833,12 +2905,61 @@ impl ObservationView {
             pip_layout,
             root,
             expanded,
+            invoked,
             viewports: BTreeMap::new(),
             collapsed,
             cluster_focus: BTreeMap::new(),
             state: ViewState::default(),
         })
     }
+
+    /// Project each observed Flow invocation beneath its actual invoker. The
+    /// compiled description still holds the one authoritative definition at the
+    /// producer; this only changes where the inspector draws that body.
+    pub(crate) fn refresh_invocations(&mut self, snapshot: &StateSnapshot) -> Result<(), RunError> {
+        let invoked = invoked_bodies(&self.description, snapshot);
+        if invoked == self.invoked {
+            return Ok(());
+        }
+        let anchor = selection_anchor(&self.root, self.state.selected);
+        let view = self.root.connection_view();
+        self.invoked = invoked;
+        self.root = Arc::new(
+            GraphLayout::with_expanded_bodies_and_invocations(
+                &self.description,
+                view,
+                &self.expanded,
+                &self.collapsed,
+                &self.invoked,
+            )
+            .context(GraphSnafu)?,
+        );
+        self.pip_layout = Arc::new(
+            GraphLayout::with_expanded_bodies_and_invocations(
+                &self.description,
+                view,
+                &self.expanded,
+                &BTreeMap::new(),
+                &self.invoked,
+            )
+            .context(GraphSnafu)?,
+        );
+        if let Some(anchor) = anchor {
+            self.state.selected = anchor_display(&self.root, &anchor).unwrap_or_else(|| {
+                self.state
+                    .selected
+                    .min(self.root.nodes().len().saturating_sub(1))
+            });
+        } else {
+            self.state.selected = self
+                .state
+                .selected
+                .min(self.root.nodes().len().saturating_sub(1));
+        }
+        self.state.sync_scope(&self.root);
+        Ok(())
+    }
+
     fn collapse_body_path(&self) -> Option<Vec<String>> {
         self.selected_body()
             .filter(|path| self.expanded.contains(path))
@@ -2878,11 +2999,12 @@ impl ObservationView {
                 expanded.remove(sibling);
             }
         }
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_expanded_bodies_and_invocations(
             &self.description,
             self.root.connection_view(),
             &expanded,
             &self.collapsed,
+            &self.invoked,
         )
         .context(GraphSnafu)?;
         let (id, parent) = path.split_last().expect("body path is nonempty");
@@ -2918,11 +3040,12 @@ impl ObservationView {
         } else {
             set.insert(index);
         }
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_expanded_bodies_and_invocations(
             &self.description,
             self.root.connection_view(),
             &self.expanded,
             &folded,
+            &self.invoked,
         )
         .context(GraphSnafu)?;
         let execution = if path.is_empty() {
@@ -2982,11 +3105,12 @@ impl ObservationView {
     }
     fn switch_connections(&mut self) -> Result<(), RunError> {
         let anchor = selection_anchor(&self.root, self.state.selected);
-        let root = GraphLayout::with_expanded_bodies(
+        let root = GraphLayout::with_expanded_bodies_and_invocations(
             &self.description,
             self.root.connection_view().next(),
             &self.expanded,
             &self.collapsed,
+            &self.invoked,
         )
         .context(GraphSnafu)?;
         let execution = GraphLayout::with_view_and_collapsed(
@@ -2995,7 +3119,7 @@ impl ObservationView {
             &self.collapsed.get(&Vec::new()).cloned().unwrap_or_default(),
         )
         .context(GraphSnafu)?;
-        let pip_layout = GraphLayout::with_expanded_bodies(
+        let pip_layout = GraphLayout::with_expanded_bodies_and_invocations(
             &self.description,
             root.connection_view(),
             &self
@@ -3005,6 +3129,7 @@ impl ObservationView {
                 .map(|body| body.path.clone())
                 .collect(),
             &BTreeMap::new(),
+            &self.invoked,
         )
         .context(GraphSnafu)?;
         self.save_viewport();
@@ -3027,6 +3152,10 @@ impl ObservationView {
         traces: &TraceSnapshot,
         logs: &LogSnapshot,
     ) {
+        if let Err(error) = self.refresh_invocations(snapshot) {
+            self.state.graph_notice = Some(format!("Graph update unavailable: {error}"));
+            return;
+        }
         if !self.state.traces.visible {
             let result = match key {
                 KeyCode::Char('c') => Some(if let Some(path) = self.selected_body() {
@@ -3223,12 +3352,16 @@ impl ObservationView {
         terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
         observation: &LocalObservation,
     ) -> Result<(), RunError> {
+        let snapshot = observation.reader.snapshot_shared();
+        if let Err(error) = self.refresh_invocations(&snapshot) {
+            self.state.graph_notice = Some(format!("Graph update unavailable: {error}"));
+        }
         draw(
             terminal,
             &self.root,
             &self.pip_layout,
             &self.description,
-            &observation.reader.snapshot_shared(),
+            &snapshot,
             &observation.capture_view(),
             observation.elapsed(),
             &mut self.state,
@@ -6646,5 +6779,60 @@ mod tests {
         assert_eq!(capture.stderr_tail.len(), MAX_STDERR_BYTES);
         assert_eq!(capture.stderr_dropped, MAX_STDERR_BYTES as u64);
         assert!(capture.error.is_none());
+    }
+
+    #[test]
+    fn observed_flow_invocations_project_live_body_state_beneath_the_invoker() {
+        use mf_telemetry::event::{FlowOrigin, ScopePathEntry};
+        use serde_json::json;
+
+        let target = vec![ScopePathEntry::binding_key("producer", "value")];
+        let description: WorkflowDescription = serde_json::from_value(json!({
+            "version":"2026-11-09",
+            "workflow_id":format!("sha256:{}", "b".repeat(64)),
+            "execution":{"mode":"single"},
+            "nodes":[
+                {"id":"producer", "kind":"builtin.constant"},
+                {"id":"execute", "kind":"builtin.router"}
+            ],
+            "execution_order":["producer", "execute"],
+            "data_edges":[], "control_edges":[],
+            "loop_bodies":[{
+                "path":target,
+                "nodes":[{"id":"calculate", "kind":"builtin.code"}],
+                "execution_order":["calculate"], "data_edges":[], "control_edges":[]
+            }]
+        }))
+        .unwrap();
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut calculate = NodeObservation::pending("calculate", "builtin.code");
+        calculate.status = NodeStatus::Running;
+        snapshot.loop_passes.push(LoopPassObservation {
+            path: vec![ScopePathEntry::Flow {
+                call_id: "execute".into(),
+                definition: FlowOrigin {
+                    workflow_id: description.workflow_id.clone(),
+                    path: target.clone(),
+                },
+            }],
+            nodes: vec![calculate],
+            started: true,
+            outcome: None,
+            interrupted: false,
+            stream_invocation: None,
+            compact_statuses: Vec::new(),
+        });
+
+        let mut view = ObservationView::new(&description).unwrap();
+        view.refresh_invocations(&snapshot).unwrap();
+        let display = view
+            .root
+            .display_index_for_scoped_node(&target, "calculate")
+            .expect("dynamic body is projected under the invoker");
+        let source = view.root.sources(display)[0];
+        let observed = inline_observations(&view.root, &description, &snapshot, &BTreeMap::new());
+        assert_eq!(observed[source].status, NodeStatus::Running);
     }
 }
