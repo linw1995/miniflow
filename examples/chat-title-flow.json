@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-23",
+  "version": "2026-11-13",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -20,18 +20,10 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
-          "prompt": {
-            "type": "string"
-          },
-          "system": {
-            "type": "string",
-            "default": ""
-          },
-          "history": {
+          "messages": {
             "type": {
               "list": "object"
-            },
-            "default": []
+            }
           },
           "context": {
             "type": "object",
@@ -69,23 +61,102 @@
         "model": {
           "$ref": "params.model"
         },
-        "capture_errors": true,
-        "attribution": {
-          "purpose": "conversation"
-        },
         "base_url": {
           "$ref": "params.base_url"
         },
         "api_key": {
           "$ref": "params.api_key"
+        },
+        "capture_errors": true,
+        "attribution": {
+          "purpose": "conversation"
         }
       },
       "inputs": {
         "messages": {
           "from": {
-            "node": "model_messages",
+            "node": "params",
             "port": "messages"
           }
+        }
+      }
+    },
+    {
+      "id": "conversation_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "succeeded",
+            "condition": {
+              "source": {
+                "output": "model.status",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": "succeeded"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "append",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "messages": {
+            "list": "object"
+          },
+          "message": "object"
+        },
+        "code": {
+          "value": "messages + [dyn(message)]"
+        }
+      },
+      "inputs": {
+        "messages": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        },
+        "message": {
+          "from": {
+            "node": "model",
+            "port": "message"
+          }
+        }
+      }
+    },
+    {
+      "id": "unchanged",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "append",
+              "port": "value"
+            },
+            {
+              "node": "unchanged",
+              "port": "value"
+            }
+          ]
         }
       }
     },
@@ -142,18 +213,20 @@
       "config": {
         "language": "cel",
         "inputs": {
-          "prompt": "string",
+          "messages": {
+            "list": "object"
+          },
           "text": "string"
         },
         "code": {
-          "value": "'user: ' + prompt + '\\nassistant: ' + text"
+          "value": "'user: ' + string(messages[size(messages) - 1].content) + '\\nassistant: ' + text"
         }
       },
       "inputs": {
-        "prompt": {
+        "messages": {
           "from": {
             "node": "params",
-            "port": "prompt"
+            "port": "messages"
           }
         },
         "text": {
@@ -172,21 +245,49 @@
       }
     },
     {
+      "id": "title_model_messages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "system": "string"
+        },
+        "code": {
+          "messages": "[{'role':'system','content':system}, {'role':'user','content':prompt}]"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "title_prompt",
+            "port": "value"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "title_system",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
       "id": "title_model",
       "kind": "builtin.llm",
       "config": {
         "model": {
           "$ref": "params.model"
         },
-        "capture_errors": true,
-        "attribution": {
-          "purpose": "title"
-        },
         "base_url": {
           "$ref": "params.base_url"
         },
         "api_key": {
           "$ref": "params.api_key"
+        },
+        "capture_errors": true,
+        "attribution": {
+          "purpose": "title"
         }
       },
       "inputs": {
@@ -290,87 +391,36 @@
           }
         }
       }
-    },
-    {
-      "id": "model_messages",
-      "kind": "builtin.code",
-      "config": {
-        "language": "cel",
-        "inputs": {
-          "prompt": "string",
-          "history": {
-            "list": "object"
-          },
-          "system": "string"
-        },
-        "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
-        }
-      },
-      "inputs": {
-        "prompt": {
-          "from": {
-            "node": "params",
-            "port": "prompt"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "params",
-            "port": "history"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "params",
-            "port": "system"
-          }
-        }
-      }
-    },
-    {
-      "id": "title_model_messages",
-      "kind": "builtin.code",
-      "config": {
-        "language": "cel",
-        "inputs": {
-          "prompt": "string",
-          "system": "string"
-        },
-        "code": {
-          "messages": "(system == '' ? [] : [{'role':'system','content':system}]) + [] + [{'role':'user','content':prompt}]"
-        }
-      },
-      "inputs": {
-        "prompt": {
-          "from": {
-            "node": "title_prompt",
-            "port": "value"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "title_system",
-            "port": "value"
-          }
-        }
-      }
     }
   ],
   "edges": [
+    {
+      "from_node": "model",
+      "to_node": "conversation_route"
+    },
+    {
+      "from_node": "conversation_route",
+      "from_output": "succeeded",
+      "to_node": "append"
+    },
+    {
+      "from_node": "conversation_route",
+      "from_output": "else",
+      "to_node": "unchanged"
+    },
     {
       "from_node": "eligible",
       "to_node": "title_route"
     },
     {
       "from_node": "title_route",
-      "to_node": "title_prompt",
-      "from_output": "yes"
+      "from_output": "yes",
+      "to_node": "title_prompt"
     },
     {
       "from_node": "title_route",
-      "to_node": "conversation_usages",
-      "from_output": "else"
+      "from_output": "else",
+      "to_node": "conversation_usages"
     },
     {
       "from_node": "title_model",
@@ -378,8 +428,8 @@
     },
     {
       "from_node": "title_success",
-      "to_node": "title",
-      "from_output": "yes"
+      "from_output": "yes",
+      "to_node": "title"
     }
   ],
   "outputs": [
@@ -394,10 +444,9 @@
       "port": "text"
     },
     {
-      "name": "error",
-      "node": "model",
-      "port": "error",
-      "optional": true
+      "name": "messages",
+      "node": "messages",
+      "port": "value"
     },
     {
       "name": "metadata",
@@ -417,6 +466,12 @@
       "port": "value"
     },
     {
+      "name": "error",
+      "node": "model",
+      "port": "error",
+      "optional": true
+    },
+    {
       "name": "title",
       "node": "title",
       "port": "value",
@@ -425,7 +480,8 @@
     {
       "name": "answer",
       "node": "model",
-      "port": "delta"
+      "port": "delta",
+      "optional": true
     }
   ],
   "clusters": [
@@ -435,7 +491,10 @@
       "nodes": [
         "params",
         "model",
-        "model_messages"
+        "conversation_route",
+        "append",
+        "unchanged",
+        "messages"
       ]
     },
     {
@@ -452,10 +511,10 @@
       "nodes": [
         "title_prompt",
         "title_system",
+        "title_model_messages",
         "title_model",
         "title_success",
-        "title",
-        "title_model_messages"
+        "title"
       ]
     },
     {

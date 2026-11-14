@@ -18,6 +18,11 @@ fn begin(database: &ChatDatabase, session_id: &str) -> crate::nodes::TurnStarted
 
 fn result(title: &str) -> ConversationResult {
     ConversationResult {
+        messages: vec![crate::ChatMessage::Assistant {
+            content: "answer".into(),
+            tool_calls: None,
+            metadata: None,
+        }],
         text: "answer".into(),
         title: Some(title.into()),
         usages: vec![crate::CallUsage {

@@ -25,24 +25,10 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
-          "prompt": {
-            "type": "string"
-          },
-          "system": {
-            "type": "string",
-            "default": ""
-          },
-          "history": {
-            "type": {
-              "list": "object"
-            },
-            "default": []
-          },
           "messages": {
             "type": {
               "list": "object"
-            },
-            "default": []
+            }
           },
           "model": {
             "type": "string",
@@ -167,24 +153,6 @@
           "from": {
             "node": "tools",
             "port": "value"
-          }
-        },
-        "params.prompt": {
-          "from": {
-            "node": "params",
-            "port": "prompt"
-          }
-        },
-        "params.system": {
-          "from": {
-            "node": "params",
-            "port": "system"
-          }
-        },
-        "params.history": {
-          "from": {
-            "node": "params",
-            "port": "history"
           }
         },
         "params.messages": {

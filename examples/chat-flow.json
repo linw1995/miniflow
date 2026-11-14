@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-23",
+  "version": "2026-11-13",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -20,6 +20,11 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
           "model": {
             "type": "string",
             "default": "your-model",
@@ -34,19 +39,6 @@
             "type": "string",
             "env": "OPENAI_API_KEY",
             "default": ""
-          },
-          "prompt": {
-            "type": "string"
-          },
-          "system": {
-            "type": "string",
-            "default": ""
-          },
-          "history": {
-            "type": {
-              "list": "object"
-            },
-            "default": []
           }
         }
       }
@@ -69,48 +61,106 @@
       "inputs": {
         "messages": {
           "from": {
-            "node": "chat_messages",
+            "node": "params",
             "port": "messages"
           }
         }
       }
     },
     {
-      "id": "chat_messages",
+      "id": "route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "succeeded",
+            "condition": {
+              "source": {
+                "output": "chat.status",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": "succeeded"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "append",
       "kind": "builtin.code",
       "config": {
         "language": "cel",
         "inputs": {
-          "prompt": "string",
-          "history": {
+          "messages": {
             "list": "object"
           },
-          "system": "string"
+          "message": "object"
         },
         "code": {
-          "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]"
+          "value": "messages + [dyn(message)]"
         }
       },
       "inputs": {
-        "prompt": {
+        "messages": {
           "from": {
             "node": "params",
-            "port": "prompt"
+            "port": "messages"
           }
         },
-        "history": {
+        "message": {
           "from": {
-            "node": "params",
-            "port": "history"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "params",
-            "port": "system"
+            "node": "chat",
+            "port": "message"
           }
         }
       }
+    },
+    {
+      "id": "unchanged",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "params",
+            "port": "messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "messages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "append",
+              "port": "value"
+            },
+            {
+              "node": "unchanged",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "chat",
+      "to_node": "route"
+    },
+    {
+      "from_node": "route",
+      "from_output": "succeeded",
+      "to_node": "append"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "unchanged"
     }
   ],
   "outputs": [
@@ -123,6 +173,11 @@
       "name": "text",
       "node": "chat",
       "port": "text"
+    },
+    {
+      "name": "messages",
+      "node": "messages",
+      "port": "value"
     },
     {
       "name": "usages",
@@ -151,11 +206,14 @@
   "clusters": [
     {
       "label": "Conversation",
-      "annotation": "Resolve conversation parameters and produce one model response with captured errors and usage.",
+      "annotation": "Consume and return the same complete-message contract as the Agent.",
       "nodes": [
         "params",
         "chat",
-        "chat_messages"
+        "route",
+        "append",
+        "unchanged",
+        "messages"
       ]
     }
   ]

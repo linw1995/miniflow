@@ -80,7 +80,7 @@ fn calculator_tools() -> BTreeMap<String, FlowTool> {
 
 fn inputs(server: &Server) -> Value {
     json!({
-        "params.prompt":"Calculate two plus three and three times four.",
+        "params.messages":[{"role":"user","content":"Calculate two plus three and three times four."}],
         "params.model":"example-model",
         "params.base_url":server.base_url,
         "params.api_key":"synthetic-agent-key"
@@ -373,18 +373,19 @@ fn full_messages_preserve_history_even_when_old_and_new_text_are_identical() {
                 Reply::text("Repeated answer")
             }]);
             let mut args = inputs(&server);
-            args["params.system"] = system.into();
-            args["params.prompt"] = "Repeated prompt".into();
-            args["params.history"] = json!([
+            let mut full = json!([
                 {"role":"user","content":"Repeated prompt","metadata":{"source":"history"}},
                 {"role":"assistant","content":"Repeated answer","metadata":{"source":"history"}}
-            ]);
+            ])
+            .as_array()
+            .unwrap()
+            .clone();
             let expected = json!([{"role":"assistant","content":"Repeated answer"}]);
-            let mut full = args["params.history"].as_array().unwrap().clone();
             if !system.is_empty() {
                 full.insert(0, json!({"role":"system","content":system}));
             }
             full.push(json!({"role":"user","content":"Repeated prompt"}));
+            args["params.messages"] = json!(full.clone());
             full.extend(expected.as_array().unwrap().iter().cloned());
             if streaming {
                 let outputs = finite_stream(message_agent(BTreeMap::new(), true), args);
@@ -427,10 +428,11 @@ fn immutable_message_events_remain_independent_of_the_full_context_output() {
         Reply::stream_text("Repeated answer"),
     ]);
     let mut args = inputs(&server);
-    args["params.system"] = "Use tools.".into();
-    args["params.history"] = json!([
+    args["params.messages"] = json!([
+        {"role":"system","content":"Use tools."},
         {"role":"assistant","content":"Repeated answer","tool_calls":[{"id":"reused","name":"calculator","arguments":{"operation":"add","left":2.0,"right":3.0}}]},
-        {"role":"tool","tool_call_id":"reused","content":"5.0","metadata":{"source":"history"}}
+        {"role":"tool","tool_call_id":"reused","content":"5.0","metadata":{"source":"history"}},
+        {"role":"user","content":"Continue"}
     ]);
     let outputs = finite_stream(message_agent(calculator_tools(), true), args);
     assert_success(terminal(&outputs), "Repeated answer", 3);
@@ -478,7 +480,7 @@ fn failed_rounds_keep_only_already_appended_messages_without_an_invented_reply()
         replies.push(failure);
         let server = Server::start(replies);
         let mut args = inputs(&server);
-        args["params.history"] = json!([{"role":"user","content":"Earlier input"},{"role":"assistant","content":"Earlier reply"}]);
+        args["params.messages"] = json!([{"role":"user","content":"Earlier input"},{"role":"assistant","content":"Earlier reply"},{"role":"user","content":"Continue"}]);
         let outputs = finite_stream(message_agent(calculator_tools(), true), args);
         assert_eq!(terminal(&outputs)["status"], "failed");
         let expected = if has_tool_round {
@@ -499,12 +501,23 @@ fn failed_rounds_keep_only_already_appended_messages_without_an_invented_reply()
 }
 
 #[test]
-fn complete_messages_input_overrides_legacy_context_without_host_bookkeeping() {
+fn complete_messages_are_the_only_agent_conversation_input() {
     let server = Server::start(vec![Reply::text("fresh reply")]);
     let mut args = inputs(&server);
-    args["params.prompt"] = "Legacy prompt must not be appended".into();
-    args["params.system"] = "Legacy system must not be restored".into();
-    args["params.history"] = json!([{"role":"assistant","content":"Legacy history"}]);
+    let definition = agent_definition().unwrap();
+    let params = definition
+        .nodes
+        .iter()
+        .find(|node| node.id.as_str() == "params")
+        .unwrap();
+    for legacy in ["prompt", "system", "history"] {
+        assert!(params.config["parameters"].get(legacy).is_none());
+    }
+    assert!(
+        params.config["parameters"]["messages"]
+            .get("default")
+            .is_none()
+    );
     args["params.messages"] = json!([{"role":"system","content":"Rewritten system"},{"role":"user","content":"Rewritten prompt"}]);
     let (output, _) = memory(message_agent(BTreeMap::new(), false), args);
     assert_success(&output, "fresh reply", 1);
@@ -538,7 +551,7 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
             .unwrap()
     };
     let parameters = node("params")["config"]["parameters"].as_object().unwrap();
-    assert_eq!(parameters.len(), 9);
+    assert_eq!(parameters.len(), 6);
     assert_eq!(parameters["tools"]["type"], json!({"map":"flow"}));
     assert_eq!(
         parameters["tool_properties"]["type"],
@@ -723,10 +736,11 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
         let server = Server::start(vec![tool_reply(calls.clone(), stream), completion]);
         let definition = configured_agent(calculator_tools());
         let mut args = inputs(&server);
-        args["params.system"] = json!("Use the calculator.");
-        args["params.history"] = json!([
+        args["params.messages"] = json!([
+            {"role":"system", "content":"Use the calculator."},
             {"role":"user", "content":"Earlier question"},
-            {"role":"assistant", "content":"Earlier answer"}
+            {"role":"assistant", "content":"Earlier answer"},
+            {"role":"user", "content":"Calculate two plus three and three times four."}
         ]);
         if stream {
             let outputs = finite_stream(definition, args.clone());
@@ -751,7 +765,7 @@ fn calculator_parallel_calls_preserve_provider_order_schema_and_usage_in_both_mo
             {"role":"system", "content":"Use the calculator."},
             {"role":"user", "content":"Earlier question"},
             {"role":"assistant", "content":"Earlier answer"},
-            {"role":"user", "content":args["params.prompt"]}
+            {"role":"user", "content":"Calculate two plus three and three times four."}
         ]);
         assert_eq!(json!(messages(&requests[0])), initial);
         // Preserve the provider's multipart system/assistant content encoding.
@@ -787,9 +801,7 @@ fn empty_agent_completes_a_direct_answer_without_advertising_tools() {
     );
     assert_eq!(
         json!(messages(&requests[0])),
-        json!([
-            {"role":"user", "content":inputs(&server)["params.prompt"]}
-        ])
+        inputs(&server)["params.messages"]
     );
 }
 
@@ -799,7 +811,6 @@ fn agent_turn_forwards_finite_stream_answer_and_terminal_usage() {
     let mut definition = agent_turn_definition().unwrap();
     local_dependencies(&mut definition);
     let mut args = inputs(&server);
-    args.as_object_mut().unwrap().remove("params.prompt");
     args["params.messages"] = json!([{"role":"user", "content":"Hello"}]);
     let outputs = finite_stream(definition, args);
     let output = terminal(&outputs);

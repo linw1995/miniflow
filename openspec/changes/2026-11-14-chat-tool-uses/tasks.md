@@ -9,7 +9,7 @@
 
 ## 2. Structured messages and source correlation
 
-- [x] 2.1 Add optional terminal messages and typed append/replay-safe message events to the chat contract/decoder.
+- [x] 2.1 Define complete terminal messages and typed append/replay-safe message events in the chat contract/decoder.
 - [x] 2.2 Return the single Agent `messages` log as complete authoritative context; accept complete input messages,
   remove initial-boundary bookkeeping, and generate immutable event identities in the publishing node.
 - [x] 2.3 Propagate explicit message/model/tool origin to standard dispatch observations without changing provider arguments.
@@ -44,6 +44,15 @@
 - [x] 5.5 Update PR scope/validation/AI disclosure and verify no conflicts with current main before readiness.
 - [x] 5.6 Prove custom Flow compaction/reordering/reset survives restart and reaches the next provider request without
   resurrected history/system input; prove immutable payload sharing preserves duplicate positions and sensitivity.
+
+## 6. Single Agent contract
+
+- [x] 6.1 Require complete message input/output for executable and embedded backends; remove split-input bindings,
+  text-only settlement and event/audit reconstruction fallbacks.
+- [x] 6.2 Simplify the Agent to required message input and migrate chat examples, callers and fixtures to that shape.
+- [x] 6.3 Test obsolete-contract rejection, explicit failed message state, storage-only legacy audit preservation,
+  complete context replacement and all existing title/preview/recovery behaviors.
+- [x] 6.4 Rebuild the planning Flow, run affected tests and focused coverage, rerun hooks/spec checks and update the PR.
 
 The earlier baseline is not evidence for the revised architecture. Final verification below is tracked against the
 new message/relation/event implementation, including real restart and next-provider-request checks.

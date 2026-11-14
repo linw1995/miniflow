@@ -197,7 +197,7 @@ fn reused_provider_tool_ids_remain_separate_across_real_model_rounds() {
                 let CompletionState::Committed(completion) = resolution.state else {
                     panic!("multi-round conversation did not commit")
                 };
-                assert_eq!(completion.result.messages.unwrap().len(), 6);
+                assert_eq!(completion.result.messages.len(), 6);
                 break *tool_uses.unwrap();
             }
             Some(ChatEvent::Error { source, .. }) => panic!("multi-round tools: {source}"),
@@ -338,7 +338,7 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
                     panic!("expected the scripted final response to commit")
                 };
                 assert_eq!(completion.result.text, "Recovered: 20");
-                assert_eq!(completion.result.messages.as_ref().unwrap().len(), 6);
+                assert_eq!(completion.result.messages.len(), 6);
                 break *tool_uses.expect("host-owned tool evidence");
             }
             _ => thread::sleep(Duration::from_millis(10)),
@@ -468,7 +468,7 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
                 };
                 assert_eq!(completion.result.text, "Context restored");
                 assert_eq!(
-                    completion.result.messages.unwrap().len(),
+                    completion.result.messages.len(),
                     8,
                     "return the complete authoritative context, including inherited messages"
                 );
@@ -1232,11 +1232,13 @@ fn loop_conversations() {
         .history(session_id.as_ref().unwrap())
         .unwrap()
         .history;
-    assert_eq!(history.len(), 2);
-    assert!(matches!(&history[1],
-        mfn_llm::ChatMessage::Assistant { metadata: Some(metadata), .. }
-            if serde_json::to_value(metadata).unwrap() == serde_json::json!({"strategy":"iterative"})
-    ));
+    assert_eq!(history.len(), 3);
+    assert!(
+        matches!(&history[1], mfn_llm::ChatMessage::Assistant { content, .. } if content == "intermediate answer")
+    );
+    assert!(
+        matches!(&history[2], mfn_llm::ChatMessage::Assistant { content, metadata: None, .. } if content == "final answer")
+    );
     for (index, invocation) in invocations.iter().enumerate() {
         let call = database.call(&invocation.call_id).unwrap();
         let usages = call.usages.unwrap();

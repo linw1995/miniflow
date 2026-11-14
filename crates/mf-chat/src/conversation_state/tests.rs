@@ -45,7 +45,7 @@ fn complete(
         .complete_turn(
             invocation.clone(),
             ConversationResult {
-                messages: Some(messages),
+                messages,
                 text: text.into(),
                 ..Default::default()
             },
@@ -62,12 +62,12 @@ fn rewritten_compacted_and_reset_context_is_the_only_next_request_state_after_re
         .create_session("default", Some("Original system".into()), None)
         .unwrap();
     let first = begin(&database, &session.id, "Original prompt");
-    let mut original = first.request.messages.clone().unwrap();
+    let mut original = first.request.messages.clone();
     original.push(assistant("first"));
     complete(&database, &first.invocation, original.clone(), "first");
     let second = begin(&database, &session.id, "Second prompt");
     assert_eq!(
-        second.request.messages.as_ref().unwrap(),
+        &second.request.messages,
         &vec![
             system("Original system"),
             user("Original prompt"),
@@ -97,7 +97,7 @@ fn rewritten_compacted_and_reset_context_is_the_only_next_request_state_after_re
     let third = begin(&database, &session.id, "Third prompt");
     let mut expected = rewritten;
     expected.push(user("Third prompt"));
-    assert_eq!(third.request.messages, Some(expected));
+    assert_eq!(third.request.messages, expected);
     complete(
         &database,
         &third.invocation,
@@ -286,7 +286,7 @@ fn failed_states_and_failed_settlements_cannot_advance_the_context_head() {
     let mut connection = storage::connect(database.path()).unwrap();
     connection.batch_execute("CREATE TRIGGER reject_settlement BEFORE UPDATE OF state ON turns WHEN NEW.state = 'succeeded' BEGIN SELECT RAISE(FAIL, 'settlement failed'); END;").unwrap();
     let reply = ConversationResult {
-        messages: Some(vec![assistant("replacement")]),
+        messages: vec![assistant("replacement")],
         text: "replacement".into(),
         ..Default::default()
     };
@@ -372,39 +372,55 @@ fn payload_interning_distinguishes_sensitivity_and_preserves_full_arguments_and_
 }
 
 #[test]
-fn legacy_turns_append_only_after_the_latest_complete_version() {
+fn text_only_results_are_rejected_without_advancing_or_appending_to_the_context() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
     let session = database
         .create_session("default", Some("Legacy system".into()), None)
         .unwrap();
     let legacy = begin(&database, &session.id, "old user");
-    database
-        .complete_turn(
-            legacy.invocation,
-            ConversationResult {
-                text: "old reply".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    let replaced = begin(&database, &session.id, "replace history");
+    assert!(
+        database
+            .complete_turn(
+                legacy.invocation.clone(),
+                ConversationResult {
+                    text: "old reply".into(),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    assert!(
+        database
+            .conversation_messages(&legacy.invocation.call_id)
+            .unwrap()
+            .is_none()
+    );
     complete(
         &database,
-        &replaced.invocation,
+        &legacy.invocation,
         vec![assistant("summary")],
         "summary",
     );
     let later = begin(&database, &session.id, "later user");
-    database
-        .complete_turn(
-            later.invocation,
-            ConversationResult {
-                text: "later reply".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    assert!(
+        database
+            .complete_turn(
+                later.invocation.clone(),
+                ConversationResult {
+                    text: "later reply".into(),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        database.history(&session.id).unwrap().history,
+        [assistant("summary")]
+    );
+    let mut messages = later.request.messages.clone();
+    messages.push(assistant("later reply"));
+    complete(&database, &later.invocation, messages, "later reply");
     let history = database.history(&session.id).unwrap();
     assert_eq!(
         history.history,

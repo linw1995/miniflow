@@ -1319,6 +1319,7 @@ impl ChatView {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::reply_messages;
     use super::*;
     use crate::run::LocalRun;
     use ratatui::backend::TestBackend;
@@ -1477,6 +1478,7 @@ mod tests {
             .complete_turn(
                 first,
                 mf_chat::ConversationResult {
+                    messages: reply_messages("first reply"),
                     text: "first reply".into(),
                     ..Default::default()
                 },
@@ -1517,8 +1519,9 @@ mod tests {
             .invocation;
         database
             .complete_turn(
-                legacy,
+                legacy.clone(),
                 mf_chat::ConversationResult {
+                    messages: reply_messages("legacy reply"),
                     text: "legacy reply".into(),
                     ..Default::default()
                 },
@@ -1528,6 +1531,12 @@ mod tests {
         let database = ChatDatabase::open(path).unwrap();
         view.session = Some(session.clone());
         view.page = Some(database.messages(&session.id, 50, None).unwrap());
+        // Exercise archived unrecorded evidence without accepting an obsolete text-only Flow result.
+        for row in &mut view.page.as_mut().unwrap().messages {
+            if row.message.turn_id == legacy.turn_id {
+                row.tool_uses = None;
+            }
+        }
         let screen = render(&view, 120, 60);
         assert_eq!(screen.matches("Tool uses").count(), 2, "{screen}");
         assert_eq!(
@@ -1588,6 +1597,7 @@ mod tests {
             .complete_turn(
                 first,
                 mf_chat::ConversationResult {
+                    messages: reply_messages("old reply"),
                     text: "old reply".into(),
                     ..Default::default()
                 },
@@ -1764,6 +1774,7 @@ mod tests {
                         completion: mf_chat::Completion {
                             invocation: current.clone(),
                             result: mf_chat::ConversationResult {
+                                messages: reply_messages("retained reply"),
                                 text: "retained reply".into(),
                                 ..Default::default()
                             },
@@ -1822,6 +1833,7 @@ mod tests {
             {"call_id":"title", "model":"fixture", "timing":{"elapsed_us":10000,"first_token_us":1000},"usage":{"output_tokens":100},"attribution":{"purpose":"title"}}
         ])).unwrap();
         let response = mf_chat::ConversationResult {
+            messages: reply_messages("canonical answer"),
             text: "canonical answer".into(),
             usages: calls,
             ..Default::default()
@@ -2124,6 +2136,7 @@ mod tests {
             )
             .unwrap();
         database.complete_turn(started.invocation, mf_chat::ConversationResult {
+            messages: reply_messages("Keep one execution lane and move infrequent actions into the command palette."),
             text: "Keep one execution lane and move infrequent actions into the command palette.".into(),
             metadata: None, usages: vec![], finish_reason: None,
         ..Default::default()
@@ -2258,6 +2271,7 @@ mod tests {
                     .complete_turn(
                         started.invocation,
                         mf_chat::ConversationResult {
+                            messages: reply_messages(&format!("reply-{index}")),
                             text: format!("reply-{index}"),
                             metadata: None,
                             usages: vec![],
@@ -2428,7 +2442,7 @@ mod tests {
         let offline = root.path().join("offline");
         launch.options.database_path = state.join("chat.sqlite");
         let path = launch.options.database_path.clone();
-        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"status\":\"succeeded\",\"text\":\"paid reply\",\"usages\":[]}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
+        std::fs::write(launch.runner.executable().with_extension("script"), "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"status\":\"succeeded\",\"text\":\"paid reply\",\"messages\":[{\"role\":\"assistant\",\"content\":\"paid reply\"}],\"usages\":[]}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
         let mut view = ChatView::new(launch.runner.description()).unwrap();
         let controller = ChatController::open(launch).unwrap();
         view.editor.insert("question");
@@ -2519,6 +2533,7 @@ mod tests {
                 state: CompletionState::Committed(mf_chat::Completion {
                     invocation,
                     result: mf_chat::ConversationResult {
+                        messages: reply_messages(text),
                         text: text.into(),
                         ..Default::default()
                     },
@@ -2641,6 +2656,7 @@ mod tests {
             .complete_turn(
                 invocation.clone(),
                 mf_chat::ConversationResult {
+                    messages: reply_messages("streamed answer"),
                     text: "streamed answer".into(),
                     ..Default::default()
                 },
@@ -2733,6 +2749,7 @@ mod tests {
                         completion: mf_chat::Completion {
                             invocation,
                             result: mf_chat::ConversationResult {
+                                messages: reply_messages("complete unsaved reply"),
                                 text: "complete unsaved reply".into(),
                                 ..Default::default()
                             },

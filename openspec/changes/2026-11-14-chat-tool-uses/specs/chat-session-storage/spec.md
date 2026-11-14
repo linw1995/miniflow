@@ -1,5 +1,47 @@
 # Source-aware Tool Storage
 
+## MODIFIED Requirements
+
+### Requirement: Preserve message ordering and context isolation
+
+Messages SHALL retain their session/turn identities and stable audit order. Model context SHALL restore exactly the latest successful complete message version for the requested session. The host SHALL append the current user input once before invocation. Failed, cancelled, interrupted and running versions MUST NOT advance the successful context head. Missing complete versions SHALL NOT be reconstructed from text pairs or execution evidence.
+
+#### Scenario: Continue after a failed submission
+
+- **WHEN** a successful turn is followed by a failed turn and a new submission
+- **THEN** the new Flow input contains only the latest successful complete state plus its new user message
+- **AND** the failed submission remains inspectable outside model context
+
+#### Scenario: Load another session
+
+- **WHEN** a caller loads context for session B after using session A
+- **THEN** no messages from session A appear in session B's context
+
+### Requirement: Persist opaque message metadata and execution call facts
+
+Messages SHALL support optional object-valued metadata in immutable complete context versions. Successful settlement SHALL atomically persist the returned messages, usage, title and terminal state. Failed message state and usage SHALL remain inspectable without advancing successful context. New versions MAY change metadata without rewriting older versions. Schema migration SHALL preserve stored audit rows and legacy usage facts, not fabricate missing canonical contexts.
+
+#### Scenario: Reopen annotated history
+
+- **WHEN** a complete saved context has metadata and storage is reopened
+- **THEN** the restored version retains the same annotations and sensitivity
+
+#### Scenario: Ignore rewritten returned history
+
+- **WHEN** a Flow returns an uncontracted history output alongside required complete messages
+- **THEN** the host ignores that extra output and uses only the complete message version as new context
+- **AND** earlier immutable versions remain unchanged
+
+#### Scenario: Return edited message metadata
+
+- **WHEN** a Flow returns different metadata for an earlier message in a complete new context
+- **THEN** the new successful version uses that metadata while the previous version remains unchanged
+
+#### Scenario: Upgrade an existing database
+
+- **WHEN** storage predates metadata and usage-list columns
+- **THEN** migration preserves old messages and counters, while missing complete contexts are reported as unrecorded
+
 ## ADDED Requirements
 
 ### Requirement: Persist tool sources in associated rows
@@ -40,6 +82,12 @@ Valid Flow messages SHALL be stored as immutable complete context versions with 
 
 - **WHEN** an already-settled invocation returns the exact same complete context
 - **THEN** no membership, payload, audit row, or context-head state is rewritten
+
+#### Scenario: Inspect saved text-only records without fabricating context
+
+- **WHEN** an older stored turn has audit messages but no complete canonical context version
+- **THEN** the audit data remains inspectable, but context restoration or result replay reports missing canonical state
+- **AND** the host does not rebuild a purported Flow result from final text or execution evidence
 
 #### Scenario: Fail final persistence
 

@@ -5,13 +5,13 @@
       "package": "mfn-core",
       "path": "../crates/builtin-nodes/core"
     },
-    "llm": {
-      "package": "mfn-llm",
-      "path": "../crates/builtin-nodes/llm"
-    },
     "code": {
       "package": "mfn-code",
       "path": "../crates/builtin-nodes/code"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
     }
   },
   "nodes": [
@@ -20,6 +20,11 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
+          "messages": {
+            "type": {
+              "list": "object"
+            }
+          },
           "model": {
             "type": "string",
             "default": "your-model",
@@ -34,51 +39,8 @@
             "type": "string",
             "env": "OPENAI_API_KEY",
             "default": ""
-          },
-          "prompt": {
-            "type": "string"
-          },
-          "system": {
-            "type": "string",
-            "default": ""
-          },
-          "history": {
-            "type": {
-              "list": "object"
-            },
-            "default": []
           }
         }
-      }
-    },
-    {
-      "id": "annotation",
-      "kind": "builtin.constant",
-      "config": {
-        "value": {
-          "strategy": "iterative"
-        }
-      }
-    },
-    {
-      "id": "empty_usages",
-      "kind": "builtin.constant",
-      "config": {
-        "value": []
-      }
-    },
-    {
-      "id": "initial_status",
-      "kind": "builtin.constant",
-      "config": {
-        "value": "succeeded"
-      }
-    },
-    {
-      "id": "empty_text",
-      "kind": "builtin.constant",
-      "config": {
-        "value": ""
       }
     },
     {
@@ -86,17 +48,14 @@
       "kind": "loop.run",
       "config": {
         "max_iterations": 2,
+        "inputs": {
+          "model": "string",
+          "base_url": "string",
+          "api_key": "string"
+        },
         "variables": [
           {
-            "name": "prompt",
-            "type": "string"
-          },
-          {
-            "name": "system",
-            "type": "string"
-          },
-          {
-            "name": "history",
+            "name": "messages",
             "type": {
               "list": "object"
             }
@@ -105,31 +64,23 @@
             "name": "usages",
             "type": {
               "list": "object"
-            }
-          },
-          {
-            "name": "status",
-            "type": "string"
+            },
+            "initial": []
           },
           {
             "name": "text",
-            "type": "string"
+            "type": "string",
+            "initial": ""
+          },
+          {
+            "name": "status",
+            "type": "string",
+            "initial": "succeeded"
           },
           {
             "name": "error",
-            "type": "string"
-          },
-          {
-            "name": "model",
-            "type": "string"
-          },
-          {
-            "name": "base_url",
-            "type": "string"
-          },
-          {
-            "name": "api_key",
-            "type": "string"
+            "type": "string",
+            "initial": ""
           }
         ],
         "until": {
@@ -159,14 +110,44 @@
               "inputs": {
                 "messages": {
                   "from": {
-                    "node": "chat_messages",
+                    "node": "%loop",
                     "port": "messages"
                   }
                 }
               }
             },
             {
-              "id": "collect",
+              "id": "append",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "messages": {
+                    "list": "object"
+                  },
+                  "message": "object"
+                },
+                "code": {
+                  "value": "messages + [dyn(message)]"
+                }
+              },
+              "inputs": {
+                "messages": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "messages"
+                  }
+                },
+                "message": {
+                  "from": {
+                    "node": "chat",
+                    "port": "message"
+                  }
+                }
+              }
+            },
+            {
+              "id": "usages",
               "kind": "builtin.code",
               "config": {
                 "language": "cel",
@@ -196,172 +177,35 @@
                   }
                 }
               }
-            },
-            {
-              "id": "save_history",
-              "kind": "workflow.assign",
-              "config": {
-                "variable": "history"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "chat_history",
-                    "port": "value"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_usages",
-              "kind": "workflow.assign",
-              "config": {
-                "variable": "usages"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "collect",
-                    "port": "value"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_status",
-              "kind": "workflow.assign",
-              "config": {
-                "variable": "status"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "chat",
-                    "port": "status"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_text",
-              "kind": "workflow.assign",
-              "config": {
-                "variable": "text"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "chat",
-                    "port": "text"
-                  }
-                }
-              }
-            },
-            {
-              "id": "save_error",
-              "kind": "workflow.assign",
-              "config": {
-                "variable": "error"
-              },
-              "inputs": {
-                "value": {
-                  "from": {
-                    "node": "chat",
-                    "port": "error"
-                  }
-                }
-              }
-            },
-            {
-              "id": "chat_messages",
-              "kind": "builtin.code",
-              "config": {
-                "language": "cel",
-                "inputs": {
-                  "prompt": "string",
-                  "history": {
-                    "list": "object"
-                  },
-                  "system": "string"
-                },
-                "code": {
-                  "messages": "(system == '' ? [] : [dyn({'role':'system','content':system})]) + history + [dyn({'role':'user','content':prompt})]",
-                  "history": "history + [dyn({'role':'user','content':prompt})]"
-                }
-              },
-              "inputs": {
-                "prompt": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "prompt"
-                  }
-                },
-                "history": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "history"
-                  }
-                },
-                "system": {
-                  "from": {
-                    "node": "%loop",
-                    "port": "system"
-                  }
-                }
-              }
-            },
-            {
-              "id": "chat_history",
-              "kind": "builtin.code",
-              "config": {
-                "language": "cel",
-                "inputs": {
-                  "history": {
-                    "list": "object"
-                  },
-                  "message": "object"
-                },
-                "code": {
-                  "value": "history + [message]"
-                }
-              },
-              "inputs": {
-                "history": {
-                  "from": {
-                    "node": "chat_messages",
-                    "port": "history"
-                  }
-                },
-                "message": {
-                  "from": {
-                    "node": "chat",
-                    "port": "message"
-                  }
-                }
-              }
             }
           ],
-          "clusters": [
+          "outputs": [
             {
-              "label": "Generate and account",
-              "annotation": "Generate one reply and append the call usage to the accumulated usage list.",
-              "nodes": [
-                "chat",
-                "collect",
-                "chat_messages",
-                "chat_history"
-              ]
+              "name": "messages",
+              "node": "append",
+              "port": "value",
+              "optional": true
             },
             {
-              "label": "Persist turn state",
-              "annotation": "Carry history, usage, status, text, and errors into the next loop iteration.",
-              "nodes": [
-                "save_history",
-                "save_usages",
-                "save_status",
-                "save_text",
-                "save_error"
-              ]
+              "name": "usages",
+              "node": "usages",
+              "port": "value"
+            },
+            {
+              "name": "text",
+              "node": "chat",
+              "port": "text"
+            },
+            {
+              "name": "status",
+              "node": "chat",
+              "port": "status"
+            },
+            {
+              "name": "error",
+              "node": "chat",
+              "port": "error",
+              "optional": true
             }
           ]
         },
@@ -373,46 +217,10 @@
         }
       },
       "inputs": {
-        "prompt": {
+        "messages": {
           "from": {
             "node": "params",
-            "port": "prompt"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "params",
-            "port": "system"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "params",
-            "port": "history"
-          }
-        },
-        "usages": {
-          "from": {
-            "node": "empty_usages",
-            "port": "value"
-          }
-        },
-        "status": {
-          "from": {
-            "node": "initial_status",
-            "port": "value"
-          }
-        },
-        "text": {
-          "from": {
-            "node": "empty_text",
-            "port": "value"
-          }
-        },
-        "error": {
-          "from": {
-            "node": "empty_text",
-            "port": "value"
+            "port": "messages"
           }
         },
         "model": {
@@ -434,14 +242,18 @@
           }
         }
       }
+    },
+    {
+      "id": "metadata",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "strategy": "iterative"
+        }
+      }
     }
   ],
   "outputs": [
-    {
-      "name": "answer",
-      "node": "repeat",
-      "port": "answer"
-    },
     {
       "name": "status",
       "node": "repeat",
@@ -453,6 +265,11 @@
       "port": "text"
     },
     {
+      "name": "messages",
+      "node": "repeat",
+      "port": "messages"
+    },
+    {
       "name": "usages",
       "node": "repeat",
       "port": "usages"
@@ -460,32 +277,19 @@
     {
       "name": "error",
       "node": "repeat",
-      "port": "error"
+      "port": "error",
+      "optional": true
     },
     {
       "name": "metadata",
-      "node": "annotation",
+      "node": "metadata",
       "port": "value"
-    }
-  ],
-  "clusters": [
-    {
-      "label": "Conversation setup",
-      "annotation": "Resolve model settings and initialize the loop state and response metadata.",
-      "nodes": [
-        "params",
-        "annotation",
-        "empty_usages",
-        "initial_status",
-        "empty_text"
-      ]
     },
     {
-      "label": "Repeated conversation",
-      "annotation": "Run two conversation turns, carrying history and accumulating usage across iterations.",
-      "nodes": [
-        "repeat"
-      ]
+      "name": "answer",
+      "node": "repeat",
+      "port": "answer",
+      "optional": true
     }
   ]
 }

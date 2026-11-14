@@ -15,11 +15,24 @@ struct Backend {
     cancellation: Arc<Mutex<Option<StreamCancellation>>>,
 }
 
+fn reply(mut request: ConversationInputs, text: &str) -> ConversationResult {
+    request.messages.push(mfn_llm::ChatMessage::Assistant {
+        content: text.into(),
+        tool_calls: None,
+        metadata: None,
+    });
+    ConversationResult {
+        messages: request.messages,
+        text: text.into(),
+        ..Default::default()
+    }
+}
+
 impl ConversationBackend for Backend {
     fn invoke(
         &self,
         _: &Invocation,
-        _: ConversationInputs,
+        request: ConversationInputs,
         context: &mut ExecutionContext,
         preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
@@ -35,10 +48,7 @@ impl ConversationBackend for Backend {
             }
         }
         self.returned.store(true, Ordering::Release);
-        Ok(ConversationResult {
-            text: "canonical".into(),
-            ..Default::default()
-        })
+        Ok(reply(request, "canonical"))
     }
 }
 
@@ -150,14 +160,18 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
     type Emission = Emission;
     fn execute(
         &self,
-        input: Self::Input,
+        mut input: Self::Input,
         context: &mut ExecutionContext,
         emitter: &mut mf_runtime::TypedEmitter<'_, '_, Emission>,
     ) -> Result<mf_runtime::TypedNodeResult<ConversationResult>, mf_runtime::NodeExecutionError>
     {
         assert!(emitter.is_connected());
         assert!(context.output("begin.database_path").is_err());
-        if input.prompt != "legacy" {
+        let prompt = match input.messages.last().unwrap() {
+            mfn_llm::ChatMessage::User { content, .. } => content.clone(),
+            _ => panic!("expected user input"),
+        };
+        if prompt != "legacy" {
             assert_eq!(
                 context.invocation_path(),
                 vec![mf_telemetry::event::ScopePathEntry::Call {
@@ -189,13 +203,19 @@ impl mf_runtime::TypedTaskStreamNode for Embedded {
                 model_call_id: call_id,
             },
         })?;
-        if input.prompt == "wait" {
+        if prompt == "wait" {
             return Err(context
                 .execute_future(context.cancellation().cancelled(), None)?
                 .into());
         }
         mf_telemetry::events::record(mfn_llm::REQUEST_FINISHED_EVENT, serde_json::json!(&usage));
+        input.messages.push(mfn_llm::ChatMessage::Assistant {
+            content: "isolated-final".into(),
+            tool_calls: None,
+            metadata: None,
+        });
         Ok(ConversationResult {
+            messages: input.messages,
             text: "isolated-final".into(),
             usages: vec![usage.into()],
             ..Default::default()
@@ -213,7 +233,7 @@ fn embedded_profile() -> WorkflowProfile {
     let definition = mf_compiler::WorkflowDefinition::from_json(&serde_json::json!({
         "version":"2026-10-23", "dependencies":{},
         "nodes":[{"id":"begin","kind":"test.chat.streaming"}],
-        "outputs":[{"name":"answer","node":"begin","port":"delta"},{"name":"status","node":"begin","port":"status"},{"name":"text","node":"begin","port":"text"},{"name":"usages","node":"begin","port":"usages"}]
+        "outputs":[{"name":"answer","node":"begin","port":"delta"},{"name":"status","node":"begin","port":"status"},{"name":"text","node":"begin","port":"text"},{"name":"messages","node":"begin","port":"messages"},{"name":"usages","node":"begin","port":"usages"}]
     }).to_string()).unwrap();
     WorkflowProfile::new("embedded", definition, Default::default()).unwrap()
 }
@@ -305,10 +325,10 @@ fn direct_embedded_invocation_reuses_the_call_stream_interface() {
         .invoke(
             &Invocation::new("session"),
             ConversationInputs {
-                messages: None,
-                prompt: "hello".into(),
-                system: None,
-                history: None,
+                messages: vec![mfn_llm::ChatMessage::User {
+                    content: "hello".into(),
+                    metadata: None,
+                }],
                 context: None,
             },
             &mut ExecutionContext::default(),
@@ -402,6 +422,7 @@ fn embedded_native_stream_graphs_keep_their_coordinator() {
             {"name":"answer","node":"preview","port":"delta","optional":true},
             {"name":"status","node":"begin","port":"status"},
             {"name":"text","node":"begin","port":"text"},
+            {"name":"messages","node":"begin","port":"messages"},
             {"name":"usages","node":"begin","port":"usages"}
         ]
     }))
@@ -467,10 +488,10 @@ fn pre_cancelled_requests_do_not_begin_application_or_embedded_flows() {
     let result = backend.invoke(
         &invocation,
         ConversationInputs {
-            messages: None,
-            prompt: "hello".into(),
-            system: None,
-            history: None,
+            messages: vec![mfn_llm::ChatMessage::User {
+                content: "hello".into(),
+                metadata: None,
+            }],
             context: None,
         },
         &mut context,
@@ -511,7 +532,7 @@ impl ConversationBackend for RetryBackend {
     fn invoke(
         &self,
         _: &Invocation,
-        _: ConversationInputs,
+        request: ConversationInputs,
         _: &mut ExecutionContext,
         preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
@@ -528,10 +549,7 @@ impl ConversationBackend for RetryBackend {
                 model_call_id: "retry-model".into(),
             })?;
         }
-        Ok(ConversationResult {
-            text: "retried-final".into(),
-            ..Default::default()
-        })
+        Ok(reply(request, "retried-final"))
     }
 }
 

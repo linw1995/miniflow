@@ -2,6 +2,14 @@ use super::*;
 use crate::schema::model_calls;
 use crate::{ConversationResult, ModelIdentity};
 
+fn messages() -> Vec<crate::ChatMessage> {
+    vec![crate::ChatMessage::Assistant {
+        content: "answer".into(),
+        tool_calls: None,
+        metadata: None,
+    }]
+}
+
 fn identity() -> ModelIdentity {
     ModelIdentity {
         profile: "default".into(),
@@ -56,6 +64,7 @@ fn performance_uses_paired_weighted_facts_and_survives_reopen_and_replay() {
         .collect::<Vec<_>>();
     let in_memory = UsageSummary::from_calls(&usages).unwrap();
     let reply = ConversationResult {
+        messages: messages(),
         text: "answer".into(),
         usages: usages.clone(),
         ..Default::default()
@@ -161,6 +170,7 @@ fn invalid_timing_is_rejected_before_persistence_and_overflow_is_explicit() {
             first_token_us,
         });
         let reply = ConversationResult {
+            messages: messages(),
             text: "answer".into(),
             usages: vec![usage.clone()],
             ..Default::default()
@@ -192,6 +202,7 @@ fn invalid_timing_is_rejected_before_persistence_and_overflow_is_explicit() {
         .complete_turn(
             begun.invocation,
             ConversationResult {
+                messages: messages(),
                 text: "answer".into(),
                 usages: vec![usage, failed],
                 ..Default::default()
@@ -215,6 +226,7 @@ fn complete(
         .complete_turn(
             begun.invocation.clone(),
             ConversationResult {
+                messages: messages(),
                 usages: vec![crate::CallUsage {
                     timing: None,
                     attribution: None,
@@ -424,6 +436,7 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
             .complete_turn(
                 begun.invocation,
                 ConversationResult {
+                    messages: messages(),
                     usages: vec![crate::CallUsage {
                         timing: None,
                         attribution: None,

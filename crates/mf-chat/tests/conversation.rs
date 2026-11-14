@@ -521,7 +521,7 @@ fn embedded_conversation_preserves_two_turn_history_and_sparse_metadata() {
     second.body = body.to_string();
     let server = Server::start(vec![Reply::text("first answer"), second]);
     let result = probe(&server, "conversation", None);
-    assert_eq!(result["messages"], 4);
+    assert_eq!(result["messages"], 5);
     for turn in ["first", "second"] {
         let usage: mf_chat::CallUsage =
             serde_json::from_value(result[turn]["result"]["usages"][0].clone()).unwrap();
@@ -719,7 +719,7 @@ fn abandoning_a_reply_preserves_identity_and_allows_a_fresh_polled_retry() {
     let server = Server::start(vec![Reply::text("uncommitted"), reply]);
     let result = probe(&server, "abandon", None);
     assert_eq!(result["original_state"], "cancelled");
-    assert_eq!(result["history"], 2);
+    assert_eq!(result["history"], 3);
     assert_eq!(result["result"]["result"]["text"], "retry answer");
     let requests = server.requests();
     assert_eq!(requests.len(), 2);

@@ -11,7 +11,7 @@ enum Delivered {
     Failed {
         error: String,
         usages: Vec<crate::CallUsage>,
-        messages: Option<Vec<crate::ChatMessage>>,
+        messages: Vec<crate::ChatMessage>,
     },
 }
 
@@ -129,9 +129,7 @@ impl ChatDatabase {
             })) if matches!(stored, InvocationState::Running) => {
                 let mut connection = crate::storage::connect(self.path())?;
                 connection.immediate_transaction(|connection| {
-                    if let Some(messages) = &messages {
-                        crate::message_log::settle(connection, invocation, messages)?;
-                    }
+                    crate::message_log::settle(connection, invocation, &messages)?;
                     turn::finalize_call(
                         connection,
                         &invocation.call_id,
@@ -147,12 +145,10 @@ impl ChatDatabase {
                 usages,
                 messages,
             })) => {
-                if let Some(messages) = &messages {
-                    let mut connection = crate::storage::connect(self.path())?;
-                    connection.immediate_transaction(|connection| {
-                        crate::message_log::settle(connection, invocation, messages)
-                    })?;
-                }
+                let mut connection = crate::storage::connect(self.path())?;
+                connection.immediate_transaction(|connection| {
+                    crate::message_log::settle(connection, invocation, &messages)
+                })?;
                 if let InvocationState::Finished(turn) = &stored
                     && turn.state == "failed"
                 {

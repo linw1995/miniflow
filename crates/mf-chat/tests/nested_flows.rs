@@ -45,7 +45,7 @@ fn nested_title_composition_preserves_answers_and_usage_after_provider_failure()
         let registry = NodeRegistry::from_inventory().unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
         let outputs = instantiate_compiled(&plan, &registry).unwrap().execute_with_inputs(WorkflowArguments::try_from(json!({
-            "params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url, "params.api_key":"synthetic-key"
+            "params.messages":[{"role":"user","content":"Hello"}], "params.model":"example-model", "params.base_url":server.base_url, "params.api_key":"synthetic-key"
         })).unwrap()).unwrap();
         assert_eq!(outputs["text"].as_str(), Some("Primary answer"));
         assert_eq!(outputs.contains_key("title"), !failed);
@@ -79,20 +79,23 @@ fn builtin_title_policy_preserves_captured_failure_usage_without_a_title() {
         )
         .unwrap();
         let usage = |purpose: &str| json!({"attribution":{"purpose":purpose},"model":"fixture-model","call_id":purpose});
-        let replace =
-            |node: &mut mf_runtime::NodeDefinition, status: &str, text: &str, purpose: &str| {
-                node.kind = "builtin.code".into();
-                let inputs = json!({"messages":{"list":"object"}});
-                node.config = json!({
-                    "language":"cel", "inputs":inputs,
-                    "code":{
-                        "status":serde_json::to_string(status).unwrap(),
-                        "text":serde_json::to_string(text).unwrap(),
-                        "usages":serde_json::to_string(&[usage(purpose)]).unwrap(),
-                        "error":"null", "metadata":"null", "finish_reason":"null"
-                    }
-                });
-            };
+        let replace = |node: &mut mf_runtime::NodeDefinition,
+                       status: &str,
+                       text: &str,
+                       purpose: &str| {
+            node.kind = "builtin.code".into();
+            let inputs = json!({"messages":{"list":"object"}});
+            node.config = json!({
+                "language":"cel", "inputs":inputs,
+                "code":{
+                    "status":serde_json::to_string(status).unwrap(),
+                    "text":serde_json::to_string(text).unwrap(),
+                    "usages":serde_json::to_string(&[usage(purpose)]).unwrap(),
+                    "error":"null", "metadata":"null", "finish_reason":"null",
+                    "message":serde_json::to_string(&json!({"role":"assistant","content":text})).unwrap()
+                }
+            });
+        };
         replace(
             child
                 .nodes
@@ -117,7 +120,7 @@ fn builtin_title_policy_preserves_captured_failure_usage_without_a_title() {
             .unwrap()
             .execute_with_inputs(
                 WorkflowArguments::try_from(
-                    json!({"params.prompt":"Hello","params.api_key":"synthetic-key"}),
+                    json!({"params.messages":[{"role":"user","content":"Hello"}],"params.api_key":"synthetic-key"}),
                 )
                 .unwrap(),
             )

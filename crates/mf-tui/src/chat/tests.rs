@@ -3,6 +3,14 @@ use mf_runtime::OutputValue;
 use serde_json::json;
 use std::{fs, time::Instant};
 
+pub fn reply_messages(text: &str) -> Vec<mf_chat::ChatMessage> {
+    vec![mf_chat::ChatMessage::Assistant {
+        content: text.into(),
+        tool_calls: None,
+        metadata: None,
+    }]
+}
+
 fn chat_manifest() -> mf_runtime::WorkflowManifest {
     let mut manifest = crate::test_support::sample_manifest();
     manifest.graph.definition = serde_json::from_value(json!({
@@ -11,15 +19,14 @@ fn chat_manifest() -> mf_runtime::WorkflowManifest {
         "outputs":[
             {"name":"status","node":"start","port":"status"},
             {"name":"text","node":"start","port":"text"},
+            {"name":"messages","node":"start","port":"messages"},
             {"name":"usages","node":"start","port":"usages"}
         ]
     }))
     .unwrap();
     manifest.graph.execution_order = vec!["start".into()];
     manifest.input_schema = serde_json::from_value(json!({"inputs":{"start":{
-        "prompt":{"type":"string","required":true},
-        "system":{"type":"string","required":false},
-        "history":{"type":mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),"required":false}
+        "messages":{"type":mf_runtime::ValueType::List(Box::new(mf_runtime::ValueType::Object)),"required":true}
     }},"stdin":{}})).unwrap();
     manifest
 }
@@ -209,7 +216,7 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
         let count = root.path().join("calls");
         prepared.options.database_path = state.join("chat.sqlite");
         let path = prepared.options.database_path.clone();
-        fs::write(prepared.runner.executable().with_extension("script"), format!("#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"retained answer\",\"metadata\":{{\"source\":\"fixture\"}},\"usages\":[{{\"call_id\":\"actual-call\",\"model\":\"fixture\"}}]}}'\n", count.display())).unwrap();
+        fs::write(prepared.runner.executable().with_extension("script"), format!("#!/bin/sh\nprintf x >> '{}'\nsleep 0.3\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"retained answer\",\"messages\":[{{\"role\":\"assistant\",\"content\":\"retained answer\",\"metadata\":{{\"source\":\"fixture\"}}}}],\"metadata\":{{\"source\":\"fixture\"}},\"usages\":[{{\"call_id\":\"actual-call\",\"model\":\"fixture\"}}]}}'\n", count.display())).unwrap();
         let controller = ChatController::open(prepared).unwrap();
         controller
             .send(ChatCommand::Submit {
@@ -269,7 +276,7 @@ fn captured_results_keep_the_lane_reserved_until_save_or_discard_without_resendi
         );
         if !abandon {
             let history = database.history(&invocation.session_id).unwrap();
-            let message = history.history[1].clone().encode().unwrap();
+            let message = history.history[0].clone().encode().unwrap();
             assert_eq!(message["metadata"], json!({"source":"fixture"}));
         }
     }
@@ -454,7 +461,7 @@ fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf)
     let gate = directory.join("release");
     let records = json!([
         {"answer":{"text":"provisional","model_call_id":"model-call"}},
-        {"status":"succeeded","text":"canonical","usages":[]}
+        {"status":"succeeded","text":"canonical","messages":[{"role":"assistant","content":"canonical"}],"usages":[]}
     ]);
     // Exceed preview and queue limits without turning delivery checks into a throughput benchmark.
     let flood_chunk_bytes = 2048;
@@ -665,7 +672,7 @@ fn save_only_recovery_persists_tools_with_the_original_reply_and_never_executes_
     launch.options.database_path = state.join("chat.sqlite");
     let marker = root.path().join("unexpected-execution");
     fs::write(launch.runner.executable().with_extension("script"), format!(
-        "#!/bin/sh\ntouch '{}'\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"wrong rerun\",\"usages\":[]}}'\n", marker.display()
+        "#!/bin/sh\ntouch '{}'\nprintf '%s' '{{\"status\":\"succeeded\",\"text\":\"wrong rerun\",\"messages\":[{{\"role\":\"assistant\",\"content\":\"wrong rerun\"}}],\"usages\":[]}}'\n", marker.display()
     )).unwrap();
     let database = Arc::new(ChatDatabase::open(&launch.options.database_path).unwrap());
     let session = database.create_session("default", None, None).unwrap();
@@ -717,6 +724,7 @@ fn save_only_recovery_persists_tools_with_the_original_reply_and_never_executes_
                 completion: mf_chat::Completion {
                     invocation: begun.invocation.clone(),
                     result: mf_chat::ConversationResult {
+                        messages: reply_messages("original paid reply"),
                         text: "original paid reply".into(),
                         ..Default::default()
                     },

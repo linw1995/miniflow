@@ -705,11 +705,13 @@ impl ChatDatabase {
         call_id: &str,
     ) -> Result<Option<Vec<ChatMessage>>, ChatError> {
         let mut connection = storage::connect(self.path())?;
-        connection.transaction(|connection| {
-            Ok(
-                crate::conversation_state::load(connection, call_id)?
-                    .or(load(connection, call_id)?),
-            )
-        })
+        connection.transaction(|connection| crate::conversation_state::load(connection, call_id))
+    }
+    pub fn conversation_evidence(
+        &self,
+        call_id: &str,
+    ) -> Result<Option<Vec<ChatMessage>>, ChatError> {
+        let mut connection = storage::connect(self.path())?;
+        connection.transaction(|connection| load(connection, call_id))
     }
 }

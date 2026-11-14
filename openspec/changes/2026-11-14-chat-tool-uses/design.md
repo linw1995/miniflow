@@ -32,12 +32,13 @@ Markdown commands or image requests.
 
 ## Structured message contract
 
-Add optional terminal `messages` and typed `message_events`/`tool_message_events` streams without making them mandatory for
-existing chat Flows. Reuse `ChatMessage` roles/tool-call values rather than parsing text into calls.
+Use the Agent Flow's required complete `messages` input/output as the single chat contract. Typed
+`message_events`/`tool_message_events` remain optional. Reuse `ChatMessage` roles/tool-call values rather than parsing
+text into calls. Old prompt/system/history bindings and text-only result contracts are not supported.
 
-- Optional input `messages` supplies the complete context including the current user message. Legacy prompt/system/
-  history inputs remain supported; the host assembles the complete input when needed. A supplied complete input takes
-  precedence, so the Agent does not append the prompt or system instruction twice.
+- Required input `messages` supplies the complete context including the current user message. The terminal prompt is
+  an admission concern: the host appends a user message before invoking the Flow. The Flow never receives a second
+  prompt/system/history representation or chooses between old and new input shapes.
 - Output `messages` is the complete next context, not a current-turn delta. No fixed prefix, text-based deduplication,
   message-boundary count, or second transcript accumulator is required from a custom Flow.
 - Immutable message events carry a publisher-generated ID, optional originating model-call ID and complete messages.
@@ -46,7 +47,8 @@ existing chat Flows. Reuse `ChatMessage` roles/tool-call values rather than pars
 - The final context need not equal the event journal: compaction may remove or rewrite previously emitted messages.
   The journal remains audit evidence, while the final context alone controls the next request. A conflicting second
   terminal result for the same invocation is still rejected.
-- Terminal-only Flows may omit the stream. Older Flows may omit both outputs and still expose observation-only tools.
+- Terminal-only Flows may omit the event streams, never the complete message result. Missing/null/optional message
+  contracts are rejected before execution or settlement; even a failed result explicitly reports its message state.
 
 ## Durable messages are the session recovery source
 
@@ -68,7 +70,8 @@ a redacted/truncated display copy and reporting successful recovery. Public diag
 
 On restart, history loading starts from the latest successfully settled complete context version, including tool
 calls/results and metadata, not concatenated older turns. Removed history and system instructions must not reappear.
-Later legacy text-only turns may append to that version; pre-version databases keep their original history behavior.
+No text-only turns or audit-row concatenation can extend or replace that version. Saved records lacking a complete
+context remain inspectable, but restoration/replay reports missing canonical state instead of guessing it.
 Failed/cancelled/interrupted versions and streamed prefixes remain inspectable but never advance the successful
 context head. Metrics-only records never become model-history messages.
 
@@ -81,9 +84,9 @@ Execution-status updates may still coalesce by identity without blocking on fron
 
 If `messages` is supplied, its final assistant record must represent the canonical final reply; a postprocessing Flow
 must make the exposed final message consistent with `text`. The host must neither silently rewrite the transcript
-from raw model text nor append another assistant message from `text`. Only a legacy Flow omitting `messages` retains
-the existing admitted-user plus final-text fallback. Display/audit rows never reconstruct model context once a complete
-version exists, so an admitted prompt or earlier history is not automatically added back to a rewritten context.
+from raw model text nor append another assistant message from `text`. There is no text-only fallback, including for
+programmatic backends. Display/audit rows and streamed evidence never substitute for the authoritative context.
+An admitted prompt or earlier history is not automatically added back to a rewritten context.
 
 ## Identity, correlation, and merged projection
 

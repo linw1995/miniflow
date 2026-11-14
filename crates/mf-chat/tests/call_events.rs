@@ -33,6 +33,11 @@ impl ConversationBackend for Backend {
         assert!(usage.timing.is_none());
         usage.started_at = Some(0);
         Ok(ConversationResult {
+            messages: vec![mf_chat::ChatMessage::Assistant {
+                content: "answer".into(),
+                tool_calls: None,
+                metadata: None,
+            }],
             text: "answer".into(),
             usages: vec![usage],
             ..Default::default()

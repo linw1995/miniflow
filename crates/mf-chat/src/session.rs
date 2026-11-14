@@ -146,61 +146,44 @@ pub fn load(connection: &mut SqliteConnection, id: &str) -> Result<Session, Chat
 
 pub fn history(connection: &mut SqliteConnection, id: &str) -> Result<HistoryContext, ChatError> {
     let session = load(connection, id)?;
-    let latest = crate::schema::conversation_states::table
-        .inner_join(model_calls::table)
+    let latest = model_calls::table
         .inner_join(turns::table.on(model_calls::turn_id.eq(turns::id.nullable())))
-        .filter(crate::schema::conversation_states::session_id.eq(id))
-        .filter(crate::schema::conversation_states::finished.eq(true))
+        .filter(model_calls::session_id.eq(id))
+        .filter(model_calls::purpose.eq("conversation"))
         .filter(model_calls::state.eq("succeeded"))
         .filter(turns::state.eq("succeeded"))
         .order(turns::sequence.desc())
-        .select((model_calls::id, turns::sequence))
-        .first::<(String, i64)>(connection)
+        .select(model_calls::id)
+        .first::<String>(connection)
         .optional()
         .context(DatabaseSnafu {
-            operation: "load authoritative conversation head",
+            operation: "load successful conversation head",
         })?;
-    let (mut result, boundary, system) = if let Some((call, sequence)) = latest {
-        (
-            crate::conversation_state::load(connection, &call)?
-                .context(ConflictSnafu { id: &call })?,
-            sequence,
-            None,
-        )
-    } else {
-        (Vec::new(), -1, session.system)
+    let Some(call) = latest else {
+        return Ok(HistoryContext {
+            history: Vec::new(),
+            system: session.system,
+        });
     };
-    let mut after = -1i64;
-    loop {
-        let page: Vec<Message> = messages::table
-            .inner_join(turns::table)
-            .filter(messages::session_id.eq(id))
-            .filter(turns::state.eq("succeeded"))
-            .filter(turns::sequence.gt(boundary))
-            .filter(messages::sequence.gt(after))
-            .order(messages::sequence.asc())
-            .limit(100)
-            .select(Message::as_select())
-            .load(connection)
-            .context(DatabaseSnafu {
-                operation: "load successful chat history",
-            })?;
-        if page.is_empty() {
-            break;
+    let finished = crate::schema::conversation_states::table
+        .find(&call)
+        .select(crate::schema::conversation_states::finished)
+        .first::<bool>(connection)
+        .optional()
+        .context(DatabaseSnafu {
+            operation: "load complete context checkpoint",
+        })?;
+    ensure!(
+        finished == Some(true),
+        InvalidSnafu {
+            field: "messages",
+            reason: "successful turn lacks a complete context; text-only history reconstruction is unsupported"
         }
-        let mut canonical = crate::message_log::reconstruct(connection, &page)?;
-        for message in page {
-            after = message.sequence;
-            result.push(
-                canonical
-                    .remove(&message.id)
-                    .expect("reconstructed each history message"),
-            );
-        }
-    }
+    );
     Ok(HistoryContext {
-        history: result,
-        system,
+        history: crate::conversation_state::load(connection, &call)?
+            .context(ConflictSnafu { id: &call })?,
+        system: None,
     })
 }
 
@@ -746,26 +729,48 @@ mod tests {
             .create_session("default", Some("instructions".into()), None)
             .unwrap();
         let other = database.create_session("default", None, None).unwrap();
-        let mut connection = storage::connect(database.path()).unwrap();
-        connection
-            .batch_execute(&format!(
-                "INSERT INTO turns VALUES ('good', '{}', NULL, 0, 'succeeded', 1, 2, NULL);
-             INSERT INTO turns VALUES ('bad', '{}', NULL, 2, 'failed', 3, 4, 'failed');
-             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('u', '{}', 'good', 0, 'user', 'question', 1);
-             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('a', '{}', 'good', 1, 'assistant', replace(hex(zeroblob(1048576)), '00', 'x'), 2);
-             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('b', '{}', 'bad', 2, 'user', 'failed question', 3);",
-                session.id, session.id, session.id, session.id, session.id
-            ))
+        let model = crate::ModelIdentity {
+            profile: "default".into(),
+            model: None,
+        };
+        let good = database
+            .begin_turn(&session.id, "question", model.clone(), None)
+            .unwrap();
+        let text = "x".repeat(1048576);
+        let mut messages = good.request.messages;
+        messages.push(crate::ChatMessage::Assistant {
+            content: text.clone(),
+            tool_calls: None,
+            metadata: None,
+        });
+        database
+            .complete_turn(
+                good.invocation,
+                crate::ConversationResult {
+                    messages,
+                    text,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let bad = database
+            .begin_turn(&session.id, "failed question", model, None)
+            .unwrap();
+        database
+            .fail_turn(bad.invocation, "failed", "failed")
             .unwrap();
         let context = database.history(&session.id).unwrap();
-        assert_eq!(context.history.len(), 2);
+        assert_eq!(context.history.len(), 3);
         assert!(
-            matches!(&context.history[0], mfn_llm::ChatMessage::User { content, .. } if content == "question")
+            matches!(&context.history[0], mfn_llm::ChatMessage::System { content, .. } if content == "instructions")
         );
         assert!(
-            matches!(&context.history[1], mfn_llm::ChatMessage::Assistant { content, .. } if content.len() == 1048576)
+            matches!(&context.history[1], mfn_llm::ChatMessage::User { content, .. } if content == "question")
         );
-        assert_eq!(context.system.as_deref(), Some("instructions"));
+        assert!(
+            matches!(&context.history[2], mfn_llm::ChatMessage::Assistant { content, .. } if content.len() == 1048576)
+        );
+        assert!(context.system.is_none());
         assert!(database.history(&other.id).unwrap().history.is_empty());
         let page = database.messages(&session.id, 2, None).unwrap();
         let tail = database.messages(&session.id, 2, page.next_after).unwrap();

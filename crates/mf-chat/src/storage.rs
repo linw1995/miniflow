@@ -250,22 +250,21 @@ mod tests {
                 usage: Some(counters.clone()),
                 error: None,
             };
-            database
-                .complete_turn(
-                    begun.invocation.clone(),
-                    crate::ConversationResult {
-                        text: "old reply".into(),
-                        usages: if has_list {
-                            vec![reported.clone()]
-                        } else {
-                            Vec::new()
-                        },
-                        metadata: metadata.clone(),
-                        finish_reason: None,
-                        ..Default::default()
+            crate::migration_test_support::complete_legacy(
+                &database,
+                &begun.invocation,
+                crate::ConversationResult {
+                    text: "old reply".into(),
+                    usages: if has_list {
+                        vec![reported.clone()]
+                    } else {
+                        Vec::new()
                     },
-                )
-                .unwrap();
+                    metadata: metadata.clone(),
+                    finish_reason: None,
+                    ..Default::default()
+                },
+            );
             let original = database.call(&begun.invocation.call_id).unwrap();
             let mut connection = connect(&path).unwrap();
             if !has_list {
@@ -315,10 +314,15 @@ mod tests {
             assert_eq!(call.input_tokens, Some(tokens));
             assert_eq!(call.result_text, original.result_text);
             assert_eq!(call.metadata, metadata);
-            assert!(matches!(
-                &reopened.history(&session.id).unwrap().history[1],
-                mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &metadata
-            ));
+            assert!(
+                reopened.history(&session.id).is_err(),
+                "missing full contexts are not reconstructed from historical text pairs"
+            );
+            assert!(
+                matches!(&reopened.messages(&session.id, 10, None).unwrap().messages[1].chat_message,
+                    mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &metadata
+                )
+            );
             assert_eq!(
                 model_calls::table
                     .find(&begun.invocation.call_id)
@@ -327,16 +331,9 @@ mod tests {
                     .unwrap(),
                 "legacy-config"
             );
-            let crate::contract::InvocationState::Committed(saved) =
-                reopened.inspect_invocation(&begun.invocation).unwrap()
-            else {
-                panic!("expected migrated completion");
-            };
-            assert_eq!(
-                reopened
-                    .complete_turn(begun.invocation, saved.result.clone())
-                    .unwrap(),
-                saved
+            assert!(
+                reopened.inspect_invocation(&begun.invocation).is_err(),
+                "legacy audit data is not a complete Flow context result"
             );
             let usage = reopened.usage(Default::default()).unwrap();
             assert_eq!(usage.overall.attempted_calls, 1);

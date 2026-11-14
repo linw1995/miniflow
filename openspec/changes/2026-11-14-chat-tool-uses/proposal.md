@@ -9,9 +9,9 @@ and persistence must be designed together rather than concatenating two tool lis
 
 ## What Changes
 
-- Add optional complete `messages` input/output and immutable typed message events to the shared chat contract.
-  Existing workflows remain valid. Custom Flows may compact, reorder or replace history; they need no host persistence
-  counter, prefix slicing, or second transcript accumulator.
+- Use the Agent's required complete `messages` input/output as the only chat contract, with optional immutable typed
+  message events. Remove historical prompt/system/history binding and text-only result compatibility. Custom Flows
+  may compact, reorder or replace history without a persistence counter, prefix slicing or second transcript.
 - Persist every accepted Flow message as canonical ordered chat data, including message metadata, assistant tool calls,
   arguments, and tool results. Restore exactly the latest successful complete context after restart, retaining older
   versions and event evidence for inspection without resurrecting discarded history. ToolUse summaries are not recovery data.

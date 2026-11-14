@@ -287,8 +287,20 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             .context(DatabaseSnafu {
                 operation: "reserve session message order",
             })?;
-        let mut request = ConversationInputs {
-            messages: None,
+        let mut messages = Vec::new();
+        if let Some(system) = context.system.filter(|system| !system.is_empty()) {
+            messages.push(crate::ChatMessage::System {
+                content: system,
+                metadata: None,
+            });
+        }
+        messages.extend(context.history);
+        messages.push(crate::ChatMessage::User {
+            content: input.prompt.clone(),
+            metadata: None,
+        });
+        let request = ConversationInputs {
+            messages,
             context: Some(ConversationContext {
                 title: crate::contract::TitleContext {
                     source: owner.title_source.clone(),
@@ -297,11 +309,7 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
                     enabled: true,
                 },
             }),
-            prompt: input.prompt.clone(),
-            system: context.system,
-            history: Some(context.history),
         };
-        request.messages = Some(request.message_context());
         Ok(TurnStarted {
             database_path: input.database_path.clone(),
             invocation: Invocation {
@@ -423,7 +431,7 @@ pub fn saved_result(
 ) -> Result<ConversationResult, ChatError> {
     Ok(ConversationResult {
         messages: crate::conversation_state::load(connection, &call.id)?
-            .or(crate::message_log::load(connection, &call.id)?),
+            .context(ConflictSnafu { id: &call.id })?,
         status: "succeeded".into(),
         error: None,
         title: call.result_title.clone(),
@@ -494,44 +502,12 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             ConflictSnafu { id: &call.id }
         );
         let timestamp = session::now()?;
-        if let Some(messages) = &input.response.messages {
-            crate::message_log::settle(connection, &input.invocation, messages)?;
-            crate::conversation_state::display_reply(connection, &input.invocation, messages)?;
-        } else {
-            ensure!(
-                crate::message_log::load(connection, &call.id)?.is_none(),
-                ConflictSnafu { id: &call.id }
-            );
-            let owner = session::load(connection, &call.session_id)?;
-            let next = owner
-                .next_sequence
-                .checked_add(1)
-                .context(ArithmeticSnafu {
-                    operation: "order assistant message",
-                })?;
-            let message = crate::Message {
-                metadata: input.response.metadata.clone(),
-                id: uuid::Uuid::new_v4().to_string(),
-                session_id: call.session_id.clone(),
-                turn_id: turn.id.clone(),
-                sequence: owner.next_sequence,
-                role: "assistant".into(),
-                content: input.response.text.clone(),
-                created_at: timestamp,
-            };
-            diesel::insert_into(messages::table)
-                .values(message)
-                .execute(connection)
-                .context(DatabaseSnafu {
-                    operation: "save assistant message",
-                })?;
-            diesel::update(sessions::table.find(&owner.id))
-                .set(sessions::next_sequence.eq(next))
-                .execute(connection)
-                .context(DatabaseSnafu {
-                    operation: "advance assistant message order",
-                })?;
-        }
+        crate::message_log::settle(connection, &input.invocation, &input.response.messages)?;
+        crate::conversation_state::display_reply(
+            connection,
+            &input.invocation,
+            &input.response.messages,
+        )?;
         save_response(
             connection,
             &call.id,
@@ -958,6 +934,11 @@ mod tests {
     }
     fn reply(text: &str) -> ConversationResult {
         ConversationResult {
+            messages: vec![crate::ChatMessage::Assistant {
+                content: text.into(),
+                tool_calls: None,
+                metadata: None,
+            }],
             usages: vec![crate::CallUsage {
                 timing: None,
                 attribution: None,
@@ -1073,9 +1054,15 @@ mod tests {
             .unwrap();
         assert_ne!(first.invocation.call_id, second.invocation.call_id);
         assert_ne!(first.invocation.turn_id, second.invocation.turn_id);
-        assert!(second.request.history.unwrap().is_empty());
+        assert!(
+            matches!(second.request.messages.as_slice(), [crate::ChatMessage::User { content, .. }] if content == "retry")
+        );
+        let mut response = reply("answer");
+        response
+            .messages
+            .splice(0..0, second.request.messages.clone());
         database
-            .complete_turn(second.invocation.clone(), reply("answer"))
+            .complete_turn(second.invocation.clone(), response)
             .unwrap();
         let history = database.history(&session.id).unwrap();
         assert_eq!(history.history.len(), 2);

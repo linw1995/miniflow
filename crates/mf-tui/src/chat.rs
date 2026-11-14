@@ -698,13 +698,19 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         preview: Option<&mut dyn FnMut(mf_chat::TextDelta) -> Result<(), mf_chat::ChatError>>,
         _: Option<&mf_telemetry::observation::Observer>,
     ) -> Result<mf_chat::ConversationResult, mf_chat::ChatError> {
+        let Some(mf_chat::ChatMessage::User { content, .. }) = request.messages.last() else {
+            return Err(mf_chat::CaptureSnafu {
+                message: "chat request must end with the admitted user message",
+            }
+            .build());
+        };
         emit(
             &self.output,
             &self.closed,
             ChatEvent::Submitted {
                 session: self.session.clone(),
                 invocation: invocation.clone(),
-                prompt: request.prompt.clone(),
+                prompt: content.clone(),
             },
         );
         let execution = self.execute(invocation, request, context, preview);
@@ -820,13 +826,10 @@ impl ExternalBackend {
                 for batch in decoder.take_message_events() {
                     tools.borrow_mut().event(batch, &self.database)?;
                 }
-                if !terminal_messages
-                    && let Some(messages) =
-                        decoder.result().and_then(|result| result.messages.as_ref())
-                {
+                if !terminal_messages && let Some(result) = decoder.result() {
                     tools
                         .borrow_mut()
-                        .context(messages.clone(), &self.database)?;
+                        .context(result.messages.clone(), &self.database)?;
                     terminal_messages = true;
                 }
                 Ok(())
@@ -848,8 +851,7 @@ impl ExternalBackend {
         if !self.launch.contract.streaming
             && let Ok(completion) = &mut completion
             && let Ok(result) = mf_chat::ConversationResult::from_json(&completion.outcome.stdout)
-            && let Some(messages) = result.messages
-            && let Err(error) = tools.borrow_mut().context(messages, &self.database)
+            && let Err(error) = tools.borrow_mut().context(result.messages, &self.database)
         {
             completion.protocol_failure = Some(error);
         }

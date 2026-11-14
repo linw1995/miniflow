@@ -5,6 +5,8 @@ mod error;
 pub mod flows;
 mod host;
 mod message_log;
+#[cfg(test)]
+mod migration_test_support;
 mod models;
 mod preview;
 #[macro_use]

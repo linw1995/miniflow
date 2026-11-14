@@ -107,23 +107,23 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 23] {
         (
             "chat-flow.json",
             None,
-            json!({"status":"succeeded", "text":"reply", "usages":[chat_usage(json!([]))], "finish_reason":"stop"}),
+            json!({"status":"succeeded", "text":"reply", "messages":[{"role":"user","content":"Hello"},{"role":"assistant","content":"reply"}], "usages":[chat_usage(json!([]))], "finish_reason":"stop"}),
         ),
         (
             "chat-loop-flow.json",
             None,
-            json!({"status":"succeeded", "text":"reply", "error":"", "metadata":{"strategy":"iterative"}, "usages":[chat_usage(json!([{"node":"repeat","index":0}])), chat_usage(json!([{"node":"repeat","index":1}]))]}),
+            json!({"status":"succeeded", "text":"reply", "messages":[{"role":"user","content":"Hello"},{"role":"assistant","content":"reply"},{"role":"assistant","content":"reply"}], "error":"", "metadata":{"strategy":"iterative"}, "usages":[chat_usage(json!([{"node":"repeat","index":0}])), chat_usage(json!([{"node":"repeat","index":1}]))]}),
         ),
         (
             "chat-title-flow.json",
             None,
-            json!({"status":"succeeded","text":"reply","title":"reply","finish_reason":"stop",
+            json!({"status":"succeeded","text":"reply","title":"reply","finish_reason":"stop", "messages":[{"role":"user","content":"Hello"},{"role":"assistant","content":"reply"}],
                 "usages":[title_usage("model", "conversation"), title_usage("title_model", "title")]}),
         ),
         (
             "chat-nested-title-flow.json",
             None,
-            json!({"status":"succeeded","text":"reply","title":"reply","finish_reason":"stop",
+            json!({"status":"succeeded","text":"reply","title":"reply","finish_reason":"stop", "messages":[{"role":"user","content":"Hello"},{"role":"assistant","content":"reply"}],
                 "usages":[title_usage("model", "conversation"), nested_title_usage()]}),
         ),
         ("else-if.json", None, json!({"medium": {"amount": 500}})),
@@ -311,18 +311,18 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
             } else if name == "chat-calculator-flow.json" {
                 json!({
-                    "params.prompt":CALCULATOR_PROMPT,
-                    "params.system":"Use the calculator.",
-                    "params.history":[
+                    "params.messages":[
+                        {"role":"system","content":"Use the calculator."},
                         {"role":"user","content":"Earlier question"},
-                        {"role":"assistant","content":"Earlier answer"}
+                        {"role":"assistant","content":"Earlier answer"},
+                        {"role":"user","content":CALCULATOR_PROMPT}
                     ],
                     "params.model":"example-model",
                     "params.base_url":server.base_url,
                     "params.api_key":"synthetic-calculator-key"
                 })
             } else if name.starts_with("chat-") {
-                json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
+                json!({"params.messages":[{"role":"user","content":"Hello"}], "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-tools.json" {
                 json!({"model.messages":[{"role":"user","content":"Hello"}]})
             } else if name == "llm-parameters.json" {

@@ -46,6 +46,11 @@ fn exact_cleanup_keeps_other_sessions_and_committed_success() {
         .complete_turn(
             second.invocation.clone(),
             ConversationResult {
+                messages: vec![mf_chat::ChatMessage::Assistant {
+                    content: "saved".into(),
+                    tool_calls: None,
+                    metadata: None,
+                }],
                 usages: Vec::new(),
                 metadata: None,
                 text: "saved".into(),

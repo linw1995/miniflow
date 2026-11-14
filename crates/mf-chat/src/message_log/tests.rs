@@ -104,7 +104,7 @@ fn canonical_arguments_and_metadata_retain_sensitivity_without_exposing_it_in_to
             invocation.clone(),
             ConversationResult {
                 text: "20".into(),
-                messages: Some(messages),
+                messages,
                 ..Default::default()
             },
         )
@@ -157,15 +157,14 @@ fn legacy_json_migrates_as_observations_without_invented_messages_or_origins() {
     history.runs[0].origin = None;
     history.finished = true;
     database.record_tool_uses(&invocation, &history).unwrap();
-    database
-        .complete_turn(
-            invocation.clone(),
-            ConversationResult {
-                text: "legacy answer".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    crate::migration_test_support::complete_legacy(
+        &database,
+        &invocation,
+        ConversationResult {
+            text: "legacy answer".into(),
+            ..Default::default()
+        },
+    );
     let mut connection = storage::connect(&path).unwrap();
     connection
         .revert_last_migration(storage::MIGRATIONS)
@@ -186,11 +185,12 @@ fn legacy_json_migrates_as_observations_without_invented_messages_or_origins() {
             .unwrap()
             .is_none()
     );
+    assert!(database.history(&invocation.session_id).is_err());
     assert_eq!(
         database
-            .history(&invocation.session_id)
+            .messages(&invocation.session_id, 100, None)
             .unwrap()
-            .history
+            .messages
             .len(),
         2
     );
@@ -219,7 +219,7 @@ fn failed_results_keep_canonical_messages_and_scalar_rejected_arguments_outside_
     let response = ConversationResult {
         status: "failed".into(),
         error: Some("provider stopped".into()),
-        messages: Some(messages.clone()),
+        messages: messages.clone(),
         ..Default::default()
     };
     let resolution = database
@@ -290,7 +290,7 @@ fn full_messages_round_trip_and_next_turn_receives_all_successful_context() {
     }
     let response = ConversationResult {
         text: "20".into(),
-        messages: Some(messages.clone()),
+        messages: messages.clone(),
         ..Default::default()
     };
     assert_eq!(
@@ -337,7 +337,10 @@ fn full_messages_round_trip_and_next_turn_receives_all_successful_context() {
         .unwrap();
     // The returned complete state deliberately omits the admitted prompt.
     let expected = messages.clone();
-    assert_eq!(next.request.history.as_deref(), Some(expected.as_slice()));
+    assert_eq!(&next.request.messages[..expected.len()], expected);
+    assert!(
+        matches!(next.request.messages.last(), Some(ChatMessage::User { content, .. }) if content == "continue")
+    );
     let crate::contract::InvocationState::Committed(saved) =
         database.inspect_invocation(&invocation).unwrap()
     else {
@@ -366,7 +369,7 @@ fn exact_replays_do_not_write_messages_payloads_relations_or_cursors() {
         CREATE TRIGGER no_order_write BEFORE UPDATE ON sessions BEGIN SELECT RAISE(ABORT, 'order rewrite'); END;").unwrap();
     database.record_messages(&invocation, &batch).unwrap();
     assert_eq!(
-        database.conversation_messages(&invocation.call_id).unwrap(),
+        database.conversation_evidence(&invocation.call_id).unwrap(),
         Some(batch.messages)
     );
 }
@@ -512,7 +515,7 @@ fn ambiguous_late_identity_keeps_both_messages_and_execution_without_a_guessed_l
     );
     assert_eq!(
         database
-            .conversation_messages(&invocation.call_id)
+            .conversation_evidence(&invocation.call_id)
             .unwrap()
             .unwrap()
             .len(),
@@ -567,7 +570,7 @@ fn successful_settlement_is_atomic_and_retry_retains_the_complete_original_messa
     let messages = vec![request("one", ""), result("one"), final_message()];
     let response = ConversationResult {
         text: "20".into(),
-        messages: Some(messages.clone()),
+        messages: messages.clone(),
         ..Default::default()
     };
     let mut connection = storage::connect(database.path()).unwrap();
@@ -604,7 +607,7 @@ fn successful_settlement_is_atomic_and_retry_retains_the_complete_original_messa
     };
     assert_eq!(
         database.save_recovered(pending).unwrap().result.messages,
-        Some(messages)
+        messages
     );
 }
 
@@ -632,7 +635,7 @@ fn canonical_messages_are_not_limited_by_observation_windows_and_history_pages_k
             invocation.clone(),
             ConversationResult {
                 text: "20".into(),
-                messages: Some(messages.clone()),
+                messages: messages.clone(),
                 ..Default::default()
             },
         )
@@ -670,7 +673,7 @@ fn interrupted_message_prefixes_survive_restart_but_never_enter_successful_conte
         "interrupted"
     );
     assert_eq!(
-        database.conversation_messages(&invocation.call_id).unwrap(),
+        database.conversation_evidence(&invocation.call_id).unwrap(),
         Some(batch.messages)
     );
     assert_eq!(

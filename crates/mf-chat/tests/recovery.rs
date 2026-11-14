@@ -42,8 +42,23 @@ fn metadata() -> mfn_llm::MessageMetadata {
         json!([{"uri":"https://example.com/reference"}]).into(),
     )])
 }
+fn messages(text: &str) -> Vec<mfn_llm::ChatMessage> {
+    vec![
+        mfn_llm::ChatMessage::User {
+            content: "prompt".into(),
+            metadata: None,
+        },
+        mfn_llm::ChatMessage::Assistant {
+            content: text.into(),
+            tool_calls: None,
+            metadata: Some(metadata()),
+        },
+    ]
+}
+
 fn reply() -> ConversationResult {
     ConversationResult {
+        messages: messages("paid reply"),
         usages: usages(),
         metadata: Some(metadata()),
         text: "paid reply".into(),
@@ -54,6 +69,7 @@ fn reply() -> ConversationResult {
 fn stdout(text: &str) -> Vec<u8> {
     serde_json::to_vec(
         &ConversationResult {
+            messages: messages(text),
             usages: usages(),
             metadata: Some(metadata()),
             text: text.into(),
@@ -317,7 +333,7 @@ fn failed_workflow_persists_all_reported_calls_atomically_without_an_assistant_m
     failed.error = Some("provider unavailable".into());
     reported.push(failed);
     let bytes = serde_json::to_vec(
-        &json!({"status":"failed", "usages":reported, "error":"workflow failed"}),
+        &json!({"status":"failed", "messages":[], "usages":reported, "error":"workflow failed"}),
     )
     .unwrap();
     let exit = || ConversationExit {
@@ -405,13 +421,28 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
     let second = database
         .begin_turn(&first.session_id, "next", profile.clone(), None)
         .unwrap();
-    assert!(matches!(&second.request.history.unwrap()[1],
+    assert!(matches!(&second.request.messages[1],
         mfn_llm::ChatMessage::Assistant { metadata: actual, .. } if actual == &Some(metadata())
     ));
     let mut output: serde_json::Value = serde_json::from_slice(&stdout("next reply")).unwrap();
     output["history"] =
         json!([{"role":"assistant","content":"rewritten","metadata":{"changed":true}}]);
     output["metadata"] = json!({"current":true});
+    let mut full = serde_json::to_value(
+        database
+            .conversation_messages(&first.call_id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .clone();
+    full.extend([
+        json!({"role":"user","content":"next"}),
+        json!({"role":"assistant","content":"next reply","metadata":{"current":true}}),
+    ]);
+    output["messages"] = json!(full);
     let bytes = serde_json::to_vec(&output).unwrap();
     let resolution = database
         .reconcile_completion(ConversationExit {
@@ -470,6 +501,7 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
         .complete_turn(
             known_empty.invocation,
             ConversationResult {
+                messages: messages("no model was needed"),
                 text: "no model was needed".into(),
                 usages: Vec::new(),
                 metadata: None,

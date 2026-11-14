@@ -95,8 +95,19 @@ impl ConversationBackend for Runner {
                 model_call_id: "model".into(),
             },
         )?;
+        let text = match request.messages.last().unwrap() {
+            mf_chat::ChatMessage::User { content, .. } => content.clone(),
+            _ => panic!("expected user input"),
+        };
+        let mut messages = request.messages;
+        messages.push(mf_chat::ChatMessage::Assistant {
+            content: text.clone(),
+            tool_calls: None,
+            metadata: None,
+        });
         let reply = ConversationResult {
-            text: request.prompt,
+            messages,
+            text,
             ..Default::default()
         };
         if self.fail_after_reply {

@@ -383,9 +383,7 @@ fn settle_result(input: CompleteTurnInputs) -> Result<Settlement, ChatError> {
     } else {
         let mut connection = crate::storage::connect(std::path::Path::new(&input.database_path))?;
         connection.immediate_transaction(|connection| {
-            if let Some(messages) = &input.response.messages {
-                crate::message_log::settle(connection, &input.invocation, messages)?;
-            }
+            crate::message_log::settle(connection, &input.invocation, &input.response.messages)?;
             crate::turn::finalize_call(
                 connection,
                 &input.invocation.call_id,
@@ -443,8 +441,11 @@ impl TitleGenerationContext {
                     reason: "requires resolved model, base_url, and api_key inputs",
                 })
         };
+        let Some(crate::ChatMessage::User { content, .. }) = request.messages.last() else {
+            return Ok(None);
+        };
         Ok(Some(Self {
-            prompt: request.prompt.clone(),
+            prompt: content.clone(),
             context: context.title.clone(),
             model: parameter("model")?,
             base_url: parameter("base_url")?,
@@ -1523,6 +1524,18 @@ mod tests {
     use mf_runtime::TypedTaskNode;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn answer(text: &str) -> ConversationResult {
+        ConversationResult {
+            messages: vec![crate::ChatMessage::Assistant {
+                content: text.into(),
+                tool_calls: None,
+                metadata: None,
+            }],
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+
     struct ReadContext;
 
     impl TypedTaskNode for ReadContext {
@@ -1534,15 +1547,11 @@ mod tests {
             _: Self::Input,
             context: &mut ExecutionContext,
         ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
-            Ok(ConversationResult {
-                text: if context.output("begin.database_path").is_ok() {
-                    "leaked"
-                } else {
-                    "isolated"
-                }
-                .into(),
-                ..Default::default()
-            }
+            Ok(answer(if context.output("begin.database_path").is_ok() {
+                "leaked"
+            } else {
+                "isolated"
+            })
             .into())
         }
     }
@@ -1600,10 +1609,10 @@ mod tests {
                     database_path: "chat.sqlite".into(),
                     invocation: Invocation::new("session"),
                     request: ConversationInputs {
-                        messages: None,
-                        prompt: "Hello".into(),
-                        system: None,
-                        history: None,
+                        messages: vec![crate::ChatMessage::User {
+                            content: "Hello".into(),
+                            metadata: None,
+                        }],
                         context: None,
                     },
                 }
@@ -1635,6 +1644,7 @@ mod tests {
             "outputs":[
                 {"name":"status","node":"backend","port":"status"},
                 {"name":"text","node":"backend","port":"text"},
+                {"name":"messages","node":"backend","port":"messages"},
                 {"name":"usages","node":"backend","port":"usages"}
             ]
         }"#,
@@ -1646,10 +1656,10 @@ mod tests {
             .invoke(
                 &Invocation::new("session"),
                 ConversationInputs {
-                    messages: None,
-                    prompt: "hello".into(),
-                    system: None,
-                    history: None,
+                    messages: vec![crate::ChatMessage::User {
+                        content: "hello".into(),
+                        metadata: None,
+                    }],
                     context: None,
                 },
                 &mut context,
@@ -1674,10 +1684,7 @@ mod tests {
         ) -> Result<ConversationResult, ChatError> {
             assert!(input.context.is_some());
             self.0.fetch_add(1, Ordering::Relaxed);
-            Ok(ConversationResult {
-                text: "answer".into(),
-                ..Default::default()
-            })
+            Ok(answer("answer"))
         }
     }
 
@@ -1689,10 +1696,7 @@ mod tests {
                     database_path: "chat.sqlite".into(),
                     invocation: Invocation::new("session"),
                     title_context: None,
-                    result: ConversationResult {
-                        text: "canonical".into(),
-                        ..Default::default()
-                    },
+                    result: answer("canonical"),
                 }),
             },
         }
@@ -1771,10 +1775,10 @@ mod tests {
         };
         let mut event = final_event();
         let request = ConversationInputs {
-            messages: None,
-            prompt: "Prompt".into(),
-            system: None,
-            history: None,
+            messages: vec![crate::ChatMessage::User {
+                content: "Prompt".into(),
+                metadata: None,
+            }],
             context: Some(crate::contract::ConversationContext {
                 title: crate::contract::TitleContext {
                     source: "provisional".into(),
@@ -1944,10 +1948,10 @@ mod tests {
             database_path: "unused.sqlite".into(),
             invocation: Invocation::new("session"),
             request: ConversationInputs {
-                messages: None,
-                prompt: "hello".into(),
-                system: None,
-                history: None,
+                messages: vec![crate::ChatMessage::User {
+                    content: "hello".into(),
+                    metadata: None,
+                }],
                 context: None,
             },
         };

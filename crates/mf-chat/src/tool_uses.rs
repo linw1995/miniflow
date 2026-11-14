@@ -181,6 +181,11 @@ mod tests {
             .complete_turn(
                 invocation.clone(),
                 crate::ConversationResult {
+                    messages: vec![crate::ChatMessage::Assistant {
+                        content: "20".into(),
+                        tool_calls: None,
+                        metadata: None,
+                    }],
                     text: "20".into(),
                     ..Default::default()
                 },
@@ -200,7 +205,7 @@ mod tests {
                 .all(|record| record.tool_uses.as_ref() == Some(&evidence))
         );
         let context = reopened.history(&invocation.session_id).unwrap();
-        assert_eq!(context.history.len(), 2);
+        assert_eq!(context.history.len(), 1);
         assert!(!format!("{:?}", context.history).contains("dispatch:0"));
     }
 
@@ -293,6 +298,11 @@ mod tests {
                 .complete_turn(
                     invocation.clone(),
                     crate::ConversationResult {
+                        messages: vec![crate::ChatMessage::Assistant {
+                            content: "answer".into(),
+                            tool_calls: None,
+                            metadata: None
+                        }],
                         text: "answer".into(),
                         ..Default::default()
                     }

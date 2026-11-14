@@ -98,7 +98,7 @@ resources or issue terminal commands. Missing durations stay unknown and incompl
 `mf_chat.turn.begin` atomically records a user message, running turn, and running model call. It reserves message order and loads successful history before releasing its short transaction. Only one conversation turn may run in a session; another session can still use the database while the provider is pending.
 
 `mf_chat.turn.complete` reconciles all supplied canonical messages, reported usages, an optional title candidate and
-successful turn state together. Legacy results without `messages` retain the user/final-text fallback. Ordering supports
+successful turn state together. Complete `messages` are required; text-only results are rejected. Ordering supports
 multiple assistant/tool messages per turn, including empty-text tool-call assistants. Replaying the same call and
 response returns the full saved completion; conflicting text, messages, metadata, title or usages fail. A failed final
 transaction exposes no successful partial turn; already-recorded prefixes remain available for save-only recovery.
@@ -244,7 +244,7 @@ The [calculator example](../examples/chat-calculator-flow.json) uses the provide
 composition with a native Loop and parallel tool dispatch. Its calculator supports addition, subtraction,
 multiplication and division. Its single `messages` loop variable retains and returns the complete context, including
 the final reply, without a second transcript, boundary counter or host-specific suffix selection. Complete input
-`messages` takes precedence over legacy prompt/system/history assembly. A custom Flow may return a rewritten context;
+`messages` is its only conversation input; there is no prompt/system/history assembly or fallback. A custom Flow may return a rewritten context;
 the host restores exactly that successful version. `llm.message_events` publishes immutable message facts before
 dispatch and after tool results, generating its own scoped event IDs rather than asking the Flow to maintain cursors.
 `message_events` and `tool_message_events` preserve their respective native stream domains. Each model
@@ -264,8 +264,8 @@ other chat examples.
 ## Shared conversation contract
 
 `mf_chat::contract` owns the common contract, argument binding, and result reconciliation for both
-execution backends. `ConversationInputs` contains `prompt`, optional complete `messages` (including the admitted
-prompt), legacy optional `system`/`history`, and optional `context`. Context is application-owned input rather than a caller-supplied configuration
+execution backends. `ConversationInputs` contains required complete `messages` (including the admitted user message)
+and optional `context`. Context is application-owned input rather than a caller-supplied configuration
 parameter. A workflow that does not declare context continues to receive only the inputs it supports.
 
 ```json
@@ -279,14 +279,15 @@ parameter. A workflow that does not declare context continues to receive only th
 }
 ```
 
-`ConversationResult` contains `status`, `text`, `usages`, optional complete `messages`, message `metadata`, `finish_reason`,
+`ConversationResult` contains `status`, `text`, `usages`, required complete `messages`, message `metadata`, `finish_reason`,
 `error`, and optional `title`. `Completion.result` retains this result. A failed result requires an error
 summary and cannot update the title. A successful result requires nonempty text. The title is a candidate,
 not confirmation that a concurrent rename allowed it to be applied. Read the saved session for its title.
 
 Custom Flows can implement compaction by returning a valid complete `messages` state. Each invocation owns an
 immutable version; only successful atomic settlement advances the context head. The host does not impose an automatic
-summarization policy or truncate canonical payloads. Older text-only Flows retain their existing append behavior.
+summarization policy or truncate canonical payloads. Text-only backends are not supported. Old stored audit rows remain
+inspectable, but missing complete context versions are reported explicitly instead of reconstructed from text pairs.
 
 ## Usage statistics
 
@@ -396,9 +397,9 @@ that complete reply available for save-only retry without invoking the backend a
 node counts, control edges, preprocessing, and loops are workflow implementation choices. Execute the whole
 workflow; there is no isolated-model execution mode or assumption that a workflow contains one LLM.
 
-The startup interface supplies an unambiguous `prompt` string and optionally complete `messages`, legacy `system`/
-`history`, and `context`. Complete messages already include the current user input; a Flow must not append the prompt
-again. The host assembles them from legacy inputs when needed. The standard Agent prefers complete input messages.
+The startup interface requires unambiguous complete `messages` and optionally accepts application `context`.
+The terminal's prompt is an admission API, not a Flow parameter: the host appends its user message before invoking
+the Flow. Initial configured system instructions are also messages. No prompt/system/history aliases are bound.
 Their qualified names can belong to any startup node. Remaining declared inputs form `contract.parameters`;
 resolve them with `mf_runtime::resolve_workflow_inputs` before admission. The contract rejects ambiguous or
 mistyped conversation ports and stdin-dependent execution.
@@ -407,7 +408,8 @@ Finite executables keep their existing final JSON transport. Native streaming ex
 ordinary output named `answer` containing `text` and `model_call_id`. The backend drains standard JSONL
 records, validates deltas, and retains the final conversation result until execution completes.
 
-An optional terminal `messages` output is the complete authoritative `mfn_llm::ChatMessage` context for the next turn.
+A required terminal `messages` output is the complete authoritative `mfn_llm::ChatMessage` context for the next turn,
+including for failed results.
 It may replace, reorder or remove any input history; no prefix count or text-matching deduplication is required. Its
 final assistant message must represent canonical `text`; the host never substitutes raw model text. Optional
 `message_events` and `tool_message_events` carry immutable `{id, model_call_id?, messages}` facts. The publishing
@@ -437,10 +439,11 @@ nix develop --command cargo run -p mf-cli --features development-support -- comp
 
 The loop exports `chat.delta` through `config.stream_outputs.answer`, reusing the normal answer subscription
 and drain-before-settlement contract. Its final reply remains authoritative.
-The loop explicitly assembles model messages, appends each returned assistant message to its history,
-and accumulates usage lists with `builtin.code`. A missing assistant message skips the history update;
+The loop receives complete messages, appends each returned assistant message to that one list,
+and accumulates usage lists with `builtin.code`. It does not append another user prompt between model rounds.
+A missing assistant message skips the message update;
 the loop stops after a reported model failure.
-Its model configuration is passed into the loop through declared variables. The runner receives conversation
+Its model configuration is passed into the loop through declared read-only inputs. The runner receives conversation
 arguments and configuration. The application flow handles database admission and saving around that
 backend invocation; the terminal's backend supplies process supervision and child observation.
 
@@ -448,8 +451,8 @@ backend invocation; the terminal's backend supplies process supervision and chil
 
 Application history reconstructs the latest successful complete context, including assistant `tool_calls` and `tool`
 results when retained by the Flow. Each message accepts optional object-valued `metadata`; omitting it means no
-annotations. A returned context may change or remove system instructions. Legacy separate inputs remain available,
-but cannot override or reinsert content into a complete returned state.
+annotations. A returned context may change or remove system instructions. There is no separate system/history Flow
+input that can override or reinsert content into a complete returned state.
 
 ```json
 {
@@ -465,8 +468,9 @@ but cannot override or reinsert content into a complete returned state.
 Metadata is opaque application data and is omitted from provider requests. Flow-level message assembly
 preserves annotations on existing messages; the LLM node returns only its current assistant message.
 The chat application persists metadata on every accepted returned message through save retries and database reopen.
-Legacy text-only results retain response metadata on their single new assistant message. A returned `history` output
-never rewrites existing records; `messages` establishes a new complete context version without deleting older ones.
+Message metadata must be supplied on the actual returned message; result-level metadata does not manufacture an
+assistant message. A returned `history` output never rewrites existing records; required `messages` establishes a new
+complete context version without deleting older ones.
 Admission audit rows have no metadata; a Flow may add metadata to user messages in its returned context.
 
 Metadata is retained in history and contributes to the executable response limit. Existing SQLite
@@ -474,16 +478,19 @@ databases receive a forward migration; old messages retain absent metadata.
 
 ## Workflow results and reported calls
 
-Executables declare `status`, `text`, and a nonoptional `usages` output. A successful result has nonempty
-text. Optional `messages` carries the complete authoritative context described above; when omitted, optional
-`metadata` belongs to the text-derived assistant message. `finish_reason` is optional. An optional `title` proposes a
+Executables declare `status`, `text`, and nonoptional `messages`/`usages` outputs. A successful result has nonempty
+text and a matching final assistant message. Required `messages` carries the complete authoritative context; omitting
+it is an error, not a request for the host to synthesize a reply. `finish_reason` is optional. An optional `title` proposes a
 session title. Other outputs, including returned `history`, do not replace persisted conversation state.
 
 ```json
 {
   "status": "succeeded",
   "text": "Final answer",
-  "metadata": {"agent": "researcher"},
+  "messages": [
+    {"role": "user", "content": "Question"},
+    {"role": "assistant", "content": "Final answer", "metadata": {"agent": "researcher"}}
+  ],
   "usages": [
     {
       "call_id": "call-001",

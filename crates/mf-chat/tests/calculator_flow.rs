@@ -17,7 +17,7 @@ fn custom_flow_rewrites_complete_context_and_reopened_next_provider_receives_onl
         "version":"2026-11-13", "dependencies":{},
         "nodes":[
             {"id":"params","kind":"builtin.parameters","config":{"parameters":{
-                "prompt":{"type":"string"}, "messages":{"type":{"list":"object"}},
+                "messages":{"type":{"list":"object"}},
                 "model":{"type":"string","default":"example-model","secret":false},
                 "base_url":{"type":"string","secret":false},"api_key":{"type":"string"}
             }}},
@@ -68,7 +68,7 @@ fn custom_flow_rewrites_complete_context_and_reopened_next_provider_receives_onl
             None,
         )
         .unwrap();
-    let first_context = reply.messages.clone().unwrap();
+    let first_context = reply.messages.clone();
     database
         .complete_turn(first.invocation.clone(), reply)
         .unwrap();
