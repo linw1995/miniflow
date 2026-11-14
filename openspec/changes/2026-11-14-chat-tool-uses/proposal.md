@@ -2,35 +2,40 @@
 
 ## Why
 
-Chat currently drops tool activity when its transient observation is released. The shared controller now captures
-and stores bounded public tool evidence, but terminal chat does not render it. Users need actual tool status and
-parameters/results inline during execution and when reopening conversations, without replaying a workflow.
+The current draft demonstrates live and saved tool records, but it treats telemetry as their only source, polls during
+presentation/checkpointing, and rewrites one JSON column. Tool requests/results should instead follow the chat Flow's
+structured messages, while runtime observations remain independently useful and visible. Their identities, authority,
+and persistence must be designed together rather than concatenating two tool lists.
 
 ## What Changes
 
-- Persist optional, bounded, redacted tool-use journals by session/turn/call in shared `mf-chat` storage.
-- Collect from validated tool-dispatch dataflow, including the Flow-property classifier merged in #294; keep
-  execution outcome separate from model text and successful conversation completion.
-- Display live and saved tool evidence inline in terminal chat, including failed/cancelled user-only turns,
-  incomplete observation, and explicit missing legacy evidence.
-- Preserve tool records through cancellation, restart, paging, new turns, and save-only recovery without generation.
-- Keep this change limited to ToolUse. No desktop frontend, graphical dependency, theme, license-policy change,
-  packaging work, or desktop proposal belongs to this change.
+- Add optional current-invocation `messages` and typed message events to the shared chat contract. Existing workflows
+  remain valid; internal full-context Agent messages must be adapted before being exposed as new messages.
+- Derive semantic tool calls/results from messages. Preserve execution observations as a separate source of actual
+  state, resolved arguments, and duration, including observation-only tools.
+- Correlate only through explicit scoped identities. Merge proven matches into one semantic item with execution
+  attempts; keep unlinked observations labeled separately and retain source-specific conflicts.
+- Replace render/checkpoint polling with producer-driven events, bounded reduction, and independent display/storage
+  subscribers. Hidden or paused drawing must not control capture, persistence, or cancellation.
+- Replace the live model-call JSON column with associated semantic-call, execution, and small source-checkpoint rows.
+  Write only changed rows/columns and preserve old draft records as observation-only evidence during migration.
+- Keep terminal presentation literal, bounded, privacy-aware, and recoverable without rerunning models or tools.
 
 ## Capabilities
 
 ### Modified Capabilities
 
-- `chat-session-storage`: Durable public tool evidence, forward migration, settlement/recovery, and message-page access.
-- `workflow-terminal-ui`: Inline tool-use status and safe details in live and historical terminal conversations.
+- `chat-executable-contract`: Optional structured message results/events and explicit per-invocation ordering.
+- `chat-session-storage`: Source-aware relational tool records, incremental updates, migration, and recovery.
+- `workflow-terminal-ui`: Event-driven, correlated message/observation presentation without duplicate or invented calls.
 
 ## Non-Goals
 
-- Desktop UI, new launch modes, settings forms, or additional dependencies.
-- Model-text inference, reconstruction of unrecorded historical calls, or raw telemetry replay.
-- Adding tool journals to model-input history or changing executable workflow outputs.
+- Desktop, new graphical dependencies, settings forms, license-policy changes, or packaging.
+- Guessing source associations from names/time, inferring success from tool-result text, or reconstructing lost messages.
+- Automatically adding diagnostic records to model context or replacing authoritative final text with raw model text.
 
-## Impact
+## Status
 
-Changes touch `mf-chat`, the shared executable controller and terminal transcript in `mf-tui`, CLI regression tests,
-and chat documentation. The forward migration adds nullable `model_calls.tool_uses`; legacy data remains unrecorded.
+This is the revised plan requested during review. The existing metrics-only/polling/JSON implementation is the
+baseline to replace, not evidence that this design is complete. New implementation and validation are pending.

@@ -1,46 +1,65 @@
-# Terminal Chat Tool Uses
+# Source-aware Terminal Tool Uses
 
 ## ADDED Requirements
 
-### Requirement: Present tool-use evidence inline in terminal chat
+### Requirement: Merge semantic tools with proven execution associations
 
-Terminal chat SHALL display actual per-turn tool status, bounded public parameters/results, and observed duration inline in the conversation. Tool presentation SHALL remain available when the execution panel is hidden. Rendering SHALL NOT write storage or infer calls from model text. Unsupported states, absent duration, and incomplete observation SHALL remain explicit.
+Terminal chat SHALL derive semantic tool requests/results from structured Flow messages and retain actual tool observations independently. A proven scoped association SHALL enrich one semantic item with its execution attempts. Unlinked observations SHALL remain visible and explicitly labeled. Names, similar parameters, time, and arrival order SHALL NOT establish association. Message-result presence SHALL NOT imply execution success.
 
-#### Scenario: Read tools while waiting for a reply
+#### Scenario: Read messages without telemetry
 
-- **WHEN** tool execution has been observed but the model has not finished its reply
-- **THEN** the transcript shows that tool's observed status and available public details without waiting for conversation completion
+- **WHEN** the Flow returns an assistant tool call and matching tool-result message but no execution evidence
+- **THEN** one semantic tool item shows the returned content and explicitly unknown execution facts
 
-#### Scenario: Hide the execution panel
+#### Scenario: Read telemetry without messages
 
-- **WHEN** the user toggles the execution panel off
-- **THEN** inline tool-use evidence remains visible and collection continues
+- **WHEN** an actual tool execution is observed without a corresponding Flow message
+- **THEN** a labeled observation-only item remains visible without an invented model request or assistant message
 
-#### Scenario: Render untrusted tool text
+#### Scenario: Receive sources in either order
 
-- **WHEN** tool details contain terminal controls, Markdown syntax, or image links
-- **THEN** details are rendered literally with control characters escaped and do not execute terminal commands or load images
+- **WHEN** a message and execution observation carry a proven common origin and arrive in either order
+- **THEN** one semantic item contains the source-specific facts without a duplicate tool-call count
 
-### Requirement: Restore tools without replaying execution
+#### Scenario: Reuse a provider tool ID
 
-Terminal chat SHALL render stored evidence once per turn using stable invocation/tool identities. Starting another turn SHALL preserve earlier records. Failed or cancelled user-only history SHALL retain its tools without inventing an assistant reply. Missing legacy evidence SHALL be labeled unrecorded, not empty success. Retained evidence SHALL remain visibly unsaved until persistence succeeds.
+- **WHEN** two model rounds or turns reuse a tool-call ID
+- **THEN** their scoped identities remain separate and ambiguous observations are not forcibly attached
 
-#### Scenario: Reopen a saved conversation
+#### Scenario: Observe multiple attempts or conflicting facts
 
-- **WHEN** terminal chat loads messages after the original reader was released
-- **THEN** tool details and phases restore from the shared message page without any model or workflow request
+- **WHEN** several attempts relate to one semantic call or returned content coexists with failed execution
+- **THEN** the presentation retains the attempts and distinct semantic/execution state instead of last-writer-wins success
 
-#### Scenario: Page across a turn boundary
+### Requirement: Drive tool presentation from events
 
-- **WHEN** a page contains both user and assistant records or only the assistant record for a turn
-- **THEN** the turn's tool journal is shown once in that page and remains associated with the correct turn
+Tool collection and frontend updates SHALL be driven by producer message/observation events, not timed snapshot polling or drawing. Bounded independent persistence/display consumers SHALL preserve uncertainty and terminal facts under backpressure. Hiding the Flow panel or pausing rendering SHALL NOT stop ingestion. Drawing SHALL only render already-reduced state and SHALL NOT write storage or query observations.
 
-#### Scenario: Read cancelled history
+#### Scenario: Update without drawing
 
-- **WHEN** a cancelled turn has a user message and recorded tools but no assistant message
-- **THEN** the terminal shows its tools and cancellation state without a fabricated reply
+- **WHEN** source events arrive while the frontend does not draw or the Flow panel is hidden
+- **THEN** the reducer and persistence advance and the next delivered frontend update contains their changes
 
-#### Scenario: Receive a stale completion
+#### Scenario: Subscribe to a fast child
 
-- **WHEN** an older invocation's completion arrives while a newer turn is active
-- **THEN** it cannot replace the newer turn's tool evidence
+- **WHEN** the child emits tool events during subscription startup and finishes immediately
+- **THEN** bootstrap/live handoff and final draining preserve those facts without a periodic catch-up poll
+
+#### Scenario: Render untrusted details
+
+- **WHEN** public tool details contain terminal controls, Markdown syntax, or image links
+- **THEN** literal, control-safe rendering does not issue terminal commands or load images
+
+### Requirement: Restore source-aware history without replay
+
+Terminal history SHALL retain source identities, associations, and explicit missing/unlinked data. New turns and paging SHALL preserve per-turn records. Cancelled user-only history SHALL not gain fabricated assistant replies. Retained changes SHALL remain visibly save-pending until persisted. Restoring and saving SHALL not execute a model or workflow.
+
+#### Scenario: Reload linked and unlinked records
+
+- **WHEN** a saved conversation is opened after the original observation receiver is gone
+- **THEN** semantic items and labeled observation-only items restore with the same proven links
+
+#### Scenario: Receive a stale update
+
+- **WHEN** an older invocation's event arrives while a newer turn is active
+- **THEN** it cannot overwrite or associate with the newer turn's tools
