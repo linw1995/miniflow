@@ -20,17 +20,22 @@ The license policy, notice generator/template, default dependencies, and root lo
 
 ## Validation
 
-Using the pinned Nix toolchain:
+After merging `main` at `99c7dc5a`, using the pinned Nix toolchain:
 
-- Shared test-affected Flow, worktree mode, test precision, telemetry enabled, and `run=true`: 392 passed, zero skipped,
-  with a completed execution report selecting `mf-tui` and its CLI consumer.
-- Focused terminal library suite: 177 passed. The live/restart calculator CLI regression passed separately and in the
-  shared affected suite.
+- Recompiled shared test-affected Flow, merge-base comparison against local `origin/main`, test precision, telemetry
+  enabled, and `run=true`: 516 passed, one skipped by configuration. The completed report covers the full PR's
+  `mf-chat`, `mf-tui`, and `mf-cli` scope without a fallback or graphical inputs.
+- Shared storage/controller/terminal libraries: 227 passed. All three executable-chat integration tests passed,
+  including the live/restart calculator CLI regression, separately and in the shared affected suite.
 - Repository Python suite after excluding desktop-only additions: 76 passed.
-- Official coverage script with the affected plan and explicit chat filters: 44 passed; 340 unrelated tests were
+- Official coverage script with the affected plan and explicit chat filters: 44 passed; 465 unrelated tests were
   intentionally filtered. The partial report is `target/coverage/result/lcov.info`, not a full-workspace coverage claim.
 - Clippy with all targets/features and warnings denied, `prek -a`, strict OpenSpec validation, and the unchanged
   workspace license audit passed.
+
+The two main-merge conflicts were confined to `.config/nextest.toml`. Both the ToolUse calculator test and the
+upstream generated-variable test remain in the matching setup and shared-Cargo filter expressions; neither side's
+test was dropped. No unmerged entries remain.
 
 Raw logs, immutable plans, profiles, and coverage artifacts stay under ignored `target/`. No machine-specific reports,
 application databases, or graphical prototype code are distributed by this PR.
