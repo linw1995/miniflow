@@ -49,8 +49,8 @@ impl ScopeContext {
         if self.inside_items
             && binding == "body"
             && matches!(
-                owner.kind.as_str(),
-                mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND
+                self.subgraphs.get(owner.kind.as_str()),
+                Some(SubgraphScope::Loop | SubgraphScope::Iteration)
             )
         {
             let mut path = self.path.clone();
@@ -477,6 +477,39 @@ mod tests {
         assert!(scope.state_outputs.is_empty());
         assert!(scope.writes.is_empty());
         assert!(scope.exits.is_empty());
+    }
+
+    #[test]
+    fn item_scope_rejects_declared_container_scopes_by_metadata() {
+        let item_owner = NodeDefinition {
+            id: "each".into(),
+            kind: "test.custom-item".into(),
+            config: json!({"inputs":{}}),
+        };
+        let context = ScopeContext::default().with_subgraphs(BTreeMap::from([(
+            "test.custom-item".to_owned(),
+            SubgraphScope::Iteration,
+        )]));
+        let item = context
+            .child(WorkflowDefinitionVersion::CURRENT, &item_owner, "body")
+            .unwrap();
+        let loop_owner = NodeDefinition {
+            id: "repeat".into(),
+            kind: "test.custom-loop".into(),
+            config: json!({"variables":[]}),
+        };
+        let item = item.with_subgraphs(BTreeMap::from([(
+            "test.custom-loop".to_owned(),
+            SubgraphScope::Loop,
+        )]));
+        let error = item
+            .child(WorkflowDefinitionVersion::CURRENT, &loop_owner, "body")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot contain container scopes")
+        );
     }
 
     #[test]
