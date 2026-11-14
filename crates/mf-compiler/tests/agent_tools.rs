@@ -402,16 +402,28 @@ fn zero_one_and_three_tool_supersets_keep_the_same_agent_source_and_ports() {
         let router = &resolved_child.children[&"repeat".into()]["body"].children
             [&"dispatch".into()]["body"]
             .children[&"dispatch".into()]["body"];
+        assert!(!router.children.contains_key(&"execute".into()));
         assert_eq!(
             router
                 .children
-                .get(&"execute".into())
-                .map_or(0, BTreeMap::len),
+                .keys()
+                .filter(|id| id.as_str().starts_with("execute:"))
+                .count(),
             names.len()
+        );
+        assert_eq!(
+            router
+                .definition
+                .nodes
+                .iter()
+                .find(|node| node.id.as_str() == "execute")
+                .unwrap()
+                .config["routes"],
+            json!(names)
         );
         let plan = compile_definition(&definition, &registry).unwrap();
         let child = &plan.graph.children[&"agent".into()]["body"];
-        let shape = author_graph(&tool_values::without_candidates(child));
+        let shape = author_graph(&tool_values::without_specialized_routes(child));
         if let Some(baseline) = &compiled_baseline {
             assert_eq!(&shape, baseline);
         } else {

@@ -4,7 +4,7 @@ use mf_runtime::{
     PreparedNode, PreparedSubgraph, SubgraphNode, SubgraphStream, WorkflowArguments,
 };
 use serde_json::Value;
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{IntoError, ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
 
 #[derive(NodeConfig)]
@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 struct Config {
     flow: String,
     body: PreparedSubgraph,
+    #[serde(default)]
+    pack: bool,
 }
 
 fn plain(config: Value) -> Result<PreparedNode, NodeBuildError> {
@@ -40,10 +42,25 @@ struct CallNode {
     scope_key: String,
     flow: String,
     body: PreparedSubgraph,
+    pack: bool,
 }
 
 impl NodePortContract for CallNode {
     fn ports(&self) -> NodePorts {
+        if self.pack {
+            return NodePorts {
+                inputs: vec![mf_runtime::PortSpec::new(
+                    "arguments",
+                    mf_runtime::ValueType::Object,
+                    true,
+                )],
+                outputs: vec![mf_runtime::PortSpec::new(
+                    "result",
+                    mf_runtime::ValueType::Object,
+                    true,
+                )],
+            };
+        }
         NodePorts {
             inputs: self
                 .body
@@ -119,6 +136,100 @@ impl SubgraphNode for CallNode {
     }
 }
 
+impl mf_runtime::TaskNode for CallNode {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        self.execute_packed(inputs, context)
+    }
+}
+
+impl CallNode {
+    fn execute_packed(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        if let Some(error) = context.cancellation().failure() {
+            return Err(error.into());
+        }
+        let mut arguments = WorkflowArguments(
+            inputs["arguments"]
+                .as_object()
+                .expect("validated argument object")
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.clone()))
+                .collect(),
+        );
+        let outputs = (|| {
+            arguments.qualify_inputs(&self.body.inputs)?;
+            self.body.inputs.mark_secrets(&mut arguments);
+            context.run_call(&self.scope_key, arguments, &self.body.nodes, |state| {
+                self.body
+                    .invoke_with_sink(state, &mut mf_runtime::DiscardSink)
+            })
+        })();
+        if let Some(error) = context.cancellation().failure() {
+            return Err(error.into());
+        }
+        let value = match outputs {
+            Ok(outputs) => mf_runtime::ValueRef::object([(
+                "outputs".into(),
+                mf_runtime::ValueRef::object(
+                    outputs
+                        .into_iter()
+                        .map(|(name, value)| (name.into(), value)),
+                ),
+            )]),
+            Err(error) if is_business_failure(&error) => {
+                mf_runtime::ValueRef::from(serde_json::json!({"error":error.to_string()}))
+                    .into_secret()
+            }
+            Err(error) => {
+                return Err(CallFailureSnafu {
+                    node: &self.id,
+                    flow: &self.flow,
+                }
+                .into_error(error)
+                .into());
+            }
+        };
+        Ok(mf_runtime::Outputs::from([("result".into(), value)]).into())
+    }
+}
+
+// Only explicit domain failures become tool results; cancellation, resources,
+// stream failures, and invalid runtime contracts retain their typed error chain.
+fn is_business_failure(error: &mf_runtime::WorkflowRunError) -> bool {
+    use mf_runtime::WorkflowRunError;
+    if matches!(error, WorkflowRunError::WorkflowInputs { .. }) {
+        return true;
+    }
+    let WorkflowRunError::NodeExecution { source, .. } = error else {
+        return false;
+    };
+    match source {
+        NodeExecutionError::ExecutionFailed { .. } => true,
+        NodeExecutionError::PluginFailed { source } => {
+            if let Some(error) = source.downcast_ref::<WorkflowRunError>() {
+                return is_business_failure(error);
+            }
+            if let Some(error) = source.downcast_ref::<CallFailure>() {
+                return is_business_failure(&error.source);
+            }
+            match source.downcast_ref::<crate::CallInputError>() {
+                Some(crate::CallInputError::Execution { source, .. }) => {
+                    is_business_failure(source)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Snafu)]
 pub enum CallBuildError {
     #[snafu(display("Flow alias must not be blank"))]
@@ -142,7 +253,7 @@ fn factory(
     config: Value,
     bodies: BTreeMap<String, PreparedSubgraph>,
 ) -> Result<PreparedNode, NodeBuildError> {
-    let Config { flow, body } = Config::from_config(config, bodies)?;
+    let Config { flow, body, pack } = Config::from_config(config, bodies)?;
     ensure!(!flow.trim().is_empty(), BlankFlowSnafu);
     ensure!(body.inputs.stdin.is_empty(), StdinSnafu);
     ensure!(
@@ -151,7 +262,7 @@ fn factory(
             .is_none_or(|relations| relations.is_callable()),
         ScopedBodySnafu
     );
-    let input_bindings = body
+    let mut input_bindings: BTreeMap<_, _> = body
         .inputs
         .inputs
         .iter()
@@ -170,7 +281,17 @@ fn factory(
                 })
         })
         .collect();
+    if pack {
+        input_bindings = BTreeMap::from([(
+            "arguments".into(),
+            mf_runtime::InputBinding {
+                secret: true,
+                ..Default::default()
+            },
+        )]);
+    }
     let node = CallNode {
+        pack,
         id: id.into(),
         scope_key: body.scope_key(id, "body"),
         flow,
@@ -180,17 +301,24 @@ fn factory(
         input_bindings,
         ..Default::default()
     };
-    PreparedNode::subgraph(node, metadata)
+    if pack {
+        PreparedNode::new(node, metadata)
+    } else {
+        PreparedNode::subgraph(node, metadata)
+    }
 }
 
 inventory::submit! {
     NodeRegistration {
         kind: mf_runtime::CALL_KIND,
-        factory: NodeFactory::Subgraph {
-            scope: Some(mf_runtime::SubgraphScope::Host),
-            flow_parameters,
-            plain,
-            prepared: factory,
+        factory: NodeFactory::WithFlowBindings {
+            factory: &NodeFactory::Subgraph {
+                scope: Some(mf_runtime::SubgraphScope::Host),
+                flow_parameters,
+                plain,
+                prepared: factory,
+            },
+            bindings: mf_runtime::FlowDispatchConfig::bindings,
         },
     }
 }
@@ -202,6 +330,204 @@ mod tests {
 
     fn body() -> PreparedSubgraph {
         PreparedSubgraph::new(vec![], vec![], |_| Ok(Default::default()))
+    }
+
+    fn packed(
+        body: PreparedSubgraph,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        let node = mf_runtime::FlowNode::new(
+            "invoke",
+            factory(
+                "invoke",
+                json!({"flow":"tool","body":{},"pack":true}),
+                BTreeMap::from([("body".into(), body)]),
+            )
+            .unwrap(),
+        )
+        .into_task()
+        .unwrap();
+        assert!(node.metadata.input_bindings["arguments"].secret);
+        assert!(node.metadata.stream_outputs.is_empty());
+        context.with_node("invoke".into(), |context| {
+            node.node.execute(
+                Inputs::from([("arguments".into(), mf_runtime::ValueRef::from(json!({})))]),
+                context,
+            )
+        })
+    }
+
+    fn has_source<T: std::error::Error + 'static>(error: &dyn std::error::Error) -> bool {
+        let mut source = error.source();
+        while let Some(cause) = source {
+            if cause.is::<T>() {
+                return true;
+            }
+            source = cause.source();
+        }
+        false
+    }
+
+    #[test]
+    fn packed_calls_recover_only_business_failures_and_preserve_typed_infrastructure_sources() {
+        use mf_runtime::WorkflowRunError;
+        #[derive(mf_runtime::NodeValue)]
+        struct InvalidOutput {
+            value: f64,
+        }
+        for nested in [false, true] {
+            for kind in [
+                "business", "context", "stream", "worker", "contract", "encode", "plugin",
+            ] {
+                let inner = PreparedSubgraph::new(vec![], vec![], move |_| {
+                    let source = match kind {
+                        "business" => mf_runtime::NodeExecutionFailedSnafu {
+                            message: "domain failure with private data",
+                        }
+                        .build(),
+                        "context" => {
+                            return Err(WorkflowRunError::Context {
+                                definition_id: "inner".into(),
+                                message: "scope/resource failure".into(),
+                            });
+                        }
+                        "stream" => mf_runtime::StreamExecutionSnafu {
+                            message: "stream failure",
+                        }
+                        .build()
+                        .into(),
+                        "worker" => mf_runtime::WorkerPoolError {
+                            worker: 0,
+                            source: std::io::Error::other("worker failure"),
+                        }
+                        .into(),
+                        "contract" => NodeExecutionError::from(Box::<
+                            dyn std::error::Error + Send + Sync,
+                        >::from(
+                            mf_telemetry::ContractError::Invalid {
+                                message: "contract failure".into(),
+                            },
+                        )),
+                        "encode" => {
+                            return mf_runtime::encode_typed_result(
+                                mf_runtime::TypedNodeResult::from(InvalidOutput {
+                                    value: f64::NAN,
+                                }),
+                            )
+                            .map(|result| result.outputs)
+                            .context(mf_runtime::NodeExecutionSnafu {
+                                definition_id: "inner",
+                            });
+                        }
+                        _ => NodeExecutionError::from(
+                            Box::<dyn std::error::Error + Send + Sync>::from(
+                                std::io::Error::other("unknown plugin failure"),
+                            ),
+                        ),
+                    };
+                    Err(source).context(mf_runtime::NodeExecutionSnafu {
+                        definition_id: "inner",
+                    })
+                });
+                let body = if nested {
+                    let call = factory(
+                        "nested",
+                        json!({"flow":"child","body":{}}),
+                        BTreeMap::from([("body".into(), inner)]),
+                    )
+                    .unwrap()
+                    .execution
+                    .into_task_node()
+                    .unwrap();
+                    PreparedSubgraph::new(vec![], vec![], move |context| {
+                        call.execute(Inputs::new(), context)
+                            .map(|result| result.outputs)
+                            .context(mf_runtime::NodeExecutionSnafu {
+                                definition_id: "nested",
+                            })
+                    })
+                } else {
+                    inner
+                };
+                let result = packed(body, &mut ExecutionContext::default());
+                if kind == "business" {
+                    let result = result.unwrap().outputs.remove("result").unwrap();
+                    assert!(result["error"].as_str().unwrap().contains("domain failure"));
+                    assert_eq!(
+                        serde_json::to_value(result.redacted()).unwrap(),
+                        json!("[REDACTED]")
+                    );
+                    continue;
+                }
+                let error = result.unwrap_err();
+                assert!(has_source::<CallFailure>(&error));
+                match kind {
+                    "stream" => assert!(has_source::<mf_runtime::StreamError>(&error)),
+                    "worker" => assert!(has_source::<mf_runtime::WorkerPoolError>(&error)),
+                    "contract" => assert!(has_source::<mf_telemetry::ContractError>(&error)),
+                    "encode" => assert!(has_source::<Box<mf_runtime::OutputEncodeError>>(&error)),
+                    "plugin" => assert!(has_source::<std::io::Error>(&error)),
+                    _ => assert!(error.to_string().contains("scope/resource failure")),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_calls_never_recover_cancellation_even_after_body_completion() {
+        let body = PreparedSubgraph::new(vec![], vec![], |state| {
+            state
+                .cancellation()
+                .cancel(mf_runtime::StreamError::InputFailure {
+                    message: "cancelled".into(),
+                });
+            Ok(Default::default())
+        });
+        assert!(packed(body, &mut ExecutionContext::default()).is_err());
+        let mut context = ExecutionContext::default();
+        context
+            .cancellation()
+            .cancel(mf_runtime::StreamError::InputFailure {
+                message: "already cancelled".into(),
+            });
+        let body = PreparedSubgraph::new(vec![], vec![], |_| panic!("a cancelled call cannot run"));
+        assert!(packed(body, &mut context).is_err());
+    }
+
+    #[test]
+    fn packed_calls_drain_stream_emissions_and_keep_native_output_privacy() {
+        let body = PreparedSubgraph::streaming(
+            vec![],
+            vec![mf_runtime::PortSpec::new(
+                "value",
+                mf_runtime::ValueType::String,
+                true,
+            )],
+            vec![mf_runtime::PortSpec::new(
+                "partial",
+                mf_runtime::ValueType::String,
+                true,
+            )],
+            |_, sink| {
+                sink.send(
+                    mf_runtime::Outputs::from([("partial".into(), "discarded".into())]).into(),
+                )
+                .map_err(NodeExecutionError::from)
+                .context(mf_runtime::NodeExecutionSnafu {
+                    definition_id: "stream",
+                })?;
+                Ok(mf_runtime::Outputs::from([(
+                    "value".into(),
+                    mf_runtime::ValueRef::from("private").into_secret(),
+                )]))
+            },
+        );
+        let result = packed(body, &mut ExecutionContext::default()).unwrap();
+        assert_eq!(
+            result.outputs["result"]["outputs"]["value"].as_str(),
+            Some("private")
+        );
+        assert!(result.outputs["result"].contains_secret());
     }
 
     #[test]

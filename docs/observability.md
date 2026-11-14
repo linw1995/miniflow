@@ -947,13 +947,14 @@ For native dynamic Calls, the compiled description retains B's definition at its
 reference cannot manufacture or select an executable; execution uses the native handle that arrived
 through the edge.
 
-Compiled Routers have a statically frozen candidate superset instead. The compiler follows caller-owned
-Flow constants and native-map wiring, preserving their definitions as Router children before execution.
-`body_paths_for_node` exposes these children through the same description contract as configured Calls.
-The selected candidate uses an ordinary Call scope at that child binding, including item correlation and
-nested-body detail. The TUI needs no runtime invocation cache, graph reconstruction, or projection of a
-producer body beneath the consumer. Disabled or unused candidates remain visible as unexecuted bodies;
-adding/removing entries from the runtime map never adds/removes static graph definitions.
+Compiled tool dispatch uses pure Router gates and ordinary static Calls. The compiler follows
+caller-owned Flow constants and native-map wiring across Call boundaries, specializing each dispatch
+site into a fixed route set and one static Call per route. `body_paths_for_node` exposes each Call's
+`body` before execution through the normal description contract; the Router owns no child bodies.
+Selected Calls use ordinary Call scopes, including item correlation and nested-body detail. The TUI
+needs no runtime invocation cache, graph reconstruction, or producer-body projection. Disabled and
+unused route Calls remain visible as unexecuted bodies. Updating `%<router>.enables`, or removing and
+re-adding declared map keys, never adds or removes static definitions.
 
 Snapshots replace callable payloads with `"<Flow>"`, or `"[REDACTED]"` when secret. Business JSON
 serialization does not use this placeholder: it rejects executable values.

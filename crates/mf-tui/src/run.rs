@@ -6650,18 +6650,26 @@ mod tests {
     }
 
     #[test]
-    fn frozen_router_branches_are_visible_before_execution_and_keep_independent_state() {
+    fn static_route_calls_are_visible_before_execution_and_keep_independent_state() {
         use mf_telemetry::event::ScopePathEntry;
         use serde_json::json;
 
-        let selected = vec![ScopePathEntry::binding_key("execute", "first")];
-        let unused = vec![ScopePathEntry::binding_key("execute", "second")];
+        let selected = vec!["execute:first".to_owned()];
+        let unused = vec!["execute:second".to_owned()];
         let description: WorkflowDescription = serde_json::from_value(json!({
             "version":"2026-11-09",
             "workflow_id":format!("sha256:{}", "b".repeat(64)),
             "execution":{"mode":"single"},
-            "nodes":[{"id":"execute", "kind":"builtin.router"}],
-            "execution_order":["execute"], "data_edges":[], "control_edges":[],
+            "nodes":[
+                {"id":"execute", "kind":"builtin.router"},
+                {"id":"execute:first", "kind":"workflow.call"},
+                {"id":"execute:second", "kind":"workflow.call"}
+            ],
+            "execution_order":["execute","execute:first","execute:second"], "data_edges":[],
+            "control_edges":[
+                {"from_node":"execute","from_output":"first","to_node":"execute:first"},
+                {"from_node":"execute","from_output":"second","to_node":"execute:second"}
+            ],
             "loop_bodies":[
                 {"path":selected, "nodes":[{"id":"calculate", "kind":"builtin.code"}],
                  "execution_order":["calculate"], "data_edges":[], "control_edges":[]},

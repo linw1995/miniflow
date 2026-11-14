@@ -3,10 +3,7 @@
 //! it neither executes nodes nor uses port types as evidence of a dynamic value.
 
 use crate::{ResolvedWorkflow, WorkflowCompileError};
-use mf_runtime::{
-    FLOW_CANDIDATES, FlowBindingSource, FlowBindings, FlowCandidate, NodeDefinition,
-    ScopePathEntry, flow_candidate_binding, flow_candidate_parameters,
-};
+use mf_runtime::{FlowBindingSource, FlowBindings, NodeDefinition, ScopePathEntry};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt, ensure};
 use std::collections::{BTreeMap, BTreeSet};
@@ -285,59 +282,41 @@ impl Freezing<'_> {
             if let Some(invocation) = invocation {
                 let inputs = incoming(scope, original, node.id.as_str(), self.state);
                 let facts = inputs.get(&invocation.input).cloned().unwrap_or_default();
-                let mut candidates = BTreeMap::new();
-                let mut children = BTreeMap::new();
+                let mut bodies = BTreeMap::new();
                 for (shape, source) in facts {
-                    let route = match (shape.as_slice(), invocation.field.as_deref()) {
-                        ([route], None) => route,
-                        ([route, field], Some(expected)) if field == expected => route,
-                        _ => continue,
+                    let [route] = shape.as_slice() else {
+                        continue;
                     };
+                    ensure!(
+                        !route.trim().is_empty() && route != "else" && !bodies.contains_key(route),
+                        crate::compiler::InvalidGraphSnafu {
+                            definition_id: node.id.clone(),
+                            message: "dispatch routes must be nonblank, unreserved, and bound to exactly one static Flow",
+                        }
+                    );
                     ensure!(
                         !self.sources.contains(&source),
                         crate::compiler::InvalidGraphSnafu {
                             definition_id: node.id.clone(),
-                            message: "recursive static Flow candidate expansion is unsupported",
+                            message: "recursive static Flow dispatch expansion is unsupported",
                         }
                     );
-                    let body = find_scope(self.root, &source).context(
-                        crate::compiler::InvalidGraphSnafu {
+                    let mut body = find_scope(self.root, &source)
+                        .context(crate::compiler::InvalidGraphSnafu {
                             definition_id: node.id.clone(),
-                            message: "Flow candidate refers to an unknown compiled source",
-                        },
-                    )?;
-                    let mut body = body.clone();
-                    body.relations.key = None;
-                    let binding = flow_candidate_binding(route);
-                    let route = route.clone();
-                    let candidate = FlowCandidate {
-                        source: source.clone(),
-                    };
+                            message: "Flow dispatch refers to an unknown compiled source",
+                        })?
+                        .clone();
+                    let call_id = format!("{}:route:{route}", node.id);
+                    body.relations.key = Some(call_id.clone());
                     let mut target = actual.clone();
-                    target.push(key(&body, &node, &binding));
+                    target.push(call_id);
                     self.sources.insert(source.clone());
                     self.freeze(&mut body, &mut source.clone(), &mut target)?;
                     self.sources.remove(&source);
-                    candidates.insert(route, candidate);
-                    children.insert(binding, body);
+                    bodies.insert(route.clone(), body);
                 }
-                let node = &mut scope.definition.nodes[index];
-                for binding in flow_candidate_parameters(&node.config).keys() {
-                    node.config
-                        .as_object_mut()
-                        .expect("candidate table requires an object")
-                        .remove(binding);
-                }
-                node.config[FLOW_CANDIDATES] = serde_json::to_value(candidates).context(
-                    crate::compiler::NodeConfigurationSnafu {
-                        definition_id: node.id.clone(),
-                    },
-                )?;
-                if children.is_empty() {
-                    scope.children.remove(&node.id);
-                } else {
-                    scope.children.insert(node.id.clone(), children);
-                }
+                expand_dispatch(scope, index, bodies)?;
             } else {
                 for (binding, child) in scope.children.get_mut(&node.id).into_iter().flatten() {
                     let child_key = key(child, &node, binding);
@@ -356,8 +335,230 @@ impl Freezing<'_> {
                     })?;
             }
         }
+        crate::routers::lower(&mut scope.definition, true)?;
         Ok(())
     }
+}
+
+/// Dispatch is authoring syntax only: every executable target is an ordinary
+/// static Call with a body binding. The generated router never receives Flows.
+fn expand_dispatch(
+    scope: &mut ResolvedWorkflow,
+    index: usize,
+    bodies: BTreeMap<String, ResolvedWorkflow>,
+) -> Result<(), WorkflowCompileError> {
+    use mf_runtime::{ControlEdgeDefinition, EdgeDefinition};
+    use serde_json::json;
+    let template = scope.definition.nodes[index].clone();
+    let id = &template.id;
+    ensure!(
+        scope
+            .definition
+            .edges
+            .iter()
+            .filter(|edge| edge.to_node == *id)
+            .all(|edge| matches!(edge.to_input.as_str(), "flows" | "route" | "arguments"))
+            && ["flows", "route", "arguments"].iter().all(|input| scope
+                .definition
+                .edges
+                .iter()
+                .any(|edge| edge.to_node == *id && edge.to_input == *input))
+            && scope
+                .definition
+                .edges
+                .iter()
+                .filter(|edge| edge.from_node == *id)
+                .all(|edge| edge.from_output == "result")
+            && scope
+                .definition
+                .outputs
+                .iter()
+                .filter(|output| output.node == *id)
+                .all(|output| output.port == "result")
+            && scope
+                .definition
+                .control_edges
+                .iter()
+                .filter(|edge| edge.from_node == *id)
+                .all(|edge| edge.from_output == "result"),
+        crate::compiler::InvalidGraphSnafu {
+            definition_id: id.clone(),
+            message: "dispatch requires flows, route, and arguments inputs and only exposes result",
+        }
+    );
+    let result_id = mf_runtime::DefinitionId::from(format!("{id}:result"));
+    let keys_id = mf_runtime::DefinitionId::from(format!("{id}:enables"));
+    let assign_id = mf_runtime::DefinitionId::from(format!("{id}:set_enables"));
+    let else_id = mf_runtime::DefinitionId::from(format!("{id}:else"));
+    let mut generated = vec![
+        NodeDefinition {
+            id: result_id.clone(),
+            kind: "builtin.identity".into(),
+            config: json!({}),
+        },
+        NodeDefinition {
+            id: else_id.clone(),
+            kind: "builtin.constant".into(),
+            config: json!({"value":{"error":"unknown or disabled route"}}),
+        },
+    ];
+    let mut candidates = vec![else_id.clone()];
+    let arguments: Vec<_> = scope
+        .definition
+        .edges
+        .iter()
+        .filter(|edge| edge.to_node == *id && edge.to_input == "arguments")
+        .cloned()
+        .collect();
+    for (route, body) in &bodies {
+        let call_id = mf_runtime::DefinitionId::from(format!("{id}:route:{route}"));
+        let mut call = NodeDefinition {
+            id: call_id.clone(),
+            kind: mf_runtime::CALL_KIND.into(),
+            config: json!({"flow":route,"body":{},"pack":true}),
+        };
+        call.set_node_flow("body", body.definition.clone())
+            .context(crate::compiler::FlowParametersSnafu {
+                definition_id: call_id.clone(),
+            })?;
+        generated.push(call);
+        scope.children.insert(
+            call_id.clone(),
+            BTreeMap::from([("body".into(), body.clone())]),
+        );
+        scope.definition.control_edges.push(ControlEdgeDefinition {
+            from_node: id.clone(),
+            from_output: route.clone().into(),
+            to_node: call_id.clone(),
+        });
+        for argument in &arguments {
+            let mut argument = argument.clone();
+            argument.to_node = call_id.clone();
+            scope.definition.edges.push(argument);
+        }
+        candidates.push(call_id);
+    }
+    {
+        // The template's prerequisites also protect reading mutable map sources;
+        // moving that read before a workflow.assign would observe stale keys.
+        let controls: Vec<_> = scope
+            .definition
+            .control_edges
+            .iter()
+            .filter(|edge| edge.to_node == *id)
+            .cloned()
+            .collect();
+        for mut edge in controls {
+            edge.to_node = keys_id.clone();
+            scope.definition.control_edges.push(edge);
+        }
+        let orders: Vec<_> = scope
+            .definition
+            .order_edges
+            .iter()
+            .filter(|edge| edge.to_node == *id)
+            .cloned()
+            .collect();
+        for mut edge in orders {
+            edge.to_node = keys_id.clone();
+            scope.definition.order_edges.push(edge);
+        }
+        generated.extend([
+            NodeDefinition {
+                id: keys_id.clone(),
+                kind: "builtin.keys".into(),
+                config: json!({}),
+            },
+            NodeDefinition {
+                id: assign_id.clone(),
+                kind: mf_runtime::ASSIGN_KIND.into(),
+                config: json!({"variable":format!("%{id}.enables")}),
+            },
+        ]);
+        scope.definition.edges.push(EdgeDefinition {
+            from_node: keys_id.clone(),
+            from_output: "keys".into(),
+            to_node: assign_id.clone(),
+            to_input: "value".into(),
+            exclusive: false,
+        });
+        scope.definition.control_edges.push(ControlEdgeDefinition {
+            from_node: assign_id,
+            from_output: "done".into(),
+            to_node: id.clone(),
+        });
+    }
+    ensure!(
+        generated.iter().all(|generated| !scope
+            .definition
+            .nodes
+            .iter()
+            .any(|node| node.id == generated.id)),
+        crate::compiler::InvalidGraphSnafu {
+            definition_id: id.clone(),
+            message: "generated static dispatch node ID collides with an authored node",
+        }
+    );
+    scope.definition.edges.retain_mut(|edge| {
+        if edge.from_node == *id && edge.from_output == "result" {
+            edge.from_node = result_id.clone();
+            edge.from_output = "value".into();
+        }
+        if edge.to_node != *id {
+            return true;
+        }
+        match edge.to_input.as_str() {
+            "route" => true,
+            "flows" => {
+                edge.to_node = keys_id.clone();
+                edge.to_input = "object".into();
+                true
+            }
+            _ => false,
+        }
+    });
+    for selection in &mut scope.definition.outputs {
+        if selection.node == *id && selection.port == "result" {
+            selection.node = result_id.clone();
+            selection.port = "value".into();
+        }
+    }
+    for edge in &mut scope.definition.control_edges {
+        if edge.from_node == *id && edge.from_output == "result" {
+            edge.from_node = result_id.clone();
+            edge.from_output = "value".into();
+        }
+    }
+    for edge in &mut scope.definition.order_edges {
+        if edge.from_node == *id {
+            edge.from_node = result_id.clone();
+        }
+    }
+    scope.definition.control_edges.push(ControlEdgeDefinition {
+        from_node: id.clone(),
+        from_output: "else".into(),
+        to_node: else_id.clone(),
+    });
+    let exclusive = candidates.len() > 1;
+    for candidate in candidates {
+        let port = if candidate == else_id {
+            "value"
+        } else {
+            "result"
+        };
+        scope.definition.edges.push(EdgeDefinition {
+            from_node: candidate,
+            from_output: port.into(),
+            to_node: result_id.clone(),
+            to_input: "input".into(),
+            exclusive,
+        });
+    }
+    let routes: Vec<_> = bodies.keys().collect();
+    scope.definition.nodes[index].kind = "builtin.router".into();
+    scope.definition.nodes[index].config = json!({"routes":routes});
+    scope.definition.nodes.extend(generated);
+    Ok(())
 }
 
 pub fn freeze(

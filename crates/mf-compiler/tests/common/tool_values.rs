@@ -100,24 +100,42 @@ fn caller(tools: BTreeMap<String, FlowTool>) -> Value {
     })
 }
 
-pub fn without_candidates(graph: &mf_runtime::CompiledGraph) -> mf_runtime::CompiledGraph {
+pub fn without_specialized_routes(graph: &mf_runtime::CompiledGraph) -> mf_runtime::CompiledGraph {
     let mut graph = graph.clone();
+    let calls: std::collections::BTreeSet<_> = graph
+        .definition
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "workflow.call" && node.config["pack"] == true)
+        .map(|node| node.id.clone())
+        .collect();
+    graph
+        .definition
+        .nodes
+        .retain(|node| !calls.contains(&node.id));
+    graph.execution_order.retain(|id| !calls.contains(id));
+    graph.children.retain(|id, _| !calls.contains(id));
+    graph
+        .definition
+        .edges
+        .retain(|edge| !calls.contains(&edge.from_node) && !calls.contains(&edge.to_node));
+    graph
+        .definition
+        .control_edges
+        .retain(|edge| !calls.contains(&edge.from_node) && !calls.contains(&edge.to_node));
+    for edge in &mut graph.definition.edges {
+        if edge.to_node.as_str().ends_with(":result") {
+            edge.exclusive = false;
+        }
+    }
     for node in &mut graph.definition.nodes {
-        if let Some(candidates) = node
-            .config
-            .get(mf_runtime::FLOW_CANDIDATES)
-            .and_then(Value::as_object)
-        {
-            let bindings: Vec<_> = candidates.keys().cloned().collect();
-            let config = node.config.as_object_mut().unwrap();
-            for route in bindings {
-                config.remove(&mf_runtime::flow_candidate_binding(&route));
-            }
-            config.remove(mf_runtime::FLOW_CANDIDATES);
-            graph.children.remove(&node.id);
-        } else if let Some(children) = graph.children.get_mut(&node.id) {
+        if node.config.get("routes").is_some() {
+            node.config["routes"] = json!([]);
+            node.config.as_object_mut().unwrap().remove("enables");
+        }
+        if let Some(children) = graph.children.get_mut(&node.id) {
             for (binding, child) in children {
-                *child = without_candidates(child);
+                *child = without_specialized_routes(child);
                 node.set_node_flow(binding, child.definition.clone())
                     .unwrap();
             }

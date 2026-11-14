@@ -227,34 +227,6 @@ impl FlowValue {
         self.invoke_with_sink(id, arguments, context, &mut crate::DiscardSink)
     }
 
-    /// Executes a compiler-frozen child binding with the same scope protocol as Call.
-    pub fn invoke_bound(
-        &self,
-        owner: &str,
-        binding: &str,
-        mut arguments: WorkflowArguments,
-        context: &mut ExecutionContext,
-    ) -> Result<FlowOutputs, WorkflowRunError> {
-        ensure!(
-            self.0
-                .relations
-                .as_ref()
-                .is_none_or(|relations| relations.is_callable()),
-            crate::runner::ContextSnafu {
-                definition_id: owner,
-                message: "Flow invocation requires an independent body; an implicit scope frame is unavailable",
-            }
-        );
-        arguments.qualify_inputs(&self.0.inputs)?;
-        self.0.inputs.mark_secrets(&mut arguments);
-        context.run_call(
-            &crate::ScopePathEntry::binding_key(owner, binding),
-            arguments,
-            &self.0.nodes,
-            |child| self.0.invoke_with_sink(child, &mut crate::DiscardSink),
-        )
-    }
-
     /// Forwards emissions with backpressure and returns only terminal outputs.
     /// Event bodies finish through the existing owned invocation lifecycle. As
     /// with static Call, a delivery failure cancels the enclosing execution.

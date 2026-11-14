@@ -146,8 +146,8 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
     let empty = compile_definition(&configured_tools(BTreeMap::new()), &registry).unwrap();
     for owner in ["catalog", "dispatch"] {
         assert_eq!(
-            tool_values::without_candidates(&plan.graph.children[&owner.into()]["body"]),
-            tool_values::without_candidates(&empty.graph.children[&owner.into()]["body"]),
+            tool_values::without_specialized_routes(&plan.graph.children[&owner.into()]["body"]),
+            tool_values::without_specialized_routes(&empty.graph.children[&owner.into()]["body"]),
         );
     }
     let catalog_call = &plan.graph.children[&"catalog".into()]["body"];
@@ -177,14 +177,18 @@ fn catalog_and_parallel_dispatch_use_actual_children_and_one_shared_chain() {
         ["calls", "tool_properties", "tools"]
     );
     let dispatch = &dispatch_call.children[&"dispatch".into()]["body"];
-    assert_eq!(dispatch.children[&"execute".into()].len(), 2);
+    assert!(!dispatch.children.contains_key(&"execute".into()));
     let description = mf_compiler::describe_compiled(&plan).unwrap();
-    assert_eq!(
-        description
-            .body_paths_for_node(&["dispatch".into(), "dispatch".into()], "execute")
-            .len(),
-        2
-    );
+    for route in ["add", "echo"] {
+        let call = format!("execute:route:{route}");
+        assert_eq!(dispatch.children[&call.clone().into()].len(), 1);
+        assert_eq!(
+            description
+                .body_paths_for_node(&["dispatch".into(), "dispatch".into()], &call)
+                .len(),
+            1
+        );
+    }
     assert!(
         dispatch
             .definition
@@ -296,8 +300,8 @@ fn fixed_agent_source_keeps_caller_wiring_while_compilation_binds_tool_children(
     let plan = compile_definition(&definition, &registry).unwrap();
     let empty = compile_definition(&configured_agent(BTreeMap::new()), &registry).unwrap();
     assert_eq!(
-        tool_values::without_candidates(&plan.graph.children[&"agent".into()]["body"]),
-        tool_values::without_candidates(&empty.graph.children[&"agent".into()]["body"]),
+        tool_values::without_specialized_routes(&plan.graph.children[&"agent".into()]["body"]),
+        tool_values::without_specialized_routes(&empty.graph.children[&"agent".into()]["body"]),
     );
     assert!(!plan.graph.children.contains_key(&"tools".into()));
     let producers: Vec<_> = plan
@@ -731,7 +735,7 @@ fn catalog_projects_once_before_dispatch_on_each_invocation_with_native_flows() 
         dispatch_call.child_scope_key(call, "body"),
         iteration.id.to_string(),
     ];
-    let candidate = graph.body_paths_for_node(&iteration_path, "execute")[0]
+    let candidate = graph.body_paths_for_node(&iteration_path, "execute:route:add")[0]
         .last()
         .unwrap()
         .clone();

@@ -70,10 +70,7 @@ pub use flow::{
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
 };
 pub use flow_bindings::{
-    FLOW_CANDIDATES, FlowBindingSource, FlowBindings, FlowCandidate, FlowInvocationBinding,
-    candidate_binding as flow_candidate_binding, candidate_parameters as flow_candidate_parameters,
-    take_candidates as take_flow_candidates,
-    validate_candidate_source as validate_flow_candidate_source,
+    FlowBindingSource, FlowBindings, FlowDispatchConfig, FlowInvocationBinding,
 };
 pub use flow_invocation::{FlowEmission, FlowInvocation};
 pub use flow_properties::{interface_properties, value_schema};

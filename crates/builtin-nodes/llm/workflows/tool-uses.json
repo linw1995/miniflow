@@ -158,9 +158,9 @@
             },
             {
               "id": "execute",
-              "kind": "builtin.router",
+              "kind": "workflow.call",
               "config": {
-                "mode": "execute"
+                "dispatch": true
               },
               "inputs": {
                 "flows": {
