@@ -3409,7 +3409,7 @@ mod tests {
     fn scope_fixture() -> WorkflowDescription {
         serde_json::from_value(serde_json::json!({
             "version":"2026-09-29","workflow_id":format!("sha256:{}","e".repeat(64)),
-            "nodes":[{"id":"first","kind":"workflow.loop"},{"id":"second","kind":"workflow.loop"}],
+            "nodes":[{"id":"first","kind":"loop.run"},{"id":"second","kind":"loop.run"}],
             "data_edges":[],"control_edges":[],"execution_order":["first","second"],
             "loop_bodies":(["first","second"].map(|id| serde_json::json!({
                 "path":[id],"source":"%loop","state_outputs":{"value":"value"},"nodes":[{"id":"%loop","kind":"%loop"},{"id":"source","kind":"fixture.task"},{"id":"target","kind":"fixture.task"}],
@@ -3525,7 +3525,7 @@ mod tests {
         let description: WorkflowDescription = serde_json::from_value(serde_json::json!({
             "version":"2026-10-23", "workflow_id":format!("sha256:{}", "9".repeat(64)),
             "execution":{"mode":"single"},
-            "nodes":[{"id":"repeat","kind":"workflow.loop"}],
+            "nodes":[{"id":"repeat","kind":"loop.run"}],
             "execution_order":["repeat"], "data_edges":[], "control_edges":[],
             "loop_bodies":[
                 {"path":["repeat"], "source":"%loop", "state_outputs":{"value":"value"}, "nodes":[{"id":"%loop","kind":"%loop"},{"id":"each","kind":"builtin.iteration"}],
@@ -4933,7 +4933,7 @@ mod tests {
             apply(LifecycleKind::NodeStarted {
                 node: NodeIdentity {
                     id: id.into(),
-                    kind: "workflow.loop".into(),
+                    kind: "loop.run".into(),
                     path: Vec::new(),
                 },
                 position: Count::try_from(position as i64 + 1).unwrap(),
@@ -6210,7 +6210,7 @@ mod tests {
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64))).unwrap(),
             nodes: vec![NodeDescription {
                 id: "repeat".into(),
-                kind: "workflow.loop".into(),
+                kind: "loop.run".into(),
             }],
             data_edges: vec![],
             control_edges: vec![],

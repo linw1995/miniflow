@@ -136,7 +136,7 @@ fn registered_calls_compare_nested_bindings_against_the_actual_compiled_tree() {
     loop_body.outputs.clear();
     body.nodes.push(
         serde_json::from_value(json!({
-            "id":"repeat", "kind":"workflow.loop", "config":{
+            "id":"repeat", "kind":"loop.run", "config":{
                 "max_iterations":1, "variables":[{"name":"count", "type":"int"}],
                 "body":loop_body
             }

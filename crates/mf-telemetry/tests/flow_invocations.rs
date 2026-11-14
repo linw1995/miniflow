@@ -21,7 +21,7 @@ fn graph() -> WorkflowDescription {
         "nodes":[{"id":"producer", "kind":"builtin.constant"}, {"id":"A", "kind":"workflow.call"}],
         "execution_order":["producer", "A"], "data_edges":[], "control_edges":[],
         "loop_bodies":[
-            {"path":["producer"], "nodes":[{"id":"same", "kind":"fixture.target"}, {"id":"nested", "kind":"workflow.call"}, {"id":"repeat", "kind":"workflow.loop"}, {"id":"each", "kind":"workflow.iteration"}],
+            {"path":["producer"], "nodes":[{"id":"same", "kind":"fixture.target"}, {"id":"nested", "kind":"workflow.call"}, {"id":"repeat", "kind":"loop.run"}, {"id":"each", "kind":"workflow.iteration"}],
              "execution_order":["same", "nested", "repeat", "each"], "data_edges":[], "control_edges":[]},
             {"path":["producer", "nested"], "nodes":[{"id":"same", "kind":"fixture.leaf"}], "execution_order":["same"], "data_edges":[], "control_edges":[]},
             {"path":["producer", "repeat"], "source":"%loop", "state_outputs":{"value":"value"}, "nodes":[{"id":"%loop", "kind":"%loop"}, {"id":"same", "kind":"fixture.loop-leaf"}], "execution_order":["%loop", "same"], "data_edges":[], "control_edges":[]},

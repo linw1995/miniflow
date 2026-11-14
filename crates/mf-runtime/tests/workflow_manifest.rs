@@ -415,7 +415,7 @@ fn loop_manifest() -> WorkflowManifest {
     let mut root = graph(
         json!({
             "version": "2026-09-29", "dependencies": {},
-            "nodes": [{"id": "repeat", "kind": "workflow.loop", "config": {"body": "opaque", "max_iterations": 1}}]
+            "nodes": [{"id": "repeat", "kind": "loop.run", "config": {"body": "opaque", "max_iterations": 1}}]
         }),
         &["repeat"],
     );
@@ -423,7 +423,7 @@ fn loop_manifest() -> WorkflowManifest {
         json!({
             "version": "2026-09-29", "dependencies": {},
             "nodes": [{"id": "%loop", "kind": "%loop"},
-                {"id": "inner", "kind": "workflow.loop", "config": {"body": false}}]
+                {"id": "inner", "kind": "loop.run", "config": {"body": false}}]
         }),
         &["%loop", "inner"],
     );
@@ -1254,7 +1254,7 @@ fn binding_scope_keys_cannot_be_claimed_by_another_authored_node() {
         .graph
         .definition
         .nodes
-        .push(serde_json::from_value(json!({"id": key, "kind": "workflow.loop"})).unwrap());
+        .push(serde_json::from_value(json!({"id": key, "kind": "loop.run"})).unwrap());
     manifest.graph.execution_order.push(key.clone().into());
     manifest.input_schema.inputs.insert(key, Default::default());
     for error in errors(&manifest) {

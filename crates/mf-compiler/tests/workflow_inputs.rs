@@ -326,7 +326,7 @@ fn preserves_noninitial_and_body_required_inputs_and_legacy_validation() {
     assert!(compile_definition(&definition, &registry).is_err());
 
     let nested = definition_from_json(json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
-        {"id":"repeat", "kind":"workflow.loop", "config":{"max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
+        {"id":"repeat", "kind":"loop.run", "config":{"max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
             "nodes":[{"id":"missing", "kind":"builtin.identity"}]
         }}}
     ]}));

@@ -220,7 +220,7 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
         },
         "nodes": [
             {"id": "seed", "kind": "builtin.constant", "config": {"value": 0}},
-            {"id": "repeat", "kind": "workflow.loop", "config": {
+            {"id": "repeat", "kind": "loop.run", "config": {
                 "max_iterations": 5,
                 "variables": [{"name": "count", "type": "int"}],
                 "until": {"variable": "count", "operator": "gte", "value": 3},
@@ -232,7 +232,7 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
                             "language": "cel", "inputs": {"count": "int"},
                             "code": {"next": "count + 1"}
                         }},
-                        {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
+                        {"id": "assign", "kind": "workflow.assign", "config": {"variable": "count"}}
                     ],
                     "edges": [
                         {"from_node": "%loop", "from_output": "count", "to_node": "increment", "to_input": "count"},

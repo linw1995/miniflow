@@ -100,13 +100,14 @@ fn loop_rounds_and_parallel_iterations_select_within_each_scope() {
         body["control_edges"][0]["from_node"] = json!(source);
         body["control_edges"][0]["from_output"] = json!(port);
         let definition = if mode == "loop" {
-            body["nodes"][3] = json!({"id":"consume", "kind":"workflow.loop_assign", "config":{"variable":"state"}});
+            body["nodes"][3] =
+                json!({"id":"consume", "kind":"workflow.assign", "config":{"variable":"state"}});
             for edge in body["edges"].as_array_mut().unwrap() {
                 edge["to_input"] = json!("value");
             }
             json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
                 {"id":"start", "kind":"builtin.constant", "config":{"value":false}},
-                {"id":"loop", "kind":"workflow.loop", "config":{"max_iterations":3, "variables":[{"name":"state", "type":"bool"}], "body":{"version":"2026-10-03", "dependencies":{},
+                {"id":"loop", "kind":"loop.run", "config":{"max_iterations":3, "variables":[{"name":"state", "type":"bool"}], "body":{"version":"2026-10-03", "dependencies":{},
                     "nodes":body["nodes"], "control_edges":body["control_edges"], "edges":body["edges"]
                 }}}
             ], "edges":[{"from_node":"start", "from_output":"value", "to_node":"loop", "to_input":"state"}],

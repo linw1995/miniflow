@@ -44,6 +44,25 @@ with an optional version override, independent dependency declarations, and loca
 message-domain restrictions. Source-file aliases used by a nested Call belong to its containing Flow,
 not an outer body's table.
 
+### Implicit scope sources
+
+Scope values are available without declaring a source node in `nodes`:
+
+| Reference source | Declared by | Available values |
+| --- | --- | --- |
+| `%root` | The Flow's definition-level `variables` | That invocation's mutable variables |
+| `%loop` | The enclosing `loop.run` node's `config.variables` and `config.inputs` | Loop variables, read-only inputs, and `index` |
+| `%iteration` | The enclosing `builtin.iteration` node | Current `item`, `key`, `index`, and read-only `config.inputs` |
+
+For example, `{"from":{"node":"%loop","port":"count"}}` reads a Loop variable directly;
+there is no `%loop` node to declare first. Workflow outputs use the same source and port fields.
+`workflow.assign` likewise needs only its target `config.variable` and a `value` input, not a variable
+source declaration. A reader requiring an updated value still needs the assignment's `done` dependency.
+
+Do not add nodes with these reserved IDs or their internal source kinds (`%root`, `%loop`, or
+`builtin.iteration_input`); authored declarations are rejected. The compiler supplies internal source
+instructions in compiled graphs. These instructions are an implementation detail, not an authoring step.
+
 ## Reusable Flows
 
 Version `2026-10-25` adds `workflow.call`, supplied by `mfn-core`. Declare reusable
@@ -631,13 +650,13 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
-| `mfn-core` | [`workflow.loop`](#structured-loop) | `config`: required `max_iterations`, `variables`, and full Flow `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
+| `mfn-core` | [`loop.run`](#structured-loop) | `config`: required `max_iterations`, `variables`, and full Flow `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
 | `mfn-deepseek` | [`builtin.deepseek.search`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `query`; optional search controls | `results`: complete structured search results |
 | `mfn-deepseek` | [`builtin.deepseek.fetch`](#deepseek-web-search-and-fetch) | Endpoint, credential reference, and deadline | Required `url` | `title` and Markdown `content` |
 | `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `messages`; optional `tools` and `tool_results` | Current assistant `message`; required `text`, `outcome`, and `tool_calls`; optional `usage` and `finish_reason` |
 
-The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's ordinary `config`
+The built-in Loop is registered as `loop.run`. Its settings belong in the node's ordinary `config`
 object, including the complete Flow definition in `config.body`. See [Structured Loop](#structured-loop) for its body and control kinds.
 
 `mfn-core` registers `builtin.iteration` for explicit dependency selection. The compiler and runtime orchestrate its
@@ -1255,14 +1274,90 @@ tool event. Usage, deadlines, cancellation, and error capture retain the same co
 Cancellation and publication failure remain execution failures even with error capture enabled.
 This interface supports text and function tools, not media inputs.
 
+## Workflow variables
+
+Version `2026-11-13` adds typed mutable state to ordinary finite Flows, without requiring a Loop.
+The [variables example](../examples/variables.json) returns `{"count":7,"observed":7}` by default:
+
+```sh
+mf compile examples/variables.json --output ./variables
+./variables --params.value 42
+```
+
+Declare variables as a definition-level field, beside `nodes`:
+
+```json
+{
+  "variables": [
+    {"name": "count", "type": "int", "initial": 0},
+    {"name": "answer", "type": {"nullable": "string"}, "initial": null}
+  ]
+}
+```
+
+This is authored data, not a node. The compiler injects the synthetic `%root` source that exposes
+one output per variable, with no inputs and no intrinsic `index`. Do not add a `%root` node or an
+`workflow.variables` node; neither name can be registered as a provider kind. The list must be nonempty, with
+unique nonblank names and compatible `initial` literals. Every variable requires an `initial` field,
+even when its value is null; an omitted field is not an implicit null. Types use the shared port
+descriptor grammar. Startup parameters remain ordinary initial node inputs; use an assignment to
+apply a supplied parameter to a variable.
+
+Use `workflow.assign` to overwrite a declared variable:
+
+```json
+{
+  "id": "assign",
+  "kind": "workflow.assign",
+  "config": {"variable": "count"},
+  "inputs": {"value": {"from": {"node": "params", "port": "value"}}}
+}
+```
+
+Its required `value` input is typed as the target variable; successful assignment publishes `done`.
+A skipped assignment preserves the previous value and skips `done`. Invalid values fail before the
+write is committed, including when the source has a broader type. Native values and secret metadata
+are preserved. Initial literals do not specialize the declared variable type for later reads.
+
+Reads use the synthetic source's current output, for example `%root.count`. **A reader that needs an
+updated value must explicitly depend on `assign.done`**, in addition to its data binding:
+
+```json
+{
+  "from_node": "assign",
+  "from_output": "done",
+  "to_node": "read"
+}
+```
+
+Reading the source does not infer a dependency on writers. Already computed ordinary node outputs
+are not retroactively updated. Selecting `%root.count` as a workflow output returns the final value.
+Assignment controls use output prerequisites, not node-success edges.
+
+State belongs to one Flow invocation and starts fresh on every execution, including when reusing
+prepared executors. It is not conversation or persistent session state. Each callable child Flow can
+declare its own variables; it cannot implicitly read or mutate its caller's variables. Loop bodies
+keep their existing variable declarations and `%loop` source; they can use `workflow.assign` with the
+same contract as `workflow.assign`. Read-only Loop and Iteration inputs remain immutable, and
+container bodies cannot declare a root `variables` field. Root state does not authorize
+`loop.exit`.
+
+Root-state Flow domains execute serially to avoid competing writes. Node-owned parallel work can
+still use the bounded worker pool. Autonomous streaming Flows cannot declare root variables; finite
+TaskStream execution and callable-child stream forwarding retain their existing contracts. Root
+state does not add a Loop frame or change observation paths, and its engine instructions cannot be
+run as isolated node targets. `workflow.assign` and the synthetic `%root` source are engine-owned and
+require no provider dependency; ordinary nodes such as the example's parameters and identity still
+require `mfn-core`.
+
 ## Structured Loop
 
 The complete [Loop output example](../examples/loop-outputs.json) below returns `{"count":3}` with
 its default step size. It uses `mfn-core` for parameters and the Loop declaration, and `mfn-code`
 for the body transformation. `count` starts at zero, `step` is a read-only input, and the body selects
 the next `count` at the end of each pass.
-The compiler replaces the Loop declaration with an engine-prepared executor. `workflow.loop_assign`,
-`workflow.exit_loop`, and the synthetic `%loop` source remain engine controls that plugins cannot
+The compiler replaces the Loop declaration with an engine-prepared executor. `workflow.assign`,
+`loop.exit`, and the synthetic `%loop` source remain engine controls that plugins cannot
 register. The outer graph and every Loop body remain acyclic. The engine repeats a body's fixed
 execution order instead of adding a graph back edge.
 
@@ -1273,8 +1368,9 @@ field is not supported. Each variable creates a Loop input and a required Loop o
 value; the input is optional when the variable declares an `initial` literal. Loop returns its
 variables rather than a second set of child results. A body using version `2026-11-13` may select
 terminal `outputs` as end-of-pass variable updates; older bodies require empty terminal outputs. The
-body reads current values, read-only inputs, and a zero-based `index` through the synthetic `%loop`
-node. Every body node ID is local to that body; `%loop` and `index` are reserved there. Cross-scope
+body reads current values, read-only inputs, and a zero-based `index` through the implicit `%loop`
+source. The compiler supplies it; do not declare a `%loop` node in the body. Every body node ID is local
+to that body; `%loop` and `index` are reserved there. Cross-scope
 edges and implicit reads of outer outputs are rejected. Import an outer value through a Loop input,
 including when initializing a nested Loop.
 
@@ -1296,7 +1392,7 @@ including when initializing a nested Loop.
     },
     {
       "id": "repeat",
-      "kind": "workflow.loop",
+      "kind": "loop.run",
       "config": {
         "max_iterations": 5,
         "inputs": {"step": "int"},
@@ -1341,8 +1437,7 @@ the result is `{"count":4}`: the updated count is checked against `until` after 
 
 Read-only `config.inputs` and per-variable `initial` defaults are supported from version `2026-11-11`.
 Read-only inputs must be bound on the Loop node, as `step` is above, and are shared by every pass.
-The body reads them through `%loop`; they produce no Loop outputs, and neither `workflow.loop_assign`
-nor `until` can target them. A variable's `initial` literal supplies its first value, makes that Loop
+The body reads them through `%loop`; they produce no Loop outputs, and neither `workflow.assign` nor `until` can target them. A variable's `initial` literal supplies its first value, makes that Loop
 input optional, and must match the declared type; an explicit input binding overrides the default.
 
 Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `number`, `int`, `uint`, `usize`, `float`, `double`, `string`, `array`, `object`, and nested `{"list": T}`, `{"map": T}`, or `{"nullable": T}`.
@@ -1350,15 +1445,17 @@ Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `n
 `nullable`, `usize`, and `float`. Initial values, assignments, and final outputs are checked against each variable's
 declared type; a broad source is checked at runtime when necessary.
 
-For immediate writes within a pass, `workflow.loop_assign` remains supported; the
+For immediate writes within a pass, `workflow.assign` remains supported; the
 [legacy Loop example](../examples/loop.json) demonstrates that form with an explicitly bound initial
 value. It takes one required `value` input and produces a `done` control output. A reached assignment
 overwrites its target variable; a skipped assignment leaves it unchanged. A later body step that
 must read the new value needs an explicit data or control dependency on the assignment.
+In version `2026-11-13`, `workflow.assign` supports the same immediate assignment contract inside a
+Loop and can also update [workflow variables](#workflow-variables) in a callable Flow.
 
-`workflow.exit_loop` has no data ports; when activated by a control dependency, it ends the nearest
+`loop.exit` has no data ports; when activated by a control dependency, it ends the nearest
 Loop immediately and leaves the rest of that pass unvisited. A skipped exit has no effect.
-Assignment and exit steps are invalid outside a Loop.
+`workflow.assign` and exit steps are invalid outside a Loop.
 
 An active Loop runs at least one pass. Each pass starts with fresh body outputs and skip markers
 while variable values persist. After a complete pass, `until` compares a declared scalar variable
@@ -1382,7 +1479,7 @@ conversation variables, parallel execution, and error-continue modes are separat
 
 With body definition version `2026-11-13`, select terminal outputs by variable name instead of adding
 assignment nodes. The complete example above selects `increment.next` as `count` in
-`config.body.outputs`; it does not also assign `count` with `workflow.loop_assign`.
+`config.body.outputs`; it does not also assign `count` with `workflow.assign`.
 
 The receiving Loop must declare each selected name as a mutable variable. After each complete successful
 pass, all selected values are validated and applied together, before evaluating `until`. Body reads in that
@@ -1391,9 +1488,9 @@ Use `optional: true` for a selection whose producer may be explicitly skipped; t
 variable. Required skipped selections and unexpectedly missing producer outputs still fail normally.
 
 Only mutable variables may be targets, not read-only inputs or `index`. A body output cannot target
-a variable also written by `workflow.loop_assign` in that body. Immediate assignments to other
-variables remain supported, including their existing explicit ordering requirements. An explicit
-`workflow.exit_loop` abandons all end-of-pass selections without reading unvisited producers, while
+a variable also written by `workflow.assign` in that body. Immediate
+assignments to other variables remain supported, including their existing explicit ordering requirements. An explicit
+`loop.exit` abandons all end-of-pass selections without reading unvisited producers, while
 retaining completed immediate assignments. A failed pass never publishes partial Loop outputs;
 external side effects are not rolled back. Values retain their native identity and secret labels.
 TaskStream deltas remain separate under `stream_outputs` and cannot be selected as terminal updates.
@@ -1482,9 +1579,9 @@ array after the body has passed validation. Other input shapes fail at execution
 }
 ```
 
-The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`. `%iteration` is a
-reserved body
-source with outputs `item` (the current array element or map value), `key` (the map key, or JSON null for an array),
+The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`.
+`%iteration` is an implicit body source, supplied by the compiler; do not declare a `%iteration` or
+`builtin.iteration_input` node. It has outputs `item` (the current array element or map value), `key` (the map key, or JSON null for an array),
 and `index` (a zero-based signed integer). Maps are visited in lexicographic key order; their `index` and collected
 results use that order in both execution modes. The outer `items` input holds the complete collection.
 For example, the body above maps `{"b":2,"a":1}` to `[1,2]`.

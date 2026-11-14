@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(rename_all = "snake_case")]
 pub enum TypedFallbackReason {
     UnsupportedMode,
+    MutableState,
     IncrementalOutput,
     CustomRunner,
     ProviderMissing,
@@ -122,6 +123,9 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
         }
         if !oneshot {
             return Some(UnsupportedMode);
+        }
+        if flow.root_scope().is_some() {
+            return Some(MutableState);
         }
         if !standard_runner {
             return Some(CustomRunner);

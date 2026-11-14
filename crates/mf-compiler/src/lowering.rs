@@ -9,7 +9,7 @@ use serde_json::json;
 use snafu::{ResultExt, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Authoring-only traversal state. Only `relations` crosses a phase boundary;
+/// Lowering-only traversal state. Only `relations` crosses a phase boundary;
 /// ancestry and diagnostic paths are carried explicitly during source lowering.
 #[derive(Clone, Debug, Default)]
 pub struct ScopeContext {
@@ -18,9 +18,18 @@ pub struct ScopeContext {
     /// The original authored root, unchanged by explicit child version overrides.
     pub root_version: Option<WorkflowDefinitionVersion>,
     inside_items: bool,
+    /// Resolved-definition adapters may receive sources inserted by an earlier lowering pass.
+    lowered_sources: bool,
 }
 
 impl ScopeContext {
+    pub fn resolved() -> Self {
+        Self {
+            lowered_sources: true,
+            ..Self::default()
+        }
+    }
+
     /// Enter a child only after its receiving callback authorizes this binding.
     pub fn child(
         &self,
@@ -66,6 +75,7 @@ impl ScopeContext {
             path,
             root_version: self.root_version,
             inside_items,
+            lowered_sources: self.lowered_sources,
         })
     }
 
@@ -74,7 +84,12 @@ impl ScopeContext {
         definition: &mut WorkflowDefinition,
     ) -> Result<(), WorkflowCompileError> {
         self.root_version.get_or_insert(definition.version);
-        lower_scope_at(definition, &mut self.relations, &self.path)
+        lower_scope_at(
+            definition,
+            &mut self.relations,
+            &self.path,
+            self.lowered_sources,
+        )
     }
 }
 
@@ -202,14 +217,96 @@ pub fn lower_scope(
     definition: &mut WorkflowDefinition,
     relations: &mut GraphRelations,
 ) -> Result<(), WorkflowCompileError> {
-    lower_scope_at(definition, relations, &[])
+    lower_scope_at(definition, relations, &[], false)
 }
 
 pub fn lower_scope_at(
     definition: &mut WorkflowDefinition,
     relations: &mut GraphRelations,
     path: &[DefinitionId],
+    lowered_sources: bool,
 ) -> Result<(), WorkflowCompileError> {
+    // Scope sources are implicit references, never authored node declarations.
+    // Reject both reserved IDs and internal kinds before injecting any source.
+    // Resolved-definition adapters retain canonical sources from an earlier pass;
+    // authored definitions cannot opt into that path. Artifact replay uses stored relations.
+    for node in &definition.nodes {
+        let reserved = matches!(
+            node.id.as_str(),
+            mf_runtime::ROOT_SOURCE_ID
+                | mf_runtime::LOOP_SOURCE_ID
+                | mf_runtime::ITERATION_INPUT_ID
+        ) || matches!(
+            node.kind.as_str(),
+            mf_runtime::ROOT_SOURCE_ID
+                | mf_runtime::LOOP_SOURCE_ID
+                | mf_runtime::ITERATION_INPUT_KIND
+        );
+        if !reserved {
+            continue;
+        }
+        let mut node_path = path.to_vec();
+        node_path.push(node.id.clone());
+        ensure!(
+            lowered_sources
+                && node.config == json!({})
+                && ((relations.scope.is_none()
+                    && !definition.variables.is_empty()
+                    && node.id.as_str() == mf_runtime::ROOT_SOURCE_ID
+                    && node.kind == mf_runtime::ROOT_SOURCE_ID)
+                    || relations.scope.as_ref().is_some_and(|scope| {
+                        let kind = if scope.is_stateful() {
+                            mf_runtime::LOOP_SOURCE_ID
+                        } else {
+                            mf_runtime::ITERATION_INPUT_KIND
+                        };
+                        node.id == scope.input && node.kind == kind
+                    })),
+            crate::compiler::InvalidScopeSnafu {
+                path: crate::loops::path_label(&node_path),
+                message: "scope sources are implicit; reference them without declaring a node",
+            }
+        );
+    }
+    // Callable Flows own their own root state; container bodies cannot redeclare it.
+    relations.root = None;
+    if !definition.variables.is_empty() {
+        let mut variables_path = path.to_vec();
+        variables_path.push(DefinitionId::from("variables"));
+        let label = crate::loops::path_label(&variables_path);
+        ensure!(
+            definition.version.supports_workflow_variables(),
+            crate::compiler::InvalidScopeSnafu {
+                path: &label,
+                message: "workflow variables require definition version 2026-11-13",
+            }
+        );
+        ensure!(
+            relations.scope.is_none(),
+            crate::compiler::InvalidScopeSnafu {
+                path: &label,
+                message: "workflow variables require a callable Flow; container bodies cannot declare them",
+            }
+        );
+        relations.root = Some(
+            mf_runtime::root_scope(&definition.variables, mf_runtime::ROOT_SOURCE_ID.into())
+                .context(crate::compiler::WorkflowVariablesSnafu { path: &label })?,
+        );
+        if !definition
+            .nodes
+            .iter()
+            .any(|node| node.id.as_str() == mf_runtime::ROOT_SOURCE_ID)
+        {
+            definition.nodes.insert(
+                0,
+                NodeDefinition {
+                    id: mf_runtime::ROOT_SOURCE_ID.into(),
+                    kind: mf_runtime::ROOT_SOURCE_ID.into(),
+                    config: json!({}),
+                },
+            );
+        }
+    }
     if let Some(scope) = &relations.scope {
         ensure!(
             !scope.is_stateful()
@@ -261,7 +358,12 @@ pub fn lower_scope_at(
                 })
                 .collect::<BTreeMap<_, _>>()
         });
-    crate::loops::validate_scope(definition, state_types.as_ref(), path)?;
+    crate::loops::validate_scope(
+        definition,
+        state_types.as_ref(),
+        relations.root.as_ref().map(|root| &root.values),
+        path,
+    )?;
     if let Some(scope) = relations.scope.as_mut() {
         scope.writes.clear();
         scope.exits.clear();
@@ -271,6 +373,8 @@ pub fn lower_scope_at(
         node_path.push(node.id.clone());
         let path = node_path.as_slice();
         match node.kind.as_str() {
+            // `validate_scope` already proved the canonical endpoint above.
+            mf_runtime::ROOT_SOURCE_ID => {}
             mf_runtime::LOOP_SOURCE_ID | mf_runtime::ITERATION_INPUT_KIND => {
                 let scope = relations.scope.as_ref();
                 let valid = scope.is_some_and(|scope| {
@@ -289,11 +393,19 @@ pub fn lower_scope_at(
                     }
                 );
             }
-            mf_runtime::LOOP_ASSIGN_KIND => {
+            mf_runtime::ASSIGN_KIND => {
                 // validate_scope checked ownership, target existence and spelling.
                 let target = crate::loops::assignment_target(&node.config, path)?;
-                let scope = relations.scope.as_mut().expect("validated state scope");
-                scope.writes.insert(node.id.clone(), target);
+                if let Some(scope) = relations.scope.as_mut() {
+                    scope.writes.insert(node.id.clone(), target);
+                } else {
+                    relations
+                        .root
+                        .as_mut()
+                        .expect("validated root state")
+                        .writes
+                        .insert(node.id.clone(), target);
+                }
             }
             mf_runtime::EXIT_LOOP_KIND => {
                 relations
@@ -306,7 +418,8 @@ pub fn lower_scope_at(
             _ => {
                 ensure!(
                     node.id.as_str() != mf_runtime::LOOP_SOURCE_ID
-                        && node.id.as_str() != mf_runtime::ITERATION_INPUT_ID,
+                        && node.id.as_str() != mf_runtime::ITERATION_INPUT_ID
+                        && node.id.as_str() != mf_runtime::ROOT_SOURCE_ID,
                     crate::compiler::InvalidScopeSnafu {
                         path: crate::loops::path_label(path),
                         message: "reserved scope source must use its canonical declaration",
@@ -367,8 +480,8 @@ mod tests {
         assert_eq!(context.relations.key.as_deref(), Some("repeat"));
         let mut definition = WorkflowDefinition::from_json(
             &json!({
-                "version":"2026-10-28", "dependencies":{}, "nodes":[{
-                    "id":"write", "kind":mf_runtime::LOOP_ASSIGN_KIND,
+                "version":"2026-11-13", "nodes":[{
+                    "id":"write", "kind":mf_runtime::ASSIGN_KIND,
                     "config":{"variable":"missing"}
                 }]
             })

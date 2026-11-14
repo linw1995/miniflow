@@ -364,7 +364,7 @@ fn infers_streaming_at_the_root_and_rejects_events_in_synchronous_bodies() {
         "{error}"
     );
 
-    let repeat = json!({"id":"repeat", "kind":"workflow.loop", "config":{
+    let repeat = json!({"id":"repeat", "kind":"loop.run", "config":{
         "max_iterations":1, "variables":[{"name":"x", "type":"int"}], "body":{"version":"2026-10-03", "dependencies":{},
             "nodes":[{"id":"collect", "kind":"test.collect"}], "edges":[edge("%loop", "x", "collect", "item")]
         }

@@ -216,7 +216,7 @@ fn loop_accumulation_fails_atomically_when_conversion_budget_is_exhausted() {
             "version":"2026-09-29", "dependencies":{},
             "nodes":[
                 {"id":"seed", "kind":"builtin.constant", "config":{"value":[]}},
-                {"id":"repeat", "kind":"workflow.loop", "config":{
+                {"id":"repeat", "kind":"loop.run", "config":{
                     "max_iterations":iterations, "variables":[{"name":"items", "type":{"list":"object"}}],
                     "body":{"version":"2026-09-29", "dependencies":{},
                         "nodes":[
@@ -225,7 +225,7 @@ fn loop_accumulation_fails_atomically_when_conversion_budget_is_exhausted() {
                                 "language":"cel", "inputs":{"left":{"list":"object"}, "right":{"list":"object"}},
                                 "code":{"value":"left + right"}
                             }},
-                            {"id":"assign", "kind":"workflow.loop_assign", "config":{"variable":"items"}}
+                            {"id":"assign", "kind":"workflow.assign", "config":{"variable":"items"}}
                         ],
                         "edges":[
                             {"from_node":"%loop", "from_output":"items", "to_node":"collect", "to_input":"left"},

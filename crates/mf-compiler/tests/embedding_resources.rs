@@ -78,7 +78,7 @@ fn host(root: &Path) {
         graph(
             json!([
                 {"id":"seed","kind":"builtin.constant","config":{"value":0}},
-                {"id":"repeat","kind":"workflow.loop","config":{
+                {"id":"repeat","kind":"loop.run","config":{
                     "max_iterations":2,
                     "variables":[{"name":"count","type":"int"}],
                     "until":{"variable":"count","operator":"gte","value":3},
@@ -94,7 +94,7 @@ fn host(root: &Path) {
         graph(
             json!([
                 {"id":"next","kind":"builtin.constant","config":{"value":3}},
-                {"id":"assign","kind":"workflow.loop_assign","config":{"variable":"count"},
+                {"id":"assign","kind":"workflow.assign","config":{"variable":"count"},
                  "inputs":{"value":{"from":{"node":"next","port":"value"}}}}
             ]),
             json!([]),

@@ -14,7 +14,7 @@ fn count(value: i64) -> Count {
 
 type ScopeFixture<'a> = (&'a str, Option<&'a str>, &'a [(&'a str, &'a str)]);
 
-const LOOP: ScopeFixture<'static> = ("workflow.loop", Some("%loop"), &[("value", "value")]);
+const LOOP: ScopeFixture<'static> = ("loop.run", Some("%loop"), &[("value", "value")]);
 const CALL: ScopeFixture<'static> = ("workflow.call", None, &[]);
 
 fn graph(scopes: &[ScopeFixture<'_>]) -> WorkflowDescription {

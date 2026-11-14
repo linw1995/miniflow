@@ -1552,7 +1552,7 @@ mod tests {
         let mut graph = description();
         graph.nodes[1] = NodeDescription {
             id: "repeat".into(),
-            kind: "workflow.loop".into(),
+            kind: "loop.run".into(),
         };
         graph.execution_order[1] = "repeat".into();
         graph.data_edges[0].to_node = "repeat".into();
@@ -1595,7 +1595,7 @@ mod tests {
             };
             let root = NodeIdentity {
                 id: "repeat".into(),
-                kind: "workflow.loop".into(),
+                kind: "loop.run".into(),
                 path: Vec::new(),
             };
             records.push(record(
@@ -1963,7 +1963,7 @@ mod tests {
                 .clone();
             for source in [None, Some("frame-input".to_owned())] {
                 let mut invalid = graph.clone();
-                invalid.nodes[1].kind = "workflow.loop".into();
+                invalid.nodes[1].kind = "loop.run".into();
                 invalid.loop_bodies[0].source = source;
                 invalid.loop_bodies[0].state_outputs.clear();
                 // A different owner's stateful body cannot authorize this summary.
@@ -1977,7 +1977,7 @@ mod tests {
                     node, loop_summary, ..
                 }) = &mut completion.payload
                 {
-                    node.kind = "workflow.loop".into();
+                    node.kind = "loop.run".into();
                     *loop_summary = Some(LoopSummary {
                         pass_count: count(1),
                         reason: LoopStopReason::Maximum,

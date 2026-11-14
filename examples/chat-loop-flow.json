@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-28",
+  "version": "2026-11-13",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -83,7 +83,7 @@
     },
     {
       "id": "repeat",
-      "kind": "workflow.loop",
+      "kind": "loop.run",
       "config": {
         "max_iterations": 2,
         "variables": [
@@ -138,7 +138,7 @@
           "value": "failed"
         },
         "body": {
-          "version": "2026-10-28",
+          "version": "2026-11-13",
           "dependencies": {},
           "nodes": [
             {
@@ -199,7 +199,7 @@
             },
             {
               "id": "save_history",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "history"
               },
@@ -214,7 +214,7 @@
             },
             {
               "id": "save_usages",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "usages"
               },
@@ -229,7 +229,7 @@
             },
             {
               "id": "save_status",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "status"
               },
@@ -244,7 +244,7 @@
             },
             {
               "id": "save_text",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "text"
               },
@@ -259,7 +259,7 @@
             },
             {
               "id": "save_error",
-              "kind": "workflow.loop_assign",
+              "kind": "workflow.assign",
               "config": {
                 "variable": "error"
               },

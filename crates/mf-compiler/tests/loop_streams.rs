@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 fn definition() -> Value {
     json!({"version":"2026-10-28","dependencies":{},
-        "nodes":[{"id":"repeat","kind":"workflow.loop","config":{
+        "nodes":[{"id":"repeat","kind":"loop.run","config":{
             "max_iterations":3,"variables":[{"name":"count","type":"usize"}],
             "stream_outputs":{"increment":{"node":"step","port":"delta"}},
             "body":{"version":"2026-10-28", "dependencies":{}, "nodes":[{"id":"step","kind":"fixture.task_stream","inputs":{"count":{"from":{"node":"%loop","port":"count"}}}}]}

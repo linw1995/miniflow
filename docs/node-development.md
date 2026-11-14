@@ -57,10 +57,15 @@ Host and target implementations must expose the same configured interface even i
 Initialization can still fail for an unavailable runtime resource; inspection returns the frozen interface without
 initializing executors. Dynamic in-memory callers derive their interfaces normally and require no manifest.
 
-`mfn-core` registers a subgraph factory for `workflow.loop`. The compiler prepares its body and passes
+`mfn-core` registers a subgraph factory for `loop.run`. The compiler prepares its body and passes
 it to that factory, which constructs the complete Loop executor. A Flow using Loop must declare
-`mfn-core` in its dependencies. `workflow.loop_assign`, `workflow.exit_loop`, and `%loop` remain reserved
-engine kinds. Ordinary nodes inside a Loop body also require their packages in `dependencies`.
+`mfn-core` in its dependencies. `workflow.assign`, `loop.exit`, and `%loop` remain reserved
+engine kinds. Version `2026-11-13` adds a definition-level `variables` field for invocation-local
+state in finite callable Flows. The compiler injects the reserved `%root` source for it, so authors
+never write a declaration node. `workflow.assign` is the reserved engine kind that writes that state;
+the generic assignment also works inside Loop bodies. Reserved kinds and the `%root` source name
+cannot be registered or authored by plugins. Ordinary nodes inside a Loop body also require their
+packages in `dependencies`.
 
 ## Registration contract
 
@@ -1206,6 +1211,14 @@ relationships, not from instruction kind labels. The actual source endpoint is a
 refresh after assignments. Directly supplied manual callbacks have no compiled relationship record and
 retain their existing caller-defined preparation semantics. These are concrete execution relationships,
 not persisted receiving-type schemas or a new factory callback interface.
+
+Callable Flows may separately carry `GraphRelations::root` with their own typed initial values and
+assignment targets. Root state does not turn a callable into a frame-backed child: calls still
+isolate startup inputs, outputs, and state using the existing invocation boundary. Preparation binds
+the root relationships to the executable Flow, and every execution initializes fresh values without
+adding an observation scope. Such Flows use serial domains and dynamic publication, preserving native
+payloads and sensitivity across updates. Root source and assignment instructions require their
+owning invocation and are not exposed as isolated node targets.
 
 The current authored/compiler-prepared child path remains finite, including compatible TaskStream
 forwarding and calls from parent Stream messages. Its preparation rejects autonomous Event/Stream

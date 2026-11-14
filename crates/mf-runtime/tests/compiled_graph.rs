@@ -99,7 +99,7 @@ fn child_scope_keys_use_explicit_override_or_generic_binding_for_every_kind() {
     owner.id = "owner/with~punctuation".into();
     for kind in [
         "workflow.call",
-        "workflow.loop",
+        "loop.run",
         "builtin.iteration",
         "user.renamed",
     ] {

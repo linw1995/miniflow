@@ -419,7 +419,7 @@ fn loop_graph() -> WorkflowDescription {
         workflow_id: graph().workflow_id,
         nodes: vec![NodeDescription {
             id: "repeat".into(),
-            kind: "workflow.loop".into(),
+            kind: "loop.run".into(),
         }],
         data_edges: vec![],
         control_edges: vec![],
@@ -476,7 +476,7 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
             2,
             Event::NodeStarted {
                 selected_inputs: Vec::new(),
-                node: node("repeat", "workflow.loop"),
+                node: node("repeat", "loop.run"),
                 position: count(0),
                 elapsed_ns: count(1),
             },
@@ -545,7 +545,7 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
         event(
             9,
             Event::NodeFinished {
-                node: node("repeat", "workflow.loop"),
+                node: node("repeat", "loop.run"),
                 position: count(0),
                 elapsed_ns: count(8),
                 duration_ns: Some(count(7)),
@@ -672,7 +672,7 @@ fn loop_summary_does_not_infer_unobserved_pass_records() {
             2,
             Event::NodeStarted {
                 selected_inputs: Vec::new(),
-                node: node("repeat", "workflow.loop"),
+                node: node("repeat", "loop.run"),
                 position: count(0),
                 elapsed_ns: count(1),
             },
@@ -682,7 +682,7 @@ fn loop_summary_does_not_infer_unobserved_pass_records() {
         .apply(event(
             3,
             Event::NodeFinished {
-                node: node("repeat", "workflow.loop"),
+                node: node("repeat", "loop.run"),
                 position: count(0),
                 elapsed_ns: count(2),
                 duration_ns: Some(count(1)),
@@ -760,7 +760,7 @@ fn live_body_start_shows_running_in_the_active_pass() {
             2,
             Event::NodeStarted {
                 selected_inputs: Vec::new(),
-                node: node("repeat", "workflow.loop"),
+                node: node("repeat", "loop.run"),
                 position: Count::ZERO,
                 elapsed_ns: count(1),
             },

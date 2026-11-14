@@ -72,7 +72,7 @@ fn search_result() -> Value {
     })
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 22] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 23] {
     [
         (
             "deepseek-fetch.json",
@@ -125,6 +125,7 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 22] {
         ("iteration.json", None, json!({"results": [2, 5, 8]})),
         ("loop.json", None, json!({"count": 3})),
         ("loop-outputs.json", None, json!({"count": 3})),
+        ("variables.json", None, json!({"count": 7, "observed": 7})),
         (
             "llm-terminal.json",
             None,

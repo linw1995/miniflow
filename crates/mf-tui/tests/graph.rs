@@ -1021,7 +1021,7 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
     graph.version = WorkflowDescriptionVersion::V2026_09_29;
     graph.nodes = vec![NodeDescription {
         id: "repeat".into(),
-        kind: "workflow.loop".into(),
+        kind: "loop.run".into(),
     }];
     graph.data_edges.clear();
     graph.control_edges.clear();
@@ -1392,7 +1392,7 @@ fn body_clusters_collapse_within_their_scope() {
     });
     graph.nodes = vec![NodeDescription {
         id: "repeat".into(),
-        kind: "workflow.loop".into(),
+        kind: "loop.run".into(),
     }];
     graph.data_edges.clear();
     graph.control_edges.clear();
@@ -2002,7 +2002,7 @@ fn root_and_loop_body_share_routing_geometry() {
     description.version = WorkflowDescriptionVersion::V2026_09_29;
     description.nodes = vec![NodeDescription {
         id: "repeat".into(),
-        kind: "workflow.loop".into(),
+        kind: "loop.run".into(),
     }];
     description.execution_order = vec!["repeat".into()];
     description.data_edges.clear();
