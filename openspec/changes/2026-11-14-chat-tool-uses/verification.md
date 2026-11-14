@@ -1,48 +1,52 @@
 # Verification
 
-## Revised-plan status
+## Implementation scope
 
-The two-source, event-driven, relational redesign in `design.md` is a plan pending implementation. The checks below
-record the earlier telemetry-only/polling/JSON baseline. They do not validate the new message contract, source merge,
-canonical message persistence/history reconstruction, association tables, differential writes, or event subscriptions. This planning revision changes no runtime code.
-Fresh verification is required after the revised tasks are implemented.
+The revised message-first, event-driven, relational implementation replaces the earlier telemetry-only/polling/JSON
+draft. This change contains only ToolUse, the canonical message storage needed for recovery, terminal presentation,
+and associated contracts/tests/documentation. Desktop prototypes remain ignored local material. License policy,
+notice generation, default dependencies and the root lockfile are unchanged.
 
-## Previous implementation scope
+## Functional evidence
 
-Only ToolUse capture, persistence, terminal presentation, and their tests/documentation are included. Desktop
-experiments and their separate license/resource review remain outside this change in ignored local storage.
-The license policy, notice generator/template, default dependencies, and root lockfile match the comparison base.
+- Canonical message tests round-trip empty-text tool-call assistants, multiple assistant/tool messages, complete
+  metadata/arguments/results, optional empty tool-call arrays, large Unicode payloads and 130-call conversations.
+  Successful history reconstruction crosses pagination boundaries; unsuccessful prefixes remain inspectable but do
+  not enter the next request's model context. Native sensitivity survives reopen without entering public previews.
+- SQL rejection triggers prove status-only updates do not touch payloads, sibling executions or model-call rows.
+  Exact replay writes no duplicate messages, order/cursor changes or execution payloads. Final-save failures roll
+  back settlement and preserve full save-only recovery. Legacy JSON migrates as observation-only data.
+- Source tests exercise both arrival orders, late origin, reused provider IDs, multiple attempts, conflicts, missing
+  proof, and late ambiguity. Ambiguity removes the association without deleting messages or execution facts.
+- Receiver subscription tests bootstrap already-admitted state, receive live changes, drain closure, detach, and
+  attach after closure without rendering or querying observation snapshots. Existing cancellation/backpressure and
+  paused-rendering regressions remain applicable; ToolUse drawing no longer collects or persists observations.
+- The actual compiled calculator Flow produces one successful and two rejected tools. A real pseudo-terminal shows
+  their facts before a delayed final reply with the Flow panel hidden. Restart restores the message/call/result rows
+  without execution; continuing that session sends its full prior assistant tool calls/results to the provider.
+- A second real-provider regression reuses a provider tool-call ID across two model rounds. Both executions retain
+  distinct identity, correct 10/21 results and their own model-scoped links after reopening. Public origin is produced
+  independently of prior business-message sensitivity, not recovered from masked snapshots or guessed by name.
+- Literal terminal formatting, explicit unobserved/unlinked states, multiple attempts, stale invocations and legacy
+  missing evidence remain covered. CLI stdout stays empty and terminal modes are restored.
 
-## Functional checks
+## Final validation
 
-- Terminal unit tests cover all phases, explicit uncertainty and missing legacy journals, once-per-turn display,
-  assistant-only pages, cancelled user-only history, repeated names, literal/control-safe details, retained save-pending
-  evidence, stale completion rejection, and previous records surviving a new turn or session change.
-- The CLI calculator regression runs the actual compiled Flow against an HTTP test provider. One call executes the
-  calculator and two are rejected. A real pseudo-terminal sees tool status/details before a deliberately delayed final
-  reply with the Flow panel hidden. Restarting terminal chat restores one journal without additional provider calls.
-  The test also checks terminal restoration, empty CLI stdout, and absence of the synthetic credential on screen.
-- Storage/controller tests cover bounded redaction, migration/reopen, identity isolation, interruption, final-journal
-  immutability, write contention, rollback, and save-only recovery without another execution.
+Using the pinned Nix Rust 1.99.0 toolchain:
 
-## Validation
+- Recompiled the shared planning Flow and ran the immutable worktree selection with test precision, telemetry enabled
+  and `run=true`: **1260 passed, 5 skipped** across 143 binaries. Six affected packages were selected with no fallback.
+  The successful source snapshot is `0d0536bfeafae465d6ed24036d9af4bd03ba5e63`; all four CLI chat integration tests are
+  included. `target/test-plan.json` retains the executable plan and execution report.
+- Repository Python checks: **76 passed**.
+- Official coverage script with the affected plan and explicit test-name filters: **39 passed, 1217 filtered**.
+  `target/coverage/result/lcov.info` is a **partial** focused report, not full-workspace or complete-crate coverage.
+  A prior overbroad instrumented attempt hit the command budget; its profiles are excluded from this regenerated report.
+- `prek -a` covers formatting, all-target/all-feature Clippy and Cargo check, Markdown, workflow validation and the
+  unchanged license audit. Strict OpenSpec validation is run for this change before submission.
 
-After merging `main` at `99c7dc5a`, using the pinned Nix toolchain:
+Updated old graph/output-shape and history-ID assertions reflect the new optional ports and per-assistant ID scope;
+within-message duplicate IDs and unpaired tool results still fail before HTTP. No test was removed to hide a failure.
 
-- Recompiled shared test-affected Flow, merge-base comparison against local `origin/main`, test precision, telemetry
-  enabled, and `run=true`: 516 passed, one skipped by configuration. The completed report covers the full PR's
-  `mf-chat`, `mf-tui`, and `mf-cli` scope without a fallback or graphical inputs.
-- Shared storage/controller/terminal libraries: 227 passed. All three executable-chat integration tests passed,
-  including the live/restart calculator CLI regression, separately and in the shared affected suite.
-- Repository Python suite after excluding desktop-only additions: 76 passed.
-- Official coverage script with the affected plan and explicit chat filters: 44 passed; 465 unrelated tests were
-  intentionally filtered. The partial report is `target/coverage/result/lcov.info`, not a full-workspace coverage claim.
-- Clippy with all targets/features and warnings denied, `prek -a`, strict OpenSpec validation, and the unchanged
-  workspace license audit passed.
-
-The two main-merge conflicts were confined to `.config/nextest.toml`. Both the ToolUse calculator test and the
-upstream generated-variable test remain in the matching setup and shared-Cargo filter expressions; neither side's
-test was dropped. No unmerged entries remain.
-
-Raw logs, immutable plans, profiles, and coverage artifacts stay under ignored `target/`. No machine-specific reports,
-application databases, or graphical prototype code are distributed by this PR.
+Raw logs, plans and coverage reports remain under ignored `target/`. No application database, machine-specific
+report, desktop code or graphical licensing material is included in the PR.

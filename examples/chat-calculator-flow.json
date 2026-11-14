@@ -210,6 +210,23 @@
   ],
   "outputs": [
     {
+      "name": "messages",
+      "node": "agent",
+      "port": "messages"
+    },
+    {
+      "name": "message_events",
+      "node": "agent",
+      "port": "message_events",
+      "optional": true
+    },
+    {
+      "name": "tool_message_events",
+      "node": "agent",
+      "port": "tool_message_events",
+      "optional": true
+    },
+    {
       "name": "answer",
       "node": "agent",
       "port": "answer",

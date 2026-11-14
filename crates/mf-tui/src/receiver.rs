@@ -30,10 +30,14 @@ use prost::Message;
 use serde_json::{Map, Value};
 use snafu::{ResultExt, Snafu, ensure};
 use std::{
+    collections::BTreeMap,
     convert::Infallible,
     io,
     net::TcpListener,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -77,7 +81,28 @@ enum IngestError {
     Invalid { message: String },
 }
 
+/// A producer-pushed, bounded observation frame. Consumers never query snapshots from drawing code.
+pub struct ObservationUpdate {
+    pub snapshot: Arc<StateSnapshot>,
+    pub description: Arc<WorkflowDescription>,
+    pub finished: bool,
+    nodes: BTreeMap<(Vec<u8>, Vec<u8>), Arc<mf_runtime::NodeSnapshot>>,
+}
+impl ObservationUpdate {
+    pub fn node_data(
+        &self,
+        node: &crate::state::NodeObservation,
+    ) -> Option<Arc<mf_runtime::NodeSnapshot>> {
+        self.nodes.get(node.correlation.as_ref()?).cloned()
+    }
+}
+pub struct ObservationSubscription {
+    consume: Box<dyn Fn(&ObservationUpdate) + Send + Sync>,
+}
+
 struct Context {
+    subscribers: Mutex<Vec<Weak<ObservationSubscription>>>,
+    finished: AtomicBool,
     state: Arc<Mutex<SessionState>>,
     snapshots: Mutex<SnapshotCapture>,
     traces: Mutex<TraceStore>,
@@ -85,6 +110,54 @@ struct Context {
     calls: Mutex<mf_chat::CallEventCollector>,
     workflow_id: WorkflowId,
     run_id: String,
+}
+
+impl Context {
+    fn update(&self) -> ObservationUpdate {
+        let (snapshot, description) = {
+            let state = self.state.lock().expect("receiver state was not poisoned");
+            (state.snapshot_shared(), state.description())
+        };
+        let data = self
+            .snapshots
+            .lock()
+            .expect("snapshot capture was not poisoned");
+        let nodes = snapshot
+            .nodes
+            .iter()
+            .chain(
+                snapshot
+                    .iterations
+                    .items
+                    .iter()
+                    .flat_map(|item| item.nodes.iter().map(|node| &node.node)),
+            )
+            .filter_map(|node| {
+                let (trace, span) = node.correlation.as_ref()?;
+                Some(((trace.clone(), span.clone()), data.data(trace, span).node?))
+            })
+            .collect();
+        ObservationUpdate {
+            snapshot,
+            description,
+            nodes,
+            finished: self.finished.load(Ordering::Acquire),
+        }
+    }
+    fn publish(&self) {
+        let mut subscribers = self
+            .subscribers
+            .lock()
+            .expect("observation subscribers were not poisoned");
+        subscribers.retain(|subscription| subscription.strong_count() > 0);
+        if subscribers.is_empty() {
+            return;
+        }
+        let update = self.update();
+        for subscription in subscribers.iter().filter_map(Weak::upgrade) {
+            (subscription.consume)(&update);
+        }
+    }
 }
 
 pub struct LoopbackReceiver {
@@ -111,6 +184,8 @@ impl LoopbackReceiver {
             tokio::net::TcpListener::from_std(listener).context(RuntimeSnafu)?
         };
         let context = Arc::new(Context {
+            subscribers: Mutex::new(Vec::new()),
+            finished: AtomicBool::new(false),
             state: Arc::new(Mutex::new(state)),
             snapshots: Mutex::new(SnapshotCapture::default()),
             traces: Mutex::new(TraceStore::default()),
@@ -177,7 +252,11 @@ impl LoopbackReceiver {
             .lock()
             .expect("receiver state was not poisoned");
         state.close();
-        state.snapshot()
+        let snapshot = state.snapshot();
+        drop(state);
+        self.context.finished.store(true, Ordering::Release);
+        self.context.publish();
+        snapshot
     }
 
     fn stop(&mut self) {
@@ -204,6 +283,25 @@ pub struct ObservationReader {
 }
 
 impl ObservationReader {
+    /// Registration and bootstrap share the publication lock: a fast child cannot fall in a gap.
+    /// Keep the returned subscription alive; dropping it detaches the consumer.
+    pub fn subscribe(
+        &self,
+        consume: impl Fn(&ObservationUpdate) + Send + Sync + 'static,
+    ) -> Arc<ObservationSubscription> {
+        let subscription = Arc::new(ObservationSubscription {
+            consume: Box::new(consume),
+        });
+        let mut subscribers = self
+            .context
+            .subscribers
+            .lock()
+            .expect("observation subscribers were not poisoned");
+        subscribers.push(Arc::downgrade(&subscription));
+        (subscription.consume)(&self.context.update());
+        subscription
+    }
+
     /// Immutable validated topology shared by this run's collectors and views.
     pub fn description(&self) -> Arc<WorkflowDescription> {
         self.context
@@ -574,6 +672,7 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
                         .expect("receiver state was not poisoned")
                         .record_diagnostic(&error.to_string());
                 }
+                context.publish();
             }
         }
     }

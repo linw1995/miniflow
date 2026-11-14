@@ -438,7 +438,7 @@ fn invalid_tool_definitions_and_unpaired_histories_fail_before_http() {
         json!({"messages":[result.clone()]}),
         json!({"messages":[pending.clone(),user("Hi"),result.clone()]}),
         json!({"messages":[pending.clone(),result.clone(),result.clone()]}),
-        json!({"messages":[pending.clone(),result.clone(),pending.clone(),result.clone()]}),
+        json!({"messages":[{"role":"assistant","content":"","tool_calls":[{"id":"one","name":"lookup","arguments":{}},{"id":"one","name":"lookup","arguments":{}}]},result.clone()]}),
         json!({"messages":[pending.clone(),{"role":"tool","tool_call_id":"unknown","content":"value"}]}),
         json!({"messages":[pending.clone(),{"role":"tool","content":"value"}]}),
         json!({"messages":[pending.clone(),{"role":"tool","tool_call_id":"","content":"value"}]}),

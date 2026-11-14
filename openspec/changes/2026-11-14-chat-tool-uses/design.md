@@ -1,15 +1,15 @@
 # Design
 
-## Revision status and current gap
+## Implementation status
 
-This revision plans the requested replacement of the draft implementation; it is not a claim that the new design is
-implemented. The current code derives tools only from telemetry, polls during drawing/checkpointing, and rewrites
-`model_calls.tool_uses` JSON. These are to be replaced together, not retained as the intended architecture.
+The implementation replaces the earlier telemetry-only, render/checkpoint-polling, whole-turn JSON draft. Optional
+canonical messages, typed append events, the shared reducer, related tables and event-driven ToolUse consumers are
+implemented together. Verification of this revision is recorded separately in `verification.md`.
 
-`mfn_llm::ChatMessage` already models assistant `tool_calls` and tool results with `tool_call_id`.
-However, `ConversationResult` currently has no `messages` field, the executable decoder forwards only answer text and
-a terminal result, and the public Agent outputs do not expose its internal messages. A new optional structured
-message contract is therefore required; reading an arbitrary internal snapshot is not a substitute for that contract.
+`ConversationResult.messages` reuses `mfn_llm::ChatMessage`. The standard Agent exposes only its current invocation's
+new messages. `llm.message_events` forwards checked `Shared<MessageBatch>` values so publishing does not erase native
+sensitivity. Assistant and result publishers retain separate native domains (`message_events` and
+`tool_message_events`), with invocation-scoped offsets and terminal-list reconciliation.
 
 ## Two sources with different authority
 
@@ -31,7 +31,7 @@ Markdown commands or image requests.
 
 ## Structured message contract
 
-Add optional terminal `messages` and an optional typed `message_events` stream without making them mandatory for
+Add optional terminal `messages` and typed `message_events`/`tool_message_events` streams without making them mandatory for
 existing chat Flows. Reuse `ChatMessage` roles/tool-call values rather than parsing text into calls.
 
 - `messages` contains this invocation's new messages. Existing system/history input and the already-admitted user
@@ -90,7 +90,9 @@ item path. Preserve that identity even when it links to a semantic call. One sem
 attempts; durations and failures remain attached to their attempts, not summed or overwritten arbitrarily.
 
 Link sources only through explicit origin/correlation metadata. The standard Agent should propagate model-call/tool
-origin to dispatch observations outside the provider's argument/schema payload. Legacy telemetry without enough
+origin to dispatch observations outside the provider's argument/schema payload. A separate origin producer depends
+only on usage identity, not the growing business-message history; conservative CEL sensitivity must not erase public
+provenance in later rounds. Legacy telemetry without enough
 identity stays unlinked; tool name, parameter similarity, timestamps, or arrival order are not association rules.
 
 | Available evidence | Presentation |
@@ -104,12 +106,13 @@ identity stays unlinked; tool name, parameter similarity, timestamps, or arrival
 Messages determine semantic tool order within the turn. Unlinked observations remain in a clearly labeled execution
 section associated with that turn, rather than being inserted as fabricated assistant/tool messages. Late association
 must unify the visible item without losing source evidence, identity-dependent UI state, or the reader's position.
+If late facts remove uniqueness, clear the association without deleting either source's rows or guessing a replacement.
 Counts distinguish semantic calls, execution attempts, and unlinked observations.
 
 ## Event-driven collection and display
 
 The path is producer event -> shared reducer -> changed-tool event -> persistence subscriber and terminal subscriber.
-No render callback reads observation snapshots. No timer, cancellation callback, or repeated revision check drives tool
+No ToolUse render callback reads observation snapshots. No timer, cancellation callback, or repeated revision check drives tool
 collection. Existing UI animation and process-supervision timers are not ToolUse data sources.
 
 The observation receiver publishes accepted lifecycle/value changes and closure. Subscription bootstrap and live
@@ -129,7 +132,9 @@ Remove the live `model_calls.tool_uses` column. Use related tables, conceptually
   identity. Evolve this existing table rather than persisting a second whole-transcript JSON copy.
 - `chat_tool_calls`: stable semantic ID, conversation-call FK, originating persisted assistant-message FK and model
   identity, provider tool-call ID, ordinal, name, and complete submitted argument structure. A tool-result association
-  links to the persisted tool-message row; returned content is not duplicated in a display-summary blob.
+  links to the persisted tool-message row; returned content is not duplicated in a display-summary blob. A small
+  immutable redacted argument preview avoids exposing canonical protected values in display queries. Sensitivity
+  paths for arguments/message metadata survive reopen alongside the complete canonical data.
 - `tool_executions`: execution ID and run/scope identity, owning conversation-call FK, nullable semantic-call FK,
   source correlation, resolved arguments, observed result/state, and duration. Multiple attempts are separate rows.
 - A small per-invocation/source checkpoint records sequence/completeness/end state. Its presence distinguishes an

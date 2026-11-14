@@ -62,7 +62,7 @@ mod tests {
         assert_eq!(loop_inputs["tools"], json!({"map":"flow"}));
         assert_eq!(loop_inputs["tool_properties"], json!({"map":"object"}));
         let variables = repeat.config["variables"].as_array().unwrap();
-        assert_eq!(variables.len(), 5);
+        assert_eq!(variables.len(), 6);
         assert!(
             variables.iter().any(|variable| {
                 variable["name"] == "usages" && variable["initial"] == json!([])
@@ -78,7 +78,7 @@ mod tests {
         ] {
             assert!(!serialized.contains(synthetic), "{synthetic}");
         }
-        assert_eq!(definition.outputs.len(), 5);
+        assert_eq!(definition.outputs.len(), 8);
         assert!(
             definition
                 .nodes

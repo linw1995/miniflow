@@ -61,15 +61,26 @@ fn render_tools(
         );
         return;
     };
-    if history.runs.is_empty() && !history.incomplete {
+    if history.runs.is_empty() && history.calls.is_empty() && !history.incomplete {
         return;
     }
+    let linked: BTreeSet<_> = history
+        .calls
+        .iter()
+        .flat_map(|call| call.execution_ids.iter())
+        .collect();
+    let count = history.calls.len()
+        + history
+            .runs
+            .iter()
+            .filter(|run| !linked.contains(&run.id))
+            .count();
     let key = format!("tools:{}", history.invocation.call_id);
     let mut heading = vec![role_label(
         &format!(
             "Tool uses{} · {} recorded",
             if unsaved { " [save pending]" } else { "" },
-            history.runs.len()
+            count
         ),
         Color::Cyan,
         None,
@@ -81,46 +92,119 @@ fn render_tools(
         ));
     }
     transcript.plain(format!("{key}:label"), heading);
-    for run in &history.runs {
-        let (phase, color) = match run.phase {
-            mf_chat::ToolUsePhase::Preparing => ("preparing", Color::Yellow),
-            mf_chat::ToolUsePhase::Running => ("running", Color::Cyan),
-            mf_chat::ToolUsePhase::Succeeded => ("succeeded", Color::Green),
-            mf_chat::ToolUsePhase::Failed => ("failed", Color::Red),
-            mf_chat::ToolUsePhase::Skipped => ("skipped", Color::DarkGray),
-            mf_chat::ToolUsePhase::Interrupted => ("interrupted", Color::Yellow),
-            mf_chat::ToolUsePhase::Unknown => ("unknown", Color::DarkGray),
+    for call in &history.calls {
+        let call_key = format!("{key}:{}", call.id);
+        let state = if call.output.is_some() {
+            "returned"
+        } else if history.finished {
+            "unresolved"
+        } else {
+            "requested"
         };
-        let duration = run
-            .duration_ns
-            .and_then(|ns| u64::try_from(ns).ok())
-            .map(crate::duration::format_duration_ns)
-            .unwrap_or_else(|| "duration unknown".into());
-        let key = format!("{key}:{}", run.id);
         transcript.plain(
-            format!("{key}:status"),
-            vec![Line::from(vec![
-                Span::styled(format!("  [{phase}] "), Style::default().fg(color)),
-                Span::raw(format!(
-                    "{} · {duration}",
-                    safe(&run.name).replace('\n', " ")
-                )),
-            ])],
+            format!("{call_key}:semantic"),
+            vec![Line::styled(
+                format!("  [{state}] {}", safe(&call.name)),
+                Style::default().fg(Color::Cyan),
+            )],
         );
-        for (label, value) in [("Arguments", &run.arguments), ("Result", &run.output)] {
-            let value = if value.is_empty() {
-                "(empty or not observed)".into()
-            } else {
-                safe(value)
-            };
-            transcript.literal(
-                format!("{key}:{label}"),
-                &format!("    {label}: {}", value.replace('\n', "\n    ")),
-                Style::default(),
+        tool_value(
+            transcript,
+            &call_key,
+            "Submitted arguments",
+            &call.arguments,
+        );
+        if let Some(output) = &call.output {
+            tool_value(transcript, &call_key, "Returned content", output);
+        }
+        if call.execution_ids.is_empty() {
+            transcript.plain(
+                format!("{call_key}:unobserved"),
+                vec![Line::styled(
+                    "    Execution not observed",
+                    Style::default().fg(Color::DarkGray),
+                )],
             );
         }
+        for id in &call.execution_ids {
+            if let Some(run) = history.runs.iter().find(|run| &run.id == id) {
+                render_execution(transcript, &call_key, run, true);
+            }
+        }
+    }
+    for run in history.runs.iter().filter(|run| !linked.contains(&run.id)) {
+        let run_key = format!("{key}:{}", run.id);
+        transcript.plain(
+            format!("{run_key}:unlinked"),
+            vec![Line::styled(
+                "  Unlinked execution",
+                Style::default().fg(Color::DarkGray),
+            )],
+        );
+        render_execution(transcript, &key, run, false);
     }
     transcript.plain(format!("{key}:gap"), vec![Line::default()]);
+}
+
+fn tool_value(transcript: &mut super::transcript::Transcript, key: &str, label: &str, value: &str) {
+    let value = if value.is_empty() {
+        "(empty or not observed)".into()
+    } else {
+        safe(value)
+    };
+    transcript.literal(
+        format!("{key}:{label}"),
+        &format!("    {label}: {}", value.replace('\n', "\n    ")),
+        Style::default(),
+    );
+}
+fn render_execution(
+    transcript: &mut super::transcript::Transcript,
+    key: &str,
+    run: &mf_chat::ToolUse,
+    linked: bool,
+) {
+    let (phase, color) = match run.phase {
+        mf_chat::ToolUsePhase::Preparing => ("preparing", Color::Yellow),
+        mf_chat::ToolUsePhase::Running => ("running", Color::Cyan),
+        mf_chat::ToolUsePhase::Succeeded => ("succeeded", Color::Green),
+        mf_chat::ToolUsePhase::Failed => ("failed", Color::Red),
+        mf_chat::ToolUsePhase::Skipped => ("skipped", Color::DarkGray),
+        mf_chat::ToolUsePhase::Interrupted => ("interrupted", Color::Yellow),
+        mf_chat::ToolUsePhase::Unknown => ("unknown", Color::DarkGray),
+    };
+    let duration = run
+        .duration_ns
+        .and_then(|ns| u64::try_from(ns).ok())
+        .map(crate::duration::format_duration_ns)
+        .unwrap_or_else(|| "duration unknown".into());
+    let key = format!("{key}:{}", run.id);
+    transcript.plain(
+        format!("{key}:status"),
+        vec![Line::from(vec![
+            Span::styled(format!("  [{phase}] "), Style::default().fg(color)),
+            Span::raw(format!(
+                "{} · {duration}",
+                safe(&run.name).replace('\n', " ")
+            )),
+        ])],
+    );
+    tool_value(
+        transcript,
+        &key,
+        if linked {
+            "Resolved arguments"
+        } else {
+            "Arguments"
+        },
+        &run.arguments,
+    );
+    tool_value(
+        transcript,
+        &key,
+        if linked { "Observed result" } else { "Result" },
+        &run.output,
+    );
 }
 
 fn execution_areas(body: Rect) -> (Rect, Rect) {
@@ -505,6 +589,7 @@ impl ChatView {
                 self.final_reply = None;
                 self.reply_usages.clear();
                 *self.tool_uses.get_mut() = Some(ToolUseHistory {
+                    calls: Vec::new(),
                     invocation: invocation.clone(),
                     runs: vec![],
                     incomplete: false,
@@ -529,6 +614,19 @@ impl ChatView {
                         .is_some_and(|(active, _)| active == &invocation)
                 {
                     self.preview = preview;
+                }
+            }
+            ChatEvent::Tools {
+                invocation,
+                history,
+            } => {
+                if self.running
+                    && self
+                        .active
+                        .as_ref()
+                        .is_some_and(|(active, _)| active == &invocation)
+                {
+                    *self.tool_uses.get_mut() = Some(*history);
                 }
             }
             ChatEvent::Observing(observation) => self.observation = Some(observation),
@@ -897,17 +995,7 @@ impl ChatView {
         Ok(())
     }
     fn render(&self, frame: &mut ratatui::Frame) {
-        let mut current_tools = self.tool_uses.borrow_mut();
-        if self.running
-            && let Some(observation) = &self.observation
-            && let Some(history) = current_tools.as_mut()
-            && self
-                .active
-                .as_ref()
-                .is_some_and(|(invocation, _)| invocation == &history.invocation)
-        {
-            super::tools::refresh(history, observation, false);
-        }
+        let current_tools = self.tool_uses.borrow();
         let current_tools = current_tools.as_ref();
         let mut tool_turns = BTreeSet::new();
         let area = frame.area();
@@ -967,20 +1055,23 @@ impl ChatView {
                 let unsaved =
                     self.retained && tools.is_some() && tools != record.tool_uses.as_ref();
                 let tools = tools.or(record.tool_uses.as_ref());
-                if assistant && tool_turns.insert(record.message.turn_id.clone()) {
+                if (assistant || record.message.role == "tool")
+                    && tool_turns.insert(record.message.turn_id.clone())
+                {
                     render_tools(&mut transcript, &record.message.turn_id, tools, unsaved);
                 }
-                // Messages and their live preview share one turn-scoped key so the
-                // authoritative text reuses the parsed preview document.
-                let key = format!(
-                    "turn:{}:{}",
-                    record.message.turn_id,
-                    if assistant { "assistant" } else { "you" }
-                );
+                if record.message.role == "tool" || assistant && record.message.content.is_empty() {
+                    continue; // Tool semantics/results are rendered once in the linked tool view.
+                }
+                let key = format!("message:{}", record.message.id);
                 transcript.plain(
                     format!("{key}:label"),
                     vec![role_label(
-                        if assistant { "Assistant" } else { "You" },
+                        match record.message.role.as_str() {
+                            "assistant" => "Assistant",
+                            "system" => "System",
+                            _ => "You",
+                        },
                         Color::Cyan,
                         None,
                     )],
@@ -995,7 +1086,7 @@ impl ChatView {
                     );
                 }
                 let mut metadata = vec![];
-                if assistant {
+                if assistant && record.usages.is_some() {
                     let calls = crate::performance::conversation_calls(
                         record.usages.as_deref().unwrap_or_default(),
                     );
@@ -1267,6 +1358,7 @@ mod tests {
         phase: mf_chat::ToolUsePhase,
     ) -> ToolUseHistory {
         ToolUseHistory {
+            calls: Vec::new(),
             invocation: invocation.clone(),
             incomplete: false,
             finished: !matches!(
@@ -1274,6 +1366,7 @@ mod tests {
                 mf_chat::ToolUsePhase::Preparing | mf_chat::ToolUsePhase::Running
             ),
             runs: vec![mf_chat::ToolUse {
+                origin: None,
                 id: "dispatch:0".into(),
                 name: name.into(),
                 phase,
@@ -1282,6 +1375,67 @@ mod tests {
                 duration_ns: Some(4_500_000),
             }],
         }
+    }
+
+    #[test]
+    fn semantic_returns_multiple_attempts_and_unlinked_observations_keep_separate_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(launch.runner.description()).unwrap();
+        view.show_execution = false;
+        let database = ChatDatabase::open(&launch.options.database_path).unwrap();
+        let session = database.create_session("default", None, None).unwrap();
+        let invocation = Invocation::new(&session.id);
+        view.session = Some(session);
+        let mut history = tool_history(&invocation, "observed-name", mf_chat::ToolUsePhase::Failed);
+        let mut retry = history.runs[0].clone();
+        retry.id = "retry".into();
+        retry.phase = mf_chat::ToolUsePhase::Succeeded;
+        retry.name = "retry-name".into();
+        let mut unlinked = retry.clone();
+        unlinked.id = "other".into();
+        unlinked.name = "metrics-only".into();
+        history.runs.extend([retry, unlinked]);
+        history.calls = vec![
+            mf_chat::ChatToolUse {
+                id: "semantic".into(),
+                assistant_message_id: "message".into(),
+                model_call_id: Some("model".into()),
+                tool_call_id: "call".into(),
+                name: "requested-name".into(),
+                arguments: "submitted arguments".into(),
+                output: Some("returned error content".into()),
+                execution_ids: vec!["dispatch:0".into(), "retry".into()],
+            },
+            mf_chat::ChatToolUse {
+                id: "unobserved".into(),
+                assistant_message_id: "message".into(),
+                model_call_id: None,
+                tool_call_id: "another".into(),
+                name: "messages-only".into(),
+                arguments: "another request".into(),
+                output: Some("another return".into()),
+                execution_ids: Vec::new(),
+            },
+        ];
+        view.active = Some((invocation, "prompt".into()));
+        view.running = true;
+        *view.tool_uses.get_mut() = Some(history);
+        let screen = render(&view, 160, 60);
+        for expected in [
+            "[returned] requested-name",
+            "[failed] observed-name",
+            "[succeeded] retry-name",
+            "Returned content: returned error content",
+            "Resolved arguments:",
+            "Unlinked execution",
+            "[succeeded] metrics-only",
+            "Execution not observed",
+        ] {
+            assert!(screen.contains(expected), "{expected}: {screen}");
+        }
+        assert!(!screen.contains("[succeeded] messages-only"));
+        assert_eq!(screen.matches("Tool uses").count(), 1);
     }
 
     #[test]
@@ -1474,6 +1628,7 @@ mod tests {
         .into_iter()
         .enumerate()
         .map(|(index, phase)| mf_chat::ToolUse {
+            origin: None,
             id: format!("call:{index}"),
             phase,
             name: "repeated".into(),
@@ -1507,9 +1662,8 @@ mod tests {
         assert!(
             controller
                 ._database
-                .call(&current.call_id)
+                .tool_uses(&current.call_id)
                 .unwrap()
-                .tool_uses
                 .is_none(),
             "drawing must not persist evidence"
         );
@@ -1626,9 +1780,8 @@ mod tests {
         assert!(
             controller
                 ._database
-                .call(&current.call_id)
+                .tool_uses(&current.call_id)
                 .unwrap()
-                .tool_uses
                 .is_none()
         );
         controller.close().unwrap();
@@ -2466,6 +2619,7 @@ mod tests {
         assert_eq!(row_of(&streamed, "streamed answer"), 5);
         assert!(!streamed.contains("FTT"));
         let no_tools = ToolUseHistory {
+            calls: Vec::new(),
             invocation: invocation.clone(),
             runs: vec![],
             incomplete: false,

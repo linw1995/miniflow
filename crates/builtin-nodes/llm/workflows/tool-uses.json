@@ -17,6 +17,11 @@
       "kind": "builtin.parameters",
       "config": {
         "parameters": {
+          "origin": {
+            "type": "object",
+            "default": {},
+            "secret": false
+          },
           "calls": {
             "type": {
               "list": "object"
@@ -95,6 +100,7 @@
         "mode": "parallel",
         "on_error": "terminate",
         "inputs": {
+          "origin": "object",
           "tools": {
             "map": "object"
           },
@@ -112,9 +118,11 @@
                 "language": "cel",
                 "inputs": {
                   "call": "object",
+                  "origin": "object",
                   "tools": "object"
                 },
                 "code": {
+                  "origin": "origin",
                   "name": "call.name",
                   "ok": "call.name in tools && type(call.arguments) == map && size(call.arguments) == size(call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v)) && tools[call.name].interface.required.all(r, r in call.arguments) && tools[call.name].interface.parameters.all(p, !p.secret || p.has_env || p.has_default)",
                   "arguments": "call.name in tools && type(call.arguments) == map ? call.arguments.transformMap(k, v, k in tools[call.name].interface.allowed, v) : {}",
@@ -127,6 +135,12 @@
                   "from": {
                     "node": "%iteration",
                     "port": "item"
+                  }
+                },
+                "origin": {
+                  "from": {
+                    "node": "%iteration",
+                    "port": "origin"
                   }
                 },
                 "tools": {
@@ -261,6 +275,12 @@
         }
       },
       "inputs": {
+        "origin": {
+          "from": {
+            "node": "params",
+            "port": "origin"
+          }
+        },
         "items": {
           "from": {
             "node": "validated_calls",

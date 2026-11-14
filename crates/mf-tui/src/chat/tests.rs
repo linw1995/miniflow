@@ -681,10 +681,12 @@ fn save_only_recovery_persists_tools_with_the_original_reply_and_never_executes_
         )
         .unwrap();
     let history = ToolUseHistory {
+        calls: Vec::new(),
         invocation: begun.invocation.clone(),
         finished: true,
         incomplete: false,
         runs: vec![ToolUse {
+            origin: None,
             id: "actual-tool-call".into(),
             name: "calculator".into(),
             phase: ToolUsePhase::Succeeded,
@@ -705,7 +707,9 @@ fn save_only_recovery_persists_tools_with_the_original_reply_and_never_executes_
         busy: busy.clone(),
         cancel: Arc::new(AtomicBool::new(false)),
         preview: Default::default(),
+        tool_updates: Default::default(),
         retained: Some(Retained {
+            messages: Vec::new(),
             invocation: begun.invocation.clone(),
             tool_uses: Some(history.clone()),
             response: RetainedResponse::Ready(UncommittedCompletion {

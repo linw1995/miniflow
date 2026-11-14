@@ -11,6 +11,7 @@ enum Delivered {
     Failed {
         error: String,
         usages: Vec<crate::CallUsage>,
+        messages: Option<Vec<crate::ChatMessage>>,
     },
 }
 
@@ -27,6 +28,7 @@ fn delivered(
         }))
     } else {
         Ok(Delivered::Failed {
+            messages: result.messages,
             error: result.error.expect("validated failure has an error"),
             usages: result.usages,
         })
@@ -120,12 +122,37 @@ impl ChatDatabase {
                     diagnostics,
                 });
             }
-            Some(Ok(Delivered::Failed { error, usages }))
-                if matches!(stored, InvocationState::Running) =>
-            {
-                self.fail_turn_with_usages(invocation.clone(), &error, usages)?;
+            Some(Ok(Delivered::Failed {
+                error,
+                usages,
+                messages,
+            })) if matches!(stored, InvocationState::Running) => {
+                let mut connection = crate::storage::connect(self.path())?;
+                connection.immediate_transaction(|connection| {
+                    if let Some(messages) = &messages {
+                        crate::message_log::settle(connection, invocation, messages)?;
+                    }
+                    turn::finalize_call(
+                        connection,
+                        &invocation.call_id,
+                        "failed",
+                        &error,
+                        Some(&usages),
+                    )?;
+                    Ok::<_, ChatError>(())
+                })?;
             }
-            Some(Ok(Delivered::Failed { error, usages })) => {
+            Some(Ok(Delivered::Failed {
+                error,
+                usages,
+                messages,
+            })) => {
+                if let Some(messages) = &messages {
+                    let mut connection = crate::storage::connect(self.path())?;
+                    connection.immediate_transaction(|connection| {
+                        crate::message_log::settle(connection, invocation, messages)
+                    })?;
+                }
                 if let InvocationState::Finished(turn) = &stored
                     && turn.state == "failed"
                 {

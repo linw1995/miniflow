@@ -45,7 +45,7 @@ platform = 'cfg(unix)'
 # Match build-oriented targets as a whole so new or renamed cases retain the cache.
 # Provider discovery also builds probes before some CLI validation failures.
 filter = '''
-(binary_id(=mf-cli::chat_tui) & test(=calculator_tool_history_restores_flow_property_dispatch_without_rerunning)) |
+(binary_id(=mf-cli::chat_tui) & (test(=calculator_tool_history_restores_flow_property_dispatch_without_rerunning) | test(=reused_provider_tool_ids_remain_separate_across_real_model_rounds))) |
 (binary_id(=mf-compiler::workflow_variables) & test(=generated_variables_match_memory_without_sources)) |
 binary_id(=mf-tui::runner_flow) |
 (binary_id(=mf-compiler) & test(pipeline::tests::)) |
@@ -162,7 +162,7 @@ setup = "package-dependencies"
 platform = 'cfg(unix)'
 # Serialize generated builds that share the prewarmed Cargo target.
 filter = '''
-(binary_id(=mf-cli::chat_tui) & test(=calculator_tool_history_restores_flow_property_dispatch_without_rerunning)) |
+(binary_id(=mf-cli::chat_tui) & (test(=calculator_tool_history_restores_flow_property_dispatch_without_rerunning) | test(=reused_provider_tool_ids_remain_separate_across_real_model_rounds))) |
 (binary_id(=mf-compiler::workflow_variables) & test(=generated_variables_match_memory_without_sources)) |
 binary_id(=mf-tui::runner_flow) |
 (binary_id(=mf-compiler) & test(pipeline::tests::)) |

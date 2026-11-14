@@ -3,6 +3,7 @@
 mod error;
 pub mod flows;
 mod host;
+mod message_log;
 mod models;
 mod preview;
 #[macro_use]
@@ -30,7 +31,8 @@ pub use preview::{PreviewConsumer, PreviewEvent, PreviewReceiver};
 pub use session::{HistoryContext, MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;
 pub use tool_uses::{
-    MAX_TOOL_NAME_BYTES, MAX_TOOL_TEXT_BYTES, MAX_TOOL_USES, ToolUse, ToolUseHistory, ToolUsePhase,
+    ChatToolUse, MAX_TOOL_NAME_BYTES, MAX_TOOL_TEXT_BYTES, MAX_TOOL_USES, ToolOrigin, ToolUse,
+    ToolUseHistory, ToolUsePhase, ToolUseReducer,
 };
 pub use turn::{Invocation, ModelIdentity};
 pub use usage::CallPurpose;
@@ -39,6 +41,8 @@ pub use usage::{
     UsageGroup, UsageGrouping, UsageQuery, UsageStatistics, UsageSummary,
 };
 
-pub use mfn_llm::{MessageMetadata, TextDelta, UsageAttribution, UsageNode, UsageScope};
+pub use mfn_llm::{
+    ChatMessage, MessageBatch, MessageMetadata, TextDelta, UsageAttribution, UsageNode, UsageScope,
+};
 
 pub use workflow::{ConversationBackend, WorkflowProfile};

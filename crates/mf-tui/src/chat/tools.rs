@@ -5,7 +5,8 @@ use crate::{
 };
 use mf_chat::{
     ChatDatabase, Invocation, MAX_TOOL_NAME_BYTES, MAX_TOOL_TEXT_BYTES, MAX_TOOL_USES,
-    ToolUse as ToolRun, ToolUseHistory, ToolUsePhase as Phase,
+    MessageBatch, ToolOrigin, ToolUse as ToolRun, ToolUseHistory, ToolUsePhase as Phase,
+    ToolUseReducer,
 };
 use mf_runtime::{NodeSnapshot, ValueRef};
 use mf_telemetry::{
@@ -13,8 +14,9 @@ use mf_telemetry::{
     event::Outcome,
 };
 use std::{
-    sync::Arc,
-    time::{Duration, Instant},
+    collections::BTreeMap,
+    sync::{Arc, Condvar, Mutex},
+    thread::{self, JoinHandle},
 };
 
 const UNOBSERVED_NAME: &str = "tool (name unobserved)";
@@ -77,6 +79,12 @@ fn bounded(text: &str, bytes: usize) -> String {
         "{}…",
         &text[..text.floor_char_boundary(bytes.saturating_sub('…'.len_utf8()))]
     )
+}
+
+fn public_identity(value: &ValueRef) -> Option<&str> {
+    value
+        .as_str()
+        .filter(|id| !id.trim().is_empty() && *id != "[REDACTED]")
 }
 
 fn public_text(value: Option<&ValueRef>, limit: usize) -> String {
@@ -162,6 +170,28 @@ fn summarize(
         MAX_TOOL_TEXT_BYTES,
     );
     ToolRun {
+        origin: arguments
+            .and_then(|snapshot| {
+                snapshot
+                    .inputs
+                    .get("origin")
+                    .and_then(|origin| origin.get("model_call_id"))
+                    .or_else(|| {
+                        snapshot
+                            .outputs
+                            .get("origin")
+                            .and_then(|origin| origin.get("model_call_id"))
+                    })
+            })
+            .and_then(public_identity)
+            .zip(
+                call.and_then(|call| call.get("id"))
+                    .and_then(public_identity),
+            )
+            .map(|(model_call_id, tool_call_id)| ToolOrigin {
+                model_call_id: model_call_id.into(),
+                tool_call_id: tool_call_id.into(),
+            }),
         id,
         name: if name.is_empty() {
             UNOBSERVED_NAME.into()
@@ -217,143 +247,195 @@ pub fn collect(
         .collect()
 }
 
-/// Refresh bounded public evidence without writing storage. Both the host recorder
-/// and terminal presentation use this projection; a final journal stays frozen.
-pub fn refresh(history: &mut ToolUseHistory, observation: &LocalObservation, finished: bool) {
-    if history.finished {
-        return;
+struct CaptureState {
+    reducer: ToolUseReducer,
+    latest: Option<ToolUseHistory>,
+    closed: bool,
+}
+struct Shared {
+    persistence: Mutex<()>,
+    state: Mutex<CaptureState>,
+    wake: Condvar,
+    updates: Arc<Mutex<Option<ToolUseHistory>>>,
+}
+impl Shared {
+    fn publish(&self, state: &mut CaptureState) {
+        let history = state.reducer.history().clone();
+        state.latest = Some(history.clone());
+        if !history.runs.is_empty() || !history.calls.is_empty() {
+            *self
+                .updates
+                .lock()
+                .expect("tool notifications were not poisoned") = Some(history);
+        }
+        self.wake.notify_one();
     }
-    let snapshot = observation.reader.snapshot_shared();
-    let description = observation.reader.description();
-    let runs = collect(&snapshot, finished, &description, |node| {
-        let (trace, span) = node.correlation.as_ref()?;
-        observation.reader.span_data(trace, span).node
-    });
-    let tool_bodies: Vec<_> = snapshot
-        .iterations
-        .items
-        .iter()
-        .filter_map(|item| description.body(&item.iteration_path))
-        .filter(|body| body.nodes.iter().any(|node| node.kind == "llm.tool_result"))
-        .collect();
-    history.incomplete |= snapshot.iterations.retention_overflows > 0
-        || snapshot.iterations.protocol_conflicts > 0
-        || snapshot.iterations.known_missing_count > 0
-        || tool_bodies.len() > MAX_TOOL_USES
-        || tool_bodies.iter().any(|body| dispatch(body).is_none())
-        || (finished && runs.iter().any(|run| run.name == UNOBSERVED_NAME))
-        || (finished && snapshot.lifecycle.completeness != crate::state::Completeness::Complete);
-    merge(history, runs);
 }
 
+/// Observation callbacks reduce in memory. A separate storage subscriber waits for changes,
+/// not a clock; frontend notifications coalesce independently of database or terminal latency.
 pub(super) struct Capture {
-    observation: Option<LocalObservation>,
-    history: ToolUseHistory,
-    next_poll: Instant,
-    checkpointed: Option<ToolUseHistory>,
+    shared: Arc<Shared>,
+    subscription: Option<Arc<crate::receiver::ObservationSubscription>>,
+    worker: Option<JoinHandle<()>>,
+    persisted: BTreeMap<i64, MessageBatch>,
 }
-
 impl Capture {
-    pub fn new(invocation: Invocation) -> Self {
-        Self {
-            observation: None,
-            history: ToolUseHistory {
-                invocation,
-                runs: Vec::new(),
-                incomplete: false,
-                finished: false,
-            },
-            next_poll: Instant::now(),
-            checkpointed: None,
-        }
+    pub fn new(
+        invocation: Invocation,
+        database: Arc<ChatDatabase>,
+        updates: Arc<Mutex<Option<ToolUseHistory>>>,
+    ) -> Result<Self, super::ChatRunError> {
+        use snafu::ResultExt;
+        let shared = Arc::new(Shared {
+            persistence: Mutex::new(()),
+            state: Mutex::new(CaptureState {
+                reducer: ToolUseReducer::new(invocation),
+                latest: None,
+                closed: false,
+            }),
+            wake: Condvar::new(),
+            updates,
+        });
+        let storage = shared.clone();
+        let worker = thread::Builder::new()
+            .name("mf-chat-tools-storage".into())
+            .spawn(move || {
+                loop {
+                    let history = {
+                        let mut state = storage.state.lock().expect("tool state was not poisoned");
+                        while state.latest.is_none() && !state.closed {
+                            state = storage
+                                .wake
+                                .wait(state)
+                                .expect("tool state was not poisoned");
+                        }
+                        match state.latest.take() {
+                            Some(history) => history,
+                            None => break,
+                        }
+                    };
+                    let _write = storage
+                        .persistence
+                        .lock()
+                        .expect("tool persistence was not poisoned");
+                    if let Err(error) = database.record_tool_uses(&history.invocation, &history) {
+                        // The reducer retains the complete latest state for the final save-only retry.
+                        eprintln!("chat tool evidence checkpoint: {error}");
+                    }
+                }
+            })
+            .context(super::IoSnafu {
+                operation: "start tool evidence storage subscriber",
+            })?;
+        Ok(Self {
+            shared,
+            subscription: None,
+            worker: Some(worker),
+            persisted: BTreeMap::new(),
+        })
     }
-
     pub fn observe(&mut self, observation: LocalObservation) {
-        self.observation = Some(observation);
+        let shared = self.shared.clone();
+        self.subscription = Some(observation.reader.subscribe(move |update| {
+            let snapshot = &update.snapshot;
+            let runs = collect(snapshot, update.finished, &update.description, |node| {
+                update.node_data(node)
+            });
+            let tool_bodies: Vec<_> = snapshot
+                .iterations
+                .items
+                .iter()
+                .filter_map(|item| update.description.body(&item.iteration_path))
+                .filter(|body| body.nodes.iter().any(|node| node.kind == "llm.tool_result"))
+                .collect();
+            let incomplete = snapshot.iterations.retention_overflows > 0
+                || snapshot.iterations.protocol_conflicts > 0
+                || snapshot.iterations.known_missing_count > 0
+                || tool_bodies.len() > MAX_TOOL_USES
+                || tool_bodies.iter().any(|body| dispatch(body).is_none())
+                || update.finished
+                    && (runs.iter().any(|run| run.name == UNOBSERVED_NAME)
+                        || snapshot.lifecycle.completeness != crate::state::Completeness::Complete);
+            let mut state = shared.state.lock().expect("tool state was not poisoned");
+            if !state.closed && state.reducer.observe(runs, incomplete) {
+                shared.publish(&mut state);
+            }
+        }));
     }
-
-    fn refresh(&mut self, finished: bool) {
-        if let Some(observation) = &self.observation {
-            refresh(&mut self.history, observation, finished);
-        } else {
-            self.history.incomplete = true;
-        }
-    }
-
-    pub fn checkpoint(&mut self, database: &ChatDatabase) -> Result<(), mf_chat::ChatError> {
-        let now = Instant::now();
-        if now < self.next_poll || self.observation.is_none() {
-            return Ok(());
-        }
-        self.next_poll = now + Duration::from_millis(100);
-        self.refresh(false);
-        if self.checkpointed.as_ref() != Some(&self.history) {
-            database.record_tool_uses(&self.history.invocation, &self.history)?;
-            self.checkpointed = Some(self.history.clone());
+    pub fn messages(
+        &mut self,
+        batch: MessageBatch,
+        database: &ChatDatabase,
+    ) -> Result<(), mf_chat::ChatError> {
+        let (invocation, batches) = {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .expect("tool state was not poisoned");
+            if state.reducer.apply_messages(batch)? {
+                self.shared.publish(&mut state);
+            }
+            (
+                state.reducer.history().invocation.clone(),
+                state.reducer.batches(),
+            )
+        };
+        // Reliable backpressure belongs to the Flow-output consumer, never to drawing or OTLP.
+        let _write = self
+            .shared
+            .persistence
+            .lock()
+            .expect("message persistence was not poisoned");
+        for batch in batches {
+            if self.persisted.get(&batch.offset) != Some(&batch) {
+                database.record_messages(&invocation, &batch)?;
+                self.persisted.insert(batch.offset, batch);
+            }
         }
         Ok(())
     }
-
+    pub fn batches(&self) -> Vec<MessageBatch> {
+        self.shared
+            .state
+            .lock()
+            .expect("tool state was not poisoned")
+            .reducer
+            .batches()
+    }
     pub fn finish(mut self, interrupted: bool) -> ToolUseHistory {
-        let pending: Vec<_> = self
-            .history
-            .runs
-            .iter()
-            .filter(|run| matches!(run.phase, Phase::Preparing | Phase::Running))
-            .map(|run| run.id.clone())
-            .collect();
-        self.refresh(true);
-        for run in &mut self.history.runs {
-            if matches!(run.phase, Phase::Preparing | Phase::Running)
-                || (interrupted && run.phase == Phase::Unknown && pending.contains(&run.id))
-            {
-                run.phase = if interrupted {
-                    Phase::Interrupted
-                } else {
-                    Phase::Unknown
-                };
-                self.history.incomplete = true;
-            }
+        self.subscription.take();
+        let history = {
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .expect("tool state was not poisoned");
+            state.reducer.finish(interrupted);
+            self.shared.publish(&mut state);
+            state.closed = true;
+            state.reducer.history().clone()
+        };
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            eprintln!("chat tool storage subscriber panicked");
         }
-        self.history.incomplete |= self
-            .history
-            .runs
-            .iter()
-            .any(|run| run.phase == Phase::Unknown);
-        self.history.finished = true;
-        self.history
+        history
     }
 }
-
-fn merge(history: &mut ToolUseHistory, runs: Vec<ToolRun>) {
-    for mut run in runs {
-        if let Some(previous) = history.runs.iter_mut().find(|old| old.id == run.id) {
-            if run.name == UNOBSERVED_NAME {
-                run.name = previous.name.clone();
-            }
-            if run.arguments.is_empty() {
-                run.arguments = previous.arguments.clone();
-            }
-            if run.output.is_empty() {
-                run.output = previous.output.clone();
-            }
-            if run.duration_ns.is_none() {
-                run.duration_ns = previous.duration_ns;
-            }
-            if matches!(
-                previous.phase,
-                Phase::Succeeded | Phase::Failed | Phase::Skipped | Phase::Interrupted
-            ) && matches!(
-                run.phase,
-                Phase::Unknown | Phase::Preparing | Phase::Running
-            ) {
-                run.phase = previous.phase;
-            }
-            *previous = run;
-        } else if history.runs.len() < MAX_TOOL_USES {
-            history.runs.push(run);
-        } else {
-            history.incomplete = true;
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.subscription.take();
+        self.shared
+            .state
+            .lock()
+            .expect("tool state was not poisoned")
+            .closed = true;
+        self.shared.wake.notify_one();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -571,6 +653,32 @@ mod tests {
     }
 
     #[test]
+    fn public_dispatch_inputs_preserve_origin_when_business_outputs_are_redacted() {
+        let snapshot = captured(
+            json!({"call":{"id":"provider-call","name":"calculator"},"origin":{"model_call_id":"model"}}),
+            json!({"name":"[REDACTED]","origin":"[REDACTED]","arguments":"[REDACTED]"}),
+        );
+        let run = summarize("execution".into(), Some(&snapshot), None, None, None, false);
+        assert_eq!(
+            run.origin,
+            Some(ToolOrigin {
+                model_call_id: "model".into(),
+                tool_call_id: "provider-call".into()
+            })
+        );
+        assert_eq!(run.arguments, "[REDACTED]");
+        let masked = captured(
+            json!({"call":{"id":"[REDACTED]"},"origin":{"model_call_id":"[REDACTED]"}}),
+            json!({}),
+        );
+        assert!(
+            summarize("masked".into(), Some(&masked), None, None, None, false)
+                .origin
+                .is_none()
+        );
+    }
+
+    #[test]
     fn captured_tool_argument_failure_is_not_a_successful_tool() {
         let arguments = captured(
             json!({"call":{"name":"calculator","arguments":{"x":1}}}),
@@ -643,6 +751,7 @@ mod tests {
             )
             .unwrap();
         let evidence = ToolUseHistory {
+            calls: Vec::new(),
             invocation: begun.invocation.clone(),
             runs: vec![first, second],
             incomplete: false,
@@ -654,9 +763,8 @@ mod tests {
         drop(database);
         let reopened = ChatDatabase::open(&path).unwrap();
         let saved = reopened
-            .call(&begun.invocation.call_id)
+            .tool_uses(&begun.invocation.call_id)
             .unwrap()
-            .tool_uses
             .unwrap();
         assert!(saved.runs[0].arguments.contains("[REDACTED]"));
         for file in [path.clone(), path.with_file_name("redacted.sqlite-wal")] {
@@ -674,8 +782,9 @@ mod tests {
     #[test]
     fn checkpoints_merge_retained_calls_and_report_capacity_without_regressing_known_states() {
         let invocation = Invocation::new("fixture");
-        let mut capture = Capture::new(invocation);
+        let mut reducer = ToolUseReducer::new(invocation);
         let make = |id, phase| ToolRun {
+            origin: None,
             id: format!("dispatch:{id}"),
             name: "calculator".into(),
             phase,
@@ -683,28 +792,29 @@ mod tests {
             output: "20".into(),
             duration_ns: Some(40),
         };
-        merge(
-            &mut capture.history,
+        reducer.observe(
             vec![make(0, Phase::Succeeded), make(1, Phase::Running)],
+            false,
         );
         let mut expired = make(0, Phase::Unknown);
         expired.name = UNOBSERVED_NAME.into();
         expired.arguments.clear();
         expired.output.clear();
         expired.duration_ns = None;
-        merge(&mut capture.history, vec![expired]);
-        assert_eq!(capture.history.runs[0].phase, Phase::Succeeded);
-        assert_eq!(capture.history.runs[0].name, "calculator");
-        assert_eq!(capture.history.runs[0].output, "20");
-        merge(
-            &mut capture.history,
+        reducer.observe(vec![expired], false);
+        assert_eq!(reducer.history().runs[0].phase, Phase::Succeeded);
+        assert_eq!(reducer.history().runs[0].name, "calculator");
+        assert_eq!(reducer.history().runs[0].output, "20");
+        reducer.observe(
             (2..MAX_TOOL_USES + 2)
                 .map(|id| make(id, Phase::Succeeded))
                 .collect(),
+            false,
         );
-        assert_eq!(capture.history.runs.len(), MAX_TOOL_USES);
-        assert!(capture.history.incomplete);
-        let final_history = capture.finish(true);
+        assert_eq!(reducer.history().runs.len(), MAX_TOOL_USES);
+        assert!(reducer.history().incomplete);
+        reducer.finish(true);
+        let final_history = reducer.history();
         assert_eq!(final_history.runs[0].phase, Phase::Succeeded);
         assert_eq!(final_history.runs[1].phase, Phase::Interrupted);
         assert!(final_history.finished && final_history.incomplete);

@@ -167,6 +167,76 @@ fn send(endpoint: &str, path: &str, content_type: &str, body: &[u8]) -> u16 {
 }
 
 #[test]
+fn subscriptions_bootstrap_handoff_live_and_drain_without_rendering_or_snapshot_queries() {
+    if !loopback_available() {
+        return;
+    }
+    let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &logs(vec![record(
+                1,
+                false,
+                &run_id().to_string(),
+                mf_telemetry::EVENT_SCHEMA_VERSION
+            )])
+        ),
+        200
+    );
+    let (output, events) = std::sync::mpsc::channel();
+    let subscription = receiver.reader().subscribe(move |update| {
+        output
+            .send((update.finished, update.snapshot.workflow_outcome))
+            .unwrap();
+    });
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        (false, None)
+    );
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &logs(vec![record(
+                2,
+                true,
+                &run_id().to_string(),
+                mf_telemetry::EVENT_SCHEMA_VERSION
+            )])
+        ),
+        200
+    );
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        (false, Some(mf_telemetry::event::Outcome::Succeeded))
+    );
+    receiver.finish();
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        (true, Some(mf_telemetry::event::Outcome::Succeeded))
+    );
+    drop(subscription);
+    assert!(matches!(
+        events.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+    let (output, late) = std::sync::mpsc::channel();
+    let _late_subscription = receiver.reader().subscribe(move |update| {
+        output
+            .send((update.finished, update.snapshot.workflow_outcome))
+            .unwrap();
+    });
+    assert_eq!(
+        late.recv_timeout(Duration::from_secs(1)).unwrap(),
+        (true, Some(mf_telemetry::event::Outcome::Succeeded))
+    );
+}
+
+#[test]
 fn graph_metrics_use_source_events_before_snapshots_and_keep_call_identity() {
     use mf_telemetry::description::NodeDescription;
     use mf_tui::graph::{GraphLayout, GraphView};

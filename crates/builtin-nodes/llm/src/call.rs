@@ -16,7 +16,7 @@ pub struct ToolDefinition {
     pub input_schema: ValueRef,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -112,7 +112,6 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
     }
 
     let mut pending = BTreeMap::new();
-    let mut seen = BTreeSet::new();
     let mut messages = Vec::new();
     for (index, message) in inputs.messages.iter().enumerate() {
         let path = format!("/messages/{index}");
@@ -143,6 +142,7 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
                 tool_calls,
                 ..
             } => {
+                let mut seen = BTreeSet::new();
                 let mut content = Vec::new();
                 if !text.is_empty() {
                     content.push(rig::AssistantContent::Text(text.clone().into()));
@@ -151,7 +151,7 @@ pub fn prepare_request(inputs: &LlmInputs) -> Result<CompletionRequest, LlmExecu
                     require(
                         !call.id.trim().is_empty() && seen.insert(&call.id),
                         &path,
-                        "nonblank unique tool call IDs",
+                        "nonblank tool call IDs unique within an assistant message",
                     )?;
                     require(valid_name(&call.name), &path, "a valid tool name")?;
                     pending.insert(call.id.as_str(), call.name.as_str());
@@ -358,6 +358,52 @@ mod tests {
             }
         );
         assert!(request.tool_choice.is_none());
+    }
+
+    #[test]
+    fn provider_tool_ids_can_be_reused_by_separate_resolved_assistant_messages() {
+        let assistant = ChatMessage::Assistant {
+            content: String::new(),
+            metadata: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "reused".into(),
+                name: "lookup".into(),
+                arguments: json!({}).into(),
+            }]),
+        };
+        let returned: ChatMessage = ToolResult {
+            tool_call_id: "reused".into(),
+            content: "42".into(),
+        }
+        .into();
+        let input = LlmInputs {
+            messages: vec![
+                assistant.clone(),
+                returned.clone(),
+                assistant.clone(),
+                returned,
+            ],
+            tools: Vec::new(),
+            tool_results: Vec::new(),
+        };
+        assert!(prepare_request(&input).is_ok());
+        let ChatMessage::Assistant {
+            tool_calls: Some(mut calls),
+            ..
+        } = assistant
+        else {
+            unreachable!()
+        };
+        calls.push(calls[0].clone());
+        let invalid = LlmInputs {
+            messages: vec![ChatMessage::Assistant {
+                content: String::new(),
+                metadata: None,
+                tool_calls: Some(calls),
+            }],
+            ..input
+        };
+        assert!(prepare_request(&invalid).is_err());
     }
 
     #[test]

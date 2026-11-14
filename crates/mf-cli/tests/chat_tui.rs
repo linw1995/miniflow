@@ -138,6 +138,127 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
 }
 
 #[test]
+fn reused_provider_tool_ids_remain_separate_across_real_model_rounds() {
+    use mf_chat::{ToolUsePhase, contract::CompletionState};
+    use mf_tui::{
+        chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
+        run::RunOptions,
+    };
+    use serde_json::json;
+    let tool_reply = |left, right| {
+        let chunk = json!({"id":"round","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"reused","type":"function","function":{"name":"calculator","arguments":json!({"operation":"add","left":left,"right":right}).to_string()}}]},"finish_reason":null}]});
+        let finish = json!({"id":"round","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]});
+        let mut reply = Reply::stream_text("");
+        reply.body = format!("data: {chunk}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+        reply
+    };
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start(vec![
+        tool_reply(5.0, 5.0),
+        tool_reply(20.0, 1.0),
+        Reply::stream_text("31"),
+        Reply::text("Two rounds"),
+    ]);
+    let binary = compiled(root.path(), &server, "chat-calculator-flow.json");
+    let options = ChatOptions {
+        database_path: root.path().join("chat.sqlite"),
+        profile: "calculator".into(),
+        run: RunOptions {
+            arguments: vec![
+                "--params.model=fixture-model".into(),
+                "--params.api_key=synthetic-key".into(),
+            ],
+            ..Default::default()
+        },
+    };
+    let controller =
+        ChatController::open(ChatLaunch::prepare(&binary, options.clone()).unwrap()).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "Two rounds".into(),
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let evidence = loop {
+        assert!(Instant::now() < deadline, "multi-round tool deadline");
+        match controller.try_event() {
+            Some(ChatEvent::Finished {
+                resolution,
+                tool_uses,
+                ..
+            }) => {
+                let resolution = resolution.unwrap();
+                assert!(
+                    resolution.diagnostics.is_empty(),
+                    "{:?}",
+                    resolution.diagnostics
+                );
+                let CompletionState::Committed(completion) = resolution.state else {
+                    panic!("multi-round conversation did not commit")
+                };
+                assert_eq!(completion.result.messages.unwrap().len(), 5);
+                break *tool_uses.unwrap();
+            }
+            Some(ChatEvent::Error { source, .. }) => panic!("multi-round tools: {source}"),
+            _ => thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    assert_eq!(evidence.runs.len(), 2, "{evidence:?}");
+    assert_eq!(evidence.calls.len(), 2, "{evidence:?}");
+    assert!(
+        evidence
+            .runs
+            .iter()
+            .all(|run| run.phase == ToolUsePhase::Succeeded)
+    );
+    assert_ne!(evidence.runs[0].id, evidence.runs[1].id);
+    assert_eq!(
+        evidence.calls[0].tool_call_id,
+        evidence.calls[1].tool_call_id
+    );
+    assert_ne!(
+        evidence.calls[0].model_call_id,
+        evidence.calls[1].model_call_id
+    );
+    assert!(
+        evidence
+            .calls
+            .iter()
+            .all(|call| call.execution_ids.len() == 1),
+        "{evidence:#?}"
+    );
+    assert_ne!(
+        evidence.calls[0].execution_ids,
+        evidence.calls[1].execution_ids
+    );
+    assert_eq!(evidence.calls[0].output.as_deref(), Some("10.0"));
+    assert_eq!(evidence.calls[1].output.as_deref(), Some("21.0"));
+    controller.close().unwrap();
+    let database = ChatDatabase::open(&options.database_path).unwrap();
+    assert_eq!(
+        database
+            .tool_uses(&evidence.invocation.call_id)
+            .unwrap()
+            .as_ref(),
+        Some(&evidence)
+    );
+    assert_eq!(
+        database
+            .history(&evidence.invocation.session_id)
+            .unwrap()
+            .history
+            .len(),
+        6
+    );
+    assert_eq!(
+        server.requests().len(),
+        4,
+        "restoration does not replay execution"
+    );
+}
+
+#[test]
 fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
     use mf_chat::{ToolUsePhase, contract::CompletionState};
     use mf_tui::{
@@ -172,6 +293,7 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
         reply,
         live_reply,
         Reply::text("Live calculator"),
+        Reply::stream_text("Context restored"),
     ]);
     let binary = compiled(root.path(), &server, "chat-calculator-flow.json");
     let options = ChatOptions {
@@ -216,6 +338,7 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
                     panic!("expected the scripted final response to commit")
                 };
                 assert_eq!(completion.result.text, "Recovered: 20");
+                assert_eq!(completion.result.messages.as_ref().unwrap().len(), 5);
                 break *tool_uses.expect("host-owned tool evidence");
             }
             _ => thread::sleep(Duration::from_millis(10)),
@@ -223,6 +346,14 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
     };
     assert!(evidence.finished);
     assert_eq!(evidence.runs.len(), 3, "{evidence:?}");
+    assert_eq!(evidence.calls.len(), 3, "{evidence:?}");
+    assert!(
+        evidence
+            .calls
+            .iter()
+            .all(|call| call.output.is_some() && call.execution_ids.len() == 1),
+        "{evidence:?}"
+    );
     assert_eq!(
         evidence
             .runs
@@ -271,7 +402,8 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
             .any(|message| { message["role"] == "tool" && message["content"] == "20.0" }),
         "the actual calculator result must reach the model"
     );
-    let controller = ChatController::open(ChatLaunch::prepare(&binary, options).unwrap()).unwrap();
+    let controller =
+        ChatController::open(ChatLaunch::prepare(&binary, options.clone()).unwrap()).unwrap();
     controller
         .send(ChatCommand::Load {
             session_id: evidence.invocation.session_id.clone(),
@@ -283,7 +415,17 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
         assert!(Instant::now() < deadline, "history restore deadline");
         match controller.try_event() {
             Some(ChatEvent::Loaded { page, .. }) => {
-                assert_eq!(page.messages.len(), 2);
+                assert_eq!(page.messages.len(), 6);
+                assert!(
+                    matches!(&page.messages[1].chat_message, mf_chat::ChatMessage::Assistant { tool_calls: Some(calls), .. } if calls.len() == 3)
+                );
+                assert_eq!(
+                    page.messages
+                        .iter()
+                        .filter(|record| record.message.role == "tool")
+                        .count(),
+                    3
+                );
                 assert!(
                     page.messages
                         .iter()
@@ -309,6 +451,58 @@ fn calculator_tool_history_restores_flow_property_dispatch_without_rerunning() {
         6,
         "terminal history must not execute models or tools"
     );
+    let controller = ChatController::open(ChatLaunch::prepare(&binary, options).unwrap()).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: Some(evidence.invocation.session_id.clone()),
+            prompt: "Continue the restored conversation".into(),
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "restored next-turn deadline");
+        match controller.try_event() {
+            Some(ChatEvent::Finished { resolution, .. }) => {
+                let CompletionState::Committed(completion) = resolution.unwrap().state else {
+                    panic!("restored turn did not commit")
+                };
+                assert_eq!(completion.result.text, "Context restored");
+                assert_eq!(
+                    completion.result.messages.unwrap().len(),
+                    1,
+                    "return only this invocation's new messages"
+                );
+                break;
+            }
+            Some(ChatEvent::Error { source, .. }) => panic!("restored turn: {source}"),
+            _ => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    controller.close().unwrap();
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        7,
+        "continuation performs one new provider request, not a replay"
+    );
+    let restored = requests[6].body["messages"].as_array().unwrap();
+    assert!(
+        restored.iter().any(|message| message["role"] == "assistant"
+            && message["tool_calls"]
+                .as_array()
+                .is_some_and(|calls| calls.len() == 3)),
+        "{restored:?}"
+    );
+    for id in ["valid", "invalid", "unknown"] {
+        assert!(
+            restored
+                .iter()
+                .any(|message| message["role"] == "tool" && message["tool_call_id"] == id),
+            "{id}: {restored:?}"
+        );
+    }
+    assert!(restored.iter().any(|message| message["role"] == "assistant"
+        && message["content"].to_string().contains("Recovered: 20")));
 }
 
 fn tool_chat(binary: &Path, database: &Path, restart: bool) {
@@ -396,7 +590,7 @@ fn tool_chat(binary: &Path, database: &Path, restart: bool) {
                     );
                     assert_eq!(text.matches("Tool uses").count(), 1, "{text}");
                     assert!(
-                        text.contains("Arguments:") && text.contains("Result:"),
+                        text.contains("Submitted arguments:") && text.contains("Returned content:"),
                         "{text}"
                     );
                     assert!(!text.contains("Flow execution") && !text.contains("synthetic-key"));
@@ -981,7 +1175,7 @@ fn loop_conversations() {
                     session_id = Some(session.id);
                     invocations.push(invocation);
                 }
-                ChatEvent::Observing(_) => {}
+                ChatEvent::Observing(_) | ChatEvent::Tools { .. } => {}
                 ChatEvent::Preview { preview, .. } => {
                     saw_preview = true;
                     assert!(!preview.segments.is_empty());

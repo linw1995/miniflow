@@ -39,7 +39,8 @@ The host SHALL persist every structured message accepted by the chat contract, i
 #### Scenario: Restore and continue after restart
 
 - **WHEN** the host reopens a successful conversation and submits its next turn
-- **THEN** the provider receives its stored canonical assistant/tool message sequence and metadata in order
+- **THEN** the next Flow receives the stored canonical assistant/tool message sequence and metadata in order
+- **AND** the provider adapter receives the supported conversation fields, without promoting opaque metadata to provider parameters
 - **AND** model context is not reconstructed from diagnostic observations or clipped tool display strings
 
 #### Scenario: Persist a valid message larger than the preview budget

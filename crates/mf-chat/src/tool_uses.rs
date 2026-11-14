@@ -1,10 +1,9 @@
 //! Bounded public tool execution evidence, owned by the conversation host rather than its views.
 
-use crate::{ChatDatabase, ChatError, Invocation, error::*, schema::model_calls, storage, turn};
-use diesel::{connection::SimpleConnection, prelude::*};
+use crate::{ChatError, Invocation, error::*};
 use mf_runtime::{NodeEnum, NodeValue};
 use serde::{Deserialize, Serialize};
-use snafu::{ResultExt, ensure};
+use snafu::ensure;
 use std::collections::BTreeSet;
 
 pub const MAX_TOOL_USES: usize = 64;
@@ -31,7 +30,28 @@ pub enum ToolUsePhase {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct ToolOrigin {
+    pub model_call_id: String,
+    pub tool_call_id: String,
+}
+
+/// Message semantics remain separate from the observed phase of each execution attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct ChatToolUse {
+    pub id: String,
+    pub assistant_message_id: String,
+    pub model_call_id: Option<String>,
+    pub tool_call_id: String,
+    pub name: String,
+    pub arguments: String,
+    pub output: Option<String>,
+    pub execution_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct ToolUse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ToolOrigin>,
     pub id: String,
     pub name: String,
     pub phase: ToolUsePhase,
@@ -42,6 +62,9 @@ pub struct ToolUse {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct ToolUseHistory {
+    #[value(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<ChatToolUse>,
     pub invocation: Invocation,
     pub runs: Vec<ToolUse>,
     pub incomplete: bool,
@@ -65,6 +88,10 @@ impl ToolUseHistory {
                         && run.arguments.len() <= MAX_TOOL_TEXT_BYTES
                         && run.output.len() <= MAX_TOOL_TEXT_BYTES
                         && run.duration_ns.is_none_or(|duration| duration >= 0)
+                        && run.origin.as_ref().is_none_or(|origin| {
+                            !origin.model_call_id.trim().is_empty()
+                                && !origin.tool_call_id.trim().is_empty()
+                        })
                         && (!self.finished
                             || !matches!(
                                 run.phase,
@@ -80,7 +107,7 @@ impl ToolUseHistory {
     }
 
     /// A host exit cannot prove that an unobserved tool succeeded.
-    fn seal(&mut self, pending: ToolUsePhase) {
+    pub fn seal(&mut self, pending: ToolUsePhase) {
         if self.finished {
             return;
         }
@@ -94,112 +121,16 @@ impl ToolUseHistory {
     }
 }
 
-impl ChatDatabase {
-    /// Checkpoints public evidence without waiting behind another storage operation.
-    /// Complete final evidence is immutable; incomplete evidence may only refine known facts.
-    pub fn record_tool_uses(
-        &self,
-        invocation: &Invocation,
-        history: &ToolUseHistory,
-    ) -> Result<(), ChatError> {
-        history.validate()?;
-        ensure!(
-            history.invocation == *invocation,
-            ConflictSnafu {
-                id: &invocation.call_id
-            }
-        );
-        let mut connection = storage::connect(self.path())?;
-        connection
-            .batch_execute("PRAGMA busy_timeout = 0;")
-            .context(DatabaseSnafu {
-                operation: "configure tool evidence checkpoint",
-            })?;
-        connection.immediate_transaction(|connection| {
-            let call = turn::load_call(connection, &invocation.call_id)?;
-            ensure!(
-                call.session_id == invocation.session_id
-                    && call.turn_id.as_deref() == Some(&invocation.turn_id)
-                    && call.purpose == "conversation"
-                    && (call.state == "running" || history.finished),
-                ConflictSnafu { id: &call.id }
-            );
-            if let Some(previous) = &call.tool_uses
-                && previous.finished
-            {
-                if previous == history {
-                    return Ok(());
-                }
-                ensure!(
-                    previous.incomplete
-                        && history.finished
-                        && previous
-                            .runs
-                            .iter()
-                            .all(|old| history.runs.iter().any(|new| {
-                                old.id == new.id
-                                    && (matches!(
-                                        old.phase,
-                                        ToolUsePhase::Unknown | ToolUsePhase::Interrupted
-                                    ) || old.phase == new.phase)
-                            })),
-                    ConflictSnafu { id: &call.id }
-                );
-            }
-            diesel::update(model_calls::table.find(&call.id))
-                .set(model_calls::tool_uses.eq(storage::StoredJson::from(Some(history.clone()))))
-                .execute(connection)
-                .context(DatabaseSnafu {
-                    operation: "save tool execution evidence",
-                })?;
-            Ok(())
-        })
-    }
-}
-
-pub fn seal_call(
-    connection: &mut SqliteConnection,
-    call_id: &str,
-    pending: ToolUsePhase,
-) -> Result<(), ChatError> {
-    let stored = model_calls::table
-        .find(call_id)
-        .select(model_calls::tool_uses)
-        .first::<storage::StoredJson<ToolUseHistory>>(connection)
-        .context(DatabaseSnafu {
-            operation: "load unfinished tool evidence",
-        })?;
-    if let Some(mut history) = Option::<ToolUseHistory>::from(stored)
-        && !history.finished
-    {
-        history.seal(pending);
-        diesel::update(model_calls::table.find(call_id))
-            .set(model_calls::tool_uses.eq(storage::StoredJson::from(Some(history))))
-            .execute(connection)
-            .context(DatabaseSnafu {
-                operation: "settle unfinished tool evidence",
-            })?;
-    }
-    Ok(())
-}
-
-pub fn recover(connection: &mut SqliteConnection) -> Result<(), ChatError> {
-    let calls = model_calls::table
-        .filter(model_calls::state.eq("running"))
-        .select(model_calls::id)
-        .load::<String>(connection)
-        .context(DatabaseSnafu {
-            operation: "find interrupted tool evidence",
-        })?;
-    for call in calls {
-        seal_call(connection, &call, ToolUsePhase::Interrupted)?;
-    }
-    Ok(())
-}
+mod reducer;
+mod storage;
+pub use reducer::{ToolUseReducer, call_id, message_id};
+pub use storage::{link_executions, load_histories, recover, seal_call};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ChatDatabase, storage};
+    use diesel::connection::SimpleConnection;
 
     fn begin(database: &ChatDatabase) -> Invocation {
         let session = database.create_session("default", None, None).unwrap();
@@ -219,10 +150,12 @@ mod tests {
 
     fn history(invocation: &Invocation, phase: ToolUsePhase, finished: bool) -> ToolUseHistory {
         ToolUseHistory {
+            calls: Vec::new(),
             invocation: invocation.clone(),
             incomplete: false,
             finished,
             runs: vec![ToolUse {
+                origin: None,
                 id: "dispatch:0".into(),
                 name: "calculator".into(),
                 phase,
@@ -253,7 +186,7 @@ mod tests {
         drop(database);
         let reopened = ChatDatabase::open(path).unwrap();
         assert_eq!(
-            reopened.call(&invocation.call_id).unwrap().tool_uses,
+            reopened.tool_uses(&invocation.call_id).unwrap(),
             Some(evidence.clone())
         );
         let page = reopened.messages(&invocation.session_id, 10, None).unwrap();
@@ -294,13 +227,12 @@ mod tests {
                 .unwrap();
             assert!(
                 database
-                    .call(&retried.invocation.call_id)
+                    .tool_uses(&retried.invocation.call_id)
                     .unwrap()
-                    .tool_uses
                     .is_none()
             );
             assert_eq!(
-                database.call(&invocation.call_id).unwrap().tool_uses,
+                database.tool_uses(&invocation.call_id).unwrap(),
                 Some(evidence)
             );
         }
@@ -320,16 +252,12 @@ mod tests {
         database.record_tool_uses(&invocation, &evidence).unwrap();
         drop(database);
         let reopened = ChatDatabase::open(path).unwrap();
-        let saved = reopened
-            .call(&invocation.call_id)
-            .unwrap()
-            .tool_uses
-            .unwrap();
+        let saved = reopened.tool_uses(&invocation.call_id).unwrap().unwrap();
         assert!(saved.finished && saved.incomplete);
         assert_eq!(saved.runs[0].phase, ToolUsePhase::Interrupted);
         assert_eq!(saved.runs[1].phase, ToolUsePhase::Succeeded);
         let legacy = begin(&reopened);
-        assert!(reopened.call(&legacy.call_id).unwrap().tool_uses.is_none());
+        assert!(reopened.tool_uses(&legacy.call_id).unwrap().is_none());
     }
 
     #[test]
@@ -344,13 +272,7 @@ mod tests {
         assert!(database.record_tool_uses(&invocation, &evidence).is_err());
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
         other.batch_execute("ROLLBACK;").unwrap();
-        assert!(
-            database
-                .call(&invocation.call_id)
-                .unwrap()
-                .tool_uses
-                .is_none()
-        );
+        assert!(database.tool_uses(&invocation.call_id).unwrap().is_none());
         database.record_tool_uses(&invocation, &evidence).unwrap();
     }
 
@@ -375,7 +297,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            database.call(&invocation.call_id).unwrap().tool_uses,
+            database.tool_uses(&invocation.call_id).unwrap(),
             Some(evidence.clone())
         );
         evidence.finished = true;

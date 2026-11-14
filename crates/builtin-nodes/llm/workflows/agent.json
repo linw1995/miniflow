@@ -137,6 +137,13 @@
         },
         "variables": [
           {
+            "name": "public_messages",
+            "type": {
+              "list": "object"
+            },
+            "initial": []
+          },
+          {
             "name": "messages",
             "type": {
               "list": "object"
@@ -217,6 +224,123 @@
                   "from": {
                     "node": "%loop",
                     "port": "api_key"
+                  }
+                }
+              }
+            },
+            {
+              "id": "prepare_origin",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "usages": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "origin": "size(usages) > 0 ? {'model_call_id': usages[0].call_id} : {}"
+                }
+              },
+              "inputs": {
+                "usages": {
+                  "from": {
+                    "node": "turn",
+                    "port": "usages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "prepare_public_assistant",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "message": "object",
+                  "messages": {
+                    "list": "object"
+                  },
+                  "usages": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "messages": "messages + [dyn(message)]",
+                  "batch": "{'offset': size(messages), 'model_call_id': size(usages) > 0 ? usages[0].call_id : null, 'messages': [message]}"
+                }
+              },
+              "inputs": {
+                "message": {
+                  "from": {
+                    "node": "turn",
+                    "port": "message"
+                  }
+                },
+                "messages": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "public_messages"
+                  }
+                },
+                "usages": {
+                  "from": {
+                    "node": "turn",
+                    "port": "usages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "publish_assistant",
+              "kind": "llm.message_events",
+              "inputs": {
+                "batch": {
+                  "from": {
+                    "node": "prepare_public_assistant",
+                    "port": "batch"
+                  }
+                }
+              }
+            },
+            {
+              "id": "no_tools",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "prepare_public_assistant",
+                    "port": "messages"
+                  }
+                }
+              }
+            },
+            {
+              "id": "public_messages",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "exclusive": [
+                    {
+                      "node": "no_tools",
+                      "port": "value"
+                    },
+                    {
+                      "node": "append_tool_results",
+                      "port": "public_messages"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "publish_results",
+              "kind": "llm.message_events",
+              "inputs": {
+                "batch": {
+                  "from": {
+                    "node": "append_tool_results",
+                    "port": "batch"
                   }
                 }
               }
@@ -309,6 +433,12 @@
                 "flow": "tool-uses"
               },
               "inputs": {
+                "params.origin": {
+                  "from": {
+                    "node": "prepare_origin",
+                    "port": "origin"
+                  }
+                },
                 "params.calls": {
                   "from": {
                     "node": "turn",
@@ -338,15 +468,33 @@
                   "assistant": {
                     "list": "object"
                   },
+                  "public_assistant": {
+                    "list": "object"
+                  },
+                  "origin": "object",
                   "results": {
                     "list": "object"
                   }
                 },
                 "code": {
-                  "messages": "assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))"
+                  "messages": "assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))",
+                  "public_messages": "public_assistant + results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))",
+                  "batch": "{'offset': size(public_assistant), 'model_call_id': 'model_call_id' in origin ? origin.model_call_id : null, 'messages': results.map(result, dyn({'role':'tool','tool_call_id':result.tool_call_id,'content':result.content}))}"
                 }
               },
               "inputs": {
+                "public_assistant": {
+                  "from": {
+                    "node": "prepare_public_assistant",
+                    "port": "messages"
+                  }
+                },
+                "origin": {
+                  "from": {
+                    "node": "prepare_origin",
+                    "port": "origin"
+                  }
+                },
                 "assistant": {
                   "from": {
                     "node": "append_assistant",
@@ -364,6 +512,15 @@
           ],
           "edges": [
             {
+              "from_node": "route",
+              "from_output": "else",
+              "to_node": "no_tools"
+            },
+            {
+              "from_node": "publish_assistant",
+              "to_node": "dispatch"
+            },
+            {
               "from_node": "turn",
               "to_node": "route"
             },
@@ -378,6 +535,12 @@
             }
           ],
           "outputs": [
+            {
+              "name": "public_messages",
+              "node": "public_messages",
+              "port": "value",
+              "optional": true
+            },
             {
               "name": "messages",
               "node": "append_tool_results",
@@ -408,6 +571,14 @@
           ]
         },
         "stream_outputs": {
+          "message_events": {
+            "node": "publish_assistant",
+            "port": "event"
+          },
+          "tool_message_events": {
+            "node": "publish_results",
+            "port": "event"
+          },
           "answer": {
             "node": "turn",
             "port": "answer"
@@ -465,6 +636,9 @@
       "config": {
         "language": "cel",
         "inputs": {
+          "messages": {
+            "list": "object"
+          },
           "text": "string",
           "outcome": "string",
           "error": "string",
@@ -473,6 +647,7 @@
           }
         },
         "code": {
+          "messages": "messages",
           "status": "outcome == 'completed' ? 'succeeded' : 'failed'",
           "text": "text",
           "usages": "usages",
@@ -480,6 +655,12 @@
         }
       },
       "inputs": {
+        "messages": {
+          "from": {
+            "node": "repeat",
+            "port": "public_messages"
+          }
+        },
         "text": {
           "from": {
             "node": "repeat",
@@ -509,6 +690,23 @@
   ],
   "edges": [],
   "outputs": [
+    {
+      "name": "messages",
+      "node": "result",
+      "port": "messages"
+    },
+    {
+      "name": "message_events",
+      "node": "repeat",
+      "port": "message_events",
+      "optional": true
+    },
+    {
+      "name": "tool_message_events",
+      "node": "repeat",
+      "port": "tool_message_events",
+      "optional": true
+    },
     {
       "name": "answer",
       "node": "repeat",

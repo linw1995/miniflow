@@ -72,6 +72,8 @@ impl From<mfn_llm::CallUsage> for CallUsage {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct ConversationResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<mfn_llm::ChatMessage>>,
     pub status: String,
     #[value(default)]
     #[serde(default)]
@@ -96,6 +98,7 @@ pub struct Completion {
 impl Default for ConversationResult {
     fn default() -> Self {
         Self {
+            messages: None,
             status: "succeeded".into(),
             text: String::new(),
             usages: Vec::new(),
@@ -130,6 +133,18 @@ impl ConversationResult {
 
     pub fn validate(&self) -> Result<(), ChatError> {
         turn::validate_usages(&self.usages)?;
+        if let Some(messages) = &self.messages {
+            crate::message_log::validate(messages, self.status == "succeeded")?;
+            if self.status == "succeeded" {
+                ensure!(
+                    matches!(messages.last(), Some(mfn_llm::ChatMessage::Assistant { content, .. }) if content == &self.text),
+                    InvalidSnafu {
+                        field: "messages",
+                        reason: "the final assistant message must represent canonical text"
+                    }
+                );
+            }
+        }
         match self.status.as_str() {
             "succeeded" => ensure!(
                 !self.text.is_empty() && self.error.as_ref().is_none_or(String::is_empty),
@@ -172,6 +187,7 @@ pub struct ChatContract {
     pub parameters: WorkflowInputSchema,
     pub answer_stream: bool,
     pub streaming: bool,
+    message_streams: std::collections::BTreeSet<String>,
     inputs: BTreeMap<String, String>,
     owns_title: bool,
 }
@@ -274,7 +290,21 @@ impl ChatContract {
                 reason: "requires native streaming execution"
             }
         );
+        let message_streams = manifest
+            .graph
+            .definition
+            .outputs
+            .iter()
+            .filter(|output| {
+                matches!(
+                    output.name.as_ref(),
+                    "message_events" | "tool_message_events"
+                )
+            })
+            .map(|output| output.name.to_string())
+            .collect();
         Ok(Self {
+            message_streams,
             parameters: configuration,
             answer_stream,
             streaming,
@@ -387,7 +417,7 @@ impl crate::ChatDatabase {
             "running" => Ok(InvocationState::Running),
             "succeeded" => Ok(InvocationState::Committed(Completion {
                 invocation: invocation.clone(),
-                result: turn::saved_result(&call)?,
+                result: turn::saved_result(&mut crate::storage::connect(self.path())?, &call)?,
             })),
             "failed" | "cancelled" | "interrupted" => Ok(InvocationState::Finished(turn)),
             _ => ConflictSnafu {
@@ -445,6 +475,9 @@ pub fn decode_answer_delta(
 /// Validates native workflow output records against the conversation protocol.
 pub struct ConversationOutputDecoder {
     answer: bool,
+    message_streams: std::collections::BTreeSet<String>,
+    messages: Vec<crate::MessageBatch>,
+    received_messages: bool,
     result: Option<ConversationResult>,
 }
 
@@ -452,6 +485,9 @@ impl ConversationOutputDecoder {
     pub fn new(contract: &ChatContract) -> Self {
         Self {
             answer: contract.answer_stream,
+            message_streams: contract.message_streams.clone(),
+            messages: Vec::new(),
+            received_messages: false,
             result: None,
         }
     }
@@ -460,6 +496,34 @@ impl ConversationOutputDecoder {
         &mut self,
         mut values: NodeValues,
     ) -> Result<Option<mfn_llm::TextDelta>, ChatError> {
+        for name in ["message_events", "tool_message_events"] {
+            if let Some(value) = values.remove(name) {
+                ensure!(
+                    self.message_streams.contains(name),
+                    InvalidSnafu {
+                        field: "message events",
+                        reason: "the workflow did not declare this message stream"
+                    }
+                );
+                let batch = <crate::MessageBatch as mf_runtime::InputField>::decode_field(
+                    name,
+                    Some(value),
+                )?;
+                ensure!(
+                    batch.offset >= 0
+                        && batch
+                            .model_call_id
+                            .as_ref()
+                            .is_none_or(|id| !id.trim().is_empty()),
+                    InvalidSnafu {
+                        field: "message events",
+                        reason: "requires a nonnegative offset and a nonblank origin"
+                    }
+                );
+                self.messages.push(batch);
+                self.received_messages = true;
+            }
+        }
         let delta = values
             .remove("answer")
             .map(|value| -> Result<_, ChatError> {
@@ -496,14 +560,26 @@ impl ConversationOutputDecoder {
         Ok(delta)
     }
 
+    pub fn take_message_events(&mut self) -> Vec<crate::MessageBatch> {
+        std::mem::take(&mut self.messages)
+    }
+
     pub fn result(&self) -> Option<&ConversationResult> {
         self.result.as_ref()
     }
 
     pub fn finish(self) -> Result<ConversationResult, ChatError> {
-        self.result.context(CaptureSnafu {
+        let result = self.result.context(CaptureSnafu {
             message: "workflow ended without a terminal conversation result",
-        })
+        })?;
+        ensure!(
+            !self.received_messages || result.messages.is_some(),
+            InvalidSnafu {
+                field: "message events",
+                reason: "message streams require terminal messages for reconciliation"
+            }
+        );
+        Ok(result)
     }
 }
 
@@ -515,6 +591,7 @@ mod output_tests {
     fn decoder(answer: bool) -> ConversationOutputDecoder {
         ConversationOutputDecoder::new(&ChatContract {
             owns_title: false,
+            message_streams: Default::default(),
             parameters: Default::default(),
             answer_stream: answer,
             streaming: true,
@@ -524,6 +601,35 @@ mod output_tests {
 
     fn values(value: serde_json::Value) -> NodeValues {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn declared_message_domains_decode_independently_and_require_terminal_reconciliation() {
+        let mut decoder = decoder(true);
+        decoder.message_streams = ["message_events".into(), "tool_message_events".into()].into();
+        decoder.accept(values(json!({"status":"succeeded", "text":"canonical", "usages":[], "messages":[{"role":"assistant", "content":"canonical"}]}))).unwrap();
+        decoder.accept(values(json!({"message_events":{"offset":0, "model_call_id":"model", "messages":[{"role":"assistant", "content":"canonical"}]}}))).unwrap();
+        let batches = decoder.take_message_events();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].model_call_id.as_deref(), Some("model"));
+        assert!(decoder.take_message_events().is_empty());
+        assert!(decoder.finish().unwrap().messages.is_some());
+        let mut decoder = self::decoder(false);
+        assert!(
+            decoder
+                .accept(values(json!({"message_events":{"offset":0,"messages":[]}})))
+                .is_err()
+        );
+        decoder.message_streams.insert("message_events".into());
+        decoder
+            .accept(values(json!({"message_events":{"offset":0,"messages":[]}})))
+            .unwrap();
+        decoder
+            .accept(values(
+                json!({"status":"succeeded","text":"canonical","usages":[]}),
+            ))
+            .unwrap();
+        assert!(decoder.finish().is_err());
     }
 
     #[test]

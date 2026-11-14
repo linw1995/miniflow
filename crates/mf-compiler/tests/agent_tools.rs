@@ -343,10 +343,10 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
     assert_eq!(shared_inputs["tool_properties"], json!({"map":"object"}));
     assert_eq!(shared_inputs["tool_definitions"], json!({"list":"object"}));
     let variables = repeat["config"]["variables"].as_array().unwrap();
-    assert_eq!(variables.len(), 5);
+    assert_eq!(variables.len(), 6);
     assert!(variables.iter().all(|variable| variable["type"] != "flow"));
     let body = &repeat["config"]["body"];
-    assert_eq!(body["outputs"].as_array().unwrap().len(), 5);
+    assert_eq!(body["outputs"].as_array().unwrap().len(), 6);
     assert!(
         body["nodes"]
             .as_array()
@@ -369,7 +369,12 @@ fn zero_one_and_three_runtime_tools_use_the_same_fixed_agent_child_and_ports() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["params.calls", "params.tool_properties", "params.tools"]
+        [
+            "params.calls",
+            "params.origin",
+            "params.tool_properties",
+            "params.tools"
+        ]
     );
     assert!(dispatch["config"].get("body").is_none());
 
