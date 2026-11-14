@@ -419,8 +419,8 @@ fn candidate_freezing_does_not_overwrite_invalid_authored_configuration() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for config in [
         json!({"mode":"execute", "flow_candidates":false}),
-        json!({"mode":"execute", "flow_candidate_0":{"path":"must-not-read.json"}}),
-        json!({"mode":"execute", "flow_candidates":{"flow_candidate_0":{"route":"first", "source":[]}}, "flow_candidate_0":{"path":"must-not-read.json"}}),
+        json!({"mode":"execute", "flow-route:first":{"path":"must-not-read.json"}}),
+        json!({"mode":"execute", "flow_candidates":{"first":{"source":[]}}, "flow-route:first":{"path":"must-not-read.json"}}),
         json!({"mode":"execute", "flow_field":17}),
     ] {
         let mut source = definition(false);

@@ -554,9 +554,12 @@ and native object fields; `FlowInvocationBinding` declares the receiving collect
 field. These callbacks inspect metadata only and never run node work. Opaque transformations retain a
 conservative superset of incoming capabilities; they cannot introduce undeclared executable targets.
 Compiler-produced candidate metadata and child bodies are persisted together, so replay and generated
-runners do not rediscover tools or depend on live telemetry. Execution still invokes the selected original
-handle at the frozen child binding, preserving native identity and shared preparation across call sites;
-a description child does not replace the capability's executor.
+runners do not rediscover tools or depend on live telemetry. The candidate metadata is keyed directly by
+route; its body uses a reserved `flow-route:<route>` config field because node configuration is a flat
+namespace that may also contain `mode`, `flow_field`, or arbitrary tool names. No ordinal binding or
+duplicated route field is required. Execution still invokes the selected original handle at the frozen
+child binding, preserving native identity and shared preparation across call sites; a description child
+does not replace the capability's executor.
 
 Router returns a `result` envelope containing `outputs` or a recoverable business `error`. An empty callable
 map is valid; unknown executable routes fail without invoking another body. Arguments are conservatively private, selected

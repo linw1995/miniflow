@@ -110,8 +110,8 @@ pub fn without_candidates(graph: &mf_runtime::CompiledGraph) -> mf_runtime::Comp
         {
             let bindings: Vec<_> = candidates.keys().cloned().collect();
             let config = node.config.as_object_mut().unwrap();
-            for binding in bindings {
-                config.remove(&binding);
+            for route in bindings {
+                config.remove(&mf_runtime::flow_candidate_binding(&route));
             }
             config.remove(mf_runtime::FLOW_CANDIDATES);
             graph.children.remove(&node.id);

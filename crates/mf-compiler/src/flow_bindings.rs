@@ -308,9 +308,9 @@ impl Freezing<'_> {
                     )?;
                     let mut body = body.clone();
                     body.relations.key = None;
-                    let binding = flow_candidate_binding(candidates.len());
+                    let binding = flow_candidate_binding(route);
+                    let route = route.clone();
                     let candidate = FlowCandidate {
-                        route: route.clone(),
                         source: source.clone(),
                     };
                     let mut target = actual.clone();
@@ -318,7 +318,7 @@ impl Freezing<'_> {
                     self.sources.insert(source.clone());
                     self.freeze(&mut body, &mut source.clone(), &mut target)?;
                     self.sources.remove(&source);
-                    candidates.insert(binding.clone(), candidate);
+                    candidates.insert(route, candidate);
                     children.insert(binding, body);
                 }
                 let node = &mut scope.definition.nodes[index];

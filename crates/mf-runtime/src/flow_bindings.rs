@@ -25,18 +25,20 @@ pub struct FlowInvocationBinding {
     pub field: Option<String>,
 }
 
-/// A compiler-frozen route and the original capability that enables it.
+/// A compiler-frozen original capability for one runtime route.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowCandidate {
-    pub route: String,
     pub source: Vec<String>,
 }
 
 pub const FLOW_CANDIDATES: &str = "flow_candidates";
+const FLOW_ROUTE_PREFIX: &str = "flow-route:";
 
-pub fn candidate_binding(index: usize) -> String {
-    format!("flow_candidate_{index}")
+/// A flat configuration needs a reserved field namespace; the route itself is
+/// the stable binding key, so no separate candidate ordinal is required.
+pub fn candidate_binding(route: &str) -> String {
+    format!("{FLOW_ROUTE_PREFIX}{route}")
 }
 
 /// Only an explicit frozen candidate table authorizes its corresponding bodies.
@@ -46,11 +48,12 @@ pub fn candidate_parameters(config: &Value) -> BTreeMap<String, Value> {
     };
     candidates
         .keys()
-        .filter_map(|binding| {
+        .filter_map(|route| {
+            let binding = candidate_binding(route);
             config
-                .get(binding)
+                .get(&binding)
                 .filter(|body| !body.is_null())
-                .map(|body| (binding.clone(), body.clone()))
+                .map(|body| (binding, body.clone()))
         })
         .collect()
 }
@@ -66,16 +69,17 @@ pub fn take_candidates(
         return Ok(None);
     };
     let candidates: BTreeMap<String, FlowCandidate> = crate::deserialize_config(candidates)?;
-    for (index, (binding, candidate)) in candidates.iter().enumerate() {
+    for (route, candidate) in &candidates {
         ensure!(
-            binding.starts_with("flow_candidate_")
-                && binding["flow_candidate_".len()..].parse::<usize>().is_ok()
+            !route.trim().is_empty()
                 && !candidate.source.is_empty()
                 && candidate.source.len() <= mf_telemetry::MAX_SCOPE_DEPTH
                 && candidate.source.iter().all(|key| !key.trim().is_empty())
-                && fields.remove(binding).is_some_and(|body| !body.is_null()),
+                && fields
+                    .remove(&candidate_binding(route))
+                    .is_some_and(|body| !body.is_null()),
             crate::NodeInvalidSubgraphSnafu {
-                message: format!("invalid frozen Flow candidate {index} `{binding}`"),
+                message: format!("invalid frozen Flow candidate `{route}`"),
             }
         );
     }
@@ -108,10 +112,10 @@ mod tests {
             assert!(candidate_parameters(&config).is_empty());
             assert!(take_candidates(&mut config).unwrap().is_none());
         }
-        let binding = candidate_binding(0);
+        let binding = candidate_binding("a/b~");
         let mut config = json!({
             "mode":"execute", "ordinary":{"nodes":[]},
-            "flow_candidates":{&binding:{"route":"a/b~", "source":["producer"]}},
+            "flow_candidates":{"a/b~":{"source":["producer"]}},
             &binding:{"nodes":[]}
         });
         assert_eq!(
@@ -119,7 +123,7 @@ mod tests {
             BTreeMap::from([(binding.clone(), json!({"nodes":[]}))])
         );
         let candidates = take_candidates(&mut config).unwrap().unwrap();
-        assert_eq!(candidates[&binding].route, "a/b~");
+        assert_eq!(candidates["a/b~"].source, ["producer"]);
         assert_eq!(config, json!({"mode":"execute", "ordinary":{"nodes":[]}}));
         let mut empty = json!({"flow_candidates":{}});
         assert_eq!(take_candidates(&mut empty).unwrap(), Some(BTreeMap::new()));
@@ -131,7 +135,8 @@ mod tests {
             json!([]),
             json!(1),
             Value::Null,
-            json!({"flow_candidate_0":{"route":1,"source":[]}}),
+            json!({"tool":{"source":"not-a-list"}}),
+            json!({"tool":{"source":["producer"], "route":"extra"}}),
         ] {
             let mut config = json!({"flow_candidates":table});
             assert!(matches!(
@@ -139,26 +144,25 @@ mod tests {
                 Err(NodeBuildError::InvalidConfiguration { .. })
             ));
         }
-        for (binding, source, body) in [
-            ("invalid", json!(["producer"]), json!({})),
-            ("flow_candidate_x", json!(["producer"]), json!({})),
-            ("flow_candidate_0", json!([]), json!({})),
-            ("flow_candidate_0", json!([""]), json!({})),
-            ("flow_candidate_0", json!(["producer"]), Value::Null),
+        for (route, source, body) in [
+            ("", json!(["producer"]), json!({})),
+            ("tool", json!([]), json!({})),
+            ("tool", json!([""]), json!({})),
+            ("tool", json!(["producer"]), Value::Null),
             (
-                "flow_candidate_0",
+                "tool",
                 json!(vec!["scope"; mf_telemetry::MAX_SCOPE_DEPTH + 1]),
                 json!({}),
             ),
         ] {
-            let mut config = json!({"flow_candidates":{binding:{"route":"tool", "source":source}}, binding:body});
+            let binding = candidate_binding(route);
+            let mut config = json!({"flow_candidates":{route:{"source":source}}, binding:body});
             assert!(matches!(
                 take_candidates(&mut config),
                 Err(NodeBuildError::InvalidSubgraph { .. })
             ));
         }
-        let mut missing =
-            json!({"flow_candidates":{"flow_candidate_0":{"route":"tool", "source":["producer"]}}});
+        let mut missing = json!({"flow_candidates":{"tool":{"source":["producer"]}}});
         assert!(candidate_parameters(&missing).is_empty());
         assert!(take_candidates(&mut missing).is_err());
     }
@@ -175,7 +179,6 @@ mod tests {
         }))
         .unwrap();
         let candidate = FlowCandidate {
-            route: "tool".into(),
             source: vec!["producer".into()],
         };
         let target = body().with_origin(crate::FlowOrigin {
@@ -187,7 +190,6 @@ mod tests {
             &source,
             &FlowCandidate {
                 source: vec!["other".into()],
-                ..candidate.clone()
             },
             &target
         ));

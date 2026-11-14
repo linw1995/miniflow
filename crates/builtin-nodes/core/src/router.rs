@@ -94,6 +94,7 @@ impl TaskNode for Router {
 }
 
 struct CompiledRoute {
+    route: String,
     candidate: FlowCandidate,
     binding: String,
     flow: mf_runtime::FlowValue,
@@ -222,7 +223,7 @@ impl TaskNode for ExecuteRouter {
                 candidates
                     .iter()
                     .find(|compiled| {
-                        compiled.candidate.route == route
+                        compiled.route == route
                             && mf_runtime::validate_flow_candidate_source(
                                 flow,
                                 &compiled.candidate,
@@ -333,14 +334,16 @@ fn prepared_factory(
         .map(|candidates| {
             candidates
                 .into_iter()
-                .map(|(binding, candidate)| {
+                .map(|(route, candidate)| {
+                    let binding = mf_runtime::flow_candidate_binding(&route);
                     let body =
                         bodies
                             .remove(&binding)
                             .context(mf_runtime::NodeInvalidSubgraphSnafu {
-                                message: format!("missing frozen router body `{binding}`"),
+                                message: format!("missing frozen router body for route `{route}`"),
                             })?;
                     Ok(CompiledRoute {
+                        route,
                         candidate,
                         binding,
                         flow: mf_runtime::FlowValue::new(body)?,
