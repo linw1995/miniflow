@@ -187,6 +187,7 @@ inventory::submit! {
     NodeRegistration {
         kind: mf_runtime::CALL_KIND,
         factory: NodeFactory::Subgraph {
+            scope: Some(mf_runtime::SubgraphScope::Host),
             flow_parameters,
             plain,
             prepared: factory,

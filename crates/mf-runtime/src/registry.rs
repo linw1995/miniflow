@@ -176,6 +176,17 @@ impl NodeRegistry {
             .collect()
     }
 
+    /// Declared child-frame semantics for every provider that accepts Flow parameters.
+    pub fn subgraph_scopes(&self) -> BTreeMap<String, crate::SubgraphScope> {
+        self.iter()
+            .filter_map(|registration| {
+                registration
+                    .subgraph_scope()
+                    .map(|scope| (registration.kind.to_owned(), scope))
+            })
+            .collect()
+    }
+
     fn from_registrations(
         registrations: impl IntoIterator<Item = &'static NodeRegistration>,
     ) -> Result<Self, NodeRegistryError> {
@@ -344,10 +355,73 @@ mod tests {
     }
 
     #[test]
+    fn subgraph_scopes_report_only_declared_child_frames() {
+        let value = Box::leak(Box::new(NodeRegistration {
+            kind: "test.value-flow",
+            factory: crate::NodeFactory::Subgraph {
+                scope: None,
+                flow_parameters: |_| BTreeMap::new(),
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        }));
+        let host = Box::leak(Box::new(NodeRegistration {
+            kind: "test.host-flow",
+            factory: crate::NodeFactory::Subgraph {
+                scope: Some(crate::SubgraphScope::Host),
+                flow_parameters: |_| BTreeMap::new(),
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        }));
+        let loop_scope = Box::leak(Box::new(NodeRegistration {
+            kind: "test.loop-flow",
+            factory: crate::NodeFactory::Subgraph {
+                scope: Some(crate::SubgraphScope::Loop),
+                flow_parameters: |_| BTreeMap::new(),
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        }));
+        let iteration = Box::leak(Box::new(NodeRegistration {
+            kind: "test.iteration-flow",
+            factory: crate::NodeFactory::Subgraph {
+                scope: Some(crate::SubgraphScope::Iteration),
+                flow_parameters: |_| BTreeMap::new(),
+                plain: first_factory,
+                prepared: |_, config, _| first_factory(config),
+            },
+        }));
+        let registry =
+            NodeRegistry::from_registrations([&FIRST, value, host, loop_scope, iteration]).unwrap();
+        assert_eq!(
+            registry.subgraph_scopes(),
+            BTreeMap::from([
+                ("test.host-flow".into(), crate::SubgraphScope::Host),
+                (
+                    "test.iteration-flow".into(),
+                    crate::SubgraphScope::Iteration
+                ),
+                ("test.loop-flow".into(), crate::SubgraphScope::Loop),
+            ])
+        );
+        for (kind, expected) in [
+            ("test.duplicate", None),
+            ("test.value-flow", None),
+            ("test.host-flow", Some(crate::SubgraphScope::Host)),
+            ("test.loop-flow", Some(crate::SubgraphScope::Loop)),
+            ("test.iteration-flow", Some(crate::SubgraphScope::Iteration)),
+        ] {
+            assert_eq!(registry.get(kind).unwrap().subgraph_scope(), expected);
+        }
+    }
+
+    #[test]
     fn subgraph_factory_retains_plain_instantiation() {
         let registration = NodeRegistration {
             kind: "test.subgraph",
             factory: crate::NodeFactory::Subgraph {
+                scope: None,
                 flow_parameters: |config| {
                     config
                         .get("body")
@@ -369,6 +443,7 @@ mod tests {
         static FLOW: NodeRegistration = NodeRegistration {
             kind: "test.flow",
             factory: crate::NodeFactory::Subgraph {
+                scope: None,
                 flow_parameters: |config| {
                     ["selected", "fallback"]
                         .into_iter()

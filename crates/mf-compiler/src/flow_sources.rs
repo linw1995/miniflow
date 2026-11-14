@@ -147,10 +147,16 @@ impl FlowSourceBundle {
             host_dependencies: true,
             embedded_sources: Some(sources),
             extractors: registry.flow_extractors(),
+            subgraphs: registry.subgraph_scopes(),
             ..Default::default()
         };
-        let definition =
-            resolver.file(&self.entry, &BTreeMap::new(), 0, ScopeContext::default())?;
+        let subgraphs = resolver.subgraphs.clone();
+        let definition = resolver.file(
+            &self.entry,
+            &BTreeMap::new(),
+            0,
+            ScopeContext::default().with_subgraphs(subgraphs),
+        )?;
         Ok(resolver.finish_resolution(definition))
     }
 }
@@ -272,6 +278,7 @@ struct Resolver {
     discovery: bool,
     unlinked: bool,
     extractors: BTreeMap<String, FlowExtractor>,
+    subgraphs: BTreeMap<String, mf_runtime::SubgraphScope>,
     pending_scopes: Vec<BTreeSet<String>>,
     builtin_catalog: BTreeMap<String, WorkflowDefinition>,
     selected_packages: BTreeSet<String>,
@@ -292,9 +299,16 @@ pub fn load_workflow_with_registry(
 ) -> Result<ResolvedWorkflow, FlowResolutionError> {
     let mut resolver = Resolver {
         extractors: registry.flow_extractors(),
+        subgraphs: registry.subgraph_scopes(),
         ..Default::default()
     };
-    let definition = resolver.file(path, &BTreeMap::new(), 0, ScopeContext::default())?;
+    let subgraphs = resolver.subgraphs.clone();
+    let definition = resolver.file(
+        path,
+        &BTreeMap::new(),
+        0,
+        ScopeContext::default().with_subgraphs(subgraphs),
+    )?;
     Ok(resolver.finish_resolution(definition))
 }
 
@@ -304,9 +318,12 @@ pub fn load_embedded_workflow(path: &Path) -> Result<ResolvedWorkflow, FlowResol
     let mut resolver = Resolver {
         host_dependencies: true,
         extractors: registry.flow_extractors(),
+        subgraphs: registry.subgraph_scopes(),
         ..Default::default()
     };
-    let definition = resolver.file(path, &BTreeMap::new(), 0, ScopeContext::default())?;
+    let subgraphs = resolver.subgraphs.clone();
+    let context = ScopeContext::default().with_subgraphs(subgraphs);
+    let definition = resolver.file(path, &BTreeMap::new(), 0, context)?;
     Ok(resolver.into_resolved(definition))
 }
 
@@ -324,16 +341,18 @@ pub fn resolve_flows_with_registry(
 ) -> Result<ResolvedWorkflow, FlowResolutionError> {
     let mut resolver = Resolver {
         extractors: registry.flow_extractors(),
+        subgraphs: registry.subgraph_scopes(),
         ..Default::default()
     };
     let mut definition = definition.clone();
+    let subgraphs = resolver.subgraphs.clone();
     let scope = resolver.definition(
         &mut definition,
         directory,
         &BTreeMap::new(),
         0,
         "workflow",
-        ScopeContext::default(),
+        ScopeContext::default().with_subgraphs(subgraphs),
     )?;
     Ok(resolver.finish_resolution(scope))
 }
@@ -348,6 +367,7 @@ pub fn discover_flows_with_registry(
     let resolver = Resolver {
         discovery: true,
         extractors: registry.flow_extractors(),
+        subgraphs: registry.subgraph_scopes(),
         ..Default::default()
     };
     resolve_using(resolver, definition, directory)
@@ -376,13 +396,14 @@ fn resolve_using(
     directory: Option<&Path>,
 ) -> Result<FlowDiscovery, FlowResolutionError> {
     let mut definition = definition.clone();
+    let subgraphs = resolver.subgraphs.clone();
     let scope = resolver.definition(
         &mut definition,
         directory,
         &BTreeMap::new(),
         0,
         "workflow",
-        ScopeContext::default(),
+        ScopeContext::default().with_subgraphs(subgraphs),
     )?;
     Ok(resolver.finish_discovery(scope))
 }
@@ -432,11 +453,14 @@ impl FlowDiscovery {
     ) -> Result<ResolvedWorkflow, FlowResolutionError> {
         let mut resolver = Resolver {
             extractors: registry.flow_extractors(),
+            subgraphs: registry.subgraph_scopes(),
             builtin_catalog,
             selected_packages,
             ..Default::default()
         };
-        let definition = resolver.file(path, &BTreeMap::new(), 0, ScopeContext::default())?;
+        let subgraphs = resolver.subgraphs.clone();
+        let context = ScopeContext::default().with_subgraphs(subgraphs);
+        let definition = resolver.file(path, &BTreeMap::new(), 0, context)?;
         Ok(resolver.finish_resolution(definition))
     }
 
@@ -454,6 +478,7 @@ impl FlowDiscovery {
             Resolver {
                 discovery: true,
                 extractors: registry.flow_extractors(),
+                subgraphs: registry.subgraph_scopes(),
                 builtin_catalog,
                 selected_packages,
                 ..Default::default()
@@ -524,7 +549,13 @@ fn discover_file(
     path: &Path,
     mut resolver: Resolver,
 ) -> Result<FlowDiscovery, FlowResolutionError> {
-    let scope = resolver.file(path, &BTreeMap::new(), 0, ScopeContext::default())?;
+    let subgraphs = resolver.subgraphs.clone();
+    let scope = resolver.file(
+        path,
+        &BTreeMap::new(),
+        0,
+        ScopeContext::default().with_subgraphs(subgraphs),
+    )?;
     Ok(resolver.finish_discovery(scope))
 }
 
@@ -987,7 +1018,8 @@ impl Resolver {
                         // Call's receiving provider is selected. Explicit bodies
                         // never take this business-only source-selection path.
                         if let Some(child) = self.with_scope(&config.flow, |resolver| {
-                            let mut bootstrap = ScopeContext::default();
+                            let mut bootstrap =
+                                ScopeContext::default().with_subgraphs(context.subgraphs.clone());
                             bootstrap.root_version = context.root_version;
                             resolver.source(
                                 source,
@@ -1055,6 +1087,23 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scopes() -> BTreeMap<String, mf_runtime::SubgraphScope> {
+        BTreeMap::from([
+            (
+                mf_runtime::LOOP_KIND.into(),
+                mf_runtime::SubgraphScope::Loop,
+            ),
+            (
+                mf_runtime::ITERATION_KIND.into(),
+                mf_runtime::SubgraphScope::Iteration,
+            ),
+            (
+                mf_runtime::CALL_KIND.into(),
+                mf_runtime::SubgraphScope::Host,
+            ),
+        ])
+    }
     use serde_json::json;
 
     fn definition(nodes: serde_json::Value) -> WorkflowDefinition {
@@ -1121,7 +1170,7 @@ mod tests {
                 &BTreeMap::new(),
                 0,
                 "test",
-                ScopeContext::default(),
+                ScopeContext::default().with_subgraphs(scopes()),
             )
         }
 
@@ -1369,6 +1418,7 @@ mod tests {
         mf_runtime::NodeRegistration {
             kind:"test.source-api-owner",
             factory:mf_runtime::NodeFactory::Subgraph {
+                scope: None,
                 flow_parameters: body_parameter,
                 plain:metadata_plain, prepared:metadata_prepared,
             },
@@ -1917,7 +1967,12 @@ mod tests {
                 ..Default::default()
             };
             let error = resolver
-                .file(&archive.entry, &BTreeMap::new(), 0, ScopeContext::default())
+                .file(
+                    &archive.entry,
+                    &BTreeMap::new(),
+                    0,
+                    ScopeContext::default().with_subgraphs(scopes()),
+                )
                 .unwrap_err();
             assert_eq!(resolver.scope_depth, 0);
             assert!(resolver.stack.is_empty());
@@ -1927,6 +1982,23 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn providerless_embedded_and_catalog_loaders_carry_scope_contexts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.json");
+        std::fs::write(&path, r#"{"version":"2026-11-13","nodes":[],"outputs":[]}"#).unwrap();
+        let embedded = load_embedded_workflow(&path).unwrap();
+        assert!(embedded.definition.nodes.is_empty());
+        let resolved = FlowDiscovery::resolve_with_builtin_catalog(
+            &path,
+            &NodeRegistry::default(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(resolved.definition.nodes.is_empty());
     }
 
     #[test]
@@ -2658,7 +2730,7 @@ mod tests {
                     &BTreeMap::new(),
                     0,
                     "replay",
-                    ScopeContext::default()
+                    ScopeContext::default().with_subgraphs(scopes())
                 )
                 .unwrap()
                 .is_some()
@@ -2950,7 +3022,12 @@ mod tests {
         let path = root.path().join("flow.json");
         write_definition(root.path(), "flow.json", &parent);
         let error = source_resolver()
-            .file(&path, &BTreeMap::new(), 0, ScopeContext::default())
+            .file(
+                &path,
+                &BTreeMap::new(),
+                0,
+                ScopeContext::default().with_subgraphs(scopes()),
+            )
             .err()
             .unwrap();
         assert!(error.to_string().contains("recursive Flow reference"));

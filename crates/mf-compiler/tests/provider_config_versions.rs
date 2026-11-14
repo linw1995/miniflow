@@ -143,6 +143,7 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.versioned_optional_flow",
         factory: NodeFactory::Subgraph {
+            scope: None,
             flow_parameters: OptionalFlowConfig::flow_parameters,
             plain: optional_typed_plain,
             prepared: unexpected_prepared,
@@ -259,6 +260,7 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.declared_flow_owner",
         factory: NodeFactory::Subgraph {
+            scope: None,
             flow_parameters: TypedConfig::flow_parameters,
             plain: optional_flow_plain, prepared: typed_prepared,
         },

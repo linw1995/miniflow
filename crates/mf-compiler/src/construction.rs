@@ -952,8 +952,14 @@ fn validate_compiled_providers(
                 .as_deref()
                 .and_then(|name| registry.flow(name))
             {
-                crate::compiler::validate_host_flow_binding(node, body, registered, root_version)
-                    .context(HostFlowBindingSnafu {
+                crate::compiler::validate_host_flow_binding(
+                    node,
+                    body,
+                    registered,
+                    root_version,
+                    &registry.subgraph_scopes(),
+                )
+                .context(HostFlowBindingSnafu {
                     definition_id: node.id.clone(),
                 })?;
                 continue;

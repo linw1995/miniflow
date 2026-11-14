@@ -151,7 +151,7 @@ fn prepared(
 inventory::submit! {
     NodeRegistration {
         kind: KIND,
-        factory: NodeFactory::Subgraph { flow_parameters: Config::flow_parameters, plain, prepared },
+        factory: NodeFactory::Subgraph { scope: None, flow_parameters: Config::flow_parameters, plain, prepared },
     }
 }
 
@@ -218,7 +218,9 @@ fn external_registration_supports_both_plain_and_prepared_factories() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let registration = registry.get(KIND).unwrap();
     let NodeFactory::Subgraph {
-        flow_parameters, ..
+        scope: None,
+        flow_parameters,
+        ..
     } = registration.factory
     else {
         panic!("custom provider must declare its Flow parameter contract");

@@ -56,6 +56,7 @@ fn receiver(node: &NodeDefinition) -> NodeRegistration {
     NodeRegistration {
         kind: "test.child",
         factory: NodeFactory::Subgraph {
+            scope: None,
             flow_parameters: match node.kind.as_str() {
                 "workflow.call" | "loop.run" | "builtin.iteration" => {
                     |config| extract(config, "body")

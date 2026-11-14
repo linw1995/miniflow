@@ -3,7 +3,7 @@
 //! reconstruct these relationships from node kinds or configuration.
 
 use crate::{DefinitionId, NodeDefinition, ValueType, WorkflowCompileError, WorkflowDefinition};
-use mf_runtime::{GraphRelations, ScopeRelations, WorkflowDefinitionVersion};
+use mf_runtime::{GraphRelations, ScopeRelations, SubgraphScope, WorkflowDefinitionVersion};
 use serde::Deserialize;
 use serde_json::json;
 use snafu::{ResultExt, ensure};
@@ -20,6 +20,8 @@ pub struct ScopeContext {
     inside_items: bool,
     /// Resolved-definition adapters may receive sources inserted by an earlier lowering pass.
     lowered_sources: bool,
+    /// Provider-declared child-frame semantics; empty when no provider metadata is loaded.
+    pub(crate) subgraphs: BTreeMap<String, SubgraphScope>,
 }
 
 impl ScopeContext {
@@ -28,6 +30,11 @@ impl ScopeContext {
             lowered_sources: true,
             ..Self::default()
         }
+    }
+
+    pub fn with_subgraphs(mut self, subgraphs: BTreeMap<String, SubgraphScope>) -> Self {
+        self.subgraphs = subgraphs;
+        self
     }
 
     /// Enter a child only after its receiving callback authorizes this binding.
@@ -42,8 +49,8 @@ impl ScopeContext {
         if self.inside_items
             && binding == "body"
             && matches!(
-                owner.kind.as_str(),
-                mf_runtime::LOOP_KIND | mf_runtime::ITERATION_KIND
+                self.subgraphs.get(owner.kind.as_str()),
+                Some(SubgraphScope::Loop | SubgraphScope::Iteration)
             )
         {
             let mut path = self.path.clone();
@@ -54,7 +61,7 @@ impl ScopeContext {
             }
             .fail();
         }
-        let relations = child_relations_at(version, owner, binding, &self.path)?;
+        let relations = child_relations_at(version, owner, binding, &self.path, &self.subgraphs)?;
         let mut path = self.path.clone();
         path.push(
             relations
@@ -76,6 +83,7 @@ impl ScopeContext {
             root_version: self.root_version,
             inside_items,
             lowered_sources: self.lowered_sources,
+            subgraphs: self.subgraphs.clone(),
         })
     }
 
@@ -88,6 +96,7 @@ impl ScopeContext {
             definition,
             &mut self.relations,
             &self.path,
+            &self.subgraphs,
             self.lowered_sources,
         )
     }
@@ -97,8 +106,9 @@ pub fn child_relations(
     version: WorkflowDefinitionVersion,
     owner: &NodeDefinition,
     binding: &str,
+    subgraphs: &BTreeMap<String, SubgraphScope>,
 ) -> Result<GraphRelations, WorkflowCompileError> {
-    child_relations_at(version, owner, binding, &[])
+    child_relations_at(version, owner, binding, &[], subgraphs)
 }
 
 /// Lower child relationships with the enclosing authored scope's full path.
@@ -107,6 +117,7 @@ pub fn child_relations_at(
     owner: &NodeDefinition,
     binding: &str,
     path: &[DefinitionId],
+    subgraphs: &BTreeMap<String, SubgraphScope>,
 ) -> Result<GraphRelations, WorkflowCompileError> {
     let mut owner_path = path.to_vec();
     owner_path.push(owner.id.clone());
@@ -114,8 +125,8 @@ pub fn child_relations_at(
     if binding != "body" {
         return Ok(relations);
     }
-    match owner.kind.as_str() {
-        mf_runtime::LOOP_KIND => {
+    match subgraphs.get(owner.kind.as_str()) {
+        Some(SubgraphScope::Loop) => {
             let config = crate::loops::parse_config(owner)?;
             ensure!(
                 version.supports_loop_inputs()
@@ -163,7 +174,7 @@ pub fn child_relations_at(
             relations.streams = config.stream_outputs;
             relations.key = Some(owner.id.to_string());
         }
-        mf_runtime::ITERATION_KIND => {
+        Some(SubgraphScope::Iteration) => {
             let config = crate::iteration::parse_config(owner)?;
             let mut inputs = config.inputs;
             ensure!(
@@ -186,7 +197,7 @@ pub fn child_relations_at(
             relations.streams = config.stream_outputs;
             relations.key = Some(owner.id.to_string());
         }
-        mf_runtime::CALL_KIND => {
+        Some(SubgraphScope::Host) => {
             #[derive(Deserialize)]
             struct Selector {
                 flow: String,
@@ -217,13 +228,14 @@ pub fn lower_scope(
     definition: &mut WorkflowDefinition,
     relations: &mut GraphRelations,
 ) -> Result<(), WorkflowCompileError> {
-    lower_scope_at(definition, relations, &[], false)
+    lower_scope_at(definition, relations, &[], &BTreeMap::new(), false)
 }
 
 pub fn lower_scope_at(
     definition: &mut WorkflowDefinition,
     relations: &mut GraphRelations,
     path: &[DefinitionId],
+    subgraphs: &BTreeMap<String, SubgraphScope>,
     lowered_sources: bool,
 ) -> Result<(), WorkflowCompileError> {
     // Scope sources are implicit references, never authored node declarations.
@@ -318,7 +330,7 @@ pub fn lower_scope_at(
             }
         );
         if !scope.is_stateful() {
-            crate::iteration::validate_body_structure(definition).context(
+            crate::iteration::validate_body_structure(definition, subgraphs).context(
                 crate::compiler::ScopeStructureSnafu {
                     definition_id: DefinitionId::from("workflow"),
                 },
@@ -363,6 +375,7 @@ pub fn lower_scope_at(
         state_types.as_ref(),
         relations.root.as_ref().map(|root| &root.values),
         path,
+        subgraphs,
     )?;
     if let Some(scope) = relations.scope.as_mut() {
         scope.writes.clear();
@@ -437,13 +450,20 @@ mod tests {
 
     #[test]
     fn iteration_shared_inputs_lower_to_immutable_scope_values() {
+        let subgraphs =
+            BTreeMap::from([(mf_runtime::ITERATION_KIND.into(), SubgraphScope::Iteration)]);
         let owner = NodeDefinition {
             id: "each".into(),
             kind: mf_runtime::ITERATION_KIND.into(),
             config: json!({"inputs":{"flow_0":"flow", "settings":"object"}}),
         };
-        let relations =
-            child_relations(WorkflowDefinitionVersion::CURRENT, &owner, "body").unwrap();
+        let relations = child_relations(
+            WorkflowDefinitionVersion::CURRENT,
+            &owner,
+            "body",
+            &subgraphs,
+        )
+        .unwrap();
         let scope = relations.scope.unwrap();
         assert_eq!(
             scope.values,
@@ -460,13 +480,111 @@ mod tests {
     }
 
     #[test]
+    fn item_scope_rejects_declared_container_scopes_by_metadata() {
+        let item_owner = NodeDefinition {
+            id: "each".into(),
+            kind: "test.custom-item".into(),
+            config: json!({"inputs":{}}),
+        };
+        let context = ScopeContext::default().with_subgraphs(BTreeMap::from([(
+            "test.custom-item".to_owned(),
+            SubgraphScope::Iteration,
+        )]));
+        let item = context
+            .child(WorkflowDefinitionVersion::CURRENT, &item_owner, "body")
+            .unwrap();
+        let loop_owner = NodeDefinition {
+            id: "repeat".into(),
+            kind: "test.custom-loop".into(),
+            config: json!({"variables":[]}),
+        };
+        let item = item.with_subgraphs(BTreeMap::from([(
+            "test.custom-loop".to_owned(),
+            SubgraphScope::Loop,
+        )]));
+        let error = item
+            .child(WorkflowDefinitionVersion::CURRENT, &loop_owner, "body")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot contain container scopes")
+        );
+    }
+
+    #[test]
+    fn declared_subgraph_scope_selects_relationships_instead_of_kind() {
+        let custom_loop = NodeDefinition {
+            id: "custom".into(),
+            kind: "test.custom-loop".into(),
+            config: json!({"variables":[{"name":"count", "type":"int"}]}),
+        };
+        let declared = BTreeMap::from([("test.custom-loop".to_owned(), SubgraphScope::Loop)]);
+        let relations = child_relations(
+            WorkflowDefinitionVersion::CURRENT,
+            &custom_loop,
+            "body",
+            &declared,
+        )
+        .unwrap();
+        assert!(relations.scope.as_ref().unwrap().is_stateful());
+        assert!(
+            child_relations(
+                WorkflowDefinitionVersion::CURRENT,
+                &custom_loop,
+                "body",
+                &BTreeMap::new()
+            )
+            .unwrap()
+            .scope
+            .is_none(),
+            "a kind without provider metadata has no frame"
+        );
+        let builtin_loop = NodeDefinition {
+            id: "repeat".into(),
+            kind: mf_runtime::LOOP_KIND.into(),
+            config: json!({"variables":[{"name":"count", "type":"int"}]}),
+        };
+        assert!(
+            child_relations(
+                WorkflowDefinitionVersion::CURRENT,
+                &builtin_loop,
+                "body",
+                &BTreeMap::new()
+            )
+            .unwrap()
+            .scope
+            .is_none(),
+            "built-in kind strings do not imply a frame"
+        );
+        let custom_host = NodeDefinition {
+            id: "invoke".into(),
+            kind: "test.custom-host".into(),
+            config: json!({"flow":"child"}),
+        };
+        let relations = child_relations(
+            WorkflowDefinitionVersion::CURRENT,
+            &custom_host,
+            "body",
+            &BTreeMap::from([("test.custom-host".to_owned(), SubgraphScope::Host)]),
+        )
+        .unwrap();
+        assert_eq!(relations.host.as_deref(), Some("child"));
+    }
+
+    #[test]
     fn lower_scope_keeps_full_authoring_paths_across_generic_bindings() {
+        let subgraphs = BTreeMap::from([
+            ("test.receiver".into(), SubgraphScope::Host),
+            (mf_runtime::LOOP_KIND.into(), SubgraphScope::Loop),
+        ]);
         let owner = NodeDefinition {
             id: "receiver".into(),
             kind: "test.receiver".into(),
             config: json!({}),
         };
         let outer = ScopeContext::default()
+            .with_subgraphs(subgraphs)
             .child(WorkflowDefinitionVersion::CURRENT, &owner, "selected")
             .unwrap();
         let frame = NodeDefinition {

@@ -1256,8 +1256,10 @@ pub fn compile_definition(
     // Lower only this authoring scope before checking its providers. A missing
     // receiver has no authority to load or interpret any child body.
     let mut root = definition.clone();
-    let mut relations = GraphRelations::default();
-    crate::lowering::lower_scope(&mut root, &mut relations)?;
+    let mut context =
+        crate::lowering::ScopeContext::default().with_subgraphs(registry.subgraph_scopes());
+    context.lower_scope(&mut root)?;
+    let relations = context.relations;
     for node in &root.nodes {
         if relations.instruction(&node.id).is_none() {
             registration_for(node, registry)?;
@@ -1351,7 +1353,7 @@ pub fn plan_resolved_definition(
     let resolved = resolve_inline_scopes(
         definition,
         registry,
-        crate::lowering::ScopeContext::resolved(),
+        crate::lowering::ScopeContext::resolved().with_subgraphs(registry.subgraph_scopes()),
         0,
     )?;
     plan_resolved_workflow(&resolved)
@@ -1865,6 +1867,7 @@ fn canonical_host_definition(
     shape: &mf_runtime::CompiledGraph,
     root_version: mf_runtime::WorkflowDefinitionVersion,
     relations: GraphRelations,
+    subgraphs: &BTreeMap<String, mf_runtime::SubgraphScope>,
     depth: usize,
 ) -> Result<WorkflowDefinition, WorkflowCompileError> {
     ensure!(
@@ -1877,7 +1880,7 @@ fn canonical_host_definition(
     let mut definition = definition.clone();
     // Registered executors may retain canonical sources from an earlier lowering pass.
     // Recompute and validate their relationships rather than trusting the stored shape.
-    let mut context = crate::lowering::ScopeContext::resolved();
+    let mut context = crate::lowering::ScopeContext::resolved().with_subgraphs(subgraphs.clone());
     context.relations = relations;
     context.lower_scope(&mut definition)?;
     ensure!(
@@ -1908,10 +1911,18 @@ fn canonical_host_definition(
                 .context(NodeConfigurationSnafu {
                     definition_id: node.id.clone(),
                 })?;
-            let child_relations = crate::lowering::child_relations(definition.version, node, name)?;
+            let child_relations =
+                crate::lowering::child_relations(definition.version, node, name, subgraphs)?;
             node.set_node_flow(
                 name,
-                canonical_host_definition(&raw, child, root_version, child_relations, depth + 1)?,
+                canonical_host_definition(
+                    &raw,
+                    child,
+                    root_version,
+                    child_relations,
+                    subgraphs,
+                    depth + 1,
+                )?,
             )
             .context(FlowParametersSnafu {
                 definition_id: node.id.clone(),
@@ -1926,6 +1937,7 @@ pub fn validate_host_flow_binding(
     graph: &mf_runtime::CompiledGraph,
     registered: &mf_runtime::RegisteredFlow,
     root_version: mf_runtime::WorkflowDefinitionVersion,
+    subgraphs: &BTreeMap<String, mf_runtime::SubgraphScope>,
 ) -> Result<(), WorkflowCompileError> {
     // The root binding's host selector and observation key identify this actual
     // call site. Its executable relationships come independently from the
@@ -1943,6 +1955,7 @@ pub fn validate_host_flow_binding(
                 graph,
                 root_version,
                 relations,
+                subgraphs,
                 0
             )?,
         InvalidGraphSnafu {
@@ -2446,7 +2459,14 @@ fn prepare_node_subgraphs(
             .as_deref()
             .and_then(|name| preparation.registry.flow(name));
         let prepared = if let Some(registered) = host {
-            validate_host_flow_binding(node, body, registered, preparation.root_version)?;
+            let subgraphs = preparation.registry.subgraph_scopes();
+            validate_host_flow_binding(
+                node,
+                body,
+                registered,
+                preparation.root_version,
+                &subgraphs,
+            )?;
             ensure!(
                 preparation.body_layouts.is_none(),
                 InvalidGraphSnafu {
@@ -2660,6 +2680,7 @@ mod tests {
         mf_runtime::NodeRegistration {
             kind: "compiler-test.native-flow-producer",
             factory: mf_runtime::NodeFactory::Subgraph {
+                scope: None,
                 flow_parameters: <NativeFlowConfig as mf_runtime::NodeConfig>::flow_parameters,
                 plain: |_| mf_runtime::NodeInvalidSubgraphSnafu {
                     message: "native producer requires a prepared callable child",

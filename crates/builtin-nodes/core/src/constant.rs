@@ -156,6 +156,7 @@ inventory::submit! {
     NodeRegistration {
         kind: KIND,
         factory: NodeFactory::Subgraph {
+            scope: None,
             flow_parameters,
             plain: constant_factory,
             prepared: flow_factory,

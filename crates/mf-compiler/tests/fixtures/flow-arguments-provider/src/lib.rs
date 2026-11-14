@@ -92,6 +92,6 @@ fn prepared(
 inventory::submit! {
     NodeRegistration {
         kind: KIND,
-        factory: NodeFactory::Subgraph { flow_parameters: Config::flow_parameters, plain, prepared },
+        factory: NodeFactory::Subgraph { scope: None, flow_parameters: Config::flow_parameters, plain, prepared },
     }
 }

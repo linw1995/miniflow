@@ -1390,10 +1390,26 @@ pub trait NodeConfig: Sized {
     ) -> Result<Self, NodeBuildError>;
 }
 
+/// The child Flow contract a receiving provider declares.
+///
+/// Scope semantics belong to the receiving provider, not to compiler-matched
+/// kind strings. The compiler derives scope relationships from this declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubgraphScope {
+    /// A named host Flow selected by the receiving provider; no enclosing frame.
+    Host,
+    /// A mutable Loop frame supplied through `%loop`.
+    Loop,
+    /// An immutable per-item frame supplied through `%iteration`.
+    Iteration,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum NodeFactory {
     Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
     Subgraph {
+        /// `None` when the Flow parameter is an ordinary value rather than a child frame.
+        scope: Option<SubgraphScope>,
         flow_parameters: fn(&Value) -> BTreeMap<String, Value>,
         plain: fn(Value) -> Result<PreparedNode, NodeBuildError>,
         #[expect(
@@ -1418,6 +1434,14 @@ impl NodeRegistration {
     /// Whether this factory can receive prepared Flow parameters.
     pub fn accepts_subgraphs(&self) -> bool {
         matches!(self.factory, NodeFactory::Subgraph { .. })
+    }
+
+    /// The child Flow frame this kind expects, if it receives Flow parameters.
+    pub fn subgraph_scope(&self) -> Option<SubgraphScope> {
+        match self.factory {
+            NodeFactory::Subgraph { scope, .. } => scope,
+            NodeFactory::Plain(_) => None,
+        }
     }
 
     pub fn flow_parameters(&self, config: &Value) -> BTreeMap<String, Value> {

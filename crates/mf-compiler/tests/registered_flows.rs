@@ -60,6 +60,13 @@ fn registered_calls_use_host_execution_without_loading_child_providers() {
         )
         .unwrap();
     let plan = compile_resolved_definition(&definition, &registry).unwrap();
+    assert_eq!(
+        plan.graph.children[&"invoke".into()]["body"]
+            .relations
+            .host
+            .as_deref(),
+        Some("host.runner")
+    );
     for prompt in ["first", "second"] {
         let arguments = WorkflowArguments(
             [

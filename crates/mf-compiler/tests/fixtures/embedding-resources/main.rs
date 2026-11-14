@@ -76,6 +76,7 @@ inventory::submit! {
     runtime::NodeRegistration {
         kind: "host.invoke",
         factory: runtime::NodeFactory::Subgraph {
+            scope: None,
             flow_parameters: Config::flow_parameters,
             plain,
             prepared: factory,

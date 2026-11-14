@@ -1,7 +1,6 @@
 use crate::{NodeDefinition, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::{
-    EXIT_LOOP_KIND, ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, LOOP_KIND,
-    LOOP_SOURCE_ID,
+    EXIT_LOOP_KIND, ITERATION_INPUT_ID, ITERATION_INPUT_KIND, LOOP_SOURCE_ID, SubgraphScope,
 };
 use serde::Deserialize;
 use snafu::{ResultExt, Snafu, ensure};
@@ -34,7 +33,10 @@ pub fn parse_config(node: &NodeDefinition) -> Result<LoweringConfig, WorkflowCom
 
 /// The supported item-scope grammar is a compiler contract. Result shape,
 /// ordinary configuration and stream-name business rules belong to the receiver.
-pub fn validate_body_structure(body: &WorkflowDefinition) -> Result<(), ScopeStructureError> {
+pub fn validate_body_structure(
+    body: &WorkflowDefinition,
+    subgraphs: &BTreeMap<String, SubgraphScope>,
+) -> Result<(), ScopeStructureError> {
     for node in &body.nodes {
         if node.id.as_str() == ITERATION_INPUT_ID || node.kind == ITERATION_INPUT_KIND {
             ensure!(
@@ -48,16 +50,14 @@ pub fn validate_body_structure(body: &WorkflowDefinition) -> Result<(), ScopeStr
             continue;
         }
         ensure!(
-            node.kind != ITERATION_KIND,
+            subgraphs.get(node.kind.as_str()) != Some(&SubgraphScope::Iteration),
             NestedScopeSnafu {
                 node: node.id.clone()
             }
         );
         ensure!(
-            !matches!(
-                node.kind.as_str(),
-                LOOP_KIND | EXIT_LOOP_KIND | LOOP_SOURCE_ID
-            ),
+            subgraphs.get(node.kind.as_str()) != Some(&SubgraphScope::Loop)
+                && !matches!(node.kind.as_str(), EXIT_LOOP_KIND | LOOP_SOURCE_ID),
             StateScopeSnafu {
                 node: node.id.clone()
             }
