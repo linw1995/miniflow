@@ -381,7 +381,7 @@ pub fn lower_scope_at(
         scope.writes.clear();
         scope.exits.clear();
     }
-    relations.router_writes.clear();
+    relations.node_writes.clear();
     for node in &definition.nodes {
         let mut node_path = path.to_vec();
         node_path.push(node.id.clone());
@@ -410,8 +410,8 @@ pub fn lower_scope_at(
             mf_runtime::ASSIGN_KIND => {
                 // validate_scope checked ownership, target existence and spelling.
                 let target = crate::loops::assignment_target(&node.config, path)?;
-                if let Some(write) = crate::routers::write_target(definition, &target) {
-                    relations.router_writes.insert(node.id.clone(), write);
+                if let Some(write) = crate::loops::node_assignment_target(definition, &target) {
+                    relations.node_writes.insert(node.id.clone(), write);
                     continue;
                 }
                 if let Some(scope) = relations.scope.as_mut() {

@@ -383,6 +383,25 @@ opaque. JSON deserialization cannot produce a Flow, and JSON defaults/environmen
 supply one. Flow-valued fields initially retain dynamic generated execution rather than claiming
 certified direct-transfer support.
 
+### Provider-owned node state
+
+`NodeFactory::WithState` wraps an existing factory with a state callback. The callback receives the
+target's final compiled configuration and returns an `Arc<dyn NodeStateContract>` without constructing
+or executing the target or its children. It composes with `WithFlowBindings` in either order.
+`NodeStateContract::initial` supplies invocation-local values; `writable_type` declares writable fields
+and their input types, and `validate_write` enforces provider-specific constraints. Writable fields must
+exist in the initial values with matching types. Return typed provider errors through
+`NodeExecutionError::PluginFailed` so their source chains remain available.
+
+`workflow.assign` can target `%<node>.<field>` for any provider that declares state. Lowering records
+only the target node ID and field in `GraphRelations::node_writes`; saved plans retain these authoritative
+relationships. Preparation rejects undeclared or read-only fields and uses the provider's current
+configuration for initialization and validation. The runtime validates the input type, asks the provider
+to validate the value, and stages the write until successful publication. Calls and container frames
+isolate node state, and domain merges retain committed writes without restoring stale snapshots.
+Use an explicit writer prerequisite on readers; the target relationship does not establish order.
+Router declares `enables` through this same protocol and owns its route-subset validation.
+
 ### Typed generation opt-in
 
 A provider can opt a named value into certified field access and borrowed validation with `#[value(typed)]`.

@@ -180,11 +180,11 @@ impl NodeRegistry {
         &self,
     ) -> BTreeMap<String, fn(&serde_json::Value) -> crate::flow_bindings::FlowBindings> {
         self.iter()
-            .filter_map(|registration| match registration.factory {
-                crate::NodeFactory::WithFlowBindings { bindings, .. } => {
-                    Some((registration.kind.to_owned(), bindings))
-                }
-                _ => None,
+            .filter_map(|registration| {
+                registration
+                    .factory
+                    .flow_binding_extractor()
+                    .map(|bindings| (registration.kind.to_owned(), bindings))
             })
             .collect()
     }

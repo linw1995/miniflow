@@ -16,6 +16,7 @@ mod future_execution;
 mod iteration;
 mod loop_node;
 mod node;
+mod node_state;
 mod node_target;
 mod number;
 mod registry;
@@ -42,7 +43,7 @@ mod workflow_manifest;
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
 pub use compiled_graph::{
-    CompiledGraph, GraphRelations, RootScopeRelations, RouterWrite, ScopeInstruction,
+    CompiledGraph, GraphRelations, NodeStateWrite, RootScopeRelations, ScopeInstruction,
     ScopeRelations,
 };
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
@@ -84,8 +85,7 @@ pub use iteration::{
 };
 pub use loop_node::{
     LoopVariableError, loop_variable_types, prepared_loop_assign, prepared_loop_exit,
-    prepared_loop_source_types, prepared_root_assign, prepared_root_source, prepared_router_assign,
-    prepared_scope_source,
+    prepared_loop_source_types, prepared_root_assign, prepared_root_source, prepared_scope_source,
 };
 pub use mf_runtime_derive::{NodeConfig, NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{FlowOrigin, NodeIdentity, ScopePathEntry, SkipCause};
@@ -106,6 +106,7 @@ pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,
     TypedTaskHandle,
 };
+pub use node_state::{NodeStateContract, prepared_node_assign};
 pub use node_target::{
     NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget, target_ports,
 };

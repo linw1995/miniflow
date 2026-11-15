@@ -891,15 +891,19 @@ fn generate_scope(
                         .inspect_err(|error| { #preparation_report })?
                 }
             }
-            Some(mf_runtime::ScopeInstruction::RouterWrite(write)) => {
-                let (routes, enables) = crate::routers::write_values(definition, write)?;
-                let router_lit = LitStr::new(write.router.as_str(), Span::call_site());
-                let routes_json = serde_json::to_string(&routes).context(SerializeSnafu)?;
-                let routes_lit = LitStr::new(&routes_json, Span::call_site());
-                let enables_json = serde_json::to_string(&enables).context(SerializeSnafu)?;
-                let enables_lit = LitStr::new(&enables_json, Span::call_site());
+            Some(mf_runtime::ScopeInstruction::NodeWrite(write)) => {
+                let target = nodes_by_id
+                    .get(&write.node)
+                    .with_context(|| UnknownNodeSnafu {
+                        definition_id: write.node.clone(),
+                    })?;
+                let target_lit = LitStr::new(write.node.as_str(), Span::call_site());
+                let target_kind = LitStr::new(&target.kind, Span::call_site());
+                let config = serde_json::to_string(&target.config).context(SerializeSnafu)?;
+                let config_lit = LitStr::new(&config, Span::call_site());
+                let field_lit = LitStr::new(&write.field, Span::call_site());
                 quote! {
-                    mf_compiler::prepared_router_assign_from_json(#id_lit, #router_lit, #routes_lit, #enables_lit)
+                    mf_compiler::prepared_node_assign_from_json(registry, #id_lit, #target_lit, #target_kind, #config_lit, #field_lit)
                         .inspect_err(|error| { #preparation_report })?
                 }
             }
@@ -2220,16 +2224,16 @@ mod tests {
                     ("custom-input", "custom.source"),
                     ("custom-write", "custom.write"),
                     ("custom-exit", "custom.exit"),
-                    ("router-write", crate::ASSIGN_KIND),
+                    ("node-write", crate::ASSIGN_KIND),
                     ("ordinary", crate::ASSIGN_KIND),
-                    ("choose", "custom.router"),
+                    ("choose", "custom.stateful"),
                 ]
                 .into_iter()
                 .map(|(id, kind)| crate::NodeDefinition {
                     id: id.into(),
                     kind: kind.into(),
                     config: if id == "choose" {
-                        serde_json::json!({"routes": ["first"]})
+                        serde_json::json!({"opaque": "provider-owned"})
                     } else {
                         serde_json::Value::Null
                     },
@@ -2245,7 +2249,7 @@ mod tests {
                 "custom-input",
                 "custom-write",
                 "custom-exit",
-                "router-write",
+                "node-write",
                 "ordinary",
                 "choose",
             ]
@@ -2260,10 +2264,11 @@ mod tests {
                     writes: BTreeMap::from([("custom-write".into(), "item".into())]),
                     exits: BTreeSet::from(["custom-exit".into()]),
                 }),
-                router_writes: BTreeMap::from([(
-                    "router-write".into(),
-                    mf_runtime::RouterWrite {
-                        router: "choose".into(),
+                node_writes: BTreeMap::from([(
+                    "node-write".into(),
+                    mf_runtime::NodeStateWrite {
+                        node: "choose".into(),
+                        field: "selection".into(),
                     },
                 )]),
                 ..Default::default()
@@ -2282,7 +2287,7 @@ mod tests {
         assert!(source.contains("prepared_scope_source_from_json"));
         assert!(source.contains("prepared_loop_assign_from_json"));
         assert!(source.contains("prepared_loop_exit"));
-        assert!(source.contains("prepared_router_assign_from_json"));
+        assert!(source.contains("prepared_node_assign_from_json"));
         assert_eq!(source.matches("instantiate_node_with_metadata").count(), 2);
         assert!(source.contains("\"ordinary\""));
         assert!(!source.contains("iteration_input_flow_node"));

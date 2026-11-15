@@ -212,6 +212,9 @@ fn is_business_failure(error: &mf_runtime::WorkflowRunError) -> bool {
     match source {
         NodeExecutionError::ExecutionFailed { .. } => true,
         NodeExecutionError::PluginFailed { source } => {
+            if source.is::<crate::router::RouterExecutionError>() {
+                return true;
+            }
             if let Some(error) = source.downcast_ref::<WorkflowRunError>() {
                 return is_business_failure(error);
             }

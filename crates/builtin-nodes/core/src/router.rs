@@ -1,12 +1,13 @@
 use mf_runtime::{
     ExecutionContext, FlowBindings, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
-    NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec,
-    PreparedNode, PreparedSubgraph, TaskNode, ValueRef, ValueType,
+    NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, NodeStateContract,
+    Outputs, PortSpec, PreparedNode, PreparedSubgraph, TaskNode, ValueRef, ValueType,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use snafu::{Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub const KIND: &str = "builtin.router";
 
@@ -59,7 +60,36 @@ fn validate(config: &Config) -> Result<(), RouterBuildError> {
     }
     Ok(())
 }
-impl Config {
+#[derive(Debug, Snafu)]
+pub enum RouterExecutionError {
+    #[snafu(display("router enables must be a duplicate-free subset of its routes"))]
+    Enables,
+}
+
+impl From<RouterExecutionError> for NodeExecutionError {
+    fn from(source: RouterExecutionError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
+impl NodeStateContract for Config {
+    fn writable_type(&self, field: &str) -> Option<ValueType> {
+        (field == "enables").then(|| ValueType::List(Box::new(ValueType::String)))
+    }
+
+    fn validate_write(&self, _field: &str, value: &ValueRef) -> Result<(), NodeExecutionError> {
+        let mut seen = BTreeSet::new();
+        let valid = value.as_array().is_some_and(|values| {
+            values.iter().all(|value| {
+                value.as_str().is_some_and(|route| {
+                    self.routes.iter().any(|known| known == route) && seen.insert(route)
+                })
+            })
+        });
+        ensure!(valid, EnablesSnafu);
+        Ok(())
+    }
+
     fn initial(&self) -> Outputs {
         Outputs::from([
             (
@@ -147,6 +177,16 @@ fn static_bindings(config: &Value) -> BTreeSet<String> {
         .map(|config| config.routes.into_iter().collect())
         .unwrap_or_default()
 }
+fn parse_config(config: Value) -> Result<Config, NodeBuildError> {
+    let config: Config = mf_runtime::deserialize_config(config)?;
+    validate(&config)?;
+    Ok(config)
+}
+
+fn state(config: &Value) -> Result<Arc<dyn NodeStateContract>, NodeBuildError> {
+    Ok(Arc::new(parse_config(config.clone())?))
+}
+
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     prepared_factory(KIND, config, BTreeMap::new())
 }
@@ -155,8 +195,7 @@ fn prepared_factory(
     config: Value,
     bodies: BTreeMap<String, PreparedSubgraph>,
 ) -> Result<PreparedNode, NodeBuildError> {
-    let config: Config = mf_runtime::deserialize_config(config)?;
-    validate(&config)?;
+    let config = parse_config(config)?;
     ensure!(
         config
             .routes
@@ -191,8 +230,11 @@ fn prepared_factory(
 }
 inventory::submit! {
     NodeRegistration { kind: KIND, factory: NodeFactory::WithFlowBindings {
-        factory: &NodeFactory::BoundSubgraph {
-            bindings: static_bindings, plain: factory, prepared: prepared_factory,
+        factory: &NodeFactory::WithState {
+            factory: &NodeFactory::BoundSubgraph {
+                bindings: static_bindings, plain: factory, prepared: prepared_factory,
+            },
+            state,
         },
         bindings,
     } }

@@ -18,9 +18,9 @@ pub struct GraphRelations {
     pub root: Option<RootScopeRelations>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub streams: BTreeMap<String, crate::OutputReferenceDefinition>,
-    /// Assignments to router-local `enables`, keyed by the assignment node.
+    /// Writes to provider-owned node state, keyed by the assignment node.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub router_writes: BTreeMap<DefinitionId, RouterWrite>,
+    pub node_writes: BTreeMap<DefinitionId, NodeStateWrite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,8 +42,9 @@ pub struct RootScopeRelations {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RouterWrite {
-    pub router: DefinitionId,
+pub struct NodeStateWrite {
+    pub node: DefinitionId,
+    pub field: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -67,14 +68,14 @@ pub enum ScopeInstruction<'a> {
     RootWrite(&'a str),
     Input,
     Write(&'a str),
-    RouterWrite(&'a RouterWrite),
+    NodeWrite(&'a NodeStateWrite),
     Exit,
 }
 
 impl GraphRelations {
     pub fn instruction(&self, id: &DefinitionId) -> Option<ScopeInstruction<'_>> {
-        if let Some(write) = self.router_writes.get(id) {
-            return Some(ScopeInstruction::RouterWrite(write));
+        if let Some(write) = self.node_writes.get(id) {
+            return Some(ScopeInstruction::NodeWrite(write));
         }
         if let Some(root) = &self.root {
             if id == &root.input {

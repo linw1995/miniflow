@@ -430,6 +430,23 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
         .iter()
         .map(|node| &node.id)
         .collect::<BTreeSet<_>>();
+    let mut instructions = BTreeSet::new();
+    for (id, write) in &graph.relations.node_writes {
+        ensure!(
+            nodes.contains(id) && instructions.insert(id) && !graph.children.contains_key(id),
+            InvalidSnafu {
+                message: "node state instructions must name known nodes without children",
+            }
+        );
+        ensure!(
+            nodes.contains(&write.node)
+                && !write.field.trim().is_empty()
+                && graph.relations.instruction(&write.node).is_none(),
+            InvalidSnafu {
+                message: "node state writes require a known ordinary target and nonblank field",
+            }
+        );
+    }
     for (name, output) in &graph.relations.streams {
         ensure!(
             !name.trim().is_empty()
@@ -462,7 +479,6 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
             }
         );
         root.validate_values().context(VariablesSnafu)?;
-        let mut instructions = BTreeSet::new();
         for id in std::iter::once(&root.input).chain(root.writes.keys()) {
             ensure!(
                 nodes.contains(id) && instructions.insert(id) && !graph.children.contains_key(id),
@@ -515,7 +531,6 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
     let Some(scope) = &graph.relations.scope else {
         return Ok(());
     };
-    let mut instructions = BTreeSet::new();
     for id in std::iter::once(&scope.input)
         .chain(scope.writes.keys())
         .chain(scope.exits.iter())

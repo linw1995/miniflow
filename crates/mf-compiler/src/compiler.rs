@@ -2552,14 +2552,15 @@ fn resolve_nodes_in_scope(
                     })?;
                     return Ok(mf_runtime::prepared_loop_assign(node.id.as_str(), target, value_type));
                 }
-                Some(ScopeInstruction::RouterWrite(write)) => {
-                    let (routes, enables) = crate::routers::write_values(definition, write)?;
-                    return Ok(mf_runtime::prepared_router_assign(
-                        node.id.as_str(),
-                        write.router.as_str(),
-                        routes,
-                        enables,
-                    ));
+                Some(ScopeInstruction::NodeWrite(write)) => {
+                    let target = definition.nodes.iter().find(|target| target.id == write.node)
+                        .with_context(|| InvalidGraphSnafu {
+                            definition_id: node.id.clone(),
+                            message: "state assignment references an unknown target node",
+                        })?;
+                    return Ok(crate::prepared_node_assign(
+                        preparation.registry, node.id.as_str(), target, &write.field,
+                    )?);
                 }
                 Some(ScopeInstruction::Exit) => {
                     return Ok(mf_runtime::prepared_loop_exit(node.id.as_str()));

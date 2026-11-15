@@ -57,6 +57,24 @@ pub fn assignment_target(
     Ok(assignment.variable)
 }
 
+pub fn node_assignment_target(
+    definition: &WorkflowDefinition,
+    target: &str,
+) -> Option<mf_runtime::NodeStateWrite> {
+    let (node, field) = target.strip_prefix('%')?.rsplit_once('.')?;
+    if matches!(node, "root" | "loop" | "iteration") || field.trim().is_empty() {
+        return None;
+    }
+    let node = definition
+        .nodes
+        .iter()
+        .find(|candidate| candidate.id.as_str() == node)?;
+    Some(mf_runtime::NodeStateWrite {
+        node: node.id.clone(),
+        field: field.to_owned(),
+    })
+}
+
 pub fn parse_config(node: &NodeDefinition) -> Result<LoweringConfig, WorkflowCompileError> {
     serde_json::from_value(node.config.clone()).context(crate::compiler::NodeConfigurationSnafu {
         definition_id: node.id.clone(),
@@ -107,7 +125,7 @@ pub fn validate_scope(
                 // Lowering validates the declaration version; inside a Loop body the
                 // assignment keeps the pre-existing immediate-write contract.
                 let target = assignment_target(&node.config, &node_path)?;
-                if crate::routers::write_target(definition, &target).is_some() {
+                if node_assignment_target(definition, &target).is_some() {
                     continue;
                 }
                 let types = enclosing

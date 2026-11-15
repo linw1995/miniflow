@@ -25,7 +25,6 @@ mod lowering;
 #[cfg(feature = "codegen")]
 mod pipeline;
 mod plan;
-mod routers;
 #[cfg(feature = "codegen")]
 mod state;
 mod streaming;
@@ -115,8 +114,8 @@ pub use construction::{
     UnknownKindSnafu as WorkflowUnknownKindSnafu, WorkflowBuildError, bind_workflow_inputs,
     build_flow, build_stream_program, instantiate_node_with_metadata,
     instantiate_subgraphs_with_metadata, into_task, partition_execution_domains, prepare_stream,
-    prepared_loop_assign_from_json, prepared_loop_source_from_json,
-    prepared_router_assign_from_json, prepared_scope_source_from_json, stream_workflow_inputs,
+    prepared_loop_assign_from_json, prepared_loop_source_from_json, prepared_node_assign,
+    prepared_node_assign_from_json, prepared_scope_source_from_json, stream_workflow_inputs,
     validate_compiled_graph, validate_execution, validate_node_flow_parameters,
     validate_scope_bindings, validate_stream_limits, validate_success_connection,
     workflow_input_schema,

@@ -272,3 +272,83 @@ fn source_free_generated_runner_executes_external_provider_flow_bindings() {
         .unwrap();
     assert!(!rejected.status.success());
 }
+
+#[test]
+fn source_free_runner_uses_external_state_contracts_for_generic_assignments() {
+    let root = tempfile::tempdir().unwrap();
+    let provider_dir = root.path().join("provider");
+    fs::create_dir_all(provider_dir.join("src")).unwrap();
+    fs::write(
+        provider_dir.join("Cargo.toml"),
+        include_str!("fixtures/flow-arguments-provider/Cargo.toml").replace(
+            "\"../../../../mf-runtime\"",
+            &serde_json::to_string(&common::crates_dir().join("mf-runtime")).unwrap(),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        provider_dir.join("src/lib.rs"),
+        include_str!("fixtures/flow-arguments-provider/src/lib.rs"),
+    )
+    .unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-11-13", "dependencies":{
+            "provider":{"package":"fixture-flow-arguments-provider", "path":provider_dir},
+            "core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}
+        },
+        "nodes":[
+            {"id":"params", "kind":"builtin.parameters", "config":{"parameters":{
+                "value":{"type":"int", "default":7, "secret":false}
+            }}},
+            {"id":"write", "kind":"workflow.assign", "config":{"variable":"%counter.count"},
+                "inputs":{"value":{"from":{"node":"params", "port":"value"}}}},
+            {"id":"counter", "kind":provider::STATE_KIND, "config":{"initial":1, "limit":10}}
+        ],
+        "edges":[{"from_node":"write", "from_output":"done", "to_node":"counter"}],
+        "outputs":[{"name":"count", "node":"counter", "port":"count"}]
+    }))
+    .unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    let flow = instantiate_compiled(&saved, &registry).unwrap();
+    let source = root.path().join("flow.json");
+    fs::write(&source, serde_json::to_vec(&definition).unwrap()).unwrap();
+    let output = root.path().join("runner");
+    let build = root.path().join("build");
+    compile_project(&CompileRequest {
+        definition: &source,
+        output: &output,
+        locked: false,
+        build_dir: Some(&build),
+        support: &SupportPackages::Local {
+            crates_dir: common::crates_dir(),
+        },
+    })
+    .unwrap();
+    fs::remove_file(&source).unwrap();
+    fs::remove_dir_all(&build).unwrap();
+    fs::remove_dir_all(&provider_dir).unwrap();
+    for value in [2, 9, 11] {
+        let memory = flow.execute_with_inputs(
+            WorkflowArguments::try_from(json!({"params.value":value})).unwrap(),
+        );
+        let generated = Command::new(&output)
+            .arg(format!("--params.value={value}"))
+            .current_dir(root.path())
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert_eq!(generated.status.success(), memory.is_ok());
+        if let Ok(expected) = memory {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&generated.stdout).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        } else {
+            assert!(
+                String::from_utf8_lossy(&generated.stderr).contains("counter exceeds its limit")
+            );
+        }
+    }
+}

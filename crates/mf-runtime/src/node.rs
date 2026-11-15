@@ -698,6 +698,17 @@ pub enum NodeBuildError {
     InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"), context(false))]
     InvalidConfiguration { source: serde_json::Error },
+    #[snafu(display("node state field `{field}` is not writable"), visibility(pub))]
+    StateField { field: String },
+    #[snafu(
+        display("invalid initial node state field `{field}`: {source}"),
+        visibility(pub)
+    )]
+    StateInitial {
+        field: String,
+        #[snafu(source(from(TypeMismatch, Box::new)))]
+        source: Box<TypeMismatch>,
+    },
     #[snafu(display("invalid Flow parameters: {source}"))]
     FlowParameters { source: crate::FlowParameterError },
     #[snafu(display("node factory failed: {source}"), visibility(pub))]
@@ -740,6 +751,12 @@ pub enum NodeExecutionError {
     WorkflowVariables {
         #[snafu(source(from(crate::WorkflowVariablesError, Box::new)))]
         source: Box<crate::WorkflowVariablesError>,
+    },
+    #[snafu(display("node state field `{field}`: {source}"), visibility(pub))]
+    StateType {
+        field: String,
+        #[snafu(source(from(TypeMismatch, Box::new)))]
+        source: Box<TypeMismatch>,
     },
     #[snafu(display("node execution failed: {message}"), visibility(pub))]
     ExecutionFailed { message: String },
@@ -1421,6 +1438,11 @@ pub enum NodeFactory {
             BTreeMap<String, crate::PreparedSubgraph>,
         ) -> Result<PreparedNode, NodeBuildError>,
     },
+    /// Declares state independently of constructing the node or its children.
+    WithState {
+        factory: &'static NodeFactory,
+        state: fn(&Value) -> Result<std::sync::Arc<dyn crate::NodeStateContract>, NodeBuildError>,
+    },
     /// Adds static capability provenance without changing construction or port types.
     WithFlowBindings {
         factory: &'static NodeFactory,
@@ -1452,15 +1474,38 @@ pub struct NodeRegistration {
 impl NodeFactory {
     pub fn base(&self) -> Self {
         match self {
-            Self::WithFlowBindings { factory, .. } => factory.base(),
+            Self::WithFlowBindings { factory, .. } | Self::WithState { factory, .. } => {
+                factory.base()
+            }
             factory => *factory,
         }
     }
 
-    pub fn flow_bindings(&self, config: &Value) -> crate::flow_bindings::FlowBindings {
+    pub fn flow_binding_extractor(
+        &self,
+    ) -> Option<fn(&Value) -> crate::flow_bindings::FlowBindings> {
         match self {
-            Self::WithFlowBindings { bindings, .. } => bindings(config),
-            _ => crate::flow_bindings::FlowBindings::default(),
+            Self::WithFlowBindings { bindings, .. } => Some(*bindings),
+            Self::WithState { factory, .. } => factory.flow_binding_extractor(),
+            _ => None,
+        }
+    }
+
+    pub fn flow_bindings(&self, config: &Value) -> crate::flow_bindings::FlowBindings {
+        self.flow_binding_extractor()
+            .map_or_else(crate::flow_bindings::FlowBindings::default, |bindings| {
+                bindings(config)
+            })
+    }
+
+    pub fn prepare_state(
+        &self,
+        config: &Value,
+    ) -> Result<Option<std::sync::Arc<dyn crate::NodeStateContract>>, NodeBuildError> {
+        match self {
+            Self::WithState { state, .. } => state(config).map(Some),
+            Self::WithFlowBindings { factory, .. } => factory.prepare_state(config),
+            _ => Ok(None),
         }
     }
 }
@@ -1588,7 +1633,9 @@ impl NodeRegistration {
             NodeFactory::Plain(factory)
             | NodeFactory::Subgraph { plain: factory, .. }
             | NodeFactory::BoundSubgraph { plain: factory, .. } => factory(config),
-            NodeFactory::WithFlowBindings { .. } => unreachable!("base factory is unwrapped"),
+            NodeFactory::WithFlowBindings { .. } | NodeFactory::WithState { .. } => {
+                unreachable!("base factory is unwrapped")
+            }
         }
     }
 }

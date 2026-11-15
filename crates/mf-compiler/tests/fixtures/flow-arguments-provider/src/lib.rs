@@ -7,6 +7,7 @@ use mf_runtime::{
 use serde_json::Value;
 use snafu::{OptionExt, ensure};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub const KIND: &str = "fixture.choose_flow";
 
@@ -93,5 +94,92 @@ inventory::submit! {
     NodeRegistration {
         kind: KIND,
         factory: NodeFactory::Subgraph { scope: None, flow_parameters: Config::flow_parameters, plain, prepared },
+    }
+}
+
+pub const STATE_KIND: &str = "fixture.counter";
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Counter {
+    initial: i64,
+    limit: i64,
+}
+
+#[derive(Debug, snafu::Snafu)]
+pub enum StateError {
+    #[snafu(display("counter exceeds its limit of {limit}"))]
+    Limit { limit: i64 },
+}
+
+impl From<StateError> for NodeExecutionError {
+    fn from(source: StateError) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
+impl mf_runtime::NodeStateContract for Counter {
+    fn initial(&self) -> mf_runtime::Outputs {
+        mf_runtime::Outputs::from([
+            ("count".into(), self.initial.into()),
+            ("limit".into(), self.limit.into()),
+        ])
+    }
+
+    fn writable_type(&self, field: &str) -> Option<ValueType> {
+        (field == "count").then_some(ValueType::Int64)
+    }
+
+    fn validate_write(
+        &self,
+        _field: &str,
+        value: &mf_runtime::ValueRef,
+    ) -> Result<(), NodeExecutionError> {
+        ensure!(
+            value.as_i64().is_some_and(|count| count <= self.limit),
+            LimitSnafu { limit: self.limit }
+        );
+        Ok(())
+    }
+}
+
+impl NodePortContract for Counter {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: vec![],
+            outputs: vec![PortSpec::new("count", ValueType::Int64, true)],
+        }
+    }
+}
+
+impl TaskNode for Counter {
+    fn execute(
+        &self,
+        _: Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        use mf_runtime::NodeStateContract;
+        let initial = self.initial();
+        let values = if let Some(id) = context.current_node() {
+            context.node_state(&format!("%{id}"), initial)
+        } else {
+            initial
+        };
+        Ok(mf_runtime::Outputs::from([("count".into(), values["count"].clone())]).into())
+    }
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: STATE_KIND,
+        factory: NodeFactory::WithState {
+            factory: &NodeFactory::WithFlowBindings {
+                factory: &NodeFactory::Plain(|config| {
+                    PreparedNode::new(mf_runtime::deserialize_config::<Counter>(config)?, NodeMetadata::default())
+                }),
+                bindings: |_| mf_runtime::FlowBindings::default(),
+            },
+            state: |config| Ok(Arc::new(mf_runtime::deserialize_config::<Counter>(config.clone())?)),
+        },
     }
 }

@@ -650,11 +650,21 @@ fn assign_replaces_enables_without_leaking_between_invocations() {
         "state assignment must not add graph nodes"
     );
     assert!(
-        mf_runtime::prepared_router_assign("write", "execute", vec![], vec![])
-            .into_task()
-            .unwrap()
-            .node
-            .supports_success_dependencies()
+        mf_compiler::prepared_node_assign(
+            &registry,
+            "write",
+            source
+                .nodes
+                .iter()
+                .find(|node| node.id.as_str() == "execute")
+                .unwrap(),
+            "enables",
+        )
+        .unwrap()
+        .into_task()
+        .unwrap()
+        .node
+        .supports_success_dependencies()
     );
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     for (enables, route, active) in [
@@ -725,6 +735,39 @@ fn saved_router_assignments_use_the_target_configuration() {
     );
     #[cfg(feature = "codegen")]
     saved.generate_runner_execution_plans(&registry).unwrap();
+}
+
+#[test]
+fn invalid_router_state_writes_remain_recoverable_packed_call_errors() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for enables in [json!(["missing"]), json!(["first", "first"])] {
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version":"2026-11-13", "nodes":[
+                {"id":"body", "kind":"builtin.constant", "config":{
+                    "type":"flow", "value":state_flow("%execute.enables")
+                }},
+                {"id":"tools", "kind":"builtin.object", "config":{"fields":{"state":"flow"}},
+                    "inputs":{"state":edge("body", "value")}},
+                {"id":"route", "kind":"builtin.constant", "config":{"value":"state"}},
+                {"id":"arguments", "kind":"builtin.constant", "config":{"value":{"params.enables":enables}}},
+                {"id":"invoke", "kind":"builtin.router", "config":{"routes":[]}, "inputs":{
+                    "flows":edge("tools", "value"), "route":edge("route", "value"), "arguments":edge("arguments", "value")
+                }}
+            ], "outputs":[{"name":"result", "node":"invoke", "port":"result"}]
+        }))
+        .unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let output = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute()
+            .unwrap();
+        assert!(
+            output["result"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("subset of its routes")
+        );
+    }
 }
 
 #[test]

@@ -1126,19 +1126,56 @@ pub fn prepared_loop_source_from_json(
     Ok(mf_runtime::prepared_loop_source_types(&types))
 }
 
-pub fn prepared_router_assign_from_json(
+pub fn prepared_node_assign(
+    registry: &NodeRegistry,
     id: &str,
-    router: &str,
-    routes_json: &str,
-    enables_json: &str,
+    target: &crate::NodeDefinition,
+    field: &str,
 ) -> Result<FlowNode, WorkflowBuildError> {
-    let routes: Vec<String> = serde_json::from_str(routes_json)
-        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    let enables: Vec<String> = serde_json::from_str(enables_json)
-        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    Ok(mf_runtime::prepared_router_assign(
-        id, router, routes, enables,
-    ))
+    let registration = registry
+        .get(&target.kind)
+        .with_context(|| UnknownKindSnafu {
+            definition_id: target.id.clone(),
+            kind: target.kind.clone(),
+        })?;
+    let state = registration
+        .factory
+        .prepare_state(&target.config)
+        .context(NodeConstructionSnafu {
+            definition_id: target.id.clone(),
+        })?
+        .with_context(|| InvalidDefinitionSnafu {
+            definition_id: target.id.clone(),
+            message: "assignment target does not declare node state",
+        })?;
+    mf_runtime::prepared_node_assign(id, target.id.as_str(), field, state).context(
+        NodeConstructionSnafu {
+            definition_id: target.id.clone(),
+        },
+    )
+}
+
+pub fn prepared_node_assign_from_json(
+    registry: &NodeRegistry,
+    id: &str,
+    node: &str,
+    kind: &str,
+    config_json: &str,
+    field: &str,
+) -> Result<FlowNode, WorkflowBuildError> {
+    let config = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
+        definition_id: node,
+    })?;
+    prepared_node_assign(
+        registry,
+        id,
+        &crate::NodeDefinition {
+            id: node.into(),
+            kind: kind.into(),
+            config,
+        },
+        field,
+    )
 }
 
 pub fn prepared_loop_assign_from_json(
@@ -1931,19 +1968,6 @@ pub fn prepare_stream(
 }
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn router_assignment_constructor_parses_generated_bindings() {
-        let node = super::prepared_router_assign_from_json(
-            "write",
-            "choose",
-            r#"["first","second"]"#,
-            r#"["first"]"#,
-        )
-        .unwrap();
-        assert_eq!(node.definition_id.as_str(), "write");
-        assert_eq!(node.metadata.ports.inputs[0].name, "value");
-    }
-
     use super::*;
     use crate::NodeExecutionError;
     use mf_runtime::{FlowOutputs, Inputs, Outputs, RuntimeOptions, TaskNode};

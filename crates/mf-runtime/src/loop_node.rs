@@ -1,7 +1,7 @@
 use crate::{
     ExecutionContext, FlowNode, Inputs, LoopVariableDefinition, NodeExecutionError, NodeMetadata,
-    NodePortContract, NodePorts, NodeResult, NodeValue, Outputs, PortSpec, TaskNode,
-    TypedNodeResult, TypedTaskNode, ValueType, encode_typed_result,
+    NodePortContract, NodePorts, NodeResult, NodeValue, PortSpec, TaskNode, TypedNodeResult,
+    TypedTaskNode, ValueType, encode_typed_result,
 };
 use snafu::{ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
@@ -170,96 +170,6 @@ pub fn prepared_loop_assign(id: &str, variable: &str, value_type: ValueType) -> 
 
 pub fn prepared_root_assign(id: &str, variable: &str, value_type: ValueType) -> FlowNode {
     prepared_assignment(id, variable, value_type, true)
-}
-
-struct RouterAssignmentNode {
-    router: String,
-    routes: Vec<String>,
-    enables: Vec<String>,
-}
-
-impl NodePortContract for RouterAssignmentNode {
-    fn ports(&self) -> NodePorts {
-        NodePorts {
-            inputs: vec![PortSpec::new(
-                "value",
-                ValueType::List(Box::new(ValueType::String)),
-                true,
-            )],
-            outputs: AssignmentOutputs::ports(),
-        }
-    }
-}
-
-impl TaskNode for RouterAssignmentNode {
-    fn supports_success_dependencies(&self) -> bool {
-        true
-    }
-    fn execute(
-        &self,
-        mut inputs: Inputs,
-        ctx: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        let value = inputs
-            .remove("value")
-            .ok_or_else(|| structural_error("missing assignment value"))?;
-        validate_router_enables(&value, &self.routes)?;
-        let source = format!("%{}", self.router);
-        let initial = Outputs::from([
-            (
-                "routes".into(),
-                crate::ValueRef::from(serde_json::json!(self.routes)),
-            ),
-            (
-                "enables".into(),
-                crate::ValueRef::from(serde_json::json!(self.enables)),
-            ),
-        ]);
-        ctx.node_state(&source, initial);
-        ctx.stage_node_write(&source, "enables", value)?;
-        encode_typed_result(AssignmentOutputs { done: true }.into())
-    }
-}
-
-fn validate_router_enables(
-    value: &crate::ValueRef,
-    routes: &[String],
-) -> Result<(), NodeExecutionError> {
-    let mut seen = std::collections::BTreeSet::new();
-    let valid = value.as_array().is_some_and(|values| {
-        values.iter().all(|value| {
-            value.as_str().is_some_and(|route| {
-                routes.iter().any(|known| known == route) && seen.insert(route)
-            })
-        })
-    });
-    ensure!(
-        valid,
-        crate::NodeExecutionFailedSnafu {
-            message: "router enables must be a duplicate-free subset of its routes",
-        }
-    );
-    Ok(())
-}
-
-pub fn prepared_router_assign(
-    id: &str,
-    router: &str,
-    routes: Vec<String>,
-    enables: Vec<String>,
-) -> FlowNode {
-    FlowNode::new(
-        id,
-        crate::PreparedNode::new(
-            RouterAssignmentNode {
-                router: router.to_owned(),
-                routes,
-                enables,
-            },
-            NodeMetadata::default(),
-        )
-        .expect("router assignment metadata has no port declarations"),
-    )
 }
 
 fn prepared_assignment(id: &str, variable: &str, value_type: ValueType, root: bool) -> FlowNode {
