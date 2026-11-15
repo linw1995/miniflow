@@ -400,7 +400,7 @@ mod tests {
             input: "params".into(),
             values: Default::default(),
             state_outputs: Default::default(),
-            writes: Default::default(),
+
             exits: Default::default(),
         });
         let scoped = FlowValue::external(&manifest, outputs.clone(), |_, _| {
@@ -439,7 +439,7 @@ mod tests {
                 input: "%frame".into(),
                 values: BTreeMap::new(),
                 state_outputs: BTreeMap::new(),
-                writes: BTreeMap::new(),
+
                 exits: Default::default(),
             }),
             ..Default::default()

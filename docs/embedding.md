@@ -138,11 +138,13 @@ constructing nodes and supports existing description and observation APIs.
 
 The plan stores an explicit `CompiledGraph`: a definition, its canonical `execution_order`, and a
 `children` map keyed by receiving node ID and configuration field name, plus required `relations`.
-These relationships name scope input sources, current-frame variable writes and exits, node state write
-targets, stream export endpoints, host bindings, and scope-edge identity. `GraphRelations::node_writes`
-stores only each target node ID and field name. Preparation and generated runners obtain state
-contracts from the target's provider using its final compiled configuration. Discovery, provider checking,
-preparation, and codegen consume those relationships rather than reclassifying instructions by their node-kind labels. Only the
+These relationships name scope input sources, state assignments and exits, stream export endpoints,
+host bindings, and scope-edge identity. `GraphRelations::writes` is the single assignment table:
+`StateTarget` identifies a Root variable, a current-frame variable, or a provider's node field. Root and
+frame declarations contain types, initial values, and output mappings rather than separate write tables.
+Interpreted and generated preparation use the same assignment constructor. Variable types come from
+the owning scope; node contracts come from the provider's final compiled configuration. Discovery,
+provider checking, preparation, and codegen consume those relationships rather than reclassifying instructions by their node-kind labels. Only the
 authoring lowering boundary interprets the language's structural syntax. Scope keys must name their
 actual receiving owner or that exact encoded owner/binding pair; runtime invocation paths and
 telemetry descriptions use the same key while routing and errors retain the physical owner ID.

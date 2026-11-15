@@ -649,22 +649,15 @@ fn assign_replaces_enables_without_leaking_between_invocations() {
         compiled, authored,
         "state assignment must not add graph nodes"
     );
+    let target = &plan.graph.relations.writes[&"write".into()];
+    let schema = mf_compiler::assignment_schema(&plan.graph, target).unwrap();
     assert!(
-        mf_compiler::prepared_node_assign(
-            &registry,
-            "write",
-            source
-                .nodes
-                .iter()
-                .find(|node| node.id.as_str() == "execute")
-                .unwrap(),
-            "enables",
-        )
-        .unwrap()
-        .into_task()
-        .unwrap()
-        .node
-        .supports_success_dependencies()
+        mf_compiler::prepared_assign(&registry, "write", target, &schema)
+            .unwrap()
+            .into_task()
+            .unwrap()
+            .node
+            .supports_success_dependencies()
     );
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     for (enables, route, active) in [

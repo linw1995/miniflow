@@ -223,7 +223,10 @@ impl IterationNode {
                 relations.scope.as_ref().is_some_and(|scope| {
                     scope.values == types
                         && scope.state_outputs.is_empty()
-                        && scope.writes.is_empty()
+                        && !relations
+                            .writes
+                            .values()
+                            .any(|target| matches!(target, mf_runtime::StateTarget::Frame { .. }))
                         && scope.exits.is_empty()
                 }),
                 InvalidScopeBindingsSnafu
@@ -593,7 +596,7 @@ mod tests {
                     ("key".into(), ValueType::Any),
                 ]),
                 state_outputs: BTreeMap::new(),
-                writes: BTreeMap::new(),
+
                 exits: Default::default(),
             }),
             ..Default::default()
@@ -687,7 +690,12 @@ mod tests {
                     scope.state_outputs.insert("item".into(), "item".into());
                 }
                 5 => {
-                    scope.writes.insert("assign".into(), "item".into());
+                    relations.writes.insert(
+                        "assign".into(),
+                        mf_runtime::StateTarget::Frame {
+                            field: "item".into(),
+                        },
+                    );
                 }
                 6 => {
                     scope.exits.insert("exit".into());
@@ -1016,9 +1024,17 @@ mod tests {
             )
             .into_task()
             .unwrap();
-            let assign = mf_runtime::prepared_loop_assign("assign", "item", ValueType::Any)
-                .into_task()
-                .unwrap();
+            let assign = mf_runtime::prepared_assign(
+                "assign",
+                mf_runtime::StateTarget::Frame {
+                    field: "item".into(),
+                },
+                ValueType::Any,
+                None,
+            )
+            .unwrap()
+            .into_task()
+            .unwrap();
             let mut body = PreparedSubgraph::new(
                 Vec::new(),
                 vec![PortSpec::new("result", ValueType::Any, true)],

@@ -544,9 +544,14 @@ fn loop_validation_preserves_variable_and_descriptor_sources() {
         .unwrap();
     assert!(find_source::<mf_runtime::LoopVariableError>(&error).is_some());
     assert!(find_source::<mf_runtime::TypeDescriptorError>(&error).is_some());
-    let error = mf_compiler::prepared_loop_assign_from_json("assign", "x", r#""unknown""#)
-        .err()
-        .unwrap();
+    let error = mf_compiler::prepared_assign_from_json(
+        &NodeRegistry::from_inventory().unwrap(),
+        "assign",
+        r#"{"scope":"frame","field":"x"}"#,
+        r#"{"source":"typed","value_type":"unknown"}"#,
+    )
+    .err()
+    .unwrap();
     assert!(find_source::<mf_runtime::TypeDescriptorError>(&error).is_some());
 }
 

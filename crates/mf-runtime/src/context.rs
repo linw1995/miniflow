@@ -93,9 +93,8 @@ impl Drop for ScopeGuard<'_> {
         self.context.scopes.truncate(self.depth);
         self.context.outputs = std::mem::take(&mut self.parent_outputs);
         self.context.scope_exit_cutoff = self.parent_exit_cutoff.clone();
-        self.context.pending_loop_write = None;
         self.context.node_state = std::mem::take(&mut self.parent_node_state);
-        self.context.pending_node_write = None;
+        self.context.pending_write = None;
     }
 }
 
@@ -120,7 +119,7 @@ struct RootStateGuard<'a> {
 impl Drop for RootStateGuard<'_> {
     fn drop(&mut self) {
         self.context.root_state = self.previous.take();
-        self.context.pending_root_write = None;
+        self.context.pending_write = None;
     }
 }
 
@@ -227,11 +226,9 @@ pub struct ExecutionContext {
     observation: Option<RunObservation>,
     body_observation: Option<BodyObservation>,
     scopes: Vec<ExecutionScope>,
-    pending_loop_write: Option<(String, Value)>,
     root_state: Option<RootState>,
-    pending_root_write: Option<(String, Value)>,
     node_state: BTreeMap<String, NodeState>,
-    pending_node_write: Option<(String, String, Value)>,
+    pending_write: Option<(crate::StateTarget, Value)>,
     current_position: Option<usize>,
     current_node: Option<crate::DefinitionId>,
     scope_exit_cutoff: Arc<AtomicUsize>,
@@ -255,11 +252,9 @@ impl Default for ExecutionContext {
             observation: None,
             body_observation: None,
             scopes: Vec::new(),
-            pending_loop_write: None,
             root_state: None,
-            pending_root_write: None,
             node_state: BTreeMap::new(),
-            pending_node_write: None,
+            pending_write: None,
             current_position: None,
             current_node: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
@@ -355,11 +350,9 @@ impl ExecutionContext {
             observation,
             body_observation: None,
             scopes: Vec::new(),
-            pending_loop_write: None,
             root_state: None,
-            pending_root_write: None,
             node_state: BTreeMap::new(),
-            pending_node_write: None,
+            pending_write: None,
             current_position: None,
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
@@ -431,11 +424,9 @@ impl ExecutionContext {
         self.outputs = ExecutionOutputs::from_values(context.0);
         self.remaining_steps = StepBudget::new(crate::MAX_SCHEDULED_STEPS);
         self.current_position = None;
-        self.pending_loop_write = None;
         self.root_state = None;
-        self.pending_root_write = None;
         self.node_state.clear();
-        self.pending_node_write = None;
+        self.pending_write = None;
         self.scope_exit_cutoff = Arc::new(AtomicUsize::new(usize::MAX));
         Ok(())
     }
@@ -589,9 +580,7 @@ impl ExecutionContext {
             observation,
             body_observation: self.body_observation.clone(),
             scopes: self.scopes.clone(),
-            pending_loop_write: None,
             root_state: self.root_state.clone(),
-            pending_root_write: None,
             node_state: self
                 .node_state
                 .iter()
@@ -605,7 +594,7 @@ impl ExecutionContext {
                     )
                 })
                 .collect(),
-            pending_node_write: None,
+            pending_write: None,
             current_position: None,
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
@@ -1183,31 +1172,6 @@ impl ExecutionContext {
             })
     }
 
-    pub(crate) fn stage_root_write(
-        &mut self,
-        variable: &str,
-        value: Value,
-    ) -> Result<(), NodeExecutionError> {
-        let state = self
-            .root_state
-            .as_ref()
-            .context(crate::NodeExecutionFailedSnafu {
-                message: "assignment is outside a Flow state scope",
-            })?;
-        let value_type =
-            state
-                .types
-                .get(variable)
-                .with_context(|| crate::NodeExecutionFailedSnafu {
-                    message: format!("unknown workflow variable `{variable}`"),
-                })?;
-        value_type
-            .validate_shared(&value)
-            .context(crate::node::WorkflowVariableTypeSnafu { variable })?;
-        self.pending_root_write = Some((variable.to_owned(), value));
-        Ok(())
-    }
-
     pub(crate) fn scope_values(&self) -> Result<Outputs, NodeExecutionError> {
         let frame = self
             .scopes
@@ -1238,31 +1202,6 @@ impl ExecutionContext {
         self.scopes.last().is_some_and(|frame| frame.exit_requested)
     }
 
-    pub(crate) fn stage_scope_write(
-        &mut self,
-        variable: &str,
-        value: Value,
-    ) -> Result<(), NodeExecutionError> {
-        let frame = self
-            .scopes
-            .last()
-            .with_context(|| crate::NodeExecutionFailedSnafu {
-                message: "Loop assignment is outside a Loop frame",
-            })?;
-        let value_type =
-            frame
-                .types
-                .get(variable)
-                .with_context(|| crate::NodeExecutionFailedSnafu {
-                    message: format!("unknown Loop variable `{variable}`"),
-                })?;
-        value_type
-            .validate_shared(&value)
-            .context(LoopVariableTypeSnafu { variable })?;
-        self.pending_loop_write = Some((variable.to_owned(), value));
-        Ok(())
-    }
-
     /// Initializes state owned by a synthetic node source in this invocation.
     pub fn node_state(&mut self, source: &str, initial: Outputs) -> Outputs {
         self.node_state
@@ -1275,22 +1214,63 @@ impl ExecutionContext {
             .clone()
     }
 
-    /// Stages a provider-validated state update until its instruction succeeds.
-    pub fn stage_node_write(
+    /// Validates the active owner and stages one assignment until successful publication.
+    /// Node business constraints are checked by the provider before entering this boundary.
+    pub fn stage_write(
         &mut self,
-        source: &str,
-        field: &str,
+        target: crate::StateTarget,
         value: Value,
     ) -> Result<(), NodeExecutionError> {
-        ensure!(
-            self.node_state
-                .get(source)
-                .is_some_and(|state| state.values.contains_key(field)),
-            crate::NodeExecutionFailedSnafu {
-                message: format!("unknown node state `{source}.{field}`"),
+        match &target {
+            crate::StateTarget::Root { field } => {
+                let state = self
+                    .root_state
+                    .as_ref()
+                    .context(crate::NodeExecutionFailedSnafu {
+                        message: "assignment is outside a Flow state scope",
+                    })?;
+                let value_type =
+                    state
+                        .types
+                        .get(field)
+                        .with_context(|| crate::NodeExecutionFailedSnafu {
+                            message: format!("unknown workflow variable `{field}`"),
+                        })?;
+                value_type
+                    .validate_shared(&value)
+                    .context(crate::node::WorkflowVariableTypeSnafu { variable: field })?;
             }
-        );
-        self.pending_node_write = Some((source.into(), field.into(), value));
+            crate::StateTarget::Frame { field } => {
+                let frame = self
+                    .scopes
+                    .last()
+                    .context(crate::NodeExecutionFailedSnafu {
+                        message: "Loop assignment is outside a Loop frame",
+                    })?;
+                let value_type =
+                    frame
+                        .types
+                        .get(field)
+                        .with_context(|| crate::NodeExecutionFailedSnafu {
+                            message: format!("unknown Loop variable `{field}`"),
+                        })?;
+                value_type
+                    .validate_shared(&value)
+                    .context(LoopVariableTypeSnafu { variable: field })?;
+            }
+            crate::StateTarget::Node { node, field } => {
+                let source = format!("%{node}");
+                ensure!(
+                    self.node_state
+                        .get(&source)
+                        .is_some_and(|state| state.values.contains_key(field)),
+                    crate::NodeExecutionFailedSnafu {
+                        message: format!("unknown node state `{source}.{field}`")
+                    }
+                );
+            }
+        }
+        self.pending_write = Some((target, value));
         Ok(())
     }
 
@@ -1325,34 +1305,37 @@ impl ExecutionContext {
     }
 
     fn commit_pending_writes(&mut self) {
-        if let Some((source, field, value)) = self.pending_node_write.take() {
-            let state = self
-                .node_state
-                .get_mut(&source)
-                .expect("validated node state");
-            state.values.insert(field.clone(), value.clone());
-            state.writes.insert(field.clone());
-            self.outputs.set_value(output_id(&source, &field), value);
-        }
-        if let Some((variable, value)) = self.pending_root_write.take() {
-            let state = self
-                .root_state
-                .as_mut()
-                .expect("validated root write has state");
-            state.variables.insert(variable.clone(), value.clone());
-            self.outputs
-                .set_value(output_id(state.source_id.as_str(), &variable), value);
-        }
-        if let Some((variable, value)) = self.pending_loop_write.take() {
-            let frame = self
-                .scopes
-                .last_mut()
-                .expect("validated Loop write has a frame");
-            frame.variables.insert(variable.clone(), value.clone());
-            // Later body steps read the current state through the synthetic source.
-            self.outputs
-                .set_value(output_id(&frame.source_id, &variable), value);
-        }
+        let Some((target, value)) = self.pending_write.take() else {
+            return;
+        };
+        let field = target.field().to_owned();
+        let (values, source) = match target {
+            crate::StateTarget::Root { .. } => {
+                let state = self
+                    .root_state
+                    .as_mut()
+                    .expect("validated root write has state");
+                (&mut state.variables, state.source_id.to_string())
+            }
+            crate::StateTarget::Frame { .. } => {
+                let frame = self
+                    .scopes
+                    .last_mut()
+                    .expect("validated frame write has a frame");
+                (&mut frame.variables, frame.source_id.clone())
+            }
+            crate::StateTarget::Node { node, .. } => {
+                let source = format!("%{node}");
+                let state = self
+                    .node_state
+                    .get_mut(&source)
+                    .expect("validated node state");
+                state.writes.insert(field.clone());
+                (&mut state.values, source)
+            }
+        };
+        values.insert(field.clone(), value.clone());
+        self.outputs.set_value(output_id(&source, &field), value);
     }
 
     fn publish_generated<N>(
@@ -1363,9 +1346,7 @@ impl ExecutionContext {
         self.outputs
             .publish_generated(node, result)
             .inspect_err(|_| {
-                self.pending_loop_write = None;
-                self.pending_root_write = None;
-                self.pending_node_write = None;
+                self.pending_write = None;
             })?;
         self.commit_pending_writes();
         Ok(())
@@ -1377,9 +1358,7 @@ impl ExecutionContext {
         result: Option<NodeResult>,
     ) -> Result<(), WorkflowRunError> {
         self.outputs.publish(node, result).inspect_err(|_| {
-            self.pending_loop_write = None;
-            self.pending_root_write = None;
-            self.pending_node_write = None;
+            self.pending_write = None;
         })?;
         self.commit_pending_writes();
         Ok(())
@@ -1543,9 +1522,7 @@ pub fn execute_resolved_node_in_context<N>(
 ) -> Result<(), WorkflowRunError> {
     let id = node.definition_id.as_str();
     ctx.reserve_step(id)?;
-    ctx.pending_loop_write = None;
-    ctx.pending_root_write = None;
-    ctx.pending_node_write = None;
+    ctx.pending_write = None;
     let mut step = ctx.begin_step_observation(id);
     let _root_context = match &step {
         Some(StepObservation::Root(step)) => Some(step.enter()),
@@ -1706,7 +1683,13 @@ mod tests {
         let unrelated = context.fork_domain_with_observation(None);
         let mut writer = context.fork_domain_with_observation(None);
         writer
-            .stage_node_write("%choose", "enables", json!(["second"]).into())
+            .stage_write(
+                crate::StateTarget::Node {
+                    node: "choose".into(),
+                    field: "enables".into(),
+                },
+                json!(["second"]).into(),
+            )
             .unwrap();
         writer.commit_pending_writes();
         let nodes: Vec<FlowNode> = Vec::new();
@@ -1750,7 +1733,13 @@ mod tests {
             .unwrap();
         assert!(
             context
-                .stage_node_write("%missing", "enables", json!([]).into())
+                .stage_write(
+                    crate::StateTarget::Node {
+                        node: "missing".into(),
+                        field: "enables".into()
+                    },
+                    json!([]).into()
+                )
                 .is_err()
         );
     }
@@ -2832,9 +2821,17 @@ mod tests {
             BTreeMap::from([("count".into(), value_type)]),
         )
         .unwrap();
-        let node = crate::prepared_loop_assign("assign", "count", ValueType::Any)
-            .into_task()
-            .unwrap();
+        let node = crate::prepared_assign(
+            "assign",
+            crate::StateTarget::Frame {
+                field: "count".into(),
+            },
+            ValueType::Any,
+            None,
+        )
+        .unwrap()
+        .into_task()
+        .unwrap();
         let mut context = ExecutionContext::default();
         let error = context
             .run_scope(scope, |context| {
@@ -2852,7 +2849,7 @@ mod tests {
                     }],
                     context,
                 );
-                assert!(context.pending_loop_write.is_none());
+                assert!(context.pending_write.is_none());
                 result
             })
             .unwrap_err();

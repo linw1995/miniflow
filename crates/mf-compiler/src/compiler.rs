@@ -34,6 +34,11 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("invalid state assignments at {path}: {source}"))]
+    StateAssignments {
+        path: String,
+        source: mf_runtime::GraphDescriptionError,
+    },
     #[snafu(transparent)]
     FlowResolution { source: crate::FlowResolutionError },
     #[snafu(
@@ -1730,6 +1735,9 @@ fn validate_relations(
         .build()
     };
     let ids: BTreeSet<_> = graph.definition.nodes.iter().map(|node| &node.id).collect();
+    mf_runtime::validate_state_writes(graph).context(StateAssignmentsSnafu {
+        path: crate::loops::path_label(path),
+    })?;
     ensure!(
         graph
             .relations
@@ -1765,7 +1773,7 @@ fn validate_relations(
             path: crate::loops::path_label(path),
         })?;
         let mut instructions = BTreeSet::new();
-        for id in std::iter::once(&root.input).chain(root.writes.keys()) {
+        for id in std::iter::once(&root.input) {
             ensure!(
                 ids.contains(id) && instructions.insert(id) && !graph.children.contains_key(id),
                 InvalidScopeSnafu {
@@ -1774,15 +1782,6 @@ fn validate_relations(
                 }
             );
         }
-        ensure!(
-            root.writes
-                .values()
-                .all(|variable| root.values.contains_key(variable)),
-            InvalidScopeSnafu {
-                path: crate::loops::path_label(path),
-                message: "root write target must name a declared workflow variable",
-            }
-        );
         ensure!(
             !dependency_pairs(&graph.definition)
                 .iter()
@@ -1816,10 +1815,7 @@ fn validate_relations(
         }
     );
     let mut instructions = BTreeSet::new();
-    for id in std::iter::once(&frame.input)
-        .chain(frame.writes.keys())
-        .chain(&frame.exits)
-    {
+    for id in std::iter::once(&frame.input).chain(&frame.exits) {
         if !ids.contains(id) || !instructions.insert(id) {
             return Err(invalid(
                 "scope instruction relationships must be disjoint and reference known nodes",
@@ -1834,13 +1830,6 @@ fn validate_relations(
         if !frame.values.contains_key(variable) || output != variable || !outputs.insert(output) {
             return Err(invalid(
                 "state outputs must preserve current-frame variable names and reference known values",
-            ));
-        }
-    }
-    for variable in frame.writes.values() {
-        if !frame.state_outputs.contains_key(variable) || !frame.values.contains_key(variable) {
-            return Err(invalid(
-                "scope write target must name an available state output and value",
             ));
         }
     }
@@ -2536,30 +2525,14 @@ fn resolve_nodes_in_scope(
                     let root = graph.relations.root.as_ref().expect("validated root source");
                     return Ok(mf_runtime::prepared_root_source(root.input.as_str(), &root.values));
                 }
-                Some(ScopeInstruction::RootWrite(target)) => {
-                    let root = graph.relations.root.as_ref().expect("validated root write");
-                    return Ok(mf_runtime::prepared_root_assign(node.id.as_str(), target, root.values[target].clone()));
-                }
                 Some(ScopeInstruction::Input) => {
                     let frame = graph.relations.scope.as_ref().expect("validated scope input");
                     return Ok(mf_runtime::prepared_scope_source(frame.input.as_str(), &frame.values));
                 }
                 Some(ScopeInstruction::Write(target)) => {
-                    let frame = graph.relations.scope.as_ref().expect("validated scope write");
-                    let value_type = frame.values.get(target).cloned().with_context(|| InvalidScopeSnafu {
-                        path: crate::loops::path_label(&preparation.path),
-                        message: format!("assignment references unavailable variable `{target}`"),
-                    })?;
-                    return Ok(mf_runtime::prepared_loop_assign(node.id.as_str(), target, value_type));
-                }
-                Some(ScopeInstruction::NodeWrite(write)) => {
-                    let target = definition.nodes.iter().find(|target| target.id == write.node)
-                        .with_context(|| InvalidGraphSnafu {
-                            definition_id: node.id.clone(),
-                            message: "state assignment references an unknown target node",
-                        })?;
-                    return Ok(crate::prepared_node_assign(
-                        preparation.registry, node.id.as_str(), target, &write.field,
+                    let schema = crate::assignment_schema(graph, target)?;
+                    return Ok(crate::prepared_assign(
+                        preparation.registry, node.id.as_str(), target, &schema,
                     )?);
                 }
                 Some(ScopeInstruction::Exit) => {

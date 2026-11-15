@@ -1207,7 +1207,7 @@ mod tests {
                     input: "input".into(),
                     values: BTreeMap::new(),
                     state_outputs: BTreeMap::new(),
-                    writes: BTreeMap::new(),
+
                     exits: BTreeSet::new(),
                 }),
                 ..Default::default()

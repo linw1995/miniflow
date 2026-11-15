@@ -1,5 +1,6 @@
 use mf_runtime::{
-    CompiledGraph, GraphRelations, ScopeInstruction, ScopePathEntry, ScopeRelations, ValueType,
+    CompiledGraph, GraphRelations, ScopeInstruction, ScopePathEntry, ScopeRelations, StateTarget,
+    ValueType,
 };
 use mf_telemetry::identity::WorkflowId;
 use serde_json::json;
@@ -36,7 +37,6 @@ fn scope() -> ScopeRelations {
         input: "origin".into(),
         values: [("counter".into(), ValueType::String)].into(),
         state_outputs: [("counter".into(), "result".into())].into(),
-        writes: [("store".into(), "counter".into())].into(),
         exits: ["stop".into()].into(),
     }
 }
@@ -45,6 +45,12 @@ fn scope() -> ScopeRelations {
 fn instruction_roles_follow_explicit_relations_not_source_names_or_kinds() {
     let mut graph = graph();
     graph.relations.scope = Some(scope());
+    graph.relations.writes.insert(
+        "store".into(),
+        StateTarget::Frame {
+            field: "counter".into(),
+        },
+    );
     for kind in ["user.noop", "renamed.provider", "builtin.iteration_input"] {
         for node in &mut graph.definition.nodes {
             node.kind = kind.into();
@@ -55,7 +61,9 @@ fn instruction_roles_follow_explicit_relations_not_source_names_or_kinds() {
         );
         assert_eq!(
             graph.relations.instruction(&"store".into()),
-            Some(ScopeInstruction::Write("counter"))
+            Some(ScopeInstruction::Write(&StateTarget::Frame {
+                field: "counter".into()
+            }))
         );
         assert_eq!(
             graph.relations.instruction(&"stop".into()),
@@ -72,6 +80,11 @@ fn instruction_roles_follow_explicit_relations_not_source_names_or_kinds() {
         Some(ScopeInstruction::Input)
     );
     graph.relations.scope = None;
+    assert!(matches!(
+        graph.relations.instruction(&"store".into()),
+        Some(ScopeInstruction::Write(_))
+    ));
+    graph.relations.writes.clear();
     assert_eq!(graph.relations.instruction(&"store".into()), None);
     assert_eq!(graph.relations.instruction(&"stop".into()), None);
 }
@@ -89,7 +102,13 @@ fn callable_and_stateful_depend_only_on_scope_and_state_outputs() {
     scope.state_outputs.clear();
     assert!(!scope.is_stateful());
     assert!(!scope.values.is_empty());
-    assert!(!scope.writes.is_empty());
+    relations.writes.insert(
+        "store".into(),
+        StateTarget::Frame {
+            field: "counter".into(),
+        },
+    );
+    assert!(!relations.is_callable());
 }
 
 #[test]
@@ -139,7 +158,7 @@ fn relations_are_required_and_empty_relationship_fields_are_optional() {
     );
     assert!(serde_json::from_value::<GraphRelations>(json!({"unknown": true})).is_err());
     let encoded = serde_json::to_value(scope()).unwrap();
-    for field in ["input", "values", "state_outputs", "writes", "exits"] {
+    for field in ["input", "values", "state_outputs", "exits"] {
         let mut missing = encoded.clone();
         missing.as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<ScopeRelations>(missing).is_err());
@@ -209,13 +228,12 @@ fn identity_preserves_every_relationship_fact() {
         .state_outputs
         .insert("counter".into(), "other".into());
     variants.push(scoped.clone());
-    scoped
-        .relations
-        .scope
-        .as_mut()
-        .unwrap()
-        .writes
-        .insert("stop".into(), "counter".into());
+    scoped.relations.writes.insert(
+        "stop".into(),
+        StateTarget::Frame {
+            field: "counter".into(),
+        },
+    );
     variants.push(scoped.clone());
     scoped
         .relations

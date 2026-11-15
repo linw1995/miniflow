@@ -394,11 +394,14 @@ exist in the initial values with matching types. Return typed provider errors th
 `NodeExecutionError::PluginFailed` so their source chains remain available.
 
 `workflow.assign` can target `%<node>.<field>` for any provider that declares state. Lowering records
-only the target node ID and field in `GraphRelations::node_writes`; saved plans retain these authoritative
-relationships. Preparation rejects undeclared or read-only fields and uses the provider's current
-configuration for initialization and validation. The runtime validates the input type, asks the provider
-to validate the value, and stages the write until successful publication. Calls and container frames
-isolate node state, and domain merges retain committed writes without restoring stale snapshots.
+all assignments in `GraphRelations::writes`, using `StateTarget::Root`, `Frame`, or `Node` to identify the
+owner and field. Saved plans retain these authoritative targets; Root and frame declarations do not
+maintain additional assignment tables. Preparation uses one constructor for every target, obtaining
+variable types from their scope or writable fields from the provider. Node initialization and business
+validation use the provider's current configuration. The runtime uses one assignment executor and one
+pending-write slot, committing the selected owner's value only after successful publication. Calls and
+container frames retain their existing lifetimes, and domain merges retain committed node writes
+without restoring stale snapshots.
 Use an explicit writer prerequisite on readers; the target relationship does not establish order.
 Router declares `enables` through this same protocol and owns its route-subset validation.
 
@@ -1243,8 +1246,8 @@ refresh after assignments. Directly supplied manual callbacks have no compiled r
 retain their existing caller-defined preparation semantics. These are concrete execution relationships,
 not persisted receiving-type schemas or a new factory callback interface.
 
-Callable Flows may separately carry `GraphRelations::root` with their own typed initial values and
-assignment targets. Root state does not turn a callable into a frame-backed child: calls still
+Callable Flows may separately carry `GraphRelations::root` with their own typed initial values.
+Their assignment targets use the same `GraphRelations::writes` table as frame and node writes. Root state does not turn a callable into a frame-backed child: calls still
 isolate startup inputs, outputs, and state using the existing invocation boundary. Preparation binds
 the root relationships to the executable Flow, and every execution initializes fresh values without
 adding an observation scope. Such Flows use serial domains and dynamic publication, preserving native

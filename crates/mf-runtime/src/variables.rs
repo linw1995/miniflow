@@ -29,7 +29,6 @@ pub fn root_scope(
         input,
         values,
         initial,
-        writes: BTreeMap::new(),
     };
     scope.validate_values()?;
     Ok(scope)

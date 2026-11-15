@@ -412,8 +412,66 @@ fn has_default_collapsed(graph: &CompiledGraph) -> bool {
             .any(has_default_collapsed)
 }
 
+/// Validate the single authoritative assignment table without constructing providers.
+pub fn validate_state_writes(graph: &CompiledGraph) -> Result<(), GraphDescriptionError> {
+    let nodes: BTreeSet<_> = graph.definition.nodes.iter().map(|node| &node.id).collect();
+    let mut reserved = BTreeSet::new();
+    if let Some(root) = &graph.relations.root {
+        reserved.insert(&root.input);
+    }
+    if let Some(scope) = &graph.relations.scope {
+        reserved.insert(&scope.input);
+        reserved.extend(&scope.exits);
+    }
+    for (id, target) in &graph.relations.writes {
+        ensure!(
+            nodes.contains(id) && !reserved.contains(id) && !graph.children.contains_key(id),
+            InvalidSnafu {
+                message: "assignment instructions must be known nodes without children or overlapping roles"
+            }
+        );
+        ensure!(
+            !target.field().trim().is_empty(),
+            InvalidSnafu {
+                message: "assignment targets require a nonblank field"
+            }
+        );
+        match target {
+            crate::StateTarget::Root { field } => ensure!(
+                graph
+                    .relations
+                    .root
+                    .as_ref()
+                    .is_some_and(|root| root.values.contains_key(field)),
+                InvalidSnafu {
+                    message: "root write target must name a declared workflow variable"
+                }
+            ),
+            crate::StateTarget::Frame { field } => ensure!(
+                graph
+                    .relations
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.values.contains_key(field)
+                        && scope.state_outputs.contains_key(field)),
+                InvalidSnafu {
+                    message: "scope write target must name an available state output and value"
+                }
+            ),
+            crate::StateTarget::Node { node, .. } => ensure!(
+                nodes.contains(node) && graph.relations.instruction(node).is_none(),
+                InvalidSnafu {
+                    message: "node state writes require a known ordinary target"
+                }
+            ),
+        }
+    }
+    Ok(())
+}
+
 /// Validate provider-free endpoints before any observation-only projection.
 fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError> {
+    validate_state_writes(graph)?;
     ensure!(
         graph
             .relations
@@ -431,22 +489,6 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
         .map(|node| &node.id)
         .collect::<BTreeSet<_>>();
     let mut instructions = BTreeSet::new();
-    for (id, write) in &graph.relations.node_writes {
-        ensure!(
-            nodes.contains(id) && instructions.insert(id) && !graph.children.contains_key(id),
-            InvalidSnafu {
-                message: "node state instructions must name known nodes without children",
-            }
-        );
-        ensure!(
-            nodes.contains(&write.node)
-                && !write.field.trim().is_empty()
-                && graph.relations.instruction(&write.node).is_none(),
-            InvalidSnafu {
-                message: "node state writes require a known ordinary target and nonblank field",
-            }
-        );
-    }
     for (name, output) in &graph.relations.streams {
         ensure!(
             !name.trim().is_empty()
@@ -479,7 +521,7 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
             }
         );
         root.validate_values().context(VariablesSnafu)?;
-        for id in std::iter::once(&root.input).chain(root.writes.keys()) {
+        for id in std::iter::once(&root.input) {
             ensure!(
                 nodes.contains(id) && instructions.insert(id) && !graph.children.contains_key(id),
                 InvalidSnafu {
@@ -497,14 +539,6 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
                     && node.config == serde_json::json!({})),
             InvalidSnafu {
                 message: "workflow variables require a canonical synthetic root source",
-            }
-        );
-        ensure!(
-            root.writes
-                .values()
-                .all(|variable| root.values.contains_key(variable)),
-            InvalidSnafu {
-                message: "root write target must name a declared workflow variable",
             }
         );
         ensure!(
@@ -531,10 +565,7 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
     let Some(scope) = &graph.relations.scope else {
         return Ok(());
     };
-    for id in std::iter::once(&scope.input)
-        .chain(scope.writes.keys())
-        .chain(scope.exits.iter())
-    {
+    for id in std::iter::once(&scope.input).chain(scope.exits.iter()) {
         ensure!(
             nodes.contains(id),
             InvalidSnafu {
@@ -557,7 +588,7 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
             message: "compiled scope variable names must be nonblank"
         }
     );
-    for variable in scope.writes.values().chain(scope.state_outputs.keys()) {
+    for variable in scope.state_outputs.keys() {
         ensure!(
             scope.values.contains_key(variable),
             InvalidSnafu {
@@ -574,15 +605,6 @@ fn validate_relations(graph: &CompiledGraph) -> Result<(), GraphDescriptionError
             }
         );
     }
-    ensure!(
-        scope
-            .writes
-            .values()
-            .all(|variable| scope.state_outputs.contains_key(variable)),
-        InvalidSnafu {
-            message: "compiled scope writes require declared state outputs"
-        }
-    );
     ensure!(
         scope.is_stateful() || scope.exits.is_empty(),
         InvalidSnafu {

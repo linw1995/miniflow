@@ -125,6 +125,66 @@ fn state_writes_are_isolated_across_calls_and_container_frames() {
 }
 
 #[test]
+fn preparation_checks_schema_ownership_and_unavailable_state_declarations() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let target = mf_runtime::StateTarget::Node {
+        node: "counter".into(),
+        field: "count".into(),
+    };
+    let typed = mf_compiler::AssignmentSchema::Typed {
+        value_type: ValueType::Int64,
+    };
+    assert!(mf_compiler::prepared_assign(&registry, "write", &target, &typed).is_err());
+    let mut owner = definition("%counter.count")
+        .nodes
+        .into_iter()
+        .find(|node| node.id.as_str() == "counter")
+        .unwrap();
+    owner.id = "other".into();
+    let schema = mf_compiler::AssignmentSchema::Provider {
+        node: owner.clone(),
+    };
+    assert!(mf_compiler::prepared_assign(&registry, "write", &target, &schema).is_err());
+    owner.id = "counter".into();
+    owner.kind = "fixture.unavailable".into();
+    let schema = mf_compiler::AssignmentSchema::Provider { node: owner };
+    let error = mf_compiler::prepared_assign(&registry, "write", &target, &schema)
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error,
+        mf_compiler::WorkflowBuildError::UnknownKind { .. }
+    ));
+    let plan = compile_definition(&definition("%counter.count"), &registry).unwrap();
+    for target in [
+        mf_runtime::StateTarget::Root {
+            field: "missing".into(),
+        },
+        mf_runtime::StateTarget::Frame {
+            field: "missing".into(),
+        },
+        mf_runtime::StateTarget::Node {
+            node: "missing".into(),
+            field: "count".into(),
+        },
+    ] {
+        assert!(mf_compiler::assignment_schema(&plan.graph, &target).is_err());
+    }
+    let prepared = registry
+        .get(provider::STATE_KIND)
+        .unwrap()
+        .instantiate(json!({"initial":3,"limit":10}))
+        .unwrap();
+    let output = prepared
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(Default::default(), &mut ExecutionContext::default())
+        .unwrap();
+    assert_eq!(output.outputs["count"], json!(3));
+}
+
+#[test]
 fn assignment_targets_require_declared_writable_state() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for target in [
@@ -132,6 +192,8 @@ fn assignment_targets_require_declared_writable_state() {
         "%counter.missing",
         "%params.value",
         "%missing.count",
+        "%counter.",
+        "%root.count",
     ] {
         assert!(
             compile_definition(&definition(target), &registry).is_err(),
@@ -148,50 +210,52 @@ fn saved_state_relationships_reject_unknown_targets_and_instruction_collisions()
         let mut changed = plan.clone();
         match mutation {
             "writer" => {
-                let write = changed
+                let target = changed
                     .graph
                     .relations
-                    .node_writes
+                    .writes
                     .remove(&"write".into())
                     .unwrap();
                 changed
                     .graph
                     .relations
-                    .node_writes
-                    .insert("missing".into(), write);
+                    .writes
+                    .insert("missing".into(), target);
             }
-            "target" => {
-                changed
+            "target" | "instruction" => {
+                let mf_runtime::StateTarget::Node { node, .. } = changed
                     .graph
                     .relations
-                    .node_writes
+                    .writes
                     .get_mut(&"write".into())
                     .unwrap()
-                    .node = "missing".into()
+                else {
+                    unreachable!()
+                };
+                *node = if mutation == "target" {
+                    "missing"
+                } else {
+                    "write"
+                }
+                .into();
             }
-            "field" => changed
-                .graph
-                .relations
-                .node_writes
-                .get_mut(&"write".into())
-                .unwrap()
-                .field
-                .clear(),
-            "instruction" => {
-                changed
+            "field" => {
+                let mf_runtime::StateTarget::Node { field, .. } = changed
                     .graph
                     .relations
-                    .node_writes
+                    .writes
                     .get_mut(&"write".into())
                     .unwrap()
-                    .node = "write".into()
+                else {
+                    unreachable!()
+                };
+                field.clear();
             }
             "collision" => {
                 changed.graph.relations.scope = Some(mf_runtime::ScopeRelations {
-                    input: "params".into(),
+                    input: "write".into(),
                     values: BTreeMap::from([("count".into(), ValueType::Int64)]),
                     state_outputs: BTreeMap::from([("count".into(), "count".into())]),
-                    writes: BTreeMap::from([("write".into(), "count".into())]),
                     exits: Default::default(),
                 })
             }
@@ -199,12 +263,10 @@ fn saved_state_relationships_reject_unknown_targets_and_instruction_collisions()
         }
         let error = CompiledWorkflow::from_json(&changed.to_json().unwrap()).unwrap_err();
         assert!(
-            error.to_string().contains(if mutation == "collision" {
-                "instruction roles collide"
-            } else if mutation == "writer" {
-                "node state instructions"
-            } else {
-                "node state writes"
+            error.to_string().contains(match mutation {
+                "collision" | "writer" => "assignment instructions",
+                "field" => "assignment targets",
+                _ => "node state writes",
             }),
             "{mutation}: {error}"
         );

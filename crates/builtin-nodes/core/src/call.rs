@@ -669,7 +669,7 @@ mod tests {
                 input: "scope".into(),
                 values: BTreeMap::new(),
                 state_outputs: BTreeMap::new(),
-                writes: BTreeMap::new(),
+
                 exits: Default::default(),
             }),
             ..Default::default()

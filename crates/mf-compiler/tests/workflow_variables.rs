@@ -497,10 +497,20 @@ fn compiled_relations_are_authoritative_and_reject_corrupt_state() {
         match mutation {
             0 => root.input = "missing".into(),
             1 => {
-                root.writes.insert(root.input.clone(), "count".into());
+                changed.graph.relations.writes.insert(
+                    root.input.clone(),
+                    mf_runtime::StateTarget::Root {
+                        field: "count".into(),
+                    },
+                );
             }
             2 => {
-                root.writes.insert("write".into(), "missing".into());
+                changed.graph.relations.writes.insert(
+                    "write".into(),
+                    mf_runtime::StateTarget::Root {
+                        field: "missing".into(),
+                    },
+                );
             }
             3 => {
                 root.initial.insert("count".into(), json!("wrong"));
@@ -667,7 +677,7 @@ fn generated_root_constructors_follow_compiled_relations_not_authored_config() {
     }
     let artifacts = plan.generate_artifacts().unwrap();
     assert!(artifacts.rust_source.contains("prepared_root_source"));
-    assert!(artifacts.rust_source.contains("prepared_root_assign"));
+    assert!(artifacts.rust_source.contains("prepared_assign_from_json"));
     assert!(artifacts.rust_source.contains(".with_root_scope("));
     assert_eq!(
         mf_compiler::CompiledWorkflow::from_json(&artifacts.plan_json).unwrap(),

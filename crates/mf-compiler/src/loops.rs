@@ -60,7 +60,7 @@ pub fn assignment_target(
 pub fn node_assignment_target(
     definition: &WorkflowDefinition,
     target: &str,
-) -> Option<mf_runtime::NodeStateWrite> {
+) -> Option<mf_runtime::StateTarget> {
     let (node, field) = target.strip_prefix('%')?.rsplit_once('.')?;
     if matches!(node, "root" | "loop" | "iteration") || field.trim().is_empty() {
         return None;
@@ -69,7 +69,7 @@ pub fn node_assignment_target(
         .nodes
         .iter()
         .find(|candidate| candidate.id.as_str() == node)?;
-    Some(mf_runtime::NodeStateWrite {
+    Some(mf_runtime::StateTarget::Node {
         node: node.id.clone(),
         field: field.to_owned(),
     })

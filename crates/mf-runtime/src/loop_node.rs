@@ -1,14 +1,10 @@
 use crate::{
     ExecutionContext, FlowNode, Inputs, LoopVariableDefinition, NodeExecutionError, NodeMetadata,
     NodePortContract, NodePorts, NodeResult, NodeValue, PortSpec, TaskNode, TypedNodeResult,
-    TypedTaskNode, ValueType, encode_typed_result,
+    TypedTaskNode, ValueType,
 };
 use snafu::{ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
-
-fn structural_error(message: impl Into<String>) -> NodeExecutionError {
-    crate::NodeExecutionFailedSnafu { message }.build()
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 pub enum LoopVariableError {
@@ -119,71 +115,6 @@ fn prepared_source(id: &str, types: &BTreeMap<String, ValueType>, root: bool) ->
             NodeMetadata::default(),
         )
         .expect("scope source metadata has no port declarations"),
-    )
-}
-
-struct AssignmentNode {
-    variable: String,
-    value_type: ValueType,
-    root: bool,
-}
-
-#[derive(NodeValue)]
-#[value(runtime = "crate")]
-struct AssignmentOutputs {
-    done: bool,
-}
-
-impl NodePortContract for AssignmentNode {
-    fn ports(&self) -> NodePorts {
-        NodePorts {
-            inputs: vec![PortSpec::new("value", self.value_type.clone(), true)],
-            outputs: AssignmentOutputs::ports(),
-        }
-    }
-}
-
-impl TaskNode for AssignmentNode {
-    fn supports_success_dependencies(&self) -> bool {
-        false
-    }
-    fn execute(
-        &self,
-        mut inputs: Inputs,
-        ctx: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        let value = inputs
-            .remove("value")
-            .ok_or_else(|| structural_error("missing assignment value"))?;
-        if self.root {
-            ctx.stage_root_write(&self.variable, value)?;
-        } else {
-            ctx.stage_scope_write(&self.variable, value)?;
-        }
-        encode_typed_result(AssignmentOutputs { done: true }.into())
-    }
-}
-
-pub fn prepared_loop_assign(id: &str, variable: &str, value_type: ValueType) -> FlowNode {
-    prepared_assignment(id, variable, value_type, false)
-}
-
-pub fn prepared_root_assign(id: &str, variable: &str, value_type: ValueType) -> FlowNode {
-    prepared_assignment(id, variable, value_type, true)
-}
-
-fn prepared_assignment(id: &str, variable: &str, value_type: ValueType, root: bool) -> FlowNode {
-    FlowNode::new(
-        id,
-        crate::PreparedNode::new(
-            AssignmentNode {
-                variable: variable.to_owned(),
-                value_type,
-                root,
-            },
-            NodeMetadata::default(),
-        )
-        .expect("assignment metadata has no port declarations"),
     )
 }
 

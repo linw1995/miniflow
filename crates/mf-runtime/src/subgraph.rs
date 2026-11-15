@@ -719,7 +719,7 @@ mod tests {
                 input: "custom-input".into(),
                 values: Default::default(),
                 state_outputs: Default::default(),
-                writes: Default::default(),
+
                 exits: Default::default(),
             }),
             ..Default::default()

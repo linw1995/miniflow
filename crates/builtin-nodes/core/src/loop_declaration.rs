@@ -280,8 +280,9 @@ fn factory(
         ensure!(
             body.relations
                 .as_ref()
-                .and_then(|relations| relations.scope.as_ref())
-                .is_none_or(|scope| scope.writes.values().all(|target| target != variable)),
+                .is_none_or(|relations| relations.writes.values().all(|target| {
+                    !matches!(target, mf_runtime::StateTarget::Frame { field } if field == variable)
+                })),
             ConflictingBodyOutputSnafu { variable }
         );
     }
@@ -335,7 +336,7 @@ mod tests {
                 input: input.into(),
                 values: BTreeMap::from([("x".into(), ValueType::Int64)]),
                 state_outputs: BTreeMap::from([("x".into(), "x".into())]),
-                writes: BTreeMap::new(),
+
                 exits: Default::default(),
             }),
             ..Default::default()
@@ -371,9 +372,15 @@ mod tests {
             let source = mf_runtime::prepared_scope_source(source_id, &types)
                 .into_task()
                 .unwrap();
-            let assign = mf_runtime::prepared_loop_assign("assign", "x", ValueType::Int64)
-                .into_task()
-                .unwrap();
+            let assign = mf_runtime::prepared_assign(
+                "assign",
+                mf_runtime::StateTarget::Frame { field: "x".into() },
+                ValueType::Int64,
+                None,
+            )
+            .unwrap()
+            .into_task()
+            .unwrap();
             let mut prepared = PreparedSubgraph::new(body().nodes, Vec::new(), move |state| {
                 mf_runtime::execute_node_in_context(&source, &[], state)?;
                 mf_runtime::execute_node_in_context(

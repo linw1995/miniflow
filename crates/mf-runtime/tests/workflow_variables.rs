@@ -1,7 +1,7 @@
 use mf_runtime::{
     ExecutionContext, Inputs, NodeExecutionError, Outputs, ROOT_SOURCE_ID, RootScopeRelations,
-    ValueRef, ValueType, WorkflowRunError, WorkflowVariableDefinition,
-    execute_generated_node_in_context, execute_node_in_context, prepared_root_assign,
+    StateTarget, ValueRef, ValueType, WorkflowRunError, WorkflowVariableDefinition,
+    execute_generated_node_in_context, execute_node_in_context, prepared_assign,
     prepared_root_source, root_scope,
 };
 use serde_json::json;
@@ -43,9 +43,17 @@ fn write(
     value: ValueRef,
     invalid_output: bool,
 ) -> Result<(), WorkflowRunError> {
-    let mut assign = prepared_root_assign("write", "count", ValueType::Any)
-        .into_task()
-        .unwrap();
+    let mut assign = prepared_assign(
+        "write",
+        StateTarget::Root {
+            field: "count".into(),
+        },
+        ValueType::Any,
+        None,
+    )
+    .unwrap()
+    .into_task()
+    .unwrap();
     // Supply inputs directly to the invocation while retaining ordinary publication validation.
     assign.metadata.ports.inputs.clear();
     if invalid_output {
@@ -103,9 +111,17 @@ fn root_state_writes_commit_only_with_valid_publication_and_preserve_typed_sourc
 fn root_assignments_reject_missing_scopes_and_unknown_targets_without_publishing() {
     let scope = scope();
     let mut context = ExecutionContext::default();
-    let assign = prepared_root_assign("write", "missing", ValueType::Int64)
-        .into_task()
-        .unwrap();
+    let assign = prepared_assign(
+        "write",
+        StateTarget::Root {
+            field: "missing".into(),
+        },
+        ValueType::Int64,
+        None,
+    )
+    .unwrap()
+    .into_task()
+    .unwrap();
     let inputs = || Inputs::from([("value".into(), 8i64.into())]);
     let error = assign.node.execute(inputs(), &mut context).unwrap_err();
     assert!(
@@ -138,7 +154,15 @@ fn root_state_preserves_native_payloads_and_sensitivity_only_writes_across_domai
             write(&mut fork, secret.clone(), false)?;
             context.merge_domain_outputs(
                 &fork,
-                [&prepared_root_assign("write", "count", ValueType::Int64)],
+                [&prepared_assign(
+                    "write",
+                    StateTarget::Root {
+                        field: "count".into(),
+                    },
+                    ValueType::Int64,
+                    None,
+                )
+                .unwrap()],
             );
             let updated = current(context, &scope).remove("count").unwrap();
             assert!(updated.is_secret());

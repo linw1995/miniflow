@@ -25,7 +25,15 @@ fn scope_indices_reject_overflow_before_entering_execution() {
 
 #[test]
 fn direct_loop_assignments_report_missing_values_without_mutating_context() {
-    let node = mf_runtime::prepared_loop_assign("assign", "count", ValueType::Int64);
+    let node = mf_runtime::prepared_assign(
+        "assign",
+        mf_runtime::StateTarget::Frame {
+            field: "count".into(),
+        },
+        ValueType::Int64,
+        None,
+    )
+    .unwrap();
     let mut context = ExecutionContext::default();
     let error = node
         .node

@@ -100,12 +100,21 @@ fn propagate(
     state: &mut State,
 ) -> Result<bool, WorkflowCompileError> {
     let mut changed = false;
-    if let Some(root) = &scope.relations.root {
-        for (writer, variable) in &root.writes {
+    for (writer, target) in &scope.relations.writes {
+        let source = match target {
+            mf_runtime::StateTarget::Root { .. } => {
+                scope.relations.root.as_ref().map(|root| &root.input)
+            }
+            mf_runtime::StateTarget::Frame { .. } => {
+                scope.relations.scope.as_ref().map(|frame| &frame.input)
+            }
+            mf_runtime::StateTarget::Node { .. } => None,
+        };
+        if let Some(source) = source {
             let facts = incoming(scope, path, writer.as_str(), state)
                 .remove("value")
                 .unwrap_or_default();
-            changed |= merge(state, output(path, root.input.as_str(), variable), facts);
+            changed |= merge(state, output(path, source.as_str(), target.field()), facts);
         }
     }
     for node in &scope.definition.nodes {
@@ -183,16 +192,6 @@ fn propagate(
                         state,
                         output(&child_path, frame.input.as_str(), name),
                         facts,
-                    );
-                }
-                for (writer, variable) in &frame.writes {
-                    let values = incoming(child, &child_path, writer.as_str(), state)
-                        .remove("value")
-                        .unwrap_or_default();
-                    changed |= merge(
-                        state,
-                        output(&child_path, frame.input.as_str(), variable),
-                        values,
                     );
                 }
                 for (variable, port) in &frame.state_outputs {

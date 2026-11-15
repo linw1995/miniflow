@@ -870,8 +870,8 @@ pub enum WorkflowBuildError {
         definition_id: DefinitionId,
         source: mf_runtime::LoopVariableError,
     },
-    #[snafu(display("invalid scope variable descriptor for node `{definition_id}`: {source}"))]
-    ScopeVariableDescriptor {
+    #[snafu(display("invalid assignment type descriptor for node `{definition_id}`: {source}"))]
+    AssignmentDescriptor {
         definition_id: DefinitionId,
         source: mf_runtime::TypeDescriptorError,
     },
@@ -1126,68 +1126,134 @@ pub fn prepared_loop_source_from_json(
     Ok(mf_runtime::prepared_loop_source_types(&types))
 }
 
-pub fn prepared_node_assign(
-    registry: &NodeRegistry,
-    id: &str,
-    target: &crate::NodeDefinition,
-    field: &str,
-) -> Result<FlowNode, WorkflowBuildError> {
-    let registration = registry
-        .get(&target.kind)
-        .with_context(|| UnknownKindSnafu {
-            definition_id: target.id.clone(),
-            kind: target.kind.clone(),
-        })?;
-    let state = registration
-        .factory
-        .prepare_state(&target.config)
-        .context(NodeConstructionSnafu {
-            definition_id: target.id.clone(),
-        })?
-        .with_context(|| InvalidDefinitionSnafu {
-            definition_id: target.id.clone(),
-            message: "assignment target does not declare node state",
-        })?;
-    mf_runtime::prepared_node_assign(id, target.id.as_str(), field, state).context(
-        NodeConstructionSnafu {
-            definition_id: target.id.clone(),
-        },
-    )
+/// A variable's compiled type or an opaque provider declaration resolved during preparation.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AssignmentSchema {
+    Typed { value_type: ValueType },
+    Provider { node: crate::NodeDefinition },
 }
 
-pub fn prepared_node_assign_from_json(
-    registry: &NodeRegistry,
-    id: &str,
-    node: &str,
-    kind: &str,
-    config_json: &str,
-    field: &str,
-) -> Result<FlowNode, WorkflowBuildError> {
-    let config = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
-        definition_id: node,
+pub fn assignment_schema(
+    graph: &mf_runtime::CompiledGraph,
+    target: &mf_runtime::StateTarget,
+) -> Result<AssignmentSchema, WorkflowBuildError> {
+    let value_type = match target {
+        mf_runtime::StateTarget::Root { field } => graph
+            .relations
+            .root
+            .as_ref()
+            .and_then(|root| root.values.get(field)),
+        mf_runtime::StateTarget::Frame { field } => graph
+            .relations
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.values.get(field)),
+        mf_runtime::StateTarget::Node { node, .. } => {
+            let owner = graph
+                .definition
+                .nodes
+                .iter()
+                .find(|owner| owner.id == *node)
+                .with_context(|| InvalidDefinitionSnafu {
+                    definition_id: node.clone(),
+                    message: "assignment target node is unknown",
+                })?;
+            return Ok(AssignmentSchema::Provider {
+                node: owner.clone(),
+            });
+        }
+    }
+    .with_context(|| InvalidDefinitionSnafu {
+        definition_id: "workflow",
+        message: "assignment target has no declared state type",
     })?;
-    prepared_node_assign(
-        registry,
-        id,
-        &crate::NodeDefinition {
-            id: node.into(),
-            kind: kind.into(),
-            config,
-        },
-        field,
-    )
+    Ok(AssignmentSchema::Typed {
+        value_type: value_type.clone(),
+    })
 }
 
-pub fn prepared_loop_assign_from_json(
+pub fn prepared_assign(
+    registry: &NodeRegistry,
     id: &str,
-    variable: &str,
-    type_json: &str,
+    target: &mf_runtime::StateTarget,
+    schema: &AssignmentSchema,
 ) -> Result<FlowNode, WorkflowBuildError> {
-    let descriptor: Value = serde_json::from_str(type_json)
+    let (value_type, state) = match (target, schema) {
+        (
+            mf_runtime::StateTarget::Root { .. } | mf_runtime::StateTarget::Frame { .. },
+            AssignmentSchema::Typed { value_type },
+        ) => (value_type.clone(), None),
+        (
+            mf_runtime::StateTarget::Node { node: owner, field },
+            AssignmentSchema::Provider { node },
+        ) => {
+            ensure!(
+                *owner == node.id,
+                InvalidDefinitionSnafu {
+                    definition_id: id,
+                    message: "assignment provider differs from its target node",
+                }
+            );
+            let registration = registry.get(&node.kind).with_context(|| UnknownKindSnafu {
+                definition_id: node.id.clone(),
+                kind: node.kind.clone(),
+            })?;
+            let state = registration
+                .factory
+                .prepare_state(&node.config)
+                .context(NodeConstructionSnafu {
+                    definition_id: node.id.clone(),
+                })?
+                .with_context(|| InvalidDefinitionSnafu {
+                    definition_id: node.id.clone(),
+                    message: "assignment target does not declare node state",
+                })?;
+            let value_type = state
+                .writable_type(field)
+                .context(mf_runtime::NodeStateFieldSnafu { field })
+                .context(NodeConstructionSnafu {
+                    definition_id: node.id.clone(),
+                })?;
+            (value_type, Some(state))
+        }
+        _ => {
+            return InvalidDefinitionSnafu {
+                definition_id: id,
+                message: "assignment schema does not match its target",
+            }
+            .fail();
+        }
+    };
+    mf_runtime::prepared_assign(id, target.clone(), value_type, state)
+        .context(NodeConstructionSnafu { definition_id: id })
+}
+
+pub fn prepared_assign_from_json(
+    registry: &NodeRegistry,
+    id: &str,
+    target_json: &str,
+    schema_json: &str,
+) -> Result<FlowNode, WorkflowBuildError> {
+    let target = serde_json::from_str(target_json)
         .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    let value_type = ValueType::parse_descriptor(&descriptor)
-        .context(ScopeVariableDescriptorSnafu { definition_id: id })?;
-    Ok(mf_runtime::prepared_loop_assign(id, variable, value_type))
+    // Decode descriptors separately so their typed errors survive the JSON boundary.
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+    enum WireSchema {
+        Typed { value_type: Value },
+        Provider { node: crate::NodeDefinition },
+    }
+    let schema = match serde_json::from_str(schema_json)
+        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?
+    {
+        WireSchema::Typed { value_type } => AssignmentSchema::Typed {
+            value_type: ValueType::parse_descriptor(&value_type)
+                .context(AssignmentDescriptorSnafu { definition_id: id })?,
+        },
+        WireSchema::Provider { node } => AssignmentSchema::Provider { node },
+    };
+    prepared_assign(registry, id, &target, &schema)
 }
 #[derive(Debug, Snafu)]
 pub enum StreamBuildError {
@@ -1987,7 +2053,7 @@ mod tests {
                 input: "scope-input".into(),
                 values: BTreeMap::from([(variable.into(), ValueType::String)]),
                 state_outputs: BTreeMap::from([(variable.into(), variable.into())]),
-                writes: BTreeMap::new(),
+
                 exits: BTreeSet::new(),
             }),
             ..Default::default()

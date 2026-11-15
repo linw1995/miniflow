@@ -1,3 +1,4 @@
+mod assignment;
 mod cancellation;
 mod compiled_graph;
 mod config_template;
@@ -16,7 +17,6 @@ mod future_execution;
 mod iteration;
 mod loop_node;
 mod node;
-mod node_state;
 mod node_target;
 mod number;
 mod registry;
@@ -39,12 +39,13 @@ mod worker;
 mod workflow_inputs;
 mod workflow_manifest;
 
+pub use assignment::{NodeStateContract, prepared_assign};
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
 pub use compiled_graph::{
-    CompiledGraph, GraphRelations, NodeStateWrite, RootScopeRelations, ScopeInstruction,
-    ScopeRelations,
+    CompiledGraph, GraphRelations, RootScopeRelations, ScopeInstruction, ScopeRelations,
+    StateTarget,
 };
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
@@ -84,8 +85,8 @@ pub use iteration::{
     IterationErrorPolicy, IterationMode, iteration_input_flow_node,
 };
 pub use loop_node::{
-    LoopVariableError, loop_variable_types, prepared_loop_assign, prepared_loop_exit,
-    prepared_loop_source_types, prepared_root_assign, prepared_root_source, prepared_scope_source,
+    LoopVariableError, loop_variable_types, prepared_loop_exit, prepared_loop_source_types,
+    prepared_root_source, prepared_scope_source,
 };
 pub use mf_runtime_derive::{NodeConfig, NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{FlowOrigin, NodeIdentity, ScopePathEntry, SkipCause};
@@ -97,16 +98,16 @@ pub use node::{
     InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeConfig, NodeExecution,
     NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
     NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
-    PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, SubgraphScope, TaskNode,
-    TypeCompatibility, TypeDepthError, TypeDescriptorError, TypeMismatch, TypeMismatchDetails,
-    TypedTaskNode, ValueType, deserialize_config, encode_typed_result, execute_typed_task,
-    output_id, port_names_match, verify_generated_metadata,
+    PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode,
+    StateFieldSnafu as NodeStateFieldSnafu, SubgraphScope, TaskNode, TypeCompatibility,
+    TypeDepthError, TypeDescriptorError, TypeMismatch, TypeMismatchDetails, TypedTaskNode,
+    ValueType, deserialize_config, encode_typed_result, execute_typed_task, output_id,
+    port_names_match, verify_generated_metadata,
 };
 pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,
     TypedTaskHandle,
 };
-pub use node_state::{NodeStateContract, prepared_node_assign};
 pub use node_target::{
     NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget, target_ports,
 };
@@ -183,5 +184,5 @@ pub use workflow_manifest::{
     GraphDescriptionError, MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC,
     MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES,
     ObservationSnafu as GraphObservationSnafu, WorkflowManifest, WorkflowManifestError,
-    WorkflowManifestVersion, describe_graph,
+    WorkflowManifestVersion, describe_graph, validate_state_writes,
 };

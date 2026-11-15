@@ -168,7 +168,6 @@ pub fn child_relations_at(
                 input: mf_runtime::LOOP_SOURCE_ID.into(),
                 values,
                 state_outputs,
-                writes: BTreeMap::new(),
                 exits: BTreeSet::new(),
             });
             relations.streams = config.stream_outputs;
@@ -191,7 +190,6 @@ pub fn child_relations_at(
                 input: mf_runtime::ITERATION_INPUT_ID.into(),
                 values: inputs,
                 state_outputs: BTreeMap::new(),
-                writes: BTreeMap::new(),
                 exits: BTreeSet::new(),
             });
             relations.streams = config.stream_outputs;
@@ -378,10 +376,9 @@ pub fn lower_scope_at(
         subgraphs,
     )?;
     if let Some(scope) = relations.scope.as_mut() {
-        scope.writes.clear();
         scope.exits.clear();
     }
-    relations.node_writes.clear();
+    relations.writes.clear();
     for node in &definition.nodes {
         let mut node_path = path.to_vec();
         node_path.push(node.id.clone());
@@ -410,20 +407,15 @@ pub fn lower_scope_at(
             mf_runtime::ASSIGN_KIND => {
                 // validate_scope checked ownership, target existence and spelling.
                 let target = crate::loops::assignment_target(&node.config, path)?;
-                if let Some(write) = crate::loops::node_assignment_target(definition, &target) {
-                    relations.node_writes.insert(node.id.clone(), write);
-                    continue;
-                }
-                if let Some(scope) = relations.scope.as_mut() {
-                    scope.writes.insert(node.id.clone(), target);
-                } else {
-                    relations
-                        .root
-                        .as_mut()
-                        .expect("validated root state")
-                        .writes
-                        .insert(node.id.clone(), target);
-                }
+                let target = crate::loops::node_assignment_target(definition, &target)
+                    .unwrap_or_else(|| {
+                        if relations.scope.is_some() {
+                            mf_runtime::StateTarget::Frame { field: target }
+                        } else {
+                            mf_runtime::StateTarget::Root { field: target }
+                        }
+                    });
+                relations.writes.insert(node.id.clone(), target);
             }
             mf_runtime::EXIT_LOOP_KIND => {
                 relations
@@ -480,7 +472,7 @@ mod tests {
             ])
         );
         assert!(scope.state_outputs.is_empty());
-        assert!(scope.writes.is_empty());
+        assert!(relations.writes.is_empty());
         assert!(scope.exits.is_empty());
     }
 

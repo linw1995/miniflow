@@ -1104,7 +1104,7 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
         .unwrap();
     let relations = body.relations.clone();
     let frame = relations.scope.as_ref().unwrap();
-    assert!(!frame.writes.is_empty());
+    assert!(!relations.writes.is_empty());
     assert!(!frame.exits.is_empty());
     let original_input = frame.input.clone();
     let renamed_input = mf_runtime::DefinitionId::from("%actual-input");
@@ -1139,7 +1139,7 @@ fn compiled_scope_relationships_execute_independently_of_instruction_labels() {
         rename(id);
     }
     body.relations.scope.as_mut().unwrap().input = renamed_input;
-    assert_eq!(body.relations.scope.as_ref().unwrap().writes, frame.writes);
+    assert_eq!(body.relations.writes, relations.writes);
     assert_eq!(body.relations.scope.as_ref().unwrap().exits, frame.exits);
     let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
     assert_eq!(
@@ -1916,11 +1916,13 @@ fn observed_preparation_attributes_damaged_loop_graphs_to_the_root_owner() {
                     .get_mut("body")
                     .unwrap()
                     .relations
-                    .scope
-                    .as_mut()
-                    .unwrap()
                     .writes
-                    .insert("assign".into(), "unknown".into());
+                    .insert(
+                        "assign".into(),
+                        mf_runtime::StateTarget::Frame {
+                            field: "unknown".into(),
+                        },
+                    );
             }
             _ => unreachable!(),
         }
@@ -1945,9 +1947,18 @@ fn observed_preparation_attributes_damaged_loop_graphs_to_the_root_owner() {
                 } else {
                     "scope write target must name an available state output and value"
                 };
-                assert!(matches!(source.as_ref(),
-                    WorkflowCompileError::InvalidScope { path, message }
-                        if path == "[\"repeat\"]" && message == expected));
+                if case == "write relationship" {
+                    assert!(
+                        matches!(source.as_ref(), WorkflowCompileError::StateAssignments { path, source }
+                        if path == "[\"repeat\"]" && source.to_string().contains(expected))
+                    );
+                    assert!(find_source::<mf_runtime::GraphDescriptionError>(&error).is_some());
+                } else {
+                    assert!(
+                        matches!(source.as_ref(), WorkflowCompileError::InvalidScope { path, message }
+                        if path == "[\"repeat\"]" && message == expected)
+                    );
+                }
             }
             (
                 WorkflowCompileError::ChildGraph {
@@ -2072,7 +2083,7 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
     for (case, expected) in [
         (
             "overlapping roles",
-            "scope instruction relationships must be disjoint and reference known nodes",
+            "assignment instructions must be known nodes without children or overlapping roles",
         ),
         (
             "unknown write target",
@@ -2084,23 +2095,25 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
         ),
     ] {
         let mut damaged = valid.clone();
-        let frame = damaged
+        let relations = &mut damaged
             .graph
             .children
             .get_mut(&"repeat".into())
             .unwrap()
             .get_mut("body")
             .unwrap()
-            .relations
-            .scope
-            .as_mut()
-            .unwrap();
+            .relations;
         match case {
-            "overlapping roles" => frame.input = "assign".into(),
+            "overlapping roles" => relations.scope.as_mut().unwrap().input = "assign".into(),
             "unknown write target" => {
-                frame.writes.insert("assign".into(), "unknown".into());
+                relations.writes.insert(
+                    "assign".into(),
+                    mf_runtime::StateTarget::Frame {
+                        field: "unknown".into(),
+                    },
+                );
             }
-            "missing input" => frame.input = "missing".into(),
+            "missing input" => relations.scope.as_mut().unwrap().input = "missing".into(),
             _ => unreachable!(),
         }
         let error = mf_compiler::describe_compiled(&damaged).unwrap_err();
@@ -2122,12 +2135,21 @@ fn descriptions_reject_damaged_loop_relationships_with_typed_owners() {
                 .unwrap()
                 .is::<Box<mf_compiler::WorkflowCompileError>>()
         );
-        assert!(
-            matches!(child.as_ref(), mf_compiler::WorkflowCompileError::InvalidScope { path, message }
-            if path == "[\"repeat\"]" && message == expected),
-            "{case}: {error}"
-        );
-        assert!(child.source().is_none());
+        if case == "missing input" {
+            assert!(
+                matches!(child.as_ref(), mf_compiler::WorkflowCompileError::InvalidScope { path, message }
+                if path == "[\"repeat\"]" && message == expected),
+                "{case}: {error}"
+            );
+            assert!(child.source().is_none());
+        } else {
+            assert!(
+                matches!(child.as_ref(), mf_compiler::WorkflowCompileError::StateAssignments { path, source }
+                if path == "[\"repeat\"]" && source.to_string().contains(expected)),
+                "{case}: {error}"
+            );
+            assert!(find_source::<mf_runtime::GraphDescriptionError>(&error).is_some());
+        }
         assert!(find_source::<serde_json::Error>(&error).is_none());
         assert!(error.to_string().contains(expected), "{case}: {error}");
         assert!(

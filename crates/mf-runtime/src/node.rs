@@ -701,6 +701,11 @@ pub enum NodeBuildError {
     #[snafu(display("node state field `{field}` is not writable"), visibility(pub))]
     StateField { field: String },
     #[snafu(
+        display("assignment state contract does not match its target"),
+        visibility(pub)
+    )]
+    StateContract,
+    #[snafu(
         display("invalid initial node state field `{field}`: {source}"),
         visibility(pub)
     )]

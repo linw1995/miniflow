@@ -18,9 +18,9 @@ pub struct GraphRelations {
     pub root: Option<RootScopeRelations>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub streams: BTreeMap<String, crate::OutputReferenceDefinition>,
-    /// Writes to provider-owned node state, keyed by the assignment node.
+    /// All state assignments, keyed by the instruction node.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub node_writes: BTreeMap<DefinitionId, NodeStateWrite>,
+    pub writes: BTreeMap<DefinitionId, StateTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,14 +37,22 @@ pub struct RootScopeRelations {
     pub input: DefinitionId,
     pub values: BTreeMap<String, ValueType>,
     pub initial: BTreeMap<String, serde_json::Value>,
-    pub writes: BTreeMap<DefinitionId, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeStateWrite {
-    pub node: DefinitionId,
-    pub field: String,
+#[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StateTarget {
+    Root { field: String },
+    Frame { field: String },
+    Node { node: DefinitionId, field: String },
+}
+
+impl StateTarget {
+    pub fn field(&self) -> &str {
+        match self {
+            Self::Root { field } | Self::Frame { field } | Self::Node { field, .. } => field,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -56,8 +64,6 @@ pub struct ScopeRelations {
     /// Source variable to receiving owner output. The current frame protocol
     /// preserves variable names; nonidentity mappings are not executable.
     pub state_outputs: BTreeMap<String, String>,
-    /// Write instruction node to scope variable.
-    pub writes: BTreeMap<DefinitionId, String>,
     pub exits: BTreeSet<DefinitionId>,
 }
 
@@ -65,31 +71,24 @@ pub struct ScopeRelations {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScopeInstruction<'a> {
     RootInput,
-    RootWrite(&'a str),
     Input,
-    Write(&'a str),
-    NodeWrite(&'a NodeStateWrite),
+    Write(&'a StateTarget),
     Exit,
 }
 
 impl GraphRelations {
     pub fn instruction(&self, id: &DefinitionId) -> Option<ScopeInstruction<'_>> {
-        if let Some(write) = self.node_writes.get(id) {
-            return Some(ScopeInstruction::NodeWrite(write));
+        if let Some(target) = self.writes.get(id) {
+            return Some(ScopeInstruction::Write(target));
         }
-        if let Some(root) = &self.root {
-            if id == &root.input {
-                return Some(ScopeInstruction::RootInput);
-            }
-            if let Some(variable) = root.writes.get(id) {
-                return Some(ScopeInstruction::RootWrite(variable));
-            }
+        if let Some(root) = &self.root
+            && id == &root.input
+        {
+            return Some(ScopeInstruction::RootInput);
         }
         let scope = self.scope.as_ref()?;
         if id == &scope.input {
             Some(ScopeInstruction::Input)
-        } else if let Some(variable) = scope.writes.get(id) {
-            Some(ScopeInstruction::Write(variable))
         } else if scope.exits.contains(id) {
             Some(ScopeInstruction::Exit)
         } else {

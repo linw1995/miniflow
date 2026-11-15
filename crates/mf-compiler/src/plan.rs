@@ -861,49 +861,18 @@ fn generate_scope(
                     mf_runtime::prepared_root_source(#id_lit, &types)
                 }}
             }
-            Some(mf_runtime::ScopeInstruction::RootWrite(target)) => {
-                let root = graph.relations.root.as_ref().expect("validated root write");
-                let target_lit = LitStr::new(target, Span::call_site());
-                let value_type = LitStr::new(
-                    &serde_json::to_string(&root.values[target]).context(SerializeSnafu)?,
+            Some(mf_runtime::ScopeInstruction::Write(target)) => {
+                let schema = crate::assignment_schema(graph, target)?;
+                let target_lit = LitStr::new(
+                    &serde_json::to_string(target).context(SerializeSnafu)?,
                     Span::call_site(),
                 );
-                quote! {{
-                    let value_type = serde_json::from_str(#value_type).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu { definition_id: mf_runtime::DefinitionId::from(#id_lit) })?;
-                    mf_runtime::prepared_root_assign(#id_lit, #target_lit, value_type)
-                }}
-            }
-            Some(mf_runtime::ScopeInstruction::Write(target)) => {
-                let value_type = graph
-                    .relations
-                    .scope
-                    .as_ref()
-                    .and_then(|frame| frame.values.get(target))
-                    .with_context(|| InvalidLoweringConfigSnafu {
-                        definition_id: id.clone(),
-                        message: format!("unknown scope variable `{target}`"),
-                    })?;
-                let target_lit = LitStr::new(target, Span::call_site());
-                let type_json = serde_json::to_string(value_type).context(SerializeSnafu)?;
-                let type_lit = LitStr::new(&type_json, Span::call_site());
+                let schema_lit = LitStr::new(
+                    &serde_json::to_string(&schema).context(SerializeSnafu)?,
+                    Span::call_site(),
+                );
                 quote! {
-                    mf_compiler::prepared_loop_assign_from_json(#id_lit, #target_lit, #type_lit)
-                        .inspect_err(|error| { #preparation_report })?
-                }
-            }
-            Some(mf_runtime::ScopeInstruction::NodeWrite(write)) => {
-                let target = nodes_by_id
-                    .get(&write.node)
-                    .with_context(|| UnknownNodeSnafu {
-                        definition_id: write.node.clone(),
-                    })?;
-                let target_lit = LitStr::new(write.node.as_str(), Span::call_site());
-                let target_kind = LitStr::new(&target.kind, Span::call_site());
-                let config = serde_json::to_string(&target.config).context(SerializeSnafu)?;
-                let config_lit = LitStr::new(&config, Span::call_site());
-                let field_lit = LitStr::new(&write.field, Span::call_site());
-                quote! {
-                    mf_compiler::prepared_node_assign_from_json(registry, #id_lit, #target_lit, #target_kind, #config_lit, #field_lit)
+                    mf_compiler::prepared_assign_from_json(registry, #id_lit, #target_lit, #schema_lit)
                         .inspect_err(|error| { #preparation_report })?
                 }
             }
@@ -2261,16 +2230,23 @@ mod tests {
                     input: "custom-input".into(),
                     values: BTreeMap::from([("item".into(), mf_runtime::ValueType::String)]),
                     state_outputs: BTreeMap::from([("item".into(), "result".into())]),
-                    writes: BTreeMap::from([("custom-write".into(), "item".into())]),
                     exits: BTreeSet::from(["custom-exit".into()]),
                 }),
-                node_writes: BTreeMap::from([(
-                    "node-write".into(),
-                    mf_runtime::NodeStateWrite {
-                        node: "choose".into(),
-                        field: "selection".into(),
-                    },
-                )]),
+                writes: BTreeMap::from([
+                    (
+                        "custom-write".into(),
+                        mf_runtime::StateTarget::Frame {
+                            field: "item".into(),
+                        },
+                    ),
+                    (
+                        "node-write".into(),
+                        mf_runtime::StateTarget::Node {
+                            node: "choose".into(),
+                            field: "selection".into(),
+                        },
+                    ),
+                ]),
                 ..Default::default()
             },
             children: BTreeMap::new(),
@@ -2285,9 +2261,9 @@ mod tests {
         .unwrap();
         let source = quote! { #(#preparations)* }.to_string();
         assert!(source.contains("prepared_scope_source_from_json"));
-        assert!(source.contains("prepared_loop_assign_from_json"));
+        assert_eq!(source.matches("prepared_assign_from_json").count(), 2);
         assert!(source.contains("prepared_loop_exit"));
-        assert!(source.contains("prepared_node_assign_from_json"));
+
         assert_eq!(source.matches("instantiate_node_with_metadata").count(), 2);
         assert!(source.contains("\"ordinary\""));
         assert!(!source.contains("iteration_input_flow_node"));

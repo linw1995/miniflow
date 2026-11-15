@@ -432,7 +432,6 @@ fn loop_manifest() -> WorkflowManifest {
         input: "%loop".into(),
         values: [("counter".into(), ValueType::Int64)].into(),
         state_outputs: [("counter".into(), "counter".into())].into(),
-        writes: Default::default(),
         exits: Default::default(),
     });
     let mut inner = graph(
@@ -447,7 +446,6 @@ fn loop_manifest() -> WorkflowManifest {
         input: "%loop".into(),
         values: [("counter".into(), ValueType::Int64)].into(),
         state_outputs: [("counter".into(), "counter".into())].into(),
-        writes: Default::default(),
         exits: Default::default(),
     });
     bind(&mut body, "inner", "body", inner);
@@ -803,7 +801,6 @@ fn historical_iteration_manifest() -> WorkflowManifest {
         input: "%iteration".into(),
         values: [("item".into(), ValueType::String)].into(),
         state_outputs: Default::default(),
-        writes: Default::default(),
         exits: Default::default(),
     });
     bind(
@@ -1021,7 +1018,6 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
         input: "value".into(),
         values: [("item".into(), ValueType::String)].into(),
         state_outputs: Default::default(),
-        writes: Default::default(),
         exits: Default::default(),
     });
     let body = child(&mut manifest.graph, "map", "body");
@@ -1066,19 +1062,34 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
         match case {
             "unknown_input" => scope.input = "missing".into(),
             "unknown_write" => {
-                scope.writes.insert("missing".into(), "item".into());
+                body.relations.writes.insert(
+                    "missing".into(),
+                    mf_runtime::StateTarget::Frame {
+                        field: "item".into(),
+                    },
+                );
             }
             "unknown_exit" => {
                 scope.exits.insert("missing".into());
             }
             "input_write_collision" => {
-                scope.writes.insert("%iteration".into(), "item".into());
+                body.relations.writes.insert(
+                    "%iteration".into(),
+                    mf_runtime::StateTarget::Frame {
+                        field: "item".into(),
+                    },
+                );
             }
             "input_exit_collision" => {
                 scope.exits.insert("%iteration".into());
             }
             "unknown_write_variable" => {
-                scope.writes.insert("dispatch".into(), "missing".into());
+                body.relations.writes.insert(
+                    "dispatch".into(),
+                    mf_runtime::StateTarget::Frame {
+                        field: "missing".into(),
+                    },
+                );
             }
             "unknown_state_variable" => {
                 scope
@@ -1103,20 +1114,35 @@ fn omitted_frames_still_validate_all_relation_endpoints_and_instruction_collisio
                 scope.values.insert("index".into(), ValueType::Int64);
             }
             "immutable_write" => {
-                scope.writes.insert("instruction".into(), "item".into());
+                body.relations.writes.insert(
+                    "instruction".into(),
+                    mf_runtime::StateTarget::Frame {
+                        field: "item".into(),
+                    },
+                );
             }
             "immutable_exit" => {
                 scope.exits.insert("instruction".into());
             }
             "write_exit_collision" => {
                 scope.state_outputs.insert("item".into(), "item".into());
-                scope.writes.insert("instruction".into(), "item".into());
+                body.relations.writes.insert(
+                    "instruction".into(),
+                    mf_runtime::StateTarget::Frame {
+                        field: "item".into(),
+                    },
+                );
                 scope.exits.insert("instruction".into());
             }
             "source_owning_children" => scope.input = "dispatch".into(),
             "write_owning_children" => {
                 scope.state_outputs.insert("item".into(), "item".into());
-                scope.writes.insert("dispatch".into(), "item".into());
+                body.relations.writes.insert(
+                    "dispatch".into(),
+                    mf_runtime::StateTarget::Frame {
+                        field: "item".into(),
+                    },
+                );
             }
             "exit_owning_children" => {
                 scope.state_outputs.insert("item".into(), "item".into());
@@ -1179,9 +1205,15 @@ fn explicit_relations_round_trip_without_kind_or_configuration_inference() {
         input: "source".into(),
         values: [("item".into(), ValueType::String)].into(),
         state_outputs: [("item".into(), "item".into())].into(),
-        writes: [("store".into(), "item".into())].into(),
+
         exits: ["leave".into()].into(),
     });
+    body.relations.writes.insert(
+        "store".into(),
+        mf_runtime::StateTarget::Frame {
+            field: "item".into(),
+        },
+    );
     body.relations.streams.insert(
         "events".into(),
         serde_json::from_value(json!({"node": "value", "port": "item"})).unwrap(),
