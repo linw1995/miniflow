@@ -352,7 +352,6 @@ pub fn lower_scope_at(
             );
         }
     }
-    crate::routers::lower(definition, lowered_sources)?;
     // Validate authoring source/control syntax before turning it into operands.
     // This is the only boundary that interprets these node-kind tokens.
     let state_types = relations
@@ -382,6 +381,7 @@ pub fn lower_scope_at(
         scope.writes.clear();
         scope.exits.clear();
     }
+    relations.router_writes.clear();
     for node in &definition.nodes {
         let mut node_path = path.to_vec();
         node_path.push(node.id.clone());
@@ -410,6 +410,10 @@ pub fn lower_scope_at(
             mf_runtime::ASSIGN_KIND => {
                 // validate_scope checked ownership, target existence and spelling.
                 let target = crate::loops::assignment_target(&node.config, path)?;
+                if let Some(write) = crate::routers::write_target(definition, &target)? {
+                    relations.router_writes.insert(node.id.clone(), write);
+                    continue;
+                }
                 if let Some(scope) = relations.scope.as_mut() {
                     scope.writes.insert(node.id.clone(), target);
                 } else {

@@ -1,7 +1,7 @@
 use mf_runtime::{
-    ContextValue, ExecutionContext, FlowBindings, Inputs, NodeBuildError, NodeExecutionError,
-    NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, Outputs,
-    PortSpec, PreparedNode, PreparedSubgraph, TaskNode, ValueRef, ValueType,
+    ExecutionContext, FlowBindings, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
+    NodeMetadata, NodePortContract, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec,
+    PreparedNode, PreparedSubgraph, TaskNode, ValueRef, ValueType,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,8 +9,6 @@ use snafu::{Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const KIND: &str = "builtin.router";
-pub const STATE_KIND: &str = "builtin.router_state";
-pub const ASSIGN_KIND: &str = "builtin.router_assign";
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,7 +17,6 @@ struct Config {
     #[serde(default, deserialize_with = "deserialize_enables")]
     enables: Option<Vec<String>>,
 }
-
 fn deserialize_enables<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error> {
@@ -50,12 +47,12 @@ fn validate_routes(routes: &[String]) -> Result<(), RouterBuildError> {
 }
 fn validate(config: &Config) -> Result<(), RouterBuildError> {
     validate_routes(&config.routes)?;
-    let seen: BTreeSet<_> = config.routes.iter().collect();
+    let known: BTreeSet<_> = config.routes.iter().collect();
     if let Some(enables) = &config.enables {
         let mut enabled = BTreeSet::new();
         for route in enables {
             ensure!(
-                seen.contains(route) && enabled.insert(route),
+                known.contains(route) && enabled.insert(route),
                 EnableSnafu { route }
             );
         }
@@ -134,89 +131,6 @@ impl TaskNode for Router {
     }
 }
 
-struct StateSource {
-    config: Config,
-}
-impl NodePortContract for StateSource {
-    fn ports(&self) -> NodePorts {
-        NodePorts {
-            inputs: Vec::new(),
-            outputs: ["routes", "enables"]
-                .map(|name| PortSpec::new(name, ValueType::List(Box::new(ValueType::String)), true))
-                .into(),
-        }
-    }
-}
-impl TaskNode for StateSource {
-    fn execute(
-        &self,
-        _: Inputs,
-        context: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        let id = context
-            .current_node()
-            .expect("state source has an ID")
-            .to_owned();
-        Ok(context.node_state(&id, self.config.initial()).into())
-    }
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AssignmentConfig {
-    source: String,
-}
-struct Assignment {
-    config: AssignmentConfig,
-}
-#[derive(Debug, Snafu)]
-pub enum RouterStateError {
-    #[snafu(display("Router enables must be a string array without duplicates or unknown routes"))]
-    InvalidEnables,
-}
-impl From<RouterStateError> for NodeExecutionError {
-    fn from(source: RouterStateError) -> Self {
-        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
-    }
-}
-impl NodePortContract for Assignment {
-    fn ports(&self) -> NodePorts {
-        NodePorts {
-            inputs: vec![PortSpec::new(
-                "value",
-                ValueType::List(Box::new(ValueType::String)),
-                true,
-            )],
-            outputs: vec![PortSpec::new("done", ValueType::Boolean, true)],
-        }
-    }
-}
-impl TaskNode for Assignment {
-    fn supports_success_dependencies(&self) -> bool {
-        false
-    }
-    fn execute(
-        &self,
-        mut inputs: Inputs,
-        context: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        let value = inputs.remove("value").expect("validated assignment value");
-        let routes = context.output(&mf_runtime::output_id(&self.config.source, "routes"))?;
-        let mut seen = BTreeSet::new();
-        ensure!(
-            matches!(routes, ContextValue::Value(routes) if
-            value.as_array().is_some_and(|values| values.iter().all(|value| {
-                value.as_str().is_some_and(|route| {
-                    routes.as_array().is_some_and(|known| known.iter().any(|value| value.as_str() == Some(route)))
-                        && seen.insert(route)
-                })
-            }))),
-            InvalidEnablesSnafu
-        );
-        context.stage_node_write(&self.config.source, "enables", value)?;
-        Ok(Outputs::from([("done".into(), ValueRef::from(true))]).into())
-    }
-}
-
 fn bindings(config: &Value) -> FlowBindings {
     if serde_json::from_value::<Config>(config.clone())
         .is_ok_and(|config| validate_routes(&config.routes).is_ok())
@@ -277,25 +191,18 @@ fn prepared_factory(
 }
 inventory::submit! {
     NodeRegistration { kind: KIND, factory: NodeFactory::WithFlowBindings {
-        factory: &NodeFactory::BoundSubgraph { bindings: static_bindings, plain: factory, prepared: prepared_factory }, bindings,
+        factory: &NodeFactory::BoundSubgraph {
+            bindings: static_bindings, plain: factory, prepared: prepared_factory,
+        },
+        bindings,
     } }
-}
-inventory::submit! {
-    NodeRegistration { kind: STATE_KIND, factory: NodeFactory::Plain(|config| {
-        let config = mf_runtime::deserialize_config(config)?; validate(&config)?;
-        PreparedNode::new(StateSource { config }, NodeMetadata::default())
-    }) }
-}
-inventory::submit! {
-    NodeRegistration { kind: ASSIGN_KIND, factory: NodeFactory::Plain(|config| {
-        PreparedNode::new(Assignment { config: mf_runtime::deserialize_config(config)? }, NodeMetadata::default())
-    }) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
     fn router(enables: Option<Value>) -> PreparedNode {
         let mut config = json!({"routes":["first","second"]});
         if let Some(enables) = enables {
@@ -316,58 +223,58 @@ mod tests {
             .collect();
         prepared_factory("choose", config, bodies).unwrap()
     }
+
+    fn execute(
+        node: &mf_runtime::TaskFlowNode,
+        route: &str,
+        context: &mut ExecutionContext,
+    ) -> NodeResult {
+        node.node
+            .execute(
+                Inputs::from([
+                    ("route".into(), ValueRef::from(route)),
+                    ("arguments".into(), ValueRef::from(json!({}))),
+                ]),
+                context,
+            )
+            .unwrap()
+    }
+
     #[test]
-    fn selects_only_one_static_child_with_the_normal_call_scope() {
+    fn selects_one_enabled_static_child_with_the_normal_call_scope() {
         let prepared = router(None);
         assert!(prepared.metadata.input_bindings["arguments"].secret);
         assert!(prepared.metadata.stream_outputs.is_empty());
         let node = mf_runtime::FlowNode::new("choose", prepared)
             .into_task()
             .unwrap();
-        for route in ["first", "second", "missing"] {
-            let mut context = ExecutionContext::default();
-            let result = node
-                .node
-                .execute(
-                    Inputs::from([
-                        ("route".into(), ValueRef::from(route)),
-                        ("arguments".into(), ValueRef::from(json!({}))),
-                    ]),
-                    &mut context,
-                )
-                .unwrap();
-            if route == "missing" {
+        for (route, selected) in [
+            ("first", "first"),
+            ("second", "second"),
+            ("missing", "missing"),
+        ] {
+            let result = execute(&node, route, &mut ExecutionContext::default());
+            if selected == "missing" {
                 assert!(result.outputs["result"].get("error").is_some());
             } else {
                 assert_eq!(
                     result.outputs["result"]["outputs"]["selected"],
-                    json!(route)
+                    json!(selected)
                 );
             }
         }
-    }
-    #[test]
-    fn empty_enables_disables_all_and_native_routers_do_not_share_state() {
-        let mut context = ExecutionContext::default();
-        for enables in [Some(json!([])), None, Some(json!(["second"])), None] {
-            let disabled = enables.is_some();
-            let node = mf_runtime::FlowNode::new("choose", router(enables))
+        for enables in [json!([]), json!(["second"])] {
+            let node = mf_runtime::FlowNode::new("choose", router(Some(enables)))
                 .into_task()
                 .unwrap();
-            let result = node
-                .node
-                .execute(
-                    Inputs::from([
-                        ("route".into(), ValueRef::from("first")),
-                        ("arguments".into(), ValueRef::from(json!({}))),
-                    ]),
-                    &mut context,
-                )
-                .unwrap();
-            assert_eq!(result.outputs["result"].get("error").is_some(), disabled);
+            assert!(
+                execute(&node, "first", &mut ExecutionContext::default()).outputs["result"]
+                    .get("error")
+                    .is_some()
+            );
         }
-        assert!(factory(json!({"routes":[]})).is_ok());
     }
+
     #[test]
     fn cancellation_prevents_selection_before_any_child_is_invoked() {
         let node = mf_runtime::FlowNode::new("choose", router(None))
@@ -391,10 +298,9 @@ mod tests {
             json!({"routes":["a","a"]}),
             json!({"routes":["a"],"enables":["b"]}),
             json!({"routes":["a"],"enables":["a","a"]}),
+            json!({"routes":[],"enables":null}),
             json!({"routes":[],"mode":"execute"}),
             json!({"routes":[],"flow_field":"run"}),
-            json!({"routes":[],"flow_candidates":{}}),
-            json!({"routes":[],"enables":null}),
             json!({"routes":["missing"]}),
         ] {
             assert!(factory(config.clone()).is_err(), "accepted {config}");

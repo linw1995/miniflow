@@ -539,18 +539,13 @@ error result without invoking any child. Blank, reserved `else`, and duplicate r
 as are duplicate or unknown names in `enables`. The output is always the same `result: Object`,
 independent of the number of branches.
 
-Each router `choose` has an implicit node-local source `%choose`:
-
-- `%choose.config.routes` retains the static full declaration.
-- `%choose.routes` publishes that full set as a read-only string array.
-- `%choose.enables` publishes the current enabled subset, initialized from `config.enables` or all routes.
-
-`workflow.assign` with `{"variable":"%choose.enables"}` replaces the entire enabled array. The runtime
-checks that it is a duplicate-free subset before committing the write. Assigning `routes`, `config`, or
-an unknown node-local field is rejected. Use an explicit `write.done` prerequisite on later readers and
-on the router itself; referencing a mutable source does not order it after a writer. State belongs to
-the current invocation and is isolated across Calls and item/container frames. Writes never add ports,
-change compiled children, or exclude disabled branches from static validation.
+`workflow.assign` with `{"variable":"%choose.enables"}` replaces the router's enabled array. The
+runtime checks that it is a duplicate-free subset of the static routes before committing the write.
+Assigning `routes`, `config`, or an unknown field is rejected. Use an explicit `write.done` prerequisite
+on the router; referencing another node does not order it after a writer. State belongs to the current
+invocation and is isolated across Calls and item/container frames. Writes never add ports, change
+compiled children, or exclude disabled branches from static validation. This target requires no
+additional node kind or synthetic graph node.
 
 The router's optional `flows: Map(Flow)` input supplies static provenance. The compiler follows that
 map through Call parameters and shared Loop/Iteration inputs, binding one child per route in

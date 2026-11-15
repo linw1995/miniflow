@@ -42,7 +42,8 @@ mod workflow_manifest;
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
 pub use compiled_graph::{
-    CompiledGraph, GraphRelations, RootScopeRelations, ScopeInstruction, ScopeRelations,
+    CompiledGraph, GraphRelations, RootScopeRelations, RouterWrite, ScopeInstruction,
+    ScopeRelations,
 };
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
@@ -83,7 +84,8 @@ pub use iteration::{
 };
 pub use loop_node::{
     LoopVariableError, loop_variable_types, prepared_loop_assign, prepared_loop_exit,
-    prepared_loop_source_types, prepared_root_assign, prepared_root_source, prepared_scope_source,
+    prepared_loop_source_types, prepared_root_assign, prepared_root_source, prepared_router_assign,
+    prepared_scope_source,
 };
 pub use mf_runtime_derive::{NodeConfig, NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::{FlowOrigin, NodeIdentity, ScopePathEntry, SkipCause};

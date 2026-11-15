@@ -106,10 +106,13 @@ pub fn validate_scope(
             mf_runtime::ASSIGN_KIND => {
                 // Lowering validates the declaration version; inside a Loop body the
                 // assignment keeps the pre-existing immediate-write contract.
+                let target = assignment_target(&node.config, &node_path)?;
+                if crate::routers::write_target(definition, &target)?.is_some() {
+                    continue;
+                }
                 let types = enclosing
                     .or(root)
                     .ok_or_else(|| invalid(&node_path, "assignment requires a state scope"))?;
-                let target = assignment_target(&node.config, &node_path)?;
                 ensure!(
                     types.contains_key(&target),
                     crate::compiler::InvalidScopeSnafu {

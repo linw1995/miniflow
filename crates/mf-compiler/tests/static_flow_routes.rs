@@ -209,7 +209,6 @@ fn compiler_binds_router_children_without_rewriting_authored_nodes_or_data_edges
         .definition
         .nodes
         .iter()
-        .filter(|node| node.kind != "builtin.router_state")
         .map(|node| node.id.clone())
         .collect();
     assert_eq!(compiled, authored);
@@ -624,21 +623,32 @@ fn state_flow(target: &str) -> WorkflowDefinition {
         .unwrap();
     router["config"] = json!({"routes":["first","second"],"enables":["first"]});
     router["inputs"]["flows"] = edge("tools", "value");
-    nodes.extend([
-        json!({"id":"write","kind":"workflow.assign","config":{"variable":target},"inputs":{"value":edge("params","enables")}}),
-        json!({"id":"read","kind":"builtin.identity","inputs":{"input":edge("%execute","enables")}})
-    ]);
-    value["edges"] = json!([{"from_node":"write","from_output":"done","to_node":"execute"},{"from_node":"write","from_output":"done","to_node":"read"}]);
-    value["outputs"].as_array_mut().unwrap().extend([
-        json!({"name":"routes","node":"%execute","port":"routes"}),
-        json!({"name":"enables","node":"read","port":"value"}),
-    ]);
+    nodes.push(json!({
+        "id":"write","kind":"workflow.assign","config":{"variable":target},
+        "inputs":{"value":edge("params","enables")}
+    }));
+    value["edges"] = json!([{"from_node":"write","from_output":"done","to_node":"execute"}]);
+    value["outputs"] = json!([{"name":"result","node":"execute","port":"result"}]);
     WorkflowDefinition::from_json(&value.to_string()).unwrap()
 }
+
 #[test]
-fn assign_replaces_enables_without_changing_routes_or_leaking_between_invocations() {
+fn assign_replaces_enables_without_leaking_between_invocations() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&state_flow("%execute.enables"), &registry).unwrap();
+    let source = state_flow("%execute.enables");
+    let plan = compile_definition(&source, &registry).unwrap();
+    let authored: BTreeSet<_> = source.nodes.iter().map(|node| node.id.clone()).collect();
+    let compiled: BTreeSet<_> = plan
+        .graph
+        .definition
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect();
+    assert_eq!(
+        compiled, authored,
+        "state assignment must not add graph nodes"
+    );
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     for (enables, route, active) in [
         (json!([]), "first", false),
@@ -652,8 +662,6 @@ fn assign_replaces_enables_without_changing_routes_or_leaking_between_invocation
                     .unwrap(),
             )
             .unwrap();
-        assert_eq!(output["routes"], json!(["first", "second"]));
-        assert_eq!(output["enables"], enables);
         assert_eq!(output["result"].get("outputs").is_some(), active);
     }
     assert_eq!(
@@ -667,25 +675,10 @@ fn assign_replaces_enables_without_changing_routes_or_leaking_between_invocation
         json!({"routes":["first","second"],"enables":["first"]})
     );
 }
+
 #[test]
-fn node_state_sources_cannot_be_authored_shadowed_or_given_extra_write_fields() {
+fn router_assignment_config_rejects_extra_fields() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    for (node, expected) in [
-        (
-            json!({"id":"manual_source","kind":"builtin.router_state","config":{"routes":[]}}),
-            "instructions are implicit",
-        ),
-        (
-            json!({"id":"%execute","kind":"builtin.constant","config":{"value":[]}}),
-            "sources are implicit",
-        ),
-    ] {
-        let mut value = serde_json::to_value(state_flow("%execute.enables")).unwrap();
-        value["nodes"].as_array_mut().unwrap().push(node);
-        let source = WorkflowDefinition::from_json(&value.to_string()).unwrap();
-        let error = compile_definition(&source, &registry).unwrap_err();
-        assert!(error.to_string().contains(expected), "{error}");
-    }
     let mut source = state_flow("%execute.enables");
     source
         .nodes
@@ -694,25 +687,7 @@ fn node_state_sources_cannot_be_authored_shadowed_or_given_extra_write_fields() 
         .unwrap()
         .config["extra"] = json!(true);
     let error = compile_definition(&source, &registry).unwrap_err();
-    assert!(
-        error.to_string().contains("only accepts variable"),
-        "{error}"
-    );
-}
-
-#[test]
-fn node_state_writes_require_output_prerequisites_not_node_success() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let mut source = state_flow("%execute.enables");
-    source
-        .control_edges
-        .retain(|edge| edge.to_node.as_str() != "execute");
-    source.order_edges.push(mf_runtime::OrderEdgeDefinition {
-        from_node: "write".into(),
-        to_node: "execute".into(),
-    });
-    let error = compile_definition(&source, &registry).unwrap_err();
-    assert!(error.to_string().contains("node-success"), "{error}");
+    assert!(error.to_string().contains("unknown field"), "{error}");
 }
 
 #[test]

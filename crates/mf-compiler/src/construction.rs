@@ -1126,6 +1126,21 @@ pub fn prepared_loop_source_from_json(
     Ok(mf_runtime::prepared_loop_source_types(&types))
 }
 
+pub fn prepared_router_assign_from_json(
+    id: &str,
+    router: &str,
+    routes_json: &str,
+    enables_json: &str,
+) -> Result<FlowNode, WorkflowBuildError> {
+    let routes: Vec<String> = serde_json::from_str(routes_json)
+        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
+    let enables: Vec<String> = serde_json::from_str(enables_json)
+        .context(InvalidEmbeddedConfigSnafu { definition_id: id })?;
+    Ok(mf_runtime::prepared_router_assign(
+        id, router, routes, enables,
+    ))
+}
+
 pub fn prepared_loop_assign_from_json(
     id: &str,
     variable: &str,
