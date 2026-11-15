@@ -88,6 +88,42 @@ impl TaskNode for Filter {
 inventory::submit! {
     NodeRegistration { kind:"test.static-route-filter", factory:NodeFactory::Plain(|_| PreparedNode::new(Filter,NodeMetadata::default())) }
 }
+struct StaticKeys;
+impl NodePortContract for StaticKeys {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: vec![PortSpec::new("object", ValueType::Object, true)],
+            outputs: vec![PortSpec::new(
+                "keys",
+                ValueType::List(Box::new(ValueType::String)),
+                true,
+            )],
+        }
+    }
+}
+impl TaskNode for StaticKeys {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        _: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        let object = &inputs["object"];
+        Ok(Outputs::from([(
+            "keys".into(),
+            ValueRef::array(
+                object
+                    .as_object()
+                    .expect("validated object")
+                    .keys()
+                    .map(|key| ValueRef::from(key.as_ref())),
+            ),
+        )])
+        .into())
+    }
+}
+inventory::submit! {
+    NodeRegistration { kind:"test.static-route-keys", factory:NodeFactory::Plain(|_| PreparedNode::new(StaticKeys,NodeMetadata::default())) }
+}
 inventory::submit! {
     NodeRegistration { kind:"test.static-route-source", factory:NodeFactory::WithFlowBindings {
         factory: &NodeFactory::Subgraph {
@@ -126,7 +162,7 @@ fn definition() -> WorkflowDefinition {
         {"id":"tools","kind":"builtin.object","config":{"fields":{"first":"flow","second":"flow"}},"inputs":{"first":edge("first","value"),"second":edge("second","value")}},
         {"id":"filter","kind":"test.static-route-filter","inputs":{"tools":edge("tools","value"),"enabled":edge("params","enabled")}},
         {"id":"arguments","kind":"builtin.object","config":{"fields":{"value":"int"}},"inputs":{"value":edge("params","value")}},
-        {"id":"enabled_routes","kind":"builtin.keys","inputs":{"object":edge("filter","value")}},
+        {"id":"enabled_routes","kind":"test.static-route-keys","inputs":{"object":edge("filter","value")}},
         {"id":"set_enables","kind":"workflow.assign","config":{"variable":"%execute.enables"},"inputs":{"value":edge("enabled_routes","keys")}},
         {"id":"execute","kind":"builtin.router","config":{"routes":[]},"inputs":{"route":edge("params","route"),"flows":edge("filter","value"),"arguments":edge("arguments","value")}}
     ],"edges":[{"from_node":"set_enables","from_output":"done","to_node":"execute"}],

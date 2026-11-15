@@ -559,11 +559,12 @@ superset; an explicit nonempty list must match it. Branch bodies live in the chi
 synthetic config fields. The router remains the authored node: there is no dispatch template,
 per-route Call-node expansion, or generated result-join topology.
 
-ToolUses explicitly authors `builtin.keys` and `workflow.assign` to replace `%execute.enables` with the
-current map keys before executing the router. Removing and re-adding declared keys only changes
-eligibility. Unknown keys fail subset validation. The runtime never selects an executor from the
-supplied handles, so substituting a handle cannot replace a static target. An empty map binds no
-children. No caller-specific Agent source or ordinal candidate IDs are needed.
+ToolUses does not rewrite `%execute.enables`: its `params.tools` map is fixed, so the compiler-bound
+route set is already the exact enabled set. Generic callers that need runtime narrowing can still use
+`workflow.assign` on `%<router>.enables`; that state is optional rather than required boilerplate.
+The runtime never selects an executor from the supplied handles, so substituting a handle cannot
+replace a static target. An empty map binds no children. No caller-specific Agent source or ordinal
+candidate IDs are needed.
 
 Providers declare capability provenance with `NodeFactory::WithFlowBindings`, wrapping their existing
 factory. `FlowBindingSource` describes child exports, forwarded inputs, and native object fields;
