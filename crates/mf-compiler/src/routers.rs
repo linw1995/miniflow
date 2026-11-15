@@ -47,3 +47,37 @@ pub fn write_target(
         routes: config.routes,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn definition() -> WorkflowDefinition {
+        WorkflowDefinition::from_json(
+            &json!({"version":"2026-11-13","nodes":[
+                {"id":"execute","kind":"builtin.router","config":{"routes":["a"],"enables":[]}}
+            ]})
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn only_router_enables_targets_are_state_writes() {
+        let definition = definition();
+        assert!(write_target(&definition, "variable").unwrap().is_none());
+        assert!(write_target(&definition, "%plain").unwrap().is_none());
+        assert!(
+            write_target(&definition, "%execute.routes")
+                .unwrap()
+                .is_none()
+        );
+        let write = write_target(&definition, "%execute.enables")
+            .unwrap()
+            .unwrap();
+        assert_eq!(write.router.as_str(), "execute");
+        assert_eq!(write.routes, ["a"]);
+        assert!(write.enables.is_empty());
+    }
+}

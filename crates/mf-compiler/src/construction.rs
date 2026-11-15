@@ -1931,6 +1931,19 @@ pub fn prepare_stream(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn router_assignment_constructor_parses_generated_bindings() {
+        let node = super::prepared_router_assign_from_json(
+            "write",
+            "choose",
+            r#"["first","second"]"#,
+            r#"["first"]"#,
+        )
+        .unwrap();
+        assert_eq!(node.definition_id.as_str(), "write");
+        assert_eq!(node.metadata.ports.inputs[0].name, "value");
+    }
+
     use super::*;
     use crate::NodeExecutionError;
     use mf_runtime::{FlowOutputs, Inputs, Outputs, RuntimeOptions, TaskNode};
