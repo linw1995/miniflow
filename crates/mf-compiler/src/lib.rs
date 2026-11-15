@@ -25,7 +25,6 @@ mod lowering;
 #[cfg(feature = "codegen")]
 mod pipeline;
 mod plan;
-mod routers;
 #[cfg(feature = "codegen")]
 mod state;
 mod streaming;

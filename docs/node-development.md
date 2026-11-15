@@ -366,9 +366,9 @@ binding, `Input` forwards incoming provenance, and `Object` prefixes it with nat
 compiler follows these facts across Call and container boundaries and binds static children directly
 to explicitly authored `builtin.router` nodes. `NodeFactory::BoundSubgraph` declares the compiled
 binding names separately from config-owned Flow parameters; `GraphRelations::static_binding` keeps
-these children out of config projection. Router owns fixed `routes` and a writable node-local
-`enables` subset, selects one child, and reuses Call's invocation implementation. There is no dispatch
-placeholder or compiler expansion into per-route Call nodes.
+these children out of config projection. Router owns fixed `routes`, selects one child, and reuses
+Call's invocation implementation. There is no dispatch placeholder, dynamic enablement state, or
+compiler expansion into per-route Call nodes.
 See [tool composition](workflows.md#configured-flow-tools) for the authoring and state contracts.
 
 Definition identity is shared prepared metadata: `PreparedSubgraph::origin` and `SubgraphOrigin`

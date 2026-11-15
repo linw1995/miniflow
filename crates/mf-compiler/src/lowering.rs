@@ -352,7 +352,6 @@ pub fn lower_scope_at(
             );
         }
     }
-    crate::routers::lower(definition, lowered_sources)?;
     // Validate authoring source/control syntax before turning it into operands.
     // This is the only boundary that interprets these node-kind tokens.
     let state_types = relations

@@ -279,9 +279,9 @@ impl Freezing<'_> {
                 .extractors
                 .get(&node.kind)
                 .and_then(|extract| extract(&node.config).invocation);
-            if let Some(invocation) = invocation {
+            if let Some(input) = invocation {
                 let inputs = incoming(scope, original, node.id.as_str(), self.state);
-                let facts = inputs.get(&invocation.input).cloned().unwrap_or_default();
+                let facts = inputs.get(&input).cloned().unwrap_or_default();
                 let mut bodies = BTreeMap::new();
                 for (shape, source) in facts {
                     let [route] = shape.as_slice() else {
@@ -338,7 +338,6 @@ impl Freezing<'_> {
                 }
             }
         }
-        crate::routers::lower(&mut scope.definition, true)?;
         Ok(())
     }
 }
