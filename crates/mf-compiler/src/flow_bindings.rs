@@ -371,27 +371,9 @@ fn bind_routes(
         configured
     };
     node.config["routes"] =
-        serde_json::to_value(routes.clone()).context(crate::compiler::NodeConfigurationSnafu {
+        serde_json::to_value(routes).context(crate::compiler::NodeConfigurationSnafu {
             definition_id: node.id.clone(),
         })?;
-    let enables = node
-        .config
-        .get("enables")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| routes.clone());
-    for write in scope.relations.router_writes.values_mut() {
-        if write.router == node.id {
-            write.routes = routes.clone();
-            write.enables = enables.clone();
-        }
-    }
     if bodies.is_empty() {
         scope.children.remove(&node.id);
     } else {

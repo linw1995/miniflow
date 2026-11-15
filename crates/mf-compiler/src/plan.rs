@@ -892,10 +892,11 @@ fn generate_scope(
                 }
             }
             Some(mf_runtime::ScopeInstruction::RouterWrite(write)) => {
+                let (routes, enables) = crate::routers::write_values(definition, write)?;
                 let router_lit = LitStr::new(write.router.as_str(), Span::call_site());
-                let routes_json = serde_json::to_string(&write.routes).context(SerializeSnafu)?;
+                let routes_json = serde_json::to_string(&routes).context(SerializeSnafu)?;
                 let routes_lit = LitStr::new(&routes_json, Span::call_site());
-                let enables_json = serde_json::to_string(&write.enables).context(SerializeSnafu)?;
+                let enables_json = serde_json::to_string(&enables).context(SerializeSnafu)?;
                 let enables_lit = LitStr::new(&enables_json, Span::call_site());
                 quote! {
                     mf_compiler::prepared_router_assign_from_json(#id_lit, #router_lit, #routes_lit, #enables_lit)
@@ -2221,12 +2222,17 @@ mod tests {
                     ("custom-exit", "custom.exit"),
                     ("router-write", crate::ASSIGN_KIND),
                     ("ordinary", crate::ASSIGN_KIND),
+                    ("choose", "custom.router"),
                 ]
                 .into_iter()
                 .map(|(id, kind)| crate::NodeDefinition {
                     id: id.into(),
                     kind: kind.into(),
-                    config: serde_json::Value::Null,
+                    config: if id == "choose" {
+                        serde_json::json!({"routes": ["first"]})
+                    } else {
+                        serde_json::Value::Null
+                    },
                 })
                 .collect(),
                 edges: Vec::new(),
@@ -2241,6 +2247,7 @@ mod tests {
                 "custom-exit",
                 "router-write",
                 "ordinary",
+                "choose",
             ]
             .into_iter()
             .map(DefinitionId::from)
@@ -2257,8 +2264,6 @@ mod tests {
                     "router-write".into(),
                     mf_runtime::RouterWrite {
                         router: "choose".into(),
-                        routes: vec!["first".into()],
-                        enables: vec!["first".into()],
                     },
                 )]),
                 ..Default::default()
@@ -2278,7 +2283,7 @@ mod tests {
         assert!(source.contains("prepared_loop_assign_from_json"));
         assert!(source.contains("prepared_loop_exit"));
         assert!(source.contains("prepared_router_assign_from_json"));
-        assert_eq!(source.matches("instantiate_node_with_metadata").count(), 1);
+        assert_eq!(source.matches("instantiate_node_with_metadata").count(), 2);
         assert!(source.contains("\"ordinary\""));
         assert!(!source.contains("iteration_input_flow_node"));
         assert!(!source.contains("prepared_loop_source_from_json"));

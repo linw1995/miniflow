@@ -410,7 +410,7 @@ pub fn lower_scope_at(
             mf_runtime::ASSIGN_KIND => {
                 // validate_scope checked ownership, target existence and spelling.
                 let target = crate::loops::assignment_target(&node.config, path)?;
-                if let Some(write) = crate::routers::write_target(definition, &target)? {
+                if let Some(write) = crate::routers::write_target(definition, &target) {
                     relations.router_writes.insert(node.id.clone(), write);
                     continue;
                 }

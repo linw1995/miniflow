@@ -2553,11 +2553,12 @@ fn resolve_nodes_in_scope(
                     return Ok(mf_runtime::prepared_loop_assign(node.id.as_str(), target, value_type));
                 }
                 Some(ScopeInstruction::RouterWrite(write)) => {
+                    let (routes, enables) = crate::routers::write_values(definition, write)?;
                     return Ok(mf_runtime::prepared_router_assign(
                         node.id.as_str(),
                         write.router.as_str(),
-                        write.routes.clone(),
-                        write.enables.clone(),
+                        routes,
+                        enables,
                     ));
                 }
                 Some(ScopeInstruction::Exit) => {

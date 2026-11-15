@@ -107,7 +107,7 @@ pub fn validate_scope(
                 // Lowering validates the declaration version; inside a Loop body the
                 // assignment keeps the pre-existing immediate-write contract.
                 let target = assignment_target(&node.config, &node_path)?;
-                if crate::routers::write_target(definition, &target)?.is_some() {
+                if crate::routers::write_target(definition, &target).is_some() {
                     continue;
                 }
                 let types = enclosing

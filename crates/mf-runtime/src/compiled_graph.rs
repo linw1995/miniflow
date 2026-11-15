@@ -44,8 +44,6 @@ pub struct RootScopeRelations {
 #[serde(deny_unknown_fields)]
 pub struct RouterWrite {
     pub router: DefinitionId,
-    pub routes: Vec<String>,
-    pub enables: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

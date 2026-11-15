@@ -684,6 +684,50 @@ fn assign_replaces_enables_without_leaking_between_invocations() {
 }
 
 #[test]
+fn saved_router_assignments_use_the_target_configuration() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut plan = compile_definition(&state_flow("%execute.enables"), &registry).unwrap();
+    plan.graph
+        .definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "execute")
+        .unwrap()
+        .config = json!({"routes":["second"]});
+    plan.graph
+        .children
+        .get_mut(&"execute".into())
+        .unwrap()
+        .remove("first");
+    let saved = mf_compiler::CompiledWorkflow::from_json(&plan.to_json().unwrap()).unwrap();
+    let flow = instantiate_compiled(&saved, &registry).unwrap();
+    assert_eq!(
+        flow.execute_with_inputs(
+            WorkflowArguments::try_from(json!({
+                "params.enables":["second"], "params.route":"second"
+            }))
+            .unwrap()
+        )
+        .unwrap()["result"]["outputs"]["value"],
+        json!(10)
+    );
+    let error = flow
+        .execute_with_inputs(
+            WorkflowArguments::try_from(json!({
+                "params.enables":["first"], "params.route":"first"
+            }))
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("subset of its routes"),
+        "{error}"
+    );
+    #[cfg(feature = "codegen")]
+    saved.generate_runner_execution_plans(&registry).unwrap();
+}
+
+#[test]
 fn router_assignment_config_rejects_extra_fields() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut source = state_flow("%execute.enables");
